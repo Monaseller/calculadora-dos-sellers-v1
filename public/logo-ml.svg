@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 64">
+  <!-- Oval amarela com borda azul -->
+  <ellipse cx="80" cy="32" rx="76" ry="28" fill="#FFE600"/>
+  <ellipse cx="80" cy="32" rx="76" ry="28" fill="none" stroke="#2D3580" stroke-width="5"/>
+
+  <!-- APERTO DE MÃO simplificado e limpo -->
+  <!-- Braço/manga esquerda (vindo da direita) -->
+  <rect x="98" y="34" width="28" height="10" rx="5" fill="#2D3580"/>
+  <!-- Braço/manga direita (vindo da esquerda) -->
+  <rect x="34" y="34" width="28" height="10" rx="5" fill="#2D3580"/>
+
+  <!-- Mão direita -->
+  <g>
+    <!-- Palma -->
+    <ellipse cx="72" cy="34" rx="12" ry="8" fill="#fff" stroke="#2D3580" stroke-width="2"/>
+    <!-- Dedos da mão direita -->
+    <rect x="60" y="22" width="7" height="14" rx="3.5" fill="#fff" stroke="#2D3580" stroke-width="1.8"/>
+    <rect x="68" y="20" width="7" height="15" rx="3.5" fill="#fff" stroke="#2D3580" stroke-width="1.8"/>
+    <rect x="76" y="21" width="7" height="14" rx="3.5" fill="#fff" stroke="#2D3580" stroke-width="1.8"/>
+    <!-- Polegar direita -->
+    <ellipse cx="60" cy="38" rx="5" ry="3.5" fill="#fff" stroke="#2D3580" stroke-width="1.8" transform="rotate(-30 60 38)"/>
+  </g>
+
+  <!-- Mão esquerda -->
+  <g>
+    <!-- Palma -->
+    <ellipse cx="88" cy="34" rx="12" ry="8" fill="#fff" stroke="#2D3580" stroke-width="2"/>
+    <!-- Dedos da mão esquerda -->
+    <rect x="93" y="22" width="7" height="14" rx="3.5" fill="#fff" stroke="#2D3580" stroke-width="1.8"/>
+    <rect x="85" y="20" width="7" height="15" rx="3.5" fill="#fff" stroke="#2D3580" stroke-width="1.8"/>
+    <rect x="77" y="21" width="7" height="14" rx="3.5" fill="#fff" stroke="#2D3580" stroke-width="1.8"/>
+    <!-- Polegar esquerda -->
+    <ellipse cx="100" cy="38" rx="5" ry="3.5" fill="#fff" stroke="#2D3580" stroke-width="1.8" transform="rotate(30 100 38)"/>
+  </g>
+
+  <!-- Linha central que une as palmas -->
+  <rect x="72" y="30" width="16" height="8" fill="#fff"/>
+</svg>

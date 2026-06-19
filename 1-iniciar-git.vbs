@@ -1,0 +1,2 @@
+Set objShell = CreateObject("WScript.Shell")
+objShell.Run "cmd.exe /k ""cd /d C:\Users\USER\Desktop\calculadora-dos-sellers-v1 && rmdir /s /q .git && git init && git config --global user.email ""rodgimpex@gmail.com"" && git config --global user.name ""Rodrigo"" && git add . && git commit -m ""feat: CDS Calculadora dos Sellers v1"" && git branch -M main && git remote add origin https://github.com/Monamor-Hub/calculadora-dos-sellers.git && git push -u origin main && echo. && echo === PRONTO! Codigo no GitHub === && pause""", 1, False
