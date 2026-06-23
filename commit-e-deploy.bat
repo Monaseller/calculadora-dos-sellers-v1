@@ -9,7 +9,7 @@ tail -5 app\api\ml\vendas\route.ts 2>nul
 
 echo === Commitando melhorias ===
 git add -A
-git commit -m "feat: auto-detecta logistic_type do ML + corrige custo frete gratis + sync MLBU->MLB"
+git commit -m "feat: agrupamento de variacoes + SKU por variacao + corrige duplicados"
 
 echo.
 echo === Deploy no Vercel ===

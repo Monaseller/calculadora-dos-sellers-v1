@@ -145,15 +145,8 @@ export async function POST(request: Request) {
       const { mlbId, body } = resultado;
       const mudancas = aplicarMudancas(anuncio, body);
 
-      // Atualiza ml_item_id para o MLB real — próximos syncs vão pelo caminho normal
-      if (mlbId !== anuncio.ml_item_id) {
-        mudancas.ml_item_id = mlbId;
-      }
-
-      // Para MLBU sem thumbnail ou com thumbnail errada, força atualização
-      if (body.thumbnail && body.thumbnail !== anuncio.thumbnail) {
-        mudancas.thumbnail = body.thumbnail;
-      }
+      if (mlbId !== anuncio.ml_item_id) mudancas.ml_item_id = mlbId;
+      if (body.thumbnail && body.thumbnail !== anuncio.thumbnail) mudancas.thumbnail = body.thumbnail;
 
       if (Object.keys(mudancas).length > 0) {
         await supabase.from("anuncios").update(mudancas).eq("id", anuncio.id);
@@ -163,8 +156,8 @@ export async function POST(request: Request) {
   }
 
   const mensagem = atualizados === 0
-    ? `Todos os ${anuncios.length} anúncios já estão atualizados!`
-    : `${atualizados} anúncio${atualizados !== 1 ? "s" : ""} atualizado${atualizados !== 1 ? "s" : ""}!`;
+    ? `Todos os ${anuncios.length} anuncios ja estao atualizados!`
+    : `${atualizados} anuncio${atualizados !== 1 ? "s" : ""} atualizado${atualizados !== 1 ? "s" : ""}!`;
 
   return NextResponse.json({ erro: false, atualizados, mensagem, detalhes });
 }

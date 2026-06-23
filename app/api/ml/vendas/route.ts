@@ -310,6 +310,7 @@ export async function GET(request: Request) {
     }
   }
 
+
   rows.sort((a, b) => b.data.localeCompare(a.data));
 
   return NextResponse.json({

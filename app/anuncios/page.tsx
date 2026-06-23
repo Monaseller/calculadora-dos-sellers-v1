@@ -4,6 +4,7 @@ import { supabase, type Anuncio } from "@/lib/supabase";
 import { moeda } from "@/lib/cds-engine";
 import FormAnuncio from "./FormAnuncio";
 import CardAnuncio from "./CardAnuncio";
+import CardAnuncioVariacoes from "./CardAnuncioVariacoes";
 
 export default function AnunciosPage() {
   const [anuncios,    setAnuncios]    = useState<Anuncio[]>([]);
@@ -94,17 +95,20 @@ export default function AnunciosPage() {
 
   // ── IDs dos duplicados antigos ───────────────────────────────────────────
   const idsAntigosDuplicados = useMemo(() => {
-    const grupos = new Map<string, string[]>();
+    const grupos = new Map<string, Anuncio[]>();
     anuncios.forEach(a => {
       if (a.ml_item_id) {
         const g = grupos.get(a.ml_item_id) ?? [];
-        g.push(a.id);
+        g.push(a);
         grupos.set(a.ml_item_id, g);
       }
     });
     const ids = new Set<string>();
     grupos.forEach(grupo => {
-      if (grupo.length > 1) grupo.slice(1).forEach(id => ids.add(id));
+      if (grupo.length <= 1) return;
+      // Grupos onde todos têm variation_id são variações intencionais — não duplicados
+      if (grupo.every(a => a.variation_id)) return;
+      grupo.slice(1).forEach(a => ids.add(a.id));
     });
     return ids;
   }, [anuncios]);
@@ -128,6 +132,25 @@ export default function AnunciosPage() {
     if (filtroDuplicados) base = base.filter(a => idsAntigosDuplicados.has(a.id));
     return base;
   }, [anuncios, busca, filtroDuplicados, filtroMarketplace, idsAntigosDuplicados]);
+
+  // ── Agrupar variações ────────────────────────────────────────────────────
+  const { soloAnuncios, gruposVariacoes } = useMemo(() => {
+    const mlIdMap = new Map<string, Anuncio[]>();
+    const soloList: Anuncio[] = [];
+    for (const a of anunciosFiltrados) {
+      if (a.variation_id && a.ml_item_id) {
+        const g = mlIdMap.get(a.ml_item_id) ?? [];
+        g.push(a);
+        mlIdMap.set(a.ml_item_id, g);
+      } else {
+        soloList.push(a);
+      }
+    }
+    return {
+      soloAnuncios:   soloList,
+      gruposVariacoes: [...mlIdMap.values()],
+    };
+  }, [anunciosFiltrados]);
 
   // ── Indicador de filtros ativos ──────────────────────────────────────────
   const filtrosAtivos = (busca ? 1 : 0) + (filtroDuplicados ? 1 : 0) + (filtroMarketplace !== "todos" ? 1 : 0);
@@ -569,19 +592,29 @@ export default function AnunciosPage() {
             <>
               <div style={{ fontSize: "40px", marginBottom: "12px" }}>✅</div>
               <p style={{ fontSize: "16px", fontWeight: 700, color: "#d7dbe5", margin: "0 0 6px" }}>Nenhum produto duplicado</p>
-              <p style={{ margin: 0, fontSize: "13px" }}>Todos os seus anúncios são únicos.</p>
+              <p style={{ margin: 0, fontSize: "13px" }}>Todos os seus anuncios sao unicos.</p>
             </>
           ) : (
             <>
               <div style={{ fontSize: "40px", marginBottom: "12px" }}>🔍</div>
-              <p style={{ fontSize: "16px", fontWeight: 700, color: "#d7dbe5", margin: "0 0 6px" }}>Nenhum anúncio encontrado</p>
+              <p style={{ fontSize: "16px", fontWeight: 700, color: "#d7dbe5", margin: "0 0 6px" }}>Nenhum anuncio encontrado</p>
               <p style={{ margin: 0, fontSize: "13px" }}>Tente ajustar os filtros.</p>
             </>
           )}
         </div>
       ) : (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", gap: "18px" }}>
-          {anunciosFiltrados.map(a => (
+          {/* Grupos de variacoes — renderiza 1 card por grupo */}
+          {gruposVariacoes.map(grupo => (
+            <CardAnuncioVariacoes
+              key={grupo[0].ml_item_id}
+              variacoes={grupo}
+              onEditar={abrirEditar}
+              onExcluir={excluir}
+            />
+          ))}
+          {/* Anuncios sem variacao — card normal */}
+          {soloAnuncios.map(a => (
             <CardAnuncio
               key={a.id}
               anuncio={a}

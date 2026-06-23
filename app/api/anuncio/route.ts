@@ -584,8 +584,9 @@ export async function GET(request: Request) {
   const sku = skuRaiz ?? skuVariacao ?? skuAtributo ?? skuUserProduct ?? null;
   console.log(`[anuncio] sku final: ${sku} (raiz=${skuRaiz}, var=${skuVariacao}, attr=${skuAtributo}, up=${skuUserProduct})`);
 
-  // ── Variações ────────────────────────────────────────────────────────────────
-  // Lê variationId da query string OU do param variation= na URL original
+
+  // ── Variacoes ────────────────────────────────────────────────────────────────
+  // Le variationId da query string OU do param variation= na URL original
   const variationIdParam = url.searchParams.get("variationId") || null;
   let variationIdFromUrl: string | null = null;
   try {
@@ -594,7 +595,7 @@ export async function GET(request: Request) {
   } catch {}
   const variationIdToUse = variationIdParam || variationIdFromUrl;
 
-  // Converte picture_id de variação → URL de thumbnail
+  // Converte picture_id de variacao -> URL de thumbnail
   const mainPictures: any[] = data.pictures ?? [];
   function picIdToThumb(picId: string): string {
     const pic = mainPictures.find((p: any) => p.id === picId);
@@ -602,7 +603,7 @@ export async function GET(request: Request) {
     return `https://http2.mlstatic.com/D_NQ_NP_${picId}-F.jpg`;
   }
 
-  // Lista de variações para o picker no FormAnuncio
+  // Lista de variacoes para o picker no FormAnuncio
   const variacoes = (data.variations ?? []).map((v: any) => ({
     id: String(v.id),
     attributes: (v.attribute_combinations ?? [])
@@ -610,9 +611,10 @@ export async function GET(request: Request) {
       .join(" | "),
     preco: typeof v.price === "number" ? v.price : null,
     thumbnail: v.picture_ids?.[0] ? picIdToThumb(v.picture_ids[0]) : null,
+    sku: (v.seller_custom_field as string | null) ?? null,
   }));
 
-  // Aplica overrides da variação selecionada (código manual ou variation= na URL)
+  // Aplica overrides da variacao selecionada
   let titulo = data.title as string;
   let preco: number = data.price;
   let thumbnail: string = data.thumbnail;
@@ -645,7 +647,7 @@ export async function GET(request: Request) {
     sku,
     freteGratis: data.shipping?.free_shipping ?? false,
     logisticType: data.shipping?.logistic_type ?? null,
-    variacoes,    // Array com todas as variações disponíveis
-    variacaoId,   // ID da variação aplicada (se houver)
+    variacoes,
+    variacaoId,
   });
 }

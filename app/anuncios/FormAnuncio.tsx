@@ -19,7 +19,7 @@ function parse(v: string) {
 
 type Etapa = "link" | "variacao" | "custos";
 
-type VariacaoItem = { id: string; attributes: string; preco: number | null; thumbnail: string | null };
+type VariacaoItem = { id: string; attributes: string; preco: number | null; thumbnail: string | null; sku?: string | null };
 
 interface DadosML {
   id: string;
@@ -250,7 +250,7 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
     const cat = CATEGORIAS_ML.find(c => c.nome.toLowerCase() === (dadosML?.categoria ?? "").toLowerCase());
     const comissaoRate = tipoAnuncio === "Premium" ? (cat?.premium ?? 0.18) : (cat?.classico ?? 0.13);
 
-    function montarPayload(titulo: string, preco: number | null, thumbnail: string | null, variationId: string | null) {
+    function montarPayload(titulo: string, preco: number | null, thumbnail: string | null, variationId: string | null, skuOverride?: string | null) {
       const cf = calcFreteParaPreco(preco);
       const comissaoVal = (preco ?? 0) * comissaoRate;
       const impostoVal  = (preco ?? 0) * imp;
@@ -270,7 +270,7 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
         margem_desejada:   Math.round(margem * 100) / 100,
         preco_ideal:       null,
         preco_anuncio:     preco,
-        sku:               skuManual.trim() || dadosML?.sku || null,
+        sku:               skuOverride !== undefined ? skuOverride : (skuManual.trim() || dadosML?.sku || null),
         peso_kg:           pesoKgNum,
         ml_item_id:        dadosML?.id ?? null,
         variation_id:      variationId,
@@ -289,6 +289,7 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
           v.preco ?? dadosML.preco,
           v.thumbnail ?? dadosML.thumbnail ?? null,
           v.id,
+          v.sku ?? (skuManual.trim() || dadosML.sku || null),
         );
         await supabase.from("anuncios").insert(payload);
       }
