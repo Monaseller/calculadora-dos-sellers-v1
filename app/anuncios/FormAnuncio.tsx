@@ -108,8 +108,9 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
     (inicial?.tipo_anuncio as TipoAnuncio) ?? "Clássico"
   );
 
-  const [salvando, setSalvando] = useState(false);
-  const [erro,     setErro]     = useState("");
+  const [salvando,       setSalvando]       = useState(false);
+  const [erro,           setErro]           = useState("");
+  const [adicionarTodas, setAdicionarTodas] = useState(false);
 
   // ── Buscar link ──────────────────────────────────────────────────────────
   async function buscarLink() {
@@ -223,6 +224,16 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
   }
 
   // ── Salvar ────────────────────────────────────────────────────────────────
+  // Calcula frete ajustado para um preço específico (respeita override manual)
+  function calcFreteParaPreco(preco: number | null): number {
+    if (freteOverride) return parse(custoFrete);
+    const calc =
+      tipoEnvio === "Full" ? calcularFreteFullMl(tamanhoFull, preco) :
+      tipoEnvio === "Flex" ? calcularFreteFlexMl(preco) :
+      calcularFreteMl(pesoKgNum, preco);
+    return calc ?? parse(custoFrete);
+  }
+
   async function salvar() {
     if (!custoProduto || parse(custoProduto) <= 0) {
       setErro("Informe o custo do produto.");
@@ -230,34 +241,72 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
     }
     setSalvando(true);
     setErro("");
-    // Persiste o imposto para o próximo anúncio
     if (typeof window !== "undefined") {
       localStorage.setItem("cds_imposto_padrao", imposto);
     }
 
+    const cp = parse(custoProduto);
+    const imp = (Number(imposto) || 0) / 100;
+    const cat = CATEGORIAS_ML.find(c => c.nome.toLowerCase() === (dadosML?.categoria ?? "").toLowerCase());
+    const comissaoRate = tipoAnuncio === "Premium" ? (cat?.premium ?? 0.18) : (cat?.classico ?? 0.13);
+
+    function montarPayload(titulo: string, preco: number | null, thumbnail: string | null, variationId: string | null) {
+      const cf = calcFreteParaPreco(preco);
+      const comissaoVal = (preco ?? 0) * comissaoRate;
+      const impostoVal  = (preco ?? 0) * imp;
+      const lucro       = (preco ?? 0) - comissaoVal - impostoVal - cf - cp;
+      const margem      = preco ? (lucro / preco) * 100 : 0;
+      return {
+        nome:              titulo,
+        marketplace:       "ML" as const,
+        categoria:         dadosML?.categoria ?? null,
+        tipo_anuncio:      tipoAnuncio,
+        tipo_conta_shopee: null,
+        custo_produto:     cp,
+        insumos:           0,
+        custo_frete:       cf,
+        frete_gratis:      freteGratis,
+        imposto:           Number(imposto) || 0,
+        margem_desejada:   Math.round(margem * 100) / 100,
+        preco_ideal:       null,
+        preco_anuncio:     preco,
+        sku:               skuManual.trim() || dadosML?.sku || null,
+        peso_kg:           pesoKgNum,
+        ml_item_id:        dadosML?.id ?? null,
+        variation_id:      variationId,
+        thumbnail,
+        permalink:         dadosML?.permalink ?? null,
+        ativo:             true,
+      };
+    }
+
+    // ── Modo "adicionar todas as variações" ──────────────────────────────────
+    if (adicionarTodas && dadosML?.variacoes?.length) {
+      const baseTitle = (dadosML.titulo ?? "").split(" — ")[0] || dadosML.titulo || nomeManual || link;
+      for (const v of dadosML.variacoes) {
+        const payload = montarPayload(
+          `${baseTitle} — ${v.attributes}`,
+          v.preco ?? dadosML.preco,
+          v.thumbnail ?? dadosML.thumbnail ?? null,
+          v.id,
+        );
+        await supabase.from("anuncios").insert(payload);
+      }
+      setSalvando(false);
+      onSalvar();
+      return;
+    }
+
+    // ── Modo normal (único anúncio) ──────────────────────────────────────────
     const r = calcResultado();
-    const payload = {
-      nome:             dadosML?.titulo || nomeManual || link,
-      marketplace:      "ML" as const,
-      categoria:        dadosML?.categoria ?? null,
-      tipo_anuncio:     tipoAnuncio,
-      tipo_conta_shopee: null,
-      custo_produto:    parse(custoProduto),
-      insumos:          0,
-      custo_frete:      custoFreteEfetivo,
-      frete_gratis:     freteGratis,
-      imposto:          Number(imposto) || 0,
-      margem_desejada:  r ? Math.round(r.margem * 100) / 100 : 0,
-      preco_ideal:      null,
-      preco_anuncio:    precoEfetivo,
-      sku:              skuManual.trim() || dadosML?.sku || null,
-      peso_kg:          pesoKgNum,
-      ml_item_id:       dadosML?.id ?? null,
-      variation_id:     dadosML?.variacaoId ?? null,
-      thumbnail:        dadosML?.thumbnail ?? null,
-      permalink:        dadosML?.permalink ?? null,
-      ativo:            true,
-    };
+    const payload = montarPayload(
+      dadosML?.titulo || nomeManual || link,
+      precoEfetivo,
+      dadosML?.thumbnail ?? null,
+      dadosML?.variacaoId ?? null,
+    );
+    // Garante margem_desejada do calcResultado quando disponível
+    if (r) (payload as any).margem_desejada = Math.round(r.margem * 100) / 100;
 
     if (inicial) {
       await supabase.from("anuncios").update(payload).eq("id", inicial.id);
@@ -356,12 +405,29 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
               </div>
             </div>
 
-            {/* Cards de variação */}
+            {/* Botão principal: adicionar todas de uma vez */}
+            <button
+              onClick={() => { setAdicionarTodas(true); setEtapa("custos"); }}
+              style={{
+                width: "100%", padding: "14px", marginBottom: "14px",
+                background: "linear-gradient(135deg,#ff6b00,#ffb800)",
+                border: "none", borderRadius: "14px", fontWeight: 900, fontSize: "15px",
+                color: "#10131b", cursor: "pointer",
+              }}
+            >
+              ➕ Adicionar todas as {dadosML.variacoes.length} variações
+            </button>
+
+            {/* Ou seleciona uma específica */}
+            <div style={{ fontSize: "11px", color: "#9099aa", fontWeight: 700, letterSpacing: "0.5px", marginBottom: "10px", textAlign: "center" }}>
+              — OU SELECIONE UMA ESPECÍFICA —
+            </div>
+
             <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginBottom: "18px" }}>
               {dadosML.variacoes.map(v => (
                 <button
                   key={v.id}
-                  onClick={() => aplicarVariacao(v)}
+                  onClick={() => { setAdicionarTodas(false); aplicarVariacao(v); }}
                   style={{
                     display: "flex", alignItems: "center", gap: "12px",
                     padding: "11px 14px", borderRadius: "14px", width: "100%",
@@ -397,7 +463,7 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
               <button onClick={() => setEtapa("link")} style={{ padding: "13px 18px", background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "14px", color: "#9099aa", fontWeight: 700, cursor: "pointer", fontSize: "14px" }}>
                 ← Voltar
               </button>
-              <button onClick={() => setEtapa("custos")} style={{ flex: 1, padding: "13px", background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "14px", color: "#9099aa", fontWeight: 600, cursor: "pointer", fontSize: "13px" }}>
+              <button onClick={() => { setAdicionarTodas(false); setEtapa("custos"); }} style={{ flex: 1, padding: "13px", background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "14px", color: "#9099aa", fontWeight: 600, cursor: "pointer", fontSize: "13px" }}>
                 Pular — sem variação
               </button>
             </div>
@@ -740,7 +806,14 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
                 border: "none", borderRadius: "14px", fontWeight: 900, fontSize: "15px",
                 color: salvando ? "#9099aa" : "#10131b", cursor: salvando ? "not-allowed" : "pointer",
               }}>
-                {salvando ? "Salvando..." : modoEdicao ? "Salvar alterações" : "✅ Cadastrar Anúncio"}
+                {salvando
+                  ? (adicionarTodas ? `Salvando variações...` : "Salvando...")
+                  : modoEdicao
+                    ? "Salvar alterações"
+                    : adicionarTodas
+                      ? `✅ Cadastrar ${dadosML?.variacoes?.length ?? ""} variações`
+                      : "✅ Cadastrar Anúncio"
+                }
               </button>
             </div>
           </div>
