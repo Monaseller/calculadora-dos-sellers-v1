@@ -54,14 +54,6 @@ export async function GET(request: Request) {
   const dataInicio = `${dateFrom}T00:00:00.000-03:00`;
   const dataFim    = `${dateTo}T23:59:59.999-03:00`;
 
-  // Helper: converte ISO para data BRT (UTC-3)
-  function getDateBRT(isoStr: string | null | undefined): string {
-    if (!isoStr) return "";
-    const d = new Date(isoStr);
-    const brt = new Date(d.getTime() - 3 * 60 * 60 * 1000);
-    return brt.toISOString().split("T")[0];
-  }
-
   async function fetchOrdersRange(from: string, to: string, status = "paid"): Promise<any[]> {
     const orders: any[] = [];
     const pageLimit = 50;
@@ -114,45 +106,15 @@ export async function GET(request: Request) {
     return fetchOrdersRange(dataInicio, dataFim, status);
   }
 
-  // Canceladas: usa o mesmo período selecionado
+  // Canceladas: usa o mesmo período selecionado, igual aos pedidos pagos
   async function fetchAllCancelled(): Promise<any[]> {
     return fetchAllDias("cancelled");
   }
 
-  // Pedidos PAGOS: busca o dia anterior também para capturar pedidos criados
-  // no final do dia anterior mas aprovados no dia atual (painel ML conta por date_approved).
-  async function fetchPaidByApproved(): Promise<any[]> {
-    const prevDay = new Date(`${dateFrom}T12:00:00Z`);
-    prevDay.setUTCDate(prevDay.getUTCDate() - 1);
-    const prevDayStr = prevDay.toISOString().split("T")[0];
-
-    const [prevOrders, currentOrders] = await Promise.all([
-      fetchOrdersRange(`${prevDayStr}T00:00:00.000-03:00`, `${prevDayStr}T23:59:59.999-03:00`, "paid"),
-      fetchAllDias("paid"),
-    ]);
-
-    // Combina e deduplica
-    const seen = new Set<number>();
-    const combined: any[] = [];
-    for (const o of [...prevOrders, ...currentOrders]) {
-      if (!seen.has(o.id)) { seen.add(o.id); combined.push(o); }
-    }
-
-    // Filtra por date_approved BRT dentro do intervalo solicitado
-    return combined.filter(o => {
-      const approvedBRT = getDateBRT(o.date_approved);
-      if (!approvedBRT) {
-        // Sem date_approved: usa date_created como fallback
-        const createdBRT = getDateBRT(o.date_created);
-        return createdBRT >= dateFrom && createdBRT <= dateTo;
-      }
-      return approvedBRT >= dateFrom && approvedBRT <= dateTo;
-    });
-  }
-
   // Sempre busca canceladas — precisamos delas para classificar "devolucao"
+  // (pedidos pagos-e-devolvidos que o ML conta como "vendas" no painel)
   const [paidOrders, confirmedOrders, paymentInProcessOrders, cancelledOrders] = await Promise.all([
-    fetchPaidByApproved(),
+    fetchAllDias("paid"),
     fetchAllDias("confirmed"),
     fetchAllDias("payment_in_process"),
     fetchAllCancelled(),
