@@ -29,6 +29,11 @@ export interface Anuncio {
   thumbnail: string | null;
   permalink: string | null;
   ativo: boolean;
+  // Campos novos
+  sku: string | null;
+  lucro_liquido: number | null;
+  margem_contribuicao: number | null;
+  peso_kg: number | null;
 }
 
 export interface VendaDia {

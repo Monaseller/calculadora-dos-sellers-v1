@@ -1,6 +1,7 @@
 "use client";
 import { useState } from "react";
 import { supabase, type Anuncio } from "@/lib/supabase";
+import { CATEGORIAS_ML } from "@/lib/comissoes-mercado-livre";
 
 interface Props {
   anuncio: Anuncio;
@@ -13,27 +14,53 @@ const moeda = (v: number) =>
 
 export default function CardAnuncio({ anuncio: a, onEditar, onExcluir }: Props) {
   const [vendas,    setVendas]    = useState("");
-  const [resultado, setResultado] = useState<{ faturamento: number; lucro: number; custos: number } | null>(null);
+  const [resultado, setResultado] = useState<{
+    faturamento: number;
+    lucro: number;
+    comissao: number;
+    imposto: number;
+    frete: number;
+    custoProduto: number;
+    insumos: number;
+  } | null>(null);
   const [salvando,  setSalvando]  = useState(false);
 
   const COR   = a.marketplace === "ML" ? "#FFE600" : "#EE4D2D";
   const CORBG = a.marketplace === "ML" ? "rgba(255,230,0,0.12)" : "rgba(238,77,45,0.12)";
 
-  // Diferença preço atual vs ideal
-  const precoAtual = (a as any).preco_anuncio as number | null;
-  const precoIdeal = a.preco_ideal;
-  let statusPreco: "ok" | "baixo" | null = null;
-  if (precoAtual && precoIdeal) {
-    statusPreco = precoAtual >= precoIdeal ? "ok" : "baixo";
+  const precoAtual = a.preco_anuncio;
+
+  // Calcula lucro e margem dinamicamente — não depende de colunas extras no DB
+  function calcLucroMargem() {
+    if (!precoAtual) return null;
+    const cat = CATEGORIAS_ML.find(c => c.nome.toLowerCase() === (a.categoria ?? "").toLowerCase());
+    // Usa taxa padrão quando categoria não é encontrada (subcategorias do ML não mapeadas)
+    const comissao    = a.marketplace === "ML"
+      ? (a.tipo_anuncio === "Premium" ? (cat?.premium ?? 0.18) : (cat?.classico ?? 0.13))
+      : 0.12;
+    const comissaoVal = precoAtual * comissao;
+    const impostoVal  = precoAtual * ((a.imposto || 0) / 100);
+    const freteVal    = a.frete_gratis ? 0 : a.custo_frete;
+    const lucro       = precoAtual - comissaoVal - impostoVal - freteVal - a.custo_produto - a.insumos;
+    return { lucro, margem: (lucro / precoAtual) * 100, comissaoVal, impostoVal, freteVal };
   }
+
+  const calc      = calcLucroMargem();
+  const lucroUnit = calc?.lucro ?? null;
+  const margemReal = calc?.margem ?? null;
 
   function calcular() {
     const u = Number(vendas) || 0;
-    if (!u || !precoIdeal) return;
-    const faturamento = precoIdeal * u;
-    const custoTotal  = (a.custo_produto + a.insumos + a.custo_frete) * u;
-    const lucro       = faturamento * (a.margem_desejada / 100);
-    setResultado({ faturamento, lucro, custos: custoTotal });
+    if (!u || !precoAtual || !calc) return;
+    setResultado({
+      faturamento:  precoAtual       * u,
+      lucro:        calc.lucro       * u,
+      comissao:     calc.comissaoVal * u,
+      imposto:      calc.impostoVal  * u,
+      frete:        calc.freteVal    * u,
+      custoProduto: a.custo_produto  * u,
+      insumos:      a.insumos        * u,
+    });
   }
 
   async function salvarVendaDia() {
@@ -82,9 +109,14 @@ export default function CardAnuncio({ anuncio: a, onEditar, onExcluir }: Props) 
             <span style={{ background: CORBG, color: COR, fontSize: "10px", fontWeight: 800, borderRadius: "6px", padding: "2px 8px", letterSpacing: "0.3px" }}>
               {a.marketplace}{a.tipo_anuncio ? ` · ${a.tipo_anuncio}` : ""}
             </span>
-            {(a as any).ml_item_id && (
+            {a.ml_item_id && (
               <span style={{ background: "rgba(255,255,255,0.06)", color: "#9099aa", fontSize: "10px", fontWeight: 700, borderRadius: "6px", padding: "2px 8px", fontFamily: "monospace" }}>
-                {(a as any).ml_item_id}
+                {a.ml_item_id}
+              </span>
+            )}
+            {a.sku && (
+              <span style={{ background: "rgba(255,255,255,0.06)", color: "#9099aa", fontSize: "10px", fontWeight: 700, borderRadius: "6px", padding: "2px 8px", fontFamily: "monospace" }}>
+                SKU: {a.sku}
               </span>
             )}
           </div>
@@ -105,26 +137,31 @@ export default function CardAnuncio({ anuncio: a, onEditar, onExcluir }: Props) 
         </div>
       </div>
 
-      {/* ── Preços ────────────────────────────────────────────────── */}
-      <div style={{ display: "grid", gridTemplateColumns: precoAtual ? "1fr 1fr" : "1fr", gap: "1px", margin: "0 18px 14px", background: "rgba(255,255,255,0.06)", borderRadius: "14px", overflow: "hidden" }}>
-        <div style={{ background: "#0d1118", padding: "12px 14px" }}>
-          <div style={{ color: "#9099aa", fontSize: "10px", fontWeight: 700, marginBottom: "3px" }}>PREÇO IDEAL</div>
-          <div style={{ fontSize: "22px", fontWeight: 900, color: "#00D97E" }}>
-            {precoIdeal ? moeda(precoIdeal) : <span style={{ color: "#9099aa", fontSize: "16px" }}>—</span>}
+      {/* ── Preços / Resultado ──────────────────────────────────────── */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "1px", margin: "0 18px 14px", background: "rgba(255,255,255,0.06)", borderRadius: "14px", overflow: "hidden" }}>
+        <div style={{ background: "#0d1118", padding: "12px 10px" }}>
+          <div style={{ color: "#9099aa", fontSize: "9px", fontWeight: 700, marginBottom: "3px" }}>PREÇO ATUAL</div>
+          <div style={{ fontSize: "17px", fontWeight: 900 }}>
+            {precoAtual ? moeda(precoAtual) : <span style={{ color: "#9099aa", fontSize: "14px" }}>—</span>}
           </div>
-          <div style={{ color: "#9099aa", fontSize: "10px", marginTop: "2px" }}>margem {a.margem_desejada}%</div>
+          <div style={{ color: "#9099aa", fontSize: "9px", marginTop: "2px" }}>
+            {a.frete_gratis ? "🚚 frete grátis" : "📦 frete comprador"}
+          </div>
         </div>
-        {precoAtual && (
-          <div style={{ background: "#0d1118", padding: "12px 14px" }}>
-            <div style={{ color: "#9099aa", fontSize: "10px", fontWeight: 700, marginBottom: "3px" }}>PREÇO ATUAL ML</div>
-            <div style={{ fontSize: "22px", fontWeight: 900, color: statusPreco === "ok" ? "#00D97E" : "#ff4d4d" }}>
-              {moeda(precoAtual)}
-            </div>
-            <div style={{ fontSize: "10px", marginTop: "2px", color: statusPreco === "ok" ? "#00D97E" : "#ff4d4d", fontWeight: 700 }}>
-              {statusPreco === "ok" ? "✓ Acima do ideal" : "⚠️ Abaixo do ideal"}
-            </div>
+        <div style={{ background: "#0d1118", padding: "12px 10px" }}>
+          <div style={{ color: "#9099aa", fontSize: "9px", fontWeight: 700, marginBottom: "3px" }}>LUCRO LÍQUIDO</div>
+          <div style={{ fontSize: "17px", fontWeight: 900, color: lucroUnit != null ? (lucroUnit >= 0 ? "#00D97E" : "#ff4d4d") : "#9099aa" }}>
+            {lucroUnit != null ? moeda(lucroUnit) : <span style={{ fontSize: "14px" }}>—</span>}
           </div>
-        )}
+          <div style={{ color: "#9099aa", fontSize: "9px", marginTop: "2px" }}>por unidade</div>
+        </div>
+        <div style={{ background: "#0d1118", padding: "12px 10px" }}>
+          <div style={{ color: "#9099aa", fontSize: "9px", fontWeight: 700, marginBottom: "3px" }}>MARGEM</div>
+          <div style={{ fontSize: "17px", fontWeight: 900, color: margemReal != null ? (margemReal >= 0 ? "#00D97E" : "#ff4d4d") : "#9099aa" }}>
+            {margemReal != null ? `${margemReal.toFixed(1)}%` : <span style={{ fontSize: "14px" }}>—</span>}
+          </div>
+          <div style={{ color: "#9099aa", fontSize: "9px", marginTop: "2px" }}>contribuição</div>
+        </div>
       </div>
 
       {/* ── Custos resumo ──────────────────────────────────────────── */}
@@ -169,18 +206,29 @@ export default function CardAnuncio({ anuncio: a, onEditar, onExcluir }: Props) 
 
         {resultado && (
           <div style={{ marginTop: "12px" }}>
-            <div style={{ display: "flex", flexDirection: "column", gap: "6px", marginBottom: "10px" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", fontSize: "13px" }}>
-                <span style={{ color: "#9099aa" }}>Faturamento</span>
+            <div style={{ display: "flex", flexDirection: "column", gap: "5px", marginBottom: "10px" }}>
+              {/* Faturamento */}
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: "13px", paddingBottom: "6px", borderBottom: "1px solid rgba(255,255,255,0.07)" }}>
+                <span style={{ fontWeight: 700 }}>Faturamento</span>
                 <span style={{ fontWeight: 800 }}>{moeda(resultado.faturamento)}</span>
               </div>
-              <div style={{ display: "flex", justifyContent: "space-between", fontSize: "13px" }}>
-                <span style={{ color: "#9099aa" }}>Custos diretos</span>
-                <span style={{ fontWeight: 800, color: "#ff4d4d" }}>-{moeda(resultado.custos)}</span>
-              </div>
+              {/* Deduções */}
+              {[
+                { label: "Comissão ML",            val: resultado.comissao },
+                { label: `Imposto (${a.imposto}%)`, val: resultado.imposto },
+                { label: "Custo produto",           val: resultado.custoProduto },
+                { label: "Insumos",                 val: resultado.insumos },
+                ...(!a.frete_gratis && resultado.frete > 0 ? [{ label: "Frete", val: resultado.frete }] : []),
+              ].filter(i => i.val > 0).map(({ label, val }) => (
+                <div key={label} style={{ display: "flex", justifyContent: "space-between", fontSize: "12px" }}>
+                  <span style={{ color: "#9099aa" }}>{label}</span>
+                  <span style={{ fontWeight: 700, color: "#ff6b6b" }}>-{moeda(val)}</span>
+                </div>
+              ))}
+              {/* Lucro líquido */}
               <div style={{ display: "flex", justifyContent: "space-between", paddingTop: "8px", borderTop: "1px solid rgba(255,255,255,0.07)" }}>
-                <span style={{ fontWeight: 700, fontSize: "14px" }}>💚 Lucro estimado</span>
-                <span style={{ fontWeight: 900, fontSize: "17px", color: "#00D97E" }}>{moeda(resultado.lucro)}</span>
+                <span style={{ fontWeight: 700, fontSize: "14px" }}>💚 Lucro líquido</span>
+                <span style={{ fontWeight: 900, fontSize: "17px", color: resultado.lucro >= 0 ? "#00D97E" : "#ff4d4d" }}>{moeda(resultado.lucro)}</span>
               </div>
             </div>
             <button onClick={salvarVendaDia} disabled={salvando} style={{

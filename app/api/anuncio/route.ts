@@ -45,16 +45,26 @@ function extrairItemId(link: string): ItemIdResult | null {
   const mlbDireto = texto.match(/^MLB-?(\d+)$/i);
   if (mlbDireto) return { primaryId: `MLB${mlbDireto[1]}` };
 
+  // Extrai item_id= do texto bruto antes de parsear a URL (cobre URLs sem https://)
+  const itemIdRaw = texto.match(/[?&]item_id=(MLB\d+)/i);
+  if (itemIdRaw) return { primaryId: itemIdRaw[1] };
+
   try {
-    const url = new URL(texto);
+    // Tenta parsear com e sem scheme
+    let url: URL;
+    try {
+      url = new URL(texto);
+    } catch {
+      url = new URL("https://" + texto);
+    }
     const pathname = url.pathname;
 
     // wid= param
     const wid = url.searchParams.get("wid");
     if (wid?.toUpperCase().startsWith("MLB")) return { primaryId: wid };
 
-    // item_id= param direto
-    const itemIdParam = url.searchParams.get("item_id");
+    // item_id= ou itemId= param direto
+    const itemIdParam = url.searchParams.get("item_id") || url.searchParams.get("itemId");
     if (itemIdParam?.toUpperCase().startsWith("MLB")) return { primaryId: itemIdParam };
 
     // pdp_filters=item_id:MLB... (anúncios e catálogo)
@@ -82,6 +92,16 @@ function extrairItemId(link: string): ItemIdResult | null {
       };
     }
 
+    // URL do painel do vendedor: /anuncios/MLBU1439310163/modificar/...
+    const anunciosVendedor = pathname.match(/\/anuncios\/(MLBU\d+)/i);
+    if (anunciosVendedor) {
+      const mlbuId = anunciosVendedor[1];
+      return {
+        primaryId: listingFromFilter || mlbuId,
+        catalogId: mlbuId,
+      };
+    }
+
     // URL de anúncio direto: /MLB1234567890 no path
     const pathMatch = pathname.match(/\/(MLB\d+)/i);
     if (pathMatch) return { primaryId: pathMatch[1] };
@@ -91,18 +111,27 @@ function extrairItemId(link: string): ItemIdResult | null {
 
   } catch {}
 
-  // Último recurso: primeiro MLB no texto
-  const match = texto.match(/MLB\d+/i);
+  // Último recurso: primeiro MLB ou MLBU no texto
+  const match = texto.match(/MLBU?\d+/i);
   if (!match) return null;
-  return { primaryId: match[0] };
+  return { primaryId: match[0], catalogId: match[0].toUpperCase().startsWith("MLBU") ? match[0] : undefined };
 }
 
-const ATTRS = "id,title,price,category_id,listing_type_id,thumbnail,permalink,site_id";
+const ATTRS = "id,title,price,category_id,listing_type_id,thumbnail,permalink,site_id,seller_custom_field,shipping,variations";
 
 async function fetchItem(itemId: string, token: string | null): Promise<Response> {
-  const authHeaders = token ? { Authorization: `Bearer ${token}` } : {};
+  const authHeaders: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
 
-  // 1. Com auth + attributes (às vezes bypassa restrições de catálogo)
+  // 1. Com auth SEM filtro de attributes — garante seller_custom_field e variações completas
+  if (token) {
+    const r = await fetch(`https://api.mercadolibre.com/items/${itemId}`, {
+      headers: authHeaders,
+    });
+    console.log(`[anuncio] /items/${itemId} com auth: ${r.status}`);
+    if (r.ok) return r;
+  }
+
+  // 2. Com auth + attributes (fallback com atributos específicos)
   if (token) {
     const r = await fetch(`https://api.mercadolibre.com/items/${itemId}?attributes=${ATTRS}`, {
       headers: authHeaders,
@@ -111,12 +140,12 @@ async function fetchItem(itemId: string, token: string | null): Promise<Response
     if (r.ok) return r;
   }
 
-  // 2. Sem auth + attributes
+  // 3. Sem auth + attributes
   const r2 = await fetch(`https://api.mercadolibre.com/items/${itemId}?attributes=${ATTRS}`);
   console.log(`[anuncio] /items/${itemId}?attributes público: ${r2.status}`);
   if (r2.ok) return r2;
 
-  // 3. Sem auth, sem attributes (fallback para items que não aceitam attributes)
+  // 4. Sem auth, sem attributes (fallback para items que não aceitam attributes)
   const r3 = await fetch(`https://api.mercadolibre.com/items/${itemId}`);
   console.log(`[anuncio] /items/${itemId} público simples: ${r3.status}`);
   return r3;
@@ -150,7 +179,7 @@ async function scraparPaginaML(pageUrl: string): Promise<DadosPagina | null> {
     const resultado: DadosPagina = {};
 
     // 1. JSON-LD structured data (melhor fonte — usado para SEO/Google)
-    const jsonLdMatches = [...html.matchAll(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi)];
+    const jsonLdMatches = Array.from(html.matchAll(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi));
     for (const match of jsonLdMatches) {
       try {
         const jsonLd = JSON.parse(match[1]);
@@ -218,7 +247,7 @@ async function scraparPaginaML(pageUrl: string): Promise<DadosPagina | null> {
       if (m) { resultado.itemId = m[1]; break; }
     }
     if (!resultado.itemId) {
-      const allIds = [...html.matchAll(/MLB(\d{10,})/g)].map((m) => `MLB${m[1]}`);
+      const allIds = Array.from(html.matchAll(/MLB(\d{10,})/g)).map((m) => `MLB${m[1]}`);
       if (allIds.length) resultado.itemId = allIds[0];
     }
 
@@ -327,7 +356,10 @@ export async function GET(request: Request) {
     return NextResponse.json({ erro: true, mensagem: "Não encontrei um ID de produto ML no link." });
   }
 
-  console.log(`[anuncio] Link: ${link.slice(0, 80)}`);
+  // Normaliza o link para ter scheme (scraping e fallback dependem de link.startsWith("http"))
+  const linkNorm = link.startsWith("http") ? link : "https://" + link;
+
+  console.log(`[anuncio] Link: ${linkNorm.slice(0, 80)}`);
   console.log(`[anuncio] primaryId: ${parsed.primaryId} | catalogId: ${parsed.catalogId}`);
 
   const cookieHeader = request.headers.get("cookie") || "";
@@ -382,8 +414,8 @@ export async function GET(request: Request) {
 
   // Fallback: scraping da página ML — extrai preço, título e ID do HTML/JSON-LD
   let dadosScrape: DadosPagina | null = null;
-  if (!response.ok && link.startsWith("http")) {
-    dadosScrape = await scraparPaginaML(link);
+  if (!response.ok) {
+    dadosScrape = await scraparPaginaML(linkNorm);
     if (dadosScrape?.itemId) {
       const r = await fetchItem(dadosScrape.itemId, token);
       if (r.ok) { itemId = dadosScrape.itemId; response = r; }
@@ -391,9 +423,9 @@ export async function GET(request: Request) {
   }
 
   // Último fallback API: busca por keywords do slug
-  if (!response.ok && link.startsWith("http")) {
+  if (!response.ok) {
     try {
-      const slugId = await buscarPorSlug(link, token);
+      const slugId = await buscarPorSlug(linkNorm, token);
       if (slugId) {
         const r = await fetchItem(slugId, token);
         if (r.ok) { itemId = slugId; response = r; }
@@ -405,40 +437,48 @@ export async function GET(request: Request) {
     const errData = await response.json().catch(() => ({}));
     console.log(`[anuncio] Falha final ${response.status}:`, errData);
 
-    // Fallback parcial: extrai título do slug da URL para catálogos (MLBU/p/)
-    // Retorna dados parciais — usuário preenche preço manualmente
-    if (response.status !== 401 && link.startsWith("http")) {
-      // Se scraping retornou dados (título e/ou preço), usa eles
+    if (response.status !== 401) {
+      // Tenta extrair título do scraping ou do slug da URL
       const tituloScrape = dadosScrape?.titulo;
-      const precoScrape = dadosScrape?.preco;
+      const precoScrape  = dadosScrape?.preco;
       const thumbnailScrape = dadosScrape?.thumbnail;
 
-      // Fallback de título pelo slug se scraping não trouxe
+      // Segmentos de navegação do back-office ML que NÃO são nomes de produto
+      const SLUGS_IGNORADOS = new Set(["anuncios", "modificar", "bomni", "variation", "p", "up", "produto", "item"]);
+
       let tituloFinal = tituloScrape;
       if (!tituloFinal) {
         try {
-          const urlObj = new URL(link);
-          const slug = urlObj.pathname.split("/")[1] || "";
-          if (slug) {
-            tituloFinal = slug
+          const urlObj = new URL(linkNorm);
+          // Percorre os segmentos do path procurando algo que pareça nome de produto
+          const segmentos = urlObj.pathname.split("/").filter(Boolean);
+          for (const seg of segmentos) {
+            const segLower = seg.toLowerCase();
+            if (SLUGS_IGNORADOS.has(segLower)) continue;
+            if (segLower.startsWith("mlbu") || segLower.startsWith("mlb")) continue;
+            if (!seg.includes("-")) continue; // nomes de produto sempre têm hífens
+            tituloFinal = seg
               .replace(/-/g, " ")
               .replace(/\b\w/g, (c) => c.toUpperCase())
               .trim();
+            break;
           }
         } catch {}
       }
 
-      if (tituloFinal && tituloFinal.length > 5) {
-        console.log(`[anuncio] Fallback parcial: título="${tituloFinal}" preço=${precoScrape}`);
+      // Para MLBU sem título: retorna parcial vazio — usuário digita nome e preço
+      const isMLBU = parsed.primaryId.toUpperCase().startsWith("MLBU");
+      if ((tituloFinal && tituloFinal.length > 5) || isMLBU) {
+        console.log(`[anuncio] Fallback parcial: título="${tituloFinal}" preço=${precoScrape} mlbu=${isMLBU}`);
         return NextResponse.json({
           id: parsed.catalogId || parsed.primaryId,
-          titulo: tituloFinal,
+          titulo: tituloFinal ?? "",
           preco: precoScrape ?? null,
           categoria: null,
           categoriaId: null,
           tipoAnuncio: null,
           thumbnail: thumbnailScrape ?? null,
-          permalink: link,
+          permalink: linkNorm,
           parcial: true,
         });
       }
@@ -456,6 +496,16 @@ export async function GET(request: Request) {
 
   const data = await response.json();
   console.log(`[anuncio] ✓ ${data.id} — ${data.title}`);
+  console.log(`[anuncio] ALL keys: ${Object.keys(data).join(", ")}`);
+  console.log(`[anuncio] seller_custom_field: ${JSON.stringify(data.seller_custom_field)}`);
+  console.log(`[anuncio] variations count: ${data.variations?.length ?? 0}`);
+  if (data.variations?.length) {
+    console.log(`[anuncio] variations[0] keys: ${Object.keys(data.variations[0]).join(", ")}`);
+    console.log(`[anuncio] variations[0].seller_custom_field: ${JSON.stringify(data.variations[0].seller_custom_field)}`);
+  }
+  if (data.attributes?.length) {
+    console.log(`[anuncio] attributes: ${JSON.stringify(data.attributes.slice(0, 5))}`);
+  }
 
   let nomeCategoria = data.category_id;
   try {
@@ -470,6 +520,66 @@ export async function GET(request: Request) {
   if (tipoAnuncio === "gold_special") tipoAnuncio = "Clássico";
   if (tipoAnuncio === "gold_pro") tipoAnuncio = "Premium";
 
+  // SKU: tenta no nível do item, depois nas variações (omnichannel/MLBU)
+  const skuRaiz = data.seller_custom_field ?? null;
+  const skuVariacao = !skuRaiz
+    ? (data.variations ?? []).map((v: { seller_custom_field?: string }) => v.seller_custom_field).find(Boolean) ?? null
+    : null;
+
+  // Atributos: alguns itens omnichannel guardam o SKU em attributes
+  const skuAtributo = !skuRaiz && !skuVariacao && Array.isArray(data.attributes)
+    ? (data.attributes as Array<{ id?: string; value_name?: string }>)
+        .find(a => ["SELLER_SKU", "SELLER_CUSTOM_FIELD", "SKU", "PRODUCT_CODE"].includes((a.id ?? "").toUpperCase()))
+        ?.value_name ?? null
+    : null;
+
+  // Fallback MLBU: tenta buscar o user product para obter o código do vendedor
+  let skuUserProduct: string | null = null;
+  if (!skuRaiz && !skuVariacao && !skuAtributo && token && parsed.catalogId) {
+    try {
+      // 1. Pega o user_id via /users/me
+      const meRes = await fetch("https://api.mercadolibre.com/users/me", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (meRes.ok) {
+        const meData = await meRes.json();
+        const userId = meData.id;
+        console.log(`[anuncio] userId: ${userId}`);
+
+        // 2. Tenta buscar via user_products com catalog_product_id
+        const upRes = await fetch(
+          `https://api.mercadolibre.com/users/${userId}/user_products?catalog_product_id=${parsed.catalogId}&status=active`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        console.log(`[anuncio] user_products status: ${upRes.status}`);
+        if (upRes.ok) {
+          const upData = await upRes.json();
+          console.log(`[anuncio] user_products response: ${JSON.stringify(upData).slice(0, 300)}`);
+          const results = Array.isArray(upData) ? upData : (upData.results ?? []);
+          skuUserProduct = results[0]?.seller_sku ?? results[0]?.seller_custom_field ?? null;
+        }
+
+        // 3. Fallback: tenta o endpoint de catalog items
+        if (!skuUserProduct) {
+          const ciRes = await fetch(
+            `https://api.mercadolibre.com/users/${userId}/items/search?catalog_product_id=${parsed.catalogId}&limit=1`,
+            { headers: { Authorization: `Bearer ${token}` } }
+          );
+          console.log(`[anuncio] items/search catalog status: ${ciRes.status}`);
+          if (ciRes.ok) {
+            const ciData = await ciRes.json();
+            console.log(`[anuncio] items/search result: ${JSON.stringify(ciData).slice(0, 200)}`);
+          }
+        }
+      }
+    } catch (e) {
+      console.log(`[anuncio] userProduct erro: ${e}`);
+    }
+  }
+
+  const sku = skuRaiz ?? skuVariacao ?? skuAtributo ?? skuUserProduct ?? null;
+  console.log(`[anuncio] sku final: ${sku} (raiz=${skuRaiz}, var=${skuVariacao}, attr=${skuAtributo}, up=${skuUserProduct})`);
+
   return NextResponse.json({
     id: data.id,
     titulo: data.title,
@@ -479,5 +589,7 @@ export async function GET(request: Request) {
     tipoAnuncio,
     thumbnail: data.thumbnail,
     permalink: data.permalink,
+    sku,
+    freteGratis: data.shipping?.free_shipping ?? false,
   });
 }

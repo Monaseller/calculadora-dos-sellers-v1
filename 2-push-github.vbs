@@ -1,0 +1,2 @@
+Set objShell = CreateObject("WScript.Shell")
+objShell.Run "cmd.exe /k ""cd /d C:\Users\USER\Desktop\calculadora-dos-sellers-v1 && echo === Limpando credenciais GitHub === && cmdkey /delete:git:https://github.com && cmdkey /delete:LegacyGeneric:target=git:https://github.com && echo === Enviando para GitHub (vai abrir login no browser) === && git push -u origin main && echo. && echo === PRONTO! === && pause""", 1, False

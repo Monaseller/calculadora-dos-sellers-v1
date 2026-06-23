@@ -16,8 +16,8 @@ const SELECT_STYLE: React.CSSProperties = {
   width: "100%",
   padding: "13px 14px",
   borderRadius: "12px",
-  border: "1px solid rgba(255,255,255,0.1)",
-  background: "rgba(255,255,255,0.06)",
+  border: "1px solid rgba(255,255,255,0.15)",
+  background: "#0d1017",
   color: "#fff",
   fontSize: "14px",
   outline: "none",
@@ -29,8 +29,8 @@ const INPUT_STYLE: React.CSSProperties = {
   width: "100%",
   padding: "13px 14px",
   borderRadius: "12px",
-  border: "1px solid rgba(255,255,255,0.1)",
-  background: "rgba(255,255,255,0.06)",
+  border: "1px solid rgba(255,255,255,0.15)",
+  background: "#0d1017",
   color: "#fff",
   fontSize: "14px",
   outline: "none",
@@ -62,6 +62,11 @@ export default function PrecificacaoPage() {
   const [customPct,       setCustomPct]       = useState("");
   const [showCustom,      setShowCustom]      = useState(false);
   const [mlConectado,     setMlConectado]     = useState<boolean | null>(null);
+
+  // ── Simulador "e se?" ──────────────────────────────────────────────────────
+  const [simMode,         setSimMode]         = useState<"preco" | "margem">("preco");
+  const [simPreco,        setSimPreco]        = useState("");
+  const [simMargem,       setSimMargem]       = useState("");
 
   useEffect(() => {
     fetch("/api/auth/status")
@@ -163,8 +168,54 @@ export default function PrecificacaoPage() {
     return [];
   }, [precoIdeal, marketplace, resultadoML, resultadoShopee, margemDesejada, imposto, freteGratis]);
 
+  // ── Cálculo simulador ──────────────────────────────────────────────────────
+  const simResultado = useMemo(() => {
+    const cp  = parseN(custoProduto);
+    const ins = parseN(insumos);
+    const cf  = freteGratis ? 0 : parseN(custoFrete);
+    const imp = parseN(imposto) / 100;
+
+    // taxa de comissão atual
+    let comRate = 0;
+    if (marketplace === "ML") {
+      const cat = CATEGORIAS_ML.find(c => c.nome === categoriaNome);
+      if (cat) comRate = tipoAnuncio === "Premium" ? cat.premium : cat.classico;
+    } else {
+      // Shopee: usa preço ideal atual para estimar a faixa de comissão
+      const precoRef = precoIdeal || 100;
+      const faixa = FAIXAS_SHOPEE.find(f => precoRef >= f.min && precoRef < f.max) ?? FAIXAS_SHOPEE[0];
+      comRate = faixa.comissao + TAXA_CAMPANHA_SHOPEE;
+    }
+
+    if (simMode === "preco") {
+      const p = parseN(simPreco);
+      if (!p) return null;
+      const comissao = p * comRate;
+      const impostoV = p * imp;
+      const custos   = cp + ins + cf + comissao + impostoV;
+      const lucro    = p - custos;
+      const mcPct    = (lucro / p) * 100;
+      const diffPreco = precoIdeal ? p - precoIdeal : null;
+      const diffMC    = precoIdeal ? mcPct - parseN(margemDesejada) : null;
+      return { p, comissao, impostoV, lucro, mcPct, diffPreco, diffMC, custos };
+    } else {
+      // modo margem: qual preço cobrar para ter simMargem%
+      const mg  = parseN(simMargem) / 100;
+      const den = 1 - comRate - imp - mg;
+      if (den <= 0) return null;
+      const p        = (cp + ins + cf) / den;
+      const comissao = p * comRate;
+      const impostoV = p * imp;
+      const lucro    = p * mg;
+      const diffPreco = precoIdeal ? p - precoIdeal : null;
+      const diffMC    = precoIdeal ? mg * 100 - parseN(margemDesejada) : null;
+      return { p, comissao, impostoV, lucro, mcPct: mg * 100, diffPreco, diffMC };
+    }
+  }, [simMode, simPreco, simMargem, custoProduto, insumos, custoFrete, freteGratis, imposto,
+      marketplace, categoriaNome, tipoAnuncio, tipoContaShopee, precoIdeal, margemDesejada]);
+
   return (
-    <div style={{ padding: "28px", maxWidth: "1280px" }}>
+    <div style={{ padding: "28px 36px", width: "100%", boxSizing: "border-box" }}>
 
       {/* ── Seção 1 + 2: Configure | Resultado ─────────────────────────── */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px", marginBottom: "20px" }}>
@@ -558,6 +609,202 @@ export default function PrecificacaoPage() {
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.51"/></svg>
           Taxas atualizadas em 2026
         </p>
+      </div>
+
+      {/* ── Seção 4: Simulador "e se?" ─────────────────────────────────── */}
+      <div style={{
+        background: "#161921",
+        border: "1px solid rgba(255,255,255,0.07)",
+        borderRadius: "20px",
+        padding: "24px",
+        marginTop: "20px",
+      }}>
+        {/* Header */}
+        <div style={{ marginBottom: "20px" }}>
+          <div style={{ fontSize: "14px", fontWeight: 800, color: "#9099aa", marginBottom: "4px" }}>
+            <span style={{
+              background: "#FF6A00", color: "#fff",
+              borderRadius: "50%", width: "22px", height: "22px",
+              display: "inline-grid", placeItems: "center",
+              fontSize: "12px", fontWeight: 900, marginRight: "8px",
+            }}>4</span>
+            Simulador — E se?
+          </div>
+          <p style={{ margin: "6px 0 0 30px", fontSize: "12px", color: "#666" }}>
+            Teste cenários sem alterar seu cálculo principal.
+          </p>
+        </div>
+
+        {/* Toggle de modo */}
+        <div style={{
+          display: "inline-flex",
+          background: "rgba(255,255,255,0.05)",
+          border: "1px solid rgba(255,255,255,0.08)",
+          borderRadius: "12px",
+          padding: "4px",
+          gap: "4px",
+          marginBottom: "24px",
+        }}>
+          {([
+            { key: "preco",  label: "💰 Se eu cobrar R$..." },
+            { key: "margem", label: "🎯 Se eu quiser X% de margem..." },
+          ] as const).map(({ key, label }) => (
+            <button
+              key={key}
+              onClick={() => { setSimMode(key); setSimPreco(""); setSimMargem(""); }}
+              style={{
+                padding: "8px 18px", borderRadius: "9px", border: "none",
+                background: simMode === key ? "linear-gradient(135deg,#FF6A00,#ffb800)" : "transparent",
+                color: simMode === key ? "#10131b" : "#9099aa",
+                fontWeight: 800, fontSize: "13px", cursor: "pointer",
+                transition: "all 0.15s",
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "24px", alignItems: "start" }}>
+          {/* Input do simulador */}
+          <div>
+            {simMode === "preco" ? (
+              <div>
+                <label style={LABEL_STYLE}>Se eu cobrar este preço (R$)</label>
+                <input
+                  value={simPreco}
+                  onChange={e => setSimPreco(e.target.value)}
+                  placeholder="Ex: 89,90"
+                  style={{ ...INPUT_STYLE, fontSize: "20px", fontWeight: 800, color: "#FFE600" }}
+                />
+                <p style={{ margin: "8px 0 0", fontSize: "12px", color: "#666" }}>
+                  → Qual será minha margem e lucro com este preço?
+                </p>
+              </div>
+            ) : (
+              <div>
+                <label style={LABEL_STYLE}>Se eu quiser esta margem (%)</label>
+                <input
+                  value={simMargem}
+                  onChange={e => setSimMargem(e.target.value)}
+                  placeholder="Ex: 35"
+                  style={{ ...INPUT_STYLE, fontSize: "20px", fontWeight: 800, color: "#FFE600" }}
+                />
+                <p style={{ margin: "8px 0 0", fontSize: "12px", color: "#666" }}>
+                  → Qual preço devo cobrar para atingir essa margem?
+                </p>
+              </div>
+            )}
+
+            {/* Referência atual */}
+            {precoIdeal && (
+              <div style={{
+                marginTop: "16px",
+                padding: "12px 14px",
+                background: "rgba(255,255,255,0.03)",
+                border: "1px solid rgba(255,255,255,0.07)",
+                borderRadius: "12px",
+                fontSize: "12px", color: "#9099aa",
+              }}>
+                <span style={{ fontWeight: 700 }}>Cálculo atual:</span>{" "}
+                Preço ideal <span style={{ color: "#00D97E", fontWeight: 800 }}>{moeda(precoIdeal)}</span>{" "}
+                com <span style={{ color: "#00D97E", fontWeight: 800 }}>{margemDesejada}%</span> de margem
+              </div>
+            )}
+          </div>
+
+          {/* Resultado do simulador */}
+          <div>
+            {simResultado ? (
+              <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                {/* Métricas principais */}
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
+                  <div style={{
+                    padding: "16px",
+                    background: simResultado.mcPct >= 0 ? "rgba(0,217,126,0.08)" : "rgba(255,77,77,0.08)",
+                    border: `1px solid ${simResultado.mcPct >= 0 ? "rgba(0,217,126,0.2)" : "rgba(255,77,77,0.2)"}`,
+                    borderRadius: "14px",
+                  }}>
+                    <div style={{ fontSize: "11px", color: "#9099aa", fontWeight: 700, marginBottom: "6px", textTransform: "uppercase" }}>Margem</div>
+                    <div style={{ fontSize: "26px", fontWeight: 900, color: simResultado.mcPct >= 0 ? "#00D97E" : "#ff4d4d" }}>
+                      {simResultado.mcPct.toFixed(1)}%
+                    </div>
+                    {simResultado.diffMC !== null && (
+                      <div style={{ fontSize: "11px", marginTop: "4px", color: simResultado.diffMC >= 0 ? "#00D97E" : "#ff4d4d", fontWeight: 700 }}>
+                        {simResultado.diffMC >= 0 ? "▲" : "▼"} {Math.abs(simResultado.diffMC).toFixed(1)}pp vs atual
+                      </div>
+                    )}
+                  </div>
+
+                  <div style={{
+                    padding: "16px",
+                    background: simResultado.lucro >= 0 ? "rgba(111,163,255,0.08)" : "rgba(255,77,77,0.08)",
+                    border: `1px solid ${simResultado.lucro >= 0 ? "rgba(111,163,255,0.2)" : "rgba(255,77,77,0.2)"}`,
+                    borderRadius: "14px",
+                  }}>
+                    <div style={{ fontSize: "11px", color: "#9099aa", fontWeight: 700, marginBottom: "6px", textTransform: "uppercase" }}>
+                      {simMode === "preco" ? "Preço simulado" : "Preço sugerido"}
+                    </div>
+                    <div style={{ fontSize: "22px", fontWeight: 900, color: "#6fa3ff" }}>
+                      {moeda(simResultado.p)}
+                    </div>
+                    {simResultado.diffPreco !== null && (
+                      <div style={{ fontSize: "11px", marginTop: "4px", color: simResultado.diffPreco >= 0 ? "#00D97E" : "#ff4d4d", fontWeight: 700 }}>
+                        {simResultado.diffPreco >= 0 ? "▲" : "▼"} {moeda(Math.abs(simResultado.diffPreco))} vs atual
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Breakdown simplificado */}
+                <div style={{
+                  padding: "14px",
+                  background: "rgba(255,255,255,0.03)",
+                  border: "1px solid rgba(255,255,255,0.06)",
+                  borderRadius: "12px",
+                  display: "flex", flexDirection: "column", gap: "6px",
+                }}>
+                  {[
+                    { label: "Lucro líquido",  val: moeda(simResultado.lucro),    cor: simResultado.lucro >= 0 ? "#00D97E" : "#ff4d4d" },
+                    { label: "Comissão",        val: moeda(simResultado.comissao), cor: "#ff6b6b" },
+                    { label: "Imposto",         val: moeda(simResultado.impostoV), cor: "#ff6b6b" },
+                    { label: "Custo produto",   val: moeda(parseN(custoProduto) + parseN(insumos)), cor: "#9099aa" },
+                  ].map(({ label, val, cor }) => (
+                    <div key={label} style={{ display: "flex", justifyContent: "space-between", fontSize: "12px" }}>
+                      <span style={{ color: "#9099aa" }}>{label}</span>
+                      <span style={{ fontWeight: 800, color: cor }}>{val}</span>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Aviso se margem negativa */}
+                {simResultado.mcPct < 0 && (
+                  <div style={{
+                    padding: "10px 14px",
+                    background: "rgba(255,77,77,0.1)",
+                    border: "1px solid rgba(255,77,77,0.25)",
+                    borderRadius: "10px",
+                    fontSize: "12px", color: "#ff6b6b", fontWeight: 700,
+                  }}>
+                    ⚠️ Você está vendendo abaixo do custo com este preço.
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div style={{
+                height: "100%", minHeight: "160px",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                color: "#555", fontSize: "13px", textAlign: "center",
+                border: "1px dashed rgba(255,255,255,0.08)",
+                borderRadius: "14px", padding: "20px",
+              }}>
+                {simMode === "preco"
+                  ? "Digite um preço para simular o resultado"
+                  : "Digite uma margem desejada para simular"}
+              </div>
+            )}
+          </div>
+        </div>
       </div>
     </div>
   );

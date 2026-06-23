@@ -1,0 +1,41 @@
+
+> calculadora-dos-sellers-v1@1.0.0 build
+> next build
+
+  ▲ Next.js 14.2.5
+  - Environments: .env.local
+
+   Creating an optimized production build ...
+ ✓ Compiled successfully
+   Linting and checking validity of types ...
+   Collecting page data ...
+   Generating static pages (0/14) ...
+   Generating static pages (3/14) 
+   Generating static pages (6/14) 
+   Generating static pages (10/14) 
+ ✓ Generating static pages (14/14)
+   Finalizing page optimization ...
+   Collecting build traces ...
+
+Route (app)                              Size     First Load JS
+┌ ○ /                                    137 B          87.3 kB
+├ ○ /_not-found                          871 B            88 kB
+├ ○ /anuncios                            69.2 kB         156 kB
+├ ƒ /api/anuncio                         0 B                0 B
+├ ƒ /api/auth/logout                     0 B                0 B
+├ ○ /api/auth/mercadolivre               0 B                0 B
+├ ƒ /api/auth/mercadolivre/callback      0 B                0 B
+├ ƒ /api/auth/relay                      0 B                0 B
+├ ƒ /api/auth/status                     0 B                0 B
+├ ƒ /api/debug                           0 B                0 B
+├ ƒ /api/ml/vendas-hoje                  0 B                0 B
+└ ○ /precificacao                        5.22 kB        92.3 kB
++ First Load JS shared by all            87.1 kB
+  ├ chunks/23-5761d438dd15b549.js        31.5 kB
+  ├ chunks/fd9d1056-95542c12c8153870.js  53.6 kB
+  └ other shared chunks (total)          1.95 kB
+
+
+○  (Static)   prerendered as static content
+ƒ  (Dynamic)  server-rendered on demand
+

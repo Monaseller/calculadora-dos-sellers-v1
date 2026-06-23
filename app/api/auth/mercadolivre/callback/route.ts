@@ -16,16 +16,17 @@ export async function GET(request: Request) {
     },
     body: new URLSearchParams({
       grant_type: "authorization_code",
-      client_id: process.env.ML_CLIENT_ID!,
-      client_secret: process.env.ML_CLIENT_SECRET!,
+      client_id: process.env.ML_CLIENT_ID!.trim(),
+      client_secret: process.env.ML_CLIENT_SECRET!.trim(),
       code,
-      redirect_uri: process.env.ML_REDIRECT_URI!,
+      redirect_uri: process.env.ML_REDIRECT_URI!.trim(),
     }),
   });
 
   const data = await response.json();
 
-  const relayUrl = new URL("/api/auth/relay", "http://localhost:3001");
+  const origin = new URL(request.url).origin;
+  const relayUrl = new URL("/api/auth/relay", origin);
   relayUrl.searchParams.set("token", data.access_token);
   relayUrl.searchParams.set("expires", String(data.expires_in));
 

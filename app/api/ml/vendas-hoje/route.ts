@@ -129,7 +129,7 @@ export async function GET(request: Request) {
     }
   }
 
-  const itens = [...itensPorAnuncio.values()];
+  const itens = Array.from(itensPorAnuncio.values());
   const faturamentoTotal = itens.reduce((s, i) => s + i.faturamento, 0);
   const lucroTotal       = itens.reduce((s, i) => s + i.lucro, 0);
 
