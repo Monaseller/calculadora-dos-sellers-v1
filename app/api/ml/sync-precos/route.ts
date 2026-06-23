@@ -17,15 +17,36 @@ function mapTipoAnuncio(listingTypeId: string): string {
   return "Clássico";
 }
 
-// Limpa thumbnails incorretas dos produtos MLBU (usada após sync errado)
-export async function DELETE() {
-  const { data, error } = await supabase
-    .from("anuncios")
-    .update({ thumbnail: null })
-    .like("ml_item_id", "MLBU%")
-    .eq("ativo", true);
-  if (error) return NextResponse.json({ erro: true, mensagem: error.message });
-  return NextResponse.json({ ok: true, linhasAfetadas: (data as any)?.length ?? "?" });
+// Helper: busca dados completos de um item MLB via /items/{id}
+async function fetchItemData(mlbId: string, token: string): Promise<any | null> {
+  const r = await fetch(`https://api.mercadolibre.com/items/${mlbId}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!r.ok) return null;
+  return r.json();
+}
+
+// Helper: resolve MLBU → MLB real do vendedor via /products/
+// Retorna o item body completo (price, title, thumbnail, etc.)
+async function resolverMLBU(mlbuId: string, token: string): Promise<{ mlbId: string; body: any } | null> {
+  // Tenta MLBU e MLB (sem o 'U')
+  for (const pid of [mlbuId, "MLB" + mlbuId.slice(4)]) {
+    try {
+      const r = await fetch(`https://api.mercadolibre.com/products/${pid}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!r.ok) continue;
+      const prod = await r.json();
+
+      // buy_box_winner.item_id = ID do anúncio real deste vendedor no catálogo
+      const mlbId: string | null = prod.buy_box_winner?.item_id ?? null;
+      if (!mlbId) continue;
+
+      const body = await fetchItemData(mlbId, token);
+      if (body) return { mlbId, body };
+    } catch {}
+  }
+  return null;
 }
 
 export async function POST(request: Request) {
@@ -34,7 +55,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ erro: true, mensagem: "Mercado Livre não conectado." });
   }
 
-  // Busca todos anúncios ML ativos com ml_item_id
+  // Busca todos anúncios ML ativos
   const { data: anuncios, error } = await supabase
     .from("anuncios")
     .select("id, ml_item_id, nome, preco_anuncio, frete_gratis, tipo_anuncio, thumbnail, permalink")
@@ -45,123 +66,89 @@ export async function POST(request: Request) {
   if (error) {
     return NextResponse.json({ erro: true, mensagem: "Erro ao buscar anúncios: " + error.message });
   }
-
   if (!anuncios?.length) {
     return NextResponse.json({ erro: false, atualizados: 0, mensagem: "Nenhum anúncio ML encontrado." });
   }
 
-  // Busca dados do ML em batches de 20 (limite seguro de URL)
-  const BATCH = 20;
-  const mlItems: any[] = [];
-
-  for (let i = 0; i < anuncios.length; i += BATCH) {
-    const ids = anuncios.slice(i, i + BATCH).map(a => a.ml_item_id).join(",");
-    const res = await fetch(`https://api.mercadolibre.com/items?ids=${ids}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (!res.ok) continue;
-    const batch = await res.json();
-    if (Array.isArray(batch)) mlItems.push(...batch);
-  }
+  // ── Separa MLB (listagens diretas) de MLBU (catálogo) ───────────────────
+  const mlbAnuncios  = anuncios.filter(a => !a.ml_item_id!.toUpperCase().startsWith("MLBU"));
+  const mlbuAnuncios = anuncios.filter(a =>  a.ml_item_id!.toUpperCase().startsWith("MLBU"));
 
   let atualizados = 0;
   const detalhes: string[] = [];
 
-  for (const item of mlItems) {
-    if (item.code !== 200 || !item.body) continue;
-    const body = item.body;
+  // ── 1. MLB: batch fetch via /items?ids= ──────────────────────────────────
+  const BATCH = 20;
+  const mlItems: any[] = [];
 
-    const anuncio = anuncios.find(a => a.ml_item_id === body.id);
-    if (!anuncio) continue;
+  for (let i = 0; i < mlbAnuncios.length; i += BATCH) {
+    const ids = mlbAnuncios.slice(i, i + BATCH).map(a => a.ml_item_id).join(",");
+    try {
+      const res = await fetch(`https://api.mercadolibre.com/items?ids=${ids}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) continue;
+      const batch = await res.json();
+      if (Array.isArray(batch)) mlItems.push(...batch);
+    } catch {}
+  }
 
-    const novoPreco      = typeof body.price === "number" ? body.price : null;
-    const novoNome       = typeof body.title === "string" ? body.title : null;
-    const novoFrete      = body.shipping?.free_shipping ?? false;
-    const novoTipo       = body.listing_type_id ? mapTipoAnuncio(body.listing_type_id) : null;
-    const novoThumb      = body.thumbnail ?? null;
-    const novoPermalink  = body.permalink ?? null;
-
+  function aplicarMudancas(anuncio: any, body: any): Record<string, any> {
     const mudancas: Record<string, any> = {};
+    const novoPreco     = typeof body.price === "number" ? body.price : null;
+    const novoNome      = typeof body.title === "string" ? body.title : null;
+    const novoFrete     = body.shipping?.free_shipping ?? false;
+    const novoTipo      = body.listing_type_id ? mapTipoAnuncio(body.listing_type_id) : null;
+    const novoThumb     = body.thumbnail ?? null;
+    const novoPermalink = body.permalink ?? null;
 
     if (novoPreco !== null && novoPreco !== anuncio.preco_anuncio) {
       mudancas.preco_anuncio = novoPreco;
-      // Registra mudança de preço para feedback
       const nomeExib = (novoNome ?? anuncio.nome ?? "").substring(0, 35);
       detalhes.push(`${nomeExib}: R$ ${(anuncio.preco_anuncio ?? 0).toFixed(2).replace(".", ",")} → R$ ${novoPreco.toFixed(2).replace(".", ",")}`);
     }
-    if (novoNome && novoNome !== anuncio.nome)              mudancas.nome         = novoNome;
-    if (novoFrete !== anuncio.frete_gratis)                 mudancas.frete_gratis = novoFrete;
-    if (novoTipo && novoTipo !== anuncio.tipo_anuncio)      mudancas.tipo_anuncio = novoTipo;
-    // Sempre atualiza thumbnail se vier da API e o DB estiver vazio ou diferente
-    if (novoThumb && (!anuncio.thumbnail || novoThumb !== anuncio.thumbnail)) mudancas.thumbnail = novoThumb;
-    if (novoPermalink && novoPermalink !== anuncio.permalink) mudancas.permalink  = novoPermalink;
+    if (novoNome      && novoNome      !== anuncio.nome)          mudancas.nome         = novoNome;
+    if (novoFrete     !== anuncio.frete_gratis)                   mudancas.frete_gratis = novoFrete;
+    if (novoTipo      && novoTipo      !== anuncio.tipo_anuncio)  mudancas.tipo_anuncio = novoTipo;
+    if (novoThumb     && novoThumb     !== anuncio.thumbnail)     mudancas.thumbnail    = novoThumb;
+    if (novoPermalink && novoPermalink !== anuncio.permalink)     mudancas.permalink    = novoPermalink;
+    return mudancas;
+  }
 
+  for (const item of mlItems) {
+    if (item.code !== 200 || !item.body) continue;
+    const body    = item.body;
+    const anuncio = mlbAnuncios.find(a => a.ml_item_id === body.id);
+    if (!anuncio) continue;
+
+    const mudancas = aplicarMudancas(anuncio, body);
     if (Object.keys(mudancas).length > 0) {
       await supabase.from("anuncios").update(mudancas).eq("id", anuncio.id);
       atualizados++;
     }
   }
 
-  // ── Fallback para MLBU (catálogo): resolve MLB real via buy_box_winner ──────
-  // /products/{MLBU} → buy_box_winner.item_id (MLB...) → /items/{MLB} → thumbnail
-  // Processa TODOS os MLBU (não só sem thumbnail) para sobrescrever imagens erradas.
-  const mlbuAnuncios = anuncios.filter(a => a.ml_item_id?.toUpperCase().startsWith("MLBU"));
-
+  // ── 2. MLBU: resolve para MLB real, atualiza tudo inclusive ml_item_id ──
   for (const anuncio of mlbuAnuncios) {
     try {
-      const mlbuId = anuncio.ml_item_id!;
-      let   thumb: string | null = null;
+      const resultado = await resolverMLBU(anuncio.ml_item_id!, token);
+      if (!resultado) continue;
 
-      // Tenta com MLBU e sem o 'U' (MLB)
-      for (const pid of [mlbuId, "MLB" + mlbuId.slice(4)]) {
-        const r = await fetch(`https://api.mercadolibre.com/products/${pid}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (!r.ok) continue;
-        const prod = await r.json();
+      const { mlbId, body } = resultado;
+      const mudancas = aplicarMudancas(anuncio, body);
 
-        // buy_box_winner.item_id = ID do anúncio real do vendedor
-        const listingId: string | null = prod.buy_box_winner?.item_id ?? null;
-        if (listingId) {
-          const ir = await fetch(`https://api.mercadolibre.com/items/${listingId}?attributes=id,thumbnail`, {
-            headers: { Authorization: `Bearer ${token}` },
-          });
-          if (ir.ok) {
-            const item = await ir.json();
-            thumb = item.thumbnail ?? null;
-          }
-        }
-        if (thumb) break;
+      // Atualiza ml_item_id para o MLB real — próximos syncs vão pelo caminho normal
+      if (mlbId !== anuncio.ml_item_id) {
+        mudancas.ml_item_id = mlbId;
       }
 
-      // Atualiza se achou thumbnail diferente (ou se o atual está errado)
-      if (thumb && thumb !== anuncio.thumbnail) {
-        await supabase.from("anuncios").update({ thumbnail: thumb }).eq("id", anuncio.id);
-        atualizados++;
-      } else if (!thumb && anuncio.thumbnail) {
-        // /products/ não retornou nada — limpa thumbnail incorreta
-        await supabase.from("anuncios").update({ thumbnail: null }).eq("id", anuncio.id);
-        atualizados++;
+      // Para MLBU sem thumbnail ou com thumbnail errada, força atualização
+      if (body.thumbnail && body.thumbnail !== anuncio.thumbnail) {
+        mudancas.thumbnail = body.thumbnail;
       }
-    } catch {}
-  }
 
-  // ── MLB normais sem thumbnail ──────────────────────────────────────────────
-  const mlbSemThumb = anuncios.filter(a =>
-    !a.thumbnail &&
-    a.ml_item_id?.toUpperCase().startsWith("MLB") &&
-    !a.ml_item_id?.toUpperCase().startsWith("MLBU")
-  );
-  for (const anuncio of mlbSemThumb) {
-    try {
-      const r = await fetch(`https://api.mercadolibre.com/items/${anuncio.ml_item_id}?attributes=thumbnail`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!r.ok) continue;
-      const item = await r.json();
-      const thumb = item.thumbnail ?? null;
-      if (thumb) {
-        await supabase.from("anuncios").update({ thumbnail: thumb }).eq("id", anuncio.id);
+      if (Object.keys(mudancas).length > 0) {
+        await supabase.from("anuncios").update(mudancas).eq("id", anuncio.id);
         atualizados++;
       }
     } catch {}
