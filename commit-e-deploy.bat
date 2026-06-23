@@ -4,13 +4,13 @@ cd /d "%~dp0"
 echo === Removendo locks ===
 del /f /s /q ".git\*.lock" 2>nul
 
-echo === Removendo tsconfig.tsbuildinfo do git ===
-git rm --cached tsconfig.tsbuildinfo 2>nul
-echo Feito.
+echo === Verificando fim do route.ts ===
+tail -5 app\api\ml\vendas\route.ts 2>nul
 
-echo === Commitando ===
+echo === Commitando correcao do syntax error ===
+git add app/api/ml/vendas/route.ts
 git add -A
-git commit -m "fix: remover tsconfig.tsbuildinfo do git tracking"
+git commit -m "fix: corrigir syntax error no route.ts (remover linhas extras)"
 
 echo.
 echo === Deploy no Vercel ===
