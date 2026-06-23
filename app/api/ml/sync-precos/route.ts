@@ -102,41 +102,64 @@ export async function POST(request: Request) {
     }
   }
 
-  // ── Fallback para produtos sem thumbnail (MLBU catálogo ou MLB sem foto) ──
-  // Para MLBU: resolve o ID de listagem MLB via /products/ ou search, depois busca thumbnail.
-  // Para MLB sem foto: tenta buscar o item diretamente.
-  const semThumb = anuncios.filter(a => !a.thumbnail && a.ml_item_id);
+  // ── Fallback para MLBU (catálogo): resolve MLB real via buy_box_winner ──────
+  // /products/{MLBU} → buy_box_winner.item_id (MLB...) → /items/{MLB} → thumbnail
+  // Processa TODOS os MLBU (não só sem thumbnail) para sobrescrever imagens erradas.
+  const mlbuAnuncios = anuncios.filter(a => a.ml_item_id?.toUpperCase().startsWith("MLBU"));
 
-  for (const anuncio of semThumb) {
+  for (const anuncio of mlbuAnuncios) {
     try {
-      const mlbuId   = anuncio.ml_item_id!;
-      const isMLBU   = mlbuId.toUpperCase().startsWith("MLBU");
+      const mlbuId = anuncio.ml_item_id!;
       let   thumb: string | null = null;
 
-      if (isMLBU) {
-        // Busca thumbnail via /products/{id} — tenta com MLBU e sem o 'U'
-        for (const pid of [mlbuId, "MLB" + mlbuId.slice(4)]) {
-          const r = await fetch(`https://api.mercadolibre.com/products/${pid}`, {
-            headers: { Authorization: `Bearer ${token}` },
-          });
-          if (!r.ok) continue;
-          const prod = await r.json();
-          thumb = prod.pictures?.[0]?.url ?? prod.thumbnail ?? null;
-          if (thumb) break;
-        }
-        // Se /products/ não funcionou, não tenta itens/search
-        // (retorna resultados errados — não vinculados ao catalog_product_id)
-      } else {
-        // MLB normal sem thumbnail: busca direto
-        const r = await fetch(`https://api.mercadolibre.com/items/${mlbuId}?attributes=thumbnail`, {
+      // Tenta com MLBU e sem o 'U' (MLB)
+      for (const pid of [mlbuId, "MLB" + mlbuId.slice(4)]) {
+        const r = await fetch(`https://api.mercadolibre.com/products/${pid}`, {
           headers: { Authorization: `Bearer ${token}` },
         });
-        if (r.ok) {
-          const item = await r.json();
-          thumb = item.thumbnail ?? null;
+        if (!r.ok) continue;
+        const prod = await r.json();
+
+        // buy_box_winner.item_id = ID do anúncio real do vendedor
+        const listingId: string | null = prod.buy_box_winner?.item_id ?? null;
+        if (listingId) {
+          const ir = await fetch(`https://api.mercadolibre.com/items/${listingId}?attributes=id,thumbnail`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (ir.ok) {
+            const item = await ir.json();
+            thumb = item.thumbnail ?? null;
+          }
         }
+        if (thumb) break;
       }
 
+      // Atualiza se achou thumbnail diferente (ou se o atual está errado)
+      if (thumb && thumb !== anuncio.thumbnail) {
+        await supabase.from("anuncios").update({ thumbnail: thumb }).eq("id", anuncio.id);
+        atualizados++;
+      } else if (!thumb && anuncio.thumbnail) {
+        // /products/ não retornou nada — limpa thumbnail incorreta
+        await supabase.from("anuncios").update({ thumbnail: null }).eq("id", anuncio.id);
+        atualizados++;
+      }
+    } catch {}
+  }
+
+  // ── MLB normais sem thumbnail ──────────────────────────────────────────────
+  const mlbSemThumb = anuncios.filter(a =>
+    !a.thumbnail &&
+    a.ml_item_id?.toUpperCase().startsWith("MLB") &&
+    !a.ml_item_id?.toUpperCase().startsWith("MLBU")
+  );
+  for (const anuncio of mlbSemThumb) {
+    try {
+      const r = await fetch(`https://api.mercadolibre.com/items/${anuncio.ml_item_id}?attributes=thumbnail`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!r.ok) continue;
+      const item = await r.json();
+      const thumb = item.thumbnail ?? null;
       if (thumb) {
         await supabase.from("anuncios").update({ thumbnail: thumb }).eq("id", anuncio.id);
         atualizados++;

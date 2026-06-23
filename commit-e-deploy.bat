@@ -7,9 +7,9 @@ del /f /s /q ".git\*.lock" 2>nul
 echo === Verificando fim do route.ts ===
 tail -5 app\api\ml\vendas\route.ts 2>nul
 
-echo === Commitando fix thumbnails MLBU (remover items/search errado) ===
+echo === Commitando fix thumbnails MLBU via buy_box_winner ===
 git add -A
-git commit -m "fix: sync-precos remove items/search que retornava foto errada para MLBU"
+git commit -m "fix: sync-precos busca thumbnail MLBU via products/buy_box_winner/items"
 
 echo.
 echo === Deploy no Vercel ===
