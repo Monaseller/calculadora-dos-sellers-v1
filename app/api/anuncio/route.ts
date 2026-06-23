@@ -41,9 +41,13 @@ interface ItemIdResult {
 function extrairItemId(link: string): ItemIdResult | null {
   const texto = link.trim();
 
-  // ID direto: MLB123456
-  const mlbDireto = texto.match(/^MLB-?(\d+)$/i);
+  // ID direto: MLB123456 ou só o número (ex: 2115083718 ou #2115083718)
+  const mlbDireto = texto.match(/^#?MLB-?(\d+)$/i);
   if (mlbDireto) return { primaryId: `MLB${mlbDireto[1]}` };
+
+  // Só o número (ex: 2115083718) → MLB2115083718
+  const somenteNumero = texto.match(/^#?(\d{7,})$/);
+  if (somenteNumero) return { primaryId: `MLB${somenteNumero[1]}` };
 
   // Extrai item_id= do texto bruto antes de parsear a URL (cobre URLs sem https://)
   const itemIdRaw = texto.match(/[?&]item_id=(MLB\d+)/i);
