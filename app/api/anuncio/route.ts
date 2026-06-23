@@ -595,5 +595,6 @@ export async function GET(request: Request) {
     permalink: data.permalink,
     sku,
     freteGratis: data.shipping?.free_shipping ?? false,
+    logisticType: data.shipping?.logistic_type ?? null,
   });
 }

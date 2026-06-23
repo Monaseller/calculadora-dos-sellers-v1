@@ -9,7 +9,7 @@ tail -5 app\api\ml\vendas\route.ts 2>nul
 
 echo === Commitando melhorias ===
 git add -A
-git commit -m "feat: aceita codigo numerico puro (ex: 2115083718) ao adicionar anuncio + sync MLBU->MLB"
+git commit -m "feat: auto-detecta logistic_type do ML + corrige custo frete gratis + sync MLBU->MLB"
 
 echo.
 echo === Deploy no Vercel ===

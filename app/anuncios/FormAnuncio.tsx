@@ -30,6 +30,7 @@ interface DadosML {
   permalink: string | null;
   sku: string | null;
   freteGratis: boolean;
+  logisticType: string | null;
   parcial?: boolean;
 }
 
@@ -115,6 +116,22 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
       else setTipoAnuncio("Clássico");
       if (data.freteGratis !== undefined) setFreteGratis(data.freteGratis);
       if (data.sku) setSkuManual(data.sku);
+
+      // Auto-detecta tipo de envio pelo logistic_type do ML
+      if (data.logisticType) {
+        let novoTipo: TipoEnvio = "ME2";
+        if (data.logisticType === "fulfillment") novoTipo = "Full";
+        else if (data.logisticType === "self_service") novoTipo = "Flex";
+        setTipoEnvio(novoTipo);
+        // Auto-calcula custo do frete com o tipo detectado
+        const preco = data.preco ?? null;
+        const calc =
+          novoTipo === "Full" ? calcularFreteFullMl(tamanhoFull, preco) :
+          novoTipo === "Flex" ? calcularFreteFlexMl(preco) :
+          calcularFreteMl(pesoKgNum, preco);
+        if (calc !== null) setCustoFrete(String(calc).replace(".", ","));
+      }
+
       setDadosML(data);
       setEtapa("custos");
     } catch {
@@ -135,7 +152,9 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
 
   // Quando tipo de envio muda, sincroniza o campo custo frete
   // (feito nos handlers dos botões abaixo)
-  const custoFreteEfetivo = freteGratis ? 0 : parse(custoFrete);
+  // O vendedor SEMPRE paga o frete ao ML, mesmo quando é grátis para o comprador.
+  // freteGratis = true significa que o COMPRADOR não paga — o vendedor ainda tem custo.
+  const custoFreteEfetivo = parse(custoFrete);
 
   // ── Calcular resultado ────────────────────────────────────────────────────
   function calcResultado() {
@@ -479,16 +498,19 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
                   </button>
                 )}
               </div>
+              {freteGratis && (
+                <div style={{ fontSize: "11px", color: "#9099aa", marginBottom: "6px" }}>
+                  💡 Frete grátis ao comprador — mas <strong style={{ color: "#fff" }}>você ainda paga ao ML</strong>. Informe o custo real abaixo.
+                </div>
+              )}
               <input
-                value={freteGratis ? "0,00" : custoFrete}
+                value={custoFrete}
                 onChange={e => { setCustoFrete(e.target.value); setFreteOverride(true); }}
                 placeholder="0,00"
-                disabled={freteGratis}
                 style={{
                   ...inputStyle,
-                  opacity: freteGratis ? 0.5 : 1,
-                  background: freteAutoCalc !== null && !freteOverride && !freteGratis ? "rgba(0,217,126,0.05)" : "rgba(255,255,255,0.05)",
-                  borderColor: freteAutoCalc !== null && !freteOverride && !freteGratis ? "rgba(0,217,126,0.3)" : "rgba(255,255,255,0.12)",
+                  background: freteAutoCalc !== null && !freteOverride ? "rgba(0,217,126,0.05)" : "rgba(255,255,255,0.05)",
+                  borderColor: freteAutoCalc !== null && !freteOverride ? "rgba(0,217,126,0.3)" : "rgba(255,255,255,0.12)",
                 }}
               />
             </div>
@@ -559,7 +581,7 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
                 {[
                   { label: `Comissão ML (${tipoAnuncio})`, val: resultado.comissaoVal },
                   { label: `Imposto (${imposto}%)`,         val: resultado.impostoVal },
-                  ...(!freteGratis ? [{ label: "Taxa de frete", val: resultado.freteVal }] : []),
+                  ...(resultado.freteVal > 0 ? [{ label: freteGratis ? "🚚 Frete (você paga ao ML)" : "Taxa de frete", val: resultado.freteVal }] : []),
                   { label: "Custo do produto",             val: resultado.cp },
                 ].filter(i => i.val > 0).map(({ label, val }) => (
                   <div key={label} style={{ display: "flex", justifyContent: "space-between", fontSize: "13px", marginBottom: "6px" }}>
