@@ -58,7 +58,7 @@ export async function POST(request: Request) {
   // Busca todos anúncios ML ativos
   const { data: anuncios, error } = await supabase
     .from("anuncios")
-    .select("id, ml_item_id, nome, preco_anuncio, frete_gratis, tipo_anuncio, thumbnail, permalink")
+    .select("id, ml_item_id, nome, preco_anuncio, frete_gratis, tipo_anuncio, thumbnail, permalink, variation_id")
     .eq("ativo", true)
     .eq("marketplace", "ML")
     .not("ml_item_id", "is", null);
@@ -95,7 +95,15 @@ export async function POST(request: Request) {
 
   function aplicarMudancas(anuncio: any, body: any): Record<string, any> {
     const mudancas: Record<string, any> = {};
-    const novoPreco     = typeof body.price === "number" ? body.price : null;
+
+    // Preço: usa o da variação específica se o anúncio tem variation_id
+    let novoPreco: number | null = typeof body.price === "number" ? body.price : null;
+    if (anuncio.variation_id && body.variations?.length) {
+      const varId = String(anuncio.variation_id);
+      const variation = (body.variations as any[]).find((v: any) => String(v.id) === varId);
+      if (variation && typeof variation.price === "number") novoPreco = variation.price;
+    }
+
     const novoNome      = typeof body.title === "string" ? body.title : null;
     const novoFrete     = body.shipping?.free_shipping ?? false;
     const novoTipo      = body.listing_type_id ? mapTipoAnuncio(body.listing_type_id) : null;

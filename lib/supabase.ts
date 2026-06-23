@@ -34,6 +34,7 @@ export interface Anuncio {
   lucro_liquido: number | null;
   margem_contribuicao: number | null;
   peso_kg: number | null;
+  variation_id: string | null;
 }
 
 export interface VendaDia {

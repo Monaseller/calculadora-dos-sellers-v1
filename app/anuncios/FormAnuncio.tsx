@@ -17,7 +17,9 @@ function parse(v: string) {
   return Number(String(v).replace(/\./g, "").replace(",", ".")) || 0;
 }
 
-type Etapa = "link" | "custos";
+type Etapa = "link" | "variacao" | "custos";
+
+type VariacaoItem = { id: string; attributes: string; preco: number | null; thumbnail: string | null };
 
 interface DadosML {
   id: string;
@@ -31,6 +33,8 @@ interface DadosML {
   sku: string | null;
   freteGratis: boolean;
   logisticType: string | null;
+  variacoes?: VariacaoItem[];
+  variacaoId?: string | null;
   parcial?: boolean;
 }
 
@@ -39,9 +43,10 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
   const [etapa, setEtapa] = useState<Etapa>(modoEdicao ? "custos" : "link");
 
   // Link
-  const [link,     setLink]     = useState("");
-  const [buscando, setBuscando] = useState(false);
-  const [erroLink, setErroLink] = useState("");
+  const [link,         setLink]         = useState("");
+  const [variacaoLink, setVariacaoLink] = useState(""); // código da variação (opcional)
+  const [buscando,     setBuscando]     = useState(false);
+  const [erroLink,     setErroLink]     = useState("");
   const [dadosML,  setDadosML]  = useState<DadosML | null>(
     modoEdicao ? {
       id:          inicial?.ml_item_id ?? "",
@@ -54,6 +59,9 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
       permalink:   inicial?.permalink ?? null,
       sku:         null,
       freteGratis: inicial?.frete_gratis ?? false,
+      logisticType: null,
+      variacoes:   [],
+      variacaoId:  null,
     } : null
   );
 
@@ -109,7 +117,10 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
     setBuscando(true);
     setErroLink("");
     try {
-      const res  = await fetch(`/api/anuncio?link=${encodeURIComponent(link.trim())}`);
+      const varQuery = variacaoLink.trim()
+        ? `&variationId=${encodeURIComponent(variacaoLink.trim())}`
+        : "";
+      const res  = await fetch(`/api/anuncio?link=${encodeURIComponent(link.trim())}${varQuery}`);
       const data = await res.json();
       if (data.erro) { setErroLink(data.mensagem); setBuscando(false); return; }
       if (data.tipoAnuncio === "Premium") setTipoAnuncio("Premium");
@@ -123,7 +134,6 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
         if (data.logisticType === "fulfillment") novoTipo = "Full";
         else if (data.logisticType === "self_service") novoTipo = "Flex";
         setTipoEnvio(novoTipo);
-        // Auto-calcula custo do frete com o tipo detectado
         const preco = data.preco ?? null;
         const calc =
           novoTipo === "Full" ? calcularFreteFullMl(tamanhoFull, preco) :
@@ -133,11 +143,43 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
       }
 
       setDadosML(data);
-      setEtapa("custos");
+
+      // Se tem mais de 1 variação e nenhuma foi pré-selecionada → mostra picker
+      if ((data.variacoes?.length ?? 0) > 1 && !variacaoLink.trim()) {
+        setEtapa("variacao");
+      } else {
+        setEtapa("custos");
+      }
     } catch {
       setErroLink("Erro ao buscar o anúncio. Tente novamente.");
     }
     setBuscando(false);
+  }
+
+  // ── Aplicar variação selecionada ──────────────────────────────────────────
+  function aplicarVariacao(v: VariacaoItem) {
+    if (!dadosML) return;
+    // Remove sufixo de variação anterior do título base
+    const baseTitle = dadosML.titulo.includes(" — ")
+      ? dadosML.titulo.split(" — ")[0]
+      : dadosML.titulo;
+    const novoPreco = v.preco ?? dadosML.preco;
+    setDadosML({
+      ...dadosML,
+      titulo:    `${baseTitle} — ${v.attributes}`,
+      preco:     novoPreco,
+      thumbnail: v.thumbnail ?? dadosML.thumbnail,
+      variacaoId: v.id,
+    });
+    // Recalcula frete com o preço da variação
+    if (!freteOverride) {
+      const calc =
+        tipoEnvio === "Full" ? calcularFreteFullMl(tamanhoFull, novoPreco) :
+        tipoEnvio === "Flex" ? calcularFreteFlexMl(novoPreco) :
+        calcularFreteMl(pesoKgNum, novoPreco);
+      if (calc !== null) setCustoFrete(String(calc).replace(".", ","));
+    }
+    setEtapa("custos");
   }
 
   // Preço efetivo: da API ML ou digitado manualmente
@@ -211,6 +253,7 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
       sku:              skuManual.trim() || dadosML?.sku || null,
       peso_kg:          pesoKgNum,
       ml_item_id:       dadosML?.id ?? null,
+      variation_id:     dadosML?.variacaoId ?? null,
       thumbnail:        dadosML?.thumbnail ?? null,
       permalink:        dadosML?.permalink ?? null,
       ativo:            true,
@@ -251,10 +294,10 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "24px" }}>
           <div>
             <h2 style={{ margin: 0, fontSize: "20px" }}>
-              {modoEdicao ? "Editar Anúncio" : etapa === "link" ? "Novo Anúncio" : "Informar Custos"}
+              {modoEdicao ? "Editar Anúncio" : etapa === "link" ? "Novo Anúncio" : etapa === "variacao" ? "Selecionar Variação" : "Informar Custos"}
             </h2>
             <p style={{ margin: "4px 0 0", color: "#9099aa", fontSize: "13px" }}>
-              {etapa === "link" ? "Cole o link do anúncio no Mercado Livre" : "Informe seus custos para ver o valor líquido"}
+              {etapa === "link" ? "Cole o link ou código do anúncio no Mercado Livre" : etapa === "variacao" ? `${dadosML?.variacoes?.length ?? 0} variações disponíveis — escolha uma` : "Informe seus custos para ver o valor líquido"}
             </p>
           </div>
           <button onClick={onFechar} style={{ background: "rgba(255,255,255,0.07)", border: "none", borderRadius: "10px", padding: "8px 14px", color: "#fff", cursor: "pointer", fontSize: "16px" }}>✕</button>
@@ -268,7 +311,7 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
                 value={link}
                 onChange={e => { setLink(e.target.value); setErroLink(""); }}
                 onKeyDown={e => e.key === "Enter" && buscarLink()}
-                placeholder="https://www.mercadolivre.com.br/..."
+                placeholder="Link, MLB ou código (ex: 2115083718)"
                 style={{ ...inputStyle, flex: 1, border: erroLink ? "1.5px solid #ff4d4d" : "1.5px solid rgba(255,255,255,0.12)" }}
               />
               <button onClick={buscarLink} disabled={buscando} style={{
@@ -281,6 +324,83 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
               </button>
             </div>
             {erroLink && <p style={{ color: "#ff4d4d", fontSize: "13px", margin: "4px 0 0" }}>{erroLink}</p>}
+
+            {/* Campo de variação (opcional) */}
+            <div style={{ marginTop: "14px" }}>
+              <span style={{ ...labelStyle, marginBottom: "7px" }}>CÓDIGO DA VARIAÇÃO (opcional)</span>
+              <input
+                value={variacaoLink}
+                onChange={e => setVariacaoLink(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && buscarLink()}
+                placeholder="Ex: 175706413780 — cor, tamanho, modelo..."
+                style={{ ...inputStyle }}
+              />
+              <div style={{ fontSize: "11px", color: "#9099aa", marginTop: "5px" }}>
+                💡 Se o anúncio tem variações, informe o código aqui — ou deixe em branco para ver todas as opções.
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── ETAPA 1.5: Picker de variação ── */}
+        {etapa === "variacao" && dadosML?.variacoes && (
+          <div>
+            {/* Preview do produto base */}
+            <div style={{ display: "flex", gap: "12px", alignItems: "center", background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: "14px", padding: "12px", marginBottom: "18px" }}>
+              {dadosML.thumbnail && (
+                <img src={dadosML.thumbnail.replace("http://", "https://")} alt="" style={{ width: "44px", height: "44px", objectFit: "contain", borderRadius: "8px", background: "#fff", flexShrink: 0 }} />
+              )}
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontWeight: 700, fontSize: "13px", lineHeight: 1.3 }}>{dadosML.titulo}</div>
+                {dadosML.preco && <div style={{ color: "#9099aa", fontSize: "12px", marginTop: "2px" }}>Preço base: R$ {dadosML.preco.toFixed(2).replace(".", ",")}</div>}
+              </div>
+            </div>
+
+            {/* Cards de variação */}
+            <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginBottom: "18px" }}>
+              {dadosML.variacoes.map(v => (
+                <button
+                  key={v.id}
+                  onClick={() => aplicarVariacao(v)}
+                  style={{
+                    display: "flex", alignItems: "center", gap: "12px",
+                    padding: "11px 14px", borderRadius: "14px", width: "100%",
+                    border: "1.5px solid rgba(255,255,255,0.1)",
+                    background: "rgba(255,255,255,0.04)", cursor: "pointer", textAlign: "left",
+                  }}
+                >
+                  {v.thumbnail ? (
+                    <img
+                      src={v.thumbnail}
+                      alt=""
+                      style={{ width: "42px", height: "42px", objectFit: "contain", borderRadius: "8px", background: "#fff", flexShrink: 0 }}
+                      onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
+                    />
+                  ) : (
+                    <div style={{ width: "42px", height: "42px", borderRadius: "8px", background: "rgba(255,255,255,0.07)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontSize: "18px" }}>📦</div>
+                  )}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: "13px", fontWeight: 700, color: "#fff", lineHeight: 1.3 }}>{v.attributes}</div>
+                    {v.preco !== null && (
+                      <div style={{ fontSize: "12px", color: "#00D97E", fontWeight: 700, marginTop: "2px" }}>
+                        R$ {v.preco.toFixed(2).replace(".", ",")}
+                      </div>
+                    )}
+                    <div style={{ fontSize: "10px", color: "#555d6b", marginTop: "1px" }}>ID: {v.id}</div>
+                  </div>
+                  <span style={{ color: "#6fa3ff", fontSize: "16px", flexShrink: 0 }}>→</span>
+                </button>
+              ))}
+            </div>
+
+            <div style={{ display: "flex", gap: "10px" }}>
+              <button onClick={() => setEtapa("link")} style={{ padding: "13px 18px", background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "14px", color: "#9099aa", fontWeight: 700, cursor: "pointer", fontSize: "14px" }}>
+                ← Voltar
+              </button>
+              <button onClick={() => setEtapa("custos")} style={{ flex: 1, padding: "13px", background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "14px", color: "#9099aa", fontWeight: 600, cursor: "pointer", fontSize: "13px" }}>
+                Pular — sem variação
+              </button>
+            </div>
           </div>
         )}
 

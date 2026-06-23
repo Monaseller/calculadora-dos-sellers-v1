@@ -584,17 +584,68 @@ export async function GET(request: Request) {
   const sku = skuRaiz ?? skuVariacao ?? skuAtributo ?? skuUserProduct ?? null;
   console.log(`[anuncio] sku final: ${sku} (raiz=${skuRaiz}, var=${skuVariacao}, attr=${skuAtributo}, up=${skuUserProduct})`);
 
+  // ── Variações ────────────────────────────────────────────────────────────────
+  // Lê variationId da query string OU do param variation= na URL original
+  const variationIdParam = url.searchParams.get("variationId") || null;
+  let variationIdFromUrl: string | null = null;
+  try {
+    const linkUrl = new URL(linkNorm);
+    variationIdFromUrl = linkUrl.searchParams.get("variation") || null;
+  } catch {}
+  const variationIdToUse = variationIdParam || variationIdFromUrl;
+
+  // Converte picture_id de variação → URL de thumbnail
+  const mainPictures: any[] = data.pictures ?? [];
+  function picIdToThumb(picId: string): string {
+    const pic = mainPictures.find((p: any) => p.id === picId);
+    if (pic) return ((pic.secure_url || pic.url) as string).replace(/-[A-Z]\.jpg$/, "-F.jpg").replace("http://", "https://");
+    return `https://http2.mlstatic.com/D_NQ_NP_${picId}-F.jpg`;
+  }
+
+  // Lista de variações para o picker no FormAnuncio
+  const variacoes = (data.variations ?? []).map((v: any) => ({
+    id: String(v.id),
+    attributes: (v.attribute_combinations ?? [])
+      .map((a: any) => `${a.name}: ${a.value_name}`)
+      .join(" | "),
+    preco: typeof v.price === "number" ? v.price : null,
+    thumbnail: v.picture_ids?.[0] ? picIdToThumb(v.picture_ids[0]) : null,
+  }));
+
+  // Aplica overrides da variação selecionada (código manual ou variation= na URL)
+  let titulo = data.title as string;
+  let preco: number = data.price;
+  let thumbnail: string = data.thumbnail;
+  let variacaoId: string | null = null;
+
+  if (variationIdToUse && data.variations?.length) {
+    const variation = (data.variations as any[]).find(
+      (v: any) => String(v.id) === String(variationIdToUse)
+    );
+    if (variation) {
+      variacaoId = String(variation.id);
+      if (typeof variation.price === "number") preco = variation.price;
+      const attrs = (variation.attribute_combinations ?? [])
+        .map((a: any) => `${a.name}: ${a.value_name}`)
+        .join(" | ");
+      if (attrs) titulo = `${data.title} — ${attrs}`;
+      if (variation.picture_ids?.[0]) thumbnail = picIdToThumb(variation.picture_ids[0]);
+    }
+  }
+
   return NextResponse.json({
     id: data.id,
-    titulo: data.title,
-    preco: data.price,
+    titulo,
+    preco,
     categoria: nomeCategoria,
     categoriaId: data.category_id,
     tipoAnuncio,
-    thumbnail: data.thumbnail,
+    thumbnail,
     permalink: data.permalink,
     sku,
     freteGratis: data.shipping?.free_shipping ?? false,
     logisticType: data.shipping?.logistic_type ?? null,
+    variacoes,    // Array com todas as variações disponíveis
+    variacaoId,   // ID da variação aplicada (se houver)
   });
 }
