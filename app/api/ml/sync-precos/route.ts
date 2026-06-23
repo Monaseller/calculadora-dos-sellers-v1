@@ -81,13 +81,36 @@ export async function POST(request: Request) {
     if (novoNome && novoNome !== anuncio.nome)              mudancas.nome         = novoNome;
     if (novoFrete !== anuncio.frete_gratis)                 mudancas.frete_gratis = novoFrete;
     if (novoTipo && novoTipo !== anuncio.tipo_anuncio)      mudancas.tipo_anuncio = novoTipo;
-    if (novoThumb && novoThumb !== anuncio.thumbnail)       mudancas.thumbnail    = novoThumb;
+    // Sempre atualiza thumbnail se vier da API e o DB estiver vazio ou diferente
+    if (novoThumb && (!anuncio.thumbnail || novoThumb !== anuncio.thumbnail)) mudancas.thumbnail = novoThumb;
     if (novoPermalink && novoPermalink !== anuncio.permalink) mudancas.permalink  = novoPermalink;
 
     if (Object.keys(mudancas).length > 0) {
       await supabase.from("anuncios").update(mudancas).eq("id", anuncio.id);
       atualizados++;
     }
+  }
+
+  // ── Fallback para produtos MLBU (catálogo) sem thumbnail ──────────────────
+  // /items?ids= não retorna dados para IDs MLBU; busca via /products/{id}
+  const semThumb = anuncios.filter(a =>
+    a.thumbnail === null &&
+    a.ml_item_id?.toUpperCase().startsWith("MLBU")
+  );
+
+  for (const anuncio of semThumb) {
+    try {
+      const r = await fetch(`https://api.mercadolibre.com/products/${anuncio.ml_item_id}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!r.ok) continue;
+      const prod = await r.json();
+      const thumb = prod.pictures?.[0]?.url ?? prod.thumbnail ?? null;
+      if (thumb) {
+        await supabase.from("anuncios").update({ thumbnail: thumb }).eq("id", anuncio.id);
+        atualizados++;
+      }
+    } catch {}
   }
 
   const mensagem = atualizados === 0
