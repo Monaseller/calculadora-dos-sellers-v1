@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { calcularFreteMl, calcularFreteFullMl, calcularFreteFlexMl } from "@/lib/tabela-frete-ml";
+import { CATEGORIAS_ML } from "@/lib/comissoes-mercado-livre";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -17,19 +19,59 @@ function mapTipoAnuncio(listingTypeId: string): string {
   return "Clássico";
 }
 
-// Helper: busca dados completos de um item MLB via /items/{id}
-async function fetchItemData(mlbId: string, token: string): Promise<any | null> {
+// Extrai peso (kg) de shipping.dimensions — formato ML: "LxWxH,gramas"
+function parsePesoSync(dim: string | null | undefined): number | null {
+  if (!dim) return null;
+  const m = dim.match(/^([\d.]+)[xX]([\d.]+)[xX]([\d.]+),\s*([\d.]+)/);
+  if (!m) return null;
+  const rawStr = m[4];
+  const w = parseFloat(rawStr);
+  return w > 0 ? (rawStr.includes(".") ? w : w / 1000) : null;
+}
+
+// Extrai peso (kg) de atributos ML (fallback ao dimensions)
+function parsePesoAtributos(attributes: any[]): number | null {
+  if (!Array.isArray(attributes)) return null;
+  const attr = attributes.find(
+    (a: any) => ["WEIGHT","SHIPPING_WEIGHT","ITEM_WEIGHT","NET_WEIGHT"].includes((a.id ?? "").toUpperCase())
+  );
+  if (!attr?.value_name) return null;
+  const str = String(attr.value_name).toLowerCase().trim();
+  const gMatch = str.match(/^([\d.,]+)\s*g$/);
+  if (gMatch) return parseFloat(gMatch[1].replace(",", ".")) / 1000;
+  const kgMatch = str.match(/^([\d.,]+)\s*kg$/);
+  if (kgMatch) return parseFloat(kgMatch[1].replace(",", "."));
+  return null;
+}
+
+// Calcula custo_frete correto pelo tipo de envio + peso + preço
+function calcularNovoFrete(
+  logisticType: string | null,
+  peso: number | null,
+  preco: number | null
+): number | null {
+  if (!preco || preco <= 0) return null;
+  const lt = (logisticType ?? "").toLowerCase();
+  if (lt === "fulfillment")  return calcularFreteFullMl("P", preco, peso);
+  if (lt === "self_service") return calcularFreteFlexMl(preco);
+  if (!peso || peso <= 0)    return null;
+  return calcularFreteMl(peso, preco);
+}
+
+// Busca o body completo de um item MLB (sempre individual — garante shipping.dimensions)
+async function fetchItemBody(mlbId: string, token: string): Promise<any | null> {
   const r = await fetch(`https://api.mercadolibre.com/items/${mlbId}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
-  if (!r.ok) return null;
+  if (!r.ok) {
+    console.log(`[sync] /items/${mlbId} → ${r.status}`);
+    return null;
+  }
   return r.json();
 }
 
-// Helper: resolve MLBU → MLB real do vendedor via /products/
-// Retorna o item body completo (price, title, thumbnail, etc.)
+// Resolve MLBU → MLB real via /products/buy_box_winner
 async function resolverMLBU(mlbuId: string, token: string): Promise<{ mlbId: string; body: any } | null> {
-  // Tenta MLBU e MLB (sem o 'U')
   for (const pid of [mlbuId, "MLB" + mlbuId.slice(4)]) {
     try {
       const r = await fetch(`https://api.mercadolibre.com/products/${pid}`, {
@@ -37,16 +79,36 @@ async function resolverMLBU(mlbuId: string, token: string): Promise<{ mlbId: str
       });
       if (!r.ok) continue;
       const prod = await r.json();
-
-      // buy_box_winner.item_id = ID do anúncio real deste vendedor no catálogo
       const mlbId: string | null = prod.buy_box_winner?.item_id ?? null;
       if (!mlbId) continue;
-
-      const body = await fetchItemData(mlbId, token);
+      const body = await fetchItemBody(mlbId, token);
       if (body) return { mlbId, body };
     } catch {}
   }
   return null;
+}
+
+// Recalcula lucro e margem com os novos valores
+function recalcularLucroMargem(
+  preco: number | null,
+  custoFrete: number,
+  custoProduto: number | null,
+  impostoPorc: number | null,
+  categoria: string | null,
+  tipoAnuncio: string | null
+): { lucro_liquido: number; margem_contribuicao: number } | null {
+  if (!preco || preco <= 0 || !custoProduto || custoProduto <= 0) return null;
+  const cat = CATEGORIAS_ML.find(c => c.nome.toLowerCase() === (categoria ?? "").toLowerCase());
+  const comissaoRate = tipoAnuncio === "Premium" ? (cat?.premium ?? 0.18) : (cat?.classico ?? 0.13);
+  const imp          = (impostoPorc ?? 0) / 100;
+  const comissaoVal  = preco * comissaoRate;
+  const impostoVal   = preco * imp;
+  const lucro        = preco - comissaoVal - impostoVal - custoFrete - custoProduto;
+  const margem       = (lucro / preco) * 100;
+  return {
+    lucro_liquido:       Math.round(lucro  * 100) / 100,
+    margem_contribuicao: Math.round(margem * 100) / 100,
+  };
 }
 
 export async function POST(request: Request) {
@@ -55,109 +117,128 @@ export async function POST(request: Request) {
     return NextResponse.json({ erro: true, mensagem: "Mercado Livre não conectado." });
   }
 
-  // Busca todos anúncios ML ativos
   const { data: anuncios, error } = await supabase
     .from("anuncios")
-    .select("id, ml_item_id, nome, preco_anuncio, frete_gratis, tipo_anuncio, thumbnail, permalink, variation_id")
+    .select("id, ml_item_id, nome, preco_anuncio, frete_gratis, tipo_anuncio, thumbnail, permalink, variation_id, custo_frete, peso_kg, custo_produto, imposto, categoria")
     .eq("ativo", true)
     .eq("marketplace", "ML")
     .not("ml_item_id", "is", null);
 
-  if (error) {
-    return NextResponse.json({ erro: true, mensagem: "Erro ao buscar anúncios: " + error.message });
-  }
-  if (!anuncios?.length) {
-    return NextResponse.json({ erro: false, atualizados: 0, mensagem: "Nenhum anúncio ML encontrado." });
-  }
-
-  // ── Separa MLB (listagens diretas) de MLBU (catálogo) ───────────────────
-  const mlbAnuncios  = anuncios.filter(a => !a.ml_item_id!.toUpperCase().startsWith("MLBU"));
-  const mlbuAnuncios = anuncios.filter(a =>  a.ml_item_id!.toUpperCase().startsWith("MLBU"));
+  if (error) return NextResponse.json({ erro: true, mensagem: "Erro Supabase: " + error.message });
+  if (!anuncios?.length) return NextResponse.json({ erro: false, atualizados: 0, mensagem: "Nenhum anúncio ML encontrado." });
 
   let atualizados = 0;
   const detalhes: string[] = [];
 
-  // ── 1. MLB: batch fetch via /items?ids= ──────────────────────────────────
-  const BATCH = 20;
-  const mlItems: any[] = [];
-
-  for (let i = 0; i < mlbAnuncios.length; i += BATCH) {
-    const ids = mlbAnuncios.slice(i, i + BATCH).map(a => a.ml_item_id).join(",");
+  for (const anuncio of anuncios) {
     try {
-      const res = await fetch(`https://api.mercadolibre.com/items?ids=${ids}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) continue;
-      const batch = await res.json();
-      if (Array.isArray(batch)) mlItems.push(...batch);
-    } catch {}
-  }
+      let resolvedId: string = anuncio.ml_item_id!;
+      let body: any = null;
 
-  function aplicarMudancas(anuncio: any, body: any): Record<string, any> {
-    const mudancas: Record<string, any> = {};
+      // Se já é MLB direto, busca individual (body completo com dimensions)
+      if (!resolvedId.toUpperCase().startsWith("MLBU")) {
+        body = await fetchItemBody(resolvedId, token);
+      } else {
+        // MLBU: resolve para o MLB real deste seller
+        const resultado = await resolverMLBU(resolvedId, token);
+        if (resultado) {
+          resolvedId = resultado.mlbId;
+          body = resultado.body;
+        }
+      }
 
-    // Preço: usa o da variação específica se o anúncio tem variation_id
-    let novoPreco: number | null = typeof body.price === "number" ? body.price : null;
-    if (anuncio.variation_id && body.variations?.length) {
-      const varId = String(anuncio.variation_id);
-      const variation = (body.variations as any[]).find((v: any) => String(v.id) === varId);
-      if (variation && typeof variation.price === "number") novoPreco = variation.price;
-    }
+      if (!body) continue;
 
-    const novoNome      = typeof body.title === "string" ? body.title : null;
-    const novoFrete     = body.shipping?.free_shipping ?? false;
-    const novoTipo      = body.listing_type_id ? mapTipoAnuncio(body.listing_type_id) : null;
-    const novoThumb     = body.thumbnail ?? null;
-    const novoPermalink = body.permalink ?? null;
+      const mudancas: Record<string, any> = {};
 
-    if (novoPreco !== null && novoPreco !== anuncio.preco_anuncio) {
-      mudancas.preco_anuncio = novoPreco;
-      const nomeExib = (novoNome ?? anuncio.nome ?? "").substring(0, 35);
-      detalhes.push(`${nomeExib}: R$ ${(anuncio.preco_anuncio ?? 0).toFixed(2).replace(".", ",")} → R$ ${novoPreco.toFixed(2).replace(".", ",")}`);
-    }
-    if (novoNome      && novoNome      !== anuncio.nome)          mudancas.nome         = novoNome;
-    if (novoFrete     !== anuncio.frete_gratis)                   mudancas.frete_gratis = novoFrete;
-    if (novoTipo      && novoTipo      !== anuncio.tipo_anuncio)  mudancas.tipo_anuncio = novoTipo;
-    if (novoThumb     && novoThumb     !== anuncio.thumbnail)     mudancas.thumbnail    = novoThumb;
-    if (novoPermalink && novoPermalink !== anuncio.permalink)     mudancas.permalink    = novoPermalink;
-    return mudancas;
-  }
+      // ── ml_item_id: atualiza se MLBU foi resolvido ──────────────────────────
+      if (resolvedId !== anuncio.ml_item_id) mudancas.ml_item_id = resolvedId;
 
-  for (const item of mlItems) {
-    if (item.code !== 200 || !item.body) continue;
-    const body    = item.body;
-    const anuncio = mlbAnuncios.find(a => a.ml_item_id === body.id);
-    if (!anuncio) continue;
+      // ── Preço: usa o da variação se houver ──────────────────────────────────
+      let novoPreco: number | null = typeof body.price === "number" ? body.price : null;
+      if (anuncio.variation_id && body.variations?.length) {
+        const varId = String(anuncio.variation_id);
+        const variation = (body.variations as any[]).find((v: any) => String(v.id) === varId);
+        if (variation && typeof variation.price === "number") novoPreco = variation.price;
+      }
+      if (novoPreco !== null && novoPreco !== anuncio.preco_anuncio) {
+        mudancas.preco_anuncio = novoPreco;
+        const nomeExib = (anuncio.nome ?? "").substring(0, 35);
+        detalhes.push(`💰 ${nomeExib}: R$ ${(anuncio.preco_anuncio ?? 0).toFixed(2).replace(".", ",")} → R$ ${novoPreco.toFixed(2).replace(".", ",")}`);
+      }
 
-    const mudancas = aplicarMudancas(anuncio, body);
-    if (Object.keys(mudancas).length > 0) {
-      await supabase.from("anuncios").update(mudancas).eq("id", anuncio.id);
-      atualizados++;
-    }
-  }
+      // ── Logistic type + Peso ────────────────────────────────────────────────
+      const logisticType = (body.shipping?.logistic_type as string | null) ?? null;
 
-  // ── 2. MLBU: resolve para MLB real, atualiza tudo inclusive ml_item_id ──
-  for (const anuncio of mlbuAnuncios) {
-    try {
-      const resultado = await resolverMLBU(anuncio.ml_item_id!, token);
-      if (!resultado) continue;
+      // ── Metadados ───────────────────────────────────────────────────────────
+      const novoNome      = typeof body.title === "string" ? body.title : null;
+      const novoFrete     = body.shipping?.free_shipping ?? false;
+      const novoTipo      = body.listing_type_id ? mapTipoAnuncio(body.listing_type_id) : null;
+      const novoThumb     = body.thumbnail ?? null;
+      const novoPermalink = body.permalink ?? null;
 
-      const { mlbId, body } = resultado;
-      const mudancas = aplicarMudancas(anuncio, body);
+      if (novoNome      && novoNome      !== anuncio.nome)                   mudancas.nome          = novoNome;
+      if (logisticType  && logisticType  !== (anuncio as any).logistic_type) mudancas.logistic_type = logisticType;
+      if (novoFrete     !== anuncio.frete_gratis)                            mudancas.frete_gratis  = novoFrete;
+      if (novoTipo      && novoTipo      !== anuncio.tipo_anuncio)           mudancas.tipo_anuncio  = novoTipo;
+      if (novoThumb     && novoThumb     !== anuncio.thumbnail)              mudancas.thumbnail     = novoThumb;
+      if (novoPermalink && novoPermalink !== anuncio.permalink)              mudancas.permalink     = novoPermalink;
+      const pesoDim      = parsePesoSync(body.shipping?.dimensions as string | null);
+      const pesoAttr     = parsePesoAtributos(body.attributes ?? []);
+      const pesoAPI      = pesoDim ?? pesoAttr;
+      const pesoFinal    = pesoAPI ?? (typeof anuncio.peso_kg === "number" ? anuncio.peso_kg : null);
 
-      if (mlbId !== anuncio.ml_item_id) mudancas.ml_item_id = mlbId;
-      if (body.thumbnail && body.thumbnail !== anuncio.thumbnail) mudancas.thumbnail = body.thumbnail;
+      if (pesoAPI !== null && pesoAPI !== anuncio.peso_kg) {
+        mudancas.peso_kg = pesoAPI;
+        console.log(`[sync] ${resolvedId} peso: ${anuncio.peso_kg} → ${pesoAPI} kg (dim=${body.shipping?.dimensions})`);
+      }
+
+      // ── Frete: recalcula com peso + preço + tipo de envio ──────────────────
+      const precoParaCalc = (mudancas.preco_anuncio as number | undefined) ?? anuncio.preco_anuncio ?? null;
+      const novoCustoFrete = calcularNovoFrete(logisticType, pesoFinal, precoParaCalc);
+
+      if (novoCustoFrete !== null) {
+        const diff = Math.abs(novoCustoFrete - (anuncio.custo_frete ?? 0));
+        if (diff > 0.005) {
+          mudancas.custo_frete = novoCustoFrete;
+          const nomeExib = (anuncio.nome ?? "").substring(0, 30);
+          detalhes.push(`🚚 ${nomeExib}: frete R$ ${(anuncio.custo_frete ?? 0).toFixed(2).replace(".", ",")} → R$ ${novoCustoFrete.toFixed(2).replace(".", ",")}`);
+        }
+      }
+
+      // ── Lucro e margem: recalcula se preço ou frete mudaram ────────────────
+      const algumaMudanca = ["preco_anuncio", "custo_frete", "tipo_anuncio"].some(k => k in mudancas);
+      if (algumaMudanca) {
+        const recalc = recalcularLucroMargem(
+          (mudancas.preco_anuncio  as number | undefined) ?? anuncio.preco_anuncio  ?? null,
+          (mudancas.custo_frete   as number | undefined) ?? anuncio.custo_frete    ?? 0,
+          anuncio.custo_produto ?? null,
+          anuncio.imposto       ?? null,
+          anuncio.categoria     ?? null,
+          (mudancas.tipo_anuncio as string | undefined) ?? anuncio.tipo_anuncio    ?? "Clássico",
+        );
+        if (recalc) {
+          mudancas.lucro_liquido       = recalc.lucro_liquido;
+          mudancas.margem_contribuicao = recalc.margem_contribuicao;
+        }
+      }
 
       if (Object.keys(mudancas).length > 0) {
         await supabase.from("anuncios").update(mudancas).eq("id", anuncio.id);
         atualizados++;
       }
-    } catch {}
+
+      // Pequena pausa para não bater no rate limit da API ML
+      await new Promise(r => setTimeout(r, 80));
+
+    } catch (e) {
+      console.log(`[sync] erro em ${anuncio.ml_item_id}: ${e}`);
+    }
   }
 
   const mensagem = atualizados === 0
-    ? `Todos os ${anuncios.length} anuncios ja estao atualizados!`
-    : `${atualizados} anuncio${atualizados !== 1 ? "s" : ""} atualizado${atualizados !== 1 ? "s" : ""}!`;
+    ? `Todos os ${anuncios.length} anúncios já estão atualizados!`
+    : `${atualizados} anúncio${atualizados !== 1 ? "s" : ""} atualizado${atualizados !== 1 ? "s" : ""}!`;
 
   return NextResponse.json({ erro: false, atualizados, mensagem, detalhes });
 }

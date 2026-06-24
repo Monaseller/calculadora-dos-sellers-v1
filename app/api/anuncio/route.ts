@@ -365,6 +365,36 @@ function parsePesoAtributo(attributes: unknown[]): number | null {
   return null;
 }
 
+// Extrai peso (kg), volume (cm³) e categoria Full de shipping.dimensions
+// Formato ML: "LxWxH,peso_gramas"  ex: "20x15x10,800"
+function parseDimensoesShipping(dim: string | null | undefined): {
+  pesoKg: number | null;
+  volumeCm3: number | null;
+  tamanhoFull: string;
+} {
+  if (!dim) return { pesoKg: null, volumeCm3: null, tamanhoFull: "P" };
+  const m = dim.match(/^([\d.]+)[xX]([\d.]+)[xX]([\d.]+),\s*([\d.]+)/);
+  if (!m) return { pesoKg: null, volumeCm3: null, tamanhoFull: "P" };
+
+  const [l, w, h] = [+m[1], +m[2], +m[3]];
+  const rawStr = m[4];
+  // ML usa inteiros em gramas (ex: "800" = 800g = 0,8 kg).
+  // Se tiver ponto decimal no string, já está em kg.
+  const weightNum = parseFloat(rawStr);
+  const pesoKg = weightNum > 0
+    ? (rawStr.includes(".") ? weightNum : weightNum / 1000)
+    : null;
+  const volumeCm3 = l * w * h;
+
+  // Categorias Full do ML por volume e peso
+  let tamanhoFull = "P";
+  if (pesoKg && pesoKg > 18)      tamanhoFull = "XG";
+  else if (volumeCm3 > 30000)     tamanhoFull = "G";
+  else if (volumeCm3 > 1200)      tamanhoFull = "M";
+
+  return { pesoKg: pesoKg && pesoKg > 0 ? Math.round(pesoKg * 1000) / 1000 : null, volumeCm3, tamanhoFull };
+}
+
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const link = url.searchParams.get("link");
@@ -651,8 +681,14 @@ export async function GET(request: Request) {
     }
   }
 
-  const pesoKg = parsePesoAtributo(data.attributes ?? []);
-  if (pesoKg) console.log(`[anuncio] pesoKg extraído: ${pesoKg} kg`);
+  // Peso: prioridade → shipping.dimensions → attributes.WEIGHT
+  const dimParsed = parseDimensoesShipping(data.shipping?.dimensions as string | null);
+  const pesoAtributo = parsePesoAtributo(data.attributes ?? []);
+  const pesoKg = dimParsed.pesoKg ?? pesoAtributo;
+  const tamanhoFullAuto = pesoKg ? dimParsed.tamanhoFull : null;
+
+  if (pesoKg) console.log(`[anuncio] pesoKg: ${pesoKg} kg | tamanho: ${tamanhoFullAuto} | dim: ${data.shipping?.dimensions}`);
+  else console.log(`[anuncio] pesoKg não encontrado (dim=${data.shipping?.dimensions})`);
 
   return NextResponse.json({
     id: data.id,
@@ -669,5 +705,6 @@ export async function GET(request: Request) {
     variacoes,
     variacaoId,
     pesoKg,
+    tamanhoFull: tamanhoFullAuto,
   });
 }

@@ -37,6 +37,7 @@ interface DadosML {
   variacaoId?: string | null;
   parcial?: boolean;
   pesoKg?: number | null;
+  tamanhoFull?: string | null;
 }
 
 export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
@@ -113,6 +114,10 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
   const [erro,           setErro]           = useState("");
   const [adicionarTodas, setAdicionarTodas] = useState(false);
 
+  // SKU editável por variação (modo "adicionar todas")
+  type VariacaoOverride = { id: string; sku: string };
+  const [variacoesOverride, setVariacoesOverride] = useState<VariacaoOverride[]>([]);
+
   // ── Auto-fetch ML ao editar ──────────────────────────────────────────────
   // Quando abre em modo edição com ml_item_id, re-busca dados frescos do ML
   useEffect(() => {
@@ -146,6 +151,7 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
           setSkuManual(data.sku);
         if (typeof data.pesoKg === "number" && data.pesoKg > 0)
           setPesoKg(String(data.pesoKg).replace(".", ","));
+        if (data.tamanhoFull) setTamanhoFull(data.tamanhoFull as TamanhoFull);
         if (data.freteGratis !== undefined)
           setFreteGratis(data.freteGratis);
         if (data.logisticType) {
@@ -153,6 +159,18 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
           if (lt === "fulfillment")   setTipoEnvio("Full");
           else if (lt === "self_service") setTipoEnvio("Flex");
           else                        setTipoEnvio("ME2");
+        }
+        // Recalcula frete com dados reais se disponíveis
+        if (data.pesoKg && data.logisticType) {
+          const apiP = data.pesoKg as number;
+          const apiT = (data.tamanhoFull as TamanhoFull) || "P";
+          const lt = (data.logisticType as string).toLowerCase();
+          const pr = typeof data.preco === "number" ? data.preco : null;
+          const calc =
+            lt === "fulfillment"  ? calcularFreteFullMl(apiT, pr, apiP) :
+            lt === "self_service" ? calcularFreteFlexMl(pr) :
+            calcularFreteMl(apiP, pr);
+          if (calc !== null) setCustoFrete(String(calc).replace(".", ","));
         }
       })
       .catch(() => {}); // falha silenciosa — mantém dados salvos
@@ -175,8 +193,12 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
       else setTipoAnuncio("Clássico");
       if (data.freteGratis !== undefined) setFreteGratis(data.freteGratis);
       if (data.sku) setSkuManual(data.sku);
-      if (typeof data.pesoKg === "number" && data.pesoKg > 0)
-        setPesoKg(String(data.pesoKg).replace(".", ","));
+
+      // Peso e tamanho reais do produto (vindos da API ML)
+      const apiPeso: number | null = typeof data.pesoKg === "number" && data.pesoKg > 0 ? data.pesoKg : null;
+      const apiTamanho: TamanhoFull | null = (data.tamanhoFull as TamanhoFull) || null;
+      if (apiPeso) setPesoKg(String(apiPeso).replace(".", ","));
+      if (apiTamanho) setTamanhoFull(apiTamanho);
 
       // Auto-detecta tipo de envio pelo logistic_type do ML
       if (data.logisticType) {
@@ -185,10 +207,11 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
         else if (data.logisticType === "self_service") novoTipo = "Flex";
         setTipoEnvio(novoTipo);
         const preco = data.preco ?? null;
+        const novoTamanho = apiTamanho ?? tamanhoFull;
         const calc =
-          novoTipo === "Full" ? calcularFreteFullMl(tamanhoFull, preco, parse(pesoKg) || null) :
+          novoTipo === "Full" ? calcularFreteFullMl(novoTamanho, preco, apiPeso ?? (parse(pesoKg) || null)) :
           novoTipo === "Flex" ? calcularFreteFlexMl(preco) :
-          calcularFreteMl(pesoKgNum, preco);
+          calcularFreteMl(apiPeso ?? pesoKgNum, preco);
         if (calc !== null) setCustoFrete(String(calc).replace(".", ","));
       }
 
@@ -326,6 +349,7 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
         thumbnail,
         permalink:         dadosML?.permalink ?? null,
         ativo:             true,
+        logistic_type:     tipoEnvio === "Full" ? "fulfillment" : tipoEnvio === "Flex" ? "self_service" : "me2",
       };
     }
 
@@ -338,7 +362,7 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
           v.preco ?? dadosML.preco,
           v.thumbnail ?? dadosML.thumbnail ?? null,
           v.id,
-          v.sku ?? (skuManual.trim() || dadosML.sku || null),
+          variacoesOverride.find(x => x.id === v.id)?.sku || v.sku || skuManual.trim() || dadosML.sku || null,
         );
         await supabase.from("anuncios").insert(payload);
       }
@@ -457,7 +481,11 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
 
             {/* Botão principal: adicionar todas de uma vez */}
             <button
-              onClick={() => { setAdicionarTodas(true); setEtapa("custos"); }}
+              onClick={() => {
+                setAdicionarTodas(true);
+                setVariacoesOverride((dadosML?.variacoes ?? []).map(v => ({ id: v.id, sku: v.sku ?? "" })));
+                setEtapa("custos");
+              }}
               style={{
                 width: "100%", padding: "14px", marginBottom: "14px",
                 background: "linear-gradient(135deg,#ff6b00,#ffb800)",
@@ -523,8 +551,55 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
         {/* ── ETAPA 2: Custos ── */}
         {etapa === "custos" && (
           <div>
-            {/* Preview do produto */}
-            {dadosML && (
+            {/* Preview: cards lado a lado (multiplas variações) ou produto único */}
+            {dadosML && adicionarTodas && variacoesOverride.length > 0 ? (
+              <div style={{ marginBottom: "20px" }}>
+                <div style={{ fontSize: "12px", fontWeight: 700, color: "#9099aa", letterSpacing: "0.5px", marginBottom: "10px" }}>
+                  {variacoesOverride.length} VARIAÇÕES — EDITE O SKU DE CADA UMA
+                </div>
+                <div style={{ display: "flex", gap: "10px", overflowX: "auto", paddingBottom: "6px" }}>
+                  {variacoesOverride.map((vo, idx) => {
+                    const varML = dadosML.variacoes?.find(v => v.id === vo.id);
+                    const CORES = ["#6fa3ff","#00D97E","#ffb800","#c084fc","#ff6b6b","#38bdf8"];
+                    const cor = CORES[idx % CORES.length];
+                    return (
+                      <div key={vo.id} style={{
+                        minWidth: "170px", flex: "0 0 170px",
+                        background: "rgba(255,255,255,0.04)",
+                        border: `2px solid ${cor}33`,
+                        borderLeft: `4px solid ${cor}`,
+                        borderRadius: "14px", padding: "12px",
+                      }}>
+                        {varML?.thumbnail && (
+                          <img src={varML.thumbnail} alt="" onError={e => { (e.target as HTMLImageElement).style.display = "none"; }}
+                            style={{ width: "40px", height: "40px", objectFit: "contain", borderRadius: "8px", background: "#fff", marginBottom: "6px", display: "block" }} />
+                        )}
+                        <div style={{ fontSize: "11px", fontWeight: 700, color: cor, lineHeight: 1.3, marginBottom: "4px" }}>
+                          {varML?.attributes ?? `Variação ${idx + 1}`}
+                        </div>
+                        {varML?.preco != null && (
+                          <div style={{ fontSize: "11px", color: "#00D97E", marginBottom: "8px" }}>
+                            R$ {varML.preco.toFixed(2).replace(".", ",")}
+                          </div>
+                        )}
+                        <div style={{ fontSize: "10px", color: "#9099aa", fontWeight: 700, marginBottom: "3px" }}>SKU</div>
+                        <input
+                          value={vo.sku}
+                          onChange={e => setVariacoesOverride(prev =>
+                            prev.map((x, i) => i === idx ? { ...x, sku: e.target.value } : x)
+                          )}
+                          placeholder="Código SKU"
+                          style={{ width: "100%", padding: "7px 10px", boxSizing: "border-box",
+                            borderRadius: "10px", border: `1.5px solid ${cor}55`,
+                            background: "rgba(255,255,255,0.06)", color: "white",
+                            fontSize: "12px", outline: "none", fontFamily: "monospace" }}
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : dadosML ? (
               <div style={{ display: "flex", gap: "14px", alignItems: "center", background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: "16px", padding: "14px", marginBottom: "24px" }}>
                 {dadosML.thumbnail && (
                   <img src={dadosML.thumbnail.replace("http://", "https://")} alt="" style={{ width: "52px", height: "52px", objectFit: "contain", borderRadius: "10px", background: "#fff", flexShrink: 0 }} />
@@ -546,7 +621,7 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
                   )}
                 </div>
               </div>
-            )}
+            ) : null}
 
             {/* Tipo anúncio — caso não venha do link */}
             <div style={{ marginBottom: "20px" }}>
@@ -650,16 +725,18 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
               </div>
             )}
 
-            {/* Full: seletor de tamanho */}
+            {/* Full: seletor de tamanho + peso (mesma tabela que ME2) */}
             {tipoEnvio === "Full" && (
               <div style={{ marginBottom: "16px" }}>
                 <span style={labelStyle}>TAMANHO DO PRODUTO (embalagem)</span>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" }}>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", marginBottom: "10px" }}>
                   {(Object.entries(TAMANHOS_FULL) as [TamanhoFull, typeof TAMANHOS_FULL[TamanhoFull]][]).map(([key, val]) => (
                     <button key={key} onClick={() => {
                       setTamanhoFull(key);
                       setFreteOverride(false);
-                      const calc = calcularFreteFullMl(key, precoEfetivo, pesoKgNum);
+                      const pesoStr = String(val.pesoKg).replace(".", ",");
+                      setPesoKg(pesoStr);
+                      const calc = calcularFreteFullMl(key, precoEfetivo, val.pesoKg);
                       if (calc !== null) setCustoFrete(String(calc).replace(".", ","));
                     }} style={{
                       padding: "10px 12px", borderRadius: "12px", border: "2px solid", textAlign: "left",
@@ -673,9 +750,39 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
                     </button>
                   ))}
                 </div>
+                <span style={{ ...labelStyle, marginTop: "4px" }}>PESO NA EMBALAGEM (kg)</span>
+                <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
+                  <input
+                    value={pesoKg}
+                    onChange={e => {
+                      setPesoKg(e.target.value);
+                      setTamanhoFull(
+                        (parse(e.target.value) || 0) <= 0.3 ? "P" :
+                        (parse(e.target.value) || 0) <= 1.75 ? "M" :
+                        (parse(e.target.value) || 0) <= 4.5 ? "G" : "XG"
+                      );
+                      setFreteOverride(false);
+                      const p = parse(e.target.value) || null;
+                      const calc = calcularFreteFullMl(tamanhoFull, precoEfetivo, p);
+                      if (calc !== null) setCustoFrete(String(calc).replace(".", ","));
+                    }}
+                    placeholder="Ex: 0,8"
+                    style={{ ...inputStyle, flex: 1 }}
+                  />
+                  {freteAutoCalc !== null && !freteOverride && (
+                    <div style={{ whiteSpace: "nowrap", fontSize: "12px", color: "#00D97E", fontWeight: 700 }}>
+                      🏭 R$ {freteAutoCalc.toFixed(2).replace(".", ",")}
+                    </div>
+                  )}
+                </div>
                 {freteAutoCalc !== null && precoEfetivo && (
-                  <div style={{ fontSize: "11px", color: "#00D97E", marginTop: "8px", fontWeight: 700 }}>
-                    🏭 Custo estimado: R$ {freteAutoCalc.toFixed(2).replace(".", ",")} — tabela ML
+                  <div style={{ fontSize: "11px", color: "#9099aa", marginTop: "5px" }}>
+                    {descricaoFaixaFrete(precoEfetivo)} — tabela oficial ML
+                  </div>
+                )}
+                {!pesoKg && (
+                  <div style={{ fontSize: "11px", color: "#9099aa", marginTop: "5px" }}>
+                    💡 Selecione um tamanho como ponto de partida, ou informe o peso exato.
                   </div>
                 )}
               </div>

@@ -105,9 +105,9 @@ export type TamanhoFull = "P" | "M" | "G" | "XG";
 
 export const TAMANHOS_FULL: Record<TamanhoFull, { label: string; desc: string; pesoKg: number }> = {
   P:  { label: "Pequeno",      desc: "Até 1.200 cm³ (ex: mouse, frasco)",         pesoKg: 0.3  },
-  M:  { label: "Médio",        desc: "1.201 a 30.000 cm³ (ex: tênis, cafeteira)", pesoKg: 1.0  },
-  G:  { label: "Grande",       desc: "Mais de 30.000 cm³ (ex: micro-ondas)",      pesoKg: 5.0  },
-  XG: { label: "Extragrande",  desc: "Mais de 60×60×70 cm ou >18 kg",             pesoKg: 20.0 },
+  M:  { label: "Médio",        desc: "1.201 a 30.000 cm³ (ex: tênis, cafeteira)", pesoKg: 1.75 },
+  G:  { label: "Grande",       desc: "Mais de 30.000 cm³ (ex: micro-ondas)",      pesoKg: 4.5  },
+  XG: { label: "Extragrande",  desc: "Mais de 60×60×70 cm ou >18 kg",             pesoKg: 19.0 },
 };
 
 // Full usa a mesma tabela ME2/Coleta (validado pelo painel ML):

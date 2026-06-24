@@ -35,6 +35,7 @@ export interface Anuncio {
   margem_contribuicao: number | null;
   peso_kg: number | null;
   variation_id: string | null;
+  logistic_type: string | null;  // ML: 'fulfillment' | 'self_service' | 'me2' | 'cross_docking'
 }
 
 export interface VendaDia {

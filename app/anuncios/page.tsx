@@ -18,6 +18,8 @@ export default function AnunciosPage() {
   const [busca,              setBusca]              = useState("");
   const [filtroDuplicados,   setFiltroDuplicados]   = useState(false);
   const [filtroMarketplace,  setFiltroMarketplace]  = useState<"todos" | "ML" | "Shopee">("todos");
+  const [filtroVariacao,     setFiltroVariacao]      = useState(false);
+  const [filtroLogistic,     setFiltroLogistic]      = useState<"" | "full" | "coleta">("" as "" | "full" | "coleta");
 
   // ── Ações ────────────────────────────────────────────────────────────────
   const [atualizandoSkus,    setAtualizandoSkus]    = useState(false);
@@ -130,8 +132,11 @@ export default function AnunciosPage() {
     }
     if (filtroMarketplace !== "todos") base = base.filter(a => a.marketplace === filtroMarketplace);
     if (filtroDuplicados) base = base.filter(a => idsAntigosDuplicados.has(a.id));
+    if (filtroVariacao)   base = base.filter(a => !!a.variation_id);
+    if (filtroLogistic === "full")   base = base.filter(a => (a as any).logistic_type === "fulfillment");
+    if (filtroLogistic === "coleta") base = base.filter(a => !(a as any).logistic_type || (a as any).logistic_type === "me2" || (a as any).logistic_type === "cross_docking");
     return base;
-  }, [anuncios, busca, filtroDuplicados, filtroMarketplace, idsAntigosDuplicados]);
+  }, [anuncios, busca, filtroDuplicados, filtroMarketplace, idsAntigosDuplicados, filtroVariacao, filtroLogistic]);
 
   // ── Agrupar variações ────────────────────────────────────────────────────
   const { soloAnuncios, gruposVariacoes } = useMemo(() => {
@@ -153,7 +158,7 @@ export default function AnunciosPage() {
   }, [anunciosFiltrados]);
 
   // ── Indicador de filtros ativos ──────────────────────────────────────────
-  const filtrosAtivos = (busca ? 1 : 0) + (filtroDuplicados ? 1 : 0) + (filtroMarketplace !== "todos" ? 1 : 0);
+  const filtrosAtivos = (busca ? 1 : 0) + (filtroDuplicados ? 1 : 0) + (filtroMarketplace !== "todos" ? 1 : 0) + (filtroVariacao ? 1 : 0) + (filtroLogistic ? 1 : 0);
 
   const totalAnuncios   = anuncios.length;
   const mediaPrecoIdeal = totalAnuncios > 0
@@ -413,10 +418,85 @@ export default function AnunciosPage() {
               🚚 Frete Grátis
             </button>
 
+            {/* Variação */}
+            {(() => {
+              const count = anuncios.filter(a => !!a.variation_id).length;
+              return count > 0 ? (
+                <button
+                  onClick={() => setFiltroVariacao(v => !v)}
+                  style={{
+                    padding: "8px 14px",
+                    background: filtroVariacao ? "rgba(192,132,252,0.15)" : "rgba(255,255,255,0.04)",
+                    border: `1px solid ${filtroVariacao ? "rgba(192,132,252,0.45)" : "rgba(255,255,255,0.1)"}`,
+                    borderRadius: "10px",
+                    color: filtroVariacao ? "#c084fc" : "#9099aa",
+                    fontWeight: 700, fontSize: "13px",
+                    cursor: "pointer",
+                    display: "flex", alignItems: "center", gap: "6px",
+                  }}
+                >
+                  🔀 Variação
+                  <span style={{ background: filtroVariacao ? "rgba(192,132,252,0.3)" : "rgba(255,255,255,0.08)", color: filtroVariacao ? "#c084fc" : "#9099aa", fontSize: "11px", fontWeight: 800, borderRadius: "8px", padding: "1px 6px" }}>
+                    {count}
+                  </span>
+                </button>
+              ) : null;
+            })()}
+
+            {/* Full */}
+            {(() => {
+              const count = anuncios.filter(a => (a as any).logistic_type === "fulfillment").length;
+              return count > 0 ? (
+                <button
+                  onClick={() => setFiltroLogistic(prev => prev === "full" ? "" : "full")}
+                  style={{
+                    padding: "8px 14px",
+                    background: filtroLogistic === "full" ? "rgba(56,189,248,0.15)" : "rgba(255,255,255,0.04)",
+                    border: `1px solid ${filtroLogistic === "full" ? "rgba(56,189,248,0.45)" : "rgba(255,255,255,0.1)"}`,
+                    borderRadius: "10px",
+                    color: filtroLogistic === "full" ? "#38bdf8" : "#9099aa",
+                    fontWeight: 700, fontSize: "13px",
+                    cursor: "pointer",
+                    display: "flex", alignItems: "center", gap: "6px",
+                  }}
+                >
+                  🏭 Full
+                  <span style={{ background: filtroLogistic === "full" ? "rgba(56,189,248,0.3)" : "rgba(255,255,255,0.08)", color: filtroLogistic === "full" ? "#38bdf8" : "#9099aa", fontSize: "11px", fontWeight: 800, borderRadius: "8px", padding: "1px 6px" }}>
+                    {count}
+                  </span>
+                </button>
+              ) : null;
+            })()}
+
+            {/* Coleta / ME2 */}
+            {(() => {
+              const count = anuncios.filter(a => !(a as any).logistic_type || (a as any).logistic_type === "me2" || (a as any).logistic_type === "cross_docking").length;
+              return count > 0 ? (
+                <button
+                  onClick={() => setFiltroLogistic(prev => prev === "coleta" ? "" : "coleta")}
+                  style={{
+                    padding: "8px 14px",
+                    background: filtroLogistic === "coleta" ? "rgba(255,183,77,0.15)" : "rgba(255,255,255,0.04)",
+                    border: `1px solid ${filtroLogistic === "coleta" ? "rgba(255,183,77,0.45)" : "rgba(255,255,255,0.1)"}`,
+                    borderRadius: "10px",
+                    color: filtroLogistic === "coleta" ? "#ffb74d" : "#9099aa",
+                    fontWeight: 700, fontSize: "13px",
+                    cursor: "pointer",
+                    display: "flex", alignItems: "center", gap: "6px",
+                  }}
+                >
+                  📦 Coleta
+                  <span style={{ background: filtroLogistic === "coleta" ? "rgba(255,183,77,0.3)" : "rgba(255,255,255,0.08)", color: filtroLogistic === "coleta" ? "#ffb74d" : "#9099aa", fontSize: "11px", fontWeight: 800, borderRadius: "8px", padding: "1px 6px" }}>
+                    {count}
+                  </span>
+                </button>
+              ) : null;
+            })()}
+
             {/* Limpar todos */}
             {filtrosAtivos > 0 && (
               <button
-                onClick={() => { setBusca(""); setFiltroDuplicados(false); setFiltroMarketplace("todos"); }}
+                onClick={() => { setBusca(""); setFiltroDuplicados(false); setFiltroMarketplace("todos"); setFiltroVariacao(false); setFiltroLogistic(""); }}
                 style={{
                   padding: "8px 14px",
                   background: "none",
