@@ -104,7 +104,7 @@ export async function GET(request: Request) {
     d.setUTCDate(d.getUTCDate() + n);
     return d.toISOString().split("T")[0];
   }
-  const dateFetchFrom = addDias(dateFrom, -3); // 3 dias antes para capturar aprovações tardias
+  const dateFetchFrom = addDias(dateFrom, -5); // 5 dias antes: cobre boletos (até 3 dias úteis) + margem
   const diasFetch = gerarDias(dateFetchFrom, dateTo);
 
   async function fetchAllDias(status: string): Promise<any[]> {
@@ -240,7 +240,8 @@ export async function GET(request: Request) {
     // ML usa date_approved (BRT) para classificar vendas — igual ao painel do seller
     let dataPedido: string;
     if (order._status === "cancelled" || order._status === "devolucao") {
-      const ref = order.date_closed ?? order.date_created ?? "";
+      // ML conta devoluções pela data original da venda (date_created), não pela data do cancelamento
+      const ref = order.date_created ?? order.date_closed ?? "";
       dataPedido = ref ? ref.split("T")[0] : dateFrom;
     } else {
       const approvedPayment = (order.payments ?? []).find(
