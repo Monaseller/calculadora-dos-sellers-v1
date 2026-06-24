@@ -192,6 +192,7 @@ export async function POST(request: Request) {
         if (variations.length === 0) {
           // ── Item sem variação ──────────────────────────────────────────
           const preco: number = item.price ?? 0;
+          const sku: string | null = item.seller_custom_field ?? null;
           const key = `${itemId}|`;
           const existente = existMap.get(key);
 
@@ -211,6 +212,7 @@ export async function POST(request: Request) {
             };
             if (!existente.peso_kg && pesoKg) upd.peso_kg = pesoKg;
             if (!existente.custo_frete && custoFrete) upd.custo_frete = custoFrete;
+            if (!existente.sku && sku) upd.sku = sku;
             await supabase.from("anuncios").update(upd).eq("id", existente.id);
             atualizados++;
           } else {
@@ -227,6 +229,7 @@ export async function POST(request: Request) {
               frete_gratis: freteGratis,
               peso_kg: pesoKg,
               custo_frete: custoFrete ?? 0,
+              sku: sku ?? null,
               custo_produto: 0,
               insumos: 0,
               imposto: 0,
