@@ -188,6 +188,8 @@ export async function POST(request: Request) {
         const categoria = mapCategoria(catName);
 
         const variations: any[] = item.variations ?? [];
+        const thumbnail: string | null = item.thumbnail ?? item.pictures?.[0]?.url ?? null;
+        const permalink: string | null = item.permalink ?? null;
 
         if (variations.length === 0) {
           // ── Item sem variação ──────────────────────────────────────────
@@ -200,8 +202,6 @@ export async function POST(request: Request) {
           const custoFrete = calcularFreteParaItem(pesoKg, preco, logisticType, freteGratis);
 
           if (existente) {
-            // Atualiza campos ML — preserva dados financeiros do usuário
-            // ativo: true reativa itens que estavam desativados
             const upd: any = {
               nome: titulo,
               preco_anuncio: preco,
@@ -209,6 +209,8 @@ export async function POST(request: Request) {
               logistic_type: logisticType,
               frete_gratis: freteGratis,
               ativo: true,
+              thumbnail,
+              permalink,
             };
             if (!existente.peso_kg && pesoKg) upd.peso_kg = pesoKg;
             if (!existente.custo_frete && custoFrete) upd.custo_frete = custoFrete;
@@ -216,7 +218,6 @@ export async function POST(request: Request) {
             await supabase.from("anuncios").update(upd).eq("id", existente.id);
             atualizados++;
           } else {
-            // Insere novo
             await supabase.from("anuncios").insert({
               marketplace: "ML",
               nome: titulo,
@@ -230,6 +231,8 @@ export async function POST(request: Request) {
               peso_kg: pesoKg,
               custo_frete: custoFrete ?? 0,
               sku: sku ?? null,
+              thumbnail,
+              permalink,
               custo_produto: 0,
               insumos: 0,
               imposto: 0,
@@ -248,6 +251,12 @@ export async function POST(request: Request) {
             const preco: number = v.price ?? item.price ?? 0;
             const sku: string | null = v.seller_custom_field ?? null;
 
+            // Thumbnail da variação: tenta picture da variação, fallback para item
+            const varPicId: string | null = v.picture_ids?.[0] ?? null;
+            const varThumb: string | null = varPicId
+              ? (item.pictures?.find((p: any) => p.id === varPicId)?.url ?? thumbnail)
+              : thumbnail;
+
             // Peso da variação (tenta atributos da variação, fallback para item)
             const varAtributos: any[] = v.attributes ?? [];
             const pesoKg = parsePeso(dim, [...varAtributos, ...attrs]);
@@ -264,6 +273,8 @@ export async function POST(request: Request) {
                 logistic_type: logisticType,
                 frete_gratis: freteGratis,
                 ativo: true,
+                thumbnail: varThumb,
+                permalink,
               };
               if (!existente.peso_kg && pesoKg) upd.peso_kg = pesoKg;
               if (!existente.custo_frete && custoFrete) upd.custo_frete = custoFrete;
@@ -284,6 +295,8 @@ export async function POST(request: Request) {
                 peso_kg: pesoKg,
                 custo_frete: custoFrete ?? 0,
                 sku: sku ?? null,
+                thumbnail: varThumb,
+                permalink,
                 custo_produto: 0,
                 insumos: 0,
                 imposto: 0,
