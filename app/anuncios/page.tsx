@@ -27,6 +27,8 @@ export default function AnunciosPage() {
   const [deletandoDuplicados, setDeletandoDuplicados] = useState(false);
   const [sincronizando,      setSincronizando]      = useState(false);
   const [msgSync,            setMsgSync]            = useState<{ ok: boolean; texto: string; detalhes?: string[] } | null>(null);
+  const [importando,         setImportando]         = useState(false);
+  const [msgImport,          setMsgImport]          = useState<{ ok: boolean; texto: string } | null>(null);
 
   async function carregar() {
     setLoading(true);
@@ -46,6 +48,27 @@ export default function AnunciosPage() {
       .then(d => setMlConectado(!!d.conectado))
       .catch(() => {});
   }, []);
+
+  async function importarDoML() {
+    setImportando(true);
+    setMsgImport(null);
+    try {
+      const res  = await fetch("/api/ml/importar-anuncios", { method: "POST" });
+      const data = await res.json();
+      if (data.erro) {
+        setMsgImport({ ok: false, texto: data.mensagem ?? "Erro ao importar." });
+      } else {
+        setMsgImport({
+          ok: true,
+          texto: `✅ ${data.importados} importados, ${data.atualizados} atualizados${data.erros > 0 ? `, ${data.erros} erros` : ""} — total ${data.total} anúncios no ML`,
+        });
+        await carregar();
+      }
+    } catch {
+      setMsgImport({ ok: false, texto: "Falha na conexão." });
+    }
+    setImportando(false);
+  }
 
   async function sincronizarPrecos() {
     setSincronizando(true);
@@ -240,6 +263,33 @@ export default function AnunciosPage() {
             }}>🔄</span>
             {sincronizando ? "Sincronizando..." : "Sincronizar"}
           </button>
+
+          {/* Botão Importar do ML */}
+          {mlConectado && (
+            <button
+              onClick={importarDoML}
+              disabled={importando}
+              title="Importa todos os anúncios ativos do ML automaticamente"
+              style={{
+                padding: "12px 20px",
+                background: importando ? "rgba(255,230,0,0.12)" : "rgba(255,230,0,0.08)",
+                border: `1px solid ${importando ? "rgba(255,230,0,0.4)" : "rgba(255,230,0,0.25)"}`,
+                borderRadius: "14px",
+                color: "#FFE600",
+                fontWeight: 800, fontSize: "14px",
+                cursor: importando ? "not-allowed" : "pointer",
+                display: "flex", alignItems: "center", gap: "8px",
+                transition: "all 0.15s",
+              }}
+            >
+              <span style={{
+                fontSize: "15px",
+                display: "inline-block",
+                animation: importando ? "spin 1s linear infinite" : "none",
+              }}>📥</span>
+              {importando ? "Importando..." : "Importar do ML"}
+            </button>
+          )}
 
           <button
             onClick={() => { setEditando(null); setShowForm(true); }}
@@ -576,6 +626,22 @@ export default function AnunciosPage() {
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {/* ── Feedback Importar do ML ───────────────────────────── */}
+      {msgImport && (
+        <div style={{
+          background: msgImport.ok ? "rgba(255,230,0,0.06)" : "rgba(255,60,60,0.07)",
+          border: `1px solid ${msgImport.ok ? "rgba(255,230,0,0.2)" : "rgba(255,60,60,0.2)"}`,
+          borderRadius: "14px", padding: "14px 18px",
+          marginBottom: "16px",
+          display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px",
+        }}>
+          <span style={{ color: msgImport.ok ? "#FFE600" : "#ff4d4d", fontWeight: 800, fontSize: "14px" }}>
+            {msgImport.texto}
+          </span>
+          <button onClick={() => setMsgImport(null)} style={{ background: "none", border: "none", color: "#9099aa", cursor: "pointer", fontSize: "18px", opacity: 0.6 }}>×</button>
         </div>
       )}
 
