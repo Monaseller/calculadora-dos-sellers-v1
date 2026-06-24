@@ -242,6 +242,9 @@ export async function GET(request: Request) {
       : (order.date_created ?? "");
     const dataPedido: string = dateRef.split("T")[0] || dateFrom;
 
+    // Exclui pedidos fora do range solicitado (vindos do dia extra de buffer)
+    if (dataPedido < dateFrom || dataPedido > dateTo) continue;
+
     const rawLogistic = shippingLogisticMap.get(order.shipping?.id) ?? "";
     const logisticaOrder =
       rawLogistic === "fulfillment"   ? "Full"   :
