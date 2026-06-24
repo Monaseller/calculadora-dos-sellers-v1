@@ -26,6 +26,9 @@ export default function AnunciosPage() {
   const [msgSkus,            setMsgSkus]            = useState<{ ok: boolean; texto: string } | null>(null);
   const [deletandoDuplicados, setDeletandoDuplicados] = useState(false);
   const [sincronizando,      setSincronizando]      = useState(false);
+  const [modoSelecao,        setModoSelecao]        = useState(false);
+  const [selectedIds,        setSelectedIds]        = useState<Set<string>>(new Set());
+  const [deletandoSelecionados, setDeletandoSelecionados] = useState(false);
   const [msgSync,            setMsgSync]            = useState<{ ok: boolean; texto: string; detalhes?: string[] } | null>(null);
   const [importando,         setImportando]         = useState(false);
   const [msgImport,          setMsgImport]          = useState<{ ok: boolean; texto: string } | null>(null);
@@ -48,6 +51,34 @@ export default function AnunciosPage() {
       .then(d => setMlConectado(!!d.conectado))
       .catch(() => {});
   }, []);
+
+  function toggleSelect(id: string) {
+    setSelectedIds(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  }
+
+  function toggleSelectGrupo(ids: string[]) {
+    setSelectedIds(prev => {
+      const n = new Set(prev);
+      const todosJa = ids.every(id => n.has(id));
+      ids.forEach(id => todosJa ? n.delete(id) : n.add(id));
+      return n;
+    });
+  }
+
+  function selecionarTodos() {
+    setSelectedIds(new Set(anunciosFiltrados.map(a => a.id)));
+  }
+
+  async function deletarSelecionados() {
+    if (!selectedIds.size) return;
+    setDeletandoSelecionados(true);
+    const ids = [...selectedIds];
+    await supabase.from("anuncios").update({ ativo: false }).in("id", ids);
+    setAnuncios(prev => prev.filter(a => !selectedIds.has(a.id)));
+    setSelectedIds(new Set());
+    setModoSelecao(false);
+    setDeletandoSelecionados(false);
+  }
 
   async function importarDoML() {
     setImportando(true);
@@ -237,6 +268,26 @@ export default function AnunciosPage() {
               </span>
             )}
           </button>
+
+          {/* Botão Selecionar */}
+          {anuncios.length > 0 && (
+            <button
+              onClick={() => { setModoSelecao(v => !v); setSelectedIds(new Set()); }}
+              style={{
+                padding: "12px 20px",
+                background: modoSelecao ? "rgba(255,77,77,0.12)" : "rgba(255,255,255,0.05)",
+                border: `1px solid ${modoSelecao ? "rgba(255,77,77,0.35)" : "rgba(255,255,255,0.1)"}`,
+                borderRadius: "14px",
+                color: modoSelecao ? "#ff4d4d" : "#d7dbe5",
+                fontWeight: 800, fontSize: "14px",
+                cursor: "pointer",
+                display: "flex", alignItems: "center", gap: "8px",
+                transition: "all 0.15s",
+              }}
+            >
+              {modoSelecao ? "✕ Cancelar" : "☑ Selecionar"}
+            </button>
+          )}
 
           {/* Botão Sincronizar */}
           <button
@@ -749,26 +800,143 @@ export default function AnunciosPage() {
           )}
         </div>
       ) : (
+        <>
+        {/* ── Barra selecionar todos (modo seleção ativo) ──────── */}
+        {modoSelecao && (
+          <div style={{
+            display: "flex", alignItems: "center", gap: "12px",
+            background: "#111318", border: "1px solid rgba(255,255,255,0.09)",
+            borderRadius: "12px", padding: "10px 16px", marginBottom: "14px",
+          }}>
+            <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer", userSelect: "none" }}>
+              <input
+                type="checkbox"
+                checked={anunciosFiltrados.length > 0 && anunciosFiltrados.every(a => selectedIds.has(a.id))}
+                onChange={e => e.target.checked ? selecionarTodos() : setSelectedIds(new Set())}
+                style={{ width: 16, height: 16, accentColor: "#ff4d4d", cursor: "pointer" }}
+              />
+              <span style={{ fontSize: "13px", fontWeight: 700, color: "#d7dbe5" }}>
+                Selecionar todos ({anunciosFiltrados.length})
+              </span>
+            </label>
+            {selectedIds.size > 0 && (
+              <span style={{ fontSize: "12px", color: "#9099aa" }}>
+                {selectedIds.size} selecionado{selectedIds.size !== 1 ? "s" : ""}
+              </span>
+            )}
+          </div>
+        )}
+
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", gap: "18px" }}>
           {/* Grupos de variacoes — renderiza 1 card por grupo */}
-          {gruposVariacoes.map(grupo => (
-            <CardAnuncioVariacoes
-              key={grupo[0].ml_item_id}
-              variacoes={grupo}
-              onEditar={abrirEditar}
-              onExcluir={excluir}
-            />
-          ))}
+          {gruposVariacoes.map(grupo => {
+            const grupoIds = grupo.map(v => v.id);
+            const todosSelected = grupoIds.every(id => selectedIds.has(id));
+            return (
+              <div key={grupo[0].ml_item_id} style={{ position: "relative" }}>
+                {modoSelecao && (
+                  <div
+                    onClick={() => toggleSelectGrupo(grupoIds)}
+                    style={{
+                      position: "absolute", top: 14, left: 14, zIndex: 10,
+                      width: 20, height: 20, borderRadius: 5,
+                      background: todosSelected ? "#ff4d4d" : "rgba(30,33,45,0.92)",
+                      border: `2px solid ${todosSelected ? "#ff4d4d" : "rgba(255,255,255,0.25)"}`,
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      cursor: "pointer", transition: "all 0.12s",
+                    }}
+                  >
+                    {todosSelected && <span style={{ color: "#fff", fontSize: 12, fontWeight: 900 }}>✓</span>}
+                  </div>
+                )}
+                <div style={{ opacity: modoSelecao && !todosSelected ? 0.75 : 1, transition: "opacity 0.12s" }}>
+                  <CardAnuncioVariacoes
+                    variacoes={grupo}
+                    onEditar={abrirEditar}
+                    onExcluir={excluir}
+                  />
+                </div>
+              </div>
+            );
+          })}
           {/* Anuncios sem variacao — card normal */}
-          {soloAnuncios.map(a => (
-            <CardAnuncio
-              key={a.id}
-              anuncio={a}
-              onEditar={() => abrirEditar(a)}
-              onExcluir={() => excluir(a.id)}
-            />
-          ))}
+          {soloAnuncios.map(a => {
+            const sel = selectedIds.has(a.id);
+            return (
+              <div key={a.id} style={{ position: "relative" }}>
+                {modoSelecao && (
+                  <div
+                    onClick={() => toggleSelect(a.id)}
+                    style={{
+                      position: "absolute", top: 14, left: 14, zIndex: 10,
+                      width: 20, height: 20, borderRadius: 5,
+                      background: sel ? "#ff4d4d" : "rgba(30,33,45,0.92)",
+                      border: `2px solid ${sel ? "#ff4d4d" : "rgba(255,255,255,0.25)"}`,
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      cursor: "pointer", transition: "all 0.12s",
+                    }}
+                  >
+                    {sel && <span style={{ color: "#fff", fontSize: 12, fontWeight: 900 }}>✓</span>}
+                  </div>
+                )}
+                <div style={{ opacity: modoSelecao && !sel ? 0.75 : 1, transition: "opacity 0.12s" }}>
+                  <CardAnuncio
+                    anuncio={a}
+                    onEditar={() => abrirEditar(a)}
+                    onExcluir={() => excluir(a.id)}
+                  />
+                </div>
+              </div>
+            );
+          })}
         </div>
+
+        {/* ── Barra flutuante de exclusão ──────────────────────── */}
+        {modoSelecao && selectedIds.size > 0 && (
+          <div style={{
+            position: "fixed", bottom: 28, left: "50%", transform: "translateX(-50%)",
+            zIndex: 200,
+            background: "#1a1d27",
+            border: "1px solid rgba(255,77,77,0.35)",
+            borderRadius: "20px",
+            padding: "14px 24px",
+            display: "flex", alignItems: "center", gap: "20px",
+            boxShadow: "0 8px 32px rgba(0,0,0,0.6)",
+            minWidth: "320px",
+          }}>
+            <span style={{ fontSize: "14px", fontWeight: 700, color: "#d7dbe5" }}>
+              🗑️ {selectedIds.size} anúncio{selectedIds.size !== 1 ? "s" : ""} selecionado{selectedIds.size !== 1 ? "s" : ""}
+            </span>
+            <div style={{ display: "flex", gap: "10px", marginLeft: "auto" }}>
+              <button
+                onClick={() => setSelectedIds(new Set())}
+                style={{
+                  padding: "8px 16px", borderRadius: "10px",
+                  background: "transparent", border: "1px solid rgba(255,255,255,0.12)",
+                  color: "#9099aa", fontWeight: 700, fontSize: "13px", cursor: "pointer",
+                }}
+              >
+                Limpar
+              </button>
+              <button
+                onClick={deletarSelecionados}
+                disabled={deletandoSelecionados}
+                style={{
+                  padding: "8px 20px", borderRadius: "10px",
+                  background: deletandoSelecionados ? "rgba(255,77,77,0.2)" : "#ff4d4d",
+                  border: "none",
+                  color: deletandoSelecionados ? "#ff4d4d" : "#fff",
+                  fontWeight: 900, fontSize: "13px",
+                  cursor: deletandoSelecionados ? "not-allowed" : "pointer",
+                  transition: "all 0.15s",
+                }}
+              >
+                {deletandoSelecionados ? "Deletando..." : `Deletar ${selectedIds.size}`}
+              </button>
+            </div>
+          </div>
+        )}
+        </>
       )}
     </div>
   );
