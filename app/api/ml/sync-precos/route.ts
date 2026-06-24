@@ -126,7 +126,7 @@ export async function POST(request: Request) {
 
   const { data: anuncios, error } = await supabase
     .from("anuncios")
-    .select("id, ml_item_id, nome, preco_anuncio, frete_gratis, tipo_anuncio, thumbnail, permalink, variation_id, custo_frete, peso_kg, custo_produto, imposto, categoria")
+    .select("id, ml_item_id, nome, preco_anuncio, frete_gratis, tipo_anuncio, thumbnail, permalink, variation_id, custo_frete, peso_kg, custo_produto, imposto, categoria, sku")
     .eq("ativo", true)
     .eq("marketplace", "ML")
     .not("ml_item_id", "is", null);
@@ -161,13 +161,19 @@ export async function POST(request: Request) {
       // ── ml_item_id: atualiza se MLBU foi resolvido ──────────────────────────
       if (resolvedId !== anuncio.ml_item_id) mudancas.ml_item_id = resolvedId;
 
-      // ── Preço: usa o da variação se houver ──────────────────────────────────
+      // ── Preço + SKU: usa o da variação se houver ────────────────────────────
       let novoPreco: number | null = typeof body.price === "number" ? body.price : null;
+      let novoSku: string | null = body.seller_custom_field ?? null;
       if (anuncio.variation_id && body.variations?.length) {
         const varId = String(anuncio.variation_id);
         const variation = (body.variations as any[]).find((v: any) => String(v.id) === varId);
-        if (variation && typeof variation.price === "number") novoPreco = variation.price;
+        if (variation) {
+          if (typeof variation.price === "number") novoPreco = variation.price;
+          if (variation.seller_custom_field) novoSku = variation.seller_custom_field;
+        }
       }
+      // Só atualiza SKU se ainda não tiver um (não sobrescreve o que o usuário digitou)
+      if (novoSku && !(anuncio as any).sku) mudancas.sku = novoSku;
       if (novoPreco !== null && novoPreco !== anuncio.preco_anuncio) {
         mudancas.preco_anuncio = novoPreco;
         const nomeExib = (anuncio.nome ?? "").substring(0, 35);
