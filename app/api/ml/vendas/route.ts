@@ -243,8 +243,19 @@ export async function GET(request: Request) {
   for (const order of allOrders) {
     // ML usa date_approved (BRT) para classificar vendas — igual ao painel do seller
     let dataPedido: string;
-    if (order._status === "cancelled" || order._status === "devolucao") {
-      // ML conta devoluções pela data original da venda (date_created), não pela data do cancelamento
+    if (order._status === "devolucao") {
+      // ML conta devolução pela data do reembolso (date_approved do payment refunded)
+      const refundPmt = (order.payments ?? []).find(
+        (p: any) => p.status === "refunded" || p.status === "partially_refunded"
+      );
+      if (refundPmt?.date_approved) {
+        const utc = new Date(refundPmt.date_approved);
+        const brt = new Date(utc.getTime() - 3 * 60 * 60 * 1000);
+        dataPedido = brt.toISOString().split("T")[0];
+      } else {
+        dataPedido = (order.date_created ?? order.date_closed ?? "").split("T")[0] || dateFrom;
+      }
+    } else if (order._status === "cancelled") {
       const ref = order.date_created ?? order.date_closed ?? "";
       dataPedido = ref ? ref.split("T")[0] : dateFrom;
     } else {
