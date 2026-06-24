@@ -39,7 +39,7 @@ const PRESETS = [
   }},
   { label: "Últimos 7 dias", get: () => {
     const d = new Date(parseISO(hojeISO()));
-    d.setDate(d.getDate() - 6);
+    d.setDate(d.getDate() - 7); // ML conta hoje + 7 dias anteriores = 8 dias
     return [toISO(d), hojeISO()];
   }},
   { label: "Este mês",    get: () => {

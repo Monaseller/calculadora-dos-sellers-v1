@@ -51,7 +51,7 @@ export default function VendasPage() {
   const hoje = hojeISO();
 
   // Padrão: Últimos 7 dias (igual ao painel ML)
-  const seteDiasAtras = (() => { const d = new Date(parseISO(hoje)); d.setDate(d.getDate() - 6); return toISO(d); })();
+  const seteDiasAtras = (() => { const d = new Date(parseISO(hoje)); d.setDate(d.getDate() - 7); return toISO(d); })(); // ML: hoje + 7 anteriores
   const [dateFrom,  setDateFrom]  = useState(seteDiasAtras);
   const [dateTo,    setDateTo]    = useState(hoje);
   const [skuTags,  setSkuTags]  = useState<string[]>([]);
