@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { supabase, type Anuncio } from "@/lib/supabase";
 import { CATEGORIAS_ML, type TipoAnuncio } from "@/lib/comissoes-mercado-livre";
 import {
@@ -36,6 +36,7 @@ interface DadosML {
   variacoes?: VariacaoItem[];
   variacaoId?: string | null;
   parcial?: boolean;
+  pesoKg?: number | null;
 }
 
 export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
@@ -112,6 +113,52 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
   const [erro,           setErro]           = useState("");
   const [adicionarTodas, setAdicionarTodas] = useState(false);
 
+  // ── Auto-fetch ML ao editar ──────────────────────────────────────────────
+  // Quando abre em modo edição com ml_item_id, re-busca dados frescos do ML
+  useEffect(() => {
+    if (!modoEdicao || !inicial?.ml_item_id) return;
+    const varId = inicial.variation_id ?? "";
+    const varQuery = varId ? `&variationId=${encodeURIComponent(varId)}` : "";
+    fetch(`/api/anuncio?link=${encodeURIComponent(inicial.ml_item_id)}${varQuery}`)
+      .then(r => r.json())
+      .then(data => {
+        if (data.erro) return;
+        setDadosML(prev => ({
+          ...prev!,
+          id:           data.id          ?? prev?.id          ?? "",
+          titulo:       data.titulo       || prev?.titulo       || "",
+          preco:        typeof data.preco === "number" ? data.preco : prev?.preco ?? null,
+          categoria:    data.categoria    || prev?.categoria    || null,
+          categoriaId:  data.categoriaId  ?? null,
+          tipoAnuncio:  data.tipoAnuncio  || prev?.tipoAnuncio || null,
+          thumbnail:    data.thumbnail    || prev?.thumbnail   || null,
+          permalink:    data.permalink    || prev?.permalink   || null,
+          sku:          data.sku          ?? null,
+          freteGratis:  data.freteGratis  ?? prev?.freteGratis ?? false,
+          logisticType: data.logisticType ?? null,
+          variacoes:    data.variacoes    ?? [],
+          variacaoId:   data.variacaoId   ?? null,
+          pesoKg:       data.pesoKg       ?? null,
+        }));
+        if (typeof data.preco === "number")
+          setPrecoManual(String(data.preco).replace(".", ","));
+        if (data.sku)
+          setSkuManual(data.sku);
+        if (typeof data.pesoKg === "number" && data.pesoKg > 0)
+          setPesoKg(String(data.pesoKg).replace(".", ","));
+        if (data.freteGratis !== undefined)
+          setFreteGratis(data.freteGratis);
+        if (data.logisticType) {
+          const lt = (data.logisticType as string).toLowerCase();
+          if (lt === "fulfillment")   setTipoEnvio("Full");
+          else if (lt === "self_service") setTipoEnvio("Flex");
+          else                        setTipoEnvio("ME2");
+        }
+      })
+      .catch(() => {}); // falha silenciosa — mantém dados salvos
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // ── Buscar link ──────────────────────────────────────────────────────────
   async function buscarLink() {
     if (!link.trim()) { setErroLink("Cole o link do anúncio."); return; }
@@ -128,6 +175,8 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
       else setTipoAnuncio("Clássico");
       if (data.freteGratis !== undefined) setFreteGratis(data.freteGratis);
       if (data.sku) setSkuManual(data.sku);
+      if (typeof data.pesoKg === "number" && data.pesoKg > 0)
+        setPesoKg(String(data.pesoKg).replace(".", ","));
 
       // Auto-detecta tipo de envio pelo logistic_type do ML
       if (data.logisticType) {
@@ -137,7 +186,7 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
         setTipoEnvio(novoTipo);
         const preco = data.preco ?? null;
         const calc =
-          novoTipo === "Full" ? calcularFreteFullMl(tamanhoFull, preco) :
+          novoTipo === "Full" ? calcularFreteFullMl(tamanhoFull, preco, parse(pesoKg) || null) :
           novoTipo === "Flex" ? calcularFreteFlexMl(preco) :
           calcularFreteMl(pesoKgNum, preco);
         if (calc !== null) setCustoFrete(String(calc).replace(".", ","));
@@ -175,7 +224,7 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
     // Recalcula frete com o preço da variação
     if (!freteOverride) {
       const calc =
-        tipoEnvio === "Full" ? calcularFreteFullMl(tamanhoFull, novoPreco) :
+        tipoEnvio === "Full" ? calcularFreteFullMl(tamanhoFull, novoPreco, pesoKgNum) :
         tipoEnvio === "Flex" ? calcularFreteFlexMl(novoPreco) :
         calcularFreteMl(pesoKgNum, novoPreco);
       if (calc !== null) setCustoFrete(String(calc).replace(".", ","));
@@ -189,7 +238,7 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
   // Frete auto-calculado conforme tipo de envio
   const pesoKgNum = parse(pesoKg) || null;
   const freteAutoCalc =
-    tipoEnvio === "Full"  ? calcularFreteFullMl(tamanhoFull, precoEfetivo) :
+    tipoEnvio === "Full"  ? calcularFreteFullMl(tamanhoFull, precoEfetivo, pesoKgNum) :
     tipoEnvio === "Flex"  ? calcularFreteFlexMl(precoEfetivo) :
     /* ME2 */               calcularFreteMl(pesoKgNum, precoEfetivo);
 
@@ -228,7 +277,7 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
   function calcFreteParaPreco(preco: number | null): number {
     if (freteOverride) return parse(custoFrete);
     const calc =
-      tipoEnvio === "Full" ? calcularFreteFullMl(tamanhoFull, preco) :
+      tipoEnvio === "Full" ? calcularFreteFullMl(tamanhoFull, preco, pesoKgNum) :
       tipoEnvio === "Flex" ? calcularFreteFlexMl(preco) :
       calcularFreteMl(pesoKgNum, preco);
     return calc ?? parse(custoFrete);
@@ -525,7 +574,7 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
                     if (t === "ME2") setTamanhoME2(null);
                     // Recalcula frete ao trocar tipo
                     const calc =
-                      t === "Full" ? calcularFreteFullMl(tamanhoFull, precoEfetivo) :
+                      t === "Full" ? calcularFreteFullMl(tamanhoFull, precoEfetivo, pesoKgNum) :
                       t === "Flex" ? calcularFreteFlexMl(precoEfetivo) :
                       calcularFreteMl(pesoKgNum, precoEfetivo);
                     if (calc !== null) setCustoFrete(String(calc).replace(".", ","));
@@ -610,7 +659,7 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
                     <button key={key} onClick={() => {
                       setTamanhoFull(key);
                       setFreteOverride(false);
-                      const calc = calcularFreteFullMl(key, precoEfetivo);
+                      const calc = calcularFreteFullMl(key, precoEfetivo, pesoKgNum);
                       if (calc !== null) setCustoFrete(String(calc).replace(".", ","));
                     }} style={{
                       padding: "10px 12px", borderRadius: "12px", border: "2px solid", textAlign: "left",
@@ -791,7 +840,7 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
               </div>
             ) : dadosML?.preco && (
               <div style={{ background: "rgba(255,180,0,0.06)", border: "1px solid rgba(255,180,0,0.15)", borderRadius: "14px", padding: "12px 16px", marginBottom: "20px", color: "#9099aa", fontSize: "13px" }}>
-                💡 Informe o custo do produto para ver o valor líquido.
+                Informe o custo do produto para ver o valor liquido.
               </div>
             )}
 
@@ -799,7 +848,7 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
 
             <div style={{ display: "flex", gap: "10px" }}>
               {!modoEdicao && (
-                <button onClick={() => setEtapa("link")} style={{ padding: "14px 18px", background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "14px", color: "#9099aa", fontWeight: 700, cursor: "pointer", fontSize: "14px" }}>← Voltar</button>
+                <button onClick={() => setEtapa("link")} style={{ padding: "14px 18px", background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "14px", color: "#9099aa", fontWeight: 700, cursor: "pointer", fontSize: "14px" }}>Voltar</button>
               )}
               <button onClick={salvar} disabled={salvando} style={{
                 flex: 1, padding: "15px",
@@ -808,12 +857,12 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
                 color: salvando ? "#9099aa" : "#10131b", cursor: salvando ? "not-allowed" : "pointer",
               }}>
                 {salvando
-                  ? (adicionarTodas ? `Salvando variações...` : "Salvando...")
+                  ? (adicionarTodas ? `Salvando variacoes...` : "Salvando...")
                   : modoEdicao
-                    ? "Salvar alterações"
+                    ? "Salvar alteracoes"
                     : adicionarTodas
-                      ? `✅ Cadastrar ${dadosML?.variacoes?.length ?? ""} variações`
-                      : "✅ Cadastrar Anúncio"
+                      ? `Cadastrar ${dadosML?.variacoes?.length ?? ""} variacoes`
+                      : "Cadastrar Anuncio"
                 }
               </button>
             </div>

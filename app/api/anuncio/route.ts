@@ -349,6 +349,22 @@ async function resolverCatalogo(catalogId: string, token: string | null): Promis
   return listingId;
 }
 
+// Extrai peso (kg) do atributo WEIGHT da API ML
+// Ex: "100 g" → 0.1, "1,5 kg" → 1.5
+function parsePesoAtributo(attributes: unknown[]): number | null {
+  if (!Array.isArray(attributes)) return null;
+  const attr = (attributes as Array<{ id?: string; value_name?: string }>).find(
+    a => ["WEIGHT", "SHIPPING_WEIGHT", "ITEM_WEIGHT", "NET_WEIGHT"].includes((a.id ?? "").toUpperCase())
+  );
+  if (!attr?.value_name) return null;
+  const str = String(attr.value_name).toLowerCase().trim();
+  const gMatch = str.match(/^([\d.,]+)\s*g$/);
+  if (gMatch) return parseFloat(gMatch[1].replace(",", ".")) / 1000;
+  const kgMatch = str.match(/^([\d.,]+)\s*kg$/);
+  if (kgMatch) return parseFloat(kgMatch[1].replace(",", "."));
+  return null;
+}
+
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const link = url.searchParams.get("link");
@@ -635,6 +651,9 @@ export async function GET(request: Request) {
     }
   }
 
+  const pesoKg = parsePesoAtributo(data.attributes ?? []);
+  if (pesoKg) console.log(`[anuncio] pesoKg extraído: ${pesoKg} kg`);
+
   return NextResponse.json({
     id: data.id,
     titulo,
@@ -649,5 +668,6 @@ export async function GET(request: Request) {
     logisticType: data.shipping?.logistic_type ?? null,
     variacoes,
     variacaoId,
+    pesoKg,
   });
 }

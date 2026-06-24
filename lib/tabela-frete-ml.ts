@@ -110,21 +110,23 @@ export const TAMANHOS_FULL: Record<TamanhoFull, { label: string; desc: string; p
   XG: { label: "Extragrande",  desc: "Mais de 60×60×70 cm ou >18 kg",             pesoKg: 20.0 },
 };
 
-// Tarifa Full por tamanho × faixa de preço [até79 | 79-150 | 150+]
-// Valores confirmados com o painel ML (custo de envio por unidade vendida)
-const TABELA_FULL: Record<TamanhoFull, [number, number, number]> = {
-  P:  [ 9.20,  12.10,  14.40 ],
-  M:  [ 13.50, 16.85,  19.50 ],
-  G:  [ 17.00, 20.10,  23.80 ],
-  XG: [ 23.00, 28.00,  32.80 ],
+// Full usa a mesma tabela ME2/Coleta (validado pelo painel ML):
+//   P (0,3 kg) + R$19 → R$6,55  ✓
+//   M (1,75 kg) + R$116,90 → R$16,85  ✓
+const PESO_PROXY_FULL: Record<TamanhoFull, number> = {
+  P:  0.3,   // "Até 0,3 kg"
+  M:  1.75,  // "De 1,5 a 2 kg"
+  G:  4.5,   // "De 4 a 5 kg"
+  XG: 19.0,  // "De 17 a 20 kg"
 };
 
-export function calcularFreteFullMl(tamanho: TamanhoFull, preco: number | null | undefined): number | null {
-  if (!preco || preco <= 0) return null;
-  const [ate79, ate150, acima150] = TABELA_FULL[tamanho];
-  if (preco < 79)  return ate79;
-  if (preco < 150) return ate150;
-  return acima150;
+export function calcularFreteFullMl(
+  tamanho: TamanhoFull,
+  preco: number | null | undefined,
+  pesoKgReal?: number | null
+): number | null {
+  const peso = (pesoKgReal != null && pesoKgReal > 0) ? pesoKgReal : PESO_PROXY_FULL[tamanho];
+  return calcularFreteMl(peso, preco);
 }
 
 // ── Envios Flex ───────────────────────────────────────────────────────────────
