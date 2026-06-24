@@ -20,13 +20,20 @@ function mapTipoAnuncio(listingTypeId: string): string {
 }
 
 // Extrai peso (kg) de shipping.dimensions — formato ML: "LxWxH,gramas"
+// ML retorna peso em gramas (inteiro). Alguns items retornam decimal.
+// Heurística: se valor >= 200 → definitivamente gramas → ÷1000
+//             se valor >= 20  → provavelmente gramas → ÷1000
+//             se valor < 20   → provavelmente já em kg (ex: "1.5", "12.5")
 function parsePesoSync(dim: string | null | undefined): number | null {
   if (!dim) return null;
   const m = dim.match(/^([\d.]+)[xX]([\d.]+)[xX]([\d.]+),\s*([\d.]+)/);
   if (!m) return null;
-  const rawStr = m[4];
-  const w = parseFloat(rawStr);
-  return w > 0 ? (rawStr.includes(".") ? w : w / 1000) : null;
+  const w = parseFloat(m[4]);
+  if (!w || w <= 0) return null;
+  // Valores >= 20 são certamente gramas (20 kg é muito raro em e-commerce)
+  const pesoKg = w >= 20 ? w / 1000 : w;
+  // Sanidade: produto deve pesar entre 1g e 150kg
+  return (pesoKg >= 0.001 && pesoKg <= 150) ? pesoKg : null;
 }
 
 // Extrai peso (kg) de atributos ML (fallback ao dimensions)
@@ -193,17 +200,17 @@ export async function POST(request: Request) {
         console.log(`[sync] ${resolvedId} peso: ${anuncio.peso_kg} → ${pesoAPI} kg (dim=${body.shipping?.dimensions})`);
       }
 
-      // ── Frete: recalcula com peso + preço + tipo de envio ──────────────────
-      // Para Full: só recalcula se tiver peso REAL da API (não proxy salvo).
-      // O proxy P=0,3kg cai no limite da tabela e pode dar centavos errados.
-      const isFull = (logisticType ?? "").toLowerCase() === "fulfillment";
+      // ── Frete: só recalcula se o PREÇO mudou E temos peso confiável ──────────
+      // Não usa pesoAPI para cálculo (parsing de dimensions pode ter erros).
+      // Usa apenas peso_kg do Supabase (digitado pelo usuário no form).
       const isFlex = (logisticType ?? "").toLowerCase() === "self_service";
-      const temPesoConfiavel = pesoAPI !== null || isFlex; // Flex não precisa de peso
-      const deveRecalcularFrete = isFlex || (!isFull && pesoFinal !== null) || (isFull && temPesoConfiavel);
+      const precoMudou = "preco_anuncio" in mudancas;
+      const pesoSalvo = typeof anuncio.peso_kg === "number" && anuncio.peso_kg > 0 ? anuncio.peso_kg : null;
+      const deveRecalcularFrete = precoMudou && (isFlex || pesoSalvo !== null);
 
       if (deveRecalcularFrete) {
         const precoParaCalc = (mudancas.preco_anuncio as number | undefined) ?? anuncio.preco_anuncio ?? null;
-        const novoCustoFrete = calcularNovoFrete(logisticType, pesoFinal, precoParaCalc);
+        const novoCustoFrete = calcularNovoFrete(logisticType, pesoSalvo, precoParaCalc);
 
         if (novoCustoFrete !== null) {
           const diff = Math.abs(novoCustoFrete - (anuncio.custo_frete ?? 0));
