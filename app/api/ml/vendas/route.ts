@@ -130,14 +130,18 @@ export async function GET(request: Request) {
   void includeCanceladas; // mantido no contrato da API por compatibilidade
 
   // Marca status
-  // ML conta como "quantidade de vendas": paid + confirmed + devoluções
-  // payment_in_process = pagamento ainda processando → ML ainda NÃO conta → marcamos separado
+  // ML conta como "quantidade de vendas": apenas "paid" + devoluções
+  // "confirmed" = boleto gerado mas NÃO pago ainda → ML não conta → marcamos como pending
+  // "payment_in_process" = pagamento processando → ML não conta → pending
   paidOrders.forEach(o => { o._status = "paid"; });
-  confirmedOrders.forEach(o => { o._status = "paid"; });
-  paymentInProcessOrders.forEach(o => { o._status = "pending"; }); // excluído do count padrão
+  confirmedOrders.forEach(o => { o._status = "pending"; }); // boleto não pago = não é venda ainda
+  paymentInProcessOrders.forEach(o => { o._status = "pending"; });
   cancelledOrders.forEach(o => {
-    const foiPago = (o.paid_amount ?? 0) > 0 ||
-      (o.payments ?? []).some((p: any) => p.status === "approved" || p.status === "refunded");
+    // Devolução = pagamento chegou a ser aprovado/reembolsado (o comprador pagou e depois cancelou)
+    // Cancelada = nunca houve pagamento confirmado (boleto vencido, desistência antes do pagamento)
+    const foiPago = (o.payments ?? []).some(
+      (p: any) => p.status === "approved" || p.status === "refunded" || p.status === "partially_refunded"
+    );
     o._status = foiPago ? "devolucao" : "cancelled";
   });
 
