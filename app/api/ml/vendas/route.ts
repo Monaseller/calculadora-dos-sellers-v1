@@ -237,32 +237,10 @@ export async function GET(request: Request) {
   const rows: VendaRow[] = [];
 
   for (const order of allOrders) {
-    // ML classifica vendas pela data de aprovação do pagamento (date_approved),
-    // não pela data de criação do pedido (date_created).
-    // Canceladas/devoluções usam date_closed.
-    let dateRef: string;
-    if (order._status === "cancelled" || order._status === "devolucao") {
-      dateRef = order.date_closed ?? order.date_created ?? "";
-    } else {
-      // Pega a data de aprovação do primeiro pagamento aprovado
-      const approvedPayment = (order.payments ?? []).find(
-        (p: any) => p.status === "approved" || p.status === "partially_refunded"
-      );
-      const approvedDateRaw: string = approvedPayment?.date_approved ?? order.date_created ?? "";
-      // Converte para BRT: date_approved vem em UTC, subtrai 3h
-      if (approvedDateRaw) {
-        const approvedUTC = new Date(approvedDateRaw);
-        const approvedBRT = new Date(approvedUTC.getTime() - 3 * 60 * 60 * 1000);
-        dateRef = approvedBRT.toISOString().split("T")[0];
-      } else {
-        dateRef = order.date_created ?? "";
-      }
-    }
+    const dateRef = order._status === "cancelled" || order._status === "devolucao"
+      ? (order.date_closed ?? order.date_created ?? "")
+      : (order.date_created ?? "");
     const dataPedido: string = dateRef.split("T")[0] || dateFrom;
-
-    // Filtra pedidos cujo dataPedido está fora do range solicitado
-    // (podem ter sido trazidos do dia anterior para capturar bordas de meia-noite)
-    if (dataPedido < dateFrom || dataPedido > dateTo) continue;
 
     const rawLogistic = shippingLogisticMap.get(order.shipping?.id) ?? "";
     const logisticaOrder =
