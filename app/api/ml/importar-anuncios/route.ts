@@ -200,12 +200,14 @@ export async function POST(request: Request) {
 
           if (existente) {
             // Atualiza campos ML — preserva dados financeiros do usuário
+            // ativo: true reativa itens que estavam desativados
             const upd: any = {
               nome: titulo,
               preco_anuncio: preco,
               tipo_anuncio: tipoAnuncio,
               logistic_type: logisticType,
               frete_gratis: freteGratis,
+              ativo: true,
             };
             if (!existente.peso_kg && pesoKg) upd.peso_kg = pesoKg;
             if (!existente.custo_frete && custoFrete) upd.custo_frete = custoFrete;
@@ -258,6 +260,7 @@ export async function POST(request: Request) {
                 tipo_anuncio: tipoAnuncio,
                 logistic_type: logisticType,
                 frete_gratis: freteGratis,
+                ativo: true,
               };
               if (!existente.peso_kg && pesoKg) upd.peso_kg = pesoKg;
               if (!existente.custo_frete && custoFrete) upd.custo_frete = custoFrete;
