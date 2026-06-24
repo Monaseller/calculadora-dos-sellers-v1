@@ -194,15 +194,24 @@ export async function POST(request: Request) {
       }
 
       // ── Frete: recalcula com peso + preço + tipo de envio ──────────────────
-      const precoParaCalc = (mudancas.preco_anuncio as number | undefined) ?? anuncio.preco_anuncio ?? null;
-      const novoCustoFrete = calcularNovoFrete(logisticType, pesoFinal, precoParaCalc);
+      // Para Full: só recalcula se tiver peso REAL da API (não proxy salvo).
+      // O proxy P=0,3kg cai no limite da tabela e pode dar centavos errados.
+      const isFull = (logisticType ?? "").toLowerCase() === "fulfillment";
+      const isFlex = (logisticType ?? "").toLowerCase() === "self_service";
+      const temPesoConfiavel = pesoAPI !== null || isFlex; // Flex não precisa de peso
+      const deveRecalcularFrete = isFlex || (!isFull && pesoFinal !== null) || (isFull && temPesoConfiavel);
 
-      if (novoCustoFrete !== null) {
-        const diff = Math.abs(novoCustoFrete - (anuncio.custo_frete ?? 0));
-        if (diff > 0.005) {
-          mudancas.custo_frete = novoCustoFrete;
-          const nomeExib = (anuncio.nome ?? "").substring(0, 30);
-          detalhes.push(`🚚 ${nomeExib}: frete R$ ${(anuncio.custo_frete ?? 0).toFixed(2).replace(".", ",")} → R$ ${novoCustoFrete.toFixed(2).replace(".", ",")}`);
+      if (deveRecalcularFrete) {
+        const precoParaCalc = (mudancas.preco_anuncio as number | undefined) ?? anuncio.preco_anuncio ?? null;
+        const novoCustoFrete = calcularNovoFrete(logisticType, pesoFinal, precoParaCalc);
+
+        if (novoCustoFrete !== null) {
+          const diff = Math.abs(novoCustoFrete - (anuncio.custo_frete ?? 0));
+          if (diff > 0.005) {
+            mudancas.custo_frete = novoCustoFrete;
+            const nomeExib = (anuncio.nome ?? "").substring(0, 30);
+            detalhes.push(`🚚 ${nomeExib}: frete R$ ${(anuncio.custo_frete ?? 0).toFixed(2).replace(".", ",")} → R$ ${novoCustoFrete.toFixed(2).replace(".", ",")}`);
+          }
         }
       }
 
