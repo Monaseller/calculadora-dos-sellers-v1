@@ -38,12 +38,21 @@ function hojeISO() {
   const brasilia = new Date(now.getTime() - 3 * 60 * 60 * 1000);
   return brasilia.toISOString().split("T")[0];
 }
+function parseISO(s: string) {
+  const [y, m, d] = s.split("-").map(Number);
+  return new Date(y, m - 1, d);
+}
+function toISO(d: Date) {
+  return d.toISOString().split("T")[0];
+}
 
 // ── Componente ─────────────────────────────────────────────────────────────
 export default function VendasPage() {
   const hoje = hojeISO();
 
-  const [dateFrom,  setDateFrom]  = useState(hoje);
+  // Padrão: Últimos 7 dias (igual ao painel ML)
+  const seteDiasAtras = (() => { const d = new Date(parseISO(hoje)); d.setDate(d.getDate() - 6); return toISO(d); })();
+  const [dateFrom,  setDateFrom]  = useState(seteDiasAtras);
   const [dateTo,    setDateTo]    = useState(hoje);
   const [skuTags,  setSkuTags]  = useState<string[]>([]);
   const [skuInput, setSkuInput] = useState("");
