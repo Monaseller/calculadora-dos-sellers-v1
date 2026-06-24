@@ -137,12 +137,12 @@ export async function GET(request: Request) {
   confirmedOrders.forEach(o => { o._status = "pending"; }); // boleto não pago = não é venda ainda
   paymentInProcessOrders.forEach(o => { o._status = "pending"; });
   cancelledOrders.forEach(o => {
-    // Devolução = pagamento chegou a ser aprovado/reembolsado (o comprador pagou e depois cancelou)
-    // Cancelada = nunca houve pagamento confirmado (boleto vencido, desistência antes do pagamento)
-    const foiPago = (o.payments ?? []).some(
-      (p: any) => p.status === "approved" || p.status === "refunded" || p.status === "partially_refunded"
+    // ML só conta como "venda cancelada" (devolução) quando o reembolso foi efetivado.
+    // Pedidos cancelados com pagamento apenas "approved" (sem refund ainda) = ainda em limbo, ML não conta.
+    const foiReembolsado = (o.payments ?? []).some(
+      (p: any) => p.status === "refunded" || p.status === "partially_refunded"
     );
-    o._status = foiPago ? "devolucao" : "cancelled";
+    o._status = foiReembolsado ? "devolucao" : "cancelled";
   });
 
   // Deduplica por order id (um mesmo pedido não deve aparecer em dois status)
