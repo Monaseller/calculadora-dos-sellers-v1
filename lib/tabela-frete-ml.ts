@@ -98,21 +98,33 @@ export function calcularFreteRapidoMl(pesoKg: number | null | undefined): number
 }
 
 // ── Envios Full ──────────────────────────────────────────────────────────────
-// Para Full, o seller não informa peso — informa o TAMANHO do produto.
-// Mapeamos cada categoria de tamanho para um peso representativo e usamos
-// a mesma tabela ME2 para calcular o custo por envio.
+// Tabela oficial ML Full (Fulfillment), custo por unidade vendida com frete grátis.
+// Fonte: mercadolivre.com.br/ajuda/tarifas-de-envio-full_2433
+// Faixas de preço: até R$79 | R$79-R$150 | acima de R$150
 export type TamanhoFull = "P" | "M" | "G" | "XG";
 
 export const TAMANHOS_FULL: Record<TamanhoFull, { label: string; desc: string; pesoKg: number }> = {
-  P:  { label: "Pequeno",      desc: "Até 1.200 cm³ (ex: mouse, frasco)",        pesoKg: 0.3  },
+  P:  { label: "Pequeno",      desc: "Até 1.200 cm³ (ex: mouse, frasco)",         pesoKg: 0.3  },
   M:  { label: "Médio",        desc: "1.201 a 30.000 cm³ (ex: tênis, cafeteira)", pesoKg: 1.0  },
   G:  { label: "Grande",       desc: "Mais de 30.000 cm³ (ex: micro-ondas)",      pesoKg: 5.0  },
-  XG: { label: "Extragrande",  desc: "Mais de 60×60×70 cm ou >18 kg",            pesoKg: 20.0 },
+  XG: { label: "Extragrande",  desc: "Mais de 60×60×70 cm ou >18 kg",             pesoKg: 20.0 },
+};
+
+// Tarifa Full por tamanho × faixa de preço [até79 | 79-150 | 150+]
+// Valores confirmados com o painel ML (custo de envio por unidade vendida)
+const TABELA_FULL: Record<TamanhoFull, [number, number, number]> = {
+  P:  [ 9.20,  12.10,  14.40 ],
+  M:  [ 13.50, 16.85,  19.50 ],
+  G:  [ 17.00, 20.10,  23.80 ],
+  XG: [ 23.00, 28.00,  32.80 ],
 };
 
 export function calcularFreteFullMl(tamanho: TamanhoFull, preco: number | null | undefined): number | null {
-  const { pesoKg } = TAMANHOS_FULL[tamanho];
-  return calcularFreteMl(pesoKg, preco);
+  if (!preco || preco <= 0) return null;
+  const [ate79, ate150, acima150] = TABELA_FULL[tamanho];
+  if (preco < 79)  return ate79;
+  if (preco < 150) return ate150;
+  return acima150;
 }
 
 // ── Envios Flex ───────────────────────────────────────────────────────────────
@@ -130,6 +142,7 @@ export function calcularFreteFlexMl(preco: number | null | undefined): number {
 /**
  * Retorna a descrição da faixa de preço para exibição.
  */
+
 export function descricaoFaixaFrete(preco: number): string {
   if (preco < 19)  return "R$ 0 a R$ 18,99";
   if (preco < 49)  return "R$ 19 a R$ 48,99";
