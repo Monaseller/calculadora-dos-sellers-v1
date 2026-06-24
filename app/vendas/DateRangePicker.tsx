@@ -32,10 +32,15 @@ const PRESETS = [
     const hoje = parseISO(hojeISO());
     const seg  = new Date(hoje);
     const day  = hoje.getDay(); // 0=dom, 1=seg, ..., 6=sáb
-    // Dias desde a última segunda-feira; se hoje é segunda (day=1), recua 7 para a segunda anterior
-    const diasAteSeg = day === 0 ? 6 : day === 1 ? 7 : day - 1;
+    // Dias desde a última segunda-feira
+    const diasAteSeg = day === 0 ? 6 : day === 1 ? 0 : day - 1;
     seg.setDate(hoje.getDate() - diasAteSeg);
     return [toISO(seg), hojeISO()];
+  }},
+  { label: "Últimos 7 dias", get: () => {
+    const d = new Date(parseISO(hojeISO()));
+    d.setDate(d.getDate() - 6);
+    return [toISO(d), hojeISO()];
   }},
   { label: "Este mês",    get: () => {
     const hoje = parseISO(hojeISO());

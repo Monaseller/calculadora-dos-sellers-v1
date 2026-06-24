@@ -96,24 +96,22 @@ export async function GET(request: Request) {
 
   const dias = gerarDias(dateFrom, dateTo);
 
-  // Para capturar pedidos criados antes da meia-noite mas aprovados dentro do período
-  // (ML classifica por date_approved, não date_created), buscamos também o dia anterior.
+  // ML classifica vendas pela data de APROVAÇÃO do pagamento (date_approved em BRT).
+  // Pedidos podem ser criados até 3 dias antes de serem aprovados,
+  // então buscamos com janela estendida e depois filtramos pelo date_approved.
   function addDias(iso: string, n: number): string {
     const d = new Date(`${iso}T12:00:00Z`);
     d.setUTCDate(d.getUTCDate() + n);
     return d.toISOString().split("T")[0];
   }
-  const dateFetchFrom = addDias(dateFrom, -1); // 1 dia antes
+  const dateFetchFrom = addDias(dateFrom, -3); // 3 dias antes para capturar aprovações tardias
   const diasFetch = gerarDias(dateFetchFrom, dateTo);
 
   async function fetchAllDias(status: string): Promise<any[]> {
-    if (diasFetch.length > 1) {
-      const res = await Promise.all(
-        diasFetch.map(d => fetchOrdersRange(`${d}T00:00:00.000-03:00`, `${d}T23:59:59.999-03:00`, status))
-      );
-      return res.flat();
-    }
-    return fetchOrdersRange(`${dateFetchFrom}T00:00:00.000-03:00`, `${dateTo}T23:59:59.999-03:00`, status);
+    const res = await Promise.all(
+      diasFetch.map(d => fetchOrdersRange(`${d}T00:00:00.000-03:00`, `${d}T23:59:59.999-03:00`, status))
+    );
+    return res.flat();
   }
 
   // Canceladas: usa o mesmo período selecionado, igual aos pedidos pagos
@@ -237,12 +235,28 @@ export async function GET(request: Request) {
   const rows: VendaRow[] = [];
 
   for (const order of allOrders) {
-    const dateRef = order._status === "cancelled" || order._status === "devolucao"
-      ? (order.date_closed ?? order.date_created ?? "")
-      : (order.date_created ?? "");
-    const dataPedido: string = dateRef.split("T")[0] || dateFrom;
+    // ML usa date_approved (BRT) para classificar vendas — igual ao painel do seller
+    let dataPedido: string;
+    if (order._status === "cancelled" || order._status === "devolucao") {
+      const ref = order.date_closed ?? order.date_created ?? "";
+      dataPedido = ref ? ref.split("T")[0] : dateFrom;
+    } else {
+      const approvedPayment = (order.payments ?? []).find(
+        (p: any) => p.status === "approved" || p.status === "partially_refunded"
+      );
+      if (approvedPayment?.date_approved) {
+        // date_approved vem em UTC — converte para BRT (-3h)
+        const utc = new Date(approvedPayment.date_approved);
+        const brt = new Date(utc.getTime() - 3 * 60 * 60 * 1000);
+        dataPedido = brt.toISOString().split("T")[0];
+      } else {
+        // Pagamento ainda não aprovado — usa date_created como fallback
+        const ref = order.date_created ?? "";
+        dataPedido = ref ? ref.split("T")[0] : dateFrom;
+      }
+    }
 
-    // Exclui pedidos fora do range solicitado (vindos do dia extra de buffer)
+    // Filtra somente pedidos cujo dataPedido está dentro do range solicitado
     if (dataPedido < dateFrom || dataPedido > dateTo) continue;
 
     const rawLogistic = shippingLogisticMap.get(order.shipping?.id) ?? "";
