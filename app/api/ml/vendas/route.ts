@@ -129,10 +129,12 @@ export async function GET(request: Request) {
   ]);
   void includeCanceladas; // mantido no contrato da API por compatibilidade
 
-  // Marca status — confirmed e payment_in_process tratados como "paid" para fins de exibição
+  // Marca status
+  // ML conta como "quantidade de vendas": paid + confirmed + devoluções
+  // payment_in_process = pagamento ainda processando → ML ainda NÃO conta → marcamos separado
   paidOrders.forEach(o => { o._status = "paid"; });
   confirmedOrders.forEach(o => { o._status = "paid"; });
-  paymentInProcessOrders.forEach(o => { o._status = "paid"; });
+  paymentInProcessOrders.forEach(o => { o._status = "pending"; }); // excluído do count padrão
   cancelledOrders.forEach(o => {
     const foiPago = (o.paid_amount ?? 0) > 0 ||
       (o.payments ?? []).some((p: any) => p.status === "approved" || p.status === "refunded");
@@ -218,7 +220,7 @@ export async function GET(request: Request) {
     mlItemId:       string;
     frete:          "gratis" | "comprador";
     logistica:      string;
-    status:         "paid" | "cancelled" | "devolucao";
+    status:         "paid" | "cancelled" | "devolucao" | "pending";
     valorUnit:      number;
     qtd:            number;
     faturamento:    number;
@@ -316,7 +318,7 @@ export async function GET(request: Request) {
         data:           dataPedido,
         anuncio:        anuncio?.nome ?? orderItem.item?.title ?? mlItemId,
         conta,
-        status:         (order._status ?? "paid") as "paid" | "cancelled" | "devolucao",
+        status:         (order._status ?? "paid") as "paid" | "cancelled" | "devolucao" | "pending",
         marketplace:    "ML",
         sku,
         mlItemId,

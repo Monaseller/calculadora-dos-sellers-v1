@@ -13,7 +13,7 @@ interface VendaRow {
   mlItemId:       string;
   frete:          "gratis" | "comprador";
   logistica:      string;
-  status:         "paid" | "cancelled" | "devolucao";
+  status:         "paid" | "cancelled" | "devolucao" | "pending";
   valorUnit:      number;
   qtd:            number;
   faturamento:    number;
@@ -201,6 +201,7 @@ export default function VendasPage() {
     validas:    rowsLoja.filter(r => r.status === "paid").length,
     canceladas: rowsLoja.filter(r => r.status === "cancelled").length,
     devolucoes: rowsLoja.filter(r => r.status === "devolucao").length,
+    aguardando: rowsLoja.filter(r => r.status === "pending").length,
   };
 
   // Contagens de envio (sobre todas as linhas filtradas por loja+cadastro, sem filtro envio)
@@ -851,6 +852,9 @@ export default function VendasPage() {
                       </div>
                       {r.status === "devolucao" && (
                         <div style={{ fontSize: "10px", color: "#b07aff", marginTop: "2px", fontWeight: 700 }}>🔄 Devolução</div>
+                      )}
+                      {r.status === "pending" && (
+                        <div style={{ fontSize: "10px", color: "#ffb800", marginTop: "2px", fontWeight: 700 }}>⏳ Aguardando pagamento</div>
                       )}
                       {!r.cadastrado && r.status !== "devolucao" && (
                         <div style={{ fontSize: "10px", color: "#ff6b00", marginTop: "2px" }}>⚠ não cadastrado</div>
