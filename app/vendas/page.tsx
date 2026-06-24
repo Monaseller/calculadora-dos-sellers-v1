@@ -165,7 +165,7 @@ export default function VendasPage() {
   // Aplica filtros de cadastro + status (multi-select, combinados em OR)
   const filteredRowsBase = rowsLoja.filter(r => {
     const temFiltro = filtrosCadastro.length > 0 || filtrosStatus.length > 0;
-    if (!temFiltro) return r.status === "paid"; // padrão: só vendas pagas
+    if (!temFiltro) return r.status === "paid" || r.status === "devolucao"; // padrão: pagas + devoluções (igual ao ML que conta ambas em "quantidade de vendas")
 
     const passCadastro = filtrosCadastro.some(f => {
       if (f === "cadastrados")     return r.status === "paid" && r.cadastrado;
@@ -843,13 +843,16 @@ export default function VendasPage() {
               </thead>
               <tbody>
                 {filteredRows.map((r, i) => (
-                  <tr key={`${r.orderId}-${r.mlItemId}`} style={{ background: i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.015)" }}>
+                  <tr key={`${r.orderId}-${r.mlItemId}`} style={{ background: r.status === "devolucao" ? "rgba(176,122,255,0.05)" : i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.015)" }}>
                     {/* Anúncio */}
                     <td style={tdStyle()}>
                       <div style={{ maxWidth: "220px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 700 }}>
                         {r.anuncio}
                       </div>
-                      {!r.cadastrado && (
+                      {r.status === "devolucao" && (
+                        <div style={{ fontSize: "10px", color: "#b07aff", marginTop: "2px", fontWeight: 700 }}>🔄 Devolução</div>
+                      )}
+                      {!r.cadastrado && r.status !== "devolucao" && (
                         <div style={{ fontSize: "10px", color: "#ff6b00", marginTop: "2px" }}>⚠ não cadastrado</div>
                       )}
                     </td>
