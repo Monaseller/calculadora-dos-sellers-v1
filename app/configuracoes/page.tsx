@@ -307,26 +307,35 @@ export default function ConfiguracoesPage() {
             </div>
           </a>
 
-          {/* Shopee — em breve */}
-          <div style={{
-            background: "rgba(238,77,45,0.03)", border: "1px solid rgba(238,77,45,0.10)",
-            borderRadius: "14px", padding: "24px", position: "relative", opacity: 0.5,
-          }}>
-            <div style={{
-              position: "absolute", top: "12px", right: "12px",
-              background: "rgba(255,255,255,0.07)", borderRadius: "6px",
-              padding: "2px 8px", fontSize: "10px", color: "#9099aa", fontWeight: 700, letterSpacing: "0.5px",
-            }}>
-              EM BREVE
-            </div>
+          {/* Shopee */}
+          <a
+            href="/api/auth/shopee"
+            style={{
+              display: "block", textDecoration: "none",
+              background: "rgba(238,77,45,0.05)", border: "1px solid rgba(238,77,45,0.18)",
+              borderRadius: "14px", padding: "24px", cursor: "pointer",
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = "rgba(238,77,45,0.10)")}
+            onMouseLeave={e => (e.currentTarget.style.background = "rgba(238,77,45,0.05)")}
+          >
             <div style={{ fontSize: "30px", marginBottom: "12px" }}>🛍️</div>
             <div style={{ fontWeight: 800, fontSize: "15px", color: "#EE4D2D", marginBottom: "6px" }}>
               Shopee
             </div>
-            <div style={{ fontSize: "12px", color: "#9099aa", lineHeight: 1.6 }}>
-              Integração via Shopee Open Platform API. Em desenvolvimento.
+            <div style={{ fontSize: "12px", color: "#9099aa", lineHeight: 1.6, marginBottom: "18px" }}>
+              Conecte via Shopee Open Platform. Suporte a múltiplas lojas.
             </div>
-          </div>
+            <div style={{
+              display: "inline-flex", alignItems: "center", gap: "6px",
+              background: "rgba(238,77,45,0.15)", border: "1px solid rgba(238,77,45,0.3)",
+              padding: "7px 14px", borderRadius: "8px", color: "#EE4D2D", fontWeight: 700, fontSize: "13px",
+            }}>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+              </svg>
+              Adicionar conta Shopee
+            </div>
+          </a>
 
         </div>
       </section>
