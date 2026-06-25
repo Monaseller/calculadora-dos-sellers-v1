@@ -170,7 +170,7 @@ export default function ConfiguracoesPage() {
     setTimeout(() => setMsg(null), 3500);
   }
 
-  const conectarML = () => { window.location.href = "/api/auth/ml"; };
+  const conectarML = () => { window.location.href = "/api/auth/mercadolivre"; };
 
   return (
     <div style={{ padding: "32px", maxWidth: "860px", margin: "0 auto" }}>

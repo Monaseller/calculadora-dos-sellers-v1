@@ -87,17 +87,17 @@ export default function TopBar() {
             onClick={() => setDropdown(d => !d)}
             style={{
               display: "flex", alignItems: "center", gap: "8px",
-              background: ativa ? "rgba(255,224,0,0.08)" : "rgba(255,80,80,0.08)",
-              border: ativa ? "1px solid rgba(255,224,0,0.25)" : "1px solid rgba(255,80,80,0.25)",
+              background: ativa ? "rgba(255,224,0,0.08)" : "rgba(255,255,255,0.04)",
+              border: ativa ? "1px solid rgba(255,224,0,0.25)" : "1px solid rgba(255,255,255,0.08)",
               borderRadius: "999px", padding: "7px 14px", cursor: "pointer",
             }}
           >
             <div style={{
               width: "8px", height: "8px", borderRadius: "50%",
-              background: ativa ? "#00D97E" : "#ff6b6b",
+              background: ativa ? "#00D97E" : "#555",
             }} />
-            <span style={{ fontSize: "13px", fontWeight: 700, color: ativa ? "#FFE000" : "#ff6b6b" }}>
-              {ativa ? (ativa.nickname || ativa.nome) : "Conectar loja"}
+            <span style={{ fontSize: "13px", fontWeight: 700, color: ativa ? "#FFE000" : "#9099aa" }}>
+              {ativa ? (ativa.nickname || ativa.nome) : "Sem loja ativa"}
             </span>
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#9099aa" strokeWidth="2.5">
               <polyline points="6 9 12 15 18 9"/>
