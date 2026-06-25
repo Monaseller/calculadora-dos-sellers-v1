@@ -10,7 +10,7 @@ function DashboardMockup() {
     { nome: "Balança Digital Cozinha",      sku: "BAL-015", mp: "Magalu",               lucro: "R$ 21,56", pct: "19,80%" },
   ];
   return (
-    <div style={{background:"#13151f",border:"1px solid rgba(255,255,255,0.12)",borderRadius:"20px",overflow:"hidden",boxShadow:"0 60px 120px rgba(0,0,0,0.8), 0 0 0 1px rgba(255,182,0,0.08)",display:"flex",height:"580px",fontSize:"11px"}}>
+    <div style={{background:"#13151f",border:"1px solid rgba(255,255,255,0.12)",borderRadius:"20px",overflow:"hidden",boxShadow:"0 60px 120px rgba(0,0,0,0.8), 0 0 0 1px rgba(255,182,0,0.08)",display:"flex",height:"100%",minHeight:"480px",maxHeight:"calc(100vh - 180px)",fontSize:"11px"}}>
       {/* Sidebar */}
       <div style={{width:"170px",background:"#0f111a",borderRight:"1px solid rgba(255,255,255,0.06)",display:"flex",flexDirection:"column",flexShrink:0}}>
         <div style={{padding:"16px 14px",borderBottom:"1px solid rgba(255,255,255,0.06)",display:"flex",alignItems:"center",gap:"10px"}}>
@@ -113,18 +113,18 @@ export default function LandingPage() {
       </header>
 
       {/* Hero */}
-      <section style={{display:"flex",alignItems:"center",gap:"64px",padding:"100px 80px 80px",maxWidth:"1440px",margin:"0 auto",minHeight:"calc(100vh - 72px)",boxSizing:"border-box"}}>
+      <section style={{display:"flex",alignItems:"center",gap:"64px",padding:"60px 80px",height:"calc(100vh - 72px)",boxSizing:"border-box",width:"100%"}}>
         {/* Esquerda */}
-        <div style={{flex:"0 0 auto",width:"520px"}}>
+        <div style={{flex:"0 0 44%",minWidth:0}}>
           <div style={{display:"inline-flex",alignItems:"center",gap:"8px",background:"rgba(255,182,0,0.1)",border:"1px solid rgba(255,182,0,0.3)",borderRadius:"100px",padding:"7px 16px",marginBottom:"32px",fontSize:"12px",fontWeight:700,color:"#FFB600",letterSpacing:"0.5px"}}>
             ⭐ A FERRAMENTA Nº1 PARA SELLERS
           </div>
-          <h1 style={{fontSize:"68px",fontWeight:900,lineHeight:1.02,margin:"0 0 24px 0",letterSpacing:"-1px"}}>
+          <h1 style={{fontSize:"clamp(52px,5.5vw,80px)",fontWeight:900,lineHeight:1.02,margin:"0 0 24px 0",letterSpacing:"-2px"}}>
             <span style={{color:"#fff",display:"block"}}>Precifique certo.</span>
             <span style={{background:"linear-gradient(90deg,#FFB600,#FF6B00)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",display:"block"}}>Lucre mais.</span>
           </h1>
-          <p style={{fontSize:"18px",color:"#9099aa",lineHeight:1.75,margin:"0 0 40px 0"}}>
-            Descubra em segundos o <span style={{color:"#FFB600",fontWeight:600}}>preço ideal</span> para vender<br/>no Mercado Livre, Shopee, Amazon e Magalu<br/>sem comprometer sua margem.
+          <p style={{fontSize:"clamp(15px,1.4vw,19px)",color:"#9099aa",lineHeight:1.75,margin:"0 0 36px 0"}}>
+            Descubra em segundos o <span style={{color:"#FFB600",fontWeight:600}}>preço ideal</span> para vender no Mercado Livre, Shopee, Amazon e Magalu sem comprometer sua margem.
           </p>
           <div style={{display:"flex",gap:"14px",marginBottom:"40px"}}>
             <Link href="/login" style={{display:"flex",alignItems:"center",gap:"10px",padding:"17px 32px",borderRadius:"13px",background:"linear-gradient(135deg,#FFB600,#FF6B00)",color:"#000",textDecoration:"none",fontSize:"16px",fontWeight:800,boxShadow:"0 8px 36px rgba(255,182,0,0.45)",letterSpacing:"0.3px"}}>ACESSAR O PAINEL →</Link>
@@ -150,7 +150,7 @@ export default function LandingPage() {
       </section>
 
       {/* Features */}
-      <section style={{borderTop:"1px solid rgba(255,255,255,0.06)",borderBottom:"1px solid rgba(255,255,255,0.06)",padding:"56px 80px",maxWidth:"1440px",margin:"0 auto"}}>
+      <section style={{borderTop:"1px solid rgba(255,255,255,0.06)",borderBottom:"1px solid rgba(255,255,255,0.06)",padding:"56px 80px"}}>
         <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:"0"}}>
           {[{icon:"💰",titulo:"Precificação automática",desc:"Calcule o preço certo considerando todos os custos e comissões de cada marketplace."},{icon:"📊",titulo:"Gestão de anúncios",desc:"Importe todos os seus produtos de ML e Shopee com um clique."},{icon:"📈",titulo:"Vendas em tempo real",desc:"Acompanhe faturamento, lucro e margem de contribuição de cada venda."},{icon:"🏪",titulo:"Multi-loja",desc:"Gerencie múltiplas contas de diferentes marketplaces em um único painel."}].map((f,i)=>(
             <div key={i} style={{padding:"36px 40px",borderRight:i<3?"1px solid rgba(255,255,255,0.06)":"none"}}>
