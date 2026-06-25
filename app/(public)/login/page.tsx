@@ -1,6 +1,30 @@
 "use client";
-import { useState, useEffect, Suspense } from "react";
+import { useState, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+
+function Field({ label, value, onChange, type = "text", placeholder = "", required = false }: {
+  label: string; value: string; onChange: (v: string) => void;
+  type?: string; placeholder?: string; required?: boolean;
+}) {
+  const inp: React.CSSProperties = {
+    width: "100%", boxSizing: "border-box",
+    background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)",
+    borderRadius: "10px", padding: "12px 16px", color: "#fff", fontSize: "15px", outline: "none",
+  };
+  return (
+    <div>
+      <label style={{ fontSize: "11px", fontWeight: 700, color: "#9099aa", display: "block", marginBottom: "6px", textTransform: "uppercase", letterSpacing: "0.5px" }}>
+        {label}{required && <span style={{ color: "#FFB600" }}> *</span>}
+      </label>
+      <input
+        type={type} value={value} onChange={e => onChange(e.target.value)}
+        placeholder={placeholder} required={required} style={inp}
+        onFocus={e => (e.target.style.borderColor = "rgba(255,182,0,0.55)")}
+        onBlur={e  => (e.target.style.borderColor = "rgba(255,255,255,0.1)")}
+      />
+    </div>
+  );
+}
 
 function LoginForm() {
   const router       = useRouter();
@@ -49,31 +73,6 @@ function LoginForm() {
     setLoading(false);
     if (resLogin.ok) router.replace(redirect);
     else { setErro("Conta criada! Faça login."); setTab("login"); }
-  }
-
-  const inp: React.CSSProperties = {
-    width: "100%", boxSizing: "border-box",
-    background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)",
-    borderRadius: "10px", padding: "12px 16px", color: "#fff", fontSize: "15px", outline: "none",
-  };
-
-  function Field({ label, value, onChange, type = "text", placeholder = "", required = false }: {
-    label: string; value: string; onChange: (v: string) => void;
-    type?: string; placeholder?: string; required?: boolean;
-  }) {
-    return (
-      <div>
-        <label style={{ fontSize: "11px", fontWeight: 700, color: "#9099aa", display: "block", marginBottom: "6px", textTransform: "uppercase", letterSpacing: "0.5px" }}>
-          {label}{required && <span style={{ color: "#FFB600" }}> *</span>}
-        </label>
-        <input
-          type={type} value={value} onChange={e => onChange(e.target.value)}
-          placeholder={placeholder} required={required} style={inp}
-          onFocus={e => (e.target.style.borderColor = "rgba(255,182,0,0.55)")}
-          onBlur={e  => (e.target.style.borderColor = "rgba(255,255,255,0.1)")}
-        />
-      </div>
-    );
   }
 
   return (
