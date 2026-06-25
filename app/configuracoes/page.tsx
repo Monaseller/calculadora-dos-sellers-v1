@@ -200,29 +200,12 @@ export default function ConfiguracoesPage() {
 
       {/* ── Minhas contas ── */}
       <section style={{ marginBottom: "40px" }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "16px" }}>
-          <div>
-            <h2 style={{ fontSize: "16px", fontWeight: 800, color: "#fff", margin: 0 }}>Minhas contas</h2>
-            <p style={{ fontSize: "12px", color: "#9099aa", marginTop: "4px" }}>
-              {lojas.length} conta{lojas.length !== 1 ? "s" : ""} conectada{lojas.length !== 1 ? "s" : ""}.
-              Clique em "Usar esta" para alternar a conta ativa.
-            </p>
-          </div>
-          {/* Botão rápido adicionar */}
-          <a
-            href="/api/auth/mercadolivre"
-            style={{
-              display: "inline-flex", alignItems: "center", gap: "6px",
-              background: "rgba(255,224,0,0.10)", border: "1px solid rgba(255,224,0,0.3)",
-              padding: "8px 16px", borderRadius: "8px", color: "#FFE000",
-              fontWeight: 700, fontSize: "13px", textDecoration: "none", flexShrink: 0,
-            }}
-          >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-              <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-            </svg>
-            Adicionar conta
-          </a>
+        <div style={{ marginBottom: "16px" }}>
+          <h2 style={{ fontSize: "16px", fontWeight: 800, color: "#fff", margin: 0 }}>Minhas contas</h2>
+          <p style={{ fontSize: "12px", color: "#9099aa", marginTop: "4px" }}>
+            {lojas.length} conta{lojas.length !== 1 ? "s" : ""} conectada{lojas.length !== 1 ? "s" : ""}.
+            Clique em "Usar esta" para alternar a conta ativa.
+          </p>
         </div>
 
         {loading ? (
