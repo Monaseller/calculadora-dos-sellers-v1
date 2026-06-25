@@ -3,6 +3,7 @@ import type { NextRequest } from "next/server";
 
 // Rotas públicas — sem sessão OK
 const PUBLIC = [
+  "/",
   "/login",
   "/api/auth/login",
   "/api/auth/logout",
