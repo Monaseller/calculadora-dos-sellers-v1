@@ -16,11 +16,7 @@ function LoginForm() {
   const [loading,   setLoading]   = useState(false);
   const [erro,      setErro]      = useState("");
 
-  useEffect(() => {
-    fetch("/api/auth/status-session")
-      .then(r => { if (r.ok) router.replace(redirect); })
-      .catch(() => {});
-  }, []);
+  // Sem auto-redirect — deixa o usuário digitar livremente
 
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
