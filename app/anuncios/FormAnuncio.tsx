@@ -103,7 +103,12 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
   );
   const [freteOverride, setFreteOverride] = useState(false);
   type TipoEnvio = "ME2" | "Full" | "Flex";
-  const [tipoEnvio, setTipoEnvio] = useState<TipoEnvio>("ME2");
+  const [tipoEnvio, setTipoEnvio] = useState<TipoEnvio>(() => {
+    const lt = ((inicial as any)?.logistic_type as string | null)?.toLowerCase() ?? "";
+    if (lt === "fulfillment")  return "Full";
+    if (lt === "self_service") return "Flex";
+    return "ME2";
+  });
   const [tamanhoFull, setTamanhoFull] = useState<TamanhoFull>("P");
   const [tamanhoME2, setTamanhoME2] = useState<TamanhoFull | null>(null);
   const [tipoAnuncio, setTipoAnuncio] = useState<TipoAnuncio>(

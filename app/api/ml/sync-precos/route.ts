@@ -206,17 +206,18 @@ export async function POST(request: Request) {
         console.log(`[sync] ${resolvedId} peso: ${anuncio.peso_kg} → ${pesoAPI} kg (dim=${body.shipping?.dimensions})`);
       }
 
-      // ── Frete: só recalcula se o PREÇO mudou E temos peso confiável ──────────
-      // Não usa pesoAPI para cálculo (parsing de dimensions pode ter erros).
-      // Usa apenas peso_kg do Supabase (digitado pelo usuário no form).
+      // ── Frete: recalcula se preço mudou OU frete está zerado ────────────────
       const isFlex = (logisticType ?? "").toLowerCase() === "self_service";
       const precoMudou = "preco_anuncio" in mudancas;
+      const freteZerado = !anuncio.custo_frete || anuncio.custo_frete === 0;
+      // Para peso: usa o da API se disponível, senão o salvo no Supabase
       const pesoSalvo = typeof anuncio.peso_kg === "number" && anuncio.peso_kg > 0 ? anuncio.peso_kg : null;
-      const deveRecalcularFrete = precoMudou && (isFlex || pesoSalvo !== null);
+      const pesoParaFrete = pesoFinal; // inclui peso da API + fallback Supabase
+      const deveRecalcularFrete = (precoMudou || freteZerado) && (isFlex || pesoParaFrete !== null);
 
       if (deveRecalcularFrete) {
         const precoParaCalc = (mudancas.preco_anuncio as number | undefined) ?? anuncio.preco_anuncio ?? null;
-        const novoCustoFrete = calcularNovoFrete(logisticType, pesoSalvo, precoParaCalc);
+        const novoCustoFrete = calcularNovoFrete(logisticType, pesoParaFrete, precoParaCalc);
 
         if (novoCustoFrete !== null) {
           const diff = Math.abs(novoCustoFrete - (anuncio.custo_frete ?? 0));
