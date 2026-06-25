@@ -10,7 +10,7 @@ function DashboardMockup() {
     { nome: "Balança Digital Cozinha",      sku: "BAL-015", mp: "Magalu",               lucro: "R$ 21,56", pct: "19,80%" },
   ];
   return (
-    <div style={{background:"#13151f",border:"1px solid rgba(255,255,255,0.12)",borderRadius:"20px",overflow:"hidden",boxShadow:"0 60px 120px rgba(0,0,0,0.8), 0 0 0 1px rgba(255,182,0,0.08)",display:"flex",height:"100%",minHeight:"480px",maxHeight:"calc(100vh - 180px)",fontSize:"11px"}}>
+    <div style={{background:"#13151f",border:"1px solid rgba(255,255,255,0.12)",borderRadius:"20px",overflow:"hidden",boxShadow:"0 60px 120px rgba(0,0,0,0.8), 0 0 0 1px rgba(255,182,0,0.08)",display:"flex",width:"100%",minHeight:"520px",maxHeight:"680px",fontSize:"11px"}}>
       {/* Sidebar */}
       <div style={{width:"170px",background:"#0f111a",borderRight:"1px solid rgba(255,255,255,0.06)",display:"flex",flexDirection:"column",flexShrink:0}}>
         <div style={{padding:"16px 14px",borderBottom:"1px solid rgba(255,255,255,0.06)",display:"flex",alignItems:"center",gap:"10px"}}>
@@ -113,9 +113,10 @@ export default function LandingPage() {
       </header>
 
       {/* Hero */}
-      <section style={{display:"flex",alignItems:"center",gap:"64px",padding:"60px 80px",height:"calc(100vh - 72px)",boxSizing:"border-box",width:"100%"}}>
+      <section style={{display:"flex",alignItems:"center",justifyContent:"center",minHeight:"calc(100vh - 72px)",padding:"60px 80px",boxSizing:"border-box",width:"100%"}}>
+        <div style={{display:"flex",alignItems:"center",gap:"72px",maxWidth:"1440px",width:"100%"}}>
         {/* Esquerda */}
-        <div style={{flex:"0 0 44%",minWidth:0}}>
+        <div style={{flex:"0 0 42%",minWidth:0}}>
           <div style={{display:"inline-flex",alignItems:"center",gap:"8px",background:"rgba(255,182,0,0.1)",border:"1px solid rgba(255,182,0,0.3)",borderRadius:"100px",padding:"7px 16px",marginBottom:"32px",fontSize:"12px",fontWeight:700,color:"#FFB600",letterSpacing:"0.5px"}}>
             ⭐ A FERRAMENTA Nº1 PARA SELLERS
           </div>
@@ -146,7 +147,8 @@ export default function LandingPage() {
           </div>
         </div>
         {/* Dashboard mockup */}
-        <div style={{flex:1,minWidth:0}}><DashboardMockup/></div>
+        <div style={{flex:1,minWidth:0,minHeight:"520px"}}><DashboardMockup/></div>
+        </div>
       </section>
 
       {/* Features */}
