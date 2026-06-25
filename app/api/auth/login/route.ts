@@ -15,7 +15,7 @@ export async function POST(request: Request) {
 
   const { data: perfil } = await supabase
     .from("perfil")
-    .select("id, email, senha, nome_completo")
+    .select("id, email, senha, nome_completo, email_verificado")
     .eq("id", 1)
     .single();
 
@@ -26,6 +26,14 @@ export async function POST(request: Request) {
 
   if (perfil.email !== email || perfil.senha !== senha) {
     return NextResponse.json({ erro: "Email ou senha incorretos." }, { status: 401 });
+  }
+
+  // Bloqueia login se email não foi confirmado
+  if (!perfil.email_verificado) {
+    return NextResponse.json(
+      { erro: "Confirme seu email antes de entrar. Verifique sua caixa de entrada.", naoVerificado: true },
+      { status: 403 }
+    );
   }
 
   const res = NextResponse.json({ ok: true, nome: perfil.nome_completo });

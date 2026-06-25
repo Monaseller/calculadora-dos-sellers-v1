@@ -5,8 +5,10 @@ import type { NextRequest } from "next/server";
 const PUBLIC = [
   "/",
   "/login",
+  "/verificar-email",
   "/api/auth/login",
   "/api/auth/logout",
+  "/api/auth/verificar-email",
   "/api/auth/mercadolivre",
   "/api/auth/shopee",
   "/api/auth/relay",

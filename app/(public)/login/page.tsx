@@ -53,6 +53,9 @@ function LoginForm() {
     if (res.ok) { router.replace(redirect); return; }
     const data = await res.json();
     if (res.status === 404) { setTab("criar"); setErro("Nenhuma conta encontrada. Crie sua conta abaixo."); }
+    else if (res.status === 403 && data.naoVerificado) {
+      router.push(`/verificar-email?email=${encodeURIComponent(email)}`);
+    }
     else setErro(data.erro || "Email ou senha incorretos.");
   }
 
@@ -63,16 +66,12 @@ function LoginForm() {
     setLoading(true);
     const resPerfil = await fetch("/api/perfil", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ nome_completo: nome, usuario, email, documento, senha }),
-    });
-    if (!resPerfil.ok) { setLoading(false); setErro("Erro ao criar conta."); return; }
-    const resLogin = await fetch("/api/auth/login", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, senha }),
+      body: JSON.stringify({ nome_completo: nome, usuario, email, documento, senha, _novaConta: true }),
     });
     setLoading(false);
-    if (resLogin.ok) router.replace(redirect);
-    else { setErro("Conta criada! Faça login."); setTab("login"); }
+    if (!resPerfil.ok) { setErro("Erro ao criar conta."); return; }
+    // Redireciona para página de verificação de email
+    router.push(`/verificar-email?email=${encodeURIComponent(email)}`);
   }
 
   return (
