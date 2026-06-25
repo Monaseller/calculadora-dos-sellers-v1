@@ -117,12 +117,52 @@ function LojaCard({ loja, ativa, onAtivar, onDesconectar }: {
   );
 }
 
+type Perfil = {
+  nome_completo: string;
+  usuario:       string;
+  email:         string;
+  documento:     string;
+  senha:         string;
+};
+
+function InputField({ label, value, onChange, type = "text", placeholder = "" }: {
+  label: string; value: string; onChange: (v: string) => void;
+  type?: string; placeholder?: string;
+}) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+      <label style={{ fontSize: "12px", fontWeight: 700, color: "#9099aa", textTransform: "uppercase", letterSpacing: "0.5px" }}>
+        {label}
+      </label>
+      <input
+        type={type}
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        placeholder={placeholder}
+        style={{
+          background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)",
+          borderRadius: "10px", padding: "10px 14px", color: "#fff", fontSize: "14px",
+          outline: "none", width: "100%", boxSizing: "border-box",
+        }}
+        onFocus={e  => (e.target.style.borderColor = "rgba(255,182,0,0.5)")}
+        onBlur={e   => (e.target.style.borderColor = "rgba(255,255,255,0.1)")}
+      />
+    </div>
+  );
+}
+
 export default function ConfiguracoesPage() {
   const router = useRouter();
   const [lojas,     setLojas]     = useState<Loja[]>([]);
   const [lojaAtiva, setLojaAtiva] = useState<string | null>(null);
   const [loading,   setLoading]   = useState(true);
   const [msg,       setMsg]       = useState<{ ok: boolean; texto: string } | null>(null);
+
+  // Perfil
+  const [perfil, setPerfil] = useState<Perfil>({
+    nome_completo: "", usuario: "", email: "", documento: "", senha: "",
+  });
+  const [salvandoPerfil, setSalvandoPerfil] = useState(false);
 
   function getCookieClient(name: string): string | null {
     if (typeof document === "undefined") return null;
@@ -141,7 +181,39 @@ export default function ConfiguracoesPage() {
     setLoading(false);
   }
 
-  useEffect(() => { carregarLojas(); }, []);
+  async function carregarPerfil() {
+    try {
+      const res  = await fetch("/api/perfil");
+      const data = await res.json();
+      if (data) setPerfil(p => ({ ...p, ...data, senha: "" }));
+    } catch {}
+  }
+
+  useEffect(() => { carregarLojas(); carregarPerfil(); }, []);
+
+  async function salvarPerfil() {
+    setSalvandoPerfil(true);
+    const payload: Partial<Perfil> = {
+      nome_completo: perfil.nome_completo,
+      usuario:       perfil.usuario,
+      email:         perfil.email,
+      documento:     perfil.documento,
+    };
+    if (perfil.senha) payload.senha = perfil.senha;
+
+    const res = await fetch("/api/perfil", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    setSalvandoPerfil(false);
+    if (res.ok) {
+      mostrarMsg(true, "Perfil salvo com sucesso!");
+      setPerfil(p => ({ ...p, senha: "" }));
+    } else {
+      mostrarMsg(false, "Erro ao salvar perfil.");
+    }
+  }
 
   async function ativarLoja(id: string) {
     const res = await fetch("/api/lojas/ativar", {
@@ -197,6 +269,94 @@ export default function ConfiguracoesPage() {
           Gerencie suas contas e conexões com marketplaces.
         </p>
       </div>
+
+      {/* ── Meu Perfil ── */}
+      <section style={{ marginBottom: "40px" }}>
+        <div style={{ marginBottom: "20px" }}>
+          <h2 style={{ fontSize: "16px", fontWeight: 800, color: "#fff", margin: 0 }}>Meu perfil</h2>
+          <p style={{ fontSize: "12px", color: "#9099aa", marginTop: "4px" }}>
+            Suas informações pessoais e de acesso.
+          </p>
+        </div>
+
+        <div style={{
+          background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)",
+          borderRadius: "16px", padding: "28px",
+        }}>
+          {/* Avatar + nome */}
+          <div style={{ display: "flex", alignItems: "center", gap: "18px", marginBottom: "28px" }}>
+            <div style={{
+              width: "64px", height: "64px", borderRadius: "50%",
+              background: "linear-gradient(135deg, #FFB600 0%, #FF6B00 100%)",
+              display: "grid", placeItems: "center",
+              fontSize: "24px", fontWeight: 900, color: "#000", flexShrink: 0,
+            }}>
+              {perfil.nome_completo ? perfil.nome_completo[0].toUpperCase() : "?"}
+            </div>
+            <div>
+              <div style={{ fontWeight: 800, fontSize: "16px", color: "#fff" }}>
+                {perfil.nome_completo || "Sem nome"}
+              </div>
+              <div style={{ fontSize: "12px", color: "#9099aa", marginTop: "2px" }}>
+                @{perfil.usuario || "usuario"}
+              </div>
+            </div>
+          </div>
+
+          {/* Campos */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px", marginBottom: "16px" }}>
+            <InputField
+              label="Nome completo"
+              value={perfil.nome_completo}
+              onChange={v => setPerfil(p => ({ ...p, nome_completo: v }))}
+              placeholder="Seu nome completo"
+            />
+            <InputField
+              label="Usuário"
+              value={perfil.usuario}
+              onChange={v => setPerfil(p => ({ ...p, usuario: v }))}
+              placeholder="@usuario"
+            />
+            <InputField
+              label="E-mail"
+              value={perfil.email}
+              onChange={v => setPerfil(p => ({ ...p, email: v }))}
+              type="email"
+              placeholder="email@exemplo.com"
+            />
+            <InputField
+              label="CPF / CNPJ"
+              value={perfil.documento}
+              onChange={v => setPerfil(p => ({ ...p, documento: v }))}
+              placeholder="000.000.000-00 ou 00.000.000/0001-00"
+            />
+          </div>
+
+          {/* Senha separada */}
+          <div style={{ marginBottom: "20px" }}>
+            <InputField
+              label="Nova senha (deixe em branco para não alterar)"
+              value={perfil.senha}
+              onChange={v => setPerfil(p => ({ ...p, senha: v }))}
+              type="password"
+              placeholder="••••••••"
+            />
+          </div>
+
+          <button
+            onClick={salvarPerfil}
+            disabled={salvandoPerfil}
+            style={{
+              padding: "10px 24px", borderRadius: "10px", border: "none",
+              background: salvandoPerfil ? "rgba(255,182,0,0.3)" : "rgba(255,182,0,0.9)",
+              color: "#000", fontWeight: 800, fontSize: "14px",
+              cursor: salvandoPerfil ? "not-allowed" : "pointer",
+            }}
+          >
+            {salvandoPerfil ? "Salvando..." : "Salvar perfil"}
+          </button>
+        </div>
+      </section>
 
       {/* ── Minhas contas ── */}
       <section style={{ marginBottom: "40px" }}>
