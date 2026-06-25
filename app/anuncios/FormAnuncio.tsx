@@ -94,9 +94,28 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
     }
     return "8";
   });
-  const [custoFrete, setCustoFrete] = useState(
-    inicial?.custo_frete ? String(inicial.custo_frete).replace(".", ",") : ""
-  );
+  const [custoFrete, setCustoFrete] = useState(() => {
+    if (inicial?.custo_frete && inicial.custo_frete > 0) {
+      return String(inicial.custo_frete).replace(".", ",");
+    }
+    // Frete zerado — calcula automaticamente pelo tipo de envio
+    const lt = ((inicial as any)?.logistic_type as string | null)?.toLowerCase() ?? "";
+    const preco = inicial?.preco_anuncio ?? null;
+    const peso  = inicial?.peso_kg ?? null;
+    if (lt === "self_service" && preco) {
+      const c = calcularFreteFlexMl(preco);
+      if (c !== null) return String(c).replace(".", ",");
+    }
+    if (lt === "fulfillment" && preco) {
+      const c = calcularFreteFullMl("P", preco, peso);
+      if (c !== null) return String(c).replace(".", ",");
+    }
+    if (preco && peso && lt && lt !== "self_service" && lt !== "fulfillment") {
+      const c = calcularFreteMl(peso, preco);
+      if (c !== null) return String(c).replace(".", ",");
+    }
+    return "";
+  });
   const [freteGratis, setFreteGratis] = useState(inicial?.frete_gratis ?? false);
   const [pesoKg, setPesoKg] = useState(
     inicial?.peso_kg ? String(inicial.peso_kg).replace(".", ",") : ""
