@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 
 type Loja = {
   id: string;
@@ -117,6 +118,7 @@ function LojaCard({ loja, ativa, onAtivar, onDesconectar }: {
 }
 
 export default function ConfiguracoesPage() {
+  const router = useRouter();
   const [lojas,     setLojas]     = useState<Loja[]>([]);
   const [lojaAtiva, setLojaAtiva] = useState<string | null>(null);
   const [loading,   setLoading]   = useState(true);
@@ -170,7 +172,7 @@ export default function ConfiguracoesPage() {
     setTimeout(() => setMsg(null), 3500);
   }
 
-  const conectarML = () => { window.location.href = "/api/auth/mercadolivre"; };
+  const conectarML = () => router.push("/api/auth/mercadolivre");
 
   return (
     <div style={{ padding: "32px", maxWidth: "860px", margin: "0 auto" }}>
@@ -244,16 +246,10 @@ export default function ConfiguracoesPage() {
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(240px,1fr))", gap: "14px" }}>
 
           {/* ML */}
-          <button
-            onClick={conectarML}
-            style={{
-              background: "rgba(255,224,0,0.06)", border: "1px solid rgba(255,224,0,0.2)",
-              borderRadius: "14px", padding: "24px", cursor: "pointer", textAlign: "left",
-              transition: "background 0.2s",
-            }}
-            onMouseEnter={e => (e.currentTarget.style.background = "rgba(255,224,0,0.12)")}
-            onMouseLeave={e => (e.currentTarget.style.background = "rgba(255,224,0,0.06)")}
-          >
+          <div style={{
+            background: "rgba(255,224,0,0.06)", border: "1px solid rgba(255,224,0,0.2)",
+            borderRadius: "14px", padding: "24px", textAlign: "left",
+          }}>
             <div style={{ fontSize: "28px", marginBottom: "12px" }}>🛒</div>
             <div style={{ fontWeight: 800, fontSize: "15px", color: "#FFE000", marginBottom: "4px" }}>
               Mercado Livre
@@ -261,18 +257,22 @@ export default function ConfiguracoesPage() {
             <div style={{ fontSize: "12px", color: "#9099aa", lineHeight: 1.5 }}>
               Conecte via OAuth. Suporte a múltiplas contas.
             </div>
-            <div style={{
-              marginTop: "16px", display: "inline-flex", alignItems: "center", gap: "6px",
-              background: "rgba(255,224,0,0.15)", border: "1px solid rgba(255,224,0,0.3)",
-              padding: "6px 14px", borderRadius: "8px", color: "#FFE000", fontWeight: 700, fontSize: "12px",
-            }}>
+            <a
+              href="/api/auth/mercadolivre"
+              style={{
+                marginTop: "16px", display: "inline-flex", alignItems: "center", gap: "6px",
+                background: "rgba(255,224,0,0.15)", border: "1px solid rgba(255,224,0,0.3)",
+                padding: "8px 16px", borderRadius: "8px", color: "#FFE000", fontWeight: 700,
+                fontSize: "13px", textDecoration: "none", cursor: "pointer",
+              }}
+            >
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
                 <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
                 <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
               </svg>
               Conectar
-            </div>
-          </button>
+            </a>
+          </div>
 
           {/* Shopee — em breve */}
           <div style={{
