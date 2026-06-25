@@ -194,33 +194,62 @@ export default function ConfiguracoesPage() {
       <div style={{ marginBottom: "36px" }}>
         <h1 style={{ fontSize: "24px", fontWeight: 900, color: "#fff", margin: 0 }}>Configurações</h1>
         <p style={{ fontSize: "14px", color: "#9099aa", marginTop: "6px" }}>
-          Gerencie suas lojas e conexões com marketplaces.
+          Gerencie suas contas e conexões com marketplaces.
         </p>
       </div>
 
-      {/* Seção lojas */}
+      {/* ── Minhas contas ── */}
       <section style={{ marginBottom: "40px" }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "16px" }}>
           <div>
-            <h2 style={{ fontSize: "16px", fontWeight: 800, color: "#fff", margin: 0 }}>Minhas lojas</h2>
+            <h2 style={{ fontSize: "16px", fontWeight: 800, color: "#fff", margin: 0 }}>Minhas contas</h2>
             <p style={{ fontSize: "12px", color: "#9099aa", marginTop: "4px" }}>
-              Conecte múltiplas contas de marketplace.
+              {lojas.length} conta{lojas.length !== 1 ? "s" : ""} conectada{lojas.length !== 1 ? "s" : ""}.
+              Clique em "Usar esta" para alternar a conta ativa.
             </p>
           </div>
+          {/* Botão rápido adicionar */}
+          <a
+            href="/api/auth/mercadolivre"
+            style={{
+              display: "inline-flex", alignItems: "center", gap: "6px",
+              background: "rgba(255,224,0,0.10)", border: "1px solid rgba(255,224,0,0.3)",
+              padding: "8px 16px", borderRadius: "8px", color: "#FFE000",
+              fontWeight: 700, fontSize: "13px", textDecoration: "none", flexShrink: 0,
+            }}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+              <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+            </svg>
+            Adicionar conta
+          </a>
         </div>
 
         {loading ? (
-          <div style={{ color: "#9099aa", fontSize: "14px" }}>Carregando...</div>
+          <div style={{ color: "#9099aa", fontSize: "14px", padding: "20px 0" }}>Carregando...</div>
         ) : lojas.length === 0 ? (
           <div style={{
             background: "rgba(255,255,255,0.03)", border: "1px dashed rgba(255,255,255,0.1)",
-            borderRadius: "14px", padding: "40px", textAlign: "center", color: "#9099aa",
+            borderRadius: "14px", padding: "48px", textAlign: "center", color: "#9099aa",
           }}>
-            <div style={{ fontSize: "36px", marginBottom: "12px" }}>🏪</div>
+            <div style={{ fontSize: "40px", marginBottom: "14px" }}>🏪</div>
             <div style={{ fontWeight: 700, fontSize: "15px", color: "#fff", marginBottom: "8px" }}>
-              Nenhuma loja conectada
+              Nenhuma conta conectada
             </div>
-            <div style={{ fontSize: "13px" }}>Conecte sua primeira loja abaixo.</div>
+            <div style={{ fontSize: "13px", marginBottom: "20px" }}>
+              Adicione sua primeira conta de marketplace para começar.
+            </div>
+            <a
+              href="/api/auth/mercadolivre"
+              style={{
+                display: "inline-flex", alignItems: "center", gap: "8px",
+                background: "rgba(255,224,0,0.15)", border: "1px solid rgba(255,224,0,0.35)",
+                padding: "10px 20px", borderRadius: "10px", color: "#FFE000",
+                fontWeight: 700, fontSize: "14px", textDecoration: "none",
+              }}
+            >
+              🛒 Conectar Mercado Livre
+            </a>
           </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
@@ -237,61 +266,65 @@ export default function ConfiguracoesPage() {
         )}
       </section>
 
-      {/* Adicionar lojas */}
+      {/* ── Adicionar conta ── */}
       <section>
-        <h2 style={{ fontSize: "16px", fontWeight: 800, color: "#fff", margin: "0 0 16px" }}>
-          Conectar nova loja
-        </h2>
+        <div style={{ marginBottom: "16px" }}>
+          <h2 style={{ fontSize: "16px", fontWeight: 800, color: "#fff", margin: 0 }}>Adicionar conta</h2>
+          <p style={{ fontSize: "12px", color: "#9099aa", marginTop: "4px" }}>
+            Conecte quantas contas quiser. Cada uma aparece no seletor do topo.
+          </p>
+        </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(240px,1fr))", gap: "14px" }}>
 
           {/* ML */}
-          <div style={{
-            background: "rgba(255,224,0,0.06)", border: "1px solid rgba(255,224,0,0.2)",
-            borderRadius: "14px", padding: "24px", textAlign: "left",
-          }}>
-            <div style={{ fontSize: "28px", marginBottom: "12px" }}>🛒</div>
-            <div style={{ fontWeight: 800, fontSize: "15px", color: "#FFE000", marginBottom: "4px" }}>
+          <a
+            href="/api/auth/mercadolivre"
+            style={{
+              display: "block", textDecoration: "none",
+              background: "rgba(255,224,0,0.05)", border: "1px solid rgba(255,224,0,0.18)",
+              borderRadius: "14px", padding: "24px", cursor: "pointer",
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = "rgba(255,224,0,0.10)")}
+            onMouseLeave={e => (e.currentTarget.style.background = "rgba(255,224,0,0.05)")}
+          >
+            <div style={{ fontSize: "30px", marginBottom: "12px" }}>🛒</div>
+            <div style={{ fontWeight: 800, fontSize: "15px", color: "#FFE000", marginBottom: "6px" }}>
               Mercado Livre
             </div>
-            <div style={{ fontSize: "12px", color: "#9099aa", lineHeight: 1.5 }}>
-              Conecte via OAuth. Suporte a múltiplas contas.
+            <div style={{ fontSize: "12px", color: "#9099aa", lineHeight: 1.6, marginBottom: "18px" }}>
+              Conecte via OAuth. Pode adicionar mais de uma conta ML ao mesmo tempo.
             </div>
-            <a
-              href="/api/auth/mercadolivre"
-              style={{
-                marginTop: "16px", display: "inline-flex", alignItems: "center", gap: "6px",
-                background: "rgba(255,224,0,0.15)", border: "1px solid rgba(255,224,0,0.3)",
-                padding: "8px 16px", borderRadius: "8px", color: "#FFE000", fontWeight: 700,
-                fontSize: "13px", textDecoration: "none", cursor: "pointer",
-              }}
-            >
+            <div style={{
+              display: "inline-flex", alignItems: "center", gap: "6px",
+              background: "rgba(255,224,0,0.15)", border: "1px solid rgba(255,224,0,0.3)",
+              padding: "7px 14px", borderRadius: "8px", color: "#FFE000", fontWeight: 700, fontSize: "13px",
+            }}>
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
-                <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+                <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
               </svg>
-              Conectar
-            </a>
-          </div>
+              Adicionar conta ML
+            </div>
+          </a>
 
           {/* Shopee — em breve */}
           <div style={{
-            background: "rgba(238,77,45,0.04)", border: "1px solid rgba(238,77,45,0.12)",
-            borderRadius: "14px", padding: "24px", opacity: 0.55, position: "relative",
+            background: "rgba(238,77,45,0.03)", border: "1px solid rgba(238,77,45,0.10)",
+            borderRadius: "14px", padding: "24px", position: "relative", opacity: 0.5,
           }}>
             <div style={{
               position: "absolute", top: "12px", right: "12px",
-              background: "rgba(255,255,255,0.08)", borderRadius: "6px",
-              padding: "2px 8px", fontSize: "10px", color: "#9099aa", fontWeight: 700,
+              background: "rgba(255,255,255,0.07)", borderRadius: "6px",
+              padding: "2px 8px", fontSize: "10px", color: "#9099aa", fontWeight: 700, letterSpacing: "0.5px",
             }}>
               EM BREVE
             </div>
-            <div style={{ fontSize: "28px", marginBottom: "12px" }}>🛍️</div>
-            <div style={{ fontWeight: 800, fontSize: "15px", color: "#EE4D2D", marginBottom: "4px" }}>
+            <div style={{ fontSize: "30px", marginBottom: "12px" }}>🛍️</div>
+            <div style={{ fontWeight: 800, fontSize: "15px", color: "#EE4D2D", marginBottom: "6px" }}>
               Shopee
             </div>
-            <div style={{ fontSize: "12px", color: "#9099aa", lineHeight: 1.5 }}>
-              Integração via API Shopee Open Platform.
+            <div style={{ fontSize: "12px", color: "#9099aa", lineHeight: 1.6 }}>
+              Integração via Shopee Open Platform API. Em desenvolvimento.
             </div>
           </div>
 
