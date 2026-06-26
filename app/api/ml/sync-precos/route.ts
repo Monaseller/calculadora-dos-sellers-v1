@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { calcularFreteMl, calcularFreteFullMl, calcularFreteFlexMl } from "@/lib/tabela-frete-ml";
 import { CATEGORIAS_ML } from "@/lib/comissoes-mercado-livre";
+import { getUserId } from "@/lib/session";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -119,9 +120,13 @@ function recalcularLucroMargem(
 }
 
 export async function POST(request: Request) {
-  const token = getToken(request);
+  const token  = getToken(request);
+  const userId = getUserId(request);
   if (!token) {
     return NextResponse.json({ erro: true, mensagem: "Mercado Livre não conectado." });
+  }
+  if (!userId) {
+    return NextResponse.json({ erro: true, mensagem: "Sessão inválida." });
   }
 
   const { data: anuncios, error } = await supabase
@@ -129,6 +134,7 @@ export async function POST(request: Request) {
     .select("id, ml_item_id, nome, preco_anuncio, frete_gratis, tipo_anuncio, thumbnail, permalink, variation_id, custo_frete, peso_kg, custo_produto, imposto, categoria, sku")
     .eq("ativo", true)
     .eq("marketplace", "ML")
+    .eq("user_id", userId)
     .not("ml_item_id", "is", null);
 
   if (error) return NextResponse.json({ erro: true, mensagem: "Erro Supabase: " + error.message });

@@ -36,6 +36,7 @@ export interface Anuncio {
   peso_kg: number | null;
   variation_id: string | null;
   logistic_type: string | null;  // ML: 'fulfillment' | 'self_service' | 'me2' | 'cross_docking'
+  user_id: string | null;
 }
 
 export interface VendaDia {

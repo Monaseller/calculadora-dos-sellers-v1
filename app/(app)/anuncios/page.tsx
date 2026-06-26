@@ -12,6 +12,7 @@ export default function AnunciosPage() {
   const [showForm,    setShowForm]    = useState(false);
   const [editando,    setEditando]    = useState<Anuncio | null>(null);
   const [mlConectado, setMlConectado] = useState(false);
+  const [userId,      setUserId]      = useState<string | null>(null);
 
   // ── Filtros ─────────────────────────────────────────────────────────────
   const [painelFiltros,      setPainelFiltros]      = useState(false);
@@ -33,23 +34,30 @@ export default function AnunciosPage() {
   const [importando,         setImportando]         = useState(false);
   const [msgImport,          setMsgImport]          = useState<{ ok: boolean; texto: string } | null>(null);
 
-  async function carregar() {
+  async function carregar(uid?: string | null) {
     setLoading(true);
+    const id = uid ?? userId;
+    if (!id) { setLoading(false); return; }
     const { data } = await supabase
       .from("anuncios")
       .select("*")
       .eq("ativo", true)
+      .eq("user_id", id)
       .order("created_at", { ascending: false });
     if (data) setAnuncios(data as Anuncio[]);
     setLoading(false);
   }
 
   useEffect(() => {
-    carregar();
-    fetch("/api/auth/status")
-      .then(r => r.json())
-      .then(d => setMlConectado(!!d.conectado))
-      .catch(() => {});
+    // Busca user_id e ML status em paralelo
+    Promise.all([
+      fetch("/api/auth/me").then(r => r.json()).catch(() => ({ userId: null })),
+      fetch("/api/auth/status").then(r => r.json()).catch(() => ({ conectado: false })),
+    ]).then(([me, status]) => {
+      setUserId(me.userId ?? null);
+      setMlConectado(!!status.conectado);
+      if (me.userId) carregar(me.userId);
+    });
   }, []);
 
   function toggleSelect(id: string) {
@@ -769,6 +777,7 @@ export default function AnunciosPage() {
       {showForm && (
         <FormAnuncio
           inicial={editando}
+          userId={userId}
           onSalvar={() => { setShowForm(false); carregar(); }}
           onFechar={() => setShowForm(false)}
         />

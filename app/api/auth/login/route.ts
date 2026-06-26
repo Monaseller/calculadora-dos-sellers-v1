@@ -13,22 +13,21 @@ export async function POST(request: Request) {
     return NextResponse.json({ erro: "Email e senha obrigatórios." }, { status: 400 });
   }
 
+  // Busca por email (suporte multi-usuário)
   const { data: perfil } = await supabase
     .from("perfil")
-    .select("id, email, senha, nome_completo, email_verificado")
-    .eq("id", 1)
+    .select("id, email, senha, nome_completo, email_verificado, user_uuid")
+    .eq("email", email)
     .single();
 
-  // Primeiro acesso: nenhum perfil cadastrado ainda
   if (!perfil || !perfil.email) {
     return NextResponse.json({ erro: "Nenhuma conta configurada. Crie sua conta primeiro." }, { status: 404 });
   }
 
-  if (perfil.email !== email || perfil.senha !== senha) {
+  if (perfil.senha !== senha) {
     return NextResponse.json({ erro: "Email ou senha incorretos." }, { status: 401 });
   }
 
-  // Bloqueia login se email não foi confirmado
   if (!perfil.email_verificado) {
     return NextResponse.json(
       { erro: "Confirme seu email antes de entrar. Verifique sua caixa de entrada.", naoVerificado: true },
@@ -36,13 +35,20 @@ export async function POST(request: Request) {
     );
   }
 
+  // Garante que o user_uuid existe (migração de contas antigas)
+  let userId = perfil.user_uuid;
+  if (!userId) {
+    userId = crypto.randomUUID();
+    await supabase.from("perfil").update({ user_uuid: userId }).eq("id", perfil.id);
+  }
+
   const res = NextResponse.json({ ok: true, nome: perfil.nome_completo });
-  res.cookies.set("cds_session", "1", {
+  res.cookies.set("cds_session", userId, {
     httpOnly: true,
     secure:   process.env.NODE_ENV === "production",
     sameSite: "lax",
     path:     "/",
-    maxAge:   86400 * 30, // 30 dias
+    maxAge:   86400 * 30,
   });
 
   return res;

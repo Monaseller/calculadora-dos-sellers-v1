@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { getUserId } from "@/lib/session";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -33,16 +34,21 @@ async function buscarSkuUserProducts(
 }
 
 export async function POST(request: Request) {
-  const token = getToken(request);
+  const token  = getToken(request);
+  const userId = getUserId(request);
   if (!token) {
     return NextResponse.json({ erro: true, mensagem: "Conta ML não conectada." });
   }
+  if (!userId) {
+    return NextResponse.json({ erro: true, mensagem: "Sessão inválida." });
+  }
 
-  // Busca anúncios com ml_item_id mas sem SKU (ou SKU vazio)
+  // Busca anúncios com ml_item_id mas sem SKU (ou SKU vazio) — apenas deste usuário
   const { data: anuncios, error } = await supabase
     .from("anuncios")
     .select("id, ml_item_id, nome, sku")
     .eq("ativo", true)
+    .eq("user_id", userId)
     .not("ml_item_id", "is", null)
     .or("sku.is.null,sku.eq.");
 

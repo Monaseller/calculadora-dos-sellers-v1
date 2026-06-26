@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { shopeeGet, shopeePost } from "@/lib/shopee-api";
+import { getUserId } from "@/lib/session";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -16,9 +17,13 @@ function getShopeeAuth(request: Request): { token: string; shopId: number } | nu
 }
 
 export async function POST(request: Request) {
-  const auth = getShopeeAuth(request);
+  const auth   = getShopeeAuth(request);
+  const userId = getUserId(request);
   if (!auth) {
     return NextResponse.json({ erro: true, mensagem: "Conta Shopee não conectada." }, { status: 401 });
+  }
+  if (!userId) {
+    return NextResponse.json({ erro: true, mensagem: "Sessão inválida." }, { status: 401 });
   }
 
   const { token, shopId } = auth;
@@ -46,11 +51,12 @@ export async function POST(request: Request) {
     return NextResponse.json({ importados: 0, atualizados: 0, total: 0 });
   }
 
-  // ── 2. Busca existentes no Supabase ──────────────────────────────────────
+  // ── 2. Busca existentes no Supabase (apenas deste usuário) ──────────────
   const { data: existentes } = await supabase
     .from("anuncios")
     .select("id, ml_item_id, variation_id, sku, custo_produto, insumos, custo_frete, imposto")
-    .eq("marketplace", "Shopee");
+    .eq("marketplace", "Shopee")
+    .eq("user_id", userId);
 
   const existMap = new Map<string, any>();
   for (const row of (existentes ?? [])) {
@@ -101,6 +107,7 @@ export async function POST(request: Request) {
             preco_anuncio: preco, sku, thumbnail,
             custo_produto: 0, insumos: 0, custo_frete: 0, imposto: 0,
             margem_desejada: 0, frete_gratis: false, ativo: true,
+            user_id: userId,
           });
           importados++;
         }
@@ -131,6 +138,7 @@ export async function POST(request: Request) {
               preco_anuncio: preco, sku, thumbnail,
               custo_produto: 0, insumos: 0, custo_frete: 0, imposto: 0,
               margem_desejada: 0, frete_gratis: false, ativo: true,
+              user_id: userId,
             });
             importados++;
           }

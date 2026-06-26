@@ -18,19 +18,15 @@ export async function GET(request: Request) {
   const { data: perfil } = await supabase
     .from("perfil")
     .select("id, token_verificacao, token_expiracao, email_verificado")
-    .eq("id", 1)
+    .eq("token_verificacao", token)
     .single();
 
   if (!perfil) {
-    return NextResponse.json({ erro: "Conta não encontrada." }, { status: 404 });
+    return NextResponse.json({ erro: "Token inválido ou expirado." }, { status: 400 });
   }
 
   if (perfil.email_verificado) {
     return NextResponse.json({ ok: true, mensagem: "Email já verificado." });
-  }
-
-  if (perfil.token_verificacao !== token) {
-    return NextResponse.json({ erro: "Token inválido ou expirado." }, { status: 400 });
   }
 
   if (perfil.token_expiracao && new Date(perfil.token_expiracao) < new Date()) {
@@ -40,7 +36,7 @@ export async function GET(request: Request) {
   await supabase
     .from("perfil")
     .update({ email_verificado: true, token_verificacao: null, token_expiracao: null })
-    .eq("id", 1);
+    .eq("id", perfil.id);
 
   return NextResponse.json({ ok: true });
 }
@@ -52,10 +48,10 @@ export async function POST(request: Request) {
   const { data: perfil } = await supabase
     .from("perfil")
     .select("id, email, email_verificado")
-    .eq("id", 1)
+    .eq("email", email)
     .single();
 
-  if (!perfil || perfil.email !== email) {
+  if (!perfil) {
     return NextResponse.json({ erro: "Email não encontrado." }, { status: 404 });
   }
 
@@ -63,13 +59,13 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: true, mensagem: "Email já verificado." });
   }
 
-  const token = crypto.randomUUID();
+  const token    = crypto.randomUUID();
   const expiracao = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 
   await supabase
     .from("perfil")
     .update({ token_verificacao: token, token_expiracao: expiracao })
-    .eq("id", 1);
+    .eq("id", perfil.id);
 
   await enviarEmailVerificacao(email, token);
 
@@ -81,11 +77,11 @@ async function enviarEmailVerificacao(email: string, token: string) {
   const resend = new Resend(process.env.RESEND_API_KEY);
 
   const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || "https://www.calculadoradossellers.com.br";
-  const link = `${baseUrl}/verificar-email?token=${token}`;
+  const link    = `${baseUrl}/verificar-email?token=${token}`;
 
   await resend.emails.send({
     from: "CDS <noreply@calculadoradossellers.com.br>",
-    to: email,
+    to:   email,
     subject: "Confirme seu email — Calculadora dos Sellers",
     html: `
       <div style="font-family:system-ui,sans-serif;max-width:520px;margin:0 auto;background:#0d0e12;color:#fff;padding:40px;border-radius:16px">

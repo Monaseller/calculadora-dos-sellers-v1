@@ -9,6 +9,7 @@ import {
 
 interface Props {
   inicial: Anuncio | null;
+  userId: string | null;
   onSalvar: () => void;
   onFechar: () => void;
 }
@@ -40,7 +41,7 @@ interface DadosML {
   tamanhoFull?: string | null;
 }
 
-export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
+export default function FormAnuncio({ inicial, userId, onSalvar, onFechar }: Props) {
   const modoEdicao = !!inicial;
   const [etapa, setEtapa] = useState<Etapa>(modoEdicao ? "custos" : "link");
 
@@ -374,6 +375,7 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
         permalink:         dadosML?.permalink ?? null,
         ativo:             true,
         logistic_type:     tipoEnvio === "Full" ? "fulfillment" : tipoEnvio === "Flex" ? "self_service" : "me2",
+        user_id:           userId ?? null,
       };
     }
 

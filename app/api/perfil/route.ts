@@ -1,16 +1,20 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { getUserId } from "@/lib/session";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 );
 
-export async function GET() {
+export async function GET(request: Request) {
+  const userId = getUserId(request);
+  if (!userId) return NextResponse.json({});
+
   const { data } = await supabase
     .from("perfil")
     .select("*")
-    .eq("id", 1)
+    .eq("user_uuid", userId)
     .single();
 
   return NextResponse.json(data ?? {});
@@ -20,40 +24,48 @@ export async function POST(request: Request) {
   const body = await request.json();
   const isNovaConta = body._novaConta === true;
 
-  const campos: Record<string, unknown> = {};
-  if (body.nome_completo !== undefined) campos.nome_completo = body.nome_completo;
-  if (body.usuario       !== undefined) campos.usuario       = body.usuario;
-  if (body.email         !== undefined) campos.email         = body.email;
-  if (body.documento     !== undefined) campos.documento     = body.documento;
-  if (body.senha         !== undefined) campos.senha         = body.senha;
-
-  // Criação de conta nova: gera token de verificação
   if (isNovaConta) {
-    const token = crypto.randomUUID();
-    campos.email_verificado = false;
-    campos.token_verificacao = token;
-    campos.token_expiracao = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
-  }
+    // Verifica se email já existe
+    const { data: existente } = await supabase
+      .from("perfil")
+      .select("id")
+      .eq("email", body.email)
+      .single();
 
-  const { error } = await supabase
-    .from("perfil")
-    .upsert({ id: 1, ...campos }, { onConflict: "id" });
+    if (existente) {
+      return NextResponse.json({ erro: true, mensagem: "Este email já está cadastrado." }, { status: 409 });
+    }
 
-  if (error) {
-    return NextResponse.json({ erro: true, mensagem: error.message }, { status: 500 });
-  }
+    const userUuid = crypto.randomUUID();
+    const token    = crypto.randomUUID();
+    const expiracao = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 
-  // Envia email de verificação para nova conta
-  if (isNovaConta && campos.email && campos.token_verificacao) {
+    const { error } = await supabase.from("perfil").insert({
+      nome_completo:     body.nome_completo,
+      usuario:           body.usuario,
+      email:             body.email,
+      documento:         body.documento,
+      senha:             body.senha,
+      email_verificado:  false,
+      token_verificacao: token,
+      token_expiracao:   expiracao,
+      user_uuid:         userUuid,
+    });
+
+    if (error) {
+      return NextResponse.json({ erro: true, mensagem: error.message }, { status: 500 });
+    }
+
+    // Envia email de verificação
     try {
       const { Resend } = await import("resend");
-      const resend = new Resend(process.env.RESEND_API_KEY);
+      const resend  = new Resend(process.env.RESEND_API_KEY);
       const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || "https://www.calculadoradossellers.com.br";
-      const link = `${baseUrl}/verificar-email?token=${campos.token_verificacao}`;
+      const link    = `${baseUrl}/verificar-email?token=${token}`;
 
       await resend.emails.send({
         from: "CDS <noreply@calculadoradossellers.com.br>",
-        to: campos.email as string,
+        to:   body.email as string,
         subject: "Confirme seu email — Calculadora dos Sellers",
         html: `
           <div style="font-family:system-ui,sans-serif;max-width:520px;margin:0 auto;background:#0d0e12;color:#fff;padding:40px;border-radius:16px">
@@ -74,7 +86,31 @@ export async function POST(request: Request) {
     } catch (e) {
       console.error("Erro ao enviar email:", e);
     }
+
+    return NextResponse.json({ ok: true, emailEnviado: true });
   }
 
-  return NextResponse.json({ ok: true, emailEnviado: isNovaConta });
+  // ── Atualização de perfil existente ──────────────────────────────────────
+  const userId = getUserId(request);
+  if (!userId) {
+    return NextResponse.json({ erro: true, mensagem: "Não autorizado." }, { status: 401 });
+  }
+
+  const campos: Record<string, unknown> = {};
+  if (body.nome_completo !== undefined) campos.nome_completo = body.nome_completo;
+  if (body.usuario       !== undefined) campos.usuario       = body.usuario;
+  if (body.email         !== undefined) campos.email         = body.email;
+  if (body.documento     !== undefined) campos.documento     = body.documento;
+  if (body.senha         !== undefined) campos.senha         = body.senha;
+
+  const { error } = await supabase
+    .from("perfil")
+    .update(campos)
+    .eq("user_uuid", userId);
+
+  if (error) {
+    return NextResponse.json({ erro: true, mensagem: error.message }, { status: 500 });
+  }
+
+  return NextResponse.json({ ok: true });
 }

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { calcularFreteMl, calcularFreteFullMl, calcularFreteFlexMl } from "@/lib/tabela-frete-ml";
 import { CATEGORIAS_ML } from "@/lib/comissoes-mercado-livre";
+import { getUserId } from "@/lib/session";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -74,9 +75,13 @@ function mapCategoria(mlCategoryName: string | null): string | null {
 }
 
 export async function POST(request: Request) {
-  const token = getToken(request);
+  const token  = getToken(request);
+  const userId = getUserId(request);
   if (!token) {
     return NextResponse.json({ erro: true, mensagem: "Conta do ML não conectada." }, { status: 401 });
+  }
+  if (!userId) {
+    return NextResponse.json({ erro: true, mensagem: "Sessão inválida." }, { status: 401 });
   }
 
   const meRes = await fetch("https://api.mercadolibre.com/users/me", {
@@ -132,11 +137,12 @@ export async function POST(request: Request) {
     }
   }
 
-  // ── 3. Busca anúncios existentes no Supabase ─────────────────────────────
+  // ── 3. Busca anúncios existentes no Supabase (apenas deste usuário) ──────
   const { data: existentes } = await supabase
     .from("anuncios")
     .select("id, ml_item_id, variation_id, sku, custo_produto, insumos, custo_frete, imposto, peso_kg, preco_anuncio")
-    .eq("marketplace", "ML");
+    .eq("marketplace", "ML")
+    .eq("user_id", userId);
 
   // Mapa: "ml_item_id|variation_id" → row
   const existMap = new Map<string, any>();
@@ -238,6 +244,7 @@ export async function POST(request: Request) {
               imposto: 0,
               margem_desejada: 0,
               ativo: true,
+              user_id: userId,
             });
             importados++;
           }
@@ -302,6 +309,7 @@ export async function POST(request: Request) {
                 imposto: 0,
                 margem_desejada: 0,
                 ativo: true,
+                user_id: userId,
               });
               importados++;
             }
