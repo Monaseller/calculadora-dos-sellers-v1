@@ -69,7 +69,11 @@ function LoginForm() {
       body: JSON.stringify({ nome_completo: nome, usuario, email, documento, senha, _novaConta: true }),
     });
     setLoading(false);
-    if (!resPerfil.ok) { setErro("Erro ao criar conta."); return; }
+    if (!resPerfil.ok) {
+      const d = await resPerfil.json().catch(() => ({}));
+      setErro(d.mensagem || "Erro ao criar conta. Tente novamente.");
+      return;
+    }
     // Redireciona para página de verificação de email
     router.push(`/verificar-email?email=${encodeURIComponent(email)}`);
   }

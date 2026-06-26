@@ -13,22 +13,24 @@ export async function POST(request: Request) {
     return NextResponse.json({ erro: "Email e senha obrigatórios." }, { status: 400 });
   }
 
-  // Busca por email (suporte multi-usuário)
+  // Busca por email (case-insensitive, suporte multi-usuário)
+  const emailNorm = email.trim().toLowerCase();
   const { data: perfil } = await supabase
     .from("perfil")
     .select("id, email, senha, nome_completo, email_verificado, user_uuid")
-    .eq("email", email)
+    .ilike("email", emailNorm)
     .single();
 
   if (!perfil || !perfil.email) {
     return NextResponse.json({ erro: "Nenhuma conta configurada. Crie sua conta primeiro." }, { status: 404 });
   }
 
-  if (perfil.senha !== senha) {
+  if (perfil.senha?.trim() !== senha.trim()) {
     return NextResponse.json({ erro: "Email ou senha incorretos." }, { status: 401 });
   }
 
-  if (!perfil.email_verificado) {
+  // Bloqueia apenas se explicitamente false (não null — contas antigas não tinham verificação)
+  if (perfil.email_verificado === false) {
     return NextResponse.json(
       { erro: "Confirme seu email antes de entrar. Verifique sua caixa de entrada.", naoVerificado: true },
       { status: 403 }
