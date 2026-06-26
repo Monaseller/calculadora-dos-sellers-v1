@@ -52,7 +52,7 @@ export async function POST(request: Request) {
       const link = `${baseUrl}/verificar-email?token=${campos.token_verificacao}`;
 
       await resend.emails.send({
-        from: "CDS <onboarding@resend.dev>",
+        from: "CDS <noreply@calculadoradossellers.com.br>",
         to: campos.email as string,
         subject: "Confirme seu email — Calculadora dos Sellers",
         html: `

@@ -84,7 +84,7 @@ async function enviarEmailVerificacao(email: string, token: string) {
   const link = `${baseUrl}/verificar-email?token=${token}`;
 
   await resend.emails.send({
-    from: "CDS <onboarding@resend.dev>",
+    from: "CDS <noreply@calculadoradossellers.com.br>",
     to: email,
     subject: "Confirme seu email — Calculadora dos Sellers",
     html: `
