@@ -1,0 +1,284 @@
+.landing {
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at top right, rgba(255, 122, 0, 0.18), transparent 35%),
+    #020817;
+  color: white;
+  padding: 28px 64px;
+}
+
+/* ── HEADER ── */
+.landingHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 70px;
+}
+.landingLogo {
+  background: linear-gradient(135deg, #ff7a00, #ffb000);
+  color: #020817;
+  font-weight: 900;
+  font-size: 34px;
+  padding: 14px 22px;
+  border-radius: 18px;
+}
+.landingHeader nav {
+  display: flex;
+  gap: 34px;
+}
+.landingHeader a {
+  color: #e5e7eb;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+}
+.headerActions,
+.heroButtons {
+  display: flex;
+  gap: 14px;
+}
+
+/* ── BUTTONS ── */
+.btnPrimary {
+  background: linear-gradient(135deg, #ff7a00, #ffb000);
+  color: white;
+  border: none;
+  padding: 16px 26px;
+  border-radius: 10px;
+  font-weight: 800;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  font-size: 15px;
+}
+.btnOutline {
+  background: transparent;
+  color: white;
+  border: 1px solid #475569;
+  padding: 16px 26px;
+  border-radius: 10px;
+  font-weight: 800;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  font-size: 15px;
+}
+
+/* ── HERO ── */
+.hero {
+  display: grid;
+  grid-template-columns: 1fr 1.15fr;
+  gap: 60px;
+  align-items: center;
+}
+.heroLeft {
+  display: flex;
+  flex-direction: column;
+}
+.badge {
+  display: inline-block;
+  border: 1px solid #334155;
+  padding: 12px 18px;
+  border-radius: 999px;
+  margin-bottom: 24px;
+  width: fit-content;
+}
+.hero h1 {
+  font-size: 64px;
+  line-height: 1.05;
+  margin: 0 0 24px;
+}
+.hero h1 span {
+  color: #ff7a00;
+}
+.hero p {
+  color: #cbd5e1;
+  font-size: 20px;
+  line-height: 1.6;
+  max-width: 620px;
+  margin: 0 0 24px;
+}
+.benefits {
+  display: flex;
+  gap: 28px;
+  margin-top: 32px;
+  color: #cbd5e1;
+}
+
+/* ── DASHBOARD CARD ── */
+.dashboardCard {
+  background: rgba(15, 23, 42, 0.92);
+  border: 1px solid rgba(255, 122, 0, 0.35);
+  border-radius: 28px;
+  padding: 34px;
+  box-shadow: 0 0 60px rgba(255, 122, 0, 0.15);
+  transform: rotate(-2deg);
+}
+.dashboardCard h3 {
+  margin: 0 0 4px;
+  font-size: 16px;
+}
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  margin: 24px 0;
+}
+.priceBox {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 16px;
+  margin: 24px 0;
+}
+.metrics div,
+.priceBox div {
+  background: #111827;
+  border: 1px solid #1e293b;
+  border-radius: 16px;
+  padding: 18px;
+}
+.metrics strong {
+  display: block;
+  color: #22c55e;
+  font-size: 24px;
+  margin-top: 8px;
+}
+.metrics small {
+  color: #94a3b8;
+  font-size: 12px;
+}
+.priceBox h2 {
+  font-size: 36px;
+  margin: 10px 0 0;
+}
+.priceBox small {
+  color: #94a3b8;
+  font-size: 12px;
+}
+.health {
+  margin: 24px 0;
+}
+.health span:first-child {
+  color: #cbd5e1;
+  font-size: 14px;
+}
+.bar {
+  height: 12px;
+  background: #334155;
+  border-radius: 999px;
+  overflow: hidden;
+  margin: 12px 0;
+}
+.barFill {
+  height: 100%;
+  width: 75%;
+  background: linear-gradient(90deg, #22c55e, #facc15, #ff7a00);
+}
+
+/* ── PRODUCT PREVIEW ── */
+.productPreview {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  background: #111827;
+  border: 1px solid #1e293b;
+  border-radius: 16px;
+  padding: 18px;
+}
+.productImg {
+  width: 72px;
+  height: 72px;
+  background: white;
+  border-radius: 14px;
+  display: grid;
+  place-items: center;
+  font-size: 34px;
+  flex-shrink: 0;
+}
+.productPreview small {
+  display: block;
+  color: #94a3b8;
+  margin-top: 4px;
+}
+
+/* ── VIDEO SECTION ── */
+.videoSection {
+  margin-top: 70px;
+  display: grid;
+  grid-template-columns: 1fr 1.3fr;
+  gap: 40px;
+  background: rgba(15, 23, 42, 0.75);
+  border: 1px solid #1e293b;
+  border-radius: 28px;
+  padding: 38px;
+}
+.videoSection h2 {
+  font-size: 28px;
+  margin: 0 0 12px;
+}
+.videoSection span {
+  color: #ff7a00;
+}
+.videoSection p {
+  color: #cbd5e1;
+}
+.videoPlaceholder {
+  height: 260px;
+  border: 1px solid rgba(255, 122, 0, 0.5);
+  border-radius: 22px;
+  background: linear-gradient(135deg, #020817, #111827);
+  display: grid;
+  place-items: center;
+  margin-top: 20px;
+}
+.videoPlaceholder button {
+  width: 82px;
+  height: 82px;
+  border-radius: 50%;
+  border: none;
+  background: linear-gradient(135deg, #ff7a00, #ffb000);
+  color: white;
+  font-size: 34px;
+  cursor: pointer;
+}
+
+/* ── FEATURES ── */
+.features h2 {
+  font-size: 26px;
+  margin: 0 0 12px;
+}
+.featureGrid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 18px;
+  margin-top: 28px;
+}
+.featureGrid div {
+  background: #111827;
+  border: 1px solid #1e293b;
+  border-radius: 18px;
+  padding: 24px;
+  font-weight: 700;
+}
+
+/* ── RESPONSIVE ── */
+@media (max-width: 900px) {
+  .landing {
+    padding: 24px;
+  }
+  .landingHeader nav {
+    display: none;
+  }
+  .hero,
+  .videoSection {
+    grid-template-columns: 1fr;
+  }
+  .hero h1 {
+    font-size: 42px;
+  }
+  .dashboardCard {
+    transform: none;
+  }
+}
