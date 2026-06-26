@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { getUserId } from "@/lib/session";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -13,6 +14,7 @@ export async function GET(request: Request) {
 
   if (!token) return NextResponse.redirect(new URL("/configuracoes", request.url));
 
+  const userId = getUserId(request);
   let lojaId: string | null = null;
 
   try {
@@ -26,11 +28,12 @@ export async function GET(request: Request) {
       const nickname = me.nickname || me.first_name || "Loja ML";
       const expiresAt = new Date(Date.now() + (Number(expires) || 21600) * 1000).toISOString();
 
+      // Upsert por seller_id + user_id para isolar lojas por usuário CDS
       const { data: loja } = await supabase
         .from("lojas")
         .upsert(
-          { marketplace: "ML", seller_id: sellerId, nickname, nome: nickname, access_token: token, token_expires_at: expiresAt, ativo: true },
-          { onConflict: "seller_id" }
+          { marketplace: "ML", seller_id: sellerId, nickname, nome: nickname, access_token: token, token_expires_at: expiresAt, ativo: true, user_id: userId },
+          { onConflict: "seller_id,user_id" }
         )
         .select("id")
         .single();

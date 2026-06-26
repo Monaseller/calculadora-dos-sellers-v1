@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { getUserId } from "@/lib/session";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -8,11 +9,14 @@ const supabase = createClient(
 
 export async function POST(request: Request) {
   const { loja_id } = await request.json();
+  const userId = getUserId(request);
+  if (!userId) return NextResponse.json({ erro: true, mensagem: "Sessão inválida." }, { status: 401 });
 
   const { data: loja } = await supabase
     .from("lojas")
     .select("*")
     .eq("id", loja_id)
+    .eq("user_id", userId)
     .single();
 
   if (!loja) return NextResponse.json({ erro: true, mensagem: "Loja não encontrada." }, { status: 404 });

@@ -14,11 +14,13 @@ function getCookie(request: Request, name: string): string | null {
 
 export async function POST(request: Request) {
   const { loja_id } = await request.json();
+  const userId = getCookie(request, "cds_session");
 
   await supabase
     .from("lojas")
     .update({ ativo: false, access_token: null })
-    .eq("id", loja_id);
+    .eq("id", loja_id)
+    .eq("user_id", userId);
 
   const activeId = getCookie(request, "loja_ativa_id");
   const res = NextResponse.json({ ok: true });
