@@ -66,15 +66,15 @@ export async function POST(request: Request) {
     return NextResponse.json({ atualizados: 0, mensagem: "Nenhum anúncio MLB sem SKU encontrado." });
   }
 
-  // Obtém user_id uma vez (necessário para o fallback user_products)
-  let userId: string | null = null;
+  // Obtém mlUserId (seller ID do ML) para o fallback user_products
+  let mlUserId: string | null = null;
   try {
     const meRes = await fetch("https://api.mercadolibre.com/users/me", {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (meRes.ok) {
       const meData = await meRes.json();
-      userId = String(meData.id);
+      mlUserId = String(meData.id);
     }
   } catch {}
 
@@ -116,7 +116,7 @@ export async function POST(request: Request) {
         }
 
         // 3. Fallback: busca individual completa para obter catalog_product_id
-        if (!sku && userId) {
+        if (!sku && mlUserId) {
           try {
             const fullRes = await fetch(
               `https://api.mercadolibre.com/items/${body.id}`,
@@ -133,7 +133,7 @@ export async function POST(request: Request) {
               }
               // Tenta user_products com catalog_product_id da resposta completa
               if (!sku && fullData.catalog_product_id) {
-                sku = await buscarSkuUserProducts(fullData.catalog_product_id, userId, token);
+                sku = await buscarSkuUserProducts(fullData.catalog_product_id, mlUserId!, token);
               }
             }
           } catch {}
