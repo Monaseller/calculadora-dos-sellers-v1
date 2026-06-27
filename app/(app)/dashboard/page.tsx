@@ -360,7 +360,7 @@ function TopProductRow({ p, rank }: { p: TopProduto; rank: number }) {
       {/* Thumbnail */}
       <div style={{ width: 40, height: 40, borderRadius: 10, overflow: "hidden", background: "#1E293B", border: "1px solid #334155", flexShrink: 0 }}>
         {p.thumbnail
-          ? <img src={p.thumbnail} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} onError={e => { (e.target as HTMLImageElement).style.display = "none"; }} />
+          ? <img src={p.thumbnail.replace("http://","https://")} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} onError={e => { const t = e.target as HTMLImageElement; t.style.display="none"; t.parentElement!.innerHTML='<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:18px">🛒</div>'; }} />
           : <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>🛒</div>
         }
       </div>
@@ -537,7 +537,8 @@ export default function DashboardPage() {
       for (const r of rows) {
         const key = r.mlItemId || r.anuncio;
         const ex  = mapA.get(key);
-        const thumb = anuncios.find(a => a.ml_item_id === r.mlItemId)?.thumbnail ?? null;
+        const rawThumb = anuncios.find(a => a.ml_item_id === r.mlItemId || a.ml_item_id?.split("-")[0] === r.mlItemId?.split("-")[0])?.thumbnail ?? null;
+        const thumb = rawThumb ? rawThumb.replace("http://", "https://") : null;
         if (ex) {
           ex.faturamento += r.faturamento;
           ex.lucro       += r.margemContrib;
@@ -582,7 +583,7 @@ export default function DashboardPage() {
   const hoje2 = new Date().toLocaleDateString("pt-BR", { weekday: "long", day: "numeric", month: "long" });
 
   return (
-    <div style={{ padding: "28px 32px", maxWidth: 1200, margin: "0 auto" }}>
+    <div style={{ padding: "24px 28px" }}>
       <style>{`
         @keyframes fadeUp { from { opacity:0; transform:translateY(16px); } to { opacity:1; transform:translateY(0); } }
         @keyframes pulse  { 0%,100% { opacity:1; } 50% { opacity:.5; } }
@@ -595,7 +596,7 @@ export default function DashboardPage() {
         background: "linear-gradient(135deg, #0F172A 0%, #1a0a00 100%)",
         border: "1px solid #1E293B",
         borderRadius: 20, padding: "28px 32px",
-        position: "relative",
+        position: "relative", zIndex: 50,
       }}>
         {/* Glow background */}
         <div style={{
