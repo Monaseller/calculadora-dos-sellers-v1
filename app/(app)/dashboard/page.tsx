@@ -150,7 +150,7 @@ export default function DashboardPage() {
         return;
       }
 
-      const rows: VendaRow[] = (data.vendas ?? []).filter((r: VendaRow) => r.status === "paid");
+      const rows: VendaRow[] = (data.rows ?? []).filter((r: VendaRow) => r.status === "paid");
 
       // ── KPIs ─────────────────────────────────────────────────────────
       const faturamento = rows.reduce((s, r) => s + r.faturamento, 0);
