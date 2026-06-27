@@ -683,6 +683,87 @@ export default function DashboardPage() {
 
   const hoje2 = new Date().toLocaleDateString("pt-BR", { weekday: "long", day: "numeric", month: "long" });
 
+  // ── CDS Intelligence ──────────────────────────────────────
+  const produtosBaixaMargem = tops.filter(p => p.margem < 10 && p.margem >= 0);
+  const comissaoPct  = kpis.faturamento > 0 ? (totalComissao / kpis.faturamento) * 100 : 0;
+  const fretePct     = kpis.faturamento > 0 ? (totalFrete / kpis.faturamento) * 100 : 0;
+  const lucroAdicionalEstimado = produtosBaixaMargem.reduce((sum, p) => {
+    return sum + Math.max(p.faturamento * 0.20 - p.lucro, 0);
+  }, 0);
+  const reducaoPrejuizo = loss.reduce((sum, p) => sum + Math.abs(p.lucro), 0);
+  const projetoMargem  = kpis.margem + (kpis.faturamento > 0 ? (lucroAdicionalEstimado / kpis.faturamento) * 100 : 0);
+
+  const cdsInsights: { prioridade: string; cor: string; icone: string; titulo: string; texto: string; acao: string }[] = [];
+  if (loss.length > 0) cdsInsights.push({
+    prioridade: "Crítica", cor: "#EF4444", icone: "💸",
+    titulo: `${loss.length} produto${loss.length > 1 ? "s" : ""} gerando prejuízo`,
+    texto: `Cada venda está te custando dinheiro. Pausar ou corrigir esses anúncios pode recuperar ${fmtBRL(reducaoPrejuizo, true)}/mês.`,
+    acao: "Corrigir agora",
+  });
+  if (produtosBaixaMargem.length > 0) cdsInsights.push({
+    prioridade: "Alta", cor: "#F97316", icone: "⚠️",
+    titulo: `${produtosBaixaMargem.length} produto${produtosBaixaMargem.length > 1 ? "s" : ""} com margem abaixo de 10%`,
+    texto: `Estão vendendo, mas quase sem lucro. Ajustando o preço para 20% de margem, você pode ganhar ${fmtBRL(lucroAdicionalEstimado, true)} a mais.`,
+    acao: "Ver produtos",
+  });
+  if (kpis.margem < 15 && kpis.pedidos > 0) cdsInsights.push({
+    prioridade: "Alta", cor: "#F97316", icone: "📉",
+    titulo: `Margem geral de ${kpis.margem.toFixed(1)}% — abaixo da meta`,
+    texto: `A meta saudável para marketplace é 15%+. Ajustar apenas os produtos críticos pode resolver sem precisar vender mais.`,
+    acao: "Ver análise",
+  });
+  if (comissaoPct > 14) cdsInsights.push({
+    prioridade: "Média", cor: "#FFB000", icone: "🏷️",
+    titulo: `Comissões consumindo ${comissaoPct.toFixed(1)}% da receita`,
+    texto: `As taxas do ML representam ${fmtBRL(totalComissao, true)}. Revise o tipo de anúncio — migrar para Classic em produtos de menor giro pode ajudar.`,
+    acao: "Analisar taxas",
+  });
+  if (fretePct > 8) cdsInsights.push({
+    prioridade: "Média", cor: "#FFB000", icone: "🚚",
+    titulo: `Frete consumindo ${fretePct.toFixed(1)}% da receita`,
+    texto: `O custo logístico está impactando a margem. Revise o peso declarado dos produtos e a configuração de frete grátis.`,
+    acao: "Revisar frete",
+  });
+  const melhorProduto = tops.find(p => p.margem >= 18);
+  if (melhorProduto) cdsInsights.push({
+    prioridade: "Positiva", cor: "#22C55E", icone: "🏆",
+    titulo: `"${melhorProduto.nome.slice(0, 28)}..." é seu produto mais saudável`,
+    texto: `Margem de ${melhorProduto.margem.toFixed(1)}% e ${fmtBRL(melhorProduto.faturamento, true)} de receita. Esse produto é candidato ideal para campanhas ADS.`,
+    acao: "Criar campanha",
+  });
+  if (kpis.margem >= 20 && loss.length === 0) cdsInsights.push({
+    prioridade: "Positiva", cor: "#22C55E", icone: "✅",
+    titulo: "Operação saudável — parabéns!",
+    texto: `Margem de ${kpis.margem.toFixed(1)}%, sem produtos em prejuízo. Continue monitorando os custos para manter essa performance.`,
+    acao: "Ver detalhes",
+  });
+
+  const cdsAcoes: { prioridade: string; cor: string; acao: string; impacto: string; motivo: string }[] = [];
+  if (loss[0]) cdsAcoes.push({
+    prioridade: "Crítica", cor: "#EF4444",
+    acao: `Revisar preço de "${loss[0].nome.slice(0, 28)}..."`,
+    impacto: `Recuperar ${fmtBRL(Math.abs(loss[0].lucro), true)}/mês`,
+    motivo: "Produto gerando prejuízo em cada venda.",
+  });
+  if (produtosBaixaMargem.length > 0) cdsAcoes.push({
+    prioridade: "Alta", cor: "#F97316",
+    acao: `Aumentar preço de ${produtosBaixaMargem.length} anúncio${produtosBaixaMargem.length > 1 ? "s" : ""} com margem < 10%`,
+    impacto: `+${fmtBRL(lucroAdicionalEstimado, true)} de lucro estimado`,
+    motivo: "Margem abaixo do mínimo recomendado.",
+  });
+  if (melhorProduto) cdsAcoes.push({
+    prioridade: "Média", cor: "#FFB000",
+    acao: `Criar campanha ADS para "${melhorProduto.nome.slice(0, 25)}..."`,
+    impacto: "Ampliar volume no produto mais lucrativo",
+    motivo: "Produto com melhor relação margem x volume.",
+  });
+  cdsAcoes.push({
+    prioridade: "Rotina", cor: "#6366F1",
+    acao: "Sincronizar SKUs e preços esta semana",
+    impacto: "Manter análises precisas",
+    motivo: "Dados desatualizados geram insights errados.",
+  });
+
   return (
     <div style={{ padding: "24px 28px" }}>
       <style>{`
@@ -910,59 +991,183 @@ export default function DashboardPage() {
             )}
           </div>
 
-          {/* ── AI INSIGHTS ───────────────────────────────── */}
-          <div className="dash-anim" style={{ animationDelay: "0.25s" }}>
+          {/* ── CENTRO DE INTELIGÊNCIA CDS ────────────────── */}
+          <div className="dash-anim" style={{ animationDelay: "0.25s", marginBottom: 24 }}>
             <div style={{
-              background: "linear-gradient(135deg, #0F172A 0%, #1a0a1a 100%)",
-              border: "1px solid #6366F130",
-              borderRadius: 20, padding: "24px 28px",
+              background: "linear-gradient(135deg, #07090F 0%, #110A00 50%, #07090F 100%)",
+              border: "1px solid rgba(255,122,0,0.18)",
+              borderRadius: 24, padding: "28px 32px",
               position: "relative", overflow: "hidden",
+              boxShadow: "0 0 80px rgba(255,122,0,0.05), inset 0 1px 0 rgba(255,122,0,0.08)",
             }}>
-              <div style={{
-                position: "absolute", top: -40, right: -40, width: 200, height: 200, borderRadius: "50%",
-                background: "radial-gradient(circle, rgba(99,102,241,0.12) 0%, transparent 70%)", pointerEvents: "none",
-              }} />
-              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 20 }}>
-                <div style={{ width: 36, height: 36, borderRadius: 10, background: "#6366F118", border: "1px solid #6366F130", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>🤖</div>
-                <div>
-                  <div style={{ fontSize: 15, fontWeight: 800, color: "#fff" }}>Insights da CDS</div>
-                  <div style={{ fontSize: 12, color: "#94A3B8" }}>Análise inteligente do seu negócio</div>
+              {/* Glow orbs */}
+              <div style={{ position:"absolute", top:-60, left:-60, width:280, height:280, borderRadius:"50%", background:"radial-gradient(circle, rgba(255,122,0,0.07) 0%, transparent 70%)", pointerEvents:"none" }} />
+              <div style={{ position:"absolute", bottom:-40, right:-40, width:220, height:220, borderRadius:"50%", background:"radial-gradient(circle, rgba(99,102,241,0.06) 0%, transparent 70%)", pointerEvents:"none" }} />
+
+              {/* Header */}
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:28 }}>
+                <div style={{ display:"flex", alignItems:"center", gap:14 }}>
+                  <div style={{
+                    width:46, height:46, borderRadius:14,
+                    background:"linear-gradient(135deg, rgba(255,122,0,0.2), rgba(255,122,0,0.05))",
+                    border:"1px solid rgba(255,122,0,0.3)",
+                    display:"flex", alignItems:"center", justifyContent:"center", fontSize:22,
+                    boxShadow:"0 0 20px rgba(255,122,0,0.15)",
+                  }}>🧠</div>
+                  <div>
+                    <div style={{ fontSize:18, fontWeight:900, color:"#fff", letterSpacing:"-0.3px" }}>Centro de Inteligência CDS</div>
+                    <div style={{ fontSize:12, color:"rgba(255,122,0,0.8)", fontWeight:600 }}>Análise automática da sua operação • {new Date().toLocaleDateString("pt-BR")}</div>
+                  </div>
+                </div>
+                <div style={{
+                  padding:"6px 14px", borderRadius:20,
+                  background:"rgba(255,122,0,0.1)", border:"1px solid rgba(255,122,0,0.2)",
+                  fontSize:11, fontWeight:800, color:"#FF7A00", letterSpacing:"0.5px",
+                }}>PREMIUM</div>
+              </div>
+
+              {/* Score + Impacto */}
+              <div style={{ display:"grid", gridTemplateColumns:"220px 1fr", gap:20, marginBottom:28 }}>
+                {/* Score CDS */}
+                <div style={{
+                  background:"rgba(255,255,255,0.02)", border:"1px solid rgba(255,122,0,0.12)",
+                  borderRadius:18, padding:"20px 16px", textAlign:"center",
+                  backdropFilter:"blur(10px)",
+                }}>
+                  <div style={{ fontSize:11, fontWeight:700, color:"#94A3B8", letterSpacing:"0.6px", marginBottom:12 }}>SCORE CDS</div>
+                  <svg viewBox="0 0 160 100" width={160} height={100} style={{ display:"block", margin:"0 auto" }}>
+                    <defs>
+                      <linearGradient id="scoreGrad" x1="0" y1="0" x2="1" y2="0">
+                        <stop offset="0%" stopColor="#EF4444" />
+                        <stop offset="40%" stopColor="#FFB000" />
+                        <stop offset="75%" stopColor="#22C55E" />
+                        <stop offset="100%" stopColor="#6366F1" />
+                      </linearGradient>
+                    </defs>
+                    {/* Track */}
+                    <path d="M 20 85 A 60 60 0 0 1 140 85" stroke="#1E293B" strokeWidth="10" fill="none" strokeLinecap="round" />
+                    {/* Fill — arc proportional to score */}
+                    {(() => {
+                      const pct = score / 100;
+                      const startAngle = Math.PI;
+                      const endAngle = Math.PI + pct * Math.PI;
+                      const x1 = 80 + 60 * Math.cos(startAngle);
+                      const y1 = 85 + 60 * Math.sin(startAngle);
+                      const x2 = 80 + 60 * Math.cos(endAngle);
+                      const y2 = 85 + 60 * Math.sin(endAngle);
+                      const large = pct > 0.5 ? 1 : 0;
+                      return pct > 0.01 ? (
+                        <path d={`M ${x1.toFixed(1)} ${y1.toFixed(1)} A 60 60 0 ${large} 1 ${x2.toFixed(1)} ${y2.toFixed(1)}`}
+                          stroke="url(#scoreGrad)" strokeWidth="10" fill="none" strokeLinecap="round" />
+                      ) : null;
+                    })()}
+                    <text x="80" y="76" textAnchor="middle" fill="#fff" fontSize="26" fontWeight="900">{score}</text>
+                    <text x="80" y="90" textAnchor="middle" fill="#94A3B8" fontSize="9">
+                      {score < 40 ? "Crítico" : score < 70 ? "Atenção" : score < 90 ? "Saudável" : "Excelente"}
+                    </text>
+                  </svg>
+                  <div style={{ marginTop:10, display:"flex", justifyContent:"center", gap:8, flexWrap:"wrap" }}>
+                    {[["0–39","#EF4444"],["40–69","#FFB000"],["70–89","#22C55E"],["90+","#6366F1"]].map(([l,c])=>(
+                      <span key={l} style={{ fontSize:9, padding:"2px 7px", borderRadius:8, background:`${c}18`, color:c, fontWeight:700 }}>{l}</span>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Impacto financeiro */}
+                <div style={{
+                  background:"rgba(255,255,255,0.02)", border:"1px solid rgba(255,122,0,0.12)",
+                  borderRadius:18, padding:"20px 24px",
+                  backdropFilter:"blur(10px)",
+                }}>
+                  <div style={{ fontSize:11, fontWeight:700, color:"#94A3B8", letterSpacing:"0.6px", marginBottom:4 }}>IMPACTO FINANCEIRO ESTIMADO</div>
+                  <div style={{ fontSize:12, color:"rgba(255,122,0,0.7)", marginBottom:16 }}>Se você seguir as recomendações da CDS:</div>
+                  <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+                    {[
+                      { label:"Lucro adicional estimado", value:`+${fmtBRL(lucroAdicionalEstimado, true)}/mês`, color:"#22C55E", icone:"💰" },
+                      { label:"Redução de prejuízo", value:`-${fmtBRL(reducaoPrejuizo, true)}/mês`, color:"#EF4444", icone:"🛡️" },
+                      { label:"Produtos a corrigir", value:`${produtosBaixaMargem.length + loss.length}`, color:"#FFB000", icone:"🔧" },
+                      { label:"Margem projetada", value:`${Math.min(projetoMargem, 99).toFixed(1)}%`, color:"#6366F1", icone:"📊" },
+                    ].map((item,i)=>(
+                      <div key={i} style={{
+                        padding:"12px 14px", borderRadius:12,
+                        background:`${item.color}08`, border:`1px solid ${item.color}18`,
+                      }}>
+                        <div style={{ fontSize:16, marginBottom:4 }}>{item.icone}</div>
+                        <div style={{ fontSize:11, color:"#94A3B8", marginBottom:3 }}>{item.label}</div>
+                        <div style={{ fontSize:16, fontWeight:900, color:item.color }}>{item.value}</div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               </div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 12 }}>
-                {[
-                  {
-                    icon: "💡", color: "#FFB000",
-                    title: "Oportunidade de preço",
-                    msg: tops.length > 0
-                      ? `"${tops[0]?.nome?.slice(0, 30)}..." tem ${tops[0]?.margem?.toFixed(1)}% de margem. Considere aumentar o preço para melhorar o retorno.`
-                      : "Importe seus anúncios para ver sugestões de preço.",
-                  },
-                  {
-                    icon: "📦", color: "#06B6D4",
-                    title: "Produto destaque",
-                    msg: tops.length > 0
-                      ? `"${tops[0]?.nome?.slice(0, 30)}..." é seu produto mais rentável com ${fmtBRL(tops[0]?.faturamento ?? 0, true)} de receita.`
-                      : "Conecte o ML e importe anúncios para ver o destaque.",
-                  },
-                  {
-                    icon: "🎯", color: "#22C55E",
-                    title: "Meta de margem",
-                    msg: kpis.margem >= 20
-                      ? `Parabéns! Sua margem de ${kpis.margem.toFixed(1)}% está acima da meta de 20%.`
-                      : `Sua margem atual é ${kpis.margem.toFixed(1)}%. A meta recomendada é 20%. Revise seus custos.`,
-                  },
-                ].map((item, i) => (
-                  <div key={i} style={{
-                    padding: "16px", background: `${item.color}0A`,
-                    border: `1px solid ${item.color}20`, borderRadius: 14,
-                  }}>
-                    <div style={{ fontSize: 18, marginBottom: 8 }}>{item.icon}</div>
-                    <div style={{ fontSize: 13, fontWeight: 700, color: "#fff", marginBottom: 6 }}>{item.title}</div>
-                    <div style={{ fontSize: 12, color: "#94A3B8", lineHeight: 1.6 }}>{item.msg}</div>
+
+              {/* Insight cards */}
+              {cdsInsights.length > 0 && (
+                <div style={{ marginBottom:24 }}>
+                  <div style={{ fontSize:11, fontWeight:700, color:"#94A3B8", letterSpacing:"0.6px", marginBottom:14 }}>INSIGHTS AUTOMÁTICOS</div>
+                  <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(280px, 1fr))", gap:12 }}>
+                    {cdsInsights.map((ins, i) => (
+                      <div key={i} style={{
+                        padding:"18px 20px",
+                        background:`${ins.cor}07`,
+                        border:`1px solid ${ins.cor}22`,
+                        borderRadius:16, position:"relative", overflow:"hidden",
+                        backdropFilter:"blur(8px)",
+                        transition:"border-color 0.2s, transform 0.2s",
+                      }}>
+                        <div style={{ position:"absolute", top:-20, right:-20, width:80, height:80, borderRadius:"50%", background:`radial-gradient(circle, ${ins.cor}15 0%, transparent 70%)`, pointerEvents:"none" }} />
+                        <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", marginBottom:10 }}>
+                          <span style={{ fontSize:20 }}>{ins.icone}</span>
+                          <span style={{
+                            fontSize:9, fontWeight:800, letterSpacing:"0.5px", padding:"3px 8px", borderRadius:8,
+                            background:`${ins.cor}18`, color:ins.cor, textTransform:"uppercase",
+                          }}>{ins.prioridade}</span>
+                        </div>
+                        <div style={{ fontSize:13, fontWeight:800, color:"#fff", marginBottom:8, lineHeight:1.4 }}>{ins.titulo}</div>
+                        <div style={{ fontSize:12, color:"#94A3B8", lineHeight:1.6, marginBottom:14 }}>{ins.texto}</div>
+                        <button style={{
+                          padding:"6px 14px", borderRadius:8, border:`1px solid ${ins.cor}40`,
+                          background:`${ins.cor}12`, color:ins.cor, fontSize:11, fontWeight:700, cursor:"pointer",
+                        }}>{ins.acao} →</button>
+                      </div>
+                    ))}
                   </div>
-                ))}
-              </div>
+                </div>
+              )}
+
+              {/* O que fazer agora */}
+              {cdsAcoes.length > 0 && (
+                <div>
+                  <div style={{ fontSize:11, fontWeight:700, color:"#94A3B8", letterSpacing:"0.6px", marginBottom:14 }}>O QUE FAZER AGORA</div>
+                  <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+                    {cdsAcoes.map((a, i) => (
+                      <div key={i} style={{
+                        display:"grid", gridTemplateColumns:"auto 1fr auto auto",
+                        alignItems:"center", gap:14, padding:"14px 18px",
+                        background:"rgba(255,255,255,0.02)", border:"1px solid rgba(255,255,255,0.06)",
+                        borderRadius:14, backdropFilter:"blur(8px)",
+                      }}>
+                        <span style={{
+                          fontSize:9, fontWeight:800, padding:"4px 9px", borderRadius:8,
+                          background:`${a.cor}18`, color:a.cor, textTransform:"uppercase", whiteSpace:"nowrap",
+                        }}>{a.prioridade}</span>
+                        <div>
+                          <div style={{ fontSize:13, fontWeight:700, color:"#fff" }}>{a.acao}</div>
+                          <div style={{ fontSize:11, color:"#94A3B8", marginTop:2 }}>{a.motivo}</div>
+                        </div>
+                        <div style={{ textAlign:"right", whiteSpace:"nowrap" }}>
+                          <div style={{ fontSize:11, color:"#94A3B8" }}>impacto</div>
+                          <div style={{ fontSize:12, fontWeight:800, color:a.cor }}>{a.impacto}</div>
+                        </div>
+                        <button style={{
+                          padding:"7px 16px", borderRadius:9, border:`1px solid ${a.cor}40`,
+                          background:`${a.cor}15`, color:a.cor, fontSize:11, fontWeight:700, cursor:"pointer", whiteSpace:"nowrap",
+                        }}>Agir →</button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
