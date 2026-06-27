@@ -595,7 +595,7 @@ export default function DashboardPage() {
         background: "linear-gradient(135deg, #0F172A 0%, #1a0a00 100%)",
         border: "1px solid #1E293B",
         borderRadius: 20, padding: "28px 32px",
-        position: "relative", overflow: "hidden",
+        position: "relative",
       }}>
         {/* Glow background */}
         <div style={{
