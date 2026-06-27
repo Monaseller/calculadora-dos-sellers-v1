@@ -211,7 +211,7 @@ function PieChartSection({ items }: { items: { label: string; value: number; col
   const total = positivos.reduce((s, i) => s + i.value, 0);
   if (total <= 0) return null;
 
-  const CX = 90, CY = 90, R = 72, RI = 42;
+  const CX = 80, CY = 80, R = 62, RI = 36;
   let angle = -Math.PI / 2;
   const slices = positivos.map((item, idx) => {
     const pct = item.value / total;
@@ -231,10 +231,10 @@ function PieChartSection({ items }: { items: { label: string; value: number; col
   });
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-      <div style={{ display: "flex", gap: 16, alignItems: "center", flex: 1 }}>
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 12, alignItems: "center", width: "100%" }}>
         {/* SVG */}
-        <svg viewBox="0 0 180 180" width={180} height={180} style={{ flexShrink: 0 }}>
+        <svg viewBox="0 0 160 160" width={160} height={160} style={{ flexShrink: 0 }}>
           {slices.map((s, i) => {
             const scale = hov === i ? 1.06 : 1;
             const tx = CX * (1 - scale), ty = CY * (1 - scale);
@@ -269,15 +269,15 @@ function PieChartSection({ items }: { items: { label: string; value: number; col
           )}
         </svg>
 
-        {/* Legenda */}
-        <div style={{ display: "flex", flexDirection: "column", gap: 8, flex: 1 }}>
+        {/* Legenda em grid 2x2 */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px 12px", width: "100%" }}>
           {slices.map((s, i) => (
             <div key={i}
               onMouseEnter={() => setHov(i)} onMouseLeave={() => setHov(null)}
-              style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", opacity: hov === null || hov === i ? 1 : 0.45, transition: "opacity 0.15s" }}>
-              <div style={{ width: 10, height: 10, borderRadius: "50%", background: s.color, flexShrink: 0 }} />
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 11, fontWeight: 700, color: hov === i ? "#fff" : "#94A3B8", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.label}</div>
+              style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", opacity: hov === null || hov === i ? 1 : 0.45, transition: "opacity 0.15s" }}>
+              <div style={{ width: 8, height: 8, borderRadius: "50%", background: s.color, flexShrink: 0 }} />
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 10, fontWeight: 700, color: hov === i ? "#fff" : "#94A3B8", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.label}</div>
                 <div style={{ fontSize: 10, color: s.color, fontWeight: 800 }}>{(s.pct * 100).toFixed(1)}%</div>
               </div>
             </div>
@@ -774,21 +774,22 @@ export default function DashboardPage() {
             <KpiCard icon="📈" label="Unidades"      value={String(kpis.unidades)}            color="#06B6D4" sub="vendidas" />
           </div>
 
-          {/* ── EVOLUÇÃO + PIZZA + BALANCETE ──────────────── */}
-          <div className="dash-anim" style={{ display: "grid", gridTemplateColumns: "1fr 240px 240px", gap: 16, marginBottom: 24, animationDelay: "0.1s" }}>
-            {/* Área chart */}
+          {/* ── EVOLUÇÃO + BALANCETE ──────────────────────── */}
+          <div className="dash-anim" style={{ display: "grid", gridTemplateColumns: "1fr 260px", gap: 16, marginBottom: 24, animationDelay: "0.1s" }}>
+            {/* Área chart + Pizza juntos */}
             <Section title="Evolução de Vendas" subtitle="Faturamento e lucro no período selecionado">
-              <AreaChartSection dias={dias} />
-            </Section>
-
-            {/* Pizza */}
-            <Section title="Composição" subtitle="Distribuição do faturamento">
-              <PieChartSection items={[
-                { label: "Lucro Líquido", value: Math.max(totalLucro, 0), color: "#22C55E" },
-                { label: "Custo Produtos", value: totalCusto, color: "#6366F1" },
-                { label: "Comissões ML", value: totalComissao, color: "#F97316" },
-                { label: "Fretes", value: totalFrete, color: "#06B6D4" },
-              ]} />
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 220px", gap: 20, alignItems: "center" }}>
+                <AreaChartSection dias={dias} />
+                <div style={{ borderLeft: "1px solid #1E293B", paddingLeft: 20 }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "#94A3B8", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 12 }}>Composição</div>
+                  <PieChartSection items={[
+                    { label: "Lucro Líquido", value: Math.max(totalLucro, 0), color: "#22C55E" },
+                    { label: "Custo Produtos", value: totalCusto, color: "#6366F1" },
+                    { label: "Comissões ML", value: totalComissao, color: "#F97316" },
+                    { label: "Fretes", value: totalFrete, color: "#06B6D4" },
+                  ]} />
+                </div>
+              </div>
             </Section>
 
             {/* Balancete */}
