@@ -195,13 +195,13 @@ export default function DateRangePicker({ from, to, onChange }: Props) {
           {/* overlay para fechar */}
           <div
             onClick={() => setOpen(false)}
-            style={{ position: "fixed", inset: 0, zIndex: 99 }}
+            style={{ position: "fixed", inset: 0, zIndex: 9998 }}
           />
           <div style={{
             position: "absolute",
             top: "calc(100% + 8px)",
             left: 0,
-            zIndex: 100,
+            zIndex: 9999,
             background: "#111318",
             border: "1px solid rgba(255,255,255,0.1)",
             borderRadius: "18px",
