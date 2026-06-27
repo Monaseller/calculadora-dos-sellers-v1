@@ -203,6 +203,92 @@ function KpiCard({ icon, label, value, sub, color, spark, diff }: {
 }
 
 // ─────────────────────────────────────────────────────────────
+// PIE CHART SVG
+// ─────────────────────────────────────────────────────────────
+function PieChartSection({ items }: { items: { label: string; value: number; color: string }[] }) {
+  const [hov, setHov] = useState<number | null>(null);
+  const positivos = items.filter(i => i.value > 0);
+  const total = positivos.reduce((s, i) => s + i.value, 0);
+  if (total <= 0) return null;
+
+  const CX = 90, CY = 90, R = 72, RI = 42;
+  let angle = -Math.PI / 2;
+  const slices = positivos.map((item, idx) => {
+    const pct = item.value / total;
+    const a1 = angle;
+    const a2 = angle + pct * 2 * Math.PI;
+    angle = a2;
+    const x1 = CX + R * Math.cos(a1), y1 = CY + R * Math.sin(a1);
+    const x2 = CX + R * Math.cos(a2), y2 = CY + R * Math.sin(a2);
+    const xi1 = CX + RI * Math.cos(a1), yi1 = CY + RI * Math.sin(a1);
+    const xi2 = CX + RI * Math.cos(a2), yi2 = CY + RI * Math.sin(a2);
+    const large = pct > 0.5 ? 1 : 0;
+    const mid = (a1 + a2) / 2;
+    const labelR = R + 14;
+    const lx = CX + labelR * Math.cos(mid);
+    const ly = CY + labelR * Math.sin(mid);
+    return { ...item, pct, x1, y1, x2, y2, xi1, yi1, xi2, yi2, large, lx, ly, mid, idx };
+  });
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+      <div style={{ display: "flex", gap: 16, alignItems: "center", flex: 1 }}>
+        {/* SVG */}
+        <svg viewBox="0 0 180 180" width={180} height={180} style={{ flexShrink: 0 }}>
+          {slices.map((s, i) => {
+            const scale = hov === i ? 1.06 : 1;
+            const tx = CX * (1 - scale), ty = CY * (1 - scale);
+            return (
+              <g key={i} style={{ cursor: "pointer", transform: `scale(${scale})`, transformOrigin: `${CX}px ${CY}px`, transition: "transform 0.2s ease" }}
+                onMouseEnter={() => setHov(i)} onMouseLeave={() => setHov(null)}>
+                <path
+                  d={`M ${s.xi1.toFixed(2)} ${s.yi1.toFixed(2)} L ${s.x1.toFixed(2)} ${s.y1.toFixed(2)} A ${R} ${R} 0 ${s.large} 1 ${s.x2.toFixed(2)} ${s.y2.toFixed(2)} L ${s.xi2.toFixed(2)} ${s.yi2.toFixed(2)} A ${RI} ${RI} 0 ${s.large} 0 ${s.xi1.toFixed(2)} ${s.yi1.toFixed(2)} Z`}
+                  fill={s.color}
+                  fillOpacity={hov === null || hov === i ? 1 : 0.5}
+                  stroke="#0F172A" strokeWidth="2"
+                />
+              </g>
+            );
+          })}
+          {/* Centro */}
+          <circle cx={CX} cy={CY} r={RI - 2} fill="#0F172A" />
+          {hov !== null ? (
+            <>
+              <text x={CX} y={CY - 6} textAnchor="middle" fill="#fff" fontSize="11" fontWeight="800">
+                {(slices[hov].pct * 100).toFixed(1)}%
+              </text>
+              <text x={CX} y={CY + 9} textAnchor="middle" fill="#94A3B8" fontSize="8">
+                {slices[hov].label.split(" ")[0]}
+              </text>
+            </>
+          ) : (
+            <>
+              <text x={CX} y={CY - 4} textAnchor="middle" fill="#fff" fontSize="10" fontWeight="800">Total</text>
+              <text x={CX} y={CY + 10} textAnchor="middle" fill="#94A3B8" fontSize="8">composição</text>
+            </>
+          )}
+        </svg>
+
+        {/* Legenda */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, flex: 1 }}>
+          {slices.map((s, i) => (
+            <div key={i}
+              onMouseEnter={() => setHov(i)} onMouseLeave={() => setHov(null)}
+              style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", opacity: hov === null || hov === i ? 1 : 0.45, transition: "opacity 0.15s" }}>
+              <div style={{ width: 10, height: 10, borderRadius: "50%", background: s.color, flexShrink: 0 }} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: hov === i ? "#fff" : "#94A3B8", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.label}</div>
+                <div style={{ fontSize: 10, color: s.color, fontWeight: 800 }}>{(s.pct * 100).toFixed(1)}%</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
 // AREA CHART (faturamento + lucro por dia)
 // ─────────────────────────────────────────────────────────────
 function AreaChartSection({ dias }: { dias: DiaData[] }) {
@@ -688,11 +774,21 @@ export default function DashboardPage() {
             <KpiCard icon="📈" label="Unidades"      value={String(kpis.unidades)}            color="#06B6D4" sub="vendidas" />
           </div>
 
-          {/* ── EVOLUÇÃO + BALANCETE ──────────────────────── */}
-          <div className="dash-anim" style={{ display: "grid", gridTemplateColumns: "1fr 280px", gap: 16, marginBottom: 24, animationDelay: "0.1s" }}>
+          {/* ── EVOLUÇÃO + PIZZA + BALANCETE ──────────────── */}
+          <div className="dash-anim" style={{ display: "grid", gridTemplateColumns: "1fr 240px 240px", gap: 16, marginBottom: 24, animationDelay: "0.1s" }}>
             {/* Área chart */}
             <Section title="Evolução de Vendas" subtitle="Faturamento e lucro no período selecionado">
               <AreaChartSection dias={dias} />
+            </Section>
+
+            {/* Pizza */}
+            <Section title="Composição" subtitle="Distribuição do faturamento">
+              <PieChartSection items={[
+                { label: "Lucro Líquido", value: Math.max(totalLucro, 0), color: "#22C55E" },
+                { label: "Custo Produtos", value: totalCusto, color: "#6366F1" },
+                { label: "Comissões ML", value: totalComissao, color: "#F97316" },
+                { label: "Fretes", value: totalFrete, color: "#06B6D4" },
+              ]} />
             </Section>
 
             {/* Balancete */}
