@@ -548,8 +548,23 @@ export default function DashboardPage() {
         }
       }
       const all = Array.from(mapA.values()).map(p => ({ ...p, margem: p.faturamento > 0 ? (p.lucro / p.faturamento) * 100 : 0 }));
-      setTops([...all].sort((a, b) => b.faturamento - a.faturamento).slice(0, 10));
-      setLoss([...all].filter(p => p.lucro < 0).sort((a, b) => a.lucro - b.lucro).slice(0, 5));
+      const topsSorted = [...all].sort((a, b) => b.faturamento - a.faturamento).slice(0, 10);
+      const lossSorted = [...all].filter(p => p.lucro < 0).sort((a, b) => a.lucro - b.lucro).slice(0, 5);
+
+      // Busca thumbnails da ML para produtos sem imagem
+      const semThumb = topsSorted.concat(lossSorted).filter(p => !p.thumbnail && p.mlItemId);
+      if (semThumb.length) {
+        const ids = [...new Set(semThumb.map(p => p.mlItemId))].join(",");
+        try {
+          const tr = await fetch(`/api/ml/item-thumbnails?ids=${ids}`);
+          const tMap: Record<string, string> = await tr.json();
+          topsSorted.forEach(p => { if (!p.thumbnail && tMap[p.mlItemId]) p.thumbnail = tMap[p.mlItemId]; });
+          lossSorted.forEach(p => { if (!p.thumbnail && tMap[p.mlItemId]) p.thumbnail = tMap[p.mlItemId]; });
+        } catch { /* silencioso */ }
+      }
+
+      setTops(topsSorted);
+      setLoss(lossSorted);
 
       // ── Alertas ───────────────────────────────────────────
       const al: typeof alertas = [];
