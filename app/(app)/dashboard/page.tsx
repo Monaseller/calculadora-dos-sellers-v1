@@ -464,11 +464,13 @@ function LojasDropdown({ lojas, selecionadas, onChange }: {
     return () => document.removeEventListener("mousedown", handler);
   }, []);
 
-  const todas = selecionadas.size === lojas.length || selecionadas.size === 0;
-  const label = todas
+  const todas = lojas.length === 0 || selecionadas.size === lojas.length || selecionadas.size === 0;
+  const label = lojas.length === 0
+    ? "Minhas lojas"
+    : todas
     ? "Todas as lojas"
     : selecionadas.size === 1
-    ? lojas.find(l => selecionadas.has(l.id))?.nickname ?? "1 loja"
+    ? (lojas.find(l => selecionadas.has(l.id))?.nickname ?? "1 loja")
     : `${selecionadas.size} lojas`;
 
   function toggleLoja(id: string) {
@@ -503,7 +505,7 @@ function LojasDropdown({ lojas, selecionadas, onChange }: {
         <span style={{ color: "#94A3B8", fontSize: 11, marginLeft: 2 }}>{aberto ? "▲" : "▼"}</span>
       </button>
 
-      {aberto && lojas.length > 0 && (
+      {aberto && (
         <div style={{
           position: "absolute", top: "calc(100% + 8px)", right: 0,
           background: "#0F172A", border: "1px solid #1E293B",
@@ -533,7 +535,14 @@ function LojasDropdown({ lojas, selecionadas, onChange }: {
             <span style={{ fontSize: 13, fontWeight: 700, color: todas ? "#FF7A00" : "#fff" }}>Todas as lojas</span>
           </div>
 
-          <div style={{ height: 1, background: "#1E293B", margin: "4px 0 8px" }} />
+          {lojas.length === 0 && (
+            <div style={{ padding: "12px 16px", fontSize: 13, color: "#94A3B8", textAlign: "center" }}>
+              Nenhuma loja conectada.<br />
+              <span style={{ fontSize: 11, color: "#64748B" }}>Vá em Configurações para conectar.</span>
+            </div>
+          )}
+
+          {lojas.length > 0 && <div style={{ height: 1, background: "#1E293B", margin: "4px 0 8px" }} />}
 
           {lojas.map(loja => {
             const sel = selecionadas.has(loja.id);
@@ -888,26 +897,14 @@ export default function DashboardPage() {
             </div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-            {lojas.length > 0 && (
-              <LojasDropdown
-                lojas={lojas}
-                selecionadas={lojasSelecionadas}
-                onChange={(ids) => {
-                  setLojasSelecionadas(ids);
-                  carregar(dateFrom, dateTo, ids);
-                }}
-              />
-            )}
-            {lojas.length === 0 && mlConectado && (
-              <div style={{
-                display: "flex", alignItems: "center", gap: 8,
-                background: "#0F172A", border: "1px solid rgba(34,197,94,0.2)",
-                borderRadius: 10, padding: "8px 14px",
-              }}>
-                <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#22C55E", boxShadow: "0 0 8px #22C55E", animation: "pulse 2s infinite" }} />
-                <span style={{ fontSize: 12, color: "#22C55E", fontWeight: 700 }}>ML Conectado</span>
-              </div>
-            )}
+            <LojasDropdown
+              lojas={lojas}
+              selecionadas={lojasSelecionadas}
+              onChange={(ids) => {
+                setLojasSelecionadas(ids);
+                carregar(dateFrom, dateTo, ids);
+              }}
+            />
             <DateRangePicker from={dateFrom} to={dateTo} onChange={(f, t) => { setDateFrom(f); setDateTo(t); }} />
           </div>
         </div>

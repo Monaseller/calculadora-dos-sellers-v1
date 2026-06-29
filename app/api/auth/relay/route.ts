@@ -28,17 +28,31 @@ export async function GET(request: Request) {
       const nickname = me.nickname || me.first_name || "Loja ML";
       const expiresAt = new Date(Date.now() + (Number(expires) || 21600) * 1000).toISOString();
 
-      // Upsert por seller_id + user_id para isolar lojas por usuário CDS
-      const { data: loja } = await supabase
+      // Busca loja existente por seller_id (independente de user_id)
+      const { data: existente } = await supabase
         .from("lojas")
-        .upsert(
-          { marketplace: "ML", seller_id: sellerId, nickname, nome: nickname, access_token: token, token_expires_at: expiresAt, ativo: true, user_id: userId },
-          { onConflict: "seller_id,user_id" }
-        )
         .select("id")
-        .single();
+        .eq("marketplace", "ML")
+        .eq("seller_id", sellerId)
+        .limit(1)
+        .maybeSingle();
 
-      lojaId = loja?.id ?? null;
+      if (existente?.id) {
+        // Atualiza loja existente (garante user_id e token)
+        await supabase.from("lojas").update({
+          nickname, nome: nickname, access_token: token,
+          token_expires_at: expiresAt, ativo: true, user_id: userId,
+        }).eq("id", existente.id);
+        lojaId = existente.id;
+      } else {
+        // Cria nova loja
+        const { data: nova } = await supabase
+          .from("lojas")
+          .insert({ marketplace: "ML", seller_id: sellerId, nickname, nome: nickname, access_token: token, token_expires_at: expiresAt, ativo: true, user_id: userId })
+          .select("id")
+          .single();
+        lojaId = nova?.id ?? null;
+      }
     }
   } catch {}
 

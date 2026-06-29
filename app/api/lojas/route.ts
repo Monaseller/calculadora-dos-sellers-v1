@@ -15,7 +15,7 @@ export async function GET(request: Request) {
     .from("lojas")
     .select("id, nome, marketplace, seller_id, nickname, ativo, created_at")
     .eq("ativo", true)
-    .eq("user_id", userId)
+    .or(`user_id.eq.${userId},user_id.is.null`)
     .order("created_at");
 
   if (error) return NextResponse.json({ erro: true, mensagem: error.message });
