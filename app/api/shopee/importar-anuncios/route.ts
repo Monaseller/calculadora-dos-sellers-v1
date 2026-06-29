@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { shopeeGet, shopeePost } from "@/lib/shopee-api";
+import { shopeeGet } from "@/lib/shopee-api";
 import { getUserId } from "@/lib/session";
 
 const supabase = createClient(
@@ -8,25 +8,29 @@ const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 );
 
-function getShopeeAuth(request: Request): { token: string; shopId: number } | null {
-  const cookies = request.headers.get("cookie") || "";
-  const token   = cookies.split("; ").find(c => c.startsWith("shopee_access_token="))?.slice("shopee_access_token=".length) ?? "";
-  const shopId  = Number(cookies.split("; ").find(c => c.startsWith("shopee_shop_id="))?.slice("shopee_shop_id=".length) ?? 0);
-  if (!token || !shopId) return null;
-  return { token, shopId };
-}
-
 export async function POST(request: Request) {
-  const auth   = getShopeeAuth(request);
   const userId = getUserId(request);
-  if (!auth) {
-    return NextResponse.json({ erro: true, mensagem: "Conta Shopee não conectada." }, { status: 401 });
-  }
   if (!userId) {
     return NextResponse.json({ erro: true, mensagem: "Sessão inválida." }, { status: 401 });
   }
 
-  const { token, shopId } = auth;
+  // Busca credenciais da loja Shopee do usuário no Supabase
+  const { data: loja } = await supabase
+    .from("lojas")
+    .select("id, shop_id, partner_id, partner_key, access_token, nickname")
+    .eq("user_id", userId)
+    .eq("marketplace", "Shopee")
+    .eq("ativo", true)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .single();
+
+  if (!loja || !loja.partner_id || !loja.partner_key || !loja.access_token) {
+    return NextResponse.json({ erro: true, semConexao: true, mensagem: "Conta Shopee não conectada." }, { status: 401 });
+  }
+
+  const { partner_id, partner_key, access_token, shop_id } = loja;
+  const shopId = Number(shop_id);
 
   // ── 1. Lista todos os item_ids ativos ────────────────────────────────────
   const allItemIds: number[] = [];
@@ -34,7 +38,7 @@ export async function POST(request: Request) {
   const pageSize = 100;
 
   for (;;) {
-    const data = await shopeeGet("/api/v2/product/get_item_list", token, shopId, {
+    const data = await shopeeGet("/api/v2/product/get_item_list", partner_id, partner_key, access_token, shopId, {
       offset,
       page_size: pageSize,
       item_status: "NORMAL",
@@ -72,7 +76,7 @@ export async function POST(request: Request) {
   for (let i = 0; i < allItemIds.length; i += BATCH) {
     const batch = allItemIds.slice(i, i + BATCH);
 
-    const baseInfo = await shopeeGet("/api/v2/product/get_item_base_info", token, shopId, {
+    const baseInfo = await shopeeGet("/api/v2/product/get_item_base_info", partner_id, partner_key, access_token, shopId, {
       item_id_list: batch.join(","),
       need_tax_info: "false",
       need_complaint_policy: "false",
@@ -81,11 +85,10 @@ export async function POST(request: Request) {
     const items: any[] = baseInfo?.response?.item_list ?? [];
 
     for (const item of items) {
-      const itemId   = String(item.item_id);
-      const titulo   = item.item_name ?? itemId;
+      const itemId    = String(item.item_id);
+      const titulo    = item.item_name ?? itemId;
       const thumbnail = item.image?.image_url_list?.[0] ?? null;
 
-      // Verifica se tem variações (modelos)
       const hasModels = (item.has_model ?? false) || (item.model_list?.length ?? 0) > 0;
 
       if (!hasModels) {
@@ -113,7 +116,7 @@ export async function POST(request: Request) {
         }
       } else {
         // ── Com variações: busca modelos ──────────────────────────────────
-        const modelData = await shopeeGet("/api/v2/product/get_model_list", token, shopId, {
+        const modelData = await shopeeGet("/api/v2/product/get_model_list", partner_id, partner_key, access_token, shopId, {
           item_id: item.item_id,
         });
         const models: any[] = modelData?.response?.model ?? [];

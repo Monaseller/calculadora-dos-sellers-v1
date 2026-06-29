@@ -3,17 +3,11 @@ import { useEffect, useState, useCallback } from "react";
 import { createClient } from "@supabase/supabase-js";
 import DateRangePicker from "../vendas/DateRangePicker";
 
-// ─────────────────────────────────────────────────────────────
-// SUPABASE CLIENT
-// ─────────────────────────────────────────────────────────────
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 );
 
-// ─────────────────────────────────────────────────────────────
-// TYPES
-// ─────────────────────────────────────────────────────────────
 type VendaRow = {
   orderId: string; data: string; anuncio: string; status: string;
   mlItemId: string; sku: string | null; qtd: number;
@@ -37,9 +31,6 @@ type TopProduto = {
   margem: number; qtd: number;
 };
 
-// ─────────────────────────────────────────────────────────────
-// HELPERS
-// ─────────────────────────────────────────────────────────────
 function hojeISO() {
   const now = new Date();
   return new Date(now.getTime() - 3 * 60 * 60 * 1000).toISOString().split("T")[0];
@@ -62,17 +53,14 @@ function fmtData(iso: string) {
   return `${d}/${m}`;
 }
 
-// ─────────────────────────────────────────────────────────────
-// SVG HELPERS
-// ─────────────────────────────────────────────────────────────
-function smoothPath(data: number[], W: number, H: number, pad = 0.1): string {
+function smoothPath(data: number[], W: number, H: number): string {
   if (data.length < 2) return "";
   const max = Math.max(...data, 0.01);
   const min = Math.min(...data, 0);
   const range = max - min || 1;
   const pts = data.map((v, i) => ({
     x: (i / (data.length - 1)) * W,
-    y: H - ((v - min) / range) * H * (1 - pad * 2) - H * pad,
+    y: H - ((v - min) / range) * H * 0.8 - H * 0.1,
   }));
   let d = `M ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)}`;
   for (let i = 1; i < pts.length; i++) {
@@ -84,13 +72,12 @@ function smoothPath(data: number[], W: number, H: number, pad = 0.1): string {
 }
 function areaPath(data: number[], W: number, H: number): string {
   const line = smoothPath(data, W, H);
-  const max = Math.max(...data, 0.01);
-  const min = Math.min(...data, 0);
-  const range = max - min || 1;
-  const pts = data.map((v, i) => ({
-    x: (i / (data.length - 1)) * W,
-    y: H - ((v - min) / range) * H * 0.8 - H * 0.1,
-  }));
+  const pts = data.map((v, i) => {
+    const max = Math.max(...data, 0.01);
+    const min = Math.min(...data, 0);
+    const range = max - min || 1;
+    return { x: (i / (data.length - 1)) * W, y: H - ((v - min) / range) * H * 0.8 - H * 0.1 };
+  });
   return line + ` L ${pts[pts.length - 1].x.toFixed(1)} ${H} L 0 ${H} Z`;
 }
 function polarToXY(cx: number, cy: number, r: number, deg: number) {
@@ -103,9 +90,6 @@ function arcD(cx: number, cy: number, r: number, a1: number, a2: number) {
   return `M ${s.x.toFixed(2)} ${s.y.toFixed(2)} A ${r} ${r} 0 ${a2 - a1 > 180 ? 1 : 0} 1 ${e.x.toFixed(2)} ${e.y.toFixed(2)}`;
 }
 
-// ─────────────────────────────────────────────────────────────
-// SPARKLINE
-// ─────────────────────────────────────────────────────────────
 function Sparkline({ data, color, w = 72, h = 30 }: { data: number[]; color: string; w?: number; h?: number }) {
   if (data.length < 2) return null;
   const id = `sg-${color.replace("#", "")}-${w}`;
@@ -125,15 +109,12 @@ function Sparkline({ data, color, w = 72, h = 30 }: { data: number[]; color: str
   );
 }
 
-// ─────────────────────────────────────────────────────────────
-// HEALTH GAUGE
-// ─────────────────────────────────────────────────────────────
 function HealthGauge({ score }: { score: number }) {
   const cx = 110, cy = 100, r = 80;
   const s = -135, e = 135, sweep = 270;
   const val = s + (Math.min(Math.max(score, 0), 100) / 100) * sweep;
   const color = score >= 70 ? "#22C55E" : score >= 40 ? "#FFB000" : "#EF4444";
-  const label = score >= 80 ? "Excelente" : score >= 60 ? "Boa" : score >= 40 ? "Regular" : "Crítica";
+  const label = score >= 80 ? "Excelente" : score >= 60 ? "Boa" : score >= 40 ? "Regular" : "Critica";
   const needle = polarToXY(cx, cy, r * 0.7, val);
   return (
     <svg width="220" height="160" viewBox="0 0 220 160">
@@ -150,9 +131,6 @@ function HealthGauge({ score }: { score: number }) {
   );
 }
 
-// ─────────────────────────────────────────────────────────────
-// KPI CARD
-// ─────────────────────────────────────────────────────────────
 function KpiCard({ icon, label, value, sub, color, spark, diff }: {
   icon: string; label: string; value: string; sub?: string;
   color: string; spark?: number[]; diff?: number;
@@ -168,12 +146,10 @@ function KpiCard({ icon, label, value, sub, color, spark, diff }: {
         border: `1px solid ${hov ? color + "50" : "#1E293B"}`,
         borderRadius: "16px", padding: "20px 20px 16px",
         transition: "all 0.2s", cursor: "default",
-        transform: hov ? "translateY(-3px)" : "none",
         boxShadow: hov ? `0 12px 40px ${color}18` : "none",
         position: "relative", overflow: "hidden",
       }}
     >
-      {/* Glow */}
       {hov && (
         <div style={{
           position: "absolute", top: 0, left: 0, right: 0, height: "1px",
@@ -193,7 +169,7 @@ function KpiCard({ icon, label, value, sub, color, spark, diff }: {
       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
         {diff !== undefined && (
           <span style={{ fontSize: 12, fontWeight: 700, color: isUp ? "#22C55E" : "#EF4444" }}>
-            {isUp ? "↑" : "↓"} {Math.abs(diff).toFixed(1)}%
+            {isUp ? "up" : "down"} {Math.abs(diff).toFixed(1)}%
           </span>
         )}
         {sub && <span style={{ fontSize: 12, color: "#94A3B8" }}>{sub}</span>}
@@ -202,9 +178,6 @@ function KpiCard({ icon, label, value, sub, color, spark, diff }: {
   );
 }
 
-// ─────────────────────────────────────────────────────────────
-// PIE CHART SVG
-// ─────────────────────────────────────────────────────────────
 function PieChartSection({ items }: { items: { label: string; value: number; color: string }[] }) {
   const [hov, setHov] = useState<number | null>(null);
   const positivos = items.filter(i => i.value > 0);
@@ -223,21 +196,15 @@ function PieChartSection({ items }: { items: { label: string; value: number; col
     const xi1 = CX + RI * Math.cos(a1), yi1 = CY + RI * Math.sin(a1);
     const xi2 = CX + RI * Math.cos(a2), yi2 = CY + RI * Math.sin(a2);
     const large = pct > 0.5 ? 1 : 0;
-    const mid = (a1 + a2) / 2;
-    const labelR = R + 14;
-    const lx = CX + labelR * Math.cos(mid);
-    const ly = CY + labelR * Math.sin(mid);
-    return { ...item, pct, x1, y1, x2, y2, xi1, yi1, xi2, yi2, large, lx, ly, mid, idx };
+    return { ...item, pct, x1, y1, x2, y2, xi1, yi1, xi2, yi2, large, idx };
   });
 
   return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
       <div style={{ display: "flex", flexDirection: "column", gap: 12, alignItems: "center", width: "100%" }}>
-        {/* SVG */}
         <svg viewBox="0 0 160 160" width={160} height={160} style={{ flexShrink: 0 }}>
           {slices.map((s, i) => {
             const scale = hov === i ? 1.06 : 1;
-            const tx = CX * (1 - scale), ty = CY * (1 - scale);
             return (
               <g key={i} style={{ cursor: "pointer", transform: `scale(${scale})`, transformOrigin: `${CX}px ${CY}px`, transition: "transform 0.2s ease" }}
                 onMouseEnter={() => setHov(i)} onMouseLeave={() => setHov(null)}>
@@ -250,7 +217,6 @@ function PieChartSection({ items }: { items: { label: string; value: number; col
               </g>
             );
           })}
-          {/* Centro */}
           <circle cx={CX} cy={CY} r={RI - 2} fill="#0F172A" />
           {hov !== null ? (
             <>
@@ -264,12 +230,10 @@ function PieChartSection({ items }: { items: { label: string; value: number; col
           ) : (
             <>
               <text x={CX} y={CY - 4} textAnchor="middle" fill="#fff" fontSize="10" fontWeight="800">Total</text>
-              <text x={CX} y={CY + 10} textAnchor="middle" fill="#94A3B8" fontSize="8">composição</text>
+              <text x={CX} y={CY + 10} textAnchor="middle" fill="#94A3B8" fontSize="8">composicao</text>
             </>
           )}
         </svg>
-
-        {/* Legenda em grid 2x2 */}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px 12px", width: "100%" }}>
           {slices.map((s, i) => (
             <div key={i}
@@ -288,14 +252,11 @@ function PieChartSection({ items }: { items: { label: string; value: number; col
   );
 }
 
-// ─────────────────────────────────────────────────────────────
-// AREA CHART (faturamento + lucro por dia)
-// ─────────────────────────────────────────────────────────────
 function AreaChartSection({ dias }: { dias: DiaData[] }) {
   const [hov, setHov] = useState<number | null>(null);
   if (dias.length < 2) return (
     <div style={{ height: 200, display: "flex", alignItems: "center", justifyContent: "center", color: "#94A3B8", fontSize: 13 }}>
-      Selecione um período com mais de 1 dia para ver o gráfico
+      Selecione um periodo com mais de 1 dia para ver o grafico
     </div>
   );
 
@@ -326,7 +287,6 @@ function AreaChartSection({ dias }: { dias: DiaData[] }) {
 
   return (
     <div>
-      {/* Legend */}
       <div style={{ display: "flex", gap: 20, marginBottom: 16 }}>
         {[["#FF7A00", "Faturamento"], ["#22C55E", "Lucro"]].map(([c, l]) => (
           <div key={l} style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -355,24 +315,19 @@ function AreaChartSection({ dias }: { dias: DiaData[] }) {
             <stop offset="100%" stopColor="#22C55E" stopOpacity="0" />
           </linearGradient>
         </defs>
-        {/* Grid */}
         {[0.25, 0.5, 0.75].map(p => (
           <line key={p} x1="0" y1={(H - p * H * 0.85 - H * 0.05).toFixed(1)} x2={W} y2={(H - p * H * 0.85 - H * 0.05).toFixed(1)}
             stroke="#1E293B" strokeWidth="1" strokeDasharray="4,6" />
         ))}
-        {/* Y labels */}
         {[0.25, 0.5, 0.75, 1].map(p => (
           <text key={p} x="0" y={(H - p * H * 0.85 - H * 0.05 - 4).toFixed(1)} fill="#94A3B8" fontSize="9">
             {fmtBRL(maxV * p, true)}
           </text>
         ))}
-        {/* Areas */}
         <path d={toSmoothPath(fat, true)} fill="url(#gf)" />
         <path d={toSmoothPath(luc, true)} fill="url(#gl)" />
-        {/* Lines */}
         <path d={toSmoothPath(fat)} stroke="#FF7A00" strokeWidth="2" fill="none" strokeLinecap="round" />
         <path d={toSmoothPath(luc)} stroke="#22C55E" strokeWidth="2" fill="none" strokeLinecap="round" />
-        {/* Hover line + dots */}
         {hovX !== null && hov !== null && (
           <>
             <line x1={hovX.toFixed(1)} y1="0" x2={hovX.toFixed(1)} y2={H} stroke="#94A3B8" strokeWidth="1" strokeDasharray="3,4" />
@@ -388,7 +343,6 @@ function AreaChartSection({ dias }: { dias: DiaData[] }) {
             })}
           </>
         )}
-        {/* X labels */}
         {dias.map((d, i) => {
           const x = (i / (dias.length - 1)) * W;
           const show = i === 0 || i === dias.length - 1 || i % Math.max(1, Math.ceil(dias.length / 7)) === 0;
@@ -397,7 +351,6 @@ function AreaChartSection({ dias }: { dias: DiaData[] }) {
           ) : null;
         })}
       </svg>
-      {/* Tooltip */}
       {hov !== null && (
         <div style={{
           marginTop: 8, padding: "8px 14px", background: "#1E293B",
@@ -413,18 +366,16 @@ function AreaChartSection({ dias }: { dias: DiaData[] }) {
   );
 }
 
-// ─────────────────────────────────────────────────────────────
-// TOP PRODUCT ROW
-// ─────────────────────────────────────────────────────────────
 const RANK_STYLE = [
-  { icon: "🥇", color: "#FFB000" },
-  { icon: "🥈", color: "#94A3B8" },
-  { icon: "🥉", color: "#CD7F32" },
+  { icon: "gold", color: "#FFB000" },
+  { icon: "silver", color: "#94A3B8" },
+  { icon: "bronze", color: "#CD7F32" },
 ];
 
 function TopProductRow({ p, rank }: { p: TopProduto; rank: number }) {
   const [hov, setHov] = useState(false);
   const rs = RANK_STYLE[rank - 1];
+  const rankIcon = rank === 1 ? "🥇" : rank === 2 ? "🥈" : rank === 3 ? "🥉" : `#${rank}`;
   return (
     <div
       onMouseEnter={() => setHov(true)}
@@ -439,40 +390,33 @@ function TopProductRow({ p, rank }: { p: TopProduto; rank: number }) {
         transition: "all 0.15s",
       }}
     >
-      {/* Rank */}
       <div style={{ textAlign: "center", fontSize: rank <= 3 ? 20 : 13, fontWeight: 800, color: rs?.color ?? "#94A3B8" }}>
-        {rs?.icon ?? `#${rank}`}
+        {rankIcon}
       </div>
-      {/* Thumbnail */}
       <div style={{ width: 40, height: 40, borderRadius: 10, overflow: "hidden", background: "#1E293B", border: "1px solid #334155", flexShrink: 0 }}>
         {p.thumbnail
-          ? <img src={p.thumbnail.replace("http://","https://")} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} onError={e => { const t = e.target as HTMLImageElement; t.style.display="none"; t.parentElement!.innerHTML='<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:18px">🛒</div>'; }} />
+          ? <img src={p.thumbnail.replace("http://","https://")} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} onError={e => { const t = e.target as HTMLImageElement; t.style.display="none"; if (t.parentElement) t.parentElement.innerHTML='<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:18px">&#x1F6D2;</div>'; }} />
           : <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>🛒</div>
         }
       </div>
-      {/* Nome + SKU */}
       <div style={{ minWidth: 0 }}>
         <div style={{ fontSize: 13, fontWeight: 600, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.nome}</div>
-        <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 2 }}>{p.sku ? `SKU: ${p.sku}` : "ML"} · {p.qtd} un.</div>
+        <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 2 }}>{p.sku ? `SKU: ${p.sku}` : "—"} · {p.qtd} un.</div>
       </div>
-      {/* Faturamento */}
       <div style={{ textAlign: "right" }}>
         <div style={{ fontSize: 13, fontWeight: 700, color: "#FFB000" }}>{fmtBRL(p.faturamento, true)}</div>
         <div style={{ fontSize: 10, color: "#94A3B8" }}>receita</div>
       </div>
-      {/* Lucro */}
       <div style={{ textAlign: "right" }}>
         <div style={{ fontSize: 13, fontWeight: 700, color: p.lucro >= 0 ? "#22C55E" : "#EF4444" }}>{fmtBRL(p.lucro, true)}</div>
         <div style={{ fontSize: 10, color: "#94A3B8" }}>lucro</div>
       </div>
-      {/* Margem */}
       <div style={{ textAlign: "right" }}>
         <div style={{ fontSize: 13, fontWeight: 700, color: p.margem >= 20 ? "#22C55E" : p.margem >= 10 ? "#FFB000" : "#EF4444" }}>
           {p.margem.toFixed(1)}%
         </div>
         <div style={{ fontSize: 10, color: "#94A3B8" }}>margem</div>
       </div>
-      {/* Qtd */}
       <div style={{ textAlign: "right" }}>
         <div style={{ fontSize: 13, fontWeight: 700, color: "#fff" }}>{p.qtd}</div>
         <div style={{ fontSize: 10, color: "#94A3B8" }}>vendas</div>
@@ -481,9 +425,6 @@ function TopProductRow({ p, rank }: { p: TopProduto; rank: number }) {
   );
 }
 
-// ─────────────────────────────────────────────────────────────
-// ALERT BADGE
-// ─────────────────────────────────────────────────────────────
 function AlertBadge({ icon, title, msg, color }: { icon: string; title: string; msg: string; color: string }) {
   return (
     <div style={{
@@ -503,9 +444,6 @@ function AlertBadge({ icon, title, msg, color }: { icon: string; title: string; 
   );
 }
 
-// ─────────────────────────────────────────────────────────────
-// SECTION WRAPPER
-// ─────────────────────────────────────────────────────────────
 function Section({ title, subtitle, action, children }: {
   title: string; subtitle?: string; action?: React.ReactNode; children: React.ReactNode;
 }) {
@@ -526,9 +464,6 @@ function Section({ title, subtitle, action, children }: {
   );
 }
 
-// ─────────────────────────────────────────────────────────────
-// MAIN PAGE
-// ─────────────────────────────────────────────────────────────
 export default function DashboardPage() {
   const hoje = hojeISO();
   const seteDias = addDays(hoje, -6);
@@ -537,25 +472,23 @@ export default function DashboardPage() {
   const [dateTo,   setDateTo]   = useState(hoje);
   const [loading,  setLoading]  = useState(true);
   const [erro,     setErro]     = useState<string | null>(null);
-  const [conta,    setConta]    = useState("Mercado Livre");
+  const [conta,    setConta]    = useState("CDS");
+  const [mlConectado,     setMlConectado]     = useState(false);
+  const [shopeeConectado, setShopeeConectado] = useState(false);
 
-  // Data
   const [kpis, setKpis] = useState({
     faturamento: 0, pedidos: 0, ticket: 0, lucro: 0,
     margem: 0, unidades: 0, roi: 0, comissoes: 0,
   });
-  const [dias,  setDias]  = useState<DiaData[]>([]);
-  const [tops,  setTops]  = useState<TopProduto[]>([]);
-  const [loss,  setLoss]  = useState<TopProduto[]>([]);
-  const [alertas, setAlertas] = useState<{ icon: string; title: string; msg: string; color: string }[]>([]);
+  const [dias,     setDias]     = useState<DiaData[]>([]);
+  const [tops,     setTops]     = useState<TopProduto[]>([]);
+  const [loss,     setLoss]     = useState<TopProduto[]>([]);
+  const [alertas,  setAlertas]  = useState<{ icon: string; title: string; msg: string; color: string }[]>([]);
   const [anuncios, setAnuncios] = useState<Anuncio[]>([]);
-  const [score, setScore] = useState(0);
-
-  // Sparkline data (last 7 days always for mini charts)
+  const [score,    setScore]    = useState(0);
   const [sparkFat, setSparkFat] = useState<number[]>([]);
   const [sparkLuc, setSparkLuc] = useState<number[]>([]);
 
-  // Fetch anuncios para thumbnails
   useEffect(() => {
     supabase.from("anuncios").select("ml_item_id, thumbnail, nome, sku, marketplace, custo_produto, preco_anuncio, margem_contribuicao")
       .eq("ativo", true)
@@ -566,15 +499,30 @@ export default function DashboardPage() {
     setLoading(true);
     setErro(null);
     try {
-      const res  = await fetch(`/api/ml/vendas?date_from=${from}&date_to=${to}`);
-      const data = await res.json();
+      const [mlData, shopeeData] = await Promise.all([
+        fetch(`/api/ml/vendas?date_from=${from}&date_to=${to}`).then(r => r.json()).catch(() => null),
+        fetch(`/api/shopee/vendas?date_from=${from}&date_to=${to}`).then(r => r.json()).catch(() => null),
+      ]);
 
-      if (data.erro) { setErro(data.mensagem || "Erro."); setLoading(false); return; }
+      const mlOk     = mlData     && !mlData.erro;
+      const shopeeOk = shopeeData && !shopeeData.erro && !shopeeData.semConexao;
 
-      setConta(data.conta || "Mercado Livre");
-      const rows: VendaRow[] = (data.rows ?? []).filter((r: VendaRow) => r.status === "paid");
+      setMlConectado(mlOk);
+      setShopeeConectado(shopeeOk);
 
-      // ── KPIs ─────────────────────────────────────────────
+      if (!mlOk && !shopeeOk) {
+        setErro(mlData?.mensagem || "Nenhum marketplace conectado.");
+        setLoading(false);
+        return;
+      }
+
+      const contas = [mlOk ? mlData.conta : null, shopeeOk ? shopeeData.conta : null].filter(Boolean);
+      setConta(contas.join(" + ") || "CDS");
+
+      const mlRows     = (mlOk     ? mlData.rows     ?? [] : []) as VendaRow[];
+      const shopeeRows = (shopeeOk ? shopeeData.rows ?? [] : []) as VendaRow[];
+      const rows: VendaRow[] = [...mlRows, ...shopeeRows].filter((r: VendaRow) => r.status === "paid");
+
       const fat       = rows.reduce((s, r) => s + r.faturamento, 0);
       const lucro     = rows.reduce((s, r) => s + r.margemContrib, 0);
       const custo     = rows.reduce((s, r) => s + r.custo, 0);
@@ -588,7 +536,6 @@ export default function DashboardPage() {
 
       setKpis({ faturamento: fat, pedidos, ticket, lucro, margem, unidades, roi, comissoes });
 
-      // ── Health score ──────────────────────────────────────
       let s = 0;
       if (margem >= 20) s += 40; else if (margem >= 10) s += 20; else if (margem > 0) s += 10;
       if (pedidos > 0) s += 20;
@@ -596,7 +543,6 @@ export default function DashboardPage() {
       if (roi > 50) s += 20;
       setScore(Math.min(s, 100));
 
-      // ── Dias ──────────────────────────────────────────────
       const mapaD = new Map<string, DiaData>();
       let cur = from;
       while (cur <= to) {
@@ -618,7 +564,6 @@ export default function DashboardPage() {
       setSparkFat(diasArr.map(d => d.faturamento));
       setSparkLuc(diasArr.map(d => Math.max(d.lucro, 0)));
 
-      // ── Top / Loss produtos ───────────────────────────────
       const mapA = new Map<string, TopProduto>();
       for (const r of rows) {
         const key = r.mlItemId || r.anuncio;
@@ -637,7 +582,6 @@ export default function DashboardPage() {
       const topsSorted = [...all].sort((a, b) => b.faturamento - a.faturamento).slice(0, 10);
       const lossSorted = [...all].filter(p => p.lucro < 0).sort((a, b) => a.lucro - b.lucro).slice(0, 5);
 
-      // Busca thumbnails da ML para produtos sem imagem
       const semThumb = topsSorted.concat(lossSorted).filter(p => !p.thumbnail && p.mlItemId);
       if (semThumb.length) {
         const ids = [...new Set(semThumb.map(p => p.mlItemId))].join(",");
@@ -652,38 +596,35 @@ export default function DashboardPage() {
       setTops(topsSorted);
       setLoss(lossSorted);
 
-      // ── Alertas ───────────────────────────────────────────
       const al: typeof alertas = [];
       const semMargem = all.filter(p => p.margem < 10 && p.margem >= 0);
-      if (semMargem.length) al.push({ icon: "⚠️", title: `${semMargem.length} produto${semMargem.length > 1 ? "s" : ""} com margem abaixo de 10%`, msg: "Revise o preço ou os custos destes anúncios.", color: "#FFB000" });
-      if (loss.length) al.push({ icon: "🔴", title: `${all.filter(p => p.lucro < 0).length} produto${all.filter(p => p.lucro < 0).length > 1 ? "s" : ""} gerando prejuízo`, msg: "Estes anúncios custam mais do que rendem.", color: "#EF4444" });
-      if (margem > 0 && margem < 15) al.push({ icon: "📉", title: "Margem geral abaixo do recomendado", msg: "A meta saudável é acima de 15% de margem líquida.", color: "#EF4444" });
-      if (!al.length && pedidos > 0) al.push({ icon: "✅", title: "Tudo certo por aqui!", msg: "Seus anúncios estão com boa saúde financeira.", color: "#22C55E" });
+      if (semMargem.length) al.push({ icon: "⚠️", title: `${semMargem.length} produto${semMargem.length > 1 ? "s" : ""} com margem abaixo de 10%`, msg: "Revise o preco ou os custos destes anuncios.", color: "#FFB000" });
+      if (lossSorted.length) al.push({ icon: "🔴", title: `${all.filter(p => p.lucro < 0).length} produto${all.filter(p => p.lucro < 0).length > 1 ? "s" : ""} gerando prejuizo`, msg: "Estes anuncios custam mais do que rendem.", color: "#EF4444" });
+      if (margem > 0 && margem < 15) al.push({ icon: "📉", title: "Margem geral abaixo do recomendado", msg: "A meta saudavel e acima de 15% de margem liquida.", color: "#EF4444" });
+      if (!al.length && pedidos > 0) al.push({ icon: "✅", title: "Tudo certo por aqui!", msg: "Seus anuncios estao com boa saude financeira.", color: "#22C55E" });
       setAlertas(al);
 
-    } catch { setErro("Erro de conexão."); }
+    } catch { setErro("Erro de conexao."); }
     setLoading(false);
   }, [anuncios]);
 
   useEffect(() => { carregar(dateFrom, dateTo); }, [dateFrom, dateTo, carregar]);
 
-  // ── Balancete total ───────────────────────────────────────
   const totalCusto    = dias.reduce((s, d) => s + d.custo, 0);
   const totalComissao = dias.reduce((s, d) => s + d.comissao, 0);
   const totalFrete    = dias.reduce((s, d) => s + d.frete, 0);
   const totalLucro    = kpis.lucro;
 
   const balItems = [
-    { label: "Receita Bruta", value: kpis.faturamento, color: "#FF7A00" },
-    { label: "Custo Produtos", value: -totalCusto, color: "#EF4444" },
-    { label: "Comissões ML", value: -totalComissao, color: "#F97316" },
-    { label: "Fretes", value: -totalFrete, color: "#FB923C" },
-    { label: "Lucro Líquido", value: totalLucro, color: totalLucro >= 0 ? "#22C55E" : "#EF4444" },
+    { label: "Receita Bruta",   value: kpis.faturamento,              color: "#FF7A00" },
+    { label: "Custo Produtos",  value: -totalCusto,                   color: "#EF4444" },
+    { label: "Comissoes",       value: -totalComissao,                 color: "#F97316" },
+    { label: "Fretes",          value: -totalFrete,                    color: "#FB923C" },
+    { label: "Lucro Liquido",   value: totalLucro,                     color: totalLucro >= 0 ? "#22C55E" : "#EF4444" },
   ];
 
   const hoje2 = new Date().toLocaleDateString("pt-BR", { weekday: "long", day: "numeric", month: "long" });
 
-  // ── CDS Intelligence ──────────────────────────────────────
   const produtosBaixaMargem = tops.filter(p => p.margem < 10 && p.margem >= 0);
   const comissaoPct  = kpis.faturamento > 0 ? (totalComissao / kpis.faturamento) * 100 : 0;
   const fretePct     = kpis.faturamento > 0 ? (totalFrete / kpis.faturamento) * 100 : 0;
@@ -695,72 +636,72 @@ export default function DashboardPage() {
 
   const cdsInsights: { prioridade: string; cor: string; icone: string; titulo: string; texto: string; acao: string }[] = [];
   if (loss.length > 0) cdsInsights.push({
-    prioridade: "Crítica", cor: "#EF4444", icone: "💸",
-    titulo: `${loss.length} produto${loss.length > 1 ? "s" : ""} gerando prejuízo`,
-    texto: `Cada venda está te custando dinheiro. Pausar ou corrigir esses anúncios pode recuperar ${fmtBRL(reducaoPrejuizo, true)}/mês.`,
+    prioridade: "Critica", cor: "#EF4444", icone: "💸",
+    titulo: `${loss.length} produto${loss.length > 1 ? "s" : ""} gerando prejuizo`,
+    texto: `Cada venda esta te custando dinheiro. Pausar ou corrigir esses anuncios pode recuperar ${fmtBRL(reducaoPrejuizo, true)}/mes.`,
     acao: "Corrigir agora",
   });
   if (produtosBaixaMargem.length > 0) cdsInsights.push({
     prioridade: "Alta", cor: "#F97316", icone: "⚠️",
     titulo: `${produtosBaixaMargem.length} produto${produtosBaixaMargem.length > 1 ? "s" : ""} com margem abaixo de 10%`,
-    texto: `Estão vendendo, mas quase sem lucro. Ajustando o preço para 20% de margem, você pode ganhar ${fmtBRL(lucroAdicionalEstimado, true)} a mais.`,
+    texto: `Estao vendendo, mas quase sem lucro. Ajustando o preco para 20% de margem, voce pode ganhar ${fmtBRL(lucroAdicionalEstimado, true)} a mais.`,
     acao: "Ver produtos",
   });
   if (kpis.margem < 15 && kpis.pedidos > 0) cdsInsights.push({
     prioridade: "Alta", cor: "#F97316", icone: "📉",
     titulo: `Margem geral de ${kpis.margem.toFixed(1)}% — abaixo da meta`,
-    texto: `A meta saudável para marketplace é 15%+. Ajustar apenas os produtos críticos pode resolver sem precisar vender mais.`,
-    acao: "Ver análise",
+    texto: `A meta saudavel para marketplace e 15%+. Ajustar apenas os produtos criticos pode resolver sem precisar vender mais.`,
+    acao: "Ver analise",
   });
   if (comissaoPct > 14) cdsInsights.push({
-    prioridade: "Média", cor: "#FFB000", icone: "🏷️",
-    titulo: `Comissões consumindo ${comissaoPct.toFixed(1)}% da receita`,
-    texto: `As taxas do ML representam ${fmtBRL(totalComissao, true)}. Revise o tipo de anúncio — migrar para Classic em produtos de menor giro pode ajudar.`,
+    prioridade: "Media", cor: "#FFB000", icone: "🏷️",
+    titulo: `Comissoes consumindo ${comissaoPct.toFixed(1)}% da receita`,
+    texto: `As taxas representam ${fmtBRL(totalComissao, true)}. Revise o tipo de anuncio para otimizar as tarifas.`,
     acao: "Analisar taxas",
   });
   if (fretePct > 8) cdsInsights.push({
-    prioridade: "Média", cor: "#FFB000", icone: "🚚",
+    prioridade: "Media", cor: "#FFB000", icone: "🚚",
     titulo: `Frete consumindo ${fretePct.toFixed(1)}% da receita`,
-    texto: `O custo logístico está impactando a margem. Revise o peso declarado dos produtos e a configuração de frete grátis.`,
+    texto: `O custo logistico esta impactando a margem. Revise o peso declarado dos produtos e a configuracao de frete gratis.`,
     acao: "Revisar frete",
   });
   const melhorProduto = tops.find(p => p.margem >= 18);
   if (melhorProduto) cdsInsights.push({
     prioridade: "Positiva", cor: "#22C55E", icone: "🏆",
-    titulo: `"${melhorProduto.nome.slice(0, 28)}..." é seu produto mais saudável`,
-    texto: `Margem de ${melhorProduto.margem.toFixed(1)}% e ${fmtBRL(melhorProduto.faturamento, true)} de receita. Esse produto é candidato ideal para campanhas ADS.`,
+    titulo: `"${melhorProduto.nome.slice(0, 28)}..." e seu produto mais saudavel`,
+    texto: `Margem de ${melhorProduto.margem.toFixed(1)}% e ${fmtBRL(melhorProduto.faturamento, true)} de receita. Candidato ideal para campanhas ADS.`,
     acao: "Criar campanha",
   });
   if (kpis.margem >= 20 && loss.length === 0) cdsInsights.push({
     prioridade: "Positiva", cor: "#22C55E", icone: "✅",
-    titulo: "Operação saudável — parabéns!",
-    texto: `Margem de ${kpis.margem.toFixed(1)}%, sem produtos em prejuízo. Continue monitorando os custos para manter essa performance.`,
+    titulo: "Operacao saudavel — parabens!",
+    texto: `Margem de ${kpis.margem.toFixed(1)}%, sem produtos em prejuizo. Continue monitorando os custos.`,
     acao: "Ver detalhes",
   });
 
   const cdsAcoes: { prioridade: string; cor: string; acao: string; impacto: string; motivo: string }[] = [];
   if (loss[0]) cdsAcoes.push({
-    prioridade: "Crítica", cor: "#EF4444",
-    acao: `Revisar preço de "${loss[0].nome.slice(0, 28)}..."`,
-    impacto: `Recuperar ${fmtBRL(Math.abs(loss[0].lucro), true)}/mês`,
-    motivo: "Produto gerando prejuízo em cada venda.",
+    prioridade: "Critica", cor: "#EF4444",
+    acao: `Revisar preco de "${loss[0].nome.slice(0, 28)}..."`,
+    impacto: `Recuperar ${fmtBRL(Math.abs(loss[0].lucro), true)}/mes`,
+    motivo: "Produto gerando prejuizo em cada venda.",
   });
   if (produtosBaixaMargem.length > 0) cdsAcoes.push({
     prioridade: "Alta", cor: "#F97316",
-    acao: `Aumentar preço de ${produtosBaixaMargem.length} anúncio${produtosBaixaMargem.length > 1 ? "s" : ""} com margem < 10%`,
+    acao: `Aumentar preco de ${produtosBaixaMargem.length} anuncio${produtosBaixaMargem.length > 1 ? "s" : ""} com margem < 10%`,
     impacto: `+${fmtBRL(lucroAdicionalEstimado, true)} de lucro estimado`,
-    motivo: "Margem abaixo do mínimo recomendado.",
+    motivo: "Margem abaixo do minimo recomendado.",
   });
   if (melhorProduto) cdsAcoes.push({
-    prioridade: "Média", cor: "#FFB000",
+    prioridade: "Media", cor: "#FFB000",
     acao: `Criar campanha ADS para "${melhorProduto.nome.slice(0, 25)}..."`,
     impacto: "Ampliar volume no produto mais lucrativo",
-    motivo: "Produto com melhor relação margem x volume.",
+    motivo: "Produto com melhor relacao margem x volume.",
   });
   cdsAcoes.push({
     prioridade: "Rotina", cor: "#6366F1",
-    acao: "Sincronizar SKUs e preços esta semana",
-    impacto: "Manter análises precisas",
+    acao: "Sincronizar SKUs e precos esta semana",
+    impacto: "Manter analises precisas",
     motivo: "Dados desatualizados geram insights errados.",
   });
 
@@ -772,7 +713,7 @@ export default function DashboardPage() {
         .dash-anim { animation: fadeUp 0.4s ease both; }
       `}</style>
 
-      {/* ── HERO ──────────────────────────────────────────── */}
+      {/* HERO */}
       <div className="dash-anim" style={{
         marginBottom: 28,
         background: "linear-gradient(135deg, #0F172A 0%, #1a0a00 100%)",
@@ -780,7 +721,6 @@ export default function DashboardPage() {
         borderRadius: 20, padding: "28px 32px",
         position: "relative", zIndex: 50,
       }}>
-        {/* Glow background */}
         <div style={{
           position: "absolute", top: -60, right: -60,
           width: 300, height: 300, borderRadius: "50%",
@@ -796,34 +736,45 @@ export default function DashboardPage() {
               {hoje2.charAt(0).toUpperCase() + hoje2.slice(1)}
             </div>
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-            {/* Status */}
-            <div style={{
-              display: "flex", alignItems: "center", gap: 8,
-              background: "#0F172A", border: "1px solid #22C55E33",
-              borderRadius: 10, padding: "8px 14px",
-            }}>
-              <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#22C55E", boxShadow: "0 0 8px #22C55E", animation: "pulse 2s infinite" }} />
-              <span style={{ fontSize: 12, color: "#22C55E", fontWeight: 700 }}>ML Conectado</span>
-            </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            {mlConectado && (
+              <div style={{
+                display: "flex", alignItems: "center", gap: 8,
+                background: "#0F172A", border: "1px solid rgba(34,197,94,0.2)",
+                borderRadius: 10, padding: "8px 14px",
+              }}>
+                <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#22C55E", boxShadow: "0 0 8px #22C55E", animation: "pulse 2s infinite" }} />
+                <span style={{ fontSize: 12, color: "#22C55E", fontWeight: 700 }}>ML</span>
+              </div>
+            )}
+            {shopeeConectado && (
+              <div style={{
+                display: "flex", alignItems: "center", gap: 8,
+                background: "#0F172A", border: "1px solid rgba(238,77,45,0.2)",
+                borderRadius: 10, padding: "8px 14px",
+              }}>
+                <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#EE4D2D", boxShadow: "0 0 8px #EE4D2D", animation: "pulse 2s infinite" }} />
+                <span style={{ fontSize: 12, color: "#EE4D2D", fontWeight: 700 }}>Shopee</span>
+              </div>
+            )}
             <DateRangePicker from={dateFrom} to={dateTo} onChange={(f, t) => { setDateFrom(f); setDateTo(t); }} />
           </div>
         </div>
       </div>
 
-      {/* ── ERROR ─────────────────────────────────────────── */}
+      {/* ERROR */}
       {erro && (
         <div style={{
           background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.25)",
           borderRadius: 14, padding: "14px 20px", color: "#fca5a5", fontSize: 13, marginBottom: 24,
         }}>
-          ⚠️ {erro.includes("não conectada") || erro.includes("expirada")
-            ? "Conecte sua conta do Mercado Livre em Configurações para ver os dados."
+          ⚠️ {erro.includes("conectado") || erro.includes("expirada")
+            ? "Conecte sua conta do Mercado Livre ou Shopee em Configuracoes para ver os dados."
             : erro}
         </div>
       )}
 
-      {/* ── SKELETON ──────────────────────────────────────── */}
+      {/* SKELETON */}
       {loading && (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 14, marginBottom: 24 }}>
           {[...Array(8)].map((_, i) => (
@@ -838,43 +789,40 @@ export default function DashboardPage() {
 
       {!loading && !erro && (
         <>
-          {/* ── KPI CARDS ─────────────────────────────────── */}
+          {/* KPI CARDS */}
           <div className="dash-anim" style={{
             display: "grid",
             gridTemplateColumns: "repeat(auto-fill, minmax(175px, 1fr))",
-            gap: 14, marginBottom: 24,
-            animationDelay: "0.05s",
+            gap: 14, marginBottom: 24, animationDelay: "0.05s",
           }}>
             <KpiCard icon="💰" label="Faturamento"   value={fmtBRL(kpis.faturamento, true)} sub={`${kpis.unidades} unid.`} color="#FF7A00" spark={sparkFat} />
-            <KpiCard icon="✨" label="Lucro Líquido" value={fmtBRL(kpis.lucro, true)}        color={kpis.lucro >= 0 ? "#22C55E" : "#EF4444"} spark={sparkLuc} sub="após custos" />
-            <KpiCard icon="📊" label="Margem Média"  value={`${kpis.margem.toFixed(1)}%`}   color={kpis.margem >= 20 ? "#22C55E" : kpis.margem >= 10 ? "#FFB000" : "#EF4444"} sub="contribuição" />
+            <KpiCard icon="✨" label="Lucro Liquido" value={fmtBRL(kpis.lucro, true)}        color={kpis.lucro >= 0 ? "#22C55E" : "#EF4444"} spark={sparkLuc} sub="apos custos" />
+            <KpiCard icon="📊" label="Margem Media"  value={`${kpis.margem.toFixed(1)}%`}    color={kpis.margem >= 20 ? "#22C55E" : kpis.margem >= 10 ? "#FFB000" : "#EF4444"} sub="contribuicao" />
             <KpiCard icon="📦" label="Pedidos"       value={String(kpis.pedidos)}             color="#6366F1" sub="pagos" />
-            <KpiCard icon="🎯" label="Ticket Médio"  value={fmtBRL(kpis.ticket, true)}       color="#FFB000" sub="por pedido" />
+            <KpiCard icon="🎯" label="Ticket Medio"  value={fmtBRL(kpis.ticket, true)}       color="#FFB000" sub="por pedido" />
             <KpiCard icon="🔄" label="ROI"           value={`${kpis.roi.toFixed(0)}%`}       color={kpis.roi >= 50 ? "#22C55E" : "#FFB000"} sub="retorno s/ custo" />
-            <KpiCard icon="🏷️" label="Comissões"    value={fmtBRL(kpis.comissoes, true)}     color="#EF4444" sub="taxas ML" />
+            <KpiCard icon="🏷️" label="Comissoes"    value={fmtBRL(kpis.comissoes, true)}     color="#EF4444" sub="taxas marketplace" />
             <KpiCard icon="📈" label="Unidades"      value={String(kpis.unidades)}            color="#06B6D4" sub="vendidas" />
           </div>
 
-          {/* ── EVOLUÇÃO + BALANCETE ──────────────────────── */}
+          {/* EVOLUCAO + BALANCETE */}
           <div className="dash-anim" style={{ display: "grid", gridTemplateColumns: "1fr 260px", gap: 16, marginBottom: 24, animationDelay: "0.1s" }}>
-            {/* Área chart + Pizza juntos */}
-            <Section title="Evolução de Vendas" subtitle="Faturamento e lucro no período selecionado">
+            <Section title="Evolucao de Vendas" subtitle="Faturamento e lucro no periodo selecionado">
               <div style={{ display: "grid", gridTemplateColumns: "1fr 220px", gap: 20, alignItems: "center" }}>
                 <AreaChartSection dias={dias} />
                 <div style={{ borderLeft: "1px solid #1E293B", paddingLeft: 20 }}>
-                  <div style={{ fontSize: 11, fontWeight: 700, color: "#94A3B8", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 12 }}>Composição</div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "#94A3B8", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 12 }}>Composicao</div>
                   <PieChartSection items={[
-                    { label: "Lucro Líquido", value: Math.max(totalLucro, 0), color: "#22C55E" },
+                    { label: "Lucro Liquido", value: Math.max(totalLucro, 0), color: "#22C55E" },
                     { label: "Custo Produtos", value: totalCusto, color: "#6366F1" },
-                    { label: "Comissões ML", value: totalComissao, color: "#F97316" },
+                    { label: "Comissoes", value: totalComissao, color: "#F97316" },
                     { label: "Fretes", value: totalFrete, color: "#06B6D4" },
                   ]} />
                 </div>
               </div>
             </Section>
 
-            {/* Balancete */}
-            <Section title="Balancete" subtitle="Composição do resultado">
+            <Section title="Balancete" subtitle="Composicao do resultado">
               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                 {balItems.map(item => {
                   const maxAbs = Math.max(...balItems.map(i => Math.abs(i.value)), 1);
@@ -895,15 +843,14 @@ export default function DashboardPage() {
             </Section>
           </div>
 
-          {/* ── TOP PRODUTOS ──────────────────────────────── */}
+          {/* TOP PRODUTOS */}
           {tops.length > 0 && (
             <div className="dash-anim" style={{ marginBottom: 24, animationDelay: "0.15s" }}>
               <Section
                 title="🏆 Top Produtos"
-                subtitle={`Melhores anúncios no período`}
+                subtitle="Melhores anuncios no periodo"
                 action={<span style={{ fontSize: 11, color: "#94A3B8" }}>{tops.length} produtos</span>}
               >
-                {/* Header */}
                 <div style={{
                   display: "grid",
                   gridTemplateColumns: "36px 44px 1fr 110px 100px 80px 56px",
@@ -921,14 +868,10 @@ export default function DashboardPage() {
             </div>
           )}
 
-          {/* ── PREJUÍZO + SAÚDE + ALERTAS ───────────────── */}
+          {/* PREJUIZO + SAUDE + ALERTAS */}
           <div className="dash-anim" style={{ display: "grid", gridTemplateColumns: loss.length ? "1fr 260px" : "1fr", gap: 16, marginBottom: 24, animationDelay: "0.2s" }}>
-
-            {/* Saúde + Alertas */}
             <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-
-              {/* Saúde */}
-              <Section title="🩺 Saúde Financeira" subtitle="Baseada em margem, volume e retorno">
+              <Section title="🩺 Saude Financeira" subtitle="Baseada em margem, volume e retorno">
                 <div style={{ display: "flex", alignItems: "center", gap: 32 }}>
                   <HealthGauge score={score} />
                   <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 10 }}>
@@ -950,9 +893,8 @@ export default function DashboardPage() {
                 </div>
               </Section>
 
-              {/* Alertas */}
               {alertas.length > 0 && (
-                <Section title="🔔 Alertas" subtitle="Atenção necessária">
+                <Section title="🔔 Alertas" subtitle="Atencao necessaria">
                   <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                     {alertas.map((a, i) => <AlertBadge key={i} {...a} />)}
                   </div>
@@ -960,9 +902,8 @@ export default function DashboardPage() {
               )}
             </div>
 
-            {/* Prejuízo */}
             {loss.length > 0 && (
-              <Section title="🔴 Em Prejuízo" subtitle="Produtos que estão perdendo dinheiro">
+              <Section title="🔴 Em Prejuizo" subtitle="Produtos que estao perdendo dinheiro">
                 <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                   {loss.map((p, i) => (
                     <div key={i} style={{ padding: "12px 14px", background: "rgba(239,68,68,0.06)", border: "1px solid rgba(239,68,68,0.2)", borderRadius: 12 }}>
@@ -982,7 +923,7 @@ export default function DashboardPage() {
                         <span style={{ fontSize: 11, color: "#94A3B8" }}>Margem: {p.margem.toFixed(1)}%</span>
                       </div>
                       <div style={{ marginTop: 8, fontSize: 11, color: "#94A3B8", background: "#0F172A", borderRadius: 8, padding: "6px 10px" }}>
-                        💡 Revise o custo ou aumente o preço deste anúncio.
+                        💡 Revise o custo ou aumente o preco deste anuncio.
                       </div>
                     </div>
                   ))}
@@ -991,7 +932,7 @@ export default function DashboardPage() {
             )}
           </div>
 
-          {/* ── CENTRO DE INTELIGÊNCIA CDS ────────────────── */}
+          {/* CENTRO DE INTELIGENCIA CDS */}
           <div className="dash-anim" style={{ animationDelay: "0.25s", marginBottom: 24 }}>
             <div style={{
               background: "linear-gradient(135deg, #07090F 0%, #110A00 50%, #07090F 100%)",
@@ -1000,11 +941,9 @@ export default function DashboardPage() {
               position: "relative", overflow: "hidden",
               boxShadow: "0 0 80px rgba(255,122,0,0.05), inset 0 1px 0 rgba(255,122,0,0.08)",
             }}>
-              {/* Glow orbs */}
               <div style={{ position:"absolute", top:-60, left:-60, width:280, height:280, borderRadius:"50%", background:"radial-gradient(circle, rgba(255,122,0,0.07) 0%, transparent 70%)", pointerEvents:"none" }} />
               <div style={{ position:"absolute", bottom:-40, right:-40, width:220, height:220, borderRadius:"50%", background:"radial-gradient(circle, rgba(99,102,241,0.06) 0%, transparent 70%)", pointerEvents:"none" }} />
 
-              {/* Header */}
               <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:28 }}>
                 <div style={{ display:"flex", alignItems:"center", gap:14 }}>
                   <div style={{
@@ -1015,8 +954,8 @@ export default function DashboardPage() {
                     boxShadow:"0 0 20px rgba(255,122,0,0.15)",
                   }}>🧠</div>
                   <div>
-                    <div style={{ fontSize:18, fontWeight:900, color:"#fff", letterSpacing:"-0.3px" }}>Centro de Inteligência CDS</div>
-                    <div style={{ fontSize:12, color:"rgba(255,122,0,0.8)", fontWeight:600 }}>Análise automática da sua operação • {new Date().toLocaleDateString("pt-BR")}</div>
+                    <div style={{ fontSize:18, fontWeight:900, color:"#fff", letterSpacing:"-0.3px" }}>Centro de Inteligencia CDS</div>
+                    <div style={{ fontSize:12, color:"rgba(255,122,0,0.8)", fontWeight:600 }}>Analise automatica da sua operacao • {new Date().toLocaleDateString("pt-BR")}</div>
                   </div>
                 </div>
                 <div style={{
@@ -1026,13 +965,10 @@ export default function DashboardPage() {
                 }}>PREMIUM</div>
               </div>
 
-              {/* Score + Impacto */}
               <div style={{ display:"grid", gridTemplateColumns:"220px 1fr", gap:20, marginBottom:28 }}>
-                {/* Score CDS */}
                 <div style={{
                   background:"rgba(255,255,255,0.02)", border:"1px solid rgba(255,122,0,0.12)",
                   borderRadius:18, padding:"20px 16px", textAlign:"center",
-                  backdropFilter:"blur(10px)",
                 }}>
                   <div style={{ fontSize:11, fontWeight:700, color:"#94A3B8", letterSpacing:"0.6px", marginBottom:12 }}>SCORE CDS</div>
                   <svg viewBox="0 0 160 100" width={160} height={100} style={{ display:"block", margin:"0 auto" }}>
@@ -1044,9 +980,7 @@ export default function DashboardPage() {
                         <stop offset="100%" stopColor="#6366F1" />
                       </linearGradient>
                     </defs>
-                    {/* Track */}
                     <path d="M 20 85 A 60 60 0 0 1 140 85" stroke="#1E293B" strokeWidth="10" fill="none" strokeLinecap="round" />
-                    {/* Fill — arc proportional to score */}
                     {(() => {
                       const pct = score / 100;
                       const startAngle = Math.PI;
@@ -1063,28 +997,26 @@ export default function DashboardPage() {
                     })()}
                     <text x="80" y="76" textAnchor="middle" fill="#fff" fontSize="26" fontWeight="900">{score}</text>
                     <text x="80" y="90" textAnchor="middle" fill="#94A3B8" fontSize="9">
-                      {score < 40 ? "Crítico" : score < 70 ? "Atenção" : score < 90 ? "Saudável" : "Excelente"}
+                      {score < 40 ? "Critico" : score < 70 ? "Atencao" : score < 90 ? "Saudavel" : "Excelente"}
                     </text>
                   </svg>
                   <div style={{ marginTop:10, display:"flex", justifyContent:"center", gap:8, flexWrap:"wrap" }}>
-                    {[["0–39","#EF4444"],["40–69","#FFB000"],["70–89","#22C55E"],["90+","#6366F1"]].map(([l,c])=>(
+                    {[["0-39","#EF4444"],["40-69","#FFB000"],["70-89","#22C55E"],["90+","#6366F1"]].map(([l,c])=>(
                       <span key={l} style={{ fontSize:9, padding:"2px 7px", borderRadius:8, background:`${c}18`, color:c, fontWeight:700 }}>{l}</span>
                     ))}
                   </div>
                 </div>
 
-                {/* Impacto financeiro */}
                 <div style={{
                   background:"rgba(255,255,255,0.02)", border:"1px solid rgba(255,122,0,0.12)",
                   borderRadius:18, padding:"20px 24px",
-                  backdropFilter:"blur(10px)",
                 }}>
                   <div style={{ fontSize:11, fontWeight:700, color:"#94A3B8", letterSpacing:"0.6px", marginBottom:4 }}>IMPACTO FINANCEIRO ESTIMADO</div>
-                  <div style={{ fontSize:12, color:"rgba(255,122,0,0.7)", marginBottom:16 }}>Se você seguir as recomendações da CDS:</div>
+                  <div style={{ fontSize:12, color:"rgba(255,122,0,0.7)", marginBottom:16 }}>Se voce seguir as recomendacoes da CDS:</div>
                   <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
                     {[
-                      { label:"Lucro adicional estimado", value:`+${fmtBRL(lucroAdicionalEstimado, true)}/mês`, color:"#22C55E", icone:"💰" },
-                      { label:"Redução de prejuízo", value:`-${fmtBRL(reducaoPrejuizo, true)}/mês`, color:"#EF4444", icone:"🛡️" },
+                      { label:"Lucro adicional estimado", value:`+${fmtBRL(lucroAdicionalEstimado, true)}/mes`, color:"#22C55E", icone:"💰" },
+                      { label:"Reducao de prejuizo", value:`-${fmtBRL(reducaoPrejuizo, true)}/mes`, color:"#EF4444", icone:"🛡️" },
                       { label:"Produtos a corrigir", value:`${produtosBaixaMargem.length + loss.length}`, color:"#FFB000", icone:"🔧" },
                       { label:"Margem projetada", value:`${Math.min(projetoMargem, 99).toFixed(1)}%`, color:"#6366F1", icone:"📊" },
                     ].map((item,i)=>(
@@ -1101,10 +1033,9 @@ export default function DashboardPage() {
                 </div>
               </div>
 
-              {/* Insight cards */}
               {cdsInsights.length > 0 && (
                 <div style={{ marginBottom:24 }}>
-                  <div style={{ fontSize:11, fontWeight:700, color:"#94A3B8", letterSpacing:"0.6px", marginBottom:14 }}>INSIGHTS AUTOMÁTICOS</div>
+                  <div style={{ fontSize:11, fontWeight:700, color:"#94A3B8", letterSpacing:"0.6px", marginBottom:14 }}>INSIGHTS AUTOMATICOS</div>
                   <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(280px, 1fr))", gap:12 }}>
                     {cdsInsights.map((ins, i) => (
                       <div key={i} style={{
@@ -1112,8 +1043,6 @@ export default function DashboardPage() {
                         background:`${ins.cor}07`,
                         border:`1px solid ${ins.cor}22`,
                         borderRadius:16, position:"relative", overflow:"hidden",
-                        backdropFilter:"blur(8px)",
-                        transition:"border-color 0.2s, transform 0.2s",
                       }}>
                         <div style={{ position:"absolute", top:-20, right:-20, width:80, height:80, borderRadius:"50%", background:`radial-gradient(circle, ${ins.cor}15 0%, transparent 70%)`, pointerEvents:"none" }} />
                         <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", marginBottom:10 }}>
@@ -1135,7 +1064,6 @@ export default function DashboardPage() {
                 </div>
               )}
 
-              {/* O que fazer agora */}
               {cdsAcoes.length > 0 && (
                 <div>
                   <div style={{ fontSize:11, fontWeight:700, color:"#94A3B8", letterSpacing:"0.6px", marginBottom:14 }}>O QUE FAZER AGORA</div>
@@ -1145,7 +1073,7 @@ export default function DashboardPage() {
                         display:"grid", gridTemplateColumns:"auto 1fr auto auto",
                         alignItems:"center", gap:14, padding:"14px 18px",
                         background:"rgba(255,255,255,0.02)", border:"1px solid rgba(255,255,255,0.06)",
-                        borderRadius:14, backdropFilter:"blur(8px)",
+                        borderRadius:14,
                       }}>
                         <span style={{
                           fontSize:9, fontWeight:800, padding:"4px 9px", borderRadius:8,
@@ -1171,15 +1099,14 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          {/* Estado vazio */}
           {kpis.pedidos === 0 && (
             <div style={{
               marginTop: 24, background: "#0F172A", border: "1px dashed #1E293B",
               borderRadius: 20, padding: 60, textAlign: "center",
             }}>
               <div style={{ fontSize: 48, marginBottom: 16 }}>📦</div>
-              <div style={{ fontSize: 16, fontWeight: 800, color: "#fff", marginBottom: 8 }}>Nenhuma venda no período</div>
-              <div style={{ fontSize: 13, color: "#94A3B8" }}>Os dados aparecem aqui assim que houver pedidos pagos no Mercado Livre.</div>
+              <div style={{ fontSize: 16, fontWeight: 800, color: "#fff", marginBottom: 8 }}>Nenhuma venda no periodo</div>
+              <div style={{ fontSize: 13, color: "#94A3B8" }}>Os dados aparecem aqui assim que houver pedidos pagos.</div>
             </div>
           )}
         </>

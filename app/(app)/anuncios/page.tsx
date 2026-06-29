@@ -33,6 +33,8 @@ export default function AnunciosPage() {
   const [msgSync,            setMsgSync]            = useState<{ ok: boolean; texto: string; detalhes?: string[] } | null>(null);
   const [importando,         setImportando]         = useState(false);
   const [msgImport,          setMsgImport]          = useState<{ ok: boolean; texto: string } | null>(null);
+  const [importandoShopee,   setImportandoShopee]   = useState(false);
+  const [msgImportShopee,    setMsgImportShopee]    = useState<{ ok: boolean; texto: string } | null>(null);
 
   async function carregar(uid?: string | null) {
     setLoading(true);
@@ -107,6 +109,27 @@ export default function AnunciosPage() {
       setMsgImport({ ok: false, texto: "Falha na conexão." });
     }
     setImportando(false);
+  }
+
+  async function importarDaShopee() {
+    setImportandoShopee(true);
+    setMsgImportShopee(null);
+    try {
+      const res  = await fetch("/api/shopee/importar-anuncios", { method: "POST" });
+      const data = await res.json();
+      if (data.erro) {
+        setMsgImportShopee({ ok: false, texto: data.mensagem ?? "Erro ao importar da Shopee." });
+      } else {
+        setMsgImportShopee({
+          ok: true,
+          texto: `🟠 ${data.importados} importados, ${data.atualizados} atualizados — total ${data.total} anúncios na Shopee`,
+        });
+        await carregar();
+      }
+    } catch {
+      setMsgImportShopee({ ok: false, texto: "Falha na conexão com a Shopee." });
+    }
+    setImportandoShopee(false);
   }
 
   async function sincronizarPrecos() {
@@ -349,6 +372,31 @@ export default function AnunciosPage() {
               {importando ? "Importando..." : "Importar do ML"}
             </button>
           )}
+
+          {/* Botão Importar da Shopee */}
+          <button
+            onClick={importarDaShopee}
+            disabled={importandoShopee}
+            title="Importa todos os anúncios ativos da Shopee automaticamente"
+            style={{
+              padding: "12px 20px",
+              background: importandoShopee ? "rgba(238,77,45,0.18)" : "rgba(238,77,45,0.08)",
+              border: `1px solid ${importandoShopee ? "rgba(238,77,45,0.5)" : "rgba(238,77,45,0.25)"}`,
+              borderRadius: "14px",
+              color: "#EE4D2D",
+              fontWeight: 800, fontSize: "14px",
+              cursor: importandoShopee ? "not-allowed" : "pointer",
+              display: "flex", alignItems: "center", gap: "8px",
+              transition: "all 0.15s",
+            }}
+          >
+            <span style={{
+              fontSize: "15px",
+              display: "inline-block",
+              animation: importandoShopee ? "spin 1s linear infinite" : "none",
+            }}>🟠</span>
+            {importandoShopee ? "Importando..." : "Importar Shopee"}
+          </button>
 
           <button
             onClick={() => { setEditando(null); setShowForm(true); }}
@@ -701,6 +749,22 @@ export default function AnunciosPage() {
             {msgImport.texto}
           </span>
           <button onClick={() => setMsgImport(null)} style={{ background: "none", border: "none", color: "#9099aa", cursor: "pointer", fontSize: "18px", opacity: 0.6 }}>×</button>
+        </div>
+      )}
+
+      {/* ── Feedback Importar da Shopee ──────────────────────── */}
+      {msgImportShopee && (
+        <div style={{
+          background: msgImportShopee.ok ? "rgba(238,77,45,0.06)" : "rgba(255,60,60,0.07)",
+          border: `1px solid ${msgImportShopee.ok ? "rgba(238,77,45,0.25)" : "rgba(255,60,60,0.2)"}`,
+          borderRadius: "14px", padding: "14px 18px",
+          marginBottom: "16px",
+          display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px",
+        }}>
+          <span style={{ color: msgImportShopee.ok ? "#EE4D2D" : "#ff4d4d", fontWeight: 800, fontSize: "14px" }}>
+            {msgImportShopee.texto}
+          </span>
+          <button onClick={() => setMsgImportShopee(null)} style={{ background: "none", border: "none", color: "#9099aa", cursor: "pointer", fontSize: "18px", opacity: 0.6 }}>×</button>
         </div>
       )}
 
