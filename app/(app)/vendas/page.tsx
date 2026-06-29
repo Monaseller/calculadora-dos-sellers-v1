@@ -88,7 +88,7 @@ export default function VendasPage() {
     setSkuTags(prev => prev.filter(t => t !== tag));
   }
 
-  const sync = useCallback(async (from: string, to: string, tags: string[], filtros: string[] = []) => {
+  const sync = useCallback(async (from: string, to: string, tags: string[], filtros: string[] = [], loja: "todos" | "ML" | "Shopee" = "todos") => {
     setLoading(true);
     setErro(null);
 
@@ -98,17 +98,26 @@ export default function VendasPage() {
       const needsCancelled = filtros.includes("canceladas") || filtros.includes("devolucoes");
       if (needsCancelled) params.set("include_cancelled", "true");
 
-      const res  = await fetch(`/api/ml/vendas?${params}`);
-      const data = await res.json();
+      const fetchML     = loja === "todos" || loja === "ML";
+      const fetchShopee = loja === "todos" || loja === "Shopee";
 
-      if (data.erro) {
-        if (data.semConexao) { setSemConexao(true); setRows([]); }
-        else setErro(data.mensagem ?? "Erro ao carregar vendas.");
+      const [mlData, shopeeData] = await Promise.all([
+        fetchML     ? fetch(`/api/ml/vendas?${params}`).then(r => r.json()).catch(() => null) : null,
+        fetchShopee ? fetch(`/api/shopee/vendas?${params}`).then(r => r.json()).catch(() => null) : null,
+      ]);
+
+      const mlRows     = (!mlData?.erro     ? mlData?.rows     ?? [] : []) as VendaRow[];
+      const shopeeRows = (!shopeeData?.erro ? shopeeData?.rows ?? [] : []) as VendaRow[];
+      const allRows    = [...mlRows, ...shopeeRows].sort((a, b) => b.data.localeCompare(a.data));
+
+      if (mlData?.erro && shopeeData?.erro) {
+        setSemConexao(true); setRows([]);
       } else {
         setSemConexao(false);
-        setRows(data.rows ?? []);
-        setTotalPedidos(data.totalPedidos ?? 0);
-        setConta(data.conta ?? "");
+        setRows(allRows);
+        setTotalPedidos((mlData?.totalPedidos ?? 0) + (shopeeData?.totalPedidos ?? 0));
+        const contas = [mlData?.conta, shopeeData?.conta].filter(Boolean);
+        setConta(contas.join(" + ") || "");
         setUltimaSync(new Date().toLocaleTimeString("pt-BR"));
       }
     } catch {
@@ -118,10 +127,10 @@ export default function VendasPage() {
     }
   }, []);
 
-  // Auto-sync ao montar E toda vez que o período mudar
+  // Auto-sync ao montar E toda vez que o período ou marketplace mudar
   useEffect(() => {
-    sync(dateFrom, dateTo, skuTags, [...filtrosCadastro, ...filtrosStatus]);
-  }, [dateFrom, dateTo]); // eslint-disable-line
+    sync(dateFrom, dateTo, skuTags, [...filtrosCadastro, ...filtrosStatus], lojaAtiva);
+  }, [dateFrom, dateTo, lojaAtiva]); // eslint-disable-line
 
   const OPCOES_CADASTRO = [
     { key: "cadastrados",     label: "Cadastrados",     icone: "✅", cor: "#00D97E", bg: "rgba(0,217,126,0.12)" },

@@ -1,39 +1,75 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { exchangeToken, shopeeGet } from "@/lib/shopee-api";
+import { createHmac } from "crypto";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 );
 
+function getCookie(request: Request, name: string): string | null {
+  const header = request.headers.get("cookie") || "";
+  const entry  = header.split("; ").find(c => c.startsWith(`${name}=`));
+  return entry ? entry.slice(name.length + 1) : null;
+}
+
+function shopeeSign(partnerId: string, path: string, timestamp: number, partnerKey: string) {
+  return createHmac("sha256", partnerKey)
+    .update(`${partnerId}${path}${timestamp}`)
+    .digest("hex");
+}
+
 export async function GET(request: Request) {
   const url    = new URL(request.url);
   const code   = url.searchParams.get("code");
   const shopId = Number(url.searchParams.get("shop_id") ?? 0);
 
-  if (!code || !shopId) {
-    return NextResponse.redirect(new URL("/configuracoes?erro=shopee_sem_code", request.url));
+  // Recupera credenciais salvas no POST /api/auth/shopee
+  const partnerId  = getCookie(request, "shopee_partner_id");
+  const partnerKey = getCookie(request, "shopee_partner_key");
+  const userId     = getCookie(request, "cds_session");
+
+  if (!code || !shopId || !partnerId || !partnerKey) {
+    return NextResponse.redirect(new URL("/configuracoes?erro=shopee_sem_credenciais", request.url));
   }
 
-  // 1. Troca code por tokens
-  const tokenData = await exchangeToken(code, shopId);
-  if (tokenData.error) {
+  // 1. Troca code por access_token
+  const timestamp  = Math.floor(Date.now() / 1000);
+  const tokenPath  = "/api/v2/auth/token/get";
+  const sign       = shopeeSign(partnerId, tokenPath, timestamp, partnerKey);
+
+  const tokenRes = await fetch(
+    `https://partner.shopeemobile.com${tokenPath}?partner_id=${partnerId}&timestamp=${timestamp}&sign=${sign}`,
+    {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ code, shop_id: shopId, partner_id: Number(partnerId) }),
+    }
+  );
+  const tokenData = await tokenRes.json();
+
+  if (!tokenData.access_token) {
     console.error("[shopee callback] token error:", tokenData);
     return NextResponse.redirect(new URL("/configuracoes?erro=shopee_token", request.url));
   }
 
   const { access_token, refresh_token, expire_in } = tokenData;
 
-  // 2. Busca info da loja
+  // 2. Busca nome da loja
   let nickname = `Shopee ${shopId}`;
   try {
-    const shopInfo = await shopeeGet("/api/v2/shop/get_shop_info", access_token, shopId);
-    if (shopInfo?.response?.shop_name) nickname = shopInfo.response.shop_name;
+    const ts2    = Math.floor(Date.now() / 1000);
+    const iPath  = "/api/v2/shop/get_shop_info";
+    const iSign  = shopeeSign(partnerId, iPath, ts2, partnerKey);
+    const infoRes = await fetch(
+      `https://partner.shopeemobile.com${iPath}?partner_id=${partnerId}&timestamp=${ts2}&sign=${iSign}&access_token=${access_token}&shop_id=${shopId}`
+    );
+    const info = await infoRes.json();
+    if (info?.response?.shop_name) nickname = info.response.shop_name;
   } catch {}
 
-  // 3. Salva/atualiza loja no Supabase
-  const expiresAt = new Date(Date.now() + expire_in * 1000).toISOString();
+  // 3. Salva loja no Supabase
+  const expiresAt = new Date(Date.now() + (expire_in ?? 14400) * 1000).toISOString();
 
   const { data: loja } = await supabase
     .from("lojas")
@@ -41,14 +77,18 @@ export async function GET(request: Request) {
       {
         marketplace:      "Shopee",
         seller_id:        String(shopId),
+        shop_id:          String(shopId),
+        partner_id:       partnerId,
+        partner_key:      partnerKey,
         nickname,
         nome:             nickname,
         access_token,
-        refresh_token,
+        refresh_token:    refresh_token ?? null,
         token_expires_at: expiresAt,
         ativo:            true,
+        user_id:          userId ?? null,
       },
-      { onConflict: "seller_id" }
+      { onConflict: "seller_id,user_id" }
     )
     .select("id")
     .single();
@@ -56,21 +96,23 @@ export async function GET(request: Request) {
   const lojaId = loja?.id ?? null;
 
   // 4. Seta cookies e redireciona
-  const res = NextResponse.redirect(new URL("/configuracoes", request.url));
+  const res = NextResponse.redirect(new URL("/configuracoes?ok=shopee", request.url));
 
+  // Limpa credenciais temporárias
+  res.cookies.set("shopee_partner_id",  "", { maxAge: 0, path: "/" });
+  res.cookies.set("shopee_partner_key", "", { maxAge: 0, path: "/" });
+
+  // Salva token ativo
   res.cookies.set("shopee_access_token", access_token, {
-    httpOnly: true, secure: false, sameSite: "lax", path: "/",
-    maxAge: expire_in,
+    httpOnly: true, sameSite: "lax", path: "/", maxAge: expire_in ?? 14400,
   });
   res.cookies.set("shopee_shop_id", String(shopId), {
-    httpOnly: false, secure: false, sameSite: "lax", path: "/",
-    maxAge: 86400 * 30,
+    httpOnly: false, sameSite: "lax", path: "/", maxAge: 86400 * 30,
   });
 
   if (lojaId) {
     res.cookies.set("loja_ativa_id", lojaId, {
-      httpOnly: false, secure: false, sameSite: "lax", path: "/",
-      maxAge: 86400 * 30,
+      httpOnly: false, sameSite: "lax", path: "/", maxAge: 86400 * 30,
     });
   }
 

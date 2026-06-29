@@ -1,52 +1,79 @@
 import { NextResponse } from "next/server";
+import { createClient } from "@supabase/supabase-js";
+import { getUserId } from "@/lib/session";
 import { shopeeGet, shopeePost } from "@/lib/shopee-api";
 import { CATEGORIAS_SHOPEE } from "@/lib/comissoes-shopee";
 
-function getShopeeAuth(request: Request): { token: string; shopId: number } | null {
-  const cookies = request.headers.get("cookie") || "";
-  const token   = cookies.split("; ").find(c => c.startsWith("shopee_access_token="))?.slice("shopee_access_token=".length) ?? "";
-  const shopId  = Number(cookies.split("; ").find(c => c.startsWith("shopee_shop_id="))?.slice("shopee_shop_id=".length) ?? 0);
-  if (!token || !shopId) return null;
-  return { token, shopId };
-}
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+);
 
 function hojeISO() {
   const now = new Date();
-  const brt = new Date(now.getTime() - 3 * 60 * 60 * 1000);
-  return brt.toISOString().split("T")[0];
+  return new Date(now.getTime() - 3 * 60 * 60 * 1000).toISOString().split("T")[0];
 }
 
+function mapStatus(s: string): string {
+  const m: Record<string, string> = {
+    UNPAID:             "pending",
+    READY_TO_SHIP:      "paid",
+    PROCESSED:          "paid",
+    SHIPPED:            "paid",
+    TO_CONFIRM_RECEIVE: "paid",
+    COMPLETED:          "paid",
+    CANCELLED:          "cancelled",
+    IN_CANCEL:          "cancelled",
+    TO_RETURN:          "devolucao",
+  };
+  return m[s] ?? "paid";
+}
+
+// GET /api/shopee/vendas?date_from=YYYY-MM-DD&date_to=YYYY-MM-DD
 export async function GET(request: Request) {
-  const auth = getShopeeAuth(request);
-  if (!auth) {
+  const userId = getUserId(request);
+  if (!userId) return NextResponse.json({ erro: true, mensagem: "Sessão inválida." }, { status: 401 });
+
+  const { searchParams } = new URL(request.url);
+  const dateFrom = searchParams.get("date_from") ?? hojeISO();
+  const dateTo   = searchParams.get("date_to")   ?? dateFrom;
+
+  // Busca loja Shopee ativa do usuário no Supabase
+  const { data: loja } = await supabase
+    .from("lojas")
+    .select("id, shop_id, partner_id, partner_key, access_token, nickname")
+    .eq("user_id", userId)
+    .eq("marketplace", "Shopee")
+    .eq("ativo", true)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .single();
+
+  if (!loja || !loja.partner_id || !loja.partner_key || !loja.access_token) {
     return NextResponse.json({ erro: true, semConexao: true, mensagem: "Conta Shopee não conectada." });
   }
 
-  const url      = new URL(request.url);
-  const dateFrom = url.searchParams.get("date_from") || hojeISO();
-  const dateTo   = url.searchParams.get("date_to")   || hojeISO();
+  const { shop_id, partner_id, partner_key, access_token, nickname } = loja;
+  const shopId = Number(shop_id);
 
   const timeFrom = Math.floor(new Date(`${dateFrom}T00:00:00-03:00`).getTime() / 1000);
   const timeTo   = Math.floor(new Date(`${dateTo}T23:59:59-03:00`).getTime() / 1000);
 
-  const { token, shopId } = auth;
-
   // ── 1. Lista orderSNs no período ─────────────────────────────────────────
   const allOrderSns: string[] = [];
   let cursor = "";
-  const pageSize = 50;
 
   for (;;) {
     const params: Record<string, string | number> = {
-      time_range_field: "create_time",
-      time_from:        timeFrom,
-      time_to:          timeTo,
-      page_size:        pageSize,
+      time_range_field:         "create_time",
+      time_from:                timeFrom,
+      time_to:                  timeTo,
+      page_size:                50,
       response_optional_fields: "order_status",
     };
     if (cursor) params.cursor = cursor;
 
-    const data = await shopeeGet("/api/v2/order/get_order_list", token, shopId, params);
+    const data = await shopeeGet("/api/v2/order/get_order_list", partner_id, partner_key, access_token, shopId, params);
     const list: any[] = data?.response?.order_list ?? [];
     allOrderSns.push(...list.map((o: any) => o.order_sn));
 
@@ -55,76 +82,54 @@ export async function GET(request: Request) {
   }
 
   if (allOrderSns.length === 0) {
-    return NextResponse.json({ dateFrom, dateTo, conta: `Shopee ${shopId}`, rows: [] });
+    return NextResponse.json({ dateFrom, dateTo, conta: nickname ?? `Shopee ${shopId}`, rows: [] });
   }
 
-  // ── 2. Detalhes dos pedidos em lotes de 50 ───────────────────────────────
-  type VendaRow = {
-    orderId:     string;
-    data:        string;
-    anuncio:     string;
-    conta:       string;
-    marketplace: string;
-    sku:         string | null;
-    status:      string;
-    valorUnit:   number;
-    qtd:         number;
-    faturamento: number;
-    tarifaVenda: number;
-    margemContrib: number;
-    mcPercent:   number;
-  };
-
-  const rows: VendaRow[] = [];
+  // ── 2. Detalhes em lotes de 50 ───────────────────────────────────────────
+  const rows: any[] = [];
   const BATCH = 50;
 
   for (let i = 0; i < allOrderSns.length; i += BATCH) {
     const batch = allOrderSns.slice(i, i + BATCH);
 
-    const detail = await shopeePost("/api/v2/order/get_order_detail", token, shopId, {
+    const detail = await shopeePost("/api/v2/order/get_order_detail", partner_id, partner_key, access_token, shopId, {
       order_sn_list: batch,
-      response_optional_fields: [
-        "item_list", "total_amount", "buyer_username",
-        "order_status", "create_time", "pay_time",
-      ].join(","),
+      response_optional_fields: "item_list,total_amount,order_status,create_time,pay_time",
     });
 
-    const orders: any[] = detail?.response?.order_list ?? [];
+    for (const order of (detail?.response?.order_list ?? [])) {
+      const status  = order.order_status ?? "UNKNOWN";
+      const ts      = order.pay_time || order.create_time || 0;
+      const dataBrt = new Date((ts - 3 * 3600) * 1000).toISOString().split("T")[0];
 
-    for (const order of orders) {
-      const status    = order.order_status ?? "UNKNOWN";
-      const ts        = order.pay_time || order.create_time || 0;
-      const dataBrt   = new Date((ts - 3 * 3600) * 1000).toISOString().split("T")[0];
+      for (const item of (order.item_list ?? [])) {
+        const valorUnit   = item.model_discounted_price ?? item.model_original_price ?? 0;
+        const qtd         = item.model_quantity_purchased ?? 1;
+        const faturamento = valorUnit * qtd;
 
-      if (dataBrt < dateFrom || dataBrt > dateTo) continue;
-
-      const items: any[] = order.item_list ?? [];
-      for (const item of items) {
-        const valorUnit: number = item.model_discounted_price ?? item.model_original_price ?? 0;
-        const qtd:       number = item.model_quantity_purchased ?? 1;
-        const faturamento       = valorUnit * qtd;
-
-        // Comissão Shopee — tenta mapear categoria
         const cat = CATEGORIAS_SHOPEE.find(c =>
           (item.item_name ?? "").toLowerCase().includes(c.nome.toLowerCase())
         );
-        const comissaoRate = cat?.taxa ?? 0.14; // 14% padrão
-        const tarifaVenda  = faturamento * comissaoRate;
+        const comissaoRate  = cat?.taxa ?? 0.14;
+        const tarifaVenda   = faturamento * comissaoRate;
         const margemContrib = faturamento - tarifaVenda;
-        const mcPercent    = faturamento > 0 ? (margemContrib / faturamento) * 100 : 0;
+        const mcPercent     = faturamento > 0 ? (margemContrib / faturamento) * 100 : 0;
 
         rows.push({
           orderId:      order.order_sn,
           data:         dataBrt,
-          anuncio:      item.item_name ?? item.item_id,
-          conta:        `Shopee ${shopId}`,
+          anuncio:      item.item_name ?? String(item.item_id),
+          mlItemId:     String(item.item_id),
+          conta:        nickname ?? `Shopee ${shopId}`,
           marketplace:  "Shopee",
           sku:          item.model_sku || null,
           status:       mapStatus(status),
-          valorUnit,
           qtd,
           faturamento,
+          custo:        0,
           tarifaVenda,
+          freteComprador: 0,
+          freteVendedor:  0,
           margemContrib,
           mcPercent,
         });
@@ -137,23 +142,9 @@ export async function GET(request: Request) {
   return NextResponse.json({
     dateFrom,
     dateTo,
-    conta: `Shopee ${shopId}`,
-    totalPedidos: allOrderSns.length,
+    conta:        nickname ?? `Shopee ${shopId}`,
+    marketplace:  "Shopee",
+    totalPedidos: new Set(rows.map(r => r.orderId)).size,
     rows,
   });
-}
-
-function mapStatus(s: string): string {
-  const m: Record<string, string> = {
-    UNPAID:              "pending",
-    READY_TO_SHIP:       "paid",
-    PROCESSED:           "paid",
-    SHIPPED:             "paid",
-    TO_CONFIRM_RECEIVE:  "paid",
-    COMPLETED:           "paid",
-    CANCELLED:           "cancelled",
-    IN_CANCEL:           "cancelled",
-    TO_RETURN:           "devolucao",
-  };
-  return m[s] ?? "paid";
 }
