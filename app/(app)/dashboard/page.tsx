@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback } from "react";
 import { createClient } from "@supabase/supabase-js";
 import DateRangePicker from "../vendas/DateRangePicker";
 
@@ -20,6 +20,9 @@ type Anuncio = {
   nome: string; sku: string | null; marketplace: string;
   custo_produto: number | null; preco_anuncio: number | null;
   margem_contribuicao: number | null;
+};
+type Loja = {
+  id: string; nome: string; marketplace: string; nickname: string | null; ativo: boolean;
 };
 type DiaData = {
   data: string; label: string; faturamento: number; lucro: number;
@@ -444,6 +447,135 @@ function AlertBadge({ icon, title, msg, color }: { icon: string; title: string; 
   );
 }
 
+function LojasDropdown({ lojas, selecionadas, onChange }: {
+  lojas: Loja[];
+  selecionadas: Set<string>;
+  onChange: (ids: Set<string>) => void;
+}) {
+  const [aberto, setAberto] = useState(false);
+  const ref = React.useRef<HTMLDivElement>(null);
+
+  // Fecha ao clicar fora
+  React.useEffect(() => {
+    function handler(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setAberto(false);
+    }
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  const todas = selecionadas.size === lojas.length || selecionadas.size === 0;
+  const label = todas
+    ? "Todas as lojas"
+    : selecionadas.size === 1
+    ? lojas.find(l => selecionadas.has(l.id))?.nickname ?? "1 loja"
+    : `${selecionadas.size} lojas`;
+
+  function toggleLoja(id: string) {
+    const next = new Set(selecionadas);
+    if (next.has(id)) { next.delete(id); } else { next.add(id); }
+    // Se zerou, volta pra todas
+    onChange(next.size === 0 ? new Set(lojas.map(l => l.id)) : next);
+  }
+  function toggleTodas() {
+    onChange(new Set(lojas.map(l => l.id)));
+  }
+
+  const mktColor = (m: string) => m === "Shopee" ? "#EE4D2D" : "#22C55E";
+  const mktLabel = (m: string) => m === "Shopee" ? "🟠" : "🟢";
+
+  return (
+    <div ref={ref} style={{ position: "relative" }}>
+      <button
+        onClick={() => setAberto(v => !v)}
+        style={{
+          display: "flex", alignItems: "center", gap: 8,
+          background: "#0F172A", border: "1px solid #334155",
+          borderRadius: 10, padding: "8px 14px", cursor: "pointer",
+          color: "#fff", fontSize: 13, fontWeight: 700,
+          transition: "border-color 0.15s",
+        }}
+        onMouseEnter={e => (e.currentTarget.style.borderColor = "#FF7A00")}
+        onMouseLeave={e => (e.currentTarget.style.borderColor = "#334155")}
+      >
+        <span style={{ fontSize: 14 }}>🏪</span>
+        <span>{label}</span>
+        <span style={{ color: "#94A3B8", fontSize: 11, marginLeft: 2 }}>{aberto ? "▲" : "▼"}</span>
+      </button>
+
+      {aberto && lojas.length > 0 && (
+        <div style={{
+          position: "absolute", top: "calc(100% + 8px)", right: 0,
+          background: "#0F172A", border: "1px solid #1E293B",
+          borderRadius: 14, padding: 8, minWidth: 220, zIndex: 999,
+          boxShadow: "0 16px 48px rgba(0,0,0,0.6)",
+        }}>
+          {/* Todas */}
+          <div
+            onClick={toggleTodas}
+            style={{
+              display: "flex", alignItems: "center", gap: 10,
+              padding: "9px 12px", borderRadius: 10, cursor: "pointer",
+              background: todas ? "rgba(255,122,0,0.1)" : "transparent",
+              marginBottom: 4,
+            }}
+            onMouseEnter={e => { if (!todas) (e.currentTarget as HTMLDivElement).style.background = "rgba(255,255,255,0.04)"; }}
+            onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.background = todas ? "rgba(255,122,0,0.1)" : "transparent"; }}
+          >
+            <div style={{
+              width: 16, height: 16, borderRadius: 4, flexShrink: 0,
+              background: todas ? "#FF7A00" : "transparent",
+              border: `2px solid ${todas ? "#FF7A00" : "#334155"}`,
+              display: "flex", alignItems: "center", justifyContent: "center",
+            }}>
+              {todas && <span style={{ color: "#fff", fontSize: 10, fontWeight: 900 }}>✓</span>}
+            </div>
+            <span style={{ fontSize: 13, fontWeight: 700, color: todas ? "#FF7A00" : "#fff" }}>Todas as lojas</span>
+          </div>
+
+          <div style={{ height: 1, background: "#1E293B", margin: "4px 0 8px" }} />
+
+          {lojas.map(loja => {
+            const sel = selecionadas.has(loja.id);
+            const cor = mktColor(loja.marketplace);
+            return (
+              <div
+                key={loja.id}
+                onClick={() => toggleLoja(loja.id)}
+                style={{
+                  display: "flex", alignItems: "center", gap: 10,
+                  padding: "9px 12px", borderRadius: 10, cursor: "pointer",
+                  background: sel && !todas ? `${cor}10` : "transparent",
+                  marginBottom: 2,
+                }}
+                onMouseEnter={e => { (e.currentTarget as HTMLDivElement).style.background = sel && !todas ? `${cor}18` : "rgba(255,255,255,0.04)"; }}
+                onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.background = sel && !todas ? `${cor}10` : "transparent"; }}
+              >
+                <div style={{
+                  width: 16, height: 16, borderRadius: 4, flexShrink: 0,
+                  background: sel && !todas ? cor : "transparent",
+                  border: `2px solid ${sel && !todas ? cor : "#334155"}`,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                }}>
+                  {sel && !todas && <span style={{ color: "#fff", fontSize: 10, fontWeight: 900 }}>✓</span>}
+                </div>
+                <span style={{ fontSize: 11 }}>{mktLabel(loja.marketplace)}</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {loja.nickname ?? loja.nome}
+                  </div>
+                  <div style={{ fontSize: 10, color: cor, fontWeight: 700 }}>{loja.marketplace}</div>
+                </div>
+                <div style={{ width: 6, height: 6, borderRadius: "50%", background: cor, flexShrink: 0, boxShadow: `0 0 6px ${cor}` }} />
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Section({ title, subtitle, action, children }: {
   title: string; subtitle?: string; action?: React.ReactNode; children: React.ReactNode;
 }) {
@@ -475,6 +607,8 @@ export default function DashboardPage() {
   const [conta,    setConta]    = useState("CDS");
   const [mlConectado,     setMlConectado]     = useState(false);
   const [shopeeConectado, setShopeeConectado] = useState(false);
+  const [lojas,            setLojas]            = useState<Loja[]>([]);
+  const [lojasSelecionadas, setLojasSelecionadas] = useState<Set<string>>(new Set());
 
   const [kpis, setKpis] = useState({
     faturamento: 0, pedidos: 0, ticket: 0, lucro: 0,
@@ -493,15 +627,32 @@ export default function DashboardPage() {
     supabase.from("anuncios").select("ml_item_id, thumbnail, nome, sku, marketplace, custo_produto, preco_anuncio, margem_contribuicao")
       .eq("ativo", true)
       .then(({ data }) => { if (data) setAnuncios(data as Anuncio[]); });
+
+    fetch("/api/lojas")
+      .then(r => r.json())
+      .then((data: Loja[]) => {
+        if (Array.isArray(data) && data.length > 0) {
+          setLojas(data);
+          setLojasSelecionadas(new Set(data.map(l => l.id)));
+        }
+      })
+      .catch(() => {});
   }, []);
 
-  const carregar = useCallback(async (from: string, to: string) => {
+  const carregar = useCallback(async (from: string, to: string, lojasAtivas?: Set<string>) => {
     setLoading(true);
     setErro(null);
+    const sel = lojasAtivas ?? lojasSelecionadas;
+    // Determina quais marketplaces buscar baseado nas lojas selecionadas
+    const lojasArr = lojas.length > 0 ? lojas : [];
+    const selecionadasArr = lojasArr.filter(l => sel.size === 0 || sel.has(l.id));
+    const buscarML     = selecionadasArr.length === 0 || selecionadasArr.some(l => l.marketplace === "ML");
+    const buscarShopee = selecionadasArr.length === 0 || selecionadasArr.some(l => l.marketplace === "Shopee");
+
     try {
       const [mlData, shopeeData] = await Promise.all([
-        fetch(`/api/ml/vendas?date_from=${from}&date_to=${to}`).then(r => r.json()).catch(() => null),
-        fetch(`/api/shopee/vendas?date_from=${from}&date_to=${to}`).then(r => r.json()).catch(() => null),
+        buscarML     ? fetch(`/api/ml/vendas?date_from=${from}&date_to=${to}`).then(r => r.json()).catch(() => null)     : Promise.resolve(null),
+        buscarShopee ? fetch(`/api/shopee/vendas?date_from=${from}&date_to=${to}`).then(r => r.json()).catch(() => null) : Promise.resolve(null),
       ]);
 
       const mlOk     = mlData     && !mlData.erro;
@@ -608,7 +759,7 @@ export default function DashboardPage() {
     setLoading(false);
   }, [anuncios]);
 
-  useEffect(() => { carregar(dateFrom, dateTo); }, [dateFrom, dateTo, carregar]);
+  useEffect(() => { carregar(dateFrom, dateTo); }, [dateFrom, dateTo, lojasSelecionadas, carregar]);
 
   const totalCusto    = dias.reduce((s, d) => s + d.custo, 0);
   const totalComissao = dias.reduce((s, d) => s + d.comissao, 0);
@@ -737,24 +888,24 @@ export default function DashboardPage() {
             </div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-            {mlConectado && (
+            {lojas.length > 0 && (
+              <LojasDropdown
+                lojas={lojas}
+                selecionadas={lojasSelecionadas}
+                onChange={(ids) => {
+                  setLojasSelecionadas(ids);
+                  carregar(dateFrom, dateTo, ids);
+                }}
+              />
+            )}
+            {lojas.length === 0 && mlConectado && (
               <div style={{
                 display: "flex", alignItems: "center", gap: 8,
                 background: "#0F172A", border: "1px solid rgba(34,197,94,0.2)",
                 borderRadius: 10, padding: "8px 14px",
               }}>
                 <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#22C55E", boxShadow: "0 0 8px #22C55E", animation: "pulse 2s infinite" }} />
-                <span style={{ fontSize: 12, color: "#22C55E", fontWeight: 700 }}>ML</span>
-              </div>
-            )}
-            {shopeeConectado && (
-              <div style={{
-                display: "flex", alignItems: "center", gap: 8,
-                background: "#0F172A", border: "1px solid rgba(238,77,45,0.2)",
-                borderRadius: 10, padding: "8px 14px",
-              }}>
-                <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#EE4D2D", boxShadow: "0 0 8px #EE4D2D", animation: "pulse 2s infinite" }} />
-                <span style={{ fontSize: 12, color: "#EE4D2D", fontWeight: 700 }}>Shopee</span>
+                <span style={{ fontSize: 12, color: "#22C55E", fontWeight: 700 }}>ML Conectado</span>
               </div>
             )}
             <DateRangePicker from={dateFrom} to={dateTo} onChange={(f, t) => { setDateFrom(f); setDateTo(t); }} />
