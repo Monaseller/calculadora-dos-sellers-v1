@@ -152,7 +152,8 @@ export async function POST(request: Request) {
         const { error: updateError } = await supabase
           .from("anuncios")
           .update(updates)
-          .eq("ml_item_id", body.id);
+          .eq("ml_item_id", body.id)
+          .eq("user_id", userId);
 
         if (!updateError) atualizados++;
       }

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { CATEGORIAS_ML } from "@/lib/comissoes-mercado-livre";
+import { getUserId } from "@/lib/session";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -20,7 +21,8 @@ function hojeISO() {
 }
 
 export async function GET(request: Request) {
-  const token = getToken(request);
+  const token  = getToken(request);
+  const userId = getUserId(request);
   if (!token) {
     return NextResponse.json({ erro: true, semConexao: true, mensagem: "Conta do Mercado Livre não conectada." });
   }
@@ -202,11 +204,13 @@ export async function GET(request: Request) {
   }
 
   // ── Anúncios cadastrados no Supabase ──────────────────────────────────────
-  const { data: anuncios } = await supabase
+  let anunciosQuery = supabase
     .from("anuncios")
     .select("id, ml_item_id, nome, sku, preco_anuncio, custo_produto, insumos, custo_frete, frete_gratis, imposto, tipo_anuncio, categoria")
     .eq("ativo", true)
     .not("ml_item_id", "is", null);
+  if (userId) anunciosQuery = anunciosQuery.eq("user_id", userId);
+  const { data: anuncios } = await anunciosQuery;
 
   const mapaAnuncios = new Map<string, any>();
   for (const a of (anuncios ?? [])) {
