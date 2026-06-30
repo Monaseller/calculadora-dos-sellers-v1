@@ -84,6 +84,18 @@ function LojaCard({ loja, ativa, onAtivar, onDesconectar }: {
             Usar esta
           </button>
         )}
+        {ativa && isML && (
+          <button
+            onClick={() => { window.location.href = "/api/auth/mercadolivre"; }}
+            style={{
+              padding: "8px 16px", borderRadius: "8px", border: "1px solid rgba(255,182,0,0.4)",
+              background: "rgba(255,182,0,0.08)", color: "#FFB600", fontWeight: 700,
+              fontSize: "13px", cursor: "pointer",
+            }}
+          >
+            Reconectar
+          </button>
+        )}
 
         {!confirmando ? (
           <button
@@ -244,7 +256,7 @@ export default function ConfiguracoesPage() {
     setTimeout(() => setMsg(null), 3500);
   }
 
-  const conectarML = () => router.push("/api/auth/mercadolivre");
+  const conectarML = () => { window.location.href = "/api/auth/mercadolivre"; };
 
   return (
     <div style={{ padding: "32px", maxWidth: "860px", margin: "0 auto" }}>
