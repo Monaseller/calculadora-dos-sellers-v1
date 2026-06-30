@@ -28,27 +28,35 @@ export async function GET(request: Request) {
       const nickname = me.nickname || me.first_name || "Loja ML";
       const expiresAt = new Date(Date.now() + (Number(expires) || 21600) * 1000).toISOString();
 
-      // Busca loja existente por seller_id (independente de user_id)
-      const { data: existente } = await supabase
-        .from("lojas")
-        .select("id")
-        .eq("marketplace", "ML")
-        .eq("seller_id", sellerId)
-        .limit(1)
-        .maybeSingle();
+      // Busca loja existente: primeiro por seller_id + user_id, depois só por seller_id
+      let existente: { id: string } | null = null;
+      if (userId) {
+        const { data } = await supabase.from("lojas").select("id")
+          .eq("marketplace", "ML").eq("seller_id", sellerId).eq("user_id", userId)
+          .limit(1).maybeSingle();
+        existente = data;
+      }
+      if (!existente) {
+        const { data } = await supabase.from("lojas").select("id")
+          .eq("marketplace", "ML").eq("seller_id", sellerId)
+          .limit(1).maybeSingle();
+        existente = data;
+      }
 
       if (existente?.id) {
-        // Atualiza loja existente (garante user_id e token)
-        await supabase.from("lojas").update({
+        // Atualiza loja existente — só sobrescreve user_id se tivermos um userId válido
+        const updates: Record<string, unknown> = {
           nickname, nome: nickname, access_token: token,
-          token_expires_at: expiresAt, ativo: true, user_id: userId,
-        }).eq("id", existente.id);
+          token_expires_at: expiresAt, ativo: true,
+        };
+        if (userId) updates.user_id = userId;
+        await supabase.from("lojas").update(updates).eq("id", existente.id);
         lojaId = existente.id;
       } else {
         // Cria nova loja
         const { data: nova } = await supabase
           .from("lojas")
-          .insert({ marketplace: "ML", seller_id: sellerId, nickname, nome: nickname, access_token: token, token_expires_at: expiresAt, ativo: true, user_id: userId })
+          .insert({ marketplace: "ML", seller_id: sellerId, nickname, nome: nickname, access_token: token, token_expires_at: expiresAt, ativo: true, user_id: userId ?? null })
           .select("id")
           .single();
         lojaId = nova?.id ?? null;

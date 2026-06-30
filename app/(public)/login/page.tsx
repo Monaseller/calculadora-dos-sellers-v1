@@ -74,8 +74,17 @@ function LoginForm() {
       setErro(d.mensagem || "Erro ao criar conta. Tente novamente.");
       return;
     }
-    // Redireciona para página de verificação de email
-    router.push(`/verificar-email?email=${encodeURIComponent(email)}`);
+    // Loga automaticamente após criar conta
+    const resLogin = await fetch("/api/auth/login", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, senha }),
+    });
+    if (resLogin.ok) {
+      router.replace(redirect);
+    } else {
+      setTab("login");
+      setErro("Conta criada! Faça login para continuar.");
+    }
   }
 
   return (
