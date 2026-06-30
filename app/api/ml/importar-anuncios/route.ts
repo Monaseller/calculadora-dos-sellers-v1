@@ -199,7 +199,9 @@ export async function POST(request: Request) {
 
         if (variations.length === 0) {
           // ── Item sem variação ──────────────────────────────────────────
-          const preco: number = item.price ?? 0;
+          // sale_price = preço com promoção de campanha (Semana do Consumidor etc.)
+          // original_price != null = promoção direta ativa (price já é o promocional)
+          const preco: number = item.sale_price?.amount ?? item.price ?? 0;
           const sku: string | null = item.seller_custom_field ?? null;
           const key = `${itemId}|`;
           const existente = existMap.get(key);
@@ -255,7 +257,7 @@ export async function POST(request: Request) {
             const varAttrs: any[] = v.attribute_combinations ?? [];
             const varDesc = varAttrs.map((a: any) => a.value_name).filter(Boolean).join(" / ");
             const nomeVar = varDesc ? `${titulo} - ${varDesc}` : titulo;
-            const preco: number = v.price ?? item.price ?? 0;
+            const preco: number = v.sale_price?.amount ?? v.price ?? item.sale_price?.amount ?? item.price ?? 0;
             const sku: string | null = v.seller_custom_field ?? null;
 
             // Thumbnail da variação: tenta picture da variação, fallback para item

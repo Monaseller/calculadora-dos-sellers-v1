@@ -168,13 +168,16 @@ export async function POST(request: Request) {
       if (resolvedId !== anuncio.ml_item_id) mudancas.ml_item_id = resolvedId;
 
       // ── Preço + SKU: usa o da variação se houver ────────────────────────────
-      let novoPreco: number | null = typeof body.price === "number" ? body.price : null;
+      // sale_price = promoção de campanha ML (tem prioridade sobre price)
+      let novoPreco: number | null = (body.sale_price?.amount ?? body.price) ?? null;
+      if (typeof novoPreco !== "number") novoPreco = null;
       let novoSku: string | null = body.seller_custom_field ?? null;
       if (anuncio.variation_id && body.variations?.length) {
         const varId = String(anuncio.variation_id);
         const variation = (body.variations as any[]).find((v: any) => String(v.id) === varId);
         if (variation) {
-          if (typeof variation.price === "number") novoPreco = variation.price;
+          const varPreco = variation.sale_price?.amount ?? variation.price;
+          if (typeof varPreco === "number") novoPreco = varPreco;
           if (variation.seller_custom_field) novoSku = variation.seller_custom_field;
         }
       }
