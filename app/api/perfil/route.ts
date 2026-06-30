@@ -46,7 +46,7 @@ export async function POST(request: Request) {
       email:             body.email,
       documento:         body.documento,
       senha:             body.senha,
-      email_verificado:  false,
+      email_verificado:  true,
       token_verificacao: token,
       token_expiracao:   expiracao,
       user_uuid:         userUuid,

@@ -2,6 +2,14 @@ import crypto from "crypto";
 
 export const SHOPEE_BASE = process.env.SHOPEE_BASE_URL ?? "https://partner.shopeemobile.com";
 
+// ── Chaves shpk*: o segredo está hex-encoded após o prefixo ──────────────────
+function getHmacKey(partnerKey: string): string | Buffer {
+  if (partnerKey.startsWith("shpk")) {
+    return Buffer.from(partnerKey.slice(4), "hex");
+  }
+  return partnerKey;
+}
+
 // ── Assinatura por usuário (credenciais dinâmicas) ───────────────────────────
 export function shopeeSign(
   partnerId: string | number,
@@ -18,7 +26,7 @@ export function shopeeSign(
     : accessToken
       ? `${pid}${path}${timestamp}${accessToken}`
       : `${pid}${path}${timestamp}`;
-  return crypto.createHmac("sha256", partnerKey).update(base).digest("hex");
+  return crypto.createHmac("sha256", getHmacKey(partnerKey)).update(base).digest("hex");
 }
 
 // ── GET autenticado ──────────────────────────────────────────────────────────

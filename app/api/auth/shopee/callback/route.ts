@@ -13,8 +13,15 @@ function getCookie(request: Request, name: string): string | null {
   return entry ? entry.slice(name.length + 1) : null;
 }
 
+function getHmacKey(partnerKey: string): string | Buffer {
+  if (partnerKey.startsWith("shpk")) {
+    return Buffer.from(partnerKey.slice(4), "hex");
+  }
+  return partnerKey;
+}
+
 function shopeeSign(partnerId: string, path: string, timestamp: number, partnerKey: string) {
-  return createHmac("sha256", partnerKey)
+  return createHmac("sha256", getHmacKey(partnerKey))
     .update(`${partnerId}${path}${timestamp}`)
     .digest("hex");
 }

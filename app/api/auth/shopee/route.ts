@@ -1,6 +1,14 @@
 import { NextResponse } from "next/server";
 import { createHmac } from "crypto";
 
+// Chaves shpk* têm o segredo em hex após o prefixo
+function getHmacKey(partnerKey: string): string | Buffer {
+  if (partnerKey.startsWith("shpk")) {
+    return Buffer.from(partnerKey.slice(4), "hex");
+  }
+  return partnerKey;
+}
+
 // GET /api/auth/shopee
 // Gera URL de autorização Shopee usando credenciais do servidor (env vars)
 export async function GET(request: Request) {
@@ -15,7 +23,7 @@ export async function GET(request: Request) {
   const timestamp   = Math.floor(Date.now() / 1000);
   const path        = "/api/v2/shop/auth_partner";
   const baseString  = `${partnerId}${path}${timestamp}`;
-  const sign        = createHmac("sha256", partnerKey).update(baseString).digest("hex");
+  const sign        = createHmac("sha256", getHmacKey(partnerKey)).update(baseString).digest("hex");
 
   const siteUrl     = process.env.SHOPEE_REDIRECT_URI
     ?? `${process.env.NEXT_PUBLIC_SITE_URL ?? "https://www.calculadoradossellers.com.br"}/api/auth/shopee/callback`;
