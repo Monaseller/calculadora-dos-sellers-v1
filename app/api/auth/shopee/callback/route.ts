@@ -24,9 +24,10 @@ export async function GET(request: Request) {
   const code   = url.searchParams.get("code");
   const shopId = Number(url.searchParams.get("shop_id") ?? 0);
 
-  // Recupera credenciais salvas no POST /api/auth/shopee
-  const partnerId  = getCookie(request, "shopee_partner_id");
-  const partnerKey = getCookie(request, "shopee_partner_key");
+  // Usa credenciais centrais do servidor (env vars)
+  const partnerId  = process.env.SHOPEE_PARTNER_ID  ?? getCookie(request, "shopee_partner_id");
+  const partnerKey = process.env.SHOPEE_PARTNER_KEY ?? getCookie(request, "shopee_partner_key");
+  const baseUrl    = process.env.SHOPEE_BASE_URL ?? "https://partner.shopeemobile.com";
   const userId     = getCookie(request, "cds_session");
 
   if (!code || !shopId || !partnerId || !partnerKey) {
@@ -39,7 +40,7 @@ export async function GET(request: Request) {
   const sign       = shopeeSign(partnerId, tokenPath, timestamp, partnerKey);
 
   const tokenRes = await fetch(
-    `https://partner.shopeemobile.com${tokenPath}?partner_id=${partnerId}&timestamp=${timestamp}&sign=${sign}`,
+    `${baseUrl}${tokenPath}?partner_id=${partnerId}&timestamp=${timestamp}&sign=${sign}`,
     {
       method:  "POST",
       headers: { "Content-Type": "application/json" },
@@ -62,38 +63,56 @@ export async function GET(request: Request) {
     const iPath  = "/api/v2/shop/get_shop_info";
     const iSign  = shopeeSign(partnerId, iPath, ts2, partnerKey);
     const infoRes = await fetch(
-      `https://partner.shopeemobile.com${iPath}?partner_id=${partnerId}&timestamp=${ts2}&sign=${iSign}&access_token=${access_token}&shop_id=${shopId}`
+      `${baseUrl}${iPath}?partner_id=${partnerId}&timestamp=${ts2}&sign=${iSign}&access_token=${access_token}&shop_id=${shopId}`
     );
     const info = await infoRes.json();
     if (info?.response?.shop_name) nickname = info.response.shop_name;
   } catch {}
 
-  // 3. Salva loja no Supabase
+  // 3. Salva loja no Supabase (SELECT + UPDATE para evitar problemas de constraint)
   const expiresAt = new Date(Date.now() + (expire_in ?? 14400) * 1000).toISOString();
 
-  const { data: loja } = await supabase
-    .from("lojas")
-    .upsert(
-      {
-        marketplace:      "Shopee",
-        seller_id:        String(shopId),
-        shop_id:          String(shopId),
-        partner_id:       partnerId,
-        partner_key:      partnerKey,
-        nickname,
-        nome:             nickname,
-        access_token,
-        refresh_token:    refresh_token ?? null,
-        token_expires_at: expiresAt,
-        ativo:            true,
-        user_id:          userId ?? null,
-      },
-      { onConflict: "seller_id,user_id" }
-    )
-    .select("id")
-    .single();
+  let lojaId: string | null = null;
 
-  const lojaId = loja?.id ?? null;
+  const { data: existente } = await supabase
+    .from("lojas")
+    .select("id")
+    .eq("marketplace", "Shopee")
+    .eq("seller_id", String(shopId))
+    .eq("user_id", userId ?? "")
+    .limit(1)
+    .maybeSingle();
+
+  if (existente?.id) {
+    await supabase.from("lojas").update({
+      nickname,
+      nome:             nickname,
+      access_token,
+      refresh_token:    refresh_token ?? null,
+      token_expires_at: expiresAt,
+      ativo:            true,
+      user_id:          userId ?? null,
+      partner_id:       partnerId,
+      partner_key:      partnerKey,
+    }).eq("id", existente.id);
+    lojaId = existente.id;
+  } else {
+    const { data: nova } = await supabase.from("lojas").insert({
+      marketplace:      "Shopee",
+      seller_id:        String(shopId),
+      shop_id:          String(shopId),
+      partner_id:       partnerId,
+      partner_key:      partnerKey,
+      nickname,
+      nome:             nickname,
+      access_token,
+      refresh_token:    refresh_token ?? null,
+      token_expires_at: expiresAt,
+      ativo:            true,
+      user_id:          userId ?? null,
+    }).select("id").single();
+    lojaId = nova?.id ?? null;
+  }
 
   // 4. Seta cookies e redireciona
   const res = NextResponse.redirect(new URL("/configuracoes?ok=shopee", request.url));

@@ -1,6 +1,6 @@
 import crypto from "crypto";
 
-export const SHOPEE_BASE = "https://partner.shopeemobile.com";
+export const SHOPEE_BASE = process.env.SHOPEE_BASE_URL ?? "https://partner.shopeemobile.com";
 
 // ── Assinatura por usuário (credenciais dinâmicas) ───────────────────────────
 export function shopeeSign(

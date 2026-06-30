@@ -1,38 +1,37 @@
 import { NextResponse } from "next/server";
 import { createHmac } from "crypto";
 
-// POST /api/auth/shopee
-// Body: { partner_id: string, partner_key: string }
-// Salva credenciais em cookies temporários e retorna URL de OAuth
-export async function POST(request: Request) {
-  const { partner_id, partner_key } = await request.json();
+// GET /api/auth/shopee
+// Gera URL de autorização Shopee usando credenciais do servidor (env vars)
+export async function GET(request: Request) {
+  const partnerId  = process.env.SHOPEE_PARTNER_ID;
+  const partnerKey = process.env.SHOPEE_PARTNER_KEY;
+  const baseUrl    = process.env.SHOPEE_BASE_URL ?? "https://partner.shopeemobile.com";
 
-  if (!partner_id || !partner_key) {
-    return NextResponse.json({ erro: true, mensagem: "partner_id e partner_key são obrigatórios." }, { status: 400 });
+  if (!partnerId || !partnerKey) {
+    return NextResponse.json({ erro: true, mensagem: "Credenciais Shopee não configuradas no servidor." }, { status: 500 });
   }
 
-  const partnerId  = String(partner_id).trim();
-  const partnerKey = String(partner_key).trim();
-  const timestamp  = Math.floor(Date.now() / 1000);
-  const path       = "/api/v2/shop/auth_partner";
-  const baseString = `${partnerId}${path}${timestamp}`;
-  const sign       = createHmac("sha256", partnerKey).update(baseString).digest("hex");
+  const timestamp   = Math.floor(Date.now() / 1000);
+  const path        = "/api/v2/shop/auth_partner";
+  const baseString  = `${partnerId}${path}${timestamp}`;
+  const sign        = createHmac("sha256", partnerKey).update(baseString).digest("hex");
 
-  const siteUrl    = process.env.NEXT_PUBLIC_SITE_URL ?? "https://calculadora-dos-sellers-v1.vercel.app";
-  const redirectUri = `${siteUrl}/api/auth/shopee/callback`;
+  const siteUrl     = process.env.SHOPEE_REDIRECT_URI
+    ?? `${process.env.NEXT_PUBLIC_SITE_URL ?? "https://www.calculadoradossellers.com.br"}/api/auth/shopee/callback`;
 
   const authUrl =
-    `https://partner.shopeemobile.com${path}` +
+    `${baseUrl}${path}` +
     `?partner_id=${partnerId}` +
     `&timestamp=${timestamp}` +
     `&sign=${sign}` +
-    `&redirect=${encodeURIComponent(redirectUri)}`;
+    `&redirect=${encodeURIComponent(siteUrl)}`;
 
-  const res = NextResponse.json({ url: authUrl });
+  // Redireciona direto para a Shopee
+  return NextResponse.redirect(authUrl);
+}
 
-  // Credenciais ficam em cookies httpOnly por 10 min para o callback usar
-  res.cookies.set("shopee_partner_id",  partnerId,  { httpOnly: true, maxAge: 600, path: "/" });
-  res.cookies.set("shopee_partner_key", partnerKey, { httpOnly: true, maxAge: 600, path: "/" });
-
-  return res;
+// Mantém POST para compatibilidade
+export async function POST(request: Request) {
+  return GET(request);
 }

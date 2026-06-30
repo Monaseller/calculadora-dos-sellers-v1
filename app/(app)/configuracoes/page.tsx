@@ -246,30 +246,6 @@ export default function ConfiguracoesPage() {
 
   const conectarML = () => router.push("/api/auth/mercadolivre");
 
-  // Shopee form state
-  const [shopeeForm,    setShopeeForm]    = useState(false);
-  const [shopeeId,      setShopeeId]      = useState("");
-  const [shopeeKey,     setShopeeKey]     = useState("");
-  const [shopeeLoading, setShopeeLoading] = useState(false);
-
-  async function conectarShopee() {
-    if (!shopeeId || !shopeeKey) return;
-    setShopeeLoading(true);
-    try {
-      const res  = await fetch("/api/auth/shopee", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ partner_id: shopeeId, partner_key: shopeeKey }),
-      });
-      const data = await res.json();
-      if (data.url) window.location.href = data.url;
-      else mostrarMsg(false, data.mensagem ?? "Erro ao conectar Shopee.");
-    } catch {
-      mostrarMsg(false, "Erro de conexão.");
-    }
-    setShopeeLoading(false);
-  }
-
   return (
     <div style={{ padding: "32px", maxWidth: "860px", margin: "0 auto" }}>
 
@@ -475,83 +451,32 @@ export default function ConfiguracoesPage() {
           </a>
 
           {/* Shopee */}
-          <div style={{
-            background: "rgba(238,77,45,0.05)", border: "1px solid rgba(238,77,45,0.18)",
-            borderRadius: "14px", padding: "24px",
-          }}>
+          <a
+            href="/api/auth/shopee"
+            style={{
+              display: "block", textDecoration: "none",
+              background: "rgba(238,77,45,0.05)", border: "1px solid rgba(238,77,45,0.18)",
+              borderRadius: "14px", padding: "24px", cursor: "pointer",
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = "rgba(238,77,45,0.10)")}
+            onMouseLeave={e => (e.currentTarget.style.background = "rgba(238,77,45,0.05)")}
+          >
             <div style={{ fontSize: "30px", marginBottom: "12px" }}>🛍️</div>
             <div style={{ fontWeight: 800, fontSize: "15px", color: "#EE4D2D", marginBottom: "6px" }}>Shopee</div>
             <div style={{ fontSize: "12px", color: "#9099aa", lineHeight: 1.6, marginBottom: "18px" }}>
-              Conecte com suas credenciais da Shopee Open Platform.{" "}
-              <a href="https://open.shopee.com/developer-guide/4" target="_blank" rel="noopener" style={{ color: "#EE4D2D" }}>Como obter?</a>
+              Conecte via OAuth. Pode adicionar mais de uma conta Shopee ao mesmo tempo.
             </div>
-
-            {!shopeeForm ? (
-              <button
-                onClick={() => setShopeeForm(true)}
-                style={{
-                  display: "inline-flex", alignItems: "center", gap: "6px",
-                  background: "rgba(238,77,45,0.15)", border: "1px solid rgba(238,77,45,0.3)",
-                  padding: "7px 14px", borderRadius: "8px", color: "#EE4D2D", fontWeight: 700,
-                  fontSize: "13px", cursor: "pointer",
-                }}
-              >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                  <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-                </svg>
-                Adicionar conta Shopee
-              </button>
-            ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-                <input
-                  type="text"
-                  placeholder="Partner ID (número)"
-                  value={shopeeId}
-                  onChange={e => setShopeeId(e.target.value)}
-                  style={{
-                    background: "rgba(255,255,255,0.04)", border: "1px solid rgba(238,77,45,0.3)",
-                    borderRadius: "8px", padding: "9px 12px", color: "#fff", fontSize: "13px",
-                    outline: "none", width: "100%", boxSizing: "border-box",
-                  }}
-                />
-                <input
-                  type="password"
-                  placeholder="Partner Key (chave secreta)"
-                  value={shopeeKey}
-                  onChange={e => setShopeeKey(e.target.value)}
-                  style={{
-                    background: "rgba(255,255,255,0.04)", border: "1px solid rgba(238,77,45,0.3)",
-                    borderRadius: "8px", padding: "9px 12px", color: "#fff", fontSize: "13px",
-                    outline: "none", width: "100%", boxSizing: "border-box",
-                  }}
-                />
-                <div style={{ display: "flex", gap: "8px" }}>
-                  <button
-                    onClick={conectarShopee}
-                    disabled={shopeeLoading || !shopeeId || !shopeeKey}
-                    style={{
-                      flex: 1, padding: "9px", borderRadius: "8px", border: "none",
-                      background: shopeeLoading ? "rgba(238,77,45,0.4)" : "#EE4D2D",
-                      color: "#fff", fontWeight: 700, fontSize: "13px",
-                      cursor: shopeeLoading ? "not-allowed" : "pointer",
-                    }}
-                  >
-                    {shopeeLoading ? "Conectando..." : "Conectar →"}
-                  </button>
-                  <button
-                    onClick={() => { setShopeeForm(false); setShopeeId(""); setShopeeKey(""); }}
-                    style={{
-                      padding: "9px 14px", borderRadius: "8px",
-                      border: "1px solid rgba(255,255,255,0.1)",
-                      background: "transparent", color: "#9099aa", fontSize: "13px", cursor: "pointer",
-                    }}
-                  >
-                    Cancelar
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
+            <div style={{
+              display: "inline-flex", alignItems: "center", gap: "6px",
+              background: "rgba(238,77,45,0.15)", border: "1px solid rgba(238,77,45,0.3)",
+              padding: "7px 14px", borderRadius: "8px", color: "#EE4D2D", fontWeight: 700, fontSize: "13px",
+            }}>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+              </svg>
+              Adicionar conta Shopee
+            </div>
+          </a>
 
         </div>
       </section>
