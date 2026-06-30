@@ -25,17 +25,8 @@ export default function NavBar() {
       height: "56px",
     }}>
       {/* Logo */}
-      <Link href="/" style={{ textDecoration: "none", display: "flex", alignItems: "center", gap: "10px", marginRight: "24px" }}>
-        <div style={{
-          width: "34px", height: "34px",
-          borderRadius: "10px",
-          background: "linear-gradient(135deg,#ff6b00,#ffb800)",
-          display: "grid", placeItems: "center",
-          fontWeight: 900, fontSize: "14px", color: "#10131b",
-        }}>CDS</div>
-        <span style={{ fontWeight: 800, fontSize: "15px", color: "#fff", letterSpacing: "0.2px" }}>
-          Calculadora dos Sellers
-        </span>
+      <Link href="/" style={{ textDecoration: "none", display: "flex", alignItems: "center", marginRight: "24px" }}>
+        <img src="/logo-cds.png" alt="Calculadora dos Sellers" style={{ height: "40px", width: "auto", objectFit: "contain" }} />
       </Link>
 
       {/* Links */}

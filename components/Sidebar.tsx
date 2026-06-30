@@ -105,19 +105,8 @@ export default function Sidebar() {
     }}>
       {/* Logo */}
       <div style={{ padding: "24px 20px 20px", borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
-        <Link href="/precificacao" style={{ textDecoration: "none", display: "flex", alignItems: "center", gap: "12px" }}>
-          <div style={{
-            width: "40px", height: "40px",
-            borderRadius: "12px",
-            background: "linear-gradient(135deg,#ff6b00,#ffb800)",
-            display: "grid", placeItems: "center",
-            fontWeight: 900, fontSize: "13px", color: "#10131b",
-            flexShrink: 0,
-          }}>CDS</div>
-          <div>
-            <div style={{ fontWeight: 800, fontSize: "13px", color: "#fff", lineHeight: 1.2 }}>Calculadora</div>
-            <div style={{ fontWeight: 600, fontSize: "11px", color: "#9099aa", lineHeight: 1.2 }}>dos Sellers</div>
-          </div>
+        <Link href="/precificacao" style={{ textDecoration: "none", display: "flex", alignItems: "center" }}>
+          <img src="/logo-cds.png" alt="Calculadora dos Sellers" style={{ height: "48px", width: "auto", objectFit: "contain" }} />
         </Link>
       </div>
 
