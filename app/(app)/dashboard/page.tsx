@@ -633,9 +633,18 @@ export default function DashboardPage() {
   const [sparkLuc, setSparkLuc] = useState<number[]>([]);
 
   useEffect(() => {
-    supabase.from("anuncios").select("ml_item_id, thumbnail, nome, sku, marketplace, custo_produto, preco_anuncio, margem_contribuicao")
-      .eq("ativo", true)
-      .then(({ data }) => { if (data) setAnuncios(data as Anuncio[]); });
+    // Busca userId via session para filtrar anúncios corretamente (multi-tenant)
+    fetch("/api/auth/me")
+      .then(r => r.json())
+      .then(({ userId }) => {
+        if (!userId) return;
+        supabase.from("anuncios")
+          .select("ml_item_id, thumbnail, nome, sku, marketplace, custo_produto, preco_anuncio, margem_contribuicao")
+          .eq("ativo", true)
+          .eq("user_id", userId)
+          .then(({ data }) => { if (data) setAnuncios(data as Anuncio[]); });
+      })
+      .catch(() => {});
 
     fetch("/api/lojas")
       .then(r => r.json())
