@@ -64,16 +64,23 @@ export async function GET(request: Request) {
     }
   } catch {}
 
+  const isProd = process.env.NODE_ENV === "production";
   const res = NextResponse.redirect(new URL("/configuracoes", request.url));
 
   res.cookies.set("ml_access_token", token, {
-    httpOnly: true, secure: false, sameSite: "lax", path: "/",
+    httpOnly: true,
+    secure: isProd,
+    sameSite: "lax",
+    path: "/",
     maxAge: Number(expires) || 21600,
   });
 
   if (lojaId) {
     res.cookies.set("loja_ativa_id", lojaId, {
-      httpOnly: false, secure: false, sameSite: "lax", path: "/",
+      httpOnly: false,
+      secure: isProd,
+      sameSite: "lax",
+      path: "/",
       maxAge: 86400 * 30,
     });
   }

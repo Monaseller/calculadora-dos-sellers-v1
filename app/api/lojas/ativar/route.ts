@@ -26,7 +26,7 @@ export async function POST(request: Request) {
   if (loja.access_token) {
     res.cookies.set("ml_access_token", loja.access_token, {
       httpOnly: true,
-      secure: false,
+      secure: process.env.NODE_ENV === "production",
       sameSite: "lax",
       path: "/",
       maxAge: 21600,
@@ -35,7 +35,7 @@ export async function POST(request: Request) {
 
   res.cookies.set("loja_ativa_id", loja.id, {
     httpOnly: false,
-    secure: false,
+    secure: process.env.NODE_ENV === "production",
     sameSite: "lax",
     path: "/",
     maxAge: 86400 * 30,
