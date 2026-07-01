@@ -229,14 +229,15 @@ export default function ConfiguracoesPage() {
     }
   }
 
-  async function ativarLoja(id: string) {
+  async function ativarLoja(id: string, marketplace: string) {
     const res = await fetch("/api/lojas/ativar", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ loja_id: id }),
     });
     if (res.ok) {
-      setLojaAtiva(id);
+      if (marketplace === "Shopee") setShopeeAtiva(id);
+      else setLojaAtiva(id);
       mostrarMsg(true, "Loja ativada com sucesso!");
     }
   }
@@ -415,7 +416,7 @@ export default function ConfiguracoesPage() {
                 key={l.id}
                 loja={l}
                 ativa={l.marketplace === "Shopee" ? shopeeAtiva === l.id : lojaAtiva === l.id}
-                onAtivar={() => ativarLoja(l.id)}
+                onAtivar={() => ativarLoja(l.id, l.marketplace)}
                 onDesconectar={() => desconectarLoja(l.id)}
               />
             ))}
