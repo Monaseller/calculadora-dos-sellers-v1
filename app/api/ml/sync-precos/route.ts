@@ -4,6 +4,7 @@ import { calcularFreteMl, calcularFreteFullMl, calcularFreteFlexMl } from "@/lib
 import { CATEGORIAS_ML } from "@/lib/comissoes-mercado-livre";
 import { getUserId } from "@/lib/session";
 import { getMLToken, applyMLCookies } from "@/lib/ml-auth";
+import { getActivePromoPrice } from "@/lib/ml-promotions";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -164,15 +165,17 @@ export async function POST(request: Request) {
       if (resolvedId !== anuncio.ml_item_id) mudancas.ml_item_id = resolvedId;
 
       // ── Preço + SKU: usa o da variação se houver ────────────────────────────
-      // sale_price = promoção de campanha ML (tem prioridade sobre price)
-      let novoPreco: number | null = (body.sale_price?.amount ?? body.price) ?? null;
+      // Prioridade: promoção ativa (seller-promotions) > sale_price > price
+      const promoPrice = await getActivePromoPrice(resolvedId, token);
+      let novoPreco: number | null = promoPrice ?? body.sale_price?.amount ?? body.price ?? null;
       if (typeof novoPreco !== "number") novoPreco = null;
       let novoSku: string | null = body.seller_custom_field ?? null;
       if (anuncio.variation_id && body.variations?.length) {
         const varId = String(anuncio.variation_id);
         const variation = (body.variations as any[]).find((v: any) => String(v.id) === varId);
         if (variation) {
-          const varPreco = variation.sale_price?.amount ?? variation.price;
+          // Para variações, o preço de promoção é no nível do item (mesmo promoPrice)
+          const varPreco = promoPrice ?? variation.sale_price?.amount ?? variation.price;
           if (typeof varPreco === "number") novoPreco = varPreco;
           if (variation.seller_custom_field) novoSku = variation.seller_custom_field;
         }
