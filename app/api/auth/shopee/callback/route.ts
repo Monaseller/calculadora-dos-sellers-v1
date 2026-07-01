@@ -136,7 +136,8 @@ export async function GET(request: Request) {
   });
 
   if (lojaId) {
-    res.cookies.set("loja_ativa_id", lojaId, {
+    // Cookie específico da Shopee — não sobrescreve loja_ativa_id do ML
+    res.cookies.set("shopee_loja_id", lojaId, {
       httpOnly: false, secure: isProd, sameSite: "lax", path: "/", maxAge: 86400 * 30,
     });
   }

@@ -165,8 +165,9 @@ function InputField({ label, value, onChange, type = "text", placeholder = "" }:
 
 export default function ConfiguracoesPage() {
   const router = useRouter();
-  const [lojas,     setLojas]     = useState<Loja[]>([]);
-  const [lojaAtiva, setLojaAtiva] = useState<string | null>(null);
+  const [lojas,        setLojas]        = useState<Loja[]>([]);
+  const [lojaAtiva,    setLojaAtiva]    = useState<string | null>(null);
+  const [shopeeAtiva,  setShopeeAtiva]  = useState<string | null>(null);
   const [loading,   setLoading]   = useState(true);
   const [msg,       setMsg]       = useState<{ ok: boolean; texto: string } | null>(null);
 
@@ -190,6 +191,7 @@ export default function ConfiguracoesPage() {
       setLojas(Array.isArray(data) ? data : []);
     } catch {}
     setLojaAtiva(getCookieClient("loja_ativa_id"));
+    setShopeeAtiva(getCookieClient("shopee_loja_id"));
     setLoading(false);
   }
 
@@ -412,7 +414,7 @@ export default function ConfiguracoesPage() {
               <LojaCard
                 key={l.id}
                 loja={l}
-                ativa={lojaAtiva === l.id}
+                ativa={l.marketplace === "Shopee" ? shopeeAtiva === l.id : lojaAtiva === l.id}
                 onAtivar={() => ativarLoja(l.id)}
                 onDesconectar={() => desconectarLoja(l.id)}
               />

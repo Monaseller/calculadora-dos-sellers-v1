@@ -23,23 +23,25 @@ export async function POST(request: Request) {
 
   const res = NextResponse.json({ ok: true, loja: { id: loja.id, nome: loja.nome, nickname: loja.nickname, marketplace: loja.marketplace } });
 
-  if (loja.access_token) {
-    res.cookies.set("ml_access_token", loja.access_token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
-      path: "/",
-      maxAge: 21600,
+  const isProd = process.env.NODE_ENV === "production";
+  const isShopee = loja.marketplace === "Shopee";
+
+  if (isShopee) {
+    // Shopee: cookie específico — não toca no loja_ativa_id do ML
+    res.cookies.set("shopee_loja_id", loja.id, {
+      httpOnly: false, secure: isProd, sameSite: "lax", path: "/", maxAge: 86400 * 30,
+    });
+  } else {
+    // ML ou outros
+    if (loja.access_token) {
+      res.cookies.set("ml_access_token", loja.access_token, {
+        httpOnly: true, secure: isProd, sameSite: "lax", path: "/", maxAge: 21600,
+      });
+    }
+    res.cookies.set("loja_ativa_id", loja.id, {
+      httpOnly: false, secure: isProd, sameSite: "lax", path: "/", maxAge: 86400 * 30,
     });
   }
-
-  res.cookies.set("loja_ativa_id", loja.id, {
-    httpOnly: false,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "lax",
-    path: "/",
-    maxAge: 86400 * 30,
-  });
 
   return res;
 }

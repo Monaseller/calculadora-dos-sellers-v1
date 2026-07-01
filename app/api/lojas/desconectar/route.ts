@@ -22,12 +22,19 @@ export async function POST(request: Request) {
     .eq("id", loja_id)
     .eq("user_id", userId);
 
-  const activeId = getCookie(request, "loja_ativa_id");
   const res = NextResponse.json({ ok: true });
 
-  if (activeId === loja_id) {
+  // Limpa o cookie correto dependendo de qual loja foi desconectada
+  const mlActiveId = getCookie(request, "loja_ativa_id");
+  if (mlActiveId === loja_id) {
     res.cookies.delete("ml_access_token");
     res.cookies.delete("loja_ativa_id");
+  }
+  const shopeeActiveId = getCookie(request, "shopee_loja_id");
+  if (shopeeActiveId === loja_id) {
+    res.cookies.delete("shopee_access_token");
+    res.cookies.delete("shopee_loja_id");
+    res.cookies.delete("shopee_shop_id");
   }
 
   return res;

@@ -23,10 +23,11 @@ export default function TopBar() {
   const router = useRouter();
   const info   = PAGE_INFO[path] ?? { title: "CDS", desc: "" };
 
-  const [lojas,     setLojas]     = useState<Loja[]>([]);
-  const [lojaAtiva, setLojaAtiva] = useState<string | null>(null);
-  const [dropdown,  setDropdown]  = useState(false);
-  const [trocando,  setTrocando]  = useState(false);
+  const [lojas,       setLojas]       = useState<Loja[]>([]);
+  const [lojaAtiva,   setLojaAtiva]   = useState<string | null>(null);
+  const [shopeeAtiva, setShopeeAtiva] = useState<string | null>(null);
+  const [dropdown,    setDropdown]    = useState(false);
+  const [trocando,    setTrocando]    = useState(false);
   const dropRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -46,10 +47,16 @@ export default function TopBar() {
       if (Array.isArray(data)) setLojas(data);
     } catch {}
     setLojaAtiva(getCookieClient("loja_ativa_id"));
+    setShopeeAtiva(getCookieClient("shopee_loja_id"));
   }
 
-  async function trocarLoja(id: string) {
-    if (trocando || id === lojaAtiva) { setDropdown(false); return; }
+  function isLojaAtiva(l: Loja): boolean {
+    return l.marketplace === "Shopee" ? shopeeAtiva === l.id : lojaAtiva === l.id;
+  }
+
+  async function trocarLoja(id: string, marketplace: string) {
+    const jaAtiva = marketplace === "Shopee" ? shopeeAtiva === id : lojaAtiva === id;
+    if (trocando || jaAtiva) { setDropdown(false); return; }
     setTrocando(true);
     try {
       await fetch("/api/lojas/ativar", {
@@ -57,13 +64,19 @@ export default function TopBar() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ loja_id: id }),
       });
-      setLojaAtiva(id);
+      if (marketplace === "Shopee") setShopeeAtiva(id);
+      else setLojaAtiva(id);
       setDropdown(false);
       router.refresh();
     } finally { setTrocando(false); }
   }
 
-  const ativa = lojas.find(l => l.id === lojaAtiva);
+  const ativasCount = lojas.filter(l => isLojaAtiva(l)).length;
+  const ativaML = lojas.find(l => l.marketplace !== "Shopee" && lojaAtiva === l.id);
+  const ativaShopee = lojas.find(l => l.marketplace === "Shopee" && shopeeAtiva === l.id);
+  const labelAtiva = ativasCount >= 2
+    ? `${ativaML?.nickname || ativaML?.nome || ""} + ${ativaShopee?.nickname || ativaShopee?.nome || ""}`
+    : (ativaML?.nickname || ativaML?.nome || ativaShopee?.nickname || ativaShopee?.nome || null);
 
   return (
     <header style={{
@@ -87,17 +100,17 @@ export default function TopBar() {
             onClick={() => setDropdown(d => !d)}
             style={{
               display: "flex", alignItems: "center", gap: "8px",
-              background: ativa ? "rgba(255,224,0,0.08)" : "rgba(255,255,255,0.04)",
-              border: ativa ? "1px solid rgba(255,224,0,0.25)" : "1px solid rgba(255,255,255,0.08)",
+              background: labelAtiva ? "rgba(255,224,0,0.08)" : "rgba(255,255,255,0.04)",
+              border: labelAtiva ? "1px solid rgba(255,224,0,0.25)" : "1px solid rgba(255,255,255,0.08)",
               borderRadius: "999px", padding: "7px 14px", cursor: "pointer",
             }}
           >
             <div style={{
               width: "8px", height: "8px", borderRadius: "50%",
-              background: ativa ? "#00D97E" : "#555",
+              background: labelAtiva ? "#00D97E" : "#555",
             }} />
-            <span style={{ fontSize: "13px", fontWeight: 700, color: ativa ? "#FFE000" : "#9099aa" }}>
-              {ativa ? (ativa.nickname || ativa.nome) : "Sem loja ativa"}
+            <span style={{ fontSize: "13px", fontWeight: 700, color: labelAtiva ? "#FFE000" : "#9099aa" }}>
+              {labelAtiva ?? "Sem loja ativa"}
             </span>
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#9099aa" strokeWidth="2.5">
               <polyline points="6 9 12 15 18 9"/>
@@ -116,9 +129,9 @@ export default function TopBar() {
                 </div>
               ) : (
                 lojas.map(l => {
-                  const isAtiva = l.id === lojaAtiva;
+                  const isAtiva = isLojaAtiva(l);
                   return (
-                    <button key={l.id} onClick={() => trocarLoja(l.id)} style={{
+                    <button key={l.id} onClick={() => trocarLoja(l.id, l.marketplace)} style={{
                       width: "100%", display: "flex", alignItems: "center", gap: "10px",
                       padding: "10px 12px", borderRadius: "8px", border: "none",
                       background: isAtiva ? "rgba(100,160,255,0.1)" : "transparent",
