@@ -71,17 +71,28 @@ export async function getShopeeLojaAtiva(userId: string): Promise<{
   shopId:      number;
   nickname:    string;
 } | null> {
-  const { data: loja } = await supabase
+  const { data: loja, error: dbErr } = await supabase
     .from("lojas")
-    .select("id, shop_id, partner_id, partner_key, access_token, refresh_token, token_expires_at, nickname")
+    .select("id, shop_id, partner_id, partner_key, access_token, refresh_token, token_expires_at, nickname, ativo")
     .eq("user_id", userId)
     .eq("marketplace", "Shopee")
     .eq("ativo", true)
     .order("created_at", { ascending: false })
     .limit(1)
-    .single();
+    .maybeSingle();
 
-  if (!loja || !loja.partner_id || !loja.partner_key) return null;
+  if (dbErr) {
+    console.error("[shopee-auth] db error:", dbErr.message, "userId:", userId);
+    return null;
+  }
+  if (!loja) {
+    console.error("[shopee-auth] loja não encontrada para userId:", userId);
+    return null;
+  }
+  if (!loja.partner_id || !loja.partner_key) {
+    console.error("[shopee-auth] loja sem partner_id/partner_key:", loja.id);
+    return null;
+  }
 
   let accessToken: string = loja.access_token;
 
@@ -90,6 +101,7 @@ export async function getShopeeLojaAtiva(userId: string): Promise<{
     (loja.token_expires_at && new Date(loja.token_expires_at).getTime() - 5 * 60 * 1000 < Date.now());
 
   if (expiredOrMissing && loja.refresh_token) {
+    console.log("[shopee-auth] token expirado, tentando refresh para loja:", loja.id);
     const refreshed = await refreshShopeeToken(
       loja.partner_id,
       loja.partner_key,
@@ -97,6 +109,7 @@ export async function getShopeeLojaAtiva(userId: string): Promise<{
       loja.refresh_token
     );
     if (refreshed) {
+      console.log("[shopee-auth] refresh OK para loja:", loja.id);
       accessToken = refreshed.access_token;
       // Salva novo token no banco
       await supabase.from("lojas").update({
@@ -107,7 +120,10 @@ export async function getShopeeLojaAtiva(userId: string): Promise<{
     }
   }
 
-  if (!accessToken) return null;
+  if (!accessToken) {
+    console.error("[shopee-auth] sem accessToken para loja:", loja.id, "expirado:", expiredOrMissing, "tem_refresh:", !!loja.refresh_token);
+    return null;
+  }
 
   return {
     lojaId:     loja.id,
