@@ -29,6 +29,7 @@ export async function GET(request: Request) {
   const relayUrl = new URL("/api/auth/relay", origin);
   relayUrl.searchParams.set("token", data.access_token);
   relayUrl.searchParams.set("expires", String(data.expires_in));
+  if (data.refresh_token) relayUrl.searchParams.set("refresh_token", data.refresh_token);
 
   return NextResponse.redirect(relayUrl.toString());
 }

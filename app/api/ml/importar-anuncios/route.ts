@@ -3,17 +3,12 @@ import { createClient } from "@supabase/supabase-js";
 import { calcularFreteMl, calcularFreteFullMl, calcularFreteFlexMl } from "@/lib/tabela-frete-ml";
 import { CATEGORIAS_ML } from "@/lib/comissoes-mercado-livre";
 import { getUserId } from "@/lib/session";
+import { getMLToken, applyMLCookies } from "@/lib/ml-auth";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 );
-
-function getToken(request: Request): string | null {
-  const cookieHeader = request.headers.get("cookie") || "";
-  const entry = cookieHeader.split("; ").find(c => c.startsWith("ml_access_token="));
-  return entry ? entry.slice("ml_access_token=".length) : null;
-}
 
 function mapTipoAnuncio(listingTypeId: string): string {
   return (listingTypeId === "gold_premium" || listingTypeId === "gold_pro") ? "Premium" : "Clássico";
@@ -75,14 +70,15 @@ function mapCategoria(mlCategoryName: string | null): string | null {
 }
 
 export async function POST(request: Request) {
-  const token  = getToken(request);
-  const userId = getUserId(request);
-  if (!token) {
+  const tokenResult = await getMLToken(request);
+  const userId      = getUserId(request);
+  if (!tokenResult) {
     return NextResponse.json({ erro: true, mensagem: "Conta do ML não conectada." }, { status: 401 });
   }
   if (!userId) {
     return NextResponse.json({ erro: true, mensagem: "Sessão inválida." }, { status: 401 });
   }
+  const token = tokenResult.token;
 
   const meRes = await fetch("https://api.mercadolibre.com/users/me", {
     headers: { Authorization: `Bearer ${token}` },
@@ -328,7 +324,9 @@ export async function POST(request: Request) {
     }
   }
 
-  return NextResponse.json({ importados, atualizados, erros, total: allItemIds.length });
+  const res = NextResponse.json({ importados, atualizados, erros, total: allItemIds.length });
+  applyMLCookies(res, tokenResult);
+  return res;
 }
 
 // Calcula custo de frete com base na logística do item

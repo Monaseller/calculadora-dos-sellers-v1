@@ -3,17 +3,12 @@ import { createClient } from "@supabase/supabase-js";
 import { calcularFreteMl, calcularFreteFullMl, calcularFreteFlexMl } from "@/lib/tabela-frete-ml";
 import { CATEGORIAS_ML } from "@/lib/comissoes-mercado-livre";
 import { getUserId } from "@/lib/session";
+import { getMLToken, applyMLCookies } from "@/lib/ml-auth";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 );
-
-function getToken(request: Request): string | null {
-  const cookieHeader = request.headers.get("cookie") || "";
-  const entry = cookieHeader.split("; ").find(c => c.startsWith("ml_access_token="));
-  return entry ? entry.slice("ml_access_token=".length) : null;
-}
 
 function mapTipoAnuncio(listingTypeId: string): string {
   if (listingTypeId === "gold_premium" || listingTypeId === "gold_pro") return "Premium";
@@ -120,14 +115,15 @@ function recalcularLucroMargem(
 }
 
 export async function POST(request: Request) {
-  const token  = getToken(request);
-  const userId = getUserId(request);
-  if (!token) {
+  const tokenResult = await getMLToken(request);
+  const userId      = getUserId(request);
+  if (!tokenResult) {
     return NextResponse.json({ erro: true, mensagem: "Mercado Livre não conectado." });
   }
   if (!userId) {
     return NextResponse.json({ erro: true, mensagem: "Sessão inválida." });
   }
+  const token = tokenResult.token;
 
   const { data: anuncios, error } = await supabase
     .from("anuncios")
@@ -272,5 +268,7 @@ export async function POST(request: Request) {
     ? `Todos os ${anuncios.length} anúncios já estão atualizados!`
     : `${atualizados} anúncio${atualizados !== 1 ? "s" : ""} atualizado${atualizados !== 1 ? "s" : ""}!`;
 
-  return NextResponse.json({ erro: false, atualizados, mensagem, detalhes });
+  const res = NextResponse.json({ erro: false, atualizados, mensagem, detalhes });
+  applyMLCookies(res, tokenResult);
+  return res;
 }

@@ -8,9 +8,10 @@ const supabase = createClient(
 );
 
 export async function GET(request: Request) {
-  const url     = new URL(request.url);
-  const token   = url.searchParams.get("token");
-  const expires = url.searchParams.get("expires");
+  const url          = new URL(request.url);
+  const token        = url.searchParams.get("token");
+  const expires      = url.searchParams.get("expires");
+  const refreshToken = url.searchParams.get("refresh_token");
 
   if (!token) return NextResponse.redirect(new URL("/configuracoes", request.url));
 
@@ -23,12 +24,12 @@ export async function GET(request: Request) {
     });
 
     if (meRes.ok) {
-      const me       = await meRes.json();
-      const sellerId = String(me.id);
-      const nickname = me.nickname || me.first_name || "Loja ML";
+      const me        = await meRes.json();
+      const sellerId  = String(me.id);
+      const nickname  = me.nickname || me.first_name || "Loja ML";
       const expiresAt = new Date(Date.now() + (Number(expires) || 21600) * 1000).toISOString();
 
-      // Busca loja existente: primeiro por seller_id + user_id, depois só por seller_id
+      // Busca loja existente
       let existente: { id: string } | null = null;
       if (userId) {
         const { data } = await supabase.from("lojas").select("id")
@@ -44,19 +45,23 @@ export async function GET(request: Request) {
       }
 
       if (existente?.id) {
-        // Atualiza loja existente — só sobrescreve user_id se tivermos um userId válido
         const updates: Record<string, unknown> = {
           nickname, nome: nickname, access_token: token,
           token_expires_at: expiresAt, ativo: true,
         };
         if (userId) updates.user_id = userId;
+        if (refreshToken) updates.refresh_token = refreshToken;
         await supabase.from("lojas").update(updates).eq("id", existente.id);
         lojaId = existente.id;
       } else {
-        // Cria nova loja
         const { data: nova } = await supabase
           .from("lojas")
-          .insert({ marketplace: "ML", seller_id: sellerId, nickname, nome: nickname, access_token: token, token_expires_at: expiresAt, ativo: true, user_id: userId ?? null })
+          .insert({
+            marketplace: "ML", seller_id: sellerId, nickname, nome: nickname,
+            access_token: token, token_expires_at: expiresAt, ativo: true,
+            user_id: userId ?? null,
+            ...(refreshToken ? { refresh_token: refreshToken } : {}),
+          })
           .select("id")
           .single();
         lojaId = nova?.id ?? null;
@@ -68,19 +73,20 @@ export async function GET(request: Request) {
   const res = NextResponse.redirect(new URL("/configuracoes", request.url));
 
   res.cookies.set("ml_access_token", token, {
-    httpOnly: true,
-    secure: isProd,
-    sameSite: "lax",
-    path: "/",
+    httpOnly: true, secure: isProd, sameSite: "lax", path: "/",
     maxAge: Number(expires) || 21600,
   });
 
+  if (refreshToken) {
+    res.cookies.set("ml_refresh_token", refreshToken, {
+      httpOnly: true, secure: isProd, sameSite: "lax", path: "/",
+      maxAge: 86400 * 180, // 6 meses
+    });
+  }
+
   if (lojaId) {
     res.cookies.set("loja_ativa_id", lojaId, {
-      httpOnly: false,
-      secure: isProd,
-      sameSite: "lax",
-      path: "/",
+      httpOnly: false, secure: isProd, sameSite: "lax", path: "/",
       maxAge: 86400 * 30,
     });
   }
