@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { shopeeGet } from "@/lib/shopee-api";
 import { getUserId } from "@/lib/session";
+import { getShopeeLojaAtiva } from "@/lib/shopee-auth";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -14,23 +15,13 @@ export async function POST(request: Request) {
     return NextResponse.json({ erro: true, mensagem: "Sessão inválida." }, { status: 401 });
   }
 
-  // Busca credenciais da loja Shopee do usuário no Supabase
-  const { data: loja } = await supabase
-    .from("lojas")
-    .select("id, shop_id, partner_id, partner_key, access_token, nickname")
-    .eq("user_id", userId)
-    .eq("marketplace", "Shopee")
-    .eq("ativo", true)
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .single();
-
-  if (!loja || !loja.partner_id || !loja.partner_key || !loja.access_token) {
+  // Busca loja Shopee com refresh automático de token
+  const lojaAtiva = await getShopeeLojaAtiva(userId);
+  if (!lojaAtiva) {
     return NextResponse.json({ erro: true, semConexao: true, mensagem: "Conta Shopee não conectada." }, { status: 401 });
   }
 
-  const { partner_id, partner_key, access_token, shop_id } = loja;
-  const shopId = Number(shop_id);
+  const { partnerId: partner_id, partnerKey: partner_key, accessToken: access_token, shopId } = lojaAtiva;
 
   // ── 1. Lista todos os item_ids ativos ────────────────────────────────────
   const allItemIds: number[] = [];

@@ -3,6 +3,7 @@ import { createClient } from "@supabase/supabase-js";
 import { getUserId } from "@/lib/session";
 import { shopeeGet, shopeePost } from "@/lib/shopee-api";
 import { CATEGORIAS_SHOPEE } from "@/lib/comissoes-shopee";
+import { getShopeeLojaAtiva } from "@/lib/shopee-auth";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -40,24 +41,15 @@ export async function GET(request: Request) {
   const skuParam = searchParams.get("sku") ?? "";
   const skuFilters = skuParam.split(",").map(s => s.toLowerCase().trim()).filter(Boolean);
 
-  // Busca loja Shopee ativa do usuário no Supabase
-  const { data: loja } = await supabase
-    .from("lojas")
-    .select("id, shop_id, partner_id, partner_key, access_token, nickname")
-    .eq("user_id", userId)
-    .eq("marketplace", "Shopee")
-    .eq("ativo", true)
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .single();
-
-  if (!loja || !loja.partner_id || !loja.partner_key || !loja.access_token) {
+  // Busca loja Shopee ativa com refresh automático de token
+  const loja = await getShopeeLojaAtiva(userId);
+  if (!loja) {
     return NextResponse.json({ erro: true, semConexao: true, mensagem: "Conta Shopee não conectada." });
   }
 
-  const { shop_id, partner_id, partner_key, access_token, nickname } = loja;
-  const shopId = Number(shop_id);
+  const { partnerId: partner_id, partnerKey: partner_key, accessToken: access_token, shopId, nickname } = loja;
 
+  try {
   const timeFrom = Math.floor(new Date(`${dateFrom}T00:00:00-03:00`).getTime() / 1000);
   const timeTo   = Math.floor(new Date(`${dateTo}T23:59:59-03:00`).getTime() / 1000);
 
@@ -183,9 +175,14 @@ export async function GET(request: Request) {
   return NextResponse.json({
     dateFrom,
     dateTo,
-    conta:        nickname ?? `Shopee ${shopId}`,
+    conta:        nickname,
     marketplace:  "Shopee",
     totalPedidos: new Set(rows.map(r => r.orderId)).size,
     rows,
   });
+
+  } catch (e) {
+    console.error("[shopee/vendas] erro:", e);
+    return NextResponse.json({ erro: true, mensagem: "Erro ao buscar vendas na Shopee. Reconecte sua conta." });
+  }
 }
