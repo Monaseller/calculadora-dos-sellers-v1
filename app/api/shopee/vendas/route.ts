@@ -181,8 +181,8 @@ export async function GET(request: Request) {
     rows,
   });
 
-  } catch (e) {
+  } catch (e: any) {
     console.error("[shopee/vendas] erro:", e);
-    return NextResponse.json({ erro: true, mensagem: "Erro ao buscar vendas na Shopee. Reconecte sua conta." });
+    return NextResponse.json({ erro: true, mensagem: `Erro Shopee: ${e?.message ?? String(e)}` });
   }
 }
