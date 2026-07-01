@@ -35,7 +35,7 @@ export async function GET() {
     sign_key_as_string: sign1,
     sign_no_shpk_string: sign2,
     sign_no_shpk_hex_decoded: sign3,
-    url_sign1: `https://partner.test-stable.shopeemobile.com${path}?partner_id=${partnerId}&timestamp=${ts}&sign=${sign1}&redirect=https://www.calculadoradossellers.com.br/api/auth/shopee/callback`,
-    url_sign3: `https://partner.test-stable.shopeemobile.com${path}?partner_id=${partnerId}&timestamp=${ts}&sign=${sign3}&redirect=https://www.calculadoradossellers.com.br/api/auth/shopee/callback`,
+    url_sign1: `${baseUrl}${path}?partner_id=${partnerId}&timestamp=${ts}&sign=${sign1}&redirect=https://www.calculadoradossellers.com.br/api/auth/shopee/callback`,
+    url_sign3: `${baseUrl}${path}?partner_id=${partnerId}&timestamp=${ts}&sign=${sign3}&redirect=https://www.calculadoradossellers.com.br/api/auth/shopee/callback`,
   });
 }

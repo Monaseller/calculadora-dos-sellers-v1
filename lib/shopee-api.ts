@@ -2,11 +2,8 @@ import crypto from "crypto";
 
 export const SHOPEE_BASE = process.env.SHOPEE_BASE_URL ?? "https://partner.shopeemobile.com";
 
-// ── Chaves shpk*: o segredo está hex-encoded após o prefixo ──────────────────
-function getHmacKey(partnerKey: string): string | Buffer {
-  if (partnerKey.startsWith("shpk")) {
-    return Buffer.from(partnerKey.slice(4), "hex");
-  }
+// Shopee espera a chave completa como string UTF-8 (não hex-decodificar)
+function getHmacKey(partnerKey: string): string {
   return partnerKey;
 }
 
