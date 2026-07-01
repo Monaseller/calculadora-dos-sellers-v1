@@ -68,6 +68,7 @@ export default function VendasPage() {
   const [loading,   setLoading]   = useState(false);
   const [erro,      setErro]      = useState<string | null>(null);
   const [semConexao, setSemConexao] = useState(false);
+  const [erroShopee, setErroShopee] = useState(false);
   const [totalPedidos, setTotalPedidos] = useState(0);
   const [conta,      setConta]    = useState("");
   const [ultimaSync, setUltimaSync] = useState<string | null>(null);
@@ -110,7 +111,12 @@ export default function VendasPage() {
       const shopeeRows = (!shopeeData?.erro ? shopeeData?.rows ?? [] : []) as VendaRow[];
       const allRows    = [...mlRows, ...shopeeRows].sort((a, b) => b.data.localeCompare(a.data));
 
-      if (mlData?.erro && shopeeData?.erro) {
+      const mlFalhou     = fetchML     && (mlData?.erro     || !mlData);
+      const shopeeFalhou = fetchShopee && (shopeeData?.erro || !shopeeData);
+
+      setErroShopee(!!shopeeFalhou);
+
+      if (mlFalhou && shopeeFalhou) {
         setSemConexao(true); setRows([]);
       } else {
         setSemConexao(false);
@@ -808,6 +814,17 @@ export default function VendasPage() {
         </div>
       )}
 
+      {/* Aviso de erro parcial da Shopee */}
+      {erroShopee && !semConexao && !loading && lojaAtiva !== "ML" && (
+        <div style={{
+          background: "rgba(238,77,45,0.08)", border: "1px solid rgba(238,77,45,0.25)",
+          borderRadius: "12px", padding: "12px 18px", marginBottom: "16px",
+          color: "#EE4D2D", fontSize: "13px", fontWeight: 600, display: "flex", alignItems: "center", gap: "8px",
+        }}>
+          🛍 Shopee não conectada ou com erro. Verifique em Configurações.
+        </div>
+      )}
+
       {!loading && !semConexao && !erro && filteredRows.length === 0 && (
         <div style={{
           textAlign: "center", padding: "60px 20px",
@@ -815,7 +832,13 @@ export default function VendasPage() {
         }}>
           <div style={{ fontSize: "40px", marginBottom: "12px" }}>📭</div>
           <div style={{ fontWeight: 800, fontSize: "18px", marginBottom: "6px" }}>Nenhuma venda encontrada</div>
-          <div style={{ color: "#9099aa", fontSize: "14px" }}>Tente outro período ou verifique se há pedidos pagos no ML.</div>
+          <div style={{ color: "#9099aa", fontSize: "14px" }}>
+            {lojaAtiva === "Shopee"
+              ? "Tente outro período ou verifique se há pedidos na Shopee."
+              : lojaAtiva === "ML"
+              ? "Tente outro período ou verifique se há pedidos pagos no Mercado Livre."
+              : "Tente outro período ou verifique suas conexões em Configurações."}
+          </div>
         </div>
       )}
 
