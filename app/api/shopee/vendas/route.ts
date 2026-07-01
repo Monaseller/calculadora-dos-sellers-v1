@@ -37,6 +37,8 @@ export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const dateFrom = searchParams.get("date_from") ?? hojeISO();
   const dateTo   = searchParams.get("date_to")   ?? dateFrom;
+  const skuParam = searchParams.get("sku") ?? "";
+  const skuFilters = skuParam.split(",").map(s => s.toLowerCase().trim()).filter(Boolean);
 
   // Busca loja Shopee ativa do usuário no Supabase
   const { data: loja } = await supabase
@@ -82,10 +84,26 @@ export async function GET(request: Request) {
   }
 
   if (allOrderSns.length === 0) {
-    return NextResponse.json({ dateFrom, dateTo, conta: nickname ?? `Shopee ${shopId}`, rows: [] });
+    return NextResponse.json({ dateFrom, dateTo, conta: nickname ?? `Shopee ${shopId}`, marketplace: "Shopee", totalPedidos: 0, rows: [] });
   }
 
-  // ── 2. Detalhes em lotes de 50 ───────────────────────────────────────────
+  // ── 2. Anúncios cadastrados no Supabase para custo/imposto ───────────────
+  const { data: anuncios } = await supabase
+    .from("anuncios")
+    .select("id, ml_item_id, variation_id, sku, custo_produto, insumos, custo_frete, imposto")
+    .eq("marketplace", "Shopee")
+    .eq("ativo", true)
+    .eq("user_id", userId);
+
+  const mapaAnuncios = new Map<string, any>();
+  for (const a of (anuncios ?? [])) {
+    const key = a.variation_id ? `${a.ml_item_id}|${a.variation_id}` : `${a.ml_item_id}|`;
+    mapaAnuncios.set(key, a);
+    // Também indexa só pelo item_id para fallback
+    if (!mapaAnuncios.has(`${a.ml_item_id}|`)) mapaAnuncios.set(`${a.ml_item_id}|`, a);
+  }
+
+  // ── 3. Detalhes em lotes de 50 ───────────────────────────────────────────
   const rows: any[] = [];
   const BATCH = 50;
 
@@ -103,35 +121,58 @@ export async function GET(request: Request) {
       const dataBrt = new Date((ts - 3 * 3600) * 1000).toISOString().split("T")[0];
 
       for (const item of (order.item_list ?? [])) {
-        const valorUnit   = item.model_discounted_price ?? item.model_original_price ?? 0;
+        const itemIdStr   = String(item.item_id);
+        const variationId = item.model_id ? String(item.model_id) : null;
+        const valorUnit   = (item.model_discounted_price ?? item.model_original_price ?? 0) / 100000;
         const qtd         = item.model_quantity_purchased ?? 1;
         const faturamento = valorUnit * qtd;
+
+        // Filtro SKU
+        if (skuFilters.length > 0) {
+          const skuLower  = (item.model_sku ?? "").toLowerCase();
+          const nameLower = (item.item_name ?? "").toLowerCase();
+          const match = skuFilters.some(f => skuLower.includes(f) || nameLower.includes(f));
+          if (!match) continue;
+        }
+
+        // Dados do anúncio cadastrado
+        const keyVar = variationId ? `${itemIdStr}|${variationId}` : `${itemIdStr}|`;
+        const anuncio = mapaAnuncios.get(keyVar) ?? mapaAnuncios.get(`${itemIdStr}|`) ?? null;
+
+        const custo        = anuncio ? ((anuncio.custo_produto || 0) + (anuncio.insumos || 0)) * qtd : 0;
+        const impostoVal   = anuncio ? faturamento * ((anuncio.imposto || 0) / 100) : 0;
+        const cadastrado   = !!anuncio;
 
         const cat = CATEGORIAS_SHOPEE.find(c =>
           (item.item_name ?? "").toLowerCase().includes(c.nome.toLowerCase())
         );
         const comissaoRate  = cat?.taxa ?? 0.14;
         const tarifaVenda   = faturamento * comissaoRate;
-        const margemContrib = faturamento - tarifaVenda;
+        const margemContrib = faturamento - tarifaVenda - custo - impostoVal;
         const mcPercent     = faturamento > 0 ? (margemContrib / faturamento) * 100 : 0;
 
         rows.push({
-          orderId:      order.order_sn,
-          data:         dataBrt,
-          anuncio:      item.item_name ?? String(item.item_id),
-          mlItemId:     String(item.item_id),
-          conta:        nickname ?? `Shopee ${shopId}`,
-          marketplace:  "Shopee",
-          sku:          item.model_sku || null,
-          status:       mapStatus(status),
+          orderId:        order.order_sn,
+          data:           dataBrt,
+          anuncio:        item.item_name ?? itemIdStr,
+          mlItemId:       itemIdStr,
+          conta:          nickname ?? `Shopee ${shopId}`,
+          marketplace:    "Shopee",
+          sku:            item.model_sku || anuncio?.sku || null,
+          status:         mapStatus(status),
+          frete:          "comprador" as const,
+          logistica:      "Shopee",
+          valorUnit,
           qtd,
           faturamento,
-          custo:        0,
+          custo,
+          imposto:        impostoVal,
           tarifaVenda,
           freteComprador: 0,
           freteVendedor:  0,
           margemContrib,
           mcPercent,
+          cadastrado,
         });
       }
     }

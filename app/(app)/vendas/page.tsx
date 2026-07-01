@@ -766,7 +766,9 @@ export default function VendasPage() {
           {/* label */}
           <div style={{ padding: "16px 20px 0", display: "flex", alignItems: "center", gap: "10px" }}>
             <span style={{ display: "inline-block", animation: "spin 1s linear infinite", fontSize: "16px" }}>⟳</span>
-            <span style={{ color: "#9099aa", fontSize: "13px", fontWeight: 600 }}>Buscando vendas no Mercado Livre…</span>
+            <span style={{ color: "#9099aa", fontSize: "13px", fontWeight: 600 }}>
+            {lojaAtiva === "Shopee" ? "Buscando vendas na Shopee…" : lojaAtiva === "ML" ? "Buscando vendas no Mercado Livre…" : "Buscando vendas em todos os marketplaces…"}
+          </span>
           </div>
           {/* skeleton rows */}
           <table style={{ width: "100%", borderCollapse: "collapse", minWidth: "900px" }}>
@@ -792,8 +794,8 @@ export default function VendasPage() {
           background: "#111318", border: "1px solid rgba(255,255,255,0.07)", borderRadius: "20px",
         }}>
           <div style={{ fontSize: "40px", marginBottom: "12px" }}>🔗</div>
-          <div style={{ fontWeight: 800, fontSize: "18px", marginBottom: "6px" }}>Conta ML não conectada</div>
-          <div style={{ color: "#9099aa", fontSize: "14px" }}>Vá em Configurações e conecte sua conta do Mercado Livre.</div>
+          <div style={{ fontWeight: 800, fontSize: "18px", marginBottom: "6px" }}>Nenhuma conta conectada</div>
+          <div style={{ color: "#9099aa", fontSize: "14px" }}>Vá em Configurações e conecte sua conta do Mercado Livre ou Shopee.</div>
         </div>
       )}
 
@@ -869,9 +871,19 @@ export default function VendasPage() {
                         <div style={{ fontSize: "10px", color: "#ff6b00", marginTop: "2px" }}>⚠ não cadastrado</div>
                       )}
                     </td>
-                    {/* Conta */}
+                    {/* Conta + Marketplace */}
                     <td style={tdStyle()}>
-                      <span style={{ fontSize: "11px", color: "#9099aa", fontWeight: 600 }}>{r.conta}</span>
+                      <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                        <span style={{
+                          fontSize: "10px", fontWeight: 800, padding: "1px 6px", borderRadius: "5px",
+                          background: r.marketplace === "Shopee" ? "rgba(238,77,45,0.15)" : "rgba(255,230,0,0.12)",
+                          color:      r.marketplace === "Shopee" ? "#EE4D2D" : "#FFE000",
+                          border:     `1px solid ${r.marketplace === "Shopee" ? "rgba(238,77,45,0.3)" : "rgba(255,230,0,0.25)"}`,
+                        }}>
+                          {r.marketplace === "Shopee" ? "🛍" : "🛒"}
+                        </span>
+                        <span style={{ fontSize: "11px", color: "#9099aa", fontWeight: 600 }}>{r.conta}</span>
+                      </div>
                     </td>
                     {/* SKU */}
                     <td style={tdStyle()}>
@@ -898,7 +910,8 @@ export default function VendasPage() {
                       {r.logistica === "Full"   && <span style={{ fontSize: "11px", color: "#00D97E", fontWeight: 800, background: "rgba(0,217,126,0.1)",   padding: "2px 9px", borderRadius: "6px" }}>Full</span>}
                       {r.logistica === "Flex"   && <span style={{ fontSize: "11px", color: "#6fa3ff", fontWeight: 800, background: "rgba(100,160,255,0.1)", padding: "2px 9px", borderRadius: "6px" }}>Flex</span>}
                       {r.logistica === "Coleta" && <span style={{ fontSize: "11px", color: "#ffb800", fontWeight: 800, background: "rgba(255,184,0,0.1)",   padding: "2px 9px", borderRadius: "6px" }}>Coleta</span>}
-                      {r.logistica !== "Full" && r.logistica !== "Flex" && r.logistica !== "Coleta" && (
+                      {r.logistica === "Shopee" && <span style={{ fontSize: "11px", color: "#EE4D2D", fontWeight: 800, background: "rgba(238,77,45,0.1)", padding: "2px 9px", borderRadius: "6px" }}>Shopee</span>}
+                      {r.logistica !== "Full" && r.logistica !== "Flex" && r.logistica !== "Coleta" && r.logistica !== "Shopee" && (
                         <span style={{ fontSize: "11px", color: "#9099aa" }}>{r.logistica || "—"}</span>
                       )}
                     </td>
