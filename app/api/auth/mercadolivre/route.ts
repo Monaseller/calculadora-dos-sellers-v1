@@ -9,7 +9,7 @@ export async function GET() {
     `?response_type=code` +
     `&client_id=${clientId}` +
     `&redirect_uri=${encodeURIComponent(redirectUri)}` +
-    `&scope=read_catalog%20offline_access`;
+    `&scope=read_catalog%20write_items%20offline_access`;
 
   return NextResponse.redirect(authUrl);
 }
