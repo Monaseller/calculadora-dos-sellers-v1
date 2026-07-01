@@ -1,11 +1,8 @@
 import { NextResponse } from "next/server";
 import { createHmac } from "crypto";
 
-// Chaves shpk* têm o segredo em hex após o prefixo
-function getHmacKey(partnerKey: string): string | Buffer {
-  if (partnerKey.startsWith("shpk")) {
-    return Buffer.from(partnerKey.slice(4), "hex");
-  }
+// Shopee espera a chave completa como string UTF-8
+function getHmacKey(partnerKey: string): string {
   return partnerKey;
 }
 

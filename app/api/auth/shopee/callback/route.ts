@@ -13,10 +13,8 @@ function getCookie(request: Request, name: string): string | null {
   return entry ? entry.slice(name.length + 1) : null;
 }
 
-function getHmacKey(partnerKey: string): string | Buffer {
-  if (partnerKey.startsWith("shpk")) {
-    return Buffer.from(partnerKey.slice(4), "hex");
-  }
+// Shopee espera a chave completa como string UTF-8
+function getHmacKey(partnerKey: string): string {
   return partnerKey;
 }
 
@@ -129,16 +127,17 @@ export async function GET(request: Request) {
   res.cookies.set("shopee_partner_key", "", { maxAge: 0, path: "/" });
 
   // Salva token ativo
+  const isProd = process.env.NODE_ENV === "production";
   res.cookies.set("shopee_access_token", access_token, {
-    httpOnly: true, sameSite: "lax", path: "/", maxAge: expire_in ?? 14400,
+    httpOnly: true, secure: isProd, sameSite: "lax", path: "/", maxAge: expire_in ?? 14400,
   });
   res.cookies.set("shopee_shop_id", String(shopId), {
-    httpOnly: false, sameSite: "lax", path: "/", maxAge: 86400 * 30,
+    httpOnly: false, secure: isProd, sameSite: "lax", path: "/", maxAge: 86400 * 30,
   });
 
   if (lojaId) {
     res.cookies.set("loja_ativa_id", lojaId, {
-      httpOnly: false, sameSite: "lax", path: "/", maxAge: 86400 * 30,
+      httpOnly: false, secure: isProd, sameSite: "lax", path: "/", maxAge: 86400 * 30,
     });
   }
 
