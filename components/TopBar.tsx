@@ -74,9 +74,12 @@ export default function TopBar() {
   const ativasCount = lojas.filter(l => isLojaAtiva(l)).length;
   const ativaML = lojas.find(l => l.marketplace !== "Shopee" && lojaAtiva === l.id);
   const ativaShopee = lojas.find(l => l.marketplace === "Shopee" && shopeeAtiva === l.id);
+  function toTitleCase(s: string): string {
+    return s.toLowerCase().replace(/(?:^|\s)\S/g, c => c.toUpperCase());
+  }
   function lojaLabel(loja: Loja | undefined): string {
     if (!loja) return "";
-    const nick = loja.nickname || loja.nome || "";
+    const nick = toTitleCase(loja.nickname || loja.nome || "");
     const mkt  = loja.marketplace === "ML" ? "Mercado Livre" : loja.marketplace;
     return `${nick} ${mkt}`;
   }

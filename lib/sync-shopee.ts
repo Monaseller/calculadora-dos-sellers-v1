@@ -37,6 +37,7 @@ export async function syncShopeeForUser(
 
   const { partnerId: partner_id, partnerKey: partner_key, accessToken: access_token, shopId, nickname } = loja;
 
+  // Busca por pay_time para capturar pedidos pagos no período (independente de quando foram criados)
   const timeFrom = Math.floor(new Date(`${dateFrom}T00:00:00-03:00`).getTime() / 1000);
   const timeTo   = Math.floor(new Date(`${dateTo}T23:59:59-03:00`).getTime() / 1000);
 
@@ -46,7 +47,7 @@ export async function syncShopeeForUser(
 
   for (;;) {
     const params: Record<string, string | number> = {
-      time_range_field:         "create_time",
+      time_range_field:         "pay_time",  // usa data de pagamento, não de criação
       time_from:                timeFrom,
       time_to:                  timeTo,
       page_size:                50,

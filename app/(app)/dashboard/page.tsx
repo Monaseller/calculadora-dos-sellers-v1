@@ -691,8 +691,9 @@ export default function DashboardPage() {
         return;
       }
 
-      // Usa o primeiro nome disponível (ML e Shopee retornam o mesmo nickname do usuário)
-      const contaNome = (mlOk ? mlData.conta : null) || (shopeeOk ? shopeeData.conta : null) || "CDS";
+      // Usa o primeiro nome disponível e normaliza capitalização (ML retorna em CAPS)
+      const rawConta = (mlOk ? mlData.conta : null) || (shopeeOk ? shopeeData.conta : null) || "CDS";
+      const contaNome = rawConta.toLowerCase().replace(/(?:^|\s)\S/g, c => c.toUpperCase());
       setConta(contaNome);
 
       const mlRowsFull     = (mlOk     ? mlData.rows     ?? [] : []) as VendaRow[];

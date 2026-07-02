@@ -187,8 +187,10 @@ export default function VendasPage() {
         setSemConexao(false);
         setRows(allRows);
         setTotalPedidos((mlData?.totalPedidos ?? 0) + (shopeeData?.totalPedidos ?? 0));
-        const contas = [mlData?.conta, shopeeData?.conta].filter(Boolean);
-        setConta(contas.join(" + ") || "");
+        // Usa o primeiro nome disponível (ML e Shopee são a mesma empresa) e normaliza capitalização
+        const rawConta = mlData?.conta || shopeeData?.conta || "";
+        const contaNorm = rawConta.toLowerCase().replace(/(?:^|\s)\S/g, c => c.toUpperCase());
+        setConta(contaNorm);
         setUltimaSync(new Date().toLocaleTimeString("pt-BR"));
       }
     } catch {
@@ -948,7 +950,7 @@ export default function VendasPage() {
                     { label: "ENVIO",             right: false },
                     { label: "VALOR UNIT.",       right: true  },
                     { label: "QTD.",              right: true  },
-                    { label: "FATURAMENTO ML",    right: true  },
+                    { label: "FATURAMENTO",        right: true  },
                     { label: "CUSTO (-)",         right: true  },
                     { label: "IMPOSTO (-)",       right: true  },
                     { label: "TARIFA VENDA (-)",  right: true  },
