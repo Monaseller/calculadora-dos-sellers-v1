@@ -48,13 +48,13 @@ export async function shopeeGet(
   });
 
   const ctrl = new AbortController();
-  const timeoutId = setTimeout(() => ctrl.abort(), 20000); // 20s timeout por chamada
+  const timeoutId = setTimeout(() => ctrl.abort(), 10000); // 10s timeout por chamada
   let res: Response;
   try {
     res = await fetch(`${SHOPEE_BASE}${path}?${qs}`, { signal: ctrl.signal });
   } catch (fetchErr: any) {
     clearTimeout(timeoutId);
-    if (fetchErr?.name === "AbortError") throw new Error(`Shopee GET ${path} timeout (20s)`);
+    if (fetchErr?.name === "AbortError") throw new Error(`Shopee GET ${path} timeout (10s)`);
     throw fetchErr;
   }
   clearTimeout(timeoutId);

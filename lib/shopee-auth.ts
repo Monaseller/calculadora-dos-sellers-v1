@@ -117,6 +117,10 @@ export async function getShopeeLojaAtiva(userId: string): Promise<{
         refresh_token:    refreshed.refresh_token ?? loja.refresh_token,
         token_expires_at: new Date(Date.now() + (refreshed.expire_in ?? 14400) * 1000).toISOString(),
       }).eq("id", loja.id);
+    } else {
+      // Refresh falhou → token expirado e não renovável → não tenta usar token inválido
+      console.error("[shopee-auth] refresh FALHOU para loja:", loja.id, "- reconecte a Shopee");
+      return null;
     }
   }
 
