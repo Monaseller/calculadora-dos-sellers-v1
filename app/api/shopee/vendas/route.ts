@@ -104,11 +104,12 @@ export async function GET(request: Request) {
     }
   } catch (syncErr) {
     // API Shopee retornou erro (token expirado, permissão revogada, etc.)
-    console.error("[shopee/vendas] sync error:", syncErr);
+    const errMsg = syncErr instanceof Error ? syncErr.message : String(syncErr);
+    console.error("[shopee/vendas] sync error:", errMsg);
     return NextResponse.json({
       erro:       true,
       semConexao: false,
-      mensagem:   "Erro ao sincronizar Shopee. Tente reconectar a conta em Configurações.",
+      mensagem:   `Shopee: ${errMsg}`,
       conta:      loja.nickname,
     });
   }

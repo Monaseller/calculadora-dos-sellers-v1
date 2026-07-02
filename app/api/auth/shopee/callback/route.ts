@@ -61,18 +61,23 @@ export async function GET(request: Request) {
 
   const { access_token, refresh_token, expire_in } = tokenData;
 
-  // 2. Busca nome da loja
+  // 2. Busca nome da loja (assinatura correta para endpoints autenticados: pid+path+ts+token+shopId)
   let nickname = `Shopee ${shopId}`;
   try {
     const ts2    = Math.floor(Date.now() / 1000);
     const iPath  = "/api/v2/shop/get_shop_info";
-    const iSign  = shopeeSign(partnerId, iPath, ts2, partnerKey);
+    // Endpoints autenticados exigem assinatura com accessToken E shopId
+    const iBase  = `${partnerId}${iPath}${ts2}${access_token}${shopId}`;
+    const iSign  = createHmac("sha256", getHmacKey(partnerKey)).update(iBase).digest("hex");
     const infoRes = await fetch(
       `${baseUrl}${iPath}?partner_id=${partnerId}&timestamp=${ts2}&sign=${iSign}&access_token=${access_token}&shop_id=${shopId}`
     );
     const info = await infoRes.json();
+    console.log("[shopee callback] shop_info:", JSON.stringify(info).slice(0, 300));
     if (info?.response?.shop_name) nickname = info.response.shop_name;
-  } catch {}
+  } catch (e) {
+    console.error("[shopee callback] get_shop_info error:", e);
+  }
 
   // 3. Salva loja no Supabase (SELECT + UPDATE para evitar problemas de constraint)
   const expiresAt = new Date(Date.now() + (expire_in ?? 14400) * 1000).toISOString();
