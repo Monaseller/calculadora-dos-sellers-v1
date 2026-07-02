@@ -115,7 +115,7 @@ export async function GET(request: Request) {
       for (const item of (order.item_list ?? [])) {
         const itemIdStr   = String(item.item_id);
         const variationId = item.model_id ? String(item.model_id) : null;
-        const valorUnit   = (item.model_discounted_price ?? item.model_original_price ?? 0) / 100000;
+        const valorUnit   = item.model_discounted_price ?? item.model_original_price ?? 0;
         const qtd         = item.model_quantity_purchased ?? 1;
         const faturamento = valorUnit * qtd;
 
