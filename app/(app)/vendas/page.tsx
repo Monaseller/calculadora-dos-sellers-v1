@@ -116,7 +116,7 @@ export default function VendasPage() {
     const janelas: Array<{ from: string; to: string }> = [];
     let cur = from;
     while (cur <= to) {
-      const end = addDays(cur, 2); // 3 dias por janela (reduz páginas de paginação)
+      const end = addDays(cur, 0); // 1 dia por janela (sem buffer + 1 dia = volume controlado)
       janelas.push({ from: cur, to: end > to ? to : end });
       cur = addDays(end, 1);
     }
@@ -126,12 +126,12 @@ export default function VendasPage() {
   // Faz uma chamada ao sync com timeout seguro
   async function syncJanela(from: string, to: string): Promise<{ ml: number; shopee: number; erro?: string }> {
     const ctrl = new AbortController();
-    const tid  = setTimeout(() => ctrl.abort(), 50000); // 50s por janela de 3 dias
+    const tid  = setTimeout(() => ctrl.abort(), 20000); // 20s por janela de 1 dia
     try {
       const res = await fetch("/api/sync/manual", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ dateFrom: from, dateTo: to, marketplace: historicoLoja }),
+        body: JSON.stringify({ dateFrom: from, dateTo: to, marketplace: historicoLoja, noBuffer: true }),
         signal: ctrl.signal,
       });
       clearTimeout(tid);

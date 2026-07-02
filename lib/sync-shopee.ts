@@ -30,7 +30,8 @@ function mapStatus(s: string): string {
 export async function syncShopeeForUser(
   userId: string,
   dateFrom: string,
-  dateTo: string
+  dateTo: string,
+  noBuffer = false   // true para Histórico (range exato, sem extensão de -3d)
 ): Promise<number> {
   const loja = await getShopeeLojaAtiva(userId);
   if (!loja) return 0;
@@ -57,10 +58,9 @@ export async function syncShopeeForUser(
     return chunks;
   }
 
-  // Busca por create_time com pequena extensão de -3 dias para capturar pedidos
-  // criados pouco antes do período mas pagos dentro dele.
-  // NOTA: pay_time não é suportado como time_range_field pela API Shopee v2.
-  const fetchFrom = addDaysShopee(dateFrom, -3);
+  // Buffer de -3 dias: captura pedidos criados antes do período mas pagos dentro dele.
+  // noBuffer=true desativa para Histórico (meses completos não precisam de overlap).
+  const fetchFrom = noBuffer ? dateFrom : addDaysShopee(dateFrom, -3);
   const chunks = gerarChunks(fetchFrom, dateTo);
 
   // ── 1. Lista orderSNs (por chunks de ≤14 dias) ──────────────────────────────
