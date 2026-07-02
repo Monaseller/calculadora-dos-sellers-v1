@@ -79,27 +79,38 @@ export async function GET(request: Request) {
   const hasData = probe && probe.length > 0;
   const hoje    = hojeISO();
 
-  if (forceSync) {
-    // Botão Sincronizar: re-sincroniza o range inteiro
-    await syncShopeeForUser(userId, dateFrom, dateTo);
-  } else if (!hasData) {
-    // Sem cache: sync completo (primeira vez)
-    await syncShopeeForUser(userId, dateFrom, dateTo);
-  } else {
-    // Tem cache: só atualiza hoje se o range inclui hoje (barato, 1 dia)
-    const rangeIncludeHoje = dateFrom <= hoje && hoje <= dateTo;
-    if (rangeIncludeHoje) {
-      const { data: probeHoje } = await supabase
-        .from("pedidos").select("synced_at")
-        .eq("user_id", userId).eq("marketplace", "Shopee")
-        .eq("data", hoje)
-        .order("synced_at", { ascending: false }).limit(1);
-      const lastSyncHoje = probeHoje?.[0]?.synced_at
-        ? new Date(probeHoje[0].synced_at).getTime() : 0;
-      if (Date.now() - lastSyncHoje > 30 * 60 * 1000) { // stale > 30 min
-        await syncShopeeForUser(userId, hoje, hoje);
+  try {
+    if (forceSync) {
+      // Botão Sincronizar: re-sincroniza o range inteiro
+      await syncShopeeForUser(userId, dateFrom, dateTo);
+    } else if (!hasData) {
+      // Sem cache: sync completo (primeira vez)
+      await syncShopeeForUser(userId, dateFrom, dateTo);
+    } else {
+      // Tem cache: só atualiza hoje se o range inclui hoje (barato, 1 dia)
+      const rangeIncludeHoje = dateFrom <= hoje && hoje <= dateTo;
+      if (rangeIncludeHoje) {
+        const { data: probeHoje } = await supabase
+          .from("pedidos").select("synced_at")
+          .eq("user_id", userId).eq("marketplace", "Shopee")
+          .eq("data", hoje)
+          .order("synced_at", { ascending: false }).limit(1);
+        const lastSyncHoje = probeHoje?.[0]?.synced_at
+          ? new Date(probeHoje[0].synced_at).getTime() : 0;
+        if (Date.now() - lastSyncHoje > 30 * 60 * 1000) { // stale > 30 min
+          await syncShopeeForUser(userId, hoje, hoje);
+        }
       }
     }
+  } catch (syncErr) {
+    // API Shopee retornou erro (token expirado, permissão revogada, etc.)
+    console.error("[shopee/vendas] sync error:", syncErr);
+    return NextResponse.json({
+      erro:       true,
+      semConexao: false,
+      mensagem:   "Erro ao sincronizar Shopee. Tente reconectar a conta em Configurações.",
+      conta:      loja.nickname,
+    });
   }
 
   // Lê do banco

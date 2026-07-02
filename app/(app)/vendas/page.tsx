@@ -69,6 +69,7 @@ export default function VendasPage() {
   const [erro,      setErro]      = useState<string | null>(null);
   const [semConexao, setSemConexao] = useState(false);
   const [erroShopee, setErroShopee] = useState(false);
+  const [erroShopeeMsg, setErroShopeeMsg] = useState<string | null>(null);
   const [totalPedidos, setTotalPedidos] = useState(0);
   const [conta,      setConta]    = useState("");
   const [ultimaSync, setUltimaSync] = useState<string | null>(null);
@@ -154,7 +155,7 @@ export default function VendasPage() {
     setSkuTags(prev => prev.filter(t => t !== tag));
   }
 
-  const sync = useCallback(async (from: string, to: string, tags: string[], filtros: string[] = [], loja: "todos" | "ML" | "Shopee" = "todos") => {
+  const sync = useCallback(async (from: string, to: string, tags: string[], filtros: string[] = [], loja: "todos" | "ML" | "Shopee" = "todos", force = false) => {
     setLoading(true);
     setErro(null);
 
@@ -163,6 +164,7 @@ export default function VendasPage() {
       if (tags.length > 0) params.set("sku", tags.join(","));
       const needsCancelled = filtros.includes("canceladas") || filtros.includes("devolucoes");
       if (needsCancelled) params.set("include_cancelled", "true");
+      if (force) params.set("sync", "1");
 
       const fetchML     = loja === "todos" || loja === "ML";
       const fetchShopee = loja === "todos" || loja === "Shopee";
@@ -180,6 +182,7 @@ export default function VendasPage() {
       const shopeeFalhou = fetchShopee && (shopeeData?.erro || !shopeeData);
 
       setErroShopee(!!shopeeFalhou);
+      setErroShopeeMsg(shopeeFalhou ? (shopeeData?.mensagem ?? null) : null);
 
       if (mlFalhou && shopeeFalhou) {
         setSemConexao(true); setRows([]);
@@ -379,7 +382,7 @@ export default function VendasPage() {
             🗂 Histórico
           </button>
           <button
-            onClick={() => sync(dateFrom, dateTo, skuTags, [...filtrosCadastro, ...filtrosStatus])}
+            onClick={() => sync(dateFrom, dateTo, skuTags, [...filtrosCadastro, ...filtrosStatus], lojaAtiva, true)}
             disabled={loading}
             style={{
               padding: "10px 20px",
@@ -908,7 +911,7 @@ export default function VendasPage() {
           borderRadius: "12px", padding: "12px 18px", marginBottom: "16px",
           color: "#EE4D2D", fontSize: "13px", fontWeight: 600, display: "flex", alignItems: "center", gap: "8px",
         }}>
-          🛍 Shopee não conectada ou com erro. Verifique em Configurações.
+          🛍 {erroShopeeMsg ?? "Shopee não conectada ou com erro. Verifique em Configurações."}
         </div>
       )}
 

@@ -56,6 +56,12 @@ export async function syncShopeeForUser(
     if (cursor) params.cursor = cursor;
 
     const data = await shopeeGet("/api/v2/order/get_order_list", partner_id, partner_key, access_token, shopId, params);
+
+    // Detecta erros da API Shopee (ex: token expirado, assinatura inválida)
+    if (data?.error && data.error !== "") {
+      throw new Error(`Shopee API error: ${data.error} – ${data.message ?? "sem mensagem"}`);
+    }
+
     const list: any[] = data?.response?.order_list ?? [];
     allOrderSns.push(...list.map((o: any) => o.order_sn));
 
