@@ -29,29 +29,42 @@ export async function POST(request: Request) {
 
   const results: { ml?: number; shopee?: number; mlErro?: string; shopeeErro?: string } = {};
 
-  await Promise.all([
-    // ── Mercado Livre ────────────────────────────────────────────────────────
-    (marketplace === "todos" || marketplace === "ML")
-      ? getMLLojaAtiva(userId)
-          .then(loja => loja
-            ? syncMLForUser(userId, dateFrom, dateTo)
-                .then(n => { results.ml = n; })
-                .catch(e => { results.mlErro = String(e?.message ?? e); })
-            : void (results.mlErro = "ML não conectada")
-          )
-      : Promise.resolve(),
+  try {
+    await Promise.all([
+      // ── Mercado Livre ────────────────────────────────────────────────────────
+      (marketplace === "todos" || marketplace === "ML")
+        ? getMLLojaAtiva(userId)
+            .then(loja => loja
+              ? syncMLForUser(userId, dateFrom, dateTo)
+                  .then(n => { results.ml = n; })
+                  .catch(e => { results.mlErro = String(e?.message ?? e); })
+              : void (results.mlErro = "ML não conectada")
+            )
+            .catch(e => { results.mlErro = String(e?.message ?? e); })
+        : Promise.resolve(),
 
-    // ── Shopee ───────────────────────────────────────────────────────────────
-    (marketplace === "todos" || marketplace === "Shopee")
-      ? getShopeeLojaAtiva(userId)
-          .then(loja => loja
-            ? syncShopeeForUser(userId, dateFrom, dateTo)
-                .then(n => { results.shopee = n; })
-                .catch(e => { results.shopeeErro = String(e?.message ?? e); })
-            : void (results.shopeeErro = "Shopee não conectada")
-          )
-      : Promise.resolve(),
-  ]);
+      // ── Shopee ───────────────────────────────────────────────────────────────
+      (marketplace === "todos" || marketplace === "Shopee")
+        ? getShopeeLojaAtiva(userId)
+            .then(loja => loja
+              ? syncShopeeForUser(userId, dateFrom, dateTo)
+                  .then(n => { results.shopee = n; })
+                  .catch(e => { results.shopeeErro = String(e?.message ?? e); })
+              : void (results.shopeeErro = "Shopee não conectada")
+            )
+            .catch(e => { results.shopeeErro = String(e?.message ?? e); })
+        : Promise.resolve(),
+    ]);
+  } catch (fatalErr: any) {
+    // Nunca deve cair aqui, mas garante JSON mesmo em erro inesperado
+    return NextResponse.json({
+      ok: false,
+      erro: true,
+      mensagem: String(fatalErr?.message ?? fatalErr),
+      dateFrom,
+      dateTo,
+    }, { status: 500 });
+  }
 
   return NextResponse.json({ ok: true, dateFrom, dateTo, ...results });
 }

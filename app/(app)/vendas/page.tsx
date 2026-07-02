@@ -120,20 +120,28 @@ export default function VendasPage() {
       ));
 
       try {
-        const res = await fetch("/api/sync/manual", {
+        const ctrl = new AbortController();
+        const tid  = setTimeout(() => ctrl.abort(), 58000); // 58s (dentro do maxDuration 60s)
+        const res  = await fetch("/api/sync/manual", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ dateFrom: meses[i].from, dateTo: meses[i].to, marketplace: historicoLoja }),
-        });
-        const data = await res.json();
+          signal: ctrl.signal,
+        }).finally(() => clearTimeout(tid));
+
+        // Parse seguro: resposta pode ser texto em caso de erro do servidor
+        let data: any = {};
+        try { data = await res.json(); } catch { data = { erro: true, mensagem: `HTTP ${res.status}` }; }
+
         const count = (data.ml ?? 0) + (data.shopee ?? 0);
-        const erro = data.mlErro || data.shopeeErro || (data.erro ? data.mensagem : undefined);
+        const erro = data.mlErro || data.shopeeErro || (data.erro ? (data.mensagem ?? "Erro") : undefined);
         setHistoricoMeses(prev => prev.map((m, idx) =>
           idx === i ? { ...m, status: erro ? "erro" : "ok", count, erro } : m
         ));
       } catch (e: any) {
+        const msg = e?.name === "AbortError" ? "Timeout (>58s)" : (e?.message ?? "Falha");
         setHistoricoMeses(prev => prev.map((m, idx) =>
-          idx === i ? { ...m, status: "erro", erro: e?.message ?? "Falha" } : m
+          idx === i ? { ...m, status: "erro", erro: msg } : m
         ));
       }
     }
