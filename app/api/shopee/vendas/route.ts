@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { getUserId } from "@/lib/session";
 import { shopeeGet } from "@/lib/shopee-api";
-import { CATEGORIAS_SHOPEE } from "@/lib/comissoes-shopee";
+import { obterFaixaShopee, TAXA_CAMPANHA_SHOPEE } from "@/lib/comissoes-shopee";
 import { getShopeeLojaAtiva } from "@/lib/shopee-auth";
 
 const supabase = createClient(
@@ -135,10 +135,8 @@ export async function GET(request: Request) {
         const impostoVal   = anuncio ? faturamento * ((anuncio.imposto || 0) / 100) : 0;
         const cadastrado   = !!anuncio;
 
-        const cat = CATEGORIAS_SHOPEE.find(c =>
-          (item.item_name ?? "").toLowerCase().includes(c.nome.toLowerCase())
-        );
-        const comissaoRate  = cat?.taxa ?? 0.14;
+        const faixa         = obterFaixaShopee(valorUnit);
+        const comissaoRate  = faixa.comissao + TAXA_CAMPANHA_SHOPEE;
         const tarifaVenda   = faturamento * comissaoRate;
         const margemContrib = faturamento - tarifaVenda - custo - impostoVal;
         const mcPercent     = faturamento > 0 ? (margemContrib / faturamento) * 100 : 0;
