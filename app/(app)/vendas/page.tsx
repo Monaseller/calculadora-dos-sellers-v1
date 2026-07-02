@@ -106,6 +106,45 @@ export default function VendasPage() {
     return meses.reverse(); // mais recente primeiro
   }
 
+  // Divide um range em janelas de 7 dias (garante 1 chunk Shopee por request)
+  function gerarJanelas(from: string, to: string): Array<{ from: string; to: string }> {
+    const addDays = (iso: string, n: number) => {
+      const d = new Date(`${iso}T12:00:00Z`);
+      d.setUTCDate(d.getUTCDate() + n);
+      return d.toISOString().split("T")[0];
+    };
+    const janelas: Array<{ from: string; to: string }> = [];
+    let cur = from;
+    while (cur <= to) {
+      const end = addDays(cur, 6); // 7 dias por janela
+      janelas.push({ from: cur, to: end > to ? to : end });
+      cur = addDays(end, 1);
+    }
+    return janelas;
+  }
+
+  // Faz uma chamada ao sync com timeout seguro
+  async function syncJanela(from: string, to: string): Promise<{ ml: number; shopee: number; erro?: string }> {
+    const ctrl = new AbortController();
+    const tid  = setTimeout(() => ctrl.abort(), 30000); // 30s por janela de 7 dias
+    try {
+      const res = await fetch("/api/sync/manual", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dateFrom: from, dateTo: to, marketplace: historicoLoja }),
+        signal: ctrl.signal,
+      });
+      clearTimeout(tid);
+      let data: any = {};
+      try { data = await res.json(); } catch { data = { erro: true, mensagem: `HTTP ${res.status}` }; }
+      const erro = data.mlErro || data.shopeeErro || (data.erro ? (data.mensagem ?? "Erro") : undefined);
+      return { ml: data.ml ?? 0, shopee: data.shopee ?? 0, erro };
+    } catch (e: any) {
+      clearTimeout(tid);
+      return { ml: 0, shopee: 0, erro: e?.name === "AbortError" ? "Timeout (>30s)" : (e?.message ?? "Falha") };
+    }
+  }
+
   async function iniciarHistorico() {
     const meses = gerarMeses(historicoDesde);
     setHistoricoMeses(meses);
@@ -119,31 +158,22 @@ export default function VendasPage() {
         idx === i ? { ...m, status: "sincronizando" } : m
       ));
 
-      try {
-        const ctrl = new AbortController();
-        const tid  = setTimeout(() => ctrl.abort(), 58000); // 58s (dentro do maxDuration 60s)
-        const res  = await fetch("/api/sync/manual", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ dateFrom: meses[i].from, dateTo: meses[i].to, marketplace: historicoLoja }),
-          signal: ctrl.signal,
-        }).finally(() => clearTimeout(tid));
+      // Divide cada mês em janelas de 7 dias — cada janela = 1 chunk na Shopee API
+      const janelas = gerarJanelas(meses[i].from, meses[i].to);
+      let totalMl = 0, totalShopee = 0, erroMes: string | undefined;
 
-        // Parse seguro: resposta pode ser texto em caso de erro do servidor
-        let data: any = {};
-        try { data = await res.json(); } catch { data = { erro: true, mensagem: `HTTP ${res.status}` }; }
-
-        const count = (data.ml ?? 0) + (data.shopee ?? 0);
-        const erro = data.mlErro || data.shopeeErro || (data.erro ? (data.mensagem ?? "Erro") : undefined);
-        setHistoricoMeses(prev => prev.map((m, idx) =>
-          idx === i ? { ...m, status: erro ? "erro" : "ok", count, erro } : m
-        ));
-      } catch (e: any) {
-        const msg = e?.name === "AbortError" ? "Timeout (>58s)" : (e?.message ?? "Falha");
-        setHistoricoMeses(prev => prev.map((m, idx) =>
-          idx === i ? { ...m, status: "erro", erro: msg } : m
-        ));
+      for (const janela of janelas) {
+        if (cancelRef.current) break;
+        const result = await syncJanela(janela.from, janela.to);
+        totalMl     += result.ml;
+        totalShopee += result.shopee;
+        if (result.erro && !erroMes) erroMes = result.erro; // guarda 1º erro
       }
+
+      const count = totalMl + totalShopee;
+      setHistoricoMeses(prev => prev.map((m, idx) =>
+        idx === i ? { ...m, status: erroMes ? "erro" : "ok", count, erro: erroMes } : m
+      ));
     }
     setHistoricoRodando(false);
   }
