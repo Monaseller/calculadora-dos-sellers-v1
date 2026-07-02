@@ -1,7 +1,8 @@
 /**
  * GET /api/shopee/vendas
- * Lê da tabela `pedidos` (cache). Se não houver dados ou estiver stale, faz sync on-demand.
- * O cron /api/sync mantém os últimos 7 dias sempre frescos.
+ * Lê da tabela `pedidos` (cache Supabase).
+ * Sync on-demand limitado a HOJE apenas (Vercel Hobby: 10s timeout).
+ * Sync de histórico via /api/sync ou botão Histórico.
  */
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
@@ -16,10 +17,6 @@ const supabase = createClient(
 
 function hojeISO() {
   return new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString().split("T")[0];
-}
-
-function diasAtras(n: number) {
-  return new Date(Date.now() - 3 * 60 * 60 * 1000 - n * 86400 * 1000).toISOString().split("T")[0];
 }
 
 function pedidoToRow(p: any) {
@@ -56,7 +53,6 @@ export async function GET(request: Request) {
   const dateFrom   = searchParams.get("date_from") ?? hojeISO();
   const dateTo     = searchParams.get("date_to")   ?? dateFrom;
   const skuParam   = searchParams.get("sku") ?? "";
-  const forceSync  = searchParams.get("sync") === "1";
   const skuFilters = skuParam.split(",").map(s => s.toLowerCase().trim()).filter(Boolean);
 
   // Verifica conexão Shopee
@@ -65,56 +61,34 @@ export async function GET(request: Request) {
     return NextResponse.json({ erro: true, semConexao: true, mensagem: "Conta Shopee não conectada." });
   }
 
-  // Checa cache: busca 1 linha para ver se há dados e quando foram sincronizados
-  const { data: probe } = await supabase
-    .from("pedidos")
-    .select("synced_at")
-    .eq("user_id", userId)
-    .eq("marketplace", "Shopee")
-    .gte("data", dateFrom)
-    .lte("data", dateTo)
-    .order("synced_at", { ascending: false })
-    .limit(1);
+  const hoje = hojeISO();
+  const rangeIncludeHoje = dateFrom <= hoje && hoje <= dateTo;
 
-  const hasData = probe && probe.length > 0;
-  const hoje    = hojeISO();
+  // ── Sync on-demand: APENAS HOJE (1 dia) para respeitar limite de 10s Vercel Hobby ──
+  // Histórico completo: use o botão Histórico ou aguarde o cron das 3h.
+  if (rangeIncludeHoje) {
+    try {
+      const { data: probeHoje } = await supabase
+        .from("pedidos").select("synced_at")
+        .eq("user_id", userId).eq("marketplace", "Shopee")
+        .eq("data", hoje)
+        .order("synced_at", { ascending: false }).limit(1);
 
-  try {
-    if (forceSync) {
-      // Botão Sincronizar: re-sincroniza o range inteiro
-      await syncShopeeForUser(userId, dateFrom, dateTo);
-    } else if (!hasData) {
-      // Sem cache: sync completo (primeira vez)
-      await syncShopeeForUser(userId, dateFrom, dateTo);
-    } else {
-      // Tem cache: só atualiza hoje se o range inclui hoje (barato, 1 dia)
-      const rangeIncludeHoje = dateFrom <= hoje && hoje <= dateTo;
-      if (rangeIncludeHoje) {
-        const { data: probeHoje } = await supabase
-          .from("pedidos").select("synced_at")
-          .eq("user_id", userId).eq("marketplace", "Shopee")
-          .eq("data", hoje)
-          .order("synced_at", { ascending: false }).limit(1);
-        const lastSyncHoje = probeHoje?.[0]?.synced_at
-          ? new Date(probeHoje[0].synced_at).getTime() : 0;
-        if (Date.now() - lastSyncHoje > 30 * 60 * 1000) { // stale > 30 min
-          await syncShopeeForUser(userId, hoje, hoje);
-        }
+      const lastSyncHoje = probeHoje?.[0]?.synced_at
+        ? new Date(probeHoje[0].synced_at).getTime() : 0;
+
+      // Sincroniza hoje se stale (> 30 min) ou nunca sincronizado
+      if (Date.now() - lastSyncHoje > 30 * 60 * 1000) {
+        await syncShopeeForUser(userId, hoje, hoje);
       }
+    } catch (syncErr) {
+      const errMsg = syncErr instanceof Error ? syncErr.message : String(syncErr);
+      console.error("[shopee/vendas] sync hoje error:", errMsg);
+      // Não retorna erro — lê do cache mesmo que hoje falhe
     }
-  } catch (syncErr) {
-    // API Shopee retornou erro (token expirado, permissão revogada, etc.)
-    const errMsg = syncErr instanceof Error ? syncErr.message : String(syncErr);
-    console.error("[shopee/vendas] sync error:", errMsg);
-    return NextResponse.json({
-      erro:       true,
-      semConexao: false,
-      mensagem:   `Shopee: ${errMsg}`,
-      conta:      loja.nickname,
-    });
   }
 
-  // Lê do banco
+  // Lê do banco (range completo — pode ser cache do cron ou Histórico)
   const { data: pedidos } = await supabase
     .from("pedidos")
     .select("*")
@@ -126,7 +100,6 @@ export async function GET(request: Request) {
 
   let rows = (pedidos ?? []).map(pedidoToRow);
 
-  // Filtro SKU client-side (já aplicado no sync, mas mantemos por segurança)
   if (skuFilters.length > 0) {
     rows = rows.filter(r => {
       const a = (r.sku ?? "").toLowerCase();
@@ -142,5 +115,6 @@ export async function GET(request: Request) {
     marketplace:  "Shopee",
     totalPedidos: new Set(rows.map(r => r.orderId)).size,
     rows,
+    semDados:     rows.length === 0,  // indica que pode precisar de sync histórico
   });
 }

@@ -70,6 +70,7 @@ export default function VendasPage() {
   const [semConexao, setSemConexao] = useState(false);
   const [erroShopee, setErroShopee] = useState(false);
   const [erroShopeeMsg, setErroShopeeMsg] = useState<string | null>(null);
+  const [shopeeSemDados, setShopeeSemDados] = useState(false);
   const [totalPedidos, setTotalPedidos] = useState(0);
   const [conta,      setConta]    = useState("");
   const [ultimaSync, setUltimaSync] = useState<string | null>(null);
@@ -192,6 +193,7 @@ export default function VendasPage() {
 
       setErroShopee(!!shopeeFalhou);
       setErroShopeeMsg(shopeeFalhou ? (shopeeData?.mensagem ?? null) : null);
+      setShopeeSemDados(!shopeeFalhou && fetchShopee && !!shopeeData?.semDados);
 
       if (mlFalhou && shopeeFalhou) {
         setSemConexao(true); setRows([]);
@@ -921,6 +923,17 @@ export default function VendasPage() {
           color: "#EE4D2D", fontSize: "13px", fontWeight: 600, display: "flex", alignItems: "center", gap: "8px",
         }}>
           🛍 {erroShopeeMsg ?? "Shopee não conectada ou com erro. Verifique em Configurações."}
+        </div>
+      )}
+
+      {/* Aviso quando Shopee está conectada mas sem dados no cache histórico */}
+      {shopeeSemDados && !erroShopee && !semConexao && !loading && lojaAtiva !== "ML" && (
+        <div style={{
+          background: "rgba(255,180,0,0.08)", border: "1px solid rgba(255,180,0,0.25)",
+          borderRadius: "12px", padding: "12px 18px", marginBottom: "16px",
+          color: "#FFB400", fontSize: "13px", fontWeight: 600, display: "flex", alignItems: "center", gap: "8px",
+        }}>
+          🛍 Sem dados Shopee no cache. Use o botão <strong style={{ marginLeft: "4px" }}>🗂 Histórico</strong> para sincronizar o período completo.
         </div>
       )}
 
