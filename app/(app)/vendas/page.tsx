@@ -169,9 +169,18 @@ export default function VendasPage() {
       const fetchML     = loja === "todos" || loja === "ML";
       const fetchShopee = loja === "todos" || loja === "Shopee";
 
+      function fetchWithTimeout(url: string, ms = 45000) {
+        const ctrl = new AbortController();
+        const id = setTimeout(() => ctrl.abort(), ms);
+        return fetch(url, { signal: ctrl.signal })
+          .then(r => r.json())
+          .catch(() => null)
+          .finally(() => clearTimeout(id));
+      }
+
       const [mlData, shopeeData] = await Promise.all([
-        fetchML     ? fetch(`/api/ml/vendas?${params}`).then(r => r.json()).catch(() => null) : null,
-        fetchShopee ? fetch(`/api/shopee/vendas?${params}`).then(r => r.json()).catch(() => null) : null,
+        fetchML     ? fetchWithTimeout(`/api/ml/vendas?${params}`)     : null,
+        fetchShopee ? fetchWithTimeout(`/api/shopee/vendas?${params}`) : null,
       ]);
 
       const mlRows     = (!mlData?.erro     ? mlData?.rows     ?? [] : []) as VendaRow[];
