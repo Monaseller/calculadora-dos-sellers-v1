@@ -291,20 +291,22 @@ export default function VendasPage() {
     Coleta: filteredRowsDedup.filter(r => r.logistica === "Coleta").length,
   };
 
-  // Totais
-  const totais = filteredRows.reduce(
-    (acc, r) => ({
-      faturamento:    acc.faturamento    + r.faturamento,
-      custo:          acc.custo          + r.custo,
-      imposto:        acc.imposto        + r.imposto,
-      tarifaVenda:    acc.tarifaVenda    + r.tarifaVenda,
-      freteComprador: acc.freteComprador + r.freteComprador,
-      freteVendedor:  acc.freteVendedor  + r.freteVendedor,
-      margemContrib:  acc.margemContrib  + r.margemContrib,
-      qtd:            acc.qtd            + r.qtd,
-    }),
-    { faturamento: 0, custo: 0, imposto: 0, tarifaVenda: 0, freteComprador: 0, freteVendedor: 0, margemContrib: 0, qtd: 0 }
-  );
+  // Totais — calculado só sobre pedidos pagos (devoluções aparecem na tabela mas não entram no total)
+  const totais = filteredRows
+    .filter(r => r.status === "paid")
+    .reduce(
+      (acc, r) => ({
+        faturamento:    acc.faturamento    + r.faturamento,
+        custo:          acc.custo          + r.custo,
+        imposto:        acc.imposto        + r.imposto,
+        tarifaVenda:    acc.tarifaVenda    + r.tarifaVenda,
+        freteComprador: acc.freteComprador + r.freteComprador,
+        freteVendedor:  acc.freteVendedor  + r.freteVendedor,
+        margemContrib:  acc.margemContrib  + r.margemContrib,
+        qtd:            acc.qtd            + r.qtd,
+      }),
+      { faturamento: 0, custo: 0, imposto: 0, tarifaVenda: 0, freteComprador: 0, freteVendedor: 0, margemContrib: 0, qtd: 0 }
+    );
   const mcTotalPct = totais.faturamento > 0 ? (totais.margemContrib / totais.faturamento) * 100 : 0;
   // Conta ordens únicas (ML conta "quantidade de vendas" = ordens, não itens de linha)
   const pedidosUnicos = new Set(filteredRows.map(r => r.orderId)).size;

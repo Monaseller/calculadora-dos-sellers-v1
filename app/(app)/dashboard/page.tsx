@@ -691,8 +691,9 @@ export default function DashboardPage() {
         return;
       }
 
-      const contas = [mlOk ? mlData.conta : null, shopeeOk ? shopeeData.conta : null].filter(Boolean);
-      setConta(contas.join(" + ") || "CDS");
+      // Usa o primeiro nome disponível (ML e Shopee retornam o mesmo nickname do usuário)
+      const contaNome = (mlOk ? mlData.conta : null) || (shopeeOk ? shopeeData.conta : null) || "CDS";
+      setConta(contaNome);
 
       const mlRowsFull     = (mlOk     ? mlData.rows     ?? [] : []) as VendaRow[];
       const shopeeRowsFull = (shopeeOk ? shopeeData.rows ?? [] : []) as VendaRow[];
