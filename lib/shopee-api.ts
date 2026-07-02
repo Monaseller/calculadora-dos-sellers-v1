@@ -47,17 +47,17 @@ export async function shopeeGet(
     ...Object.fromEntries(Object.entries(params).map(([k, v]) => [k, String(v)])),
   });
 
-  const ctrl = new AbortController();
-  const timeoutId = setTimeout(() => ctrl.abort(), 10000); // 10s timeout por chamada
+  // Promise.race garante timeout independente do AbortController funcionar no runtime
+  const fetchPromise = fetch(`${SHOPEE_BASE}${path}?${qs}`);
+  const timeoutPromise = new Promise<never>((_, reject) =>
+    setTimeout(() => reject(new Error(`Shopee GET ${path} timeout (8s)`)), 8000)
+  );
   let res: Response;
   try {
-    res = await fetch(`${SHOPEE_BASE}${path}?${qs}`, { signal: ctrl.signal });
-  } catch (fetchErr: any) {
-    clearTimeout(timeoutId);
-    if (fetchErr?.name === "AbortError") throw new Error(`Shopee GET ${path} timeout (10s)`);
-    throw fetchErr;
+    res = await Promise.race([fetchPromise, timeoutPromise]);
+  } catch (err: any) {
+    throw err; // re-lança tanto timeout quanto erros de rede
   }
-  clearTimeout(timeoutId);
   const text = await res.text();
   try {
     return JSON.parse(text);
