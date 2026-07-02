@@ -23,10 +23,6 @@ function hojeISO() {
   return new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString().split("T")[0];
 }
 
-function diasAtras(n: number) {
-  return new Date(Date.now() - 3 * 60 * 60 * 1000 - n * 86400 * 1000).toISOString().split("T")[0];
-}
-
 function pedidoToRow(p: any) {
   return {
     orderId:        p.order_id,
@@ -79,20 +75,35 @@ export async function GET(request: Request) {
     .order("synced_at", { ascending: false })
     .limit(1);
 
-  const hasData        = probe && probe.length > 0;
-  const lastSync       = hasData ? new Date(probe![0].synced_at).getTime() : 0;
-  const staleThreshold = 2 * 60 * 60 * 1000; // 2 horas
-  const isStale        = Date.now() - lastSync > staleThreshold;
-  const isRecent       = dateTo >= diasAtras(7);
+  const hasData = probe && probe.length > 0;
+  const hoje    = hojeISO();
 
   // Sem token de cookie E sem cache → ML não conectada
   if (!token && !hasData) {
     return NextResponse.json({ erro: true, semConexao: true, mensagem: "Conta do Mercado Livre não conectada." });
   }
 
-  if (forceSync || !hasData || (isRecent && isStale)) {
-    // Passa o cookie token se disponível (mais fresco que o DB)
+  if (forceSync) {
+    // Botão Sincronizar: re-sincroniza o range inteiro
     await syncMLForUser(userId, dateFrom, dateTo, token ?? undefined);
+  } else if (!hasData) {
+    // Sem cache: sync completo (primeira vez)
+    await syncMLForUser(userId, dateFrom, dateTo, token ?? undefined);
+  } else {
+    // Tem cache: só atualiza hoje se o range inclui hoje (barato, 1 dia)
+    const rangeIncludeHoje = dateFrom <= hoje && hoje <= dateTo;
+    if (rangeIncludeHoje) {
+      const { data: probeHoje } = await supabase
+        .from("pedidos").select("synced_at")
+        .eq("user_id", userId).eq("marketplace", "ML")
+        .eq("data", hoje)
+        .order("synced_at", { ascending: false }).limit(1);
+      const lastSyncHoje = probeHoje?.[0]?.synced_at
+        ? new Date(probeHoje[0].synced_at).getTime() : 0;
+      if (Date.now() - lastSyncHoje > 30 * 60 * 1000) { // stale > 30 min
+        await syncMLForUser(userId, hoje, hoje, token ?? undefined);
+      }
+    }
   }
 
   // Lê do banco
