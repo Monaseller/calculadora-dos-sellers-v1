@@ -84,31 +84,6 @@ function LojaCard({ loja, ativa, onAtivar, onDesconectar }: {
             Usar esta
           </button>
         )}
-        {ativa && isML && (
-          <button
-            onClick={() => { window.location.href = "/api/auth/mercadolivre"; }}
-            style={{
-              padding: "8px 16px", borderRadius: "8px", border: "1px solid rgba(255,182,0,0.4)",
-              background: "rgba(255,182,0,0.08)", color: "#FFB600", fontWeight: 700,
-              fontSize: "13px", cursor: "pointer",
-            }}
-          >
-            Reconectar
-          </button>
-        )}
-        {ativa && !isML && (
-          <button
-            onClick={() => { window.location.href = "/api/auth/shopee"; }}
-            style={{
-              padding: "8px 16px", borderRadius: "8px", border: "1px solid rgba(238,77,45,0.4)",
-              background: "rgba(238,77,45,0.08)", color: "#EE4D2D", fontWeight: 700,
-              fontSize: "13px", cursor: "pointer",
-            }}
-          >
-            Reconectar
-          </button>
-        )}
-
         {!confirmando ? (
           <button
             onClick={() => setConfirmando(true)}

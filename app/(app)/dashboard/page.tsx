@@ -474,10 +474,13 @@ function LojasDropdown({ lojas, selecionadas, onChange }: {
     : `${selecionadas.size} lojas`;
 
   function toggleLoja(id: string) {
-    const next = new Set(selecionadas);
-    if (next.has(id)) { next.delete(id); } else { next.add(id); }
-    // Se zerou, volta pra todas
-    onChange(next.size === 0 ? new Set(lojas.map(l => l.id)) : next);
+    // Seleção exclusiva: clicar numa loja mostra só ela
+    // Clicar na mesma loja já selecionada volta pra "todas"
+    if (selecionadas.size === 1 && selecionadas.has(id)) {
+      onChange(new Set(lojas.map(l => l.id))); // volta pra todas
+    } else {
+      onChange(new Set([id])); // seleciona exclusivamente
+    }
   }
   function toggleTodas() {
     onChange(new Set(lojas.map(l => l.id)));
@@ -571,9 +574,9 @@ function LojasDropdown({ lojas, selecionadas, onChange }: {
                 <span style={{ fontSize: 11 }}>{mktLabel(loja.marketplace)}</span>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 13, fontWeight: 600, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {loja.nickname ?? loja.nome}
+                    {(loja.nickname ?? loja.nome)} {loja.marketplace === "ML" ? "Mercado Livre" : loja.marketplace}
                   </div>
-                  <div style={{ fontSize: 10, color: cor, fontWeight: 700 }}>{loja.marketplace}</div>
+                  <div style={{ fontSize: 10, color: cor, fontWeight: 700 }}>{loja.marketplace === "ML" ? "Mercado Livre" : "Shopee"}</div>
                 </div>
                 <div style={{ width: 6, height: 6, borderRadius: "50%", background: cor, flexShrink: 0, boxShadow: `0 0 6px ${cor}` }} />
               </div>
@@ -624,8 +627,11 @@ export default function DashboardPage() {
     margem: 0, unidades: 0, roi: 0, comissoes: 0,
   });
   const [dias,     setDias]     = useState<DiaData[]>([]);
-  const [tops,     setTops]     = useState<TopProduto[]>([]);
-  const [loss,     setLoss]     = useState<TopProduto[]>([]);
+  const [tops,       setTops]       = useState<TopProduto[]>([]);
+  const [loss,       setLoss]       = useState<TopProduto[]>([]);
+  const [topsML,     setTopsML]     = useState<TopProduto[]>([]);
+  const [topsShopee, setTopsShopee] = useState<TopProduto[]>([]);
+  const [showBothMkt, setShowBothMkt] = useState(false);
   const [alertas,  setAlertas]  = useState<{ icon: string; title: string; msg: string; color: string }[]>([]);
   const [anuncios, setAnuncios] = useState<Anuncio[]>([]);
   const [score,    setScore]    = useState(0);
@@ -688,9 +694,14 @@ export default function DashboardPage() {
       const contas = [mlOk ? mlData.conta : null, shopeeOk ? shopeeData.conta : null].filter(Boolean);
       setConta(contas.join(" + ") || "CDS");
 
-      const mlRows     = (mlOk     ? mlData.rows     ?? [] : []) as VendaRow[];
-      const shopeeRows = (shopeeOk ? shopeeData.rows ?? [] : []) as VendaRow[];
-      const rows: VendaRow[] = [...mlRows, ...shopeeRows].filter((r: VendaRow) => r.status === "paid");
+      const mlRowsFull     = (mlOk     ? mlData.rows     ?? [] : []) as VendaRow[];
+      const shopeeRowsFull = (shopeeOk ? shopeeData.rows ?? [] : []) as VendaRow[];
+      const mlRows     = mlRowsFull.filter((r: VendaRow) => r.status === "paid");
+      const shopeeRows = shopeeRowsFull.filter((r: VendaRow) => r.status === "paid");
+      const rows: VendaRow[] = [...mlRows, ...shopeeRows];
+
+      // Detecta se há dados de ambas as plataformas
+      setShowBothMkt(mlRows.length > 0 && shopeeRows.length > 0);
 
       const fat       = rows.reduce((s, r) => s + r.faturamento, 0);
       const lucro     = rows.reduce((s, r) => s + r.margemContrib, 0);
@@ -733,24 +744,38 @@ export default function DashboardPage() {
       setSparkFat(diasArr.map(d => d.faturamento));
       setSparkLuc(diasArr.map(d => Math.max(d.lucro, 0)));
 
-      const mapA = new Map<string, TopProduto>();
-      for (const r of rows) {
-        const key = r.mlItemId || r.anuncio;
-        const ex  = mapA.get(key);
-        const rawThumb = anuncios.find(a => a.ml_item_id === r.mlItemId || a.ml_item_id?.split("-")[0] === r.mlItemId?.split("-")[0])?.thumbnail ?? null;
-        const thumb = rawThumb ? rawThumb.replace("http://", "https://") : null;
-        if (ex) {
-          ex.faturamento += r.faturamento;
-          ex.lucro       += r.margemContrib;
-          ex.qtd         += r.qtd;
-        } else {
-          mapA.set(key, { mlItemId: r.mlItemId, nome: r.anuncio, sku: r.sku, thumbnail: thumb, faturamento: r.faturamento, lucro: r.margemContrib, qtd: r.qtd, margem: 0 });
+      // Constrói mapa de tops por marketplace
+      function buildTops(rowsSubset: VendaRow[]): { all: TopProduto[]; tops: TopProduto[]; loss: TopProduto[] } {
+        const mapA = new Map<string, TopProduto>();
+        for (const r of rowsSubset) {
+          const key = r.mlItemId || r.anuncio;
+          const ex  = mapA.get(key);
+          const rawThumb = anuncios.find(a => a.ml_item_id === r.mlItemId || a.ml_item_id?.split("-")[0] === r.mlItemId?.split("-")[0])?.thumbnail ?? null;
+          const thumb = rawThumb ? rawThumb.replace("http://", "https://") : null;
+          if (ex) {
+            ex.faturamento += r.faturamento;
+            ex.lucro       += r.margemContrib;
+            ex.qtd         += r.qtd;
+          } else {
+            mapA.set(key, { mlItemId: r.mlItemId, nome: r.anuncio, sku: r.sku, thumbnail: thumb, faturamento: r.faturamento, lucro: r.margemContrib, qtd: r.qtd, margem: 0 });
+          }
         }
+        const all = Array.from(mapA.values()).map(p => ({ ...p, margem: p.faturamento > 0 ? (p.lucro / p.faturamento) * 100 : 0 }));
+        return {
+          all,
+          tops: [...all].sort((a, b) => b.faturamento - a.faturamento).slice(0, 10),
+          loss: [...all].filter(p => p.lucro < 0).sort((a, b) => a.lucro - b.lucro).slice(0, 5),
+        };
       }
-      const all = Array.from(mapA.values()).map(p => ({ ...p, margem: p.faturamento > 0 ? (p.lucro / p.faturamento) * 100 : 0 }));
-      const topsSorted = [...all].sort((a, b) => b.faturamento - a.faturamento).slice(0, 10);
-      const lossSorted = [...all].filter(p => p.lucro < 0).sort((a, b) => a.lucro - b.lucro).slice(0, 5);
 
+      const builtAll    = buildTops(rows);
+      const builtML     = buildTops(mlRows);
+      const builtShopee = buildTops(shopeeRows);
+
+      const topsSorted = builtAll.tops;
+      const lossSorted = builtAll.loss;
+
+      // Busca thumbnails para itens ML sem thumbnail
       const semThumb = topsSorted.concat(lossSorted).filter(p => !p.thumbnail && p.mlItemId);
       if (semThumb.length) {
         const ids = [...new Set(semThumb.map(p => p.mlItemId))].join(",");
@@ -759,11 +784,14 @@ export default function DashboardPage() {
           const tMap: Record<string, string> = await tr.json();
           topsSorted.forEach(p => { if (!p.thumbnail && tMap[p.mlItemId]) p.thumbnail = tMap[p.mlItemId]; });
           lossSorted.forEach(p => { if (!p.thumbnail && tMap[p.mlItemId]) p.thumbnail = tMap[p.mlItemId]; });
+          builtML.tops.forEach(p => { if (!p.thumbnail && tMap[p.mlItemId]) p.thumbnail = tMap[p.mlItemId]; });
         } catch { /* silencioso */ }
       }
 
       setTops(topsSorted);
       setLoss(lossSorted);
+      setTopsML(builtML.tops);
+      setTopsShopee(builtShopee.tops);
 
       const al: typeof alertas = [];
       const semMargem = all.filter(p => p.margem < 10 && p.margem >= 0);
@@ -775,7 +803,7 @@ export default function DashboardPage() {
 
     } catch { setErro("Erro de conexao."); }
     setLoading(false);
-  }, [anuncios]);
+  }, [anuncios, lojas]);
 
   useEffect(() => { carregar(dateFrom, dateTo); }, [dateFrom, dateTo, lojasSelecionadas, carregar]);
 
@@ -1001,27 +1029,78 @@ export default function DashboardPage() {
           </div>
 
           {/* TOP PRODUTOS */}
-          {tops.length > 0 && (
+          {(tops.length > 0 || topsML.length > 0 || topsShopee.length > 0) && (
             <div className="dash-anim" style={{ marginBottom: 24, animationDelay: "0.15s" }}>
-              <Section
-                title="🏆 Top Produtos"
-                subtitle="Melhores anuncios no periodo"
-                action={<span style={{ fontSize: 11, color: "#94A3B8" }}>{tops.length} produtos</span>}
-              >
-                <div style={{
-                  display: "grid",
-                  gridTemplateColumns: "36px 44px 1fr 110px 100px 80px 56px",
-                  gap: 12, padding: "0 16px 10px",
-                  borderBottom: "1px solid #1E293B", marginBottom: 8,
-                }}>
-                  {["", "", "Produto", "Receita", "Lucro", "Margem", "Qtd"].map((h, i) => (
-                    <div key={i} style={{ fontSize: 10, fontWeight: 700, color: "#94A3B8", textTransform: "uppercase", letterSpacing: "0.5px", textAlign: i > 2 ? "right" : "left" }}>{h}</div>
-                  ))}
+              {showBothMkt ? (
+                // Duas plataformas: mostra top 10 lado a lado
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+                  {/* Top ML */}
+                  {topsML.length > 0 && (
+                    <Section
+                      title="🛒 Top Produtos — Mercado Livre"
+                      subtitle={`${topsML.length} melhores por faturamento`}
+                      action={<span style={{ fontSize: 11, color: "#22C55E", fontWeight: 700 }}>ML</span>}
+                    >
+                      <div style={{
+                        display: "grid",
+                        gridTemplateColumns: "36px 44px 1fr 90px 72px 56px",
+                        gap: 8, padding: "0 12px 8px",
+                        borderBottom: "1px solid #1E293B", marginBottom: 6,
+                      }}>
+                        {["", "", "Produto", "Receita", "Margem", "Qtd"].map((h, i) => (
+                          <div key={i} style={{ fontSize: 9, fontWeight: 700, color: "#94A3B8", textTransform: "uppercase", letterSpacing: "0.5px", textAlign: i > 2 ? "right" : "left" }}>{h}</div>
+                        ))}
+                      </div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                        {topsML.map((p, i) => <TopProductRow key={p.mlItemId || i} p={p} rank={i + 1} />)}
+                      </div>
+                    </Section>
+                  )}
+                  {/* Top Shopee */}
+                  {topsShopee.length > 0 && (
+                    <Section
+                      title="🛍 Top Produtos — Shopee"
+                      subtitle={`${topsShopee.length} melhores por faturamento`}
+                      action={<span style={{ fontSize: 11, color: "#EE4D2D", fontWeight: 700 }}>Shopee</span>}
+                    >
+                      <div style={{
+                        display: "grid",
+                        gridTemplateColumns: "36px 44px 1fr 90px 72px 56px",
+                        gap: 8, padding: "0 12px 8px",
+                        borderBottom: "1px solid #1E293B", marginBottom: 6,
+                      }}>
+                        {["", "", "Produto", "Receita", "Margem", "Qtd"].map((h, i) => (
+                          <div key={i} style={{ fontSize: 9, fontWeight: 700, color: "#94A3B8", textTransform: "uppercase", letterSpacing: "0.5px", textAlign: i > 2 ? "right" : "left" }}>{h}</div>
+                        ))}
+                      </div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                        {topsShopee.map((p, i) => <TopProductRow key={p.mlItemId || i} p={p} rank={i + 1} />)}
+                      </div>
+                    </Section>
+                  )}
                 </div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                  {tops.map((p, i) => <TopProductRow key={p.mlItemId || i} p={p} rank={i + 1} />)}
-                </div>
-              </Section>
+              ) : (
+                // Uma plataforma: top 10 completo
+                <Section
+                  title="🏆 Top Produtos"
+                  subtitle="Melhores anuncios no periodo"
+                  action={<span style={{ fontSize: 11, color: "#94A3B8" }}>{tops.length} produtos</span>}
+                >
+                  <div style={{
+                    display: "grid",
+                    gridTemplateColumns: "36px 44px 1fr 110px 100px 80px 56px",
+                    gap: 12, padding: "0 16px 10px",
+                    borderBottom: "1px solid #1E293B", marginBottom: 8,
+                  }}>
+                    {["", "", "Produto", "Receita", "Lucro", "Margem", "Qtd"].map((h, i) => (
+                      <div key={i} style={{ fontSize: 10, fontWeight: 700, color: "#94A3B8", textTransform: "uppercase", letterSpacing: "0.5px", textAlign: i > 2 ? "right" : "left" }}>{h}</div>
+                    ))}
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    {tops.map((p, i) => <TopProductRow key={p.mlItemId || i} p={p} rank={i + 1} />)}
+                  </div>
+                </Section>
+              )}
             </div>
           )}
 
