@@ -48,7 +48,13 @@ export async function shopeeGet(
   });
 
   const res = await fetch(`${SHOPEE_BASE}${path}?${qs}`);
-  return res.json();
+  const text = await res.text();
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    console.error(`[shopee-api] GET ${path} status=${res.status} body=${text.slice(0, 300)}`);
+    throw new Error(`Shopee GET ${path} retornou JSON inválido (${res.status}): ${text.slice(0, 150)}`);
+  }
 }
 
 // ── POST autenticado ─────────────────────────────────────────────────────────
@@ -76,5 +82,11 @@ export async function shopeePost(
     headers: { "Content-Type": "application/json" },
     body:    JSON.stringify(body),
   });
-  return res.json();
+  const text = await res.text();
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    console.error(`[shopee-api] POST ${path} status=${res.status} body=${text.slice(0, 300)}`);
+    throw new Error(`Shopee POST ${path} retornou JSON inválido (${res.status}): ${text.slice(0, 150)}`);
+  }
 }
