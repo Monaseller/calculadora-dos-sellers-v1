@@ -95,18 +95,30 @@ export async function GET(request: Request) {
     if (!mapaAnuncios.has(`${a.ml_item_id}|`)) mapaAnuncios.set(`${a.ml_item_id}|`, a);
   }
 
-  // ── 3. Detalhes em lotes de 50 ───────────────────────────────────────────
-  const rows: any[] = [];
+  // ── 3. Detalhes em lotes de 50 (paralelo, 5 por vez) ────────────────────
   const BATCH = 50;
+  const CONCURRENCY = 5;
 
+  const batches: string[][] = [];
   for (let i = 0; i < allOrderSns.length; i += BATCH) {
-    const batch = allOrderSns.slice(i, i + BATCH);
+    batches.push(allOrderSns.slice(i, i + BATCH));
+  }
 
-    const detail = await shopeeGet("/api/v2/order/get_order_detail", partner_id, partner_key, access_token, shopId, {
-      order_sn_list: batch.join(","),
-      response_optional_fields: "item_list,total_amount,order_status,create_time,pay_time",
-    });
+  const allDetails: any[] = [];
+  for (let i = 0; i < batches.length; i += CONCURRENCY) {
+    const chunk = batches.slice(i, i + CONCURRENCY);
+    const results = await Promise.all(
+      chunk.map(batch => shopeeGet("/api/v2/order/get_order_detail", partner_id, partner_key, access_token, shopId, {
+        order_sn_list: batch.join(","),
+        response_optional_fields: "item_list,total_amount,order_status,create_time,pay_time",
+      }))
+    );
+    allDetails.push(...results);
+  }
 
+  const rows: any[] = [];
+
+  for (const detail of allDetails) {
     for (const order of (detail?.response?.order_list ?? [])) {
       const status  = order.order_status ?? "UNKNOWN";
       const ts      = order.pay_time || order.create_time || 0;
