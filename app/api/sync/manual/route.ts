@@ -48,9 +48,9 @@ export async function POST(request: Request) {
         ? getShopeeLojaAtiva(userId)
             .then(loja => {
               if (!loja) { results.shopeeErro = "Shopee não conectada"; return; }
-              // Timeout global 25s: garante resposta antes do cliente abortar em 30s
+              // Timeout global 45s: garante resposta antes do cliente abortar em 50s
               const limitTimer = new Promise<never>((_, reject) =>
-                setTimeout(() => reject(new Error("Shopee sync timeout interno (25s)")), 25000)
+                setTimeout(() => reject(new Error("Shopee sync timeout interno (45s)")), 45000)
               );
               return Promise.race([syncShopeeForUser(userId, dateFrom, dateTo), limitTimer])
                 .then(n => { results.shopee = n as number; })

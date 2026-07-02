@@ -76,7 +76,7 @@ export async function syncShopeeForUser(
         time_range_field:         "create_time",
         time_from:                chunkFrom,
         time_to:                  chunkTo,
-        page_size:                50,
+        page_size:                100, // máximo da API Shopee — reduz páginas à metade
         response_optional_fields: "order_status",
       };
       if (cursor) params.cursor = cursor;
