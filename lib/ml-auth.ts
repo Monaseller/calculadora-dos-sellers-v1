@@ -97,6 +97,45 @@ async function saveTokensToDB(lojaId: string, result: MLTokenResult) {
   await supabase.from("lojas").update(updates).eq("id", lojaId);
 }
 
+/** Busca loja ML ativa pelo userId (para sync server-side sem cookie) */
+export async function getMLLojaAtiva(userId: string): Promise<{
+  lojaId:      string;
+  accessToken: string;
+  sellerId:    string;
+  nickname:    string;
+} | null> {
+  const { data: loja } = await supabase
+    .from("lojas")
+    .select("id, seller_id, nickname, access_token, refresh_token, token_expires_at")
+    .eq("user_id", userId)
+    .eq("marketplace", "ML")
+    .eq("ativo", true)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (!loja || !loja.access_token) return null;
+
+  let accessToken = loja.access_token;
+  const expired = loja.token_expires_at &&
+    new Date(loja.token_expires_at).getTime() - 5 * 60 * 1000 < Date.now();
+
+  if (expired && loja.refresh_token) {
+    const result = await refreshMLToken(loja.refresh_token);
+    if (result) {
+      accessToken = result.newAccessToken!;
+      await saveTokensToDB(loja.id, result);
+    }
+  }
+
+  return {
+    lojaId:      loja.id,
+    accessToken,
+    sellerId:    loja.seller_id ?? "",
+    nickname:    loja.nickname ?? "ML",
+  };
+}
+
 /** Aplica cookies novos numa NextResponse após refresh */
 export function applyMLCookies(res: any, result: MLTokenResult) {
   if (!result.newAccessToken) return;

@@ -1,7 +1,12 @@
+/**
+ * GET /api/ml/vendas
+ * Lê da tabela `pedidos` (cache). Se não houver dados ou estiver stale, faz sync on-demand.
+ * O cron /api/sync mantém os últimos 7 dias sempre frescos.
+ */
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { CATEGORIAS_ML } from "@/lib/comissoes-mercado-livre";
 import { getUserId } from "@/lib/session";
+import { syncMLForUser } from "@/lib/sync-ml";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -15,348 +20,109 @@ function getToken(request: Request): string | null {
 }
 
 function hojeISO() {
-  const now = new Date();
-  const brasilia = new Date(now.getTime() - 3 * 60 * 60 * 1000);
-  return brasilia.toISOString().split("T")[0];
+  return new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString().split("T")[0];
+}
+
+function diasAtras(n: number) {
+  return new Date(Date.now() - 3 * 60 * 60 * 1000 - n * 86400 * 1000).toISOString().split("T")[0];
+}
+
+function pedidoToRow(p: any) {
+  return {
+    orderId:        p.order_id,
+    data:           p.data,
+    anuncio:        p.anuncio,
+    mlItemId:       p.ml_item_id,
+    conta:          p.conta,
+    marketplace:    p.marketplace,
+    sku:            p.sku,
+    status:         p.status,
+    frete:          p.frete,
+    logistica:      p.logistica,
+    valorUnit:      Number(p.valor_unit),
+    qtd:            Number(p.qtd),
+    faturamento:    Number(p.faturamento),
+    custo:          Number(p.custo),
+    imposto:        Number(p.imposto),
+    tarifaVenda:    Number(p.tarifa_venda),
+    freteComprador: Number(p.frete_comprador),
+    freteVendedor:  Number(p.frete_vendedor),
+    margemContrib:  Number(p.margem_contrib),
+    mcPercent:      Number(p.mc_percent),
+    cadastrado:     p.cadastrado,
+  };
 }
 
 export async function GET(request: Request) {
   const token  = getToken(request);
   const userId = getUserId(request);
-  if (!token) {
+
+  if (!userId) {
+    return NextResponse.json({ erro: true, semConexao: true, mensagem: "Sessão inválida." }, { status: 401 });
+  }
+
+  const url        = new URL(request.url);
+  const dateFrom   = url.searchParams.get("date_from") || hojeISO();
+  const dateTo     = url.searchParams.get("date_to")   || hojeISO();
+  const skuParam   = url.searchParams.get("sku") || "";
+  const forceSync  = url.searchParams.get("sync") === "1";
+  const skuFilters = skuParam.split(",").map(s => s.toLowerCase().trim()).filter(Boolean);
+
+  // Checa cache
+  const { data: probe } = await supabase
+    .from("pedidos")
+    .select("synced_at")
+    .eq("user_id", userId)
+    .eq("marketplace", "ML")
+    .gte("data", dateFrom)
+    .lte("data", dateTo)
+    .order("synced_at", { ascending: false })
+    .limit(1);
+
+  const hasData        = probe && probe.length > 0;
+  const lastSync       = hasData ? new Date(probe![0].synced_at).getTime() : 0;
+  const staleThreshold = 2 * 60 * 60 * 1000; // 2 horas
+  const isStale        = Date.now() - lastSync > staleThreshold;
+  const isRecent       = dateTo >= diasAtras(7);
+
+  // Sem token de cookie E sem cache → ML não conectada
+  if (!token && !hasData) {
     return NextResponse.json({ erro: true, semConexao: true, mensagem: "Conta do Mercado Livre não conectada." });
   }
 
-  const url = new URL(request.url);
-  const dateFrom          = url.searchParams.get("date_from") || hojeISO();
-  const dateTo            = url.searchParams.get("date_to")   || hojeISO();
-  const skuParam          = url.searchParams.get("sku") || "";
-  const skuFilters        = skuParam.split(",").map(s => s.toLowerCase().trim()).filter(Boolean);
-  const includeCanceladas = url.searchParams.get("include_cancelled") === "true";
-
-  // ── Dados do usuário ML ────────────────────────────────────────────────────
-  const meRes = await fetch("https://api.mercadolibre.com/users/me", {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-
-  if (!meRes.ok) {
-    return NextResponse.json({ erro: true, tokenExpirado: true, mensagem: "Sessão do Mercado Livre expirada. Reconecte." });
+  if (forceSync || !hasData || (isRecent && isStale)) {
+    // Passa o cookie token se disponível (mais fresco que o DB)
+    await syncMLForUser(userId, dateFrom, dateTo, token ?? undefined);
   }
 
-  const me         = await meRes.json();
-  const sellerId   = me.id as number;
-  const conta      = (me.nickname || me.first_name || "ML") as string;
+  // Lê do banco
+  const { data: pedidos } = await supabase
+    .from("pedidos")
+    .select("*")
+    .eq("user_id", userId)
+    .eq("marketplace", "ML")
+    .gte("data", dateFrom)
+    .lte("data", dateTo)
+    .order("data", { ascending: false });
 
-  // ── Busca pedidos com paginação completa ──────────────────────────────────
-  // ML limita offset a 1000. Para ranges longos dividimos por dia.
-  // Usamos BRT (-03:00) para date_created.
-  // Para pedidos PAGOS: também buscamos o dia anterior e filtramos por date_approved BRT,
-  // pois o painel ML classifica por data de aprovação (não de criação).
-  // Ex: pedido criado 23:50 BRT de ontem mas aprovado 00:05 BRT de hoje = ML conta em HOJE.
-  const dataInicio = `${dateFrom}T00:00:00.000-03:00`;
-  const dataFim    = `${dateTo}T23:59:59.999-03:00`;
+  let rows = (pedidos ?? []).map(pedidoToRow);
 
-  async function fetchOrdersRange(from: string, to: string, status = "paid"): Promise<any[]> {
-    const orders: any[] = [];
-    const pageLimit = 50;
-    let offset = 0;
-
-    for (;;) {
-      const url =
-        `https://api.mercadolibre.com/orders/search` +
-        `?seller=${sellerId}` +
-        `&order.status=${status}` +
-        `&order.date_created.from=${encodeURIComponent(from)}` +
-        `&order.date_created.to=${encodeURIComponent(to)}` +
-        `&limit=${pageLimit}&offset=${offset}`;
-
-      const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-      if (!res.ok) break;
-
-      const data = await res.json();
-      const results: any[] = data.results ?? [];
-      orders.push(...results);
-
-      if (results.length < pageLimit || offset + pageLimit >= 1000) break;
-      offset += pageLimit;
-    }
-
-    return orders;
+  if (skuFilters.length > 0) {
+    rows = rows.filter(r => {
+      const a = (r.sku ?? "").toLowerCase();
+      const b = (r.anuncio ?? "").toLowerCase();
+      return skuFilters.some(f => a.includes(f) || b.includes(f));
+    });
   }
 
-  // Gera lista de dias entre dateFrom e dateTo
-  function gerarDias(from: string, to: string): string[] {
-    const dias: string[] = [];
-    const cur = new Date(`${from}T12:00:00Z`); // meio-dia UTC para evitar problemas de timezone
-    const fim = new Date(`${to}T12:00:00Z`);
-    while (cur <= fim) {
-      dias.push(cur.toISOString().split("T")[0]);
-      cur.setUTCDate(cur.getUTCDate() + 1);
-    }
-    return dias;
-  }
-
-  const dias = gerarDias(dateFrom, dateTo);
-
-  // ML classifica vendas pela data de APROVAÇÃO do pagamento (date_approved em BRT).
-  // Pedidos podem ser criados até 3 dias antes de serem aprovados,
-  // então buscamos com janela estendida e depois filtramos pelo date_approved.
-  function addDias(iso: string, n: number): string {
-    const d = new Date(`${iso}T12:00:00Z`);
-    d.setUTCDate(d.getUTCDate() + n);
-    return d.toISOString().split("T")[0];
-  }
-  const dateFetchFrom = addDias(dateFrom, -5); // 5 dias antes: cobre boletos (até 3 dias úteis) + margem
-  const diasFetch = gerarDias(dateFetchFrom, dateTo);
-
-  async function fetchAllDias(status: string): Promise<any[]> {
-    const res = await Promise.all(
-      diasFetch.map(d => fetchOrdersRange(`${d}T00:00:00.000-03:00`, `${d}T23:59:59.999-03:00`, status))
-    );
-    return res.flat();
-  }
-
-  // Canceladas: usa o mesmo período selecionado, igual aos pedidos pagos
-  async function fetchAllCancelled(): Promise<any[]> {
-    return fetchAllDias("cancelled");
-  }
-
-  // Sempre busca canceladas — precisamos delas para classificar "devolucao"
-  // (pedidos pagos-e-devolvidos que o ML conta como "vendas" no painel)
-  const [paidOrders, confirmedOrders, paymentInProcessOrders, cancelledOrders] = await Promise.all([
-    fetchAllDias("paid"),
-    fetchAllDias("confirmed"),
-    fetchAllDias("payment_in_process"),
-    fetchAllCancelled(),
-  ]);
-  void includeCanceladas; // mantido no contrato da API por compatibilidade
-
-  // Marca status
-  // ML conta como "quantidade de vendas": apenas "paid" + devoluções
-  // "confirmed" = boleto gerado mas NÃO pago ainda → ML não conta → marcamos como pending
-  // "payment_in_process" = pagamento processando → ML não conta → pending
-  paidOrders.forEach(o => { o._status = "paid"; });
-  confirmedOrders.forEach(o => { o._status = "pending"; }); // boleto não pago = não é venda ainda
-  paymentInProcessOrders.forEach(o => { o._status = "pending"; });
-  cancelledOrders.forEach(o => {
-    // ML só conta como "venda cancelada" (devolução) quando o reembolso foi efetivado.
-    // Pedidos cancelados com pagamento apenas "approved" (sem refund ainda) = ainda em limbo, ML não conta.
-    const foiReembolsado = (o.payments ?? []).some(
-      (p: any) => p.status === "refunded" || p.status === "partially_refunded"
-    );
-    o._status = foiReembolsado ? "devolucao" : "cancelled";
-  });
-
-  // Deduplica por order id (um mesmo pedido não deve aparecer em dois status)
-  const seenIds = new Set<number>();
-  const allOrders = [...paidOrders, ...confirmedOrders, ...paymentInProcessOrders, ...cancelledOrders]
-    .filter(o => { if (seenIds.has(o.id)) return false; seenIds.add(o.id); return true; });
-
-  // ── Inferência de logística sem chamadas extras à API ────────────────────
-  // O /orders/search retorna campos suficientes para identificar Full e Flex:
-  //   order.fulfillment         → existe e não-nulo = Full (Fulfillment)
-  //   order.shipping.logistic_type → às vezes presente diretamente
-  //   order.tags                → array com strings como "fulfillment", "self_service"
-  //
-  // Isso elimina ~380 chamadas extras por request (que causavam rate limit 429 no ML).
-  function inferLogistica(order: any): string {
-    // 1. Se o campo logistic_type vier direto no shipping (algumas versões da API)
-    const directType = order.shipping?.logistic_type as string | undefined;
-    if (directType) {
-      return mapLogisticType(directType);
-    }
-    // 2. Se existir fulfillment object → Full
-    if (order.fulfillment) return "Full";
-    // 3. Verifica tags do pedido
-    const tags: string[] = order.tags ?? [];
-    if (tags.includes("fulfillment"))  return "Full";
-    if (tags.includes("self_service")) return "Flex";
-    if (tags.includes("me2") || tags.includes("me1") || tags.includes("drop_off") ||
-        tags.includes("xd_drop_off") || tags.includes("cross_docking")) return "Coleta";
-    // 4. Verifica shipping.tags
-    const shTags: string[] = order.shipping?.tags ?? [];
-    if (shTags.some((t: string) => t.includes("fulfillment"))) return "Full";
-    if (shTags.some((t: string) => t.includes("self_service"))) return "Flex";
-    // 5. Não identificado
-    return "—";
-  }
-
-  function mapLogisticType(t: string): string {
-    const map: Record<string, string> = {
-      fulfillment:   "Full",
-      self_service:  "Flex",
-      me2:           "Coleta",
-      me1:           "Coleta",
-      drop_off:      "Coleta",
-      xd_drop_off:   "Coleta",
-      cross_docking: "Coleta",
-    };
-    return map[t] ?? t;
-  }
-
-  const shippingLogisticMap = new Map<number, string>();
-  // Preenche com inferência local (sem chamadas extras)
-  for (const o of allOrders) {
-    const shId = o.shipping?.id;
-    if (shId && !shippingLogisticMap.has(shId)) {
-      shippingLogisticMap.set(shId, inferLogistica(o));
-    }
-  }
-
-  // ── Anúncios cadastrados no Supabase ──────────────────────────────────────
-  let anunciosQuery = supabase
-    .from("anuncios")
-    .select("id, ml_item_id, nome, sku, preco_anuncio, custo_produto, insumos, custo_frete, frete_gratis, imposto, tipo_anuncio, categoria")
-    .eq("ativo", true)
-    .not("ml_item_id", "is", null);
-  if (userId) anunciosQuery = anunciosQuery.eq("user_id", userId);
-  const { data: anuncios } = await anunciosQuery;
-
-  const mapaAnuncios = new Map<string, any>();
-  for (const a of (anuncios ?? [])) {
-    if (a.ml_item_id) mapaAnuncios.set(a.ml_item_id, a);
-  }
-
-  // ── Monta linhas da tabela ─────────────────────────────────────────────────
-  type VendaRow = {
-    orderId:        string;
-    data:           string;
-    anuncio:        string;
-    conta:          string;
-    marketplace:    string;
-    sku:            string | null;
-    mlItemId:       string;
-    frete:          "gratis" | "comprador";
-    logistica:      string;
-    status:         "paid" | "cancelled" | "devolucao" | "pending";
-    valorUnit:      number;
-    qtd:            number;
-    faturamento:    number;
-    custo:          number;
-    imposto:        number;
-    tarifaVenda:    number;
-    freteComprador: number;
-    freteVendedor:  number;
-    margemContrib:  number;
-    mcPercent:      number;
-    cadastrado:     boolean;
-  };
-
-  const rows: VendaRow[] = [];
-
-  for (const order of allOrders) {
-    // ML usa date_approved (BRT) para classificar vendas — igual ao painel do seller
-    let dataPedido: string;
-    if (order._status === "cancelled" || order._status === "devolucao") {
-      // Usa date_created (data original da venda) para devoluções e cancelamentos
-      const ref = order.date_created ?? order.date_closed ?? "";
-      dataPedido = ref ? ref.split("T")[0] : dateFrom;
-    } else {
-      const approvedPayment = (order.payments ?? []).find(
-        (p: any) => p.status === "approved" || p.status === "partially_refunded"
-      );
-      if (approvedPayment?.date_approved) {
-        // date_approved vem em UTC — converte para BRT (-3h)
-        const utc = new Date(approvedPayment.date_approved);
-        const brt = new Date(utc.getTime() - 3 * 60 * 60 * 1000);
-        dataPedido = brt.toISOString().split("T")[0];
-      } else {
-        // Pagamento ainda não aprovado — usa date_created como fallback
-        const ref = order.date_created ?? "";
-        dataPedido = ref ? ref.split("T")[0] : dateFrom;
-      }
-    }
-
-    // Filtra somente pedidos cujo dataPedido está dentro do range solicitado
-    if (dataPedido < dateFrom || dataPedido > dateTo) continue;
-
-    const rawLogistic = shippingLogisticMap.get(order.shipping?.id) ?? "";
-    const logisticaOrder =
-      rawLogistic === "fulfillment"   ? "Full"   :
-      rawLogistic === "self_service"  ? "Flex"   :
-      rawLogistic === "me2"           ? "Coleta" :
-      rawLogistic === "me1"           ? "Coleta" :
-      rawLogistic === "drop_off"      ? "Coleta" :
-      rawLogistic === "xd_drop_off"   ? "Coleta" :
-      rawLogistic === "cross_docking" ? "Coleta" :
-      rawLogistic                     || "—";
-
-    for (const orderItem of (order.order_items ?? [])) {
-      const mlItemId:  string = orderItem.item?.id  ?? "";
-      const qtd:       number = orderItem.quantity   ?? 1;
-      const valorUnit: number = orderItem.unit_price ?? 0;
-      const faturamento       = valorUnit * qtd;
-      const logistica         = logisticaOrder;
-
-      const anuncio = mapaAnuncios.get(mlItemId);
-      const sku: string | null = anuncio?.sku ?? null;
-
-      if (skuFilters.length > 0) {
-        const skuLower  = sku?.toLowerCase() ?? "";
-        const nameLower = (anuncio?.nome ?? orderItem.item?.title ?? "").toLowerCase();
-        const match = skuFilters.some(f => skuLower.includes(f) || nameLower.includes(f));
-        if (!match) continue;
-      }
-
-      const saleFeeML = typeof orderItem.sale_fee === "number" ? orderItem.sale_fee : null;
-
-      let tarifaVenda: number;
-      if (saleFeeML !== null) {
-        tarifaVenda = saleFeeML;
-      } else {
-        const cat = anuncio?.categoria
-          ? CATEGORIAS_ML.find(c => c.nome.toLowerCase() === (anuncio.categoria as string).toLowerCase())
-          : null;
-        const comissaoRate = cat
-          ? (anuncio.tipo_anuncio === "Premium" ? cat.premium : cat.classico)
-          : 0.13;
-        tarifaVenda = faturamento * comissaoRate;
-      }
-
-      const impostoVal     = anuncio ? faturamento * ((anuncio.imposto || 0) / 100) : 0;
-      const custo          = anuncio ? ((anuncio.custo_produto || 0) + (anuncio.insumos || 0)) * qtd : 0;
-      const freteGratis    = anuncio?.frete_gratis ?? false;
-      const custoFrete     = (anuncio?.custo_frete ?? 0) as number;
-      const freteComprador = freteGratis ? 0 : custoFrete * qtd;
-      const freteVendedor  = freteGratis ? custoFrete * qtd : 0;
-      const margemContrib  = faturamento - tarifaVenda - (freteComprador + freteVendedor) - impostoVal - custo;
-      const mcPercent      = faturamento > 0 ? (margemContrib / faturamento) * 100 : 0;
-
-      rows.push({
-        orderId:        String(order.id),
-        data:           dataPedido,
-        anuncio:        anuncio?.nome ?? orderItem.item?.title ?? mlItemId,
-        conta,
-        status:         (order._status ?? "paid") as "paid" | "cancelled" | "devolucao" | "pending",
-        marketplace:    "ML",
-        sku,
-        mlItemId,
-        frete:          freteGratis ? "gratis" : "comprador",
-        logistica,
-        valorUnit,
-        qtd,
-        faturamento,
-        custo,
-        imposto:        impostoVal,
-        tarifaVenda,
-        freteComprador,
-        freteVendedor,
-        margemContrib,
-        mcPercent,
-        cadastrado:     !!anuncio,
-      });
-    }
-  }
-
-
-  rows.sort((a, b) => b.data.localeCompare(a.data));
+  const conta       = pedidos?.[0]?.conta ?? "ML";
+  const totalOrders = new Set(rows.map(r => r.orderId)).size;
 
   return NextResponse.json({
     dateFrom,
     dateTo,
     conta,
-    sellerId,
-    totalPedidos: allOrders.length,
+    totalPedidos: totalOrders,
     rows,
   });
 }

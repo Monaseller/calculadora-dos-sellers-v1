@@ -14,6 +14,7 @@ const PUBLIC = [
   "/api/auth/relay",
   "/api/auth/shopee/callback",
   "/api/shopee/status",
+  "/api/sync",
   "/_next",
   "/favicon",
 ];
