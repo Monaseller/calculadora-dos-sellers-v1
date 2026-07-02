@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { getUserId } from "@/lib/session";
-import { shopeeGet, shopeePost } from "@/lib/shopee-api";
+import { shopeeGet } from "@/lib/shopee-api";
 import { CATEGORIAS_SHOPEE } from "@/lib/comissoes-shopee";
 import { getShopeeLojaAtiva } from "@/lib/shopee-auth";
 
@@ -102,8 +102,8 @@ export async function GET(request: Request) {
   for (let i = 0; i < allOrderSns.length; i += BATCH) {
     const batch = allOrderSns.slice(i, i + BATCH);
 
-    const detail = await shopeePost("/api/v2/order/get_order_detail", partner_id, partner_key, access_token, shopId, {
-      order_sn_list: batch,
+    const detail = await shopeeGet("/api/v2/order/get_order_detail", partner_id, partner_key, access_token, shopId, {
+      order_sn_list: batch.join(","),
       response_optional_fields: "item_list,total_amount,order_status,create_time,pay_time",
     });
 
