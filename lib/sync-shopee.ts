@@ -31,9 +31,13 @@ export async function syncShopeeForUser(
   userId: string,
   dateFrom: string,
   dateTo: string,
-  noBuffer = false   // true para Histórico (range exato, sem extensão de -3d)
+  noBuffer = false,           // true para Histórico (range exato, sem extensão de -3d)
+  lojaOverride?: {            // evita dupla chamada getShopeeLojaAtiva quando rota já buscou
+    lojaId: string; partnerId: string; partnerKey: string;
+    accessToken: string; shopId: number; nickname: string;
+  }
 ): Promise<number> {
-  const loja = await getShopeeLojaAtiva(userId);
+  const loja = lojaOverride ?? await getShopeeLojaAtiva(userId);
   if (!loja) return 0;
 
   const { partnerId: partner_id, partnerKey: partner_key, accessToken: access_token, shopId, nickname } = loja;
@@ -113,9 +117,9 @@ export async function syncShopeeForUser(
     if (!mapaAnuncios.has(`${a.ml_item_id}|`)) mapaAnuncios.set(`${a.ml_item_id}|`, a);
   }
 
-  // ── 3. Detalhes em paralelo (5 por vez) ─────────────────────────────────────
+  // ── 3. Detalhes em paralelo (10 por vez) ────────────────────────────────────
   const BATCH = 50;
-  const CONCURRENCY = 5;
+  const CONCURRENCY = 10;
   const batches: string[][] = [];
   for (let i = 0; i < allOrderSns.length; i += BATCH) {
     batches.push(allOrderSns.slice(i, i + BATCH));
@@ -196,8 +200,8 @@ export async function syncShopeeForUser(
     }
   }
 
-  // ── 5. Upsert em lotes de 100 ────────────────────────────────────────────────
-  const UPSERT_BATCH = 100;
+  // ── 5. Upsert em lotes de 250 ────────────────────────────────────────────────
+  const UPSERT_BATCH = 250;
   for (let i = 0; i < rows.length; i += UPSERT_BATCH) {
     await supabase
       .from("pedidos")

@@ -244,8 +244,8 @@ export async function syncMLForUser(
     }
   }
 
-  // Upsert em lotes
-  const UPSERT_BATCH = 100;
+  // Upsert em lotes de 250
+  const UPSERT_BATCH = 250;
   for (let i = 0; i < rows.length; i += UPSERT_BATCH) {
     await supabase
       .from("pedidos")

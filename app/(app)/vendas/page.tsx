@@ -126,7 +126,7 @@ export default function VendasPage() {
   // Faz uma chamada ao sync com timeout seguro
   async function syncJanela(from: string, to: string): Promise<{ ml: number; shopee: number; erro?: string }> {
     const ctrl = new AbortController();
-    const tid  = setTimeout(() => ctrl.abort(), 20000); // 20s por janela de 1 dia
+    const tid  = setTimeout(() => ctrl.abort(), 58000); // 58s — alinhado ao maxDuration=60 do Vercel
     try {
       const res = await fetch("/api/sync/manual", {
         method: "POST",
@@ -141,7 +141,7 @@ export default function VendasPage() {
       return { ml: data.ml ?? 0, shopee: data.shopee ?? 0, erro };
     } catch (e: any) {
       clearTimeout(tid);
-      return { ml: 0, shopee: 0, erro: e?.name === "AbortError" ? "Timeout (>30s)" : (e?.message ?? "Falha") };
+      return { ml: 0, shopee: 0, erro: e?.name === "AbortError" ? "Timeout (>58s)" : (e?.message ?? "Falha") };
     }
   }
 

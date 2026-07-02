@@ -48,11 +48,12 @@ export async function POST(request: Request) {
         ? getShopeeLojaAtiva(userId)
             .then(loja => {
               if (!loja) { results.shopeeErro = "Shopee não conectada"; return; }
-              // Timeout global 15s: garante resposta antes do cliente abortar em 20s
+              // Timeout global 55s: máximo seguro no Vercel Hobby (maxDuration=60).
+              // Passa loja direto p/ evitar 2ª chamada getShopeeLojaAtiva (~800ms).
               const limitTimer = new Promise<never>((_, reject) =>
-                setTimeout(() => reject(new Error("Shopee sync timeout interno (15s)")), 15000)
+                setTimeout(() => reject(new Error("Shopee sync timeout (55s)")), 55000)
               );
-              return Promise.race([syncShopeeForUser(userId, dateFrom, dateTo, noBuffer), limitTimer])
+              return Promise.race([syncShopeeForUser(userId, dateFrom, dateTo, noBuffer, loja), limitTimer])
                 .then(n => { results.shopee = n as number; })
                 .catch(e => { results.shopeeErro = String(e?.message ?? e); });
             })
