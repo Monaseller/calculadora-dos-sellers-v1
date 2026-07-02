@@ -31,18 +31,28 @@ export async function refreshShopeeToken(
     const timestamp = Math.floor(Date.now() / 1000);
     const sign      = shopeeSign(partnerId, partnerKey, path, timestamp);
 
-    const res = await fetch(
-      `${SHOPEE_BASE}${path}?partner_id=${partnerId}&timestamp=${timestamp}&sign=${sign}`,
-      {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({
-          shop_id:       shopId,
-          refresh_token: refreshToken,
-          partner_id:    Number(partnerId),
-        }),
-      }
-    );
+    const refreshCtrl = new AbortController();
+    const refreshTimer = setTimeout(() => refreshCtrl.abort(), 8000); // 8s timeout
+    let res: Response;
+    try {
+      res = await fetch(
+        `${SHOPEE_BASE}${path}?partner_id=${partnerId}&timestamp=${timestamp}&sign=${sign}`,
+        {
+          method:  "POST",
+          headers: { "Content-Type": "application/json" },
+          body:    JSON.stringify({
+            shop_id:       shopId,
+            refresh_token: refreshToken,
+            partner_id:    Number(partnerId),
+          }),
+          signal: refreshCtrl.signal,
+        }
+      );
+    } catch {
+      clearTimeout(refreshTimer);
+      return null; // timeout ou erro de rede no refresh
+    }
+    clearTimeout(refreshTimer);
 
     if (!res.ok) return null;
     const data = await res.json();

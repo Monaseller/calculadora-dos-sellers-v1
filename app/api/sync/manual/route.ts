@@ -46,12 +46,16 @@ export async function POST(request: Request) {
       // ── Shopee ───────────────────────────────────────────────────────────────
       (marketplace === "todos" || marketplace === "Shopee")
         ? getShopeeLojaAtiva(userId)
-            .then(loja => loja
-              ? syncShopeeForUser(userId, dateFrom, dateTo)
-                  .then(n => { results.shopee = n; })
-                  .catch(e => { results.shopeeErro = String(e?.message ?? e); })
-              : void (results.shopeeErro = "Shopee não conectada")
-            )
+            .then(loja => {
+              if (!loja) { results.shopeeErro = "Shopee não conectada"; return; }
+              // Timeout global 25s: garante resposta antes do cliente abortar em 30s
+              const limitTimer = new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error("Shopee sync timeout interno (25s)")), 25000)
+              );
+              return Promise.race([syncShopeeForUser(userId, dateFrom, dateTo), limitTimer])
+                .then(n => { results.shopee = n as number; })
+                .catch(e => { results.shopeeErro = String(e?.message ?? e); });
+            })
             .catch(e => { results.shopeeErro = String(e?.message ?? e); })
         : Promise.resolve(),
     ]);
