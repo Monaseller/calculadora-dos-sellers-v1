@@ -37,44 +37,63 @@ export async function syncShopeeForUser(
 
   const { partnerId: partner_id, partnerKey: partner_key, accessToken: access_token, shopId, nickname } = loja;
 
-  // Busca por create_time com janela estendida (-7 dias) para capturar pedidos
-  // cujo pagamento (pay_time) cai dentro do período mesmo criados antes.
-  // Nota: pay_time não é suportado como time_range_field pela API Shopee v2.
+  // A API Shopee limita get_order_list a máximo 15 dias por chamada.
+  // Dividimos o range em chunks de 14 dias para não ultrapassar o limite.
   function addDaysShopee(iso: string, n: number): string {
     const d = new Date(`${iso}T12:00:00Z`);
     d.setUTCDate(d.getUTCDate() + n);
     return d.toISOString().split("T")[0];
   }
-  const fetchFrom = addDaysShopee(dateFrom, -7);
-  const timeFrom  = Math.floor(new Date(`${fetchFrom}T00:00:00-03:00`).getTime() / 1000);
-  const timeTo    = Math.floor(new Date(`${dateTo}T23:59:59-03:00`).getTime() / 1000);
 
-  // ── 1. Lista orderSNs ────────────────────────────────────────────────────────
-  const allOrderSns: string[] = [];
-  let cursor = "";
-
-  for (;;) {
-    const params: Record<string, string | number> = {
-      time_range_field:         "create_time",  // pay_time não é válido na API Shopee v2
-      time_from:                timeFrom,
-      time_to:                  timeTo,
-      page_size:                50,
-      response_optional_fields: "order_status",
-    };
-    if (cursor) params.cursor = cursor;
-
-    const data = await shopeeGet("/api/v2/order/get_order_list", partner_id, partner_key, access_token, shopId, params);
-
-    // Detecta erros da API Shopee (ex: token expirado, assinatura inválida)
-    if (data?.error && data.error !== "") {
-      throw new Error(`Shopee API error: ${data.error} – ${data.message ?? "sem mensagem"}`);
+  // Gera chunks de [chunkFrom, chunkTo] com máx 14 dias cada
+  function gerarChunks(from: string, to: string): Array<{ from: string; to: string }> {
+    const chunks: Array<{ from: string; to: string }> = [];
+    let cur = from;
+    while (cur <= to) {
+      const end = addDaysShopee(cur, 13); // +13 dias = 14 dias total
+      chunks.push({ from: cur, to: end > to ? to : end });
+      cur = addDaysShopee(end, 1);
     }
+    return chunks;
+  }
 
-    const list: any[] = data?.response?.order_list ?? [];
-    allOrderSns.push(...list.map((o: any) => o.order_sn));
+  // Busca por create_time com pequena extensão de -3 dias para capturar pedidos
+  // criados pouco antes do período mas pagos dentro dele.
+  // NOTA: pay_time não é suportado como time_range_field pela API Shopee v2.
+  const fetchFrom = addDaysShopee(dateFrom, -3);
+  const chunks = gerarChunks(fetchFrom, dateTo);
 
-    if (!data?.response?.more || !data?.response?.next_cursor) break;
-    cursor = data.response.next_cursor;
+  // ── 1. Lista orderSNs (por chunks de ≤14 dias) ──────────────────────────────
+  const allOrderSns: string[] = [];
+
+  for (const chunk of chunks) {
+    const chunkFrom = Math.floor(new Date(`${chunk.from}T00:00:00-03:00`).getTime() / 1000);
+    const chunkTo   = Math.floor(new Date(`${chunk.to}T23:59:59-03:00`).getTime() / 1000);
+    let cursor = "";
+
+    for (;;) {
+      const params: Record<string, string | number> = {
+        time_range_field:         "create_time",
+        time_from:                chunkFrom,
+        time_to:                  chunkTo,
+        page_size:                50,
+        response_optional_fields: "order_status",
+      };
+      if (cursor) params.cursor = cursor;
+
+      const data = await shopeeGet("/api/v2/order/get_order_list", partner_id, partner_key, access_token, shopId, params);
+
+      // Detecta erros da API Shopee (ex: token expirado, range inválido)
+      if (data?.error && data.error !== "") {
+        throw new Error(`Shopee API error: ${data.error} – ${data.message ?? "sem mensagem"}`);
+      }
+
+      const list: any[] = data?.response?.order_list ?? [];
+      allOrderSns.push(...list.map((o: any) => o.order_sn));
+
+      if (!data?.response?.more || !data?.response?.next_cursor) break;
+      cursor = data.response.next_cursor;
+    }
   }
 
   if (allOrderSns.length === 0) return 0;
