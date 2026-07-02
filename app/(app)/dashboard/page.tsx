@@ -793,15 +793,17 @@ export default function DashboardPage() {
       setTopsML(builtML.tops);
       setTopsShopee(builtShopee.tops);
 
+      const todosOsProdutos = builtAll.all;
       const al: typeof alertas = [];
-      const semMargem = all.filter(p => p.margem < 10 && p.margem >= 0);
+      const semMargem = todosOsProdutos.filter(p => p.margem < 10 && p.margem >= 0);
       if (semMargem.length) al.push({ icon: "⚠️", title: `${semMargem.length} produto${semMargem.length > 1 ? "s" : ""} com margem abaixo de 10%`, msg: "Revise o preco ou os custos destes anuncios.", color: "#FFB000" });
-      if (lossSorted.length) al.push({ icon: "🔴", title: `${all.filter(p => p.lucro < 0).length} produto${all.filter(p => p.lucro < 0).length > 1 ? "s" : ""} gerando prejuizo`, msg: "Estes anuncios custam mais do que rendem.", color: "#EF4444" });
+      const prejuizo = todosOsProdutos.filter(p => p.lucro < 0);
+      if (lossSorted.length) al.push({ icon: "🔴", title: `${prejuizo.length} produto${prejuizo.length > 1 ? "s" : ""} gerando prejuizo`, msg: "Estes anuncios custam mais do que rendem.", color: "#EF4444" });
       if (margem > 0 && margem < 15) al.push({ icon: "📉", title: "Margem geral abaixo do recomendado", msg: "A meta saudavel e acima de 15% de margem liquida.", color: "#EF4444" });
       if (!al.length && pedidos > 0) al.push({ icon: "✅", title: "Tudo certo por aqui!", msg: "Seus anuncios estao com boa saude financeira.", color: "#22C55E" });
       setAlertas(al);
 
-    } catch { setErro("Erro de conexao."); }
+    } catch (e) { console.error("[dashboard] carregar error:", e); setErro("Erro ao carregar dados."); }
     setLoading(false);
   }, [anuncios, lojas]);
 

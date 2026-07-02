@@ -74,9 +74,15 @@ export default function TopBar() {
   const ativasCount = lojas.filter(l => isLojaAtiva(l)).length;
   const ativaML = lojas.find(l => l.marketplace !== "Shopee" && lojaAtiva === l.id);
   const ativaShopee = lojas.find(l => l.marketplace === "Shopee" && shopeeAtiva === l.id);
+  function lojaLabel(loja: Loja | undefined): string {
+    if (!loja) return "";
+    const nick = loja.nickname || loja.nome || "";
+    const mkt  = loja.marketplace === "ML" ? "Mercado Livre" : loja.marketplace;
+    return `${nick} ${mkt}`;
+  }
   const labelAtiva = ativasCount >= 2
-    ? `${ativaML?.nickname || ativaML?.nome || ""} + ${ativaShopee?.nickname || ativaShopee?.nome || ""}`
-    : (ativaML?.nickname || ativaML?.nome || ativaShopee?.nickname || ativaShopee?.nome || null);
+    ? `${lojaLabel(ativaML)} + ${lojaLabel(ativaShopee)}`
+    : (lojaLabel(ativaML || ativaShopee)) || null;
 
   return (
     <header style={{
