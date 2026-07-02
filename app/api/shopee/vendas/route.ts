@@ -76,15 +76,30 @@ export async function GET(request: Request) {
     .order("synced_at", { ascending: false })
     .limit(1);
 
-  const hasData        = probe && probe.length > 0;
-  const lastSync       = hasData ? new Date(probe![0].synced_at).getTime() : 0;
-  const staleThreshold = 2 * 60 * 60 * 1000; // 2 horas
-  const isStale        = Date.now() - lastSync > staleThreshold;
-  const isRecent       = dateTo >= diasAtras(7); // dentro da janela do cron
+  const hasData = probe && probe.length > 0;
+  const hoje    = hojeISO();
 
-  // Sincroniza se: forçado, sem dados, ou dados recentes estão stale
-  if (forceSync || !hasData || (isRecent && isStale)) {
+  if (forceSync) {
+    // Botão Sincronizar: re-sincroniza o range inteiro
     await syncShopeeForUser(userId, dateFrom, dateTo);
+  } else if (!hasData) {
+    // Sem cache: sync completo (primeira vez)
+    await syncShopeeForUser(userId, dateFrom, dateTo);
+  } else {
+    // Tem cache: só atualiza hoje se o range inclui hoje (barato, 1 dia)
+    const rangeIncludeHoje = dateFrom <= hoje && hoje <= dateTo;
+    if (rangeIncludeHoje) {
+      const { data: probeHoje } = await supabase
+        .from("pedidos").select("synced_at")
+        .eq("user_id", userId).eq("marketplace", "Shopee")
+        .eq("data", hoje)
+        .order("synced_at", { ascending: false }).limit(1);
+      const lastSyncHoje = probeHoje?.[0]?.synced_at
+        ? new Date(probeHoje[0].synced_at).getTime() : 0;
+      if (Date.now() - lastSyncHoje > 30 * 60 * 1000) { // stale > 30 min
+        await syncShopeeForUser(userId, hoje, hoje);
+      }
+    }
   }
 
   // Lê do banco

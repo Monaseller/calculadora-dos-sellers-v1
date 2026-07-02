@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import DateRangePicker from "./DateRangePicker";
 
 // ── Tipos ──────────────────────────────────────────────────────────────────
@@ -72,6 +72,71 @@ export default function VendasPage() {
   const [totalPedidos, setTotalPedidos] = useState(0);
   const [conta,      setConta]    = useState("");
   const [ultimaSync, setUltimaSync] = useState<string | null>(null);
+
+  // ── Histórico ──────────────────────────────────────────────────────────────
+  const [historicoOpen,   setHistoricoOpen]   = useState(false);
+  const [historicoDesde,  setHistoricoDesde]  = useState(() => {
+    // Padrão: 12 meses atrás
+    const d = new Date();
+    d.setMonth(d.getMonth() - 12);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  });
+  const [historicoLoja, setHistoricoLoja] = useState<"todos" | "ML" | "Shopee">("todos");
+  type MesStatus = "pendente" | "sincronizando" | "ok" | "erro";
+  const [historicoMeses, setHistoricoMeses] = useState<{ label: string; from: string; to: string; status: MesStatus; count?: number; erro?: string }[]>([]);
+  const [historicoRodando, setHistoricoRodando] = useState(false);
+  const cancelRef = useRef(false);
+
+  function gerarMeses(desde: string): { label: string; from: string; to: string; status: MesStatus }[] {
+    const meses = [];
+    const hoje = new Date();
+    const [startY, startM] = desde.split("-").map(Number);
+    let y = startY, m = startM;
+    while (y < hoje.getFullYear() || (y === hoje.getFullYear() && m <= hoje.getMonth() + 1)) {
+      const from = `${y}-${String(m).padStart(2, "0")}-01`;
+      const lastDay = new Date(y, m, 0).getDate();
+      const to   = `${y}-${String(m).padStart(2, "0")}-${lastDay}`;
+      const label = new Date(y, m - 1).toLocaleDateString("pt-BR", { month: "long", year: "numeric" });
+      meses.push({ label, from, to, status: "pendente" as MesStatus });
+      m++;
+      if (m > 12) { m = 1; y++; }
+    }
+    return meses.reverse(); // mais recente primeiro
+  }
+
+  async function iniciarHistorico() {
+    const meses = gerarMeses(historicoDesde);
+    setHistoricoMeses(meses);
+    setHistoricoRodando(true);
+    cancelRef.current = false;
+
+    for (let i = 0; i < meses.length; i++) {
+      if (cancelRef.current) break;
+
+      setHistoricoMeses(prev => prev.map((m, idx) =>
+        idx === i ? { ...m, status: "sincronizando" } : m
+      ));
+
+      try {
+        const res = await fetch("/api/sync/manual", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ dateFrom: meses[i].from, dateTo: meses[i].to, marketplace: historicoLoja }),
+        });
+        const data = await res.json();
+        const count = (data.ml ?? 0) + (data.shopee ?? 0);
+        const erro = data.mlErro || data.shopeeErro || (data.erro ? data.mensagem : undefined);
+        setHistoricoMeses(prev => prev.map((m, idx) =>
+          idx === i ? { ...m, status: erro ? "erro" : "ok", count, erro } : m
+        ));
+      } catch (e: any) {
+        setHistoricoMeses(prev => prev.map((m, idx) =>
+          idx === i ? { ...m, status: "erro", erro: e?.message ?? "Falha" } : m
+        ));
+      }
+    }
+    setHistoricoRodando(false);
+  }
 
   const LOJAS = [
     { key: "todos",  label: "Todas",         cor: "#d7dbe5", bg: "rgba(255,255,255,0.08)", border: "rgba(255,255,255,0.2)" },
@@ -292,30 +357,48 @@ export default function VendasPage() {
           </div>
         </div>
 
-        <button
-          onClick={() => sync(dateFrom, dateTo, skuTags, [...filtrosCadastro, ...filtrosStatus])}
-          disabled={loading}
-          style={{
-            padding: "10px 20px",
-            background: loading ? "rgba(255,255,255,0.06)" : "linear-gradient(135deg,#ff6b00,#ffb800)",
-            border: "none",
-            borderRadius: "12px",
-            color: loading ? "#9099aa" : "#10131b",
-            fontWeight: 800,
-            fontSize: "13px",
-            cursor: loading ? "not-allowed" : "pointer",
-            display: "flex",
-            alignItems: "center",
-            gap: "7px",
-          }}
-        >
-          {loading ? (
-            <>
-              <span style={{ display: "inline-block", animation: "spin 1s linear infinite" }}>⟳</span>
-              Sincronizando...
-            </>
-          ) : "⟳ Sincronizar Vendas"}
-        </button>
+        <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+          <button
+            onClick={() => setHistoricoOpen(true)}
+            style={{
+              padding: "10px 16px",
+              background: "rgba(255,255,255,0.05)",
+              border: "1px solid rgba(255,255,255,0.1)",
+              borderRadius: "12px",
+              color: "#9099aa",
+              fontWeight: 700,
+              fontSize: "13px",
+              cursor: "pointer",
+              display: "flex", alignItems: "center", gap: "7px",
+            }}
+          >
+            🗂 Histórico
+          </button>
+          <button
+            onClick={() => sync(dateFrom, dateTo, skuTags, [...filtrosCadastro, ...filtrosStatus])}
+            disabled={loading}
+            style={{
+              padding: "10px 20px",
+              background: loading ? "rgba(255,255,255,0.06)" : "linear-gradient(135deg,#ff6b00,#ffb800)",
+              border: "none",
+              borderRadius: "12px",
+              color: loading ? "#9099aa" : "#10131b",
+              fontWeight: 800,
+              fontSize: "13px",
+              cursor: loading ? "not-allowed" : "pointer",
+              display: "flex",
+              alignItems: "center",
+              gap: "7px",
+            }}
+          >
+            {loading ? (
+              <>
+                <span style={{ display: "inline-block", animation: "spin 1s linear infinite" }}>⟳</span>
+                Sincronizando...
+              </>
+            ) : "⟳ Sincronizar"}
+          </button>
+        </div>
       </div>
 
       {/* ── Filtros ─────────────────────────────────────────────────────── */}
@@ -1004,9 +1087,226 @@ export default function VendasPage() {
         </div>
       )}
 
+      {/* ── Modal Histórico ─────────────────────────────────────────────── */}
+      {historicoOpen && (
+        <>
+          {/* Overlay */}
+          <div
+            onClick={() => { if (!historicoRodando) setHistoricoOpen(false); }}
+            style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 200, backdropFilter: "blur(4px)" }}
+          />
+
+          {/* Modal */}
+          <div style={{
+            position: "fixed", top: "50%", left: "50%",
+            transform: "translate(-50%,-50%)",
+            zIndex: 201,
+            background: "#111318",
+            border: "1px solid rgba(255,255,255,0.1)",
+            borderRadius: "20px",
+            padding: "32px",
+            width: "min(520px, 95vw)",
+            maxHeight: "85vh",
+            overflowY: "auto",
+            boxShadow: "0 24px 64px rgba(0,0,0,0.7)",
+          }}>
+            {/* Cabeçalho */}
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "24px" }}>
+              <div>
+                <h2 style={{ margin: 0, fontSize: "20px", fontWeight: 900 }}>🗂 Sincronizar Histórico</h2>
+                <p style={{ margin: "4px 0 0", color: "#9099aa", fontSize: "13px" }}>
+                  Busca todos os pedidos mês a mês e salva no banco de dados.
+                </p>
+              </div>
+              {!historicoRodando && (
+                <button
+                  onClick={() => setHistoricoOpen(false)}
+                  style={{ background: "none", border: "none", color: "#9099aa", fontSize: "20px", cursor: "pointer", padding: "4px 8px" }}
+                >✕</button>
+              )}
+            </div>
+
+            {/* Configurações (só mostra antes de iniciar) */}
+            {historicoMeses.length === 0 && (
+              <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
+                <div>
+                  <label style={{ fontSize: "11px", fontWeight: 700, color: "#9099aa", letterSpacing: "0.5px", display: "block", marginBottom: "8px" }}>
+                    BUSCAR DESDE
+                  </label>
+                  <input
+                    type="month"
+                    value={historicoDesde}
+                    onChange={e => setHistoricoDesde(e.target.value)}
+                    style={{
+                      padding: "10px 14px", borderRadius: "10px",
+                      border: "1px solid rgba(255,255,255,0.1)",
+                      background: "rgba(255,255,255,0.05)",
+                      color: "white", fontSize: "14px", outline: "none", width: "100%",
+                    }}
+                  />
+                </div>
+
+                <div>
+                  <label style={{ fontSize: "11px", fontWeight: 700, color: "#9099aa", letterSpacing: "0.5px", display: "block", marginBottom: "8px" }}>
+                    PLATAFORMA
+                  </label>
+                  <div style={{ display: "flex", gap: "8px" }}>
+                    {(["todos", "ML", "Shopee"] as const).map(key => (
+                      <button
+                        key={key}
+                        onClick={() => setHistoricoLoja(key)}
+                        style={{
+                          flex: 1, padding: "10px", borderRadius: "10px",
+                          border: `1px solid ${historicoLoja === key ? "rgba(255,107,0,0.5)" : "rgba(255,255,255,0.1)"}`,
+                          background: historicoLoja === key ? "rgba(255,107,0,0.12)" : "rgba(255,255,255,0.04)",
+                          color: historicoLoja === key ? "#ff6b00" : "#9099aa",
+                          fontWeight: 700, fontSize: "13px", cursor: "pointer",
+                        }}
+                      >
+                        {key === "todos" ? "🏪 Todas" : key === "ML" ? "🛒 ML" : "🟠 Shopee"}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div style={{
+                  background: "rgba(255,184,0,0.06)", border: "1px solid rgba(255,184,0,0.2)",
+                  borderRadius: "12px", padding: "14px 16px",
+                  color: "#ffb800", fontSize: "12px", lineHeight: 1.6,
+                }}>
+                  ⚡ Cada mês é sincronizado em sequência. Pedidos já salvos serão atualizados (upsert). O processo pode demorar alguns minutos.
+                </div>
+
+                <button
+                  onClick={iniciarHistorico}
+                  style={{
+                    padding: "14px", borderRadius: "12px",
+                    background: "linear-gradient(135deg,#ff6b00,#ffb800)",
+                    border: "none", color: "#10131b", fontWeight: 900,
+                    fontSize: "15px", cursor: "pointer",
+                  }}
+                >
+                  Iniciar Sincronização
+                </button>
+              </div>
+            )}
+
+            {/* Progresso */}
+            {historicoMeses.length > 0 && (
+              <div>
+                {/* Barra de progresso geral */}
+                {(() => {
+                  const done  = historicoMeses.filter(m => m.status === "ok" || m.status === "erro").length;
+                  const total = historicoMeses.length;
+                  const pctV  = Math.round((done / total) * 100);
+                  return (
+                    <div style={{ marginBottom: "20px" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: "12px", color: "#9099aa", marginBottom: "8px" }}>
+                        <span>{historicoRodando ? "Sincronizando..." : done === total ? "✅ Concluído!" : "Cancelado"}</span>
+                        <span>{done}/{total} meses</span>
+                      </div>
+                      <div style={{ height: "6px", background: "rgba(255,255,255,0.08)", borderRadius: "3px", overflow: "hidden" }}>
+                        <div style={{
+                          height: "100%", width: `${pctV}%`,
+                          background: "linear-gradient(90deg,#ff6b00,#ffb800)",
+                          borderRadius: "3px", transition: "width 0.4s ease",
+                        }} />
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* Lista de meses */}
+                <div style={{ display: "flex", flexDirection: "column", gap: "4px", maxHeight: "340px", overflowY: "auto" }}>
+                  {historicoMeses.map((mes, i) => (
+                    <div key={i} style={{
+                      display: "flex", alignItems: "center", justifyContent: "space-between",
+                      padding: "10px 14px", borderRadius: "10px",
+                      background: mes.status === "sincronizando"
+                        ? "rgba(255,107,0,0.1)"
+                        : mes.status === "ok"
+                        ? "rgba(0,217,126,0.06)"
+                        : mes.status === "erro"
+                        ? "rgba(255,77,77,0.08)"
+                        : "rgba(255,255,255,0.03)",
+                      border: `1px solid ${
+                        mes.status === "sincronizando" ? "rgba(255,107,0,0.25)"
+                        : mes.status === "ok"           ? "rgba(0,217,126,0.15)"
+                        : mes.status === "erro"         ? "rgba(255,77,77,0.2)"
+                        : "rgba(255,255,255,0.06)"
+                      }`,
+                    }}>
+                      <span style={{
+                        fontSize: "13px", fontWeight: 600, textTransform: "capitalize",
+                        color: mes.status === "sincronizando" ? "#ff6b00"
+                          : mes.status === "ok"  ? "#00D97E"
+                          : mes.status === "erro" ? "#ff4d4d"
+                          : "#9099aa",
+                      }}>
+                        {mes.status === "sincronizando" && (
+                          <span style={{ display: "inline-block", animation: "spin 1s linear infinite", marginRight: "6px" }}>⟳</span>
+                        )}
+                        {mes.status === "ok"       && "✅ "}
+                        {mes.status === "erro"     && "❌ "}
+                        {mes.status === "pendente" && "○ "}
+                        {mes.label}
+                      </span>
+                      <span style={{ fontSize: "12px", color: "#9099aa" }}>
+                        {mes.status === "ok"   && mes.count !== undefined && `${mes.count} pedidos`}
+                        {mes.status === "erro" && (mes.erro ?? "Erro")}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Botões de controle */}
+                <div style={{ display: "flex", gap: "8px", marginTop: "20px" }}>
+                  {historicoRodando ? (
+                    <button
+                      onClick={() => { cancelRef.current = true; }}
+                      style={{
+                        flex: 1, padding: "12px", borderRadius: "12px",
+                        background: "rgba(255,77,77,0.1)", border: "1px solid rgba(255,77,77,0.3)",
+                        color: "#ff4d4d", fontWeight: 700, fontSize: "14px", cursor: "pointer",
+                      }}
+                    >
+                      ⏹ Cancelar
+                    </button>
+                  ) : (
+                    <>
+                      <button
+                        onClick={() => { setHistoricoMeses([]); }}
+                        style={{
+                          flex: 1, padding: "12px", borderRadius: "12px",
+                          background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)",
+                          color: "#9099aa", fontWeight: 700, fontSize: "14px", cursor: "pointer",
+                        }}
+                      >
+                        ↩ Reiniciar
+                      </button>
+                      <button
+                        onClick={() => { setHistoricoOpen(false); setHistoricoMeses([]); sync(dateFrom, dateTo, skuTags, [...filtrosCadastro, ...filtrosStatus]); }}
+                        style={{
+                          flex: 2, padding: "12px", borderRadius: "12px",
+                          background: "linear-gradient(135deg,#ff6b00,#ffb800)",
+                          border: "none", color: "#10131b", fontWeight: 900, fontSize: "14px", cursor: "pointer",
+                        }}
+                      >
+                        Ver Vendas
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
       <style>{`
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
         input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(0.5); cursor: pointer; }
+        input[type="month"]::-webkit-calendar-picker-indicator { filter: invert(0.5); cursor: pointer; }
       `}</style>
     </div>
   );
