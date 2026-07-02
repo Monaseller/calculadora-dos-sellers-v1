@@ -37,9 +37,17 @@ export async function syncShopeeForUser(
 
   const { partnerId: partner_id, partnerKey: partner_key, accessToken: access_token, shopId, nickname } = loja;
 
-  // Busca por pay_time para capturar pedidos pagos no período (independente de quando foram criados)
-  const timeFrom = Math.floor(new Date(`${dateFrom}T00:00:00-03:00`).getTime() / 1000);
-  const timeTo   = Math.floor(new Date(`${dateTo}T23:59:59-03:00`).getTime() / 1000);
+  // Busca por create_time com janela estendida (-7 dias) para capturar pedidos
+  // cujo pagamento (pay_time) cai dentro do período mesmo criados antes.
+  // Nota: pay_time não é suportado como time_range_field pela API Shopee v2.
+  function addDaysShopee(iso: string, n: number): string {
+    const d = new Date(`${iso}T12:00:00Z`);
+    d.setUTCDate(d.getUTCDate() + n);
+    return d.toISOString().split("T")[0];
+  }
+  const fetchFrom = addDaysShopee(dateFrom, -7);
+  const timeFrom  = Math.floor(new Date(`${fetchFrom}T00:00:00-03:00`).getTime() / 1000);
+  const timeTo    = Math.floor(new Date(`${dateTo}T23:59:59-03:00`).getTime() / 1000);
 
   // ── 1. Lista orderSNs ────────────────────────────────────────────────────────
   const allOrderSns: string[] = [];
@@ -47,7 +55,7 @@ export async function syncShopeeForUser(
 
   for (;;) {
     const params: Record<string, string | number> = {
-      time_range_field:         "pay_time",  // usa data de pagamento, não de criação
+      time_range_field:         "create_time",  // pay_time não é válido na API Shopee v2
       time_from:                timeFrom,
       time_to:                  timeTo,
       page_size:                50,
@@ -117,6 +125,9 @@ export async function syncShopeeForUser(
       const status  = order.order_status ?? "UNKNOWN";
       const ts      = order.pay_time || order.create_time || 0;
       const dataBrt = new Date((ts - 3 * 3600) * 1000).toISOString().split("T")[0];
+
+      // Só armazena pedidos cujo pay_time (ou create_time) cai dentro do range real
+      if (dataBrt < dateFrom || dataBrt > dateTo) continue;
 
       for (const item of (order.item_list ?? [])) {
         const itemIdStr   = String(item.item_id);
