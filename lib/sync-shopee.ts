@@ -267,7 +267,11 @@ export async function syncShopeeForUserV2(
         const impostoVal    = anuncio ? faturamento * ((anuncio.imposto || 0) / 100) : 0;
         const faixa         = obterFaixaShopee(valorUnit);
         const tarifaVenda   = faturamento * (faixa.comissao + TAXA_CAMPANHA_SHOPEE);
-        const margemContrib = faturamento - tarifaVenda - custo - impostoVal - freteReal;
+        // freteReal (actual_shipping_fee) = frete pago pelo COMPRADOR à Shopee, NÃO é custo do vendedor.
+        // Além disso é um campo de nível de PEDIDO; aplicá-lo por item causaria multi-contagem.
+        // O custo de frete do vendedor (ex: etiqueta Shopee) deve ser registrado em anuncio.custo_frete.
+        const custoFrete    = anuncio?.custo_frete ? (anuncio.custo_frete as number) * qtd : 0;
+        const margemContrib = faturamento - tarifaVenda - custo - impostoVal - custoFrete;
         const mcPercent     = faturamento > 0 ? (margemContrib / faturamento) * 100 : 0;
         const lucroLiquido  = margemContrib;
         const roi           = custo > 0 ? (lucroLiquido / custo) * 100 : 0;
@@ -293,8 +297,8 @@ export async function syncShopeeForUserV2(
           imposto:          impostoVal,
           tarifa_venda:     tarifaVenda,
           frete_comprador:  0,
-          frete_vendedor:   0,
-          frete_real:       freteReal,
+          frete_vendedor:   custoFrete,   // custo_frete do anuncio (frete do vendedor real)
+          frete_real:       freteReal,    // actual_shipping_fee Shopee (frete do comprador, só referência)
           frete_estimado:   freteEstimado,
           margem_contrib:   margemContrib,
           mc_percent:       mcPercent,

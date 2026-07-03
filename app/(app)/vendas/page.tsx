@@ -98,6 +98,15 @@ export default function VendasPage() {
   const [historicoRodando, setHistoricoRodando] = useState(false);
   const cancelRef = useRef(false);
 
+  // ── Sync Rápido (preset buttons) ────────────────────────────────────────
+  const [quickSyncRodando, setQuickSyncRodando] = useState(false);
+  const [quickSyncPreset,  setQuickSyncPreset]  = useState("");
+  const [quickSyncFrom,    setQuickSyncFrom]    = useState("");
+  const [quickSyncTo,      setQuickSyncTo]      = useState("");
+  const [quickSyncDias, setQuickSyncDias] = useState<{
+    label: string; from: string; to: string; status: MesStatus; count?: number; erro?: string;
+  }[]>([]);
+
   // Estado do teste rápido (1 dia)
   const [testeRodando, setTesteRodando]   = useState(false);
   const [testeResult,  setTesteResult]    = useState<{ ok: boolean; msg: string } | null>(null);
@@ -156,6 +165,30 @@ export default function VendasPage() {
       clearTimeout(tid);
       return { ml: 0, shopee: 0, erro: e?.name === "AbortError" ? "Timeout (>58s)" : (e?.message ?? "Falha") };
     }
+  }
+
+  async function iniciarSyncRapido(from: string, to: string, preset: string) {
+    const janelas = gerarJanelas(from, to);
+    const dias = janelas.map(j => {
+      const [yy, mm, dd] = j.from.split("-");
+      return { label: `${dd}/${mm}/${yy.slice(2)}`, from: j.from, to: j.to, status: "pendente" as MesStatus };
+    });
+    setQuickSyncDias(dias);
+    setQuickSyncPreset(preset);
+    setQuickSyncFrom(from);
+    setQuickSyncTo(to);
+    setQuickSyncRodando(true);
+    cancelRef.current = false;
+
+    for (let i = 0; i < janelas.length; i++) {
+      if (cancelRef.current) break;
+      setQuickSyncDias(prev => prev.map((d, idx) => idx === i ? { ...d, status: "sincronizando" } : d));
+      const result = await syncJanela(janelas[i].from, janelas[i].to);
+      setQuickSyncDias(prev => prev.map((d, idx) =>
+        idx === i ? { ...d, status: result.erro ? "erro" : "ok", count: (result.ml ?? 0) + (result.shopee ?? 0), erro: result.erro } : d
+      ));
+    }
+    setQuickSyncRodando(false);
   }
 
   async function iniciarHistorico() {
@@ -1276,12 +1309,12 @@ export default function VendasPage() {
         </div>
       )}
 
-      {/* ── Modal Histórico ─────────────────────────────────────────────── */}
+      {/* ── Modal Sync Rápido ──────────────────────────────────────────────── */}
       {historicoOpen && (
         <>
           {/* Overlay */}
           <div
-            onClick={() => { if (!historicoRodando) setHistoricoOpen(false); }}
+            onClick={() => { if (!quickSyncRodando) setHistoricoOpen(false); }}
             style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 200, backdropFilter: "blur(4px)" }}
           />
 
@@ -1294,224 +1327,165 @@ export default function VendasPage() {
             border: "1px solid rgba(255,255,255,0.1)",
             borderRadius: "20px",
             padding: "32px",
-            width: "min(520px, 95vw)",
+            width: "min(480px, 95vw)",
             maxHeight: "85vh",
             overflowY: "auto",
             boxShadow: "0 24px 64px rgba(0,0,0,0.7)",
           }}>
+
             {/* Cabeçalho */}
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "24px" }}>
               <div>
-                <h2 style={{ margin: 0, fontSize: "20px", fontWeight: 900 }}>📊 Histórico de Vendas</h2>
+                <h2 style={{ margin: 0, fontSize: "20px", fontWeight: 900 }}>🔄 Sincronizar Período</h2>
                 <p style={{ margin: "4px 0 0", color: "#9099aa", fontSize: "13px" }}>
-                  {historicoRodando
-                    ? "Sincronizando os últimos 2 meses, aguarde..."
-                    : historicoMeses.length === 0
-                    ? "Preparando sincronização..."
-                    : historicoMeses.every(m => m.status === "ok")
-                    ? "✅ Concluído! A partir de agora atualiza sozinho todo dia."
-                    : historicoMeses.some(m => m.status === "erro")
-                    ? "Alguns meses falharam — use o botão abaixo para tentar novamente."
-                    : "Sincronização encerrada."}
+                  Selecione o período — os dados são importados e exibidos automaticamente.
                 </p>
               </div>
-              {!historicoRodando && (
+              {!quickSyncRodando && (
                 <button
-                  onClick={() => setHistoricoOpen(false)}
+                  onClick={() => { setHistoricoOpen(false); setQuickSyncDias([]); }}
                   style={{ background: "none", border: "none", color: "#9099aa", fontSize: "20px", cursor: "pointer", padding: "4px 8px" }}
                 >✕</button>
               )}
             </div>
 
-            {/* Iniciando — estado breve antes dos meses carregarem */}
-            {historicoMeses.length === 0 && (
-              <div style={{ textAlign: "center", padding: "40px 0", color: "#9099aa" }}>
-                <div style={{ fontSize: "28px", animation: "spin 1s linear infinite", display: "inline-block", marginBottom: "12px" }}>⟳</div>
-                <p style={{ margin: 0, fontSize: "13px" }}>Preparando os últimos 2 meses...</p>
-              </div>
-            )}
-
-            {/* Progresso */}
-            {historicoMeses.length > 0 && (
-              <div>
-                {/* Barra de progresso geral */}
-                {(() => {
-                  const done  = historicoMeses.filter(m => m.status === "ok" || m.status === "erro").length;
-                  const total = historicoMeses.length;
-                  const pctV  = Math.round((done / total) * 100);
-                  return (
-                    <div style={{ marginBottom: "20px" }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: "12px", color: "#9099aa", marginBottom: "8px" }}>
-                        <span>{historicoRodando ? "Sincronizando..." : done === total ? "✅ Concluído!" : "Cancelado"}</span>
-                        <span>{done}/{total} meses</span>
-                      </div>
-                      <div style={{ height: "6px", background: "rgba(255,255,255,0.08)", borderRadius: "3px", overflow: "hidden" }}>
-                        <div style={{
-                          height: "100%", width: `${pctV}%`,
-                          background: "linear-gradient(90deg,#ff6b00,#ffb800)",
-                          borderRadius: "3px", transition: "width 0.4s ease",
-                        }} />
-                      </div>
-                    </div>
-                  );
-                })()}
-
-                {/* Lista de meses */}
-                <div style={{ display: "flex", flexDirection: "column", gap: "4px", maxHeight: "340px", overflowY: "auto" }}>
-                  {historicoMeses.map((mes, i) => (
-                    <div key={i} style={{
-                      display: "flex", alignItems: "center", justifyContent: "space-between",
-                      padding: "10px 14px", borderRadius: "10px",
-                      background: mes.status === "sincronizando"
-                        ? "rgba(255,107,0,0.1)"
-                        : mes.status === "ok"
-                        ? "rgba(0,217,126,0.06)"
-                        : mes.status === "erro"
-                        ? "rgba(255,77,77,0.08)"
-                        : "rgba(255,255,255,0.03)",
-                      border: `1px solid ${
-                        mes.status === "sincronizando" ? "rgba(255,107,0,0.25)"
-                        : mes.status === "ok"           ? "rgba(0,217,126,0.15)"
-                        : mes.status === "erro"         ? "rgba(255,77,77,0.2)"
-                        : "rgba(255,255,255,0.06)"
-                      }`,
-                    }}>
-                      <span style={{
-                        fontSize: "13px", fontWeight: 600, textTransform: "capitalize",
-                        color: mes.status === "sincronizando" ? "#ff6b00"
-                          : mes.status === "ok"  ? "#00D97E"
-                          : mes.status === "erro" ? "#ff4d4d"
-                          : "#9099aa",
-                      }}>
-                        {mes.status === "sincronizando" && (
-                          <span style={{ display: "inline-block", animation: "spin 1s linear infinite", marginRight: "6px" }}>⟳</span>
-                        )}
-                        {mes.status === "ok"       && "✅ "}
-                        {mes.status === "erro"     && "❌ "}
-                        {mes.status === "pendente" && "○ "}
-                        {mes.label}
+            {quickSyncDias.length > 0 ? (
+              /* ── Progresso dia-a-dia ── */
+              (() => {
+                const done  = quickSyncDias.filter(d => d.status === "ok" || d.status === "erro").length;
+                const total = quickSyncDias.length;
+                const pct   = total > 0 ? Math.round((done / total) * 100) : 0;
+                const erros = quickSyncDias.filter(d => d.status === "erro").length;
+                const allDone = !quickSyncRodando && done === total;
+                const totalPedidos = quickSyncDias.reduce((s, d) => s + (d.count ?? 0), 0);
+                return (
+                  <div>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: "12px", color: "#9099aa", marginBottom: "8px" }}>
+                      <span>
+                        {quickSyncRodando ? `Sincronizando ${quickSyncPreset}…`
+                          : allDone && erros === 0 ? `✅ ${quickSyncPreset} — ${totalPedidos} pedidos importados`
+                          : `⚠️ ${erros} dia(s) com erro`}
                       </span>
-                      <span style={{ fontSize: "11px", color: "#9099aa", textAlign: "right", maxWidth: "55%", wordBreak: "break-word" }}>
-                        {mes.status === "ok"   && mes.count !== undefined && `${mes.count} pedidos`}
-                        {mes.status === "sincronizando" && mes.diasTotal && mes.diasTotal > 1 && (
-                          `dia ${(mes.diasOk ?? 0) + 1}/${mes.diasTotal}`
-                        )}
-                        {mes.status === "erro" && (
-                          <span title={mes.erro ?? "Erro"} style={{ cursor: "help" }}>
-                            {mes.erro ? mes.erro.slice(0, 50) + (mes.erro.length > 50 ? "…" : "") : "Erro"}
-                            {mes.diasTotal && mes.diasTotal > 1 && ` (${mes.diasOk ?? 0}/${mes.diasTotal} dias ok)`}
-                          </span>
-                        )}
-                      </span>
+                      <span>{done}/{total} dias</span>
                     </div>
-                  ))}
-                </div>
-
-                {/* Teste rápido (1 dia) — valida configuração sem rodar o histórico completo */}
-                {!historicoRodando && historicoMeses.length === 0 && (
-                  <div style={{ marginBottom: "8px" }}>
-                    <button
-                      onClick={testarSync}
-                      disabled={testeRodando}
-                      style={{
-                        width: "100%", padding: "10px 14px", borderRadius: "10px",
-                        background: "rgba(111,163,255,0.08)", border: "1px solid rgba(111,163,255,0.25)",
-                        color: testeRodando ? "#9099aa" : "#6fa3ff",
-                        fontWeight: 700, fontSize: "13px", cursor: testeRodando ? "not-allowed" : "pointer",
-                        display: "flex", alignItems: "center", justifyContent: "center", gap: "8px",
-                      }}
-                    >
-                      {testeRodando
-                        ? <><span style={{ display: "inline-block", animation: "spin 1s linear infinite" }}>⟳</span> Testando ontem…</>
-                        : "🧪 Testar 1 dia antes de sincronizar"
-                      }
-                    </button>
-                    {testeResult && (
+                    <div style={{ height: "6px", background: "rgba(255,255,255,0.08)", borderRadius: "3px", overflow: "hidden", marginBottom: "16px" }}>
                       <div style={{
-                        marginTop: "6px", padding: "8px 12px", borderRadius: "8px", fontSize: "12px",
-                        background: testeResult.ok ? "rgba(0,217,126,0.08)" : "rgba(255,77,77,0.08)",
-                        border: `1px solid ${testeResult.ok ? "rgba(0,217,126,0.2)" : "rgba(255,77,77,0.2)"}`,
-                        color: testeResult.ok ? "#00D97E" : "#ff4d4d",
-                      }}>
-                        {testeResult.msg}
-                      </div>
-                    )}
-                  </div>
-                )}
+                        height: "100%", width: `${pct}%`,
+                        background: erros > 0 ? "linear-gradient(90deg,#ff4d4d,#ffb800)" : "linear-gradient(90deg,#ff6b00,#ffb800)",
+                        borderRadius: "3px", transition: "width 0.4s ease",
+                      }} />
+                    </div>
 
-                {/* Botões de controle */}
-                <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginTop: "20px" }}>
-                  {historicoRodando ? (
-                    <button
-                      onClick={() => { cancelRef.current = true; }}
-                      style={{
-                        padding: "12px", borderRadius: "12px",
-                        background: "rgba(255,77,77,0.1)", border: "1px solid rgba(255,77,77,0.3)",
-                        color: "#ff4d4d", fontWeight: 700, fontSize: "14px", cursor: "pointer",
-                      }}
-                    >
-                      ⏹ Cancelar
-                    </button>
-                  ) : (
-                    <>
-                      {/* Retry meses com erro */}
-                      {historicoMeses.some(m => m.status === "erro") && (
-                        <button
-                          onClick={reprocessarErros}
-                          style={{
-                            padding: "12px", borderRadius: "12px",
-                            background: "rgba(255,107,0,0.1)", border: "1px solid rgba(255,107,0,0.3)",
-                            color: "#ff6b00", fontWeight: 700, fontSize: "14px", cursor: "pointer",
-                          }}
-                        >
-                          🔄 Tentar novamente os meses com erro ({historicoMeses.filter(m => m.status === "erro").length})
-                        </button>
-                      )}
-
-                      {/* Mensagem de sincronização automática pós-conclusão */}
-                      {historicoMeses.length > 0 && historicoMeses.every(m => m.status === "ok") && (
-                        <div style={{
-                          background: "rgba(0,217,126,0.07)", border: "1px solid rgba(0,217,126,0.2)",
-                          borderRadius: "12px", padding: "14px 16px",
-                          color: "#00D97E", fontSize: "12px", lineHeight: 1.6, textAlign: "center",
+                    <div style={{ display: "flex", flexDirection: "column", gap: "3px", maxHeight: "280px", overflowY: "auto" }}>
+                      {quickSyncDias.map((d, i) => (
+                        <div key={i} style={{
+                          display: "flex", alignItems: "center", justifyContent: "space-between",
+                          padding: "8px 12px", borderRadius: "8px",
+                          background: d.status === "sincronizando" ? "rgba(255,107,0,0.1)"
+                            : d.status === "ok"   ? "rgba(0,217,126,0.06)"
+                            : d.status === "erro" ? "rgba(255,77,77,0.08)"
+                            : "rgba(255,255,255,0.03)",
                         }}>
-                          🎉 Pronto! Seus dados dos últimos 2 meses estão salvos.<br />
-                          <span style={{ color: "#9099aa" }}>O sistema atualiza automaticamente todo dia. Você não precisa fazer isso de novo.</span>
+                          <span style={{
+                            fontSize: "13px", fontWeight: 600,
+                            color: d.status === "sincronizando" ? "#ff6b00"
+                              : d.status === "ok"   ? "#00D97E"
+                              : d.status === "erro" ? "#ff4d4d"
+                              : "#9099aa",
+                          }}>
+                            {d.status === "sincronizando" && <span style={{ display: "inline-block", animation: "spin 1s linear infinite", marginRight: "6px" }}>⟳</span>}
+                            {d.status === "ok"       && "✅ "}
+                            {d.status === "erro"     && "❌ "}
+                            {d.status === "pendente" && "○ "}
+                            {d.label}
+                          </span>
+                          <span style={{ fontSize: "11px", color: "#9099aa" }}>
+                            {d.status === "ok"   && d.count !== undefined && `${d.count} pedidos`}
+                            {d.status === "erro" && d.erro && d.erro.slice(0, 45)}
+                          </span>
                         </div>
-                      )}
+                      ))}
+                    </div>
 
-                      <div style={{ display: "flex", gap: "8px" }}>
-                        {/* Re-sincronizar: reinicia do zero */}
+                    <div style={{ marginTop: "20px", display: "flex", gap: "8px" }}>
+                      {quickSyncRodando ? (
                         <button
-                          onClick={() => { setHistoricoMeses([]); iniciarHistorico(); }}
+                          onClick={() => { cancelRef.current = true; }}
                           style={{
                             flex: 1, padding: "12px", borderRadius: "12px",
-                            background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)",
-                            color: "#9099aa", fontWeight: 700, fontSize: "13px", cursor: "pointer",
+                            background: "rgba(255,77,77,0.1)", border: "1px solid rgba(255,77,77,0.3)",
+                            color: "#ff4d4d", fontWeight: 700, fontSize: "14px", cursor: "pointer",
                           }}
-                        >
-                          🔄 Re-sincronizar
-                        </button>
-                        <button
-                          onClick={() => { setHistoricoOpen(false); sync(dateFrom, dateTo, skuTags, [...filtrosCadastro, ...filtrosStatus]); }}
-                          style={{
-                            flex: 2, padding: "12px", borderRadius: "12px",
-                            background: "linear-gradient(135deg,#ff6b00,#ffb800)",
-                            border: "none", color: "#10131b", fontWeight: 900, fontSize: "14px", cursor: "pointer",
-                          }}
-                        >
-                          Ver Vendas
-                        </button>
-                      </div>
-                    </>
-                  )}
-                </div>
+                        >⏹ Cancelar</button>
+                      ) : (
+                        <>
+                          <button
+                            onClick={() => setQuickSyncDias([])}
+                            style={{
+                              flex: 1, padding: "12px", borderRadius: "12px",
+                              background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)",
+                              color: "#9099aa", fontWeight: 700, fontSize: "13px", cursor: "pointer",
+                            }}
+                          >← Voltar</button>
+                          <button
+                            onClick={() => {
+                              if (quickSyncFrom && quickSyncTo) {
+                                setDateFrom(quickSyncFrom);
+                                setDateTo(quickSyncTo);
+                                sync(quickSyncFrom, quickSyncTo, skuTags, [...filtrosCadastro, ...filtrosStatus]);
+                              }
+                              setHistoricoOpen(false);
+                              setQuickSyncDias([]);
+                            }}
+                            style={{
+                              flex: 2, padding: "12px", borderRadius: "12px",
+                              background: "linear-gradient(135deg,#ff6b00,#ffb800)",
+                              border: "none", color: "#10131b", fontWeight: 900, fontSize: "14px", cursor: "pointer",
+                            }}
+                          >📊 Ver resultados →</button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()
+            ) : (
+              /* ── Seleção de preset ── */
+              <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                {([
+                  { label: "Ontem",          emoji: "📅", desc: "Sincroniza 1 dia",
+                    get: () => { const d = new Date(Date.now() - 3*3600000); d.setDate(d.getDate()-1); const s = d.toISOString().split("T")[0]; return [s, s] as [string,string]; } },
+                  { label: "Últimos 7 dias", emoji: "📆", desc: "Sincroniza dia a dia (7 requests)",
+                    get: () => { const hoje = new Date(Date.now() - 3*3600000).toISOString().split("T")[0]; const d7 = new Date(Date.now() - 3*3600000); d7.setDate(d7.getDate()-7); return [d7.toISOString().split("T")[0], hoje] as [string,string]; } },
+                  { label: "Este mês",       emoji: "🗓", desc: "Do dia 1 até hoje",
+                    get: () => { const hoje = new Date(Date.now() - 3*3600000).toISOString().split("T")[0]; return [hoje.slice(0,7)+"-01", hoje] as [string,string]; } },
+                ] as { label: string; emoji: string; desc: string; get: () => [string,string] }[]).map(p => (
+                  <button
+                    key={p.label}
+                    onClick={() => { const [f, t] = p.get(); iniciarSyncRapido(f, t, p.label); }}
+                    style={{
+                      display: "flex", alignItems: "center", gap: "14px",
+                      padding: "16px 20px", borderRadius: "14px",
+                      background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)",
+                      color: "#fff", fontWeight: 700, fontSize: "15px", cursor: "pointer", textAlign: "left",
+                    }}
+                    onMouseEnter={e => { e.currentTarget.style.background = "rgba(255,107,0,0.1)"; e.currentTarget.style.borderColor = "rgba(255,107,0,0.3)"; }}
+                    onMouseLeave={e => { e.currentTarget.style.background = "rgba(255,255,255,0.04)"; e.currentTarget.style.borderColor = "rgba(255,255,255,0.1)"; }}
+                  >
+                    <span style={{ fontSize: "22px" }}>{p.emoji}</span>
+                    <div>
+                      <div>{p.label}</div>
+                      <div style={{ fontSize: "12px", color: "#9099aa", fontWeight: 500, marginTop: "2px" }}>{p.desc}</div>
+                    </div>
+                    <span style={{ marginLeft: "auto", color: "#ff6b00", fontSize: "18px" }}>→</span>
+                  </button>
+                ))}
               </div>
             )}
+
           </div>
         </>
       )}
-
       <style>{`
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
         input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(0.5); cursor: pointer; }
