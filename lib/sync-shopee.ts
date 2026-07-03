@@ -62,11 +62,13 @@ export async function syncShopeeForUser(
     return chunks;
   }
 
-  // Usamos update_time em vez de create_time:
-  // quando um pedido é pago, o update_time é atualizado naquele instante.
-  // Isso captura pedidos criados antes do range mas pagos dentro dele —
-  // exatamente o critério "Produto Pago" do painel da Shopee.
-  // noBuffer não é mais necessário (mantido por compatibilidade, ignorado).
+  // Estratégia dupla por contexto de uso:
+  //   noBuffer=true  → Histórico: create_time + range exato
+  //                    ~15 páginas/dia (1500 pedidos), cabe em 55s com folga
+  //   noBuffer=false → Cron diário: update_time + range exato
+  //                    captura boletos pagos fora da janela de criação
+  //                    (só roda 2 dias/vez, volume controlado)
+  const timeRangeField = noBuffer ? "create_time" : "update_time";
   const fetchFrom = dateFrom;
   const chunks = gerarChunks(fetchFrom, dateTo);
 
@@ -80,7 +82,7 @@ export async function syncShopeeForUser(
 
     for (;;) {
       const params: Record<string, string | number> = {
-        time_range_field:         "update_time",   // era "create_time" — mudado para capturar por data de pagamento
+        time_range_field:         timeRangeField,  // create_time (Histórico) ou update_time (Cron)
         time_from:                chunkFrom,
         time_to:                  chunkTo,
         page_size:                100,
