@@ -78,10 +78,15 @@ export default function VendasPage() {
   // ── Histórico ──────────────────────────────────────────────────────────────
   const [historicoOpen,   setHistoricoOpen]   = useState(false);
   const [historicoDesde,  setHistoricoDesde]  = useState(() => {
-    // Padrão: 12 meses atrás
+    // Padrão: 2 meses atrás (onboarding cobre o período útil sem sobrecarregar)
     const d = new Date();
-    d.setMonth(d.getMonth() - 12);
+    d.setMonth(d.getMonth() - 2);
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  });
+  // Onboarding: true enquanto o usuário não tiver feito ao menos 1 sync de histórico
+  const [onboardingPendente, setOnboardingPendente] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return !localStorage.getItem("historico_concluido_v1");
   });
   const [historicoLoja, setHistoricoLoja] = useState<"todos" | "ML" | "Shopee">("todos");
   type MesStatus = "pendente" | "sincronizando" | "ok" | "erro";
@@ -150,6 +155,7 @@ export default function VendasPage() {
     setHistoricoMeses(meses);
     setHistoricoRodando(true);
     cancelRef.current = false;
+    let algumaOk = false;
 
     for (let i = 0; i < meses.length; i++) {
       if (cancelRef.current) break;
@@ -158,7 +164,6 @@ export default function VendasPage() {
         idx === i ? { ...m, status: "sincronizando" } : m
       ));
 
-      // Divide cada mês em janelas de 7 dias — cada janela = 1 chunk na Shopee API
       const janelas = gerarJanelas(meses[i].from, meses[i].to);
       let totalMl = 0, totalShopee = 0, erroMes: string | undefined;
 
@@ -167,15 +172,54 @@ export default function VendasPage() {
         const result = await syncJanela(janela.from, janela.to);
         totalMl     += result.ml;
         totalShopee += result.shopee;
-        if (result.erro && !erroMes) erroMes = result.erro; // guarda 1º erro
+        if (result.erro && !erroMes) erroMes = result.erro;
       }
 
       const count = totalMl + totalShopee;
+      if (!erroMes) algumaOk = true;
       setHistoricoMeses(prev => prev.map((m, idx) =>
         idx === i ? { ...m, status: erroMes ? "erro" : "ok", count, erro: erroMes } : m
       ));
     }
     setHistoricoRodando(false);
+    if (algumaOk) {
+      try { localStorage.setItem("historico_concluido_v1", "1"); } catch {}
+      setOnboardingPendente(false);
+    }
+  }
+
+  // Reprocessa apenas os meses que falharam
+  async function reprocessarErros() {
+    const comErro = historicoMeses.filter(m => m.status === "erro");
+    if (comErro.length === 0 || historicoRodando) return;
+    setHistoricoRodando(true);
+    cancelRef.current = false;
+    let algumaOk = false;
+    for (const mes of comErro) {
+      if (cancelRef.current) break;
+      const idx = historicoMeses.findIndex(m => m.from === mes.from);
+      setHistoricoMeses(prev => prev.map((m, i) =>
+        i === idx ? { ...m, status: "sincronizando", erro: undefined } : m
+      ));
+      const janelas = gerarJanelas(mes.from, mes.to);
+      let totalMl = 0, totalShopee = 0, erroMes: string | undefined;
+      for (const janela of janelas) {
+        if (cancelRef.current) break;
+        const result = await syncJanela(janela.from, janela.to);
+        totalMl += result.ml; totalShopee += result.shopee;
+        if (result.erro && !erroMes) erroMes = result.erro;
+      }
+      const count = totalMl + totalShopee;
+      if (!erroMes) algumaOk = true;
+      setHistoricoMeses(prev => prev.map((m, i) =>
+        i === idx ? { ...m, status: erroMes ? "erro" : "ok", count, erro: erroMes } : m
+      ));
+    }
+    setHistoricoRodando(false);
+    if (algumaOk) {
+      try { localStorage.setItem("historico_concluido_v1", "1"); } catch {}
+      setOnboardingPendente(false);
+    }
   }
 
   const LOJAS = [
@@ -872,6 +916,37 @@ export default function VendasPage() {
         )}
       </div>
 
+      {/* ── Banner de onboarding ────────────────────────────────────────── */}
+      {onboardingPendente && !loading && (
+        <div style={{
+          background: "linear-gradient(135deg,rgba(255,107,0,0.1),rgba(255,184,0,0.06))",
+          border: "1px solid rgba(255,107,0,0.3)",
+          borderRadius: "16px", padding: "20px 24px", marginBottom: "20px",
+          display: "flex", alignItems: "center", justifyContent: "space-between", gap: "16px",
+          flexWrap: "wrap",
+        }}>
+          <div>
+            <p style={{ margin: 0, fontSize: "15px", fontWeight: 800, color: "#ffb800" }}>
+              🚀 Configure seu histórico de vendas
+            </p>
+            <p style={{ margin: "4px 0 0", fontSize: "13px", color: "#9099aa", lineHeight: 1.5 }}>
+              Sincronize os últimos 2 meses para ver dados completos. Feito isso, o sistema atualiza automaticamente todo dia.
+            </p>
+          </div>
+          <button
+            onClick={() => setHistoricoOpen(true)}
+            style={{
+              padding: "12px 22px", borderRadius: "12px",
+              background: "linear-gradient(135deg,#ff6b00,#ffb800)",
+              border: "none", color: "#10131b", fontWeight: 900,
+              fontSize: "13px", cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0,
+            }}
+          >
+            Sincronizar Histórico →
+          </button>
+        </div>
+      )}
+
       {/* ── Cards de resumo ─────────────────────────────────────────────── */}
       {!loading && filteredRows.length > 0 && (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: "12px", marginBottom: "24px" }}>
@@ -1327,12 +1402,12 @@ export default function VendasPage() {
                 </div>
 
                 {/* Botões de controle */}
-                <div style={{ display: "flex", gap: "8px", marginTop: "20px" }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginTop: "20px" }}>
                   {historicoRodando ? (
                     <button
                       onClick={() => { cancelRef.current = true; }}
                       style={{
-                        flex: 1, padding: "12px", borderRadius: "12px",
+                        padding: "12px", borderRadius: "12px",
                         background: "rgba(255,77,77,0.1)", border: "1px solid rgba(255,77,77,0.3)",
                         color: "#ff4d4d", fontWeight: 700, fontSize: "14px", cursor: "pointer",
                       }}
@@ -1341,26 +1416,41 @@ export default function VendasPage() {
                     </button>
                   ) : (
                     <>
-                      <button
-                        onClick={() => { setHistoricoMeses([]); }}
-                        style={{
-                          flex: 1, padding: "12px", borderRadius: "12px",
-                          background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)",
-                          color: "#9099aa", fontWeight: 700, fontSize: "14px", cursor: "pointer",
-                        }}
-                      >
-                        ↩ Reiniciar
-                      </button>
-                      <button
-                        onClick={() => { setHistoricoOpen(false); setHistoricoMeses([]); sync(dateFrom, dateTo, skuTags, [...filtrosCadastro, ...filtrosStatus]); }}
-                        style={{
-                          flex: 2, padding: "12px", borderRadius: "12px",
-                          background: "linear-gradient(135deg,#ff6b00,#ffb800)",
-                          border: "none", color: "#10131b", fontWeight: 900, fontSize: "14px", cursor: "pointer",
-                        }}
-                      >
-                        Ver Vendas
-                      </button>
+                      {/* Retry meses com erro */}
+                      {historicoMeses.some(m => m.status === "erro") && (
+                        <button
+                          onClick={reprocessarErros}
+                          style={{
+                            padding: "12px", borderRadius: "12px",
+                            background: "rgba(255,107,0,0.1)", border: "1px solid rgba(255,107,0,0.3)",
+                            color: "#ff6b00", fontWeight: 700, fontSize: "14px", cursor: "pointer",
+                          }}
+                        >
+                          🔄 Tentar novamente os meses com erro ({historicoMeses.filter(m => m.status === "erro").length})
+                        </button>
+                      )}
+                      <div style={{ display: "flex", gap: "8px" }}>
+                        <button
+                          onClick={() => { setHistoricoMeses([]); }}
+                          style={{
+                            flex: 1, padding: "12px", borderRadius: "12px",
+                            background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)",
+                            color: "#9099aa", fontWeight: 700, fontSize: "14px", cursor: "pointer",
+                          }}
+                        >
+                          ↩ Reiniciar
+                        </button>
+                        <button
+                          onClick={() => { setHistoricoOpen(false); setHistoricoMeses([]); sync(dateFrom, dateTo, skuTags, [...filtrosCadastro, ...filtrosStatus]); }}
+                          style={{
+                            flex: 2, padding: "12px", borderRadius: "12px",
+                            background: "linear-gradient(135deg,#ff6b00,#ffb800)",
+                            border: "none", color: "#10131b", fontWeight: 900, fontSize: "14px", cursor: "pointer",
+                          }}
+                        >
+                          Ver Vendas
+                        </button>
+                      </div>
                     </>
                   )}
                 </div>

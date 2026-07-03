@@ -809,7 +809,7 @@ export default function DashboardPage() {
     setLoading(false);
   }, [anuncios, lojas]);
 
-  useEffect(() => { carregar(dateFrom, dateTo); }, [dateFrom, dateTo, lojasSelecionadas, carregar]);
+  useEffect(() => { carregar(dateFrom, dateTo, lojasSelecionadas); }, [dateFrom, dateTo, lojasSelecionadas, carregar]);
 
   const totalCusto    = dias.reduce((s, d) => s + d.custo, 0);
   const totalComissao = dias.reduce((s, d) => s + d.comissao, 0);
