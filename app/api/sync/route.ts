@@ -77,5 +77,5 @@ export async function GET(request: Request) {
     ]);
   }
 
-  return NextResponse.json({ ok: true, from: from7, to: hoje, synced: results });
+  return NextResponse.json({ ok: true, from: ontem, to: hoje, synced: results });
 }

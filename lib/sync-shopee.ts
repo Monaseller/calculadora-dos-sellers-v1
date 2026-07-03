@@ -96,7 +96,12 @@ export async function syncShopeeForUser(
       }
 
       const list: any[] = data?.response?.order_list ?? [];
-      allOrderSns.push(...list.map((o: any) => o.order_sn));
+      // COMPLETED = pedidos entregues há semanas, com pay_time antigo.
+      // Com update_time eles aparecem na listagem mas são descartados pelo filtro de data.
+      // Excluir aqui evita buscar ~1500 detalhes desnecessários por dia, prevenindo timeout.
+      allOrderSns.push(...list
+        .filter((o: any) => (o.order_status ?? "") !== "COMPLETED")
+        .map((o: any) => o.order_sn));
 
       if (!data?.response?.more || !data?.response?.next_cursor) break;
       cursor = data.response.next_cursor;
