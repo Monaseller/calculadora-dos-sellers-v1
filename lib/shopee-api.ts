@@ -50,7 +50,7 @@ export async function shopeeGet(
   // Promise.race garante timeout independente do AbortController funcionar no runtime
   const fetchPromise = fetch(`${SHOPEE_BASE}${path}?${qs}`);
   const timeoutPromise = new Promise<never>((_, reject) =>
-    setTimeout(() => reject(new Error(`Shopee GET ${path} timeout (8s)`)), 8000)
+    setTimeout(() => reject(new Error(`Shopee GET ${path} timeout (15s)`)), 15000)
   );
   let res: Response;
   try {
