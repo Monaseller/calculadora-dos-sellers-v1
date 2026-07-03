@@ -90,9 +90,17 @@ export default function VendasPage() {
   });
   // historicoLoja removido — sempre sincroniza todas as plataformas
   type MesStatus = "pendente" | "sincronizando" | "ok" | "erro";
-  const [historicoMeses, setHistoricoMeses] = useState<{ label: string; from: string; to: string; status: MesStatus; count?: number; erro?: string }[]>([]);
+  const [historicoMeses, setHistoricoMeses] = useState<{
+    label: string; from: string; to: string; status: MesStatus;
+    count?: number; erro?: string;
+    diasOk?: number; diasTotal?: number; // progresso dia-a-dia dentro do mês
+  }[]>([]);
   const [historicoRodando, setHistoricoRodando] = useState(false);
   const cancelRef = useRef(false);
+
+  // Estado do teste rápido (1 dia)
+  const [testeRodando, setTesteRodando]   = useState(false);
+  const [testeResult,  setTesteResult]    = useState<{ ok: boolean; msg: string } | null>(null);
 
   function gerarMeses(desde: string): { label: string; from: string; to: string; status: MesStatus }[] {
     const meses = [];
@@ -166,19 +174,30 @@ export default function VendasPage() {
 
       const janelas = gerarJanelas(meses[i].from, meses[i].to);
       let totalMl = 0, totalShopee = 0, erroMes: string | undefined;
+      let diasOk = 0; const diasTotal = janelas.length;
 
       for (const janela of janelas) {
         if (cancelRef.current) break;
+        const t0 = Date.now();
         const result = await syncJanela(janela.from, janela.to);
+        const elapsed = ((Date.now() - t0) / 1000).toFixed(0);
         totalMl     += result.ml;
         totalShopee += result.shopee;
-        if (result.erro && !erroMes) erroMes = result.erro;
+        if (result.erro && !erroMes) {
+          erroMes = `${janela.from}: ${result.erro} (${elapsed}s)`;
+        } else {
+          diasOk++;
+        }
+        // Atualiza progresso dia-a-dia dentro do mês
+        setHistoricoMeses(prev => prev.map((m, idx) =>
+          idx === i ? { ...m, diasOk, diasTotal } : m
+        ));
       }
 
       const count = totalMl + totalShopee;
       if (!erroMes) algumaOk = true;
       setHistoricoMeses(prev => prev.map((m, idx) =>
-        idx === i ? { ...m, status: erroMes ? "erro" : "ok", count, erro: erroMes } : m
+        idx === i ? { ...m, status: erroMes ? "erro" : "ok", count, erro: erroMes, diasOk, diasTotal } : m
       ));
     }
     setHistoricoRodando(false);
@@ -203,16 +222,26 @@ export default function VendasPage() {
       ));
       const janelas = gerarJanelas(mes.from, mes.to);
       let totalMl = 0, totalShopee = 0, erroMes: string | undefined;
+      let diasOk = 0; const diasTotal = janelas.length;
       for (const janela of janelas) {
         if (cancelRef.current) break;
+        const t0 = Date.now();
         const result = await syncJanela(janela.from, janela.to);
+        const elapsed = ((Date.now() - t0) / 1000).toFixed(0);
         totalMl += result.ml; totalShopee += result.shopee;
-        if (result.erro && !erroMes) erroMes = result.erro;
+        if (result.erro && !erroMes) {
+          erroMes = `${janela.from}: ${result.erro} (${elapsed}s)`;
+        } else {
+          diasOk++;
+        }
+        setHistoricoMeses(prev => prev.map((m, i) =>
+          i === idx ? { ...m, diasOk, diasTotal } : m
+        ));
       }
       const count = totalMl + totalShopee;
       if (!erroMes) algumaOk = true;
       setHistoricoMeses(prev => prev.map((m, i) =>
-        i === idx ? { ...m, status: erroMes ? "erro" : "ok", count, erro: erroMes } : m
+        i === idx ? { ...m, status: erroMes ? "erro" : "ok", count, erro: erroMes, diasOk, diasTotal } : m
       ));
     }
     setHistoricoRodando(false);
@@ -220,6 +249,24 @@ export default function VendasPage() {
       try { localStorage.setItem("historico_concluido_v1", "1"); } catch {}
       setOnboardingPendente(false);
     }
+  }
+
+  // ── Teste rápido: sincroniza ontem (1 dia) para validar configuração ─────────
+  async function testarSync() {
+    setTesteRodando(true);
+    setTesteResult(null);
+    const ontemDate = new Date(Date.now() - 3 * 60 * 60 * 1000);
+    ontemDate.setDate(ontemDate.getDate() - 1);
+    const ontem = ontemDate.toISOString().split("T")[0];
+    const t0 = Date.now();
+    const result = await syncJanela(ontem, ontem);
+    const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+    if (result.erro) {
+      setTesteResult({ ok: false, msg: `❌ ${result.erro} (${elapsed}s)` });
+    } else {
+      setTesteResult({ ok: true, msg: `✅ ${result.ml + result.shopee} pedidos em ${elapsed}s — tudo ok!` });
+    }
+    setTesteRodando(false);
   }
 
   const LOJAS = [
@@ -1344,13 +1391,53 @@ export default function VendasPage() {
                         {mes.status === "pendente" && "○ "}
                         {mes.label}
                       </span>
-                      <span style={{ fontSize: "12px", color: "#9099aa" }}>
+                      <span style={{ fontSize: "11px", color: "#9099aa", textAlign: "right", maxWidth: "55%", wordBreak: "break-word" }}>
                         {mes.status === "ok"   && mes.count !== undefined && `${mes.count} pedidos`}
-                        {mes.status === "erro" && (mes.erro ?? "Erro")}
+                        {mes.status === "sincronizando" && mes.diasTotal && mes.diasTotal > 1 && (
+                          `dia ${(mes.diasOk ?? 0) + 1}/${mes.diasTotal}`
+                        )}
+                        {mes.status === "erro" && (
+                          <span title={mes.erro ?? "Erro"} style={{ cursor: "help" }}>
+                            {mes.erro ? mes.erro.slice(0, 50) + (mes.erro.length > 50 ? "…" : "") : "Erro"}
+                            {mes.diasTotal && mes.diasTotal > 1 && ` (${mes.diasOk ?? 0}/${mes.diasTotal} dias ok)`}
+                          </span>
+                        )}
                       </span>
                     </div>
                   ))}
                 </div>
+
+                {/* Teste rápido (1 dia) — valida configuração sem rodar o histórico completo */}
+                {!historicoRodando && historicoMeses.length === 0 && (
+                  <div style={{ marginBottom: "8px" }}>
+                    <button
+                      onClick={testarSync}
+                      disabled={testeRodando}
+                      style={{
+                        width: "100%", padding: "10px 14px", borderRadius: "10px",
+                        background: "rgba(111,163,255,0.08)", border: "1px solid rgba(111,163,255,0.25)",
+                        color: testeRodando ? "#9099aa" : "#6fa3ff",
+                        fontWeight: 700, fontSize: "13px", cursor: testeRodando ? "not-allowed" : "pointer",
+                        display: "flex", alignItems: "center", justifyContent: "center", gap: "8px",
+                      }}
+                    >
+                      {testeRodando
+                        ? <><span style={{ display: "inline-block", animation: "spin 1s linear infinite" }}>⟳</span> Testando ontem…</>
+                        : "🧪 Testar 1 dia antes de sincronizar"
+                      }
+                    </button>
+                    {testeResult && (
+                      <div style={{
+                        marginTop: "6px", padding: "8px 12px", borderRadius: "8px", fontSize: "12px",
+                        background: testeResult.ok ? "rgba(0,217,126,0.08)" : "rgba(255,77,77,0.08)",
+                        border: `1px solid ${testeResult.ok ? "rgba(0,217,126,0.2)" : "rgba(255,77,77,0.2)"}`,
+                        color: testeResult.ok ? "#00D97E" : "#ff4d4d",
+                      }}>
+                        {testeResult.msg}
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {/* Botões de controle */}
                 <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginTop: "20px" }}>
