@@ -2,7 +2,7 @@
 cd /d "%~dp0"
 if exist .git\index.lock del .git\index.lock
 git add -A
-git commit -m "fix: dashboard faturamento - passa lojasSelecionadas explicitamente no useEffect (stale closure)"
+git commit -m "fix: shopee sync usa update_time p/ capturar pedidos pagos no dia (era create_time); cron reduzido para 2 dias; cron 2x/dia"
 git push
 echo.
 echo === Subindo para o Vercel ===

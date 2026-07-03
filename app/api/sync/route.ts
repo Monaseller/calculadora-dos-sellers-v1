@@ -32,7 +32,9 @@ export async function GET(request: Request) {
   const targetUserId = searchParams.get("userId"); // opcional: sync de um usuário específico
 
   const hoje  = brtDate(0);
-  const from7 = brtDate(7);   // janela de 7 dias
+  const ontem = brtDate(1);   // janela de 2 dias (ontem + hoje)
+  // Com update_time no sync Shopee, 2 dias bastam: pedidos pagos ontem
+  // ou hoje são capturados diretamente pelo update_time da confirmação de pagamento.
 
   // Busca todos os usuários com loja ativa
   const { data: lojas } = await supabase
@@ -62,13 +64,13 @@ export async function GET(request: Request) {
     // Shopee e ML em paralelo por usuário
     await Promise.all([
       marketplaces.has("Shopee")
-        ? syncShopeeForUser(userId, from7, hoje)
+        ? syncShopeeForUser(userId, ontem, hoje)
             .then(n  => { results[userId].shopee = n; })
             .catch(e => { results[userId].shopee_err = String(e?.message ?? e); })
         : Promise.resolve(),
 
       marketplaces.has("ML")
-        ? syncMLForUser(userId, from7, hoje)
+        ? syncMLForUser(userId, ontem, hoje)
             .then(n  => { results[userId].ml = n; })
             .catch(e => { results[userId].ml_err = String(e?.message ?? e); })
         : Promise.resolve(),

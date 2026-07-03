@@ -62,9 +62,12 @@ export async function syncShopeeForUser(
     return chunks;
   }
 
-  // Buffer de -3 dias: captura pedidos criados antes do período mas pagos dentro dele.
-  // noBuffer=true desativa para Histórico (meses completos não precisam de overlap).
-  const fetchFrom = noBuffer ? dateFrom : addDaysShopee(dateFrom, -3);
+  // Usamos update_time em vez de create_time:
+  // quando um pedido é pago, o update_time é atualizado naquele instante.
+  // Isso captura pedidos criados antes do range mas pagos dentro dele —
+  // exatamente o critério "Produto Pago" do painel da Shopee.
+  // noBuffer não é mais necessário (mantido por compatibilidade, ignorado).
+  const fetchFrom = dateFrom;
   const chunks = gerarChunks(fetchFrom, dateTo);
 
   // ── 1. Lista orderSNs (por chunks de ≤14 dias) ──────────────────────────────
@@ -77,10 +80,10 @@ export async function syncShopeeForUser(
 
     for (;;) {
       const params: Record<string, string | number> = {
-        time_range_field:         "create_time",
+        time_range_field:         "update_time",   // era "create_time" — mudado para capturar por data de pagamento
         time_from:                chunkFrom,
         time_to:                  chunkTo,
-        page_size:                100, // máximo da API Shopee — reduz páginas à metade
+        page_size:                100,
         response_optional_fields: "order_status",
       };
       if (cursor) params.cursor = cursor;
