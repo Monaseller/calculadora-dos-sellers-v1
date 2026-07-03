@@ -61,13 +61,24 @@ export async function GET(request: Request) {
     return NextResponse.json({ erro: true, semConexao: true, mensagem: "Conta Shopee não conectada." });
   }
 
-  const hoje = hojeISO();
-  const rangeIncludeHoje = dateFrom <= hoje && hoje <= dateTo;
+  const { searchParams: sp2 } = new URL(request.url);
+  const forceSync = sp2.get("sync") === "1";
 
-  // ── Sync on-demand: APENAS HOJE (1 dia) para respeitar limite de 10s Vercel Hobby ──
-  // Histórico completo: use o botão Histórico ou aguarde o cron das 3h.
-  if (rangeIncludeHoje) {
-    try {
+  const hoje = hojeISO();
+
+  // ── Sync on-demand ──────────────────────────────────────────────────────────
+  // forceSync (botão Sincronizar): sincroniza ontem + hoje (máx 2 dias, cabe em 55s)
+  // Auto-load: só sincroniza hoje se stale (> 30 min)
+  try {
+    if (forceSync) {
+      // Sincroniza os últimos 2 dias (ontem + hoje) para refrescar o cache recente
+      const ontem = new Date(Date.now() - 3 * 60 * 60 * 1000);
+      ontem.setDate(ontem.getDate() - 1);
+      const ontemISO = ontem.toISOString().split("T")[0];
+      const syncFrom = dateFrom > ontemISO ? dateFrom : ontemISO;
+      await syncShopeeForUser(userId, syncFrom, hoje, true); // noBuffer=true → create_time
+    } else if (dateFrom <= hoje && hoje <= dateTo) {
+      // Auto: só sincroniza hoje se stale
       const { data: probeHoje } = await supabase
         .from("pedidos").select("synced_at")
         .eq("user_id", userId).eq("marketplace", "Shopee")
@@ -77,15 +88,13 @@ export async function GET(request: Request) {
       const lastSyncHoje = probeHoje?.[0]?.synced_at
         ? new Date(probeHoje[0].synced_at).getTime() : 0;
 
-      // Sincroniza hoje se stale (> 30 min) ou nunca sincronizado
       if (Date.now() - lastSyncHoje > 30 * 60 * 1000) {
-        await syncShopeeForUser(userId, hoje, hoje);
+        await syncShopeeForUser(userId, hoje, hoje, true); // noBuffer=true → create_time
       }
-    } catch (syncErr) {
-      const errMsg = syncErr instanceof Error ? syncErr.message : String(syncErr);
-      console.error("[shopee/vendas] sync hoje error:", errMsg);
-      // Não retorna erro — lê do cache mesmo que hoje falhe
     }
+  } catch (syncErr) {
+    console.error("[shopee/vendas] sync error:", syncErr instanceof Error ? syncErr.message : syncErr);
+    // Não retorna erro — lê do cache mesmo que sync falhe
   }
 
   // Lê do banco (range completo — pode ser cache do cron ou Histórico)

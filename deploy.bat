@@ -2,7 +2,7 @@
 cd /d "%~dp0"
 if exist .git\index.lock del .git\index.lock
 git add -A
-git commit -m "fix: create_time p/ Historico, update_time p/ Cron; timeout shopeeGet 8s->15s; fix from7 cron"
+git commit -m "fix: Historico create_time sem timeout; Sincronizar Shopee agora sincroniza ontem+hoje; fix from7 cron"
 git push
 echo.
 echo === Subindo para o Vercel ===
