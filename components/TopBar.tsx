@@ -28,6 +28,7 @@ export default function TopBar() {
   const [shopeeAtiva, setShopeeAtiva] = useState<string | null>(null);
   const [dropdown,    setDropdown]    = useState(false);
   const [trocando,    setTrocando]    = useState(false);
+  const [avatarLetra, setAvatarLetra] = useState("?");
   const dropRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -48,6 +49,13 @@ export default function TopBar() {
     } catch {}
     setLojaAtiva(getCookieClient("loja_ativa_id"));
     setShopeeAtiva(getCookieClient("shopee_loja_id"));
+    // Busca inicial do perfil para mostrar letra dinâmica no avatar
+    try {
+      const perfilRes = await fetch("/api/perfil");
+      const perfil = await perfilRes.json();
+      const nome = perfil?.nome_completo || perfil?.usuario || "";
+      if (nome) setAvatarLetra(nome.trim()[0].toUpperCase());
+    } catch {}
   }
 
   function isLojaAtiva(l: Loja): boolean {
@@ -202,8 +210,9 @@ export default function TopBar() {
 
         {/* Avatar */}
         <div style={{ width: "34px", height: "34px", borderRadius: "50%", background: "linear-gradient(135deg,#ff6b00,#ffb800)", display: "grid", placeItems: "center", fontWeight: 900, fontSize: "13px", color: "#10131b", cursor: "pointer" }}
+             title="Configurações"
              onClick={() => router.push("/configuracoes")}>
-          R
+          {avatarLetra}
         </div>
 
         {/* Sair */}
@@ -229,6 +238,7 @@ export default function TopBar() {
         </button>
 
       </div>
+
     </header>
   );
 }

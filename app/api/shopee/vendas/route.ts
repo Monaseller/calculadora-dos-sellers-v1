@@ -107,6 +107,17 @@ export async function GET(request: Request) {
     .lte("data", dateTo)
     .order("data", { ascending: false });
 
+  if (!pedidos || pedidos.length === 0) {
+    return NextResponse.json({
+      semDados: true,
+      conta: loja.nickname ?? "Shopee",
+      dateFrom,
+      dateTo,
+      totalPedidos: 0,
+      rows: [],
+    });
+  }
+
   let rows = (pedidos ?? []).map(pedidoToRow);
 
   if (skuFilters.length > 0) {
@@ -117,13 +128,14 @@ export async function GET(request: Request) {
     });
   }
 
+  const conta       = pedidos[0]?.conta ?? loja.nickname ?? "Shopee";
+  const totalOrders = new Set(rows.map(r => r.orderId)).size;
+
   return NextResponse.json({
     dateFrom,
     dateTo,
-    conta:        loja.nickname,
-    marketplace:  "Shopee",
-    totalPedidos: new Set(rows.map(r => r.orderId)).size,
+    conta,
+    totalPedidos: totalOrders,
     rows,
-    semDados:     rows.length === 0,  // indica que pode precisar de sync histórico
   });
 }

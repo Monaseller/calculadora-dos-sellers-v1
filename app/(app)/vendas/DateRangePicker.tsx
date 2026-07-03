@@ -32,14 +32,28 @@ const PRESETS = [
     const hoje = parseISO(hojeISO());
     const seg  = new Date(hoje);
     const day  = hoje.getDay(); // 0=dom, 1=seg, ..., 6=sáb
-    // Dias desde a última segunda-feira
     const diasAteSeg = day === 0 ? 6 : day === 1 ? 0 : day - 1;
     seg.setDate(hoje.getDate() - diasAteSeg);
     return [toISO(seg), hojeISO()];
   }},
   { label: "Últimos 7 dias", get: () => {
     const d = new Date(parseISO(hojeISO()));
-    d.setDate(d.getDate() - 7); // ML conta hoje + 7 dias anteriores = 8 dias
+    d.setDate(d.getDate() - 7);
+    return [toISO(d), hojeISO()];
+  }},
+  { label: "Últimos 15 dias", get: () => {
+    const d = new Date(parseISO(hojeISO()));
+    d.setDate(d.getDate() - 15);
+    return [toISO(d), hojeISO()];
+  }},
+  { label: "Últimos 30 dias", get: () => {
+    const d = new Date(parseISO(hojeISO()));
+    d.setDate(d.getDate() - 30);
+    return [toISO(d), hojeISO()];
+  }},
+  { label: "Últimos 90 dias", get: () => {
+    const d = new Date(parseISO(hojeISO()));
+    d.setDate(d.getDate() - 90);
     return [toISO(d), hojeISO()];
   }},
   { label: "Este mês",    get: () => {
@@ -65,7 +79,13 @@ export default function DateRangePicker({ from, to, onChange }: Props) {
   const [tempFrom,     setTempFrom]     = useState(from);
   const [tempTo,       setTempTo]       = useState(to);
   const [hover,        setHover]        = useState<string | null>(null);
-  const [activePreset, setActivePreset] = useState<string | null>("Hoje");
+  const [activePreset, setActivePreset] = useState<string | null>(() => {
+    for (const p of PRESETS) {
+      const [f, t] = p.get();
+      if (f === from && t === to) return p.label;
+    }
+    return null;
+  });
 
   const today = parseISO(hojeISO());
   const [viewYear,  setViewYear]  = useState(today.getFullYear());
@@ -81,13 +101,12 @@ export default function DateRangePicker({ from, to, onChange }: Props) {
   }
 
   function handleDayClick(iso: string) {
-    setActivePreset(null); // seleção manual — sem preset
+    setActivePreset(null);
     if (selecting === "start") {
       setTempFrom(iso);
       setTempTo(iso);
       setSelecting("end");
     } else {
-      // Se clicar numa data antes do start, inverte
       if (iso < tempFrom) {
         setTempFrom(iso);
         setTempTo(tempFrom);
@@ -110,11 +129,9 @@ export default function DateRangePicker({ from, to, onChange }: Props) {
     setOpen(false);
   }
 
-  // Dias do mês atual para renderizar
-  const firstDay = new Date(viewYear, viewMonth, 1).getDay(); // 0=dom
+  const firstDay = new Date(viewYear, viewMonth, 1).getDay();
   const daysInMonth = new Date(viewYear, viewMonth + 1, 0).getDate();
 
-  // Range efetivo para highlight (inclui hover durante seleção de end)
   const rangeStart = tempFrom;
   const rangeEnd   = selecting === "end" && hover
     ? (hover < tempFrom ? tempFrom : hover)
@@ -146,12 +163,10 @@ export default function DateRangePicker({ from, to, onChange }: Props) {
       cursor: future ? "default" : "pointer",
       outline: isToday && !isStart && !isEnd ? "1px solid rgba(255,107,0,0.4)" : "none",
       outlineOffset: "-1px",
-      borderRadius2: "0",
       transition: "background 0.1s",
     } as React.CSSProperties;
   }
 
-  // Label do intervalo selecionado
   function fmtLabel(iso: string) {
     const d = parseISO(iso);
     return d.toLocaleDateString("pt-BR", { day: "2-digit", month: "short" }).replace(".", "");
@@ -192,7 +207,6 @@ export default function DateRangePicker({ from, to, onChange }: Props) {
       {/* Dropdown */}
       {open && (
         <>
-          {/* overlay para fechar */}
           <div
             onClick={() => setOpen(false)}
             style={{ position: "fixed", inset: 0, zIndex: 9998 }}
@@ -212,7 +226,7 @@ export default function DateRangePicker({ from, to, onChange }: Props) {
           }}>
 
             {/* Presets */}
-            <div style={{ display: "flex", flexDirection: "column", gap: "4px", minWidth: "120px", paddingRight: "16px", borderRight: "1px solid rgba(255,255,255,0.07)" }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: "4px", minWidth: "140px", paddingRight: "16px", borderRight: "1px solid rgba(255,255,255,0.07)" }}>
               <div style={{ fontSize: "10px", fontWeight: 700, color: "#9099aa", letterSpacing: "0.4px", marginBottom: "6px" }}>ATALHOS</div>
               {PRESETS.map(p => {
                 const active = activePreset === p.label;
@@ -240,7 +254,6 @@ export default function DateRangePicker({ from, to, onChange }: Props) {
 
             {/* Calendário */}
             <div>
-              {/* Hint */}
               <div style={{ fontSize: "11px", color: "#9099aa", marginBottom: "10px", textAlign: "center" }}>
                 {selecting === "start" ? "Clique no dia inicial" : "Clique no dia final"}
               </div>
@@ -263,7 +276,6 @@ export default function DateRangePicker({ from, to, onChange }: Props) {
 
               {/* Dias */}
               <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 34px)", gap: "2px" }}>
-                {/* Células vazias */}
                 {Array.from({ length: firstDay }).map((_, i) => <div key={`e${i}`} />)}
 
                 {Array.from({ length: daysInMonth }).map((_, i) => {

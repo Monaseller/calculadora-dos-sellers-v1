@@ -87,13 +87,23 @@ export async function shopeePost(
     sign,
   });
 
-  const res = await fetch(`${SHOPEE_BASE}${path}?${qs}`, {
-    method:  "POST",
-    headers: { "Content-Type": "application/json" },
-    body:    JSON.stringify(body),
-  });
-  const text = await res.text();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15_000);
+  let res: Response;
   try {
+    res = await fetch(`${SHOPEE_BASE}${path}?${qs}`, {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify(body),
+      signal:  controller.signal,
+    });
+  } catch (err) {
+    clearTimeout(timer);
+    throw err;
+  }
+  clearTimeout(timer);
+  const text = await res.text();
+    try {
     return JSON.parse(text);
   } catch (e) {
     console.error(`[shopee-api] POST ${path} status=${res.status} body=${text.slice(0, 300)}`);

@@ -71,5 +71,5 @@ export async function POST(request: Request) {
     }, { status: 500 });
   }
 
-  return NextResponse.json({ ok: true, dateFrom, dateTo, ...results });
+  return NextResponse.json({ ok: true, dateFrom, dateTo, ml: results.ml, shopee: results.shopee, mlErro: results.mlErro, shopeeErro: results.shopeeErro });
 }

@@ -25,6 +25,14 @@ export async function GET(request: Request) {
 
   const data = await response.json();
 
+  // Verifica se o ML retornou erro (ex: code expirado, client_id errado)
+  if (!response.ok || data.error || !data.access_token) {
+    const origin = new URL(request.url).origin;
+    const errUrl = new URL("/configuracoes", origin);
+    errUrl.searchParams.set("ml_erro", data.error_description ?? data.error ?? "Erro ao conectar com Mercado Livre");
+    return NextResponse.redirect(errUrl.toString());
+  }
+
   const origin = new URL(request.url).origin;
   const relayUrl = new URL("/api/auth/relay", origin);
   relayUrl.searchParams.set("token", data.access_token);

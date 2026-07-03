@@ -1,5 +1,5 @@
 "use client";
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback, useRef } from "react";
 import { createClient } from "@supabase/supabase-js";
 import DateRangePicker from "../vendas/DateRangePicker";
 
@@ -634,6 +634,9 @@ export default function DashboardPage() {
   const [showBothMkt, setShowBothMkt] = useState(false);
   const [alertas,  setAlertas]  = useState<{ icon: string; title: string; msg: string; color: string }[]>([]);
   const [anuncios, setAnuncios] = useState<Anuncio[]>([]);
+  // Refs estáveis — evitam double-load quando anuncios carrega de forma assíncrona
+  const anunciosRef = useRef<Anuncio[]>([]);
+  const lojasRef    = useRef<Loja[]>([]);
   const [score,    setScore]    = useState(0);
   const [sparkFat, setSparkFat] = useState<number[]>([]);
   const [sparkLuc, setSparkLuc] = useState<number[]>([]);
@@ -648,7 +651,7 @@ export default function DashboardPage() {
           .select("ml_item_id, thumbnail, nome, sku, marketplace, custo_produto, preco_anuncio, margem_contribuicao")
           .eq("ativo", true)
           .eq("user_id", userId)
-          .then(({ data }) => { if (data) setAnuncios(data as Anuncio[]); });
+          .then(({ data }) => { if (data) { anunciosRef.current = data as Anuncio[]; setAnuncios(data as Anuncio[]); } });
       })
       .catch(() => {});
 
@@ -656,6 +659,7 @@ export default function DashboardPage() {
       .then(r => r.json())
       .then((data: Loja[]) => {
         if (Array.isArray(data) && data.length > 0) {
+          lojasRef.current = data;
           setLojas(data);
           setLojasSelecionadas(new Set(data.map(l => l.id)));
         }
@@ -668,7 +672,7 @@ export default function DashboardPage() {
     setErro(null);
     const sel = lojasAtivas ?? lojasSelecionadas;
     // Determina quais marketplaces buscar baseado nas lojas selecionadas
-    const lojasArr = lojas.length > 0 ? lojas : [];
+    const lojasArr = lojasRef.current.length > 0 ? lojasRef.current : [];
     const selecionadasArr = lojasArr.filter(l => sel.size === 0 || sel.has(l.id));
     const buscarML     = selecionadasArr.length === 0 || selecionadasArr.some(l => l.marketplace === "ML");
     const buscarShopee = selecionadasArr.length === 0 || selecionadasArr.some(l => l.marketplace === "Shopee");
@@ -693,7 +697,7 @@ export default function DashboardPage() {
 
       // Usa o primeiro nome disponível e normaliza capitalização (ML retorna em CAPS)
       const rawConta = (mlOk ? mlData.conta : null) || (shopeeOk ? shopeeData.conta : null) || "CDS";
-      const contaNome = rawConta.toLowerCase().replace(/(?:^|\s)\S/g, c => c.toUpperCase());
+      const contaNome = rawConta.toLowerCase().replace(/(?:^|\s)\S/g, (c: string) => c.toUpperCase());
       setConta(contaNome);
 
       const mlRowsFull     = (mlOk     ? mlData.rows     ?? [] : []) as VendaRow[];
@@ -752,7 +756,7 @@ export default function DashboardPage() {
         for (const r of rowsSubset) {
           const key = r.mlItemId || r.anuncio;
           const ex  = mapA.get(key);
-          const rawThumb = anuncios.find(a => a.ml_item_id === r.mlItemId || a.ml_item_id?.split("-")[0] === r.mlItemId?.split("-")[0])?.thumbnail ?? null;
+          const rawThumb = anunciosRef.current.find(a => a.ml_item_id === r.mlItemId || a.ml_item_id?.split("-")[0] === r.mlItemId?.split("-")[0])?.thumbnail ?? null;
           const thumb = rawThumb ? rawThumb.replace("http://", "https://") : null;
           if (ex) {
             ex.faturamento += r.faturamento;
@@ -807,7 +811,8 @@ export default function DashboardPage() {
 
     } catch (e) { console.error("[dashboard] carregar error:", e); setErro("Erro ao carregar dados."); }
     setLoading(false);
-  }, [anuncios, lojas]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // anuncios e lojas acessados via ref — carregar não muda de referência
 
   useEffect(() => { carregar(dateFrom, dateTo, lojasSelecionadas); }, [dateFrom, dateTo, lojasSelecionadas, carregar]);
 

@@ -13,7 +13,7 @@ export async function GET(request: Request) {
 
   const { data } = await supabase
     .from("perfil")
-    .select("*")
+    .select("id, nome_completo, usuario, email, documento, email_verificado, user_uuid")
     .eq("user_uuid", userId)
     .single();
 
@@ -46,7 +46,7 @@ export async function POST(request: Request) {
       email:             body.email,
       documento:         body.documento,
       senha:             body.senha,
-      email_verificado:  true,
+      email_verificado:  false, // verificação via email obrigatória antes do primeiro acesso
       token_verificacao: token,
       token_expiracao:   expiracao,
       user_uuid:         userUuid,
@@ -108,9 +108,9 @@ export async function POST(request: Request) {
     .update(campos)
     .eq("user_uuid", userId);
 
-  if (error) {
-    return NextResponse.json({ erro: true, mensagem: error.message }, { status: 500 });
+  if (error) {    return NextResponse.json({ erro: true, mensagem: error.message }, { status: 500 });
   }
 
   return NextResponse.json({ ok: true });
 }
+

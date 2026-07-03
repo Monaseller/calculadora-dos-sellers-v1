@@ -332,7 +332,7 @@ export default function VendasPage() {
         setTotalPedidos((mlData?.totalPedidos ?? 0) + (shopeeData?.totalPedidos ?? 0));
         // Usa o primeiro nome disponível (ML e Shopee são a mesma empresa) e normaliza capitalização
         const rawConta = mlData?.conta || shopeeData?.conta || "";
-        const contaNorm = rawConta.toLowerCase().replace(/(?:^|\s)\S/g, c => c.toUpperCase());
+        const contaNorm = rawConta.toLowerCase().replace(/(?:^|\s)\S/g, (c: string) => c.toUpperCase());
         setConta(contaNorm);
         setUltimaSync(new Date().toLocaleTimeString("pt-BR"));
       }
