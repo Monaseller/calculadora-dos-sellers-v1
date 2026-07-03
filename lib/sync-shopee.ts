@@ -1,19 +1,31 @@
 /**
  * sync-shopee.ts -- Sync completo Shopee -> Supabase (tabela pedidos)
  *
- * CORRECOES v2:
- * BUG 1 CORRIGIDO: COMPLETED filtrado no create_time causava -20-40% de pedidos.
- *   -> create_time: inclui TODOS os status (COMPLETED = entregue = valido)
- *   -> update_time: filtra COMPLETED (evita pedidos antigos com update hoje)
+ * ── FASE 1: CONFIABILIDADE DOS DADOS ─────────────────────────────────────
  *
- * BUG 2 CORRIGIDO: response_optional_fields incompleto.
- *   -> Agora busca: actual_shipping_fee, payment_method, package_list,
- *     recipient_address, buyer_username, estimated_shipping_fee
- *   -> Extrai imagem direto do item_list[].image_info.image_url
+ * P1 — income_distribution implementado
+ *   Os valores financeiros agora vêm diretamente da Shopee quando disponíveis.
+ *   Campos armazenados: escrow_amount, commission_fee, service_fee,
+ *   voucher_from_shopee, voucher_from_seller, transaction_fee, campaign_fee,
+ *   buyer_paid_amount, seller_income, item_subtotal.
+ *   A lib de comissões é usada apenas como fallback.
  *
- * BUG 3 NOVO: Retry com backoff exponencial (3 tentativas, 1s->2s->4s)
+ * P2 — item_subtotal armazenado separadamente
+ *   item_subtotal = model_discounted_price × qty (preço puro dos itens)
+ *   buyer_paid_amount = total pago pelo comprador (income_distribution)
+ *   Permite comparar com o painel Shopee para identificar o campo de faturamento.
  *
- * Retorna { found, inserted } para validacao externa.
+ * P3 — Comissão usa income_distribution quando disponível
+ *   tarifaVenda = commission_fee + service_fee + campaign_fee + transaction_fee
+ *   (valores oficiais da Shopee, distribuídos proporcionalmente por item)
+ *   Fallback: tabela de estimativa usando itemValue como base (não faturamento)
+ *
+ * P4 — Upsert com verificação de erro
+ *   Falhas no upsert são logadas e contabilizadas separadamente.
+ *
+ * P5 — Todos os status tratados corretamente
+ *   Nenhum status desconhecido mapeado para "paid".
+ *   Status "unknown" não entra em faturamento nem contagem de pedidos.
  */
 import { createClient } from "@supabase/supabase-js";
 import { shopeeGet } from "@/lib/shopee-api";
@@ -25,19 +37,38 @@ const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 );
 
+// ── P5: mapeamento completo de status ────────────────────────────────────────
+// NUNCA usar "paid" como default — status desconhecido nao deve inflar faturamento
 function mapStatus(s: string): string {
   const m: Record<string, string> = {
-    UNPAID:             "pending",
+    // Aguardando pagamento (nao conta em faturamento)
+    UNPAID: "pending",
+
+    // Pedidos pagos — contam em faturamento e pedidos
     READY_TO_SHIP:      "paid",
+    RETRY_SHIP:         "paid",   // nova tentativa de envio apos falha logistica
     PROCESSED:          "paid",
     SHIPPED:            "paid",
     TO_CONFIRM_RECEIVE: "paid",
-    COMPLETED:          "paid",
-    CANCELLED:          "cancelled",
-    IN_CANCEL:          "cancelled",
-    TO_RETURN:          "devolucao",
+    COMPLETED:          "paid",   // entregue e confirmado pelo comprador
+
+    // Cancelados — nao contam em faturamento
+    CANCELLED:  "cancelled",
+    IN_CANCEL:  "cancelled",     // cancelamento em andamento
+
+    // Devolucoes e reembolsos — nao contam em faturamento
+    TO_RETURN:      "devolucao",
+    RETURN:         "devolucao",
+    RETURN_APPROVE: "devolucao",
+    RETURN_DONE:    "devolucao",
+    REFUND:         "devolucao",  // reembolso processado
+
+    // Problemas logisticos — nao contam em faturamento
+    LOST:    "lost",
+    DAMAGED: "devolucao",         // dano no transporte — mesmo tratamento de devolucao
   };
-  return m[s] ?? "paid";
+  // CORRECAO P5: status desconhecido → "unknown" (nao "paid")
+  return m[s] ?? "unknown";
 }
 
 async function withRetry<T>(
@@ -77,8 +108,9 @@ function gerarChunks(from: string, to: string): Array<{ from: string; to: string
 }
 
 export interface SyncShopeeResult {
-  found:    number;
-  inserted: number;
+  found:        number;
+  inserted:     number;
+  upsertErrors: number;
 }
 
 export async function syncShopeeForUser(
@@ -106,23 +138,18 @@ export async function syncShopeeForUserV2(
   }
 ): Promise<SyncShopeeResult> {
   const loja = lojaOverride ?? await getShopeeLojaAtiva(userId);
-  if (!loja) return { found: 0, inserted: 0 };
+  if (!loja) return { found: 0, inserted: 0, upsertErrors: 0 };
 
   const { partnerId: partner_id, partnerKey: partner_key, accessToken: access_token, shopId, nickname } = loja;
 
-  // noBuffer=true  -> Historico: create_time
-  //   Inclui TODOS os status -- COMPLETED (entregue) e valido no range
-  //   NAO filtrar COMPLETED aqui (era bug: -20-40% pedidos perdidos silenciosamente)
-  //
-  // noBuffer=false -> Cron diario: update_time
-  //   Pedidos com qualquer update hoje -- pode incluir pedidos antigos
-  //   Filtra COMPLETED (pedidos de meses atras com update de entrega hoje)
+  // noBuffer=true  → Historico: create_time (todos os status validos no range)
+  // noBuffer=false → Cron diario: update_time (filtra COMPLETED = entregues antigos)
   const timeRangeField   = noBuffer ? "create_time" : "update_time";
   const filtrarCompleted = !noBuffer;
 
   const chunks = gerarChunks(dateFrom, dateTo);
 
-  // 1. Listagem: todas as paginas via cursor
+  // ── ETAPA 1: Listar todos os order_sn via cursor paginado ──────────────────
   const allOrderSns: string[] = [];
 
   for (const chunk of chunks) {
@@ -145,32 +172,31 @@ export async function syncShopeeForUserV2(
       );
 
       if (data?.error && data.error !== "") {
-        throw new Error(`Shopee API error: ${data.error} -- ${data.message ?? ""}`);
+        throw new Error(`Shopee get_order_list error: ${data.error} -- ${data.message ?? ""}`);
       }
 
       const list: any[] = data?.response?.order_list ?? [];
 
-      // CORRECAO BUG 1:
-      // create_time: inclui TODOS os status -- COMPLETED = entregue mas valido
-      // update_time: exclui COMPLETED -- sao pedidos antigos com update hoje (entrega)
+      // Cron (update_time): exclui COMPLETED para nao buscar pedidos antigos entregues hoje
       const sns = filtrarCompleted
         ? list.filter((o: any) => (o.order_status ?? "") !== "COMPLETED").map((o: any) => o.order_sn)
         : list.map((o: any) => o.order_sn);
 
       allOrderSns.push(...sns);
 
+      // Paginacao: para quando mais=false OU cursor vazio
       if (!data?.response?.more || !data?.response?.next_cursor) break;
       cursor = data.response.next_cursor;
     }
   }
 
   const found = allOrderSns.length;
-  if (found === 0) return { found: 0, inserted: 0 };
+  if (found === 0) return { found: 0, inserted: 0, upsertErrors: 0 };
 
-  // 2. Anuncios cadastrados
+  // ── ETAPA 2: Carregar anuncios cadastrados (para custos) ───────────────────
   const { data: anuncios } = await supabase
     .from("anuncios")
-    .select("id, ml_item_id, variation_id, sku, custo_produto, insumos, imposto")
+    .select("id, ml_item_id, variation_id, sku, custo_produto, insumos, custo_frete, imposto")
     .eq("marketplace", "Shopee")
     .eq("ativo", true)
     .eq("user_id", userId);
@@ -182,8 +208,8 @@ export async function syncShopeeForUserV2(
     if (!mapaAnuncios.has(`${a.ml_item_id}|`)) mapaAnuncios.set(`${a.ml_item_id}|`, a);
   }
 
-  // 3. Detalhes em paralelo (50 por batch, 10 concurrent)
-  // CORRECAO BUG 2: response_optional_fields completos
+  // ── ETAPA 3: Buscar detalhes em paralelo (50/batch, 10 concurrent) ─────────
+  // P1: income_distribution adicionado para valores financeiros oficiais
   const DETAIL_FIELDS = [
     "item_list",
     "order_status",
@@ -199,6 +225,10 @@ export async function syncShopeeForUserV2(
     "shipping_carrier",
     "cancel_reason",
     "buyer_cancel_reason",
+    "cancel_by",
+    "income_distribution",   // P1: valores financeiros oficiais da Shopee
+    "fulfillment_flag",      // SFS vs vendedor
+    "split_up",              // pedido dividido
   ].join(",");
 
   const BATCH       = 50;
@@ -224,57 +254,200 @@ export async function syncShopeeForUserV2(
     allDetails.push(...results);
   }
 
-  // 4. Monta linhas
+  // ── ETAPA 4: Montar linhas ──────────────────────────────────────────────────
   const rows: any[] = [];
   const now = new Date().toISOString();
 
   for (const detail of allDetails) {
     for (const order of (detail?.response?.order_list ?? [])) {
-      const status   = order.order_status ?? "UNKNOWN";
-      const ts       = order.pay_time || order.create_time || 0;
-      const dataBrt  = new Date((ts - 3 * 3600) * 1000).toISOString().split("T")[0];
+      const status = order.order_status ?? "UNKNOWN";
+
+      // P5 + BUG-PIPE-1 FIX: usar create_time quando noBuffer=true
+      // (API foi consultada por create_time — pay_time pode estar fora do range para boletos)
+      const refTs   = noBuffer
+        ? (order.create_time || 0)
+        : (order.pay_time || order.create_time || 0);
+      const dataBrt = new Date((refTs - 3 * 3600) * 1000).toISOString().split("T")[0];
 
       if (dataBrt < dateFrom || dataBrt > dateTo) continue;
 
-      const freteReal      = Number(order.actual_shipping_fee   ?? 0);
+      // ── Campos de endereco e logistica ──────────────────────────────────────
+      const freteReal      = Number(order.actual_shipping_fee    ?? 0);
       const freteEstimado  = Number(order.estimated_shipping_fee ?? 0);
       const formaPagamento = order.payment_method ?? null;
       const buyerUsername  = order.buyer_username ?? null;
+      const cancelBy       = order.cancel_by      ?? null;
+      const cancelReason   = order.cancel_reason  ?? order.buyer_cancel_reason ?? null;
+      const fulfillmentFlag = order.fulfillment_flag ?? null;
+      const splitUp        = order.split_up ?? false;
 
       const addr        = order.recipient_address ?? {};
-      const buyerCidade = addr.city    ?? addr.district ?? null;
-      const buyerEstado = addr.state   ?? null;
+      const buyerCidade = addr.city ?? addr.district ?? null;
+      const buyerEstado = addr.state ?? null;
 
-      const packages      = order.package_list ?? [];
-      const firstPkg      = packages[0] ?? {};
-      const rastreio      = firstPkg.package_number ?? null;
+      const packages    = order.package_list ?? [];
+      const firstPkg    = packages[0] ?? {};
+      const rastreio    = firstPkg.package_number ?? null;
       const transportadora = order.shipping_carrier ?? firstPkg.logistics_status ?? null;
+
+      // ── P1: income_distribution — valores financeiros oficiais da Shopee ────
+      const incDist = order.income_distribution ?? {};
+
+      // Mapeamento com fallbacks para variações de nome entre versoes da API
+      const incEscrow        = Number(incDist.escrow_amount                                   ?? 0);
+      const incCommission    = Number(incDist.commission_amount   ?? incDist.commission_fee    ?? 0);
+      const incServiceFee    = Number(incDist.service_fee                                      ?? 0);
+      const incTxFee         = Number(incDist.seller_transaction_fee ?? incDist.transaction_fee ?? 0);
+      const incCampaignFee   = Number(incDist.campaign_fee        ?? incDist.advertising_fee   ?? 0);
+      const incVoucherShopee = Number(incDist.voucher_from_shopee ?? incDist.coins_cash_back   ?? 0);
+      const incVoucherSeller = Number(incDist.voucher_from_seller                              ?? 0);
+      const incBuyerTotal    = Number(incDist.buyer_total_amount  ?? order.total_amount        ?? 0);
+
+      // income_distribution considerado disponivel quando tem pelo menos um valor significativo
+      const hasIncomeData = incEscrow > 0 || incCommission > 0 || incBuyerTotal > 0;
+
+      // Total Shopee fees (ordem inteira) — distribui por item proporcionalmente
+      const incPlataformaTotalOrder = incCommission + incServiceFee + incCampaignFee + incTxFee;
+
+      // total_amount = o que o comprador pagou (itens + frete comprador - coins/vouchers buyer)
+      const totalAmount = Number(order.total_amount ?? 0);
+
+      // orderItemsSubtotal = soma de (model_discounted_price × qty) de todos os itens
+      // usado como denominador para distribuicao proporcional
+      const orderItemsSubtotal = (order.item_list ?? []).reduce((sum: number, it: any) =>
+        sum + Number(it.model_discounted_price ?? it.model_original_price ?? 0)
+            * Number(it.model_quantity_purchased ?? 1), 0);
+
+      // ── Processar cada item do pedido ────────────────────────────────────────
+      if ((order.item_list ?? []).length === 0) {
+        // P4 (BUG-DATA-EMPTY): pedido sem item_list — salva row minima para nao perder o pedido
+        rows.push({
+          id:               `${userId}_SHOPEE_${order.order_sn}_NOITEM`,
+          user_id:          userId,
+          marketplace:      "Shopee",
+          order_id:         order.order_sn,
+          data:             dataBrt,
+          anuncio:          "(sem item_list)",
+          ml_item_id:       "",
+          variation_id:     null,
+          conta:            nickname,
+          sku:              null,
+          status:           mapStatus(status),
+          frete:            "comprador",
+          logistica:        fulfillmentFlag === "fulfilled_by_shopee" ? "SFS" : "Shopee",
+          valor_unit:       0,
+          qtd:              0,
+          item_subtotal:    0,
+          faturamento:      hasIncomeData ? incBuyerTotal : totalAmount,
+          buyer_paid_amount: incBuyerTotal || totalAmount,
+          custo:            0,
+          imposto:          0,
+          tarifa_venda:     incPlataformaTotalOrder,
+          frete_comprador:  0,
+          frete_vendedor:   0,
+          frete_real:       freteReal,
+          frete_estimado:   freteEstimado,
+          margem_contrib:   hasIncomeData ? incEscrow : 0,
+          mc_percent:       0,
+          lucro_liquido:    hasIncomeData ? incEscrow : 0,
+          seller_income:    hasIncomeData ? incEscrow : 0,
+          roi:              0,
+          escrow_amount:    incEscrow,
+          commission_fee:   incCommission,
+          service_fee:      incServiceFee,
+          transaction_fee:  incTxFee,
+          campaign_fee:     incCampaignFee,
+          voucher_from_shopee: incVoucherShopee,
+          voucher_from_seller: incVoucherSeller,
+          has_income_data:  hasIncomeData,
+          split_up:         splitUp,
+          forma_pagamento:  formaPagamento,
+          cancel_reason:    cancelReason,
+          cancel_by:        cancelBy,
+          fulfillment_flag: fulfillmentFlag,
+          codigo_rastreio:  rastreio,
+          transportadora,
+          imagem_url:       null,
+          buyer_username:   buyerUsername,
+          buyer_cidade:     buyerCidade,
+          buyer_estado:     buyerEstado,
+          cadastrado:       false,
+          synced_at:        now,
+        });
+        continue;
+      }
 
       for (const item of (order.item_list ?? [])) {
         const itemIdStr   = String(item.item_id);
         const variationId = item.model_id ? String(item.model_id) : null;
         const valorUnit   = Number(item.model_discounted_price ?? item.model_original_price ?? 0);
         const qtd         = Number(item.model_quantity_purchased ?? 1);
-        const faturamento = valorUnit * qtd;
+        const itemValue   = valorUnit * qtd; // item_subtotal deste item especifico
 
-        const imagemUrl = item.image_info?.image_url ?? item.cover_image ?? null;
-        const itemSku   = item.model_sku || item.item_sku || null;
+        // ── Ratio proporcional (peso deste item no total de itens do pedido) ──
+        const ratioItem = orderItemsSubtotal > 0 ? itemValue / orderItemsSubtotal : 1;
 
-        const keyVar  = variationId ? `${itemIdStr}|${variationId}` : `${itemIdStr}|`;
-        const anuncio = mapaAnuncios.get(keyVar) ?? mapaAnuncios.get(`${itemIdStr}|`) ?? null;
+        // ── P2: faturamento vs item_subtotal ──────────────────────────────────
+        // item_subtotal = preço puro dos itens (model_discounted_price × qty)
+        // faturamento   = buyer_paid_amount proporcional (total_amount inclui frete comprador)
+        // Apos primeiro sync, comparar qual deles bate com o painel Shopee (Prioridade 2)
+        const itemSubtotal = itemValue;
+        const faturamento  = totalAmount > 0 && orderItemsSubtotal > 0
+          ? totalAmount * ratioItem
+          : itemValue; // fallback se total_amount nao disponivel
 
-        const custo         = anuncio ? ((anuncio.custo_produto || 0) + (anuncio.insumos || 0)) * qtd : 0;
-        const impostoVal    = anuncio ? faturamento * ((anuncio.imposto || 0) / 100) : 0;
-        const faixa         = obterFaixaShopee(valorUnit);
-        const tarifaVenda   = faturamento * (faixa.comissao + TAXA_CAMPANHA_SHOPEE);
-        // freteReal (actual_shipping_fee) = frete pago pelo COMPRADOR à Shopee, NÃO é custo do vendedor.
-        // Além disso é um campo de nível de PEDIDO; aplicá-lo por item causaria multi-contagem.
-        // O custo de frete do vendedor (ex: etiqueta Shopee) deve ser registrado em anuncio.custo_frete.
-        const custoFrete    = anuncio?.custo_frete ? (anuncio.custo_frete as number) * qtd : 0;
-        const margemContrib = faturamento - tarifaVenda - custo - impostoVal - custoFrete;
-        const mcPercent     = faturamento > 0 ? (margemContrib / faturamento) * 100 : 0;
-        const lucroLiquido  = margemContrib;
-        const roi           = custo > 0 ? (lucroLiquido / custo) * 100 : 0;
+        // buyer_paid_amount = o que o comprador pagou (via income_distribution ou total_amount)
+        const buyerPaidItem = hasIncomeData
+          ? incBuyerTotal * ratioItem
+          : faturamento;
+
+        // ── P3: comissao oficial vs estimada ──────────────────────────────────
+        let tarifaVenda: number;
+        if (hasIncomeData && incPlataformaTotalOrder > 0) {
+          // Valores oficiais da Shopee: distribui proporcional por item
+          tarifaVenda = incPlataformaTotalOrder * ratioItem;
+        } else {
+          // Fallback: tabela estimada
+          // BUG-COM-1 FIX: usar itemValue como base (nao faturamento que inclui frete)
+          const faixa = obterFaixaShopee(valorUnit);
+          tarifaVenda = itemValue * (faixa.comissao + TAXA_CAMPANHA_SHOPEE);
+          // Nota: taxaFixa (BUG-COM-2) pendente — requer tipo CNPJ/CPF
+        }
+
+        // ── P1: campos income_distribution proporcionais ───────────────────────
+        const escrowItem        = hasIncomeData ? incEscrow        * ratioItem : 0;
+        const commissionItem    = hasIncomeData ? incCommission    * ratioItem : tarifaVenda;
+        const serviceFeeItem    = hasIncomeData ? incServiceFee    * ratioItem : 0;
+        const txFeeItem         = hasIncomeData ? incTxFee         * ratioItem : 0;
+        const campaignFeeItem   = hasIncomeData ? incCampaignFee   * ratioItem : 0;
+        const voucherShopeeItem = hasIncomeData ? incVoucherShopee * ratioItem : 0;
+        const voucherSellerItem = hasIncomeData ? incVoucherSeller * ratioItem : 0;
+
+        // ── Custos do vendedor ────────────────────────────────────────────────
+        const imagemUrl  = item.image_info?.image_url ?? item.cover_image ?? null;
+        const itemSku    = item.model_sku || item.item_sku || null;
+        const keyVar     = variationId ? `${itemIdStr}|${variationId}` : `${itemIdStr}|`;
+        const anuncio    = mapaAnuncios.get(keyVar) ?? mapaAnuncios.get(`${itemIdStr}|`) ?? null;
+
+        const custo      = anuncio ? ((anuncio.custo_produto || 0) + (anuncio.insumos || 0)) * qtd : 0;
+        const impostoVal = anuncio ? faturamento * ((anuncio.imposto || 0) / 100) : 0;
+        const custoFrete = anuncio?.custo_frete ? (anuncio.custo_frete as number) * qtd : 0;
+
+        // ── Margem e lucro ────────────────────────────────────────────────────
+        // Com income_distribution: escrow_amount ja descontou todas as taxas Shopee
+        // Sem income_distribution: faturamento - tarifaVenda (estimado)
+        let margemContrib: number;
+        if (hasIncomeData && incEscrow > 0) {
+          // Margem real = receita liquida Shopee - custos do vendedor
+          margemContrib = escrowItem - custo - impostoVal - custoFrete;
+        } else {
+          margemContrib = faturamento - tarifaVenda - custo - impostoVal - custoFrete;
+        }
+
+        const mcPercent    = faturamento > 0 ? (margemContrib / faturamento) * 100 : 0;
+        const lucroLiquido = margemContrib; // mesmo valor, nome mais intuitivo
+        const sellerIncome = escrowItem - custo - impostoVal - custoFrete; // receita liquida real
+        const roi          = custo > 0 ? (lucroLiquido / custo) * 100 : 0;
 
         rows.push({
           id:               `${userId}_SHOPEE_${order.order_sn}_${itemIdStr}_${variationId ?? "nv"}`,
@@ -289,22 +462,40 @@ export async function syncShopeeForUserV2(
           sku:              itemSku ?? anuncio?.sku ?? null,
           status:           mapStatus(status),
           frete:            "comprador",
-          logistica:        "Shopee",
+          logistica:        fulfillmentFlag === "fulfilled_by_shopee" ? "SFS" : "Shopee",
           valor_unit:       valorUnit,
           qtd,
-          faturamento,
+          // P2: item_subtotal e faturamento separados para comparacao com painel
+          item_subtotal:    itemSubtotal,     // model_discounted_price × qty
+          faturamento,                         // total_amount proporcional (inclui frete)
+          buyer_paid_amount: buyerPaidItem,   // confirmacao via income_distribution
           custo,
           imposto:          impostoVal,
-          tarifa_venda:     tarifaVenda,
+          tarifa_venda:     tarifaVenda,       // P3: oficial ou estimado
           frete_comprador:  0,
-          frete_vendedor:   custoFrete,   // custo_frete do anuncio (frete do vendedor real)
-          frete_real:       freteReal,    // actual_shipping_fee Shopee (frete do comprador, só referência)
+          frete_vendedor:   custoFrete,
+          frete_real:       freteReal,
           frete_estimado:   freteEstimado,
           margem_contrib:   margemContrib,
           mc_percent:       mcPercent,
           lucro_liquido:    lucroLiquido,
           roi,
+          // P1: campos income_distribution (valores oficiais Shopee)
+          escrow_amount:       escrowItem,
+          commission_fee:      commissionItem,
+          service_fee:         serviceFeeItem,
+          transaction_fee:     txFeeItem,
+          campaign_fee:        campaignFeeItem,
+          voucher_from_shopee: voucherShopeeItem,
+          voucher_from_seller: voucherSellerItem,
+          seller_income:       sellerIncome,
+          has_income_data:     hasIncomeData,
+          // Metadata
+          split_up:         splitUp,
           forma_pagamento:  formaPagamento,
+          cancel_reason:    cancelReason,
+          cancel_by:        cancelBy,
+          fulfillment_flag: fulfillmentFlag,
           codigo_rastreio:  rastreio,
           transportadora,
           imagem_url:       imagemUrl,
@@ -318,13 +509,24 @@ export async function syncShopeeForUserV2(
     }
   }
 
-  // 5. Upsert em lotes de 250
+  // ── ETAPA 5: Upsert com verificacao de erro (P4) ──────────────────────────
   const UPSERT_BATCH = 250;
+  let upsertErrors   = 0;
+
   for (let i = 0; i < rows.length; i += UPSERT_BATCH) {
-    await supabase
+    const { error } = await supabase
       .from("pedidos")
       .upsert(rows.slice(i, i + UPSERT_BATCH), { onConflict: "id" });
+
+    if (error) {
+      upsertErrors++;
+      console.error(
+        `[sync-shopee] upsert batch ${i / UPSERT_BATCH + 1} falhou:`,
+        error.message,
+        `| rows ${i}–${Math.min(i + UPSERT_BATCH, rows.length) - 1}`
+      );
+    }
   }
 
-  return { found, inserted: rows.length };
+  return { found, inserted: rows.length, upsertErrors };
 }

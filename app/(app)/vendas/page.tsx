@@ -486,8 +486,9 @@ export default function VendasPage() {
       { faturamento: 0, custo: 0, imposto: 0, tarifaVenda: 0, freteComprador: 0, freteVendedor: 0, margemContrib: 0, qtd: 0 }
     );
   const mcTotalPct = totais.faturamento > 0 ? (totais.margemContrib / totais.faturamento) * 100 : 0;
-  // Conta ordens únicas (ML conta "quantidade de vendas" = ordens, não itens de linha)
-  const pedidosUnicos = new Set(filteredRows.map(r => r.orderId)).size;
+  // Conta ordens únicas PAGAS (igual ao critério de totais.faturamento)
+  // BUG 3 FIX: antes contava todos os status incluindo cancelados, divergindo da Shopee
+  const pedidosUnicos = new Set(filteredRows.filter(r => r.status === "paid").map(r => r.orderId)).size;
 
   // ── Estilos reutilizáveis ────────────────────────────────────────────────
   const inputStyle: React.CSSProperties = {

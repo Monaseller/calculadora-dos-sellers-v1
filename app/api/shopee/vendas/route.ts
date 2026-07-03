@@ -129,7 +129,8 @@ export async function GET(request: Request) {
   }
 
   const conta       = pedidos[0]?.conta ?? loja.nickname ?? "Shopee";
-  const totalOrders = new Set(rows.map(r => r.orderId)).size;
+  // P5 FIX: contar apenas pedidos pagos (igual ao pedidosUnicos da página vendas)
+  const totalOrders = new Set(rows.filter(r => r.status === 'paid').map(r => r.orderId)).size;
 
   return NextResponse.json({
     dateFrom,

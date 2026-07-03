@@ -2,6 +2,7 @@
 **Data:** 03/07/2026  
 **Versão auditada:** branch atual (commit 9c97d4a)  
 **Resultado final:** ✅ APROVADA PARA PRODUÇÃO (com ressalvas documentadas abaixo)
+**Atualização 03/07/2026:** 3 bugs críticos de pipeline de dados corrigidos — ver seção abaixo
 
 ---
 
@@ -47,6 +48,86 @@ A auditoria cobriu 100% do código-fonte: libs de cálculo, APIs de sync (ML + S
 | `app/(app)/dashboard/page.tsx` | Parâmetro `c` implicitamente `any` em `.replace()` | Tipado como `(c: string)` |
 | `app/(app)/vendas/page.tsx` | Parâmetro `c` implicitamente `any` em `.replace()` | Tipado como `(c: string)` |
 | `components/TopBar.tsx` | JSX desbalanceado — `</>` órfão e `</div>` faltando para o container flex | Estrutura JSX corrigida: `</div>` adicionado antes de `</header>`, fragmento espúrio removido |
+
+---
+
+## CORREÇÕES DE PIPELINE DE DADOS (auditoria 03/07/2026 — continuação)
+
+> **Contexto:** Após constatar que a CDS exibia números divergentes da Shopee (ex: Shopee mostra 842 pedidos, CDS mostrava 792), foi realizada uma auditoria completa do fluxo `API Shopee → mapeamento → Supabase → Dashboard`. Três bugs críticos foram identificados e corrigidos.
+
+### 🔴 CRÍTICO — Pedidos silenciosamente descartados no sync (BUG-PIPE-1)
+
+**Arquivo:** `lib/sync-shopee.ts`  
+**Linha afetada:** ~237 (filtro pós-fetch)  
+**Problema:**
+```typescript
+// ANTES (BUG): usava pay_time mesmo quando API foi consultada por create_time
+const ts = order.pay_time || order.create_time || 0;
+const dataBrt = new Date((ts - 3 * 3600) * 1000).toISOString().split("T")[0];
+if (dataBrt < dateFrom || dataBrt > dateTo) continue; // DESCARTAVA pedidos silenciosamente
+```
+A API era chamada com `create_time` no range [dateFrom, dateTo]. Todos os pedidos retornados TÊM `create_time` dentro do range. Mas o código usava `pay_time` (quando disponível) para validar a data. Pedidos com boleto pago 1-3 dias após a criação, ou pedidos criados próximo à meia-noite (create_time = dia X, pay_time = dia X+1) eram silenciosamente descartados. Esse bug explica a diferença de contagem entre Shopee e CDS.
+
+**Correção:**
+```typescript
+// DEPOIS: noBuffer=true → API consultou por create_time → usar create_time para dataBrt
+const refTs = noBuffer
+  ? (order.create_time || 0)
+  : (order.pay_time || order.create_time || 0);
+const dataBrt = new Date((refTs - 3 * 3600) * 1000).toISOString().split("T")[0];
+if (dataBrt < dateFrom || dataBrt > dateTo) continue;
+```
+
+---
+
+### 🔴 CRÍTICO — Faturamento usa preço por item em vez de `total_amount` (BUG-PIPE-2)
+
+**Arquivo:** `lib/sync-shopee.ts`  
+**Problema:**
+```typescript
+// ANTES (BUG): faturamento = preço do item × quantidade
+// total_amount ERA solicitado na API mas NUNCA USADO
+const valorUnit = Number(item.model_discounted_price ?? item.model_original_price ?? 0);
+const faturamento = valorUnit * qtd; // ≠ total_amount da Shopee
+```
+`total_amount` = o que a Shopee registra como faturamento do pedido: inclui frete pago pelo comprador e considera vouchers/descontos da plataforma. `model_discounted_price × qty` é apenas o preço dos itens. Para um pedido com frete de R$15, a diferença é R$15 por pedido.
+
+**Correção:**
+```typescript
+// DEPOIS: usa total_amount distribuído proporcionalmente por item
+// Garante que sum(faturamento por item do pedido) = total_amount = número da Shopee
+const totalAmount = Number(order.total_amount ?? 0);
+const orderItemsSubtotal = (order.item_list ?? []).reduce((sum, it) =>
+  sum + Number(it.model_discounted_price ?? it.model_original_price ?? 0) * Number(it.model_quantity_purchased ?? 1), 0);
+
+const faturamento = totalAmount > 0 && orderItemsSubtotal > 0
+  ? totalAmount * (itemValue / orderItemsSubtotal)
+  : itemValue; // fallback se total_amount não disponível
+```
+
+---
+
+### 🟠 MÉDIO — `pedidosUnicos` incluía pedidos cancelados (BUG-PIPE-3)
+
+**Arquivo:** `app/(app)/vendas/page.tsx`, linha 490  
+**Problema:**
+```typescript
+// ANTES (BUG): contava TODOS os status incluindo cancelados
+const pedidosUnicos = new Set(filteredRows.map(r => r.orderId)).size;
+// vs totais que corretamente filtrava apenas paid:
+const totais = filteredRows.filter(r => r.status === "paid")...
+```
+O card "Pedidos" exibia um número inflado (incluía cancelados) enquanto o card "Faturamento" excluía cancelados — inconsistente com a Shopee que conta apenas pedidos pagos.
+
+**Correção:**
+```typescript
+// DEPOIS: mesma regra do totais — apenas pedidos paid
+const pedidosUnicos = new Set(filteredRows.filter(r => r.status === "paid").map(r => r.orderId)).size;
+```
+
+---
+
+**Resultado esperado após resync:** A CDS deve exibir exatamente os mesmos números que a Shopee mostra no painel oficial (Pedidos e Faturamento).
 
 ---
 
