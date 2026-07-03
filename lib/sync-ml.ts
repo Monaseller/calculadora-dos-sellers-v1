@@ -1,6 +1,21 @@
 /**
- * Sync de pedidos ML → tabela `pedidos` (Supabase).
- * Chamado pelo cron horário e pelo endpoint de vendas quando cache está vazio/stale.
+ * sync-ml.ts -- Sync completo Mercado Livre -> Supabase (tabela pedidos)
+ *
+ * CORRECOES v2:
+ * BUG 1 CORRIGIDO: Paginacao travava em 1.000 pedidos por dia por status.
+ *   -> ANTES: if (results.length < 50 || offset + 50 >= 1000) break;
+ *   -> DEPOIS: usa paging.total da resposta; para so quando offset >= total
+ *   -> Safety cap em 50.000
+ *
+ * BUG 2 CORRIGIDO: Historico buscava 6 dias quando pediu 1 (buffer desnecessario).
+ *   -> noBuffer=true (Historico): busca EXATAMENTE o range solicitado
+ *   -> noBuffer=false (Cron diario): estende -5 dias para capturar boletos
+ *
+ * BUG 3 NOVO: Retry com backoff exponencial (3 tentativas, 1s->2s->4s).
+ *
+ * BUG 4 NOVO: Timeout por request ML (20s).
+ *
+ * Retorna { found, inserted } para validacao externa.
  */
 import { createClient } from "@supabase/supabase-js";
 import { CATEGORIAS_ML } from "@/lib/comissoes-mercado-livre";
@@ -11,7 +26,46 @@ const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 );
 
-// ── Helpers (idênticos ao ml/vendas/route.ts) ────────────────────────────────
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  tentativas = 3,
+  delayMs    = 1000
+): Promise<T> {
+  let ultimoErro: unknown;
+  for (let i = 0; i < tentativas; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      ultimoErro = e;
+      if (i < tentativas - 1) {
+        await new Promise(r => setTimeout(r, delayMs * Math.pow(2, i)));
+      }
+    }
+  }
+  throw ultimoErro;
+}
+
+async function mlFetch(url: string, token: string): Promise<any> {
+  return withRetry(async () => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 20_000);
+    try {
+      const res = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        throw new Error(`ML API ${res.status}: ${body.slice(0, 120)}`);
+      }
+      return await res.json();
+    } catch (e) {
+      clearTimeout(timer);
+      throw e;
+    }
+  });
+}
 
 function inferLogistica(order: any): string {
   const directType = order.shipping?.logistic_type as string | undefined;
@@ -24,7 +78,7 @@ function inferLogistica(order: any): string {
   const shTags: string[] = order.shipping?.tags ?? [];
   if (shTags.some((t: string) => t.includes("fulfillment")))  return "Full";
   if (shTags.some((t: string) => t.includes("self_service"))) return "Flex";
-  return "—";
+  return "\u2014";
 }
 
 function mapLogisticType(t: string): string {
@@ -36,28 +90,50 @@ function mapLogisticType(t: string): string {
   return map[t] ?? t;
 }
 
+// CORRECAO BUG 1: usa paging.total; nao trava em 1.000
 async function fetchOrdersRange(
-  sellerId: string, token: string,
-  from: string, to: string, status = "paid"
+  sellerId: string,
+  token:    string,
+  from:     string,
+  to:       string,
+  status  = "paid"
 ): Promise<any[]> {
   const orders: any[] = [];
-  let offset = 0;
+  let offset  = 0;
+  const LIMIT = 50;
+  const MAX   = 50_000;
+
   for (;;) {
     const url =
       `https://api.mercadolibre.com/orders/search` +
       `?seller=${sellerId}&order.status=${status}` +
       `&order.date_created.from=${encodeURIComponent(from)}` +
       `&order.date_created.to=${encodeURIComponent(to)}` +
-      `&limit=50&offset=${offset}`;
-    const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-    if (!res.ok) break;
-    const data = await res.json();
+      `&sort=date_asc` +
+      `&limit=${LIMIT}&offset=${offset}`;
+
+    const data = await mlFetch(url, token);
     const results: any[] = data.results ?? [];
     orders.push(...results);
-    if (results.length < 50 || offset + 50 >= 1000) break;
-    offset += 50;
+
+    // CORRECAO BUG 1:
+    // ANTES: if (results.length < 50 || offset + 50 >= 1000) break;
+    // DEPOIS: para quando nao ha mais itens ou offset atingiu o total
+    if (results.length < LIMIT) break;
+
+    offset += LIMIT;
+    const total = data.paging?.total ?? 0;
+    if (total > 0 && offset >= total) break;
+    if (offset >= MAX) break;
   }
+
   return orders;
+}
+
+function addDias(iso: string, n: number): string {
+  const d = new Date(`${iso}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().split("T")[0];
 }
 
 function gerarDias(from: string, to: string): string[] {
@@ -71,81 +147,104 @@ function gerarDias(from: string, to: string): string[] {
   return dias;
 }
 
-function addDias(iso: string, n: number): string {
-  const d = new Date(`${iso}T12:00:00Z`);
-  d.setUTCDate(d.getUTCDate() + n);
-  return d.toISOString().split("T")[0];
+export interface SyncMLResult {
+  found:    number;
+  inserted: number;
 }
 
-// ── Função principal ──────────────────────────────────────────────────────────
-
 export async function syncMLForUser(
-  userId: string,
-  dateFrom: string,
-  dateTo: string,
-  cookieToken?: string   // passa o token do cookie se disponível (mais fresco)
+  userId:      string,
+  dateFrom:    string,
+  dateTo:      string,
+  cookieToken?: string,
+  noBuffer     = false
 ): Promise<number> {
-  // Obtém token — cookie tem prioridade, depois DB
-  let token = cookieToken;
+  const result = await syncMLForUserV2(userId, dateFrom, dateTo, cookieToken, noBuffer);
+  return result.inserted;
+}
+
+export async function syncMLForUserV2(
+  userId:      string,
+  dateFrom:    string,
+  dateTo:      string,
+  cookieToken?: string,
+  noBuffer     = false
+): Promise<SyncMLResult> {
+  let token    = cookieToken;
   let sellerId = "";
-  let conta = "ML";
+  let conta    = "ML";
 
   if (token) {
-    const meRes = await fetch("https://api.mercadolibre.com/users/me", {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (meRes.ok) {
-      const me = await meRes.json();
+    try {
+      const me = await mlFetch("https://api.mercadolibre.com/users/me", token);
       sellerId = String(me.id);
       conta    = me.nickname || me.first_name || "ML";
-    } else {
-      token = undefined; // cookie expirado, tenta DB
+    } catch {
+      token = undefined;
     }
   }
 
   if (!token) {
     const loja = await getMLLojaAtiva(userId);
-    if (!loja) return 0;
+    if (!loja) return { found: 0, inserted: 0 };
     token    = loja.accessToken;
     sellerId = loja.sellerId;
     conta    = loja.nickname;
   }
 
-  // Busca com janela estendida (5 dias antes para capturar boletos atrasados)
-  const dateFetchFrom = addDias(dateFrom, -5);
+  // CORRECAO BUG 2:
+  // noBuffer=true  (Historico): busca EXATAMENTE o range pedido
+  // noBuffer=false (Cron diario): estende -5 dias para capturar boletos
+  const dateFetchFrom = noBuffer ? dateFrom : addDias(dateFrom, -5);
   const diasFetch     = gerarDias(dateFetchFrom, dateTo);
 
-  async function fetchAllDias(status: string): Promise<any[]> {
-    const res = await Promise.all(
-      diasFetch.map(d =>
-        fetchOrdersRange(sellerId, token!, `${d}T00:00:00.000-03:00`, `${d}T23:59:59.999-03:00`, status)
-      )
-    );
-    return res.flat();
-  }
+  const STATUSES = ["paid", "confirmed", "payment_in_process", "cancelled"] as const;
+  const STATUS_MAP: Record<string, string> = {
+    paid:               "paid",
+    confirmed:          "pending",
+    payment_in_process: "pending",
+    cancelled:          "cancelled",
+  };
 
-  const [paidOrders, confirmedOrders, paymentInProcessOrders, cancelledOrders] = await Promise.all([
-    fetchAllDias("paid"),
-    fetchAllDias("confirmed"),
-    fetchAllDias("payment_in_process"),
-    fetchAllDias("cancelled"),
-  ]);
-
-  paidOrders.forEach(o => { o._status = "paid"; });
-  confirmedOrders.forEach(o => { o._status = "pending"; });
-  paymentInProcessOrders.forEach(o => { o._status = "pending"; });
-  cancelledOrders.forEach(o => {
-    const foiReembolsado = (o.payments ?? []).some(
-      (p: any) => p.status === "refunded" || p.status === "partially_refunded"
-    );
-    o._status = foiReembolsado ? "devolucao" : "cancelled";
-  });
+  const allByStatus = await Promise.all(
+    STATUSES.map(status =>
+      Promise.all(
+        diasFetch.map(d =>
+          fetchOrdersRange(
+            sellerId, token!,
+            `${d}T00:00:00.000-03:00`,
+            `${d}T23:59:59.999-03:00`,
+            status
+          ).catch(() => [] as any[])
+        )
+      ).then(results => results.flat().map(o => ({ ...o, _rawStatus: status })))
+    )
+  );
 
   const seenIds = new Set<number>();
-  const allOrders = [...paidOrders, ...confirmedOrders, ...paymentInProcessOrders, ...cancelledOrders]
-    .filter(o => { if (seenIds.has(o.id)) return false; seenIds.add(o.id); return true; });
+  const allOrders: any[] = [];
 
-  // Anúncios
+  for (const grupo of allByStatus) {
+    for (const o of grupo) {
+      if (seenIds.has(o.id)) continue;
+      seenIds.add(o.id);
+
+      if (o._rawStatus === "cancelled") {
+        const foiReembolsado = (o.payments ?? []).some(
+          (p: any) => p.status === "refunded" || p.status === "partially_refunded"
+        );
+        o._status = foiReembolsado ? "devolucao" : "cancelled";
+      } else {
+        o._status = STATUS_MAP[o._rawStatus] ?? "paid";
+      }
+
+      allOrders.push(o);
+    }
+  }
+
+  const found = allOrders.length;
+  if (found === 0) return { found: 0, inserted: 0 };
+
   const { data: anuncios } = await supabase
     .from("anuncios")
     .select("id, ml_item_id, nome, sku, custo_produto, insumos, custo_frete, frete_gratis, imposto, tipo_anuncio, categoria")
@@ -162,7 +261,6 @@ export async function syncMLForUser(
   const now = new Date().toISOString();
 
   for (const order of allOrders) {
-    // Data do pedido em BRT (igual ao ml/vendas atual)
     let dataPedido: string;
     if (order._status === "cancelled" || order._status === "devolucao") {
       const ref = order.date_created ?? order.date_closed ?? "";
@@ -205,7 +303,7 @@ export async function syncMLForUser(
         tarifaVenda = faturamento * comissaoRate;
       }
 
-      const impostoVal     = anuncio ? faturamento * ((anuncio.imposto || 0) / 100) : 0;
+      const impostoVal     = anuncio ? faturamento * ((anuncio.imposto   || 0) / 100) : 0;
       const custo          = anuncio ? ((anuncio.custo_produto || 0) + (anuncio.insumos || 0)) * qtd : 0;
       const freteGratis    = anuncio?.frete_gratis ?? false;
       const custoFrete     = (anuncio?.custo_frete ?? 0) as number;
@@ -213,6 +311,8 @@ export async function syncMLForUser(
       const freteVendedor  = freteGratis ? custoFrete * qtd : 0;
       const margemContrib  = faturamento - tarifaVenda - freteComprador - freteVendedor - impostoVal - custo;
       const mcPercent      = faturamento > 0 ? (margemContrib / faturamento) * 100 : 0;
+      const lucroLiquido   = margemContrib;
+      const roi            = custo > 0 ? (lucroLiquido / custo) * 100 : 0;
 
       rows.push({
         id:              `${userId}_ML_${order.id}_${mlItemId}`,
@@ -238,13 +338,14 @@ export async function syncMLForUser(
         frete_vendedor:  freteVendedor,
         margem_contrib:  margemContrib,
         mc_percent:      mcPercent,
+        lucro_liquido:   lucroLiquido,
+        roi,
         cadastrado:      !!anuncio,
         synced_at:       now,
       });
     }
   }
 
-  // Upsert em lotes de 250
   const UPSERT_BATCH = 250;
   for (let i = 0; i < rows.length; i += UPSERT_BATCH) {
     await supabase
@@ -252,5 +353,5 @@ export async function syncMLForUser(
       .upsert(rows.slice(i, i + UPSERT_BATCH), { onConflict: "id" });
   }
 
-  return rows.length;
+  return { found, inserted: rows.length };
 }

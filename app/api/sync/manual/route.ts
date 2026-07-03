@@ -35,7 +35,7 @@ export async function POST(request: Request) {
       (marketplace === "todos" || marketplace === "ML")
         ? getMLLojaAtiva(userId)
             .then(loja => loja
-              ? syncMLForUser(userId, dateFrom, dateTo)
+              ? syncMLForUser(userId, dateFrom, dateTo, undefined, noBuffer)
                   .then(n => { results.ml = n; })
                   .catch(e => { results.mlErro = String(e?.message ?? e); })
               : void (results.mlErro = "ML não conectada")

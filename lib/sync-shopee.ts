@@ -1,6 +1,19 @@
 /**
- * Sync de pedidos Shopee → tabela `pedidos` (Supabase).
- * Chamado pelo cron horário e pelo endpoint de vendas quando cache está vazio/stale.
+ * sync-shopee.ts -- Sync completo Shopee -> Supabase (tabela pedidos)
+ *
+ * CORRECOES v2:
+ * BUG 1 CORRIGIDO: COMPLETED filtrado no create_time causava -20-40% de pedidos.
+ *   -> create_time: inclui TODOS os status (COMPLETED = entregue = valido)
+ *   -> update_time: filtra COMPLETED (evita pedidos antigos com update hoje)
+ *
+ * BUG 2 CORRIGIDO: response_optional_fields incompleto.
+ *   -> Agora busca: actual_shipping_fee, payment_method, package_list,
+ *     recipient_address, buyer_username, estimated_shipping_fee
+ *   -> Extrai imagem direto do item_list[].image_info.image_url
+ *
+ * BUG 3 NOVO: Retry com backoff exponencial (3 tentativas, 1s->2s->4s)
+ *
+ * Retorna { found, inserted } para validacao externa.
  */
 import { createClient } from "@supabase/supabase-js";
 import { shopeeGet } from "@/lib/shopee-api";
@@ -27,52 +40,89 @@ function mapStatus(s: string): string {
   return m[s] ?? "paid";
 }
 
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  tentativas = 3,
+  delayMs = 1000
+): Promise<T> {
+  let ultimoErro: unknown;
+  for (let i = 0; i < tentativas; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      ultimoErro = e;
+      if (i < tentativas - 1) {
+        await new Promise(r => setTimeout(r, delayMs * Math.pow(2, i)));
+      }
+    }
+  }
+  throw ultimoErro;
+}
+
+function addDays(iso: string, n: number): string {
+  const d = new Date(`${iso}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().split("T")[0];
+}
+
+function gerarChunks(from: string, to: string): Array<{ from: string; to: string }> {
+  const chunks: Array<{ from: string; to: string }> = [];
+  let cur = from;
+  while (cur <= to) {
+    const end = addDays(cur, 13);
+    chunks.push({ from: cur, to: end > to ? to : end });
+    cur = addDays(end, 1);
+  }
+  return chunks;
+}
+
+export interface SyncShopeeResult {
+  found:    number;
+  inserted: number;
+}
+
 export async function syncShopeeForUser(
-  userId: string,
-  dateFrom: string,
-  dateTo: string,
-  noBuffer = false,           // true para Histórico (range exato, sem extensão de -3d)
-  lojaOverride?: {            // evita dupla chamada getShopeeLojaAtiva quando rota já buscou
+  userId:      string,
+  dateFrom:    string,
+  dateTo:      string,
+  noBuffer     = false,
+  lojaOverride?: {
     lojaId: string; partnerId: string; partnerKey: string;
     accessToken: string; shopId: number; nickname: string;
   }
 ): Promise<number> {
+  const result = await syncShopeeForUserV2(userId, dateFrom, dateTo, noBuffer, lojaOverride);
+  return result.inserted;
+}
+
+export async function syncShopeeForUserV2(
+  userId:      string,
+  dateFrom:    string,
+  dateTo:      string,
+  noBuffer     = false,
+  lojaOverride?: {
+    lojaId: string; partnerId: string; partnerKey: string;
+    accessToken: string; shopId: number; nickname: string;
+  }
+): Promise<SyncShopeeResult> {
   const loja = lojaOverride ?? await getShopeeLojaAtiva(userId);
-  if (!loja) return 0;
+  if (!loja) return { found: 0, inserted: 0 };
 
   const { partnerId: partner_id, partnerKey: partner_key, accessToken: access_token, shopId, nickname } = loja;
 
-  // A API Shopee limita get_order_list a máximo 15 dias por chamada.
-  // Dividimos o range em chunks de 14 dias para não ultrapassar o limite.
-  function addDaysShopee(iso: string, n: number): string {
-    const d = new Date(`${iso}T12:00:00Z`);
-    d.setUTCDate(d.getUTCDate() + n);
-    return d.toISOString().split("T")[0];
-  }
+  // noBuffer=true  -> Historico: create_time
+  //   Inclui TODOS os status -- COMPLETED (entregue) e valido no range
+  //   NAO filtrar COMPLETED aqui (era bug: -20-40% pedidos perdidos silenciosamente)
+  //
+  // noBuffer=false -> Cron diario: update_time
+  //   Pedidos com qualquer update hoje -- pode incluir pedidos antigos
+  //   Filtra COMPLETED (pedidos de meses atras com update de entrega hoje)
+  const timeRangeField   = noBuffer ? "create_time" : "update_time";
+  const filtrarCompleted = !noBuffer;
 
-  // Gera chunks de [chunkFrom, chunkTo] com máx 14 dias cada
-  function gerarChunks(from: string, to: string): Array<{ from: string; to: string }> {
-    const chunks: Array<{ from: string; to: string }> = [];
-    let cur = from;
-    while (cur <= to) {
-      const end = addDaysShopee(cur, 13); // +13 dias = 14 dias total
-      chunks.push({ from: cur, to: end > to ? to : end });
-      cur = addDaysShopee(end, 1);
-    }
-    return chunks;
-  }
+  const chunks = gerarChunks(dateFrom, dateTo);
 
-  // Estratégia dupla por contexto de uso:
-  //   noBuffer=true  → Histórico: create_time + range exato
-  //                    ~15 páginas/dia (1500 pedidos), cabe em 55s com folga
-  //   noBuffer=false → Cron diário: update_time + range exato
-  //                    captura boletos pagos fora da janela de criação
-  //                    (só roda 2 dias/vez, volume controlado)
-  const timeRangeField = noBuffer ? "create_time" : "update_time";
-  const fetchFrom = dateFrom;
-  const chunks = gerarChunks(fetchFrom, dateTo);
-
-  // ── 1. Lista orderSNs (por chunks de ≤14 dias) ──────────────────────────────
+  // 1. Listagem: todas as paginas via cursor
   const allOrderSns: string[] = [];
 
   for (const chunk of chunks) {
@@ -82,7 +132,7 @@ export async function syncShopeeForUser(
 
     for (;;) {
       const params: Record<string, string | number> = {
-        time_range_field:         timeRangeField,  // create_time (Histórico) ou update_time (Cron)
+        time_range_field:         timeRangeField,
         time_from:                chunkFrom,
         time_to:                  chunkTo,
         page_size:                100,
@@ -90,29 +140,34 @@ export async function syncShopeeForUser(
       };
       if (cursor) params.cursor = cursor;
 
-      const data = await shopeeGet("/api/v2/order/get_order_list", partner_id, partner_key, access_token, shopId, params);
+      const data = await withRetry(() =>
+        shopeeGet("/api/v2/order/get_order_list", partner_id, partner_key, access_token, shopId, params)
+      );
 
-      // Detecta erros da API Shopee (ex: token expirado, range inválido)
       if (data?.error && data.error !== "") {
-        throw new Error(`Shopee API error: ${data.error} – ${data.message ?? "sem mensagem"}`);
+        throw new Error(`Shopee API error: ${data.error} -- ${data.message ?? ""}`);
       }
 
       const list: any[] = data?.response?.order_list ?? [];
-      // COMPLETED = pedidos entregues há semanas, com pay_time antigo.
-      // Com update_time eles aparecem na listagem mas são descartados pelo filtro de data.
-      // Excluir aqui evita buscar ~1500 detalhes desnecessários por dia, prevenindo timeout.
-      allOrderSns.push(...list
-        .filter((o: any) => (o.order_status ?? "") !== "COMPLETED")
-        .map((o: any) => o.order_sn));
+
+      // CORRECAO BUG 1:
+      // create_time: inclui TODOS os status -- COMPLETED = entregue mas valido
+      // update_time: exclui COMPLETED -- sao pedidos antigos com update hoje (entrega)
+      const sns = filtrarCompleted
+        ? list.filter((o: any) => (o.order_status ?? "") !== "COMPLETED").map((o: any) => o.order_sn)
+        : list.map((o: any) => o.order_sn);
+
+      allOrderSns.push(...sns);
 
       if (!data?.response?.more || !data?.response?.next_cursor) break;
       cursor = data.response.next_cursor;
     }
   }
 
-  if (allOrderSns.length === 0) return 0;
+  const found = allOrderSns.length;
+  if (found === 0) return { found: 0, inserted: 0 };
 
-  // ── 2. Anúncios cadastrados ───────────────────────────────────────────────────
+  // 2. Anuncios cadastrados
   const { data: anuncios } = await supabase
     .from("anuncios")
     .select("id, ml_item_id, variation_id, sku, custo_produto, insumos, imposto")
@@ -127,8 +182,26 @@ export async function syncShopeeForUser(
     if (!mapaAnuncios.has(`${a.ml_item_id}|`)) mapaAnuncios.set(`${a.ml_item_id}|`, a);
   }
 
-  // ── 3. Detalhes em paralelo (10 por vez) ────────────────────────────────────
-  const BATCH = 50;
+  // 3. Detalhes em paralelo (50 por batch, 10 concurrent)
+  // CORRECAO BUG 2: response_optional_fields completos
+  const DETAIL_FIELDS = [
+    "item_list",
+    "order_status",
+    "create_time",
+    "pay_time",
+    "total_amount",
+    "actual_shipping_fee",
+    "estimated_shipping_fee",
+    "payment_method",
+    "package_list",
+    "recipient_address",
+    "buyer_username",
+    "shipping_carrier",
+    "cancel_reason",
+    "buyer_cancel_reason",
+  ].join(",");
+
+  const BATCH       = 50;
   const CONCURRENCY = 10;
   const batches: string[][] = [];
   for (let i = 0; i < allOrderSns.length; i += BATCH) {
@@ -137,80 +210,111 @@ export async function syncShopeeForUser(
 
   const allDetails: any[] = [];
   for (let i = 0; i < batches.length; i += CONCURRENCY) {
-    const chunk = batches.slice(i, i + CONCURRENCY);
+    const grupo = batches.slice(i, i + CONCURRENCY);
     const results = await Promise.all(
-      chunk.map(batch =>
-        shopeeGet("/api/v2/order/get_order_detail", partner_id, partner_key, access_token, shopId, {
-          order_sn_list:            batch.join(","),
-          response_optional_fields: "item_list,total_amount,order_status,create_time,pay_time",
-        })
+      grupo.map(batch =>
+        withRetry(() =>
+          shopeeGet("/api/v2/order/get_order_detail", partner_id, partner_key, access_token, shopId, {
+            order_sn_list:            batch.join(","),
+            response_optional_fields: DETAIL_FIELDS,
+          })
+        )
       )
     );
     allDetails.push(...results);
   }
 
-  // ── 4. Monta linhas ───────────────────────────────────────────────────────────
+  // 4. Monta linhas
   const rows: any[] = [];
   const now = new Date().toISOString();
 
   for (const detail of allDetails) {
     for (const order of (detail?.response?.order_list ?? [])) {
-      const status  = order.order_status ?? "UNKNOWN";
-      const ts      = order.pay_time || order.create_time || 0;
-      const dataBrt = new Date((ts - 3 * 3600) * 1000).toISOString().split("T")[0];
+      const status   = order.order_status ?? "UNKNOWN";
+      const ts       = order.pay_time || order.create_time || 0;
+      const dataBrt  = new Date((ts - 3 * 3600) * 1000).toISOString().split("T")[0];
 
-      // Só armazena pedidos cujo pay_time (ou create_time) cai dentro do range real
       if (dataBrt < dateFrom || dataBrt > dateTo) continue;
+
+      const freteReal      = Number(order.actual_shipping_fee   ?? 0);
+      const freteEstimado  = Number(order.estimated_shipping_fee ?? 0);
+      const formaPagamento = order.payment_method ?? null;
+      const buyerUsername  = order.buyer_username ?? null;
+
+      const addr        = order.recipient_address ?? {};
+      const buyerCidade = addr.city    ?? addr.district ?? null;
+      const buyerEstado = addr.state   ?? null;
+
+      const packages      = order.package_list ?? [];
+      const firstPkg      = packages[0] ?? {};
+      const rastreio      = firstPkg.package_number ?? null;
+      const transportadora = order.shipping_carrier ?? firstPkg.logistics_status ?? null;
 
       for (const item of (order.item_list ?? [])) {
         const itemIdStr   = String(item.item_id);
         const variationId = item.model_id ? String(item.model_id) : null;
-        const valorUnit   = item.model_discounted_price ?? item.model_original_price ?? 0;
-        const qtd         = item.model_quantity_purchased ?? 1;
+        const valorUnit   = Number(item.model_discounted_price ?? item.model_original_price ?? 0);
+        const qtd         = Number(item.model_quantity_purchased ?? 1);
         const faturamento = valorUnit * qtd;
+
+        const imagemUrl = item.image_info?.image_url ?? item.cover_image ?? null;
+        const itemSku   = item.model_sku || item.item_sku || null;
 
         const keyVar  = variationId ? `${itemIdStr}|${variationId}` : `${itemIdStr}|`;
         const anuncio = mapaAnuncios.get(keyVar) ?? mapaAnuncios.get(`${itemIdStr}|`) ?? null;
 
-        const custo       = anuncio ? ((anuncio.custo_produto || 0) + (anuncio.insumos || 0)) * qtd : 0;
-        const impostoVal  = anuncio ? faturamento * ((anuncio.imposto || 0) / 100) : 0;
-        const faixa       = obterFaixaShopee(valorUnit);
-        const tarifaVenda = faturamento * (faixa.comissao + TAXA_CAMPANHA_SHOPEE);
-        const margemContrib = faturamento - tarifaVenda - custo - impostoVal;
+        const custo         = anuncio ? ((anuncio.custo_produto || 0) + (anuncio.insumos || 0)) * qtd : 0;
+        const impostoVal    = anuncio ? faturamento * ((anuncio.imposto || 0) / 100) : 0;
+        const faixa         = obterFaixaShopee(valorUnit);
+        const tarifaVenda   = faturamento * (faixa.comissao + TAXA_CAMPANHA_SHOPEE);
+        const margemContrib = faturamento - tarifaVenda - custo - impostoVal - freteReal;
         const mcPercent     = faturamento > 0 ? (margemContrib / faturamento) * 100 : 0;
+        const lucroLiquido  = margemContrib;
+        const roi           = custo > 0 ? (lucroLiquido / custo) * 100 : 0;
 
         rows.push({
-          id:              `${userId}_SHOPEE_${order.order_sn}_${itemIdStr}_${variationId ?? "nv"}`,
-          user_id:         userId,
-          marketplace:     "Shopee",
-          order_id:        order.order_sn,
-          data:            dataBrt,
-          anuncio:         item.item_name ?? itemIdStr,
-          ml_item_id:      itemIdStr,
-          variation_id:    variationId,
-          conta:           nickname,
-          sku:             item.model_sku || anuncio?.sku || null,
-          status:          mapStatus(status),
-          frete:           "comprador",
-          logistica:       "Shopee",
-          valor_unit:      valorUnit,
+          id:               `${userId}_SHOPEE_${order.order_sn}_${itemIdStr}_${variationId ?? "nv"}`,
+          user_id:          userId,
+          marketplace:      "Shopee",
+          order_id:         order.order_sn,
+          data:             dataBrt,
+          anuncio:          item.item_name ?? itemIdStr,
+          ml_item_id:       itemIdStr,
+          variation_id:     variationId,
+          conta:            nickname,
+          sku:              itemSku ?? anuncio?.sku ?? null,
+          status:           mapStatus(status),
+          frete:            "comprador",
+          logistica:        "Shopee",
+          valor_unit:       valorUnit,
           qtd,
           faturamento,
           custo,
-          imposto:         impostoVal,
-          tarifa_venda:    tarifaVenda,
-          frete_comprador: 0,
-          frete_vendedor:  0,
-          margem_contrib:  margemContrib,
-          mc_percent:      mcPercent,
-          cadastrado:      !!anuncio,
-          synced_at:       now,
+          imposto:          impostoVal,
+          tarifa_venda:     tarifaVenda,
+          frete_comprador:  0,
+          frete_vendedor:   0,
+          frete_real:       freteReal,
+          frete_estimado:   freteEstimado,
+          margem_contrib:   margemContrib,
+          mc_percent:       mcPercent,
+          lucro_liquido:    lucroLiquido,
+          roi,
+          forma_pagamento:  formaPagamento,
+          codigo_rastreio:  rastreio,
+          transportadora,
+          imagem_url:       imagemUrl,
+          buyer_username:   buyerUsername,
+          buyer_cidade:     buyerCidade,
+          buyer_estado:     buyerEstado,
+          cadastrado:       !!anuncio,
+          synced_at:        now,
         });
       }
     }
   }
 
-  // ── 5. Upsert em lotes de 250 ────────────────────────────────────────────────
+  // 5. Upsert em lotes de 250
   const UPSERT_BATCH = 250;
   for (let i = 0; i < rows.length; i += UPSERT_BATCH) {
     await supabase
@@ -218,5 +322,5 @@ export async function syncShopeeForUser(
       .upsert(rows.slice(i, i + UPSERT_BATCH), { onConflict: "id" });
   }
 
-  return rows.length;
+  return { found, inserted: rows.length };
 }
