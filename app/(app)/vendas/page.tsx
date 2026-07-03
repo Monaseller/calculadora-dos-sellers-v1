@@ -88,7 +88,7 @@ export default function VendasPage() {
     if (typeof window === "undefined") return false;
     return !localStorage.getItem("historico_concluido_v1");
   });
-  const [historicoLoja, setHistoricoLoja] = useState<"todos" | "ML" | "Shopee">("todos");
+  // historicoLoja removido — sempre sincroniza todas as plataformas
   type MesStatus = "pendente" | "sincronizando" | "ok" | "erro";
   const [historicoMeses, setHistoricoMeses] = useState<{ label: string; from: string; to: string; status: MesStatus; count?: number; erro?: string }[]>([]);
   const [historicoRodando, setHistoricoRodando] = useState(false);
@@ -136,7 +136,7 @@ export default function VendasPage() {
       const res = await fetch("/api/sync/manual", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ dateFrom: from, dateTo: to, marketplace: historicoLoja, noBuffer: true }),
+        body: JSON.stringify({ dateFrom: from, dateTo: to, marketplace: "todos", noBuffer: true }),
         signal: ctrl.signal,
       });
       clearTimeout(tid);
@@ -459,7 +459,7 @@ export default function VendasPage() {
 
         <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
           <button
-            onClick={() => setHistoricoOpen(true)}
+            onClick={() => { setHistoricoOpen(true); if (!historicoRodando && historicoMeses.length === 0) iniciarHistorico(); }}
             style={{
               padding: "10px 16px",
               background: "rgba(255,255,255,0.05)",
@@ -934,7 +934,7 @@ export default function VendasPage() {
             </p>
           </div>
           <button
-            onClick={() => setHistoricoOpen(true)}
+            onClick={() => { setHistoricoOpen(true); if (!historicoRodando && historicoMeses.length === 0) iniciarHistorico(); }}
             style={{
               padding: "12px 22px", borderRadius: "12px",
               background: "linear-gradient(135deg,#ff6b00,#ffb800)",
@@ -1255,9 +1255,17 @@ export default function VendasPage() {
             {/* Cabeçalho */}
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "24px" }}>
               <div>
-                <h2 style={{ margin: 0, fontSize: "20px", fontWeight: 900 }}>🗂 Sincronizar Histórico</h2>
+                <h2 style={{ margin: 0, fontSize: "20px", fontWeight: 900 }}>📊 Histórico de Vendas</h2>
                 <p style={{ margin: "4px 0 0", color: "#9099aa", fontSize: "13px" }}>
-                  Busca todos os pedidos mês a mês e salva no banco de dados.
+                  {historicoRodando
+                    ? "Sincronizando os últimos 2 meses, aguarde..."
+                    : historicoMeses.length === 0
+                    ? "Preparando sincronização..."
+                    : historicoMeses.every(m => m.status === "ok")
+                    ? "✅ Concluído! A partir de agora atualiza sozinho todo dia."
+                    : historicoMeses.some(m => m.status === "erro")
+                    ? "Alguns meses falharam — use o botão abaixo para tentar novamente."
+                    : "Sincronização encerrada."}
                 </p>
               </div>
               {!historicoRodando && (
@@ -1268,68 +1276,11 @@ export default function VendasPage() {
               )}
             </div>
 
-            {/* Configurações (só mostra antes de iniciar) */}
+            {/* Iniciando — estado breve antes dos meses carregarem */}
             {historicoMeses.length === 0 && (
-              <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
-                <div>
-                  <label style={{ fontSize: "11px", fontWeight: 700, color: "#9099aa", letterSpacing: "0.5px", display: "block", marginBottom: "8px" }}>
-                    BUSCAR DESDE
-                  </label>
-                  <input
-                    type="month"
-                    value={historicoDesde}
-                    onChange={e => setHistoricoDesde(e.target.value)}
-                    style={{
-                      padding: "10px 14px", borderRadius: "10px",
-                      border: "1px solid rgba(255,255,255,0.1)",
-                      background: "rgba(255,255,255,0.05)",
-                      color: "white", fontSize: "14px", outline: "none", width: "100%",
-                    }}
-                  />
-                </div>
-
-                <div>
-                  <label style={{ fontSize: "11px", fontWeight: 700, color: "#9099aa", letterSpacing: "0.5px", display: "block", marginBottom: "8px" }}>
-                    PLATAFORMA
-                  </label>
-                  <div style={{ display: "flex", gap: "8px" }}>
-                    {(["todos", "ML", "Shopee"] as const).map(key => (
-                      <button
-                        key={key}
-                        onClick={() => setHistoricoLoja(key)}
-                        style={{
-                          flex: 1, padding: "10px", borderRadius: "10px",
-                          border: `1px solid ${historicoLoja === key ? "rgba(255,107,0,0.5)" : "rgba(255,255,255,0.1)"}`,
-                          background: historicoLoja === key ? "rgba(255,107,0,0.12)" : "rgba(255,255,255,0.04)",
-                          color: historicoLoja === key ? "#ff6b00" : "#9099aa",
-                          fontWeight: 700, fontSize: "13px", cursor: "pointer",
-                        }}
-                      >
-                        {key === "todos" ? "🏪 Todas" : key === "ML" ? "🛒 ML" : "🟠 Shopee"}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div style={{
-                  background: "rgba(255,184,0,0.06)", border: "1px solid rgba(255,184,0,0.2)",
-                  borderRadius: "12px", padding: "14px 16px",
-                  color: "#ffb800", fontSize: "12px", lineHeight: 1.6,
-                }}>
-                  ⚡ Cada mês é sincronizado em sequência. Pedidos já salvos serão atualizados (upsert). O processo pode demorar alguns minutos.
-                </div>
-
-                <button
-                  onClick={iniciarHistorico}
-                  style={{
-                    padding: "14px", borderRadius: "12px",
-                    background: "linear-gradient(135deg,#ff6b00,#ffb800)",
-                    border: "none", color: "#10131b", fontWeight: 900,
-                    fontSize: "15px", cursor: "pointer",
-                  }}
-                >
-                  Iniciar Sincronização
-                </button>
+              <div style={{ textAlign: "center", padding: "40px 0", color: "#9099aa" }}>
+                <div style={{ fontSize: "28px", animation: "spin 1s linear infinite", display: "inline-block", marginBottom: "12px" }}>⟳</div>
+                <p style={{ margin: 0, fontSize: "13px" }}>Preparando os últimos 2 meses...</p>
               </div>
             )}
 
@@ -1429,19 +1380,33 @@ export default function VendasPage() {
                           🔄 Tentar novamente os meses com erro ({historicoMeses.filter(m => m.status === "erro").length})
                         </button>
                       )}
+
+                      {/* Mensagem de sincronização automática pós-conclusão */}
+                      {historicoMeses.length > 0 && historicoMeses.every(m => m.status === "ok") && (
+                        <div style={{
+                          background: "rgba(0,217,126,0.07)", border: "1px solid rgba(0,217,126,0.2)",
+                          borderRadius: "12px", padding: "14px 16px",
+                          color: "#00D97E", fontSize: "12px", lineHeight: 1.6, textAlign: "center",
+                        }}>
+                          🎉 Pronto! Seus dados dos últimos 2 meses estão salvos.<br />
+                          <span style={{ color: "#9099aa" }}>O sistema atualiza automaticamente todo dia. Você não precisa fazer isso de novo.</span>
+                        </div>
+                      )}
+
                       <div style={{ display: "flex", gap: "8px" }}>
+                        {/* Re-sincronizar: reinicia do zero */}
                         <button
-                          onClick={() => { setHistoricoMeses([]); }}
+                          onClick={() => { setHistoricoMeses([]); iniciarHistorico(); }}
                           style={{
                             flex: 1, padding: "12px", borderRadius: "12px",
                             background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)",
-                            color: "#9099aa", fontWeight: 700, fontSize: "14px", cursor: "pointer",
+                            color: "#9099aa", fontWeight: 700, fontSize: "13px", cursor: "pointer",
                           }}
                         >
-                          ↩ Reiniciar
+                          🔄 Re-sincronizar
                         </button>
                         <button
-                          onClick={() => { setHistoricoOpen(false); setHistoricoMeses([]); sync(dateFrom, dateTo, skuTags, [...filtrosCadastro, ...filtrosStatus]); }}
+                          onClick={() => { setHistoricoOpen(false); sync(dateFrom, dateTo, skuTags, [...filtrosCadastro, ...filtrosStatus]); }}
                           style={{
                             flex: 2, padding: "12px", borderRadius: "12px",
                             background: "linear-gradient(135deg,#ff6b00,#ffb800)",
