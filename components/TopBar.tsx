@@ -1,6 +1,7 @@
 "use client";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
+import { useDateField } from "@/lib/date-field-context";
 
 const PAGE_INFO: Record<string, { title: string; desc: string }> = {
   "/dashboard":     { title: "Dashboard",     desc: "Visão geral dos seus anúncios e resultados." },
@@ -22,6 +23,9 @@ export default function TopBar() {
   const path   = usePathname();
   const router = useRouter();
   const info   = PAGE_INFO[path] ?? { title: "CDS", desc: "" };
+  // Fase D (2026-07-06): seletor global de data — afeta Dashboard, Vendas, KPIs,
+  // gráficos, balancete, produtos e rankings (ver docs/BUSINESS_RULES.md).
+  const { dateField, setDateField } = useDateField();
 
   const [lojas,       setLojas]       = useState<Loja[]>([]);
   const [lojaAtiva,   setLojaAtiva]   = useState<string | null>(null);
@@ -110,6 +114,38 @@ export default function TopBar() {
       </div>
 
       <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+
+        {/* ── Seletor de data (Fase D) — Data de Pagamento (padrão) / Data de Criação ── */}
+        <div
+          title="Define a data usada para filtrar e calcular todas as telas: Data de Pagamento (visão financeira) ou Data de Criação (visão operacional)."
+          style={{
+            display: "flex", alignItems: "center",
+            background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)",
+            borderRadius: "999px", padding: "3px", gap: "2px",
+          }}
+        >
+          {([
+            { key: "pagamento", label: "Data de Pagamento" },
+            { key: "criacao",   label: "Data de Criação" },
+          ] as const).map(opt => {
+            const ativo = dateField === opt.key;
+            return (
+              <button
+                key={opt.key}
+                onClick={() => setDateField(opt.key)}
+                style={{
+                  padding: "6px 13px", borderRadius: "999px", border: "none", cursor: "pointer",
+                  fontSize: "12px", fontWeight: 700, whiteSpace: "nowrap",
+                  background: ativo ? "linear-gradient(135deg,#ff6b00,#ffb800)" : "transparent",
+                  color: ativo ? "#10131b" : "#9099aa",
+                  transition: "background 0.15s, color 0.15s",
+                }}
+              >
+                {opt.label}
+              </button>
+            );
+          })}
+        </div>
 
         {/* ── Seletor de loja ── */}
         <div ref={dropRef} style={{ position: "relative" }}>

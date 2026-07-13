@@ -2,6 +2,8 @@
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import { createClient } from "@supabase/supabase-js";
 import DateRangePicker from "../vendas/DateRangePicker";
+import { useDateField } from "@/lib/date-field-context";
+import { addDays, calcularUltimos7Dias } from "@/lib/date-range-utils";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -34,15 +36,6 @@ type TopProduto = {
   margem: number; qtd: number;
 };
 
-function hojeISO() {
-  const now = new Date();
-  return new Date(now.getTime() - 3 * 60 * 60 * 1000).toISOString().split("T")[0];
-}
-function addDays(iso: string, n: number) {
-  const d = new Date(iso + "T12:00:00Z");
-  d.setUTCDate(d.getUTCDate() + n);
-  return d.toISOString().split("T")[0];
-}
 function saudacao() {
   const h = new Date().getHours();
   return h < 12 ? "Bom dia" : h < 18 ? "Boa tarde" : "Boa noite";
@@ -609,11 +602,16 @@ function Section({ title, subtitle, action, children }: {
 }
 
 export default function DashboardPage() {
-  const hoje = hojeISO();
-  const seteDias = addDays(hoje, -6);
+  // Padrão de abertura (aprovado 2026-07-10): Últimos 7 dias, via fonte
+  // única lib/date-range-utils.ts — mesma função usada por Vendas e pelo
+  // DateRangePicker, garante que as duas telas abrem com o mesmo período.
+  const ultimos7 = calcularUltimos7Dias();
 
-  const [dateFrom, setDateFrom] = useState(seteDias);
-  const [dateTo,   setDateTo]   = useState(hoje);
+  const [dateFrom, setDateFrom] = useState(ultimos7.from);
+  const [dateTo,   setDateTo]   = useState(ultimos7.to);
+  // Fase D (2026-07-06): seletor global (TopBar) — afeta KPIs, gráficos, balancete,
+  // top produtos e comparativo ML×Shopee desta página.
+  const { dateField } = useDateField();
   const [loading,  setLoading]  = useState(true);
   const [erro,     setErro]     = useState<string | null>(null);
   const [conta,    setConta]    = useState("CDS");
@@ -678,9 +676,10 @@ export default function DashboardPage() {
     const buscarShopee = selecionadasArr.length === 0 || selecionadasArr.some(l => l.marketplace === "Shopee");
 
     try {
+      // Fase D (2026-07-06): date_field propagado às duas APIs (Fase C já suporta o parâmetro)
       const [mlData, shopeeData] = await Promise.all([
-        buscarML     ? fetch(`/api/ml/vendas?date_from=${from}&date_to=${to}`).then(r => r.json()).catch(() => null)     : Promise.resolve(null),
-        buscarShopee ? fetch(`/api/shopee/vendas?date_from=${from}&date_to=${to}`).then(r => r.json()).catch(() => null) : Promise.resolve(null),
+        buscarML     ? fetch(`/api/ml/vendas?date_from=${from}&date_to=${to}&date_field=${dateField}`).then(r => r.json()).catch(() => null)     : Promise.resolve(null),
+        buscarShopee ? fetch(`/api/shopee/vendas?date_from=${from}&date_to=${to}&date_field=${dateField}`).then(r => r.json()).catch(() => null) : Promise.resolve(null),
       ]);
 
       const mlOk     = mlData     && !mlData.erro;
@@ -812,7 +811,7 @@ export default function DashboardPage() {
     } catch (e) { console.error("[dashboard] carregar error:", e); setErro("Erro ao carregar dados."); }
     setLoading(false);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // anuncios e lojas acessados via ref — carregar não muda de referência
+  }, [dateField]); // anuncios e lojas acessados via ref; dateField é dependência real (Fase D) — nova referência força refetch ao trocar o seletor
 
   useEffect(() => { carregar(dateFrom, dateTo, lojasSelecionadas); }, [dateFrom, dateTo, lojasSelecionadas, carregar]);
 

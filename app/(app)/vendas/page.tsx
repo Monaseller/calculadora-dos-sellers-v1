@@ -1,6 +1,9 @@
 "use client";
 import { useEffect, useState, useCallback, useRef } from "react";
 import DateRangePicker from "./DateRangePicker";
+import { useDateField } from "@/lib/date-field-context";
+import { calcularUltimos7Dias, DATE_PRESETS } from "@/lib/date-range-utils";
+import { ASYNC_SYNC_JOBS_ENABLED } from "@/lib/feature-flags";
 
 // ── Tipos ──────────────────────────────────────────────────────────────────
 interface VendaRow {
@@ -33,27 +36,19 @@ const moeda = (v: number) =>
 
 const pct = (v: number) => `${v.toFixed(1)}%`;
 
-function hojeISO() {
-  const now = new Date();
-  const brasilia = new Date(now.getTime() - 3 * 60 * 60 * 1000);
-  return brasilia.toISOString().split("T")[0];
-}
-function parseISO(s: string) {
-  const [y, m, d] = s.split("-").map(Number);
-  return new Date(y, m - 1, d);
-}
-function toISO(d: Date) {
-  return d.toISOString().split("T")[0];
-}
-
 // ── Componente ─────────────────────────────────────────────────────────────
 export default function VendasPage() {
-  const hoje = hojeISO();
+  // Padrão de abertura (aprovado 2026-07-10): Últimos 7 dias, via fonte
+  // única lib/date-range-utils.ts — corrige bug real (esta linha calculava
+  // 8 dias antes, via "hoje - 7"; agora usa a mesma função do Dashboard e
+  // do DateRangePicker, garantindo os mesmos 7 dias nas três telas).
+  const ultimos7 = calcularUltimos7Dias();
+  const hoje     = ultimos7.to;
 
-  // Padrão: Últimos 7 dias (igual ao painel ML)
-  const seteDiasAtras = (() => { const d = new Date(parseISO(hoje)); d.setDate(d.getDate() - 7); return toISO(d); })(); // ML: hoje + 7 anteriores
-  const [dateFrom,  setDateFrom]  = useState(seteDiasAtras);
-  const [dateTo,    setDateTo]    = useState(hoje);
+  const [dateFrom,  setDateFrom]  = useState(ultimos7.from);
+  const [dateTo,    setDateTo]    = useState(ultimos7.to);
+  // Fase D (2026-07-06): seletor global (TopBar) — afeta a tabela e os cards desta página.
+  const { dateField } = useDateField();
   const [skuTags,  setSkuTags]  = useState<string[]>([]);
   const [skuInput, setSkuInput] = useState("");
   const [lojaAtiva, setLojaAtiva] = useState<"todos" | "ML" | "Shopee">("todos");
@@ -64,7 +59,16 @@ export default function VendasPage() {
   const [filtrosStatus, setFiltrosStatus] = useState<string[]>([]);
   const [envioOpen, setEnvioOpen] = useState(false);
   const [filtrosEnvio, setFiltrosEnvio] = useState<string[]>([]);
-  const [rows,      setRows]      = useState<VendaRow[]>([]);
+  // Fase de redesenho do botão Sincronizar (aprovado 2026-07-11): rows
+  // separado por marketplace — cada um só é sobrescrito quando SUA
+  // própria leitura tiver sucesso, nunca zerado pela falha do outro.
+  // Corrige o bug em que uma falha/timeout num marketplace derrubava o
+  // faturamento total (o array combinado inteiro era substituído).
+  const [mlRows,     setMlRows]     = useState<VendaRow[]>([]);
+  const [shopeeRows, setShopeeRows] = useState<VendaRow[]>([]);
+  const rows = [...mlRows, ...shopeeRows].sort((a, b) => b.data.localeCompare(a.data));
+  const [mlLojaId,     setMlLojaId]     = useState<string | null>(null);
+  const [shopeeLojaId, setShopeeLojaId] = useState<string | null>(null);
   const [loading,   setLoading]   = useState(false);
   const [erro,      setErro]      = useState<string | null>(null);
   const [semConexao, setSemConexao] = useState(false);
@@ -74,6 +78,11 @@ export default function VendasPage() {
   const [totalPedidos, setTotalPedidos] = useState(0);
   const [conta,      setConta]    = useState("");
   const [ultimaSync, setUltimaSync] = useState<string | null>(null);
+  // "atualizando" (job de sync via botão) é distinto de "loading" (leitura
+  // inicial/normal) — regra aprovada 2026-07-11.
+  const [atualizando, setAtualizando] = useState<{ ml: boolean; shopee: boolean }>({ ml: false, shopee: false });
+  const [syncMsg, setSyncMsg] = useState<{ ml: string | null; shopee: string | null }>({ ml: null, shopee: null });
+  const pollTimers = useRef<{ ml: number | null; shopee: number | null }>({ ml: null, shopee: null });
 
   // ── Histórico ──────────────────────────────────────────────────────────────
   const [historicoOpen,   setHistoricoOpen]   = useState(false);
@@ -103,6 +112,12 @@ export default function VendasPage() {
   const [quickSyncPreset,  setQuickSyncPreset]  = useState("");
   const [quickSyncFrom,    setQuickSyncFrom]    = useState("");
   const [quickSyncTo,      setQuickSyncTo]      = useState("");
+  // Personalizado (aprovado 2026-07-10): datas digitadas manualmente, sem
+  // nenhum cálculo de "hoje"/soma de dias — não é lógica local de datas,
+  // é apenas o valor que o usuário escolheu.
+  const [personalizadoAberto, setPersonalizadoAberto] = useState(false);
+  const [personalizadoFrom,   setPersonalizadoFrom]   = useState("");
+  const [personalizadoTo,     setPersonalizadoTo]     = useState("");
   const [quickSyncDias, setQuickSyncDias] = useState<{
     label: string; from: string; to: string; status: MesStatus; count?: number; erro?: string;
   }[]>([]);
@@ -318,53 +333,94 @@ export default function VendasPage() {
     setSkuTags(prev => prev.filter(t => t !== tag));
   }
 
-  const sync = useCallback(async (from: string, to: string, tags: string[], filtros: string[] = [], loja: "todos" | "ML" | "Shopee" = "todos", force = false) => {
+  // Lê o cache de UM marketplace por vez. Nunca sobrescreve nem zera as
+  // linhas do OUTRO marketplace, e — em caso de falha/timeout deste
+  // marketplace — nunca zera as próprias linhas já exibidas: só atualiza
+  // quando a leitura tem sucesso. Correção aprovada 2026-07-11: a antiga
+  // função `sync()` combinava os dois marketplaces num único array e
+  // substituía tudo de uma vez, então uma falha isolada (ex: timeout da
+  // Shopee) derrubava o faturamento total mesmo com o ML saudável.
+  const lerMarketplace = useCallback(async (
+    mkt: "ML" | "Shopee",
+    from: string, to: string, tags: string[], filtros: string[] = [],
+    force = false
+  ) => {
+    const params = new URLSearchParams({ date_from: from, date_to: to, date_field: dateField });
+    if (tags.length > 0) params.set("sku", tags.join(","));
+    const needsCancelled = filtros.includes("canceladas") || filtros.includes("devolucoes");
+    if (needsCancelled) params.set("include_cancelled", "true");
+    // force=true (fluxo antigo, ENABLE_ASYNC_SYNC_JOBS=false — ver
+    // docs/DECISIONS.md 2026-07-13): pede sync inline na própria rota de
+    // leitura, exatamente como funcionava antes de 2026-07-11. Continua se
+    // beneficiando da separação mlRows/shopeeRows abaixo — uma falha aqui
+    // não zera o outro marketplace nem os dados já exibidos deste.
+    if (force) params.set("sync", "1");
+
+    const url  = mkt === "ML" ? `/api/ml/vendas?${params}` : `/api/shopee/vendas?${params}`;
+    const ctrl = new AbortController();
+    // force=true faz sync inline (pode levar bem mais que uma leitura de
+    // cache) — mesmo timeout generoso que o antigo forceSync já usava.
+    const tid  = setTimeout(() => ctrl.abort(), 45000);
+    let data: any = null;
+    try {
+      const res = await fetch(url, { signal: ctrl.signal });
+      data = await res.json();
+    } catch {
+      data = null;
+    } finally {
+      clearTimeout(tid);
+    }
+
+    const falhou = !data || data.erro;
+
+    if (mkt === "ML") {
+      if (data?.lojaId) setMlLojaId(data.lojaId);
+      if (!falhou) setMlRows((data.rows ?? []) as VendaRow[]);
+      // falha no ML: mlRows permanece como estava — nunca zera.
+    } else {
+      if (data?.lojaId) setShopeeLojaId(data.lojaId);
+      setErroShopee(!!falhou);
+      setErroShopeeMsg(falhou ? (data?.mensagem ?? null) : null);
+      setShopeeSemDados(!falhou && !!data?.semDados);
+      if (!falhou) setShopeeRows((data.rows ?? []) as VendaRow[]);
+      // falha na Shopee: shopeeRows permanece como estava — nunca zera.
+    }
+
+    return { falhou, data };
+  }, [dateField]);
+
+  // Orquestra a leitura normal (montagem, mudança de filtro/data/date_field,
+  // "Buscar", "Limpar"). NÃO dispara sincronização — só lê o cache atual.
+  // Disparo de sync é responsabilidade separada: ver dispararSincronizar().
+  const refetchTudo = useCallback(async (
+    from: string, to: string, tags: string[], filtros: string[] = [],
+    loja: "todos" | "ML" | "Shopee" = "todos"
+  ) => {
     setLoading(true);
     setErro(null);
-
     try {
-      const params = new URLSearchParams({ date_from: from, date_to: to });
-      if (tags.length > 0) params.set("sku", tags.join(","));
-      const needsCancelled = filtros.includes("canceladas") || filtros.includes("devolucoes");
-      if (needsCancelled) params.set("include_cancelled", "true");
-      if (force) params.set("sync", "1");
+      const lerML     = loja === "todos" || loja === "ML";
+      const lerShopee = loja === "todos" || loja === "Shopee";
 
-      const fetchML     = loja === "todos" || loja === "ML";
-      const fetchShopee = loja === "todos" || loja === "Shopee";
-
-      function fetchWithTimeout(url: string, ms = 45000) {
-        const ctrl = new AbortController();
-        const id = setTimeout(() => ctrl.abort(), ms);
-        return fetch(url, { signal: ctrl.signal })
-          .then(r => r.json())
-          .catch(() => null)
-          .finally(() => clearTimeout(id));
-      }
-
-      const [mlData, shopeeData] = await Promise.all([
-        fetchML     ? fetchWithTimeout(`/api/ml/vendas?${params}`)     : null,
-        fetchShopee ? fetchWithTimeout(`/api/shopee/vendas?${params}`) : null,
+      const [resML, resShopee] = await Promise.all([
+        lerML     ? lerMarketplace("ML",     from, to, tags, filtros) : Promise.resolve(null),
+        lerShopee ? lerMarketplace("Shopee", from, to, tags, filtros) : Promise.resolve(null),
       ]);
 
-      const mlRows     = (!mlData?.erro     ? mlData?.rows     ?? [] : []) as VendaRow[];
-      const shopeeRows = (!shopeeData?.erro ? shopeeData?.rows ?? [] : []) as VendaRow[];
-      const allRows    = [...mlRows, ...shopeeRows].sort((a, b) => b.data.localeCompare(a.data));
+      const mlFalhou     = lerML     && resML?.falhou;
+      const shopeeFalhou = lerShopee && resShopee?.falhou;
 
-      const mlFalhou     = fetchML     && (mlData?.erro     || !mlData);
-      const shopeeFalhou = fetchShopee && (shopeeData?.erro || !shopeeData);
+      // "Nenhuma conta conectada" só faz sentido quando não há NENHUM dado
+      // já exibido — se já havia linhas na tela, uma falha dupla e
+      // temporária não deve substituir a tabela pela tela de "desconectado"
+      // (mesma regra de preservação, aplicada também a este estado).
+      setSemConexao(!!(mlFalhou && shopeeFalhou) && mlRows.length === 0 && shopeeRows.length === 0);
 
-      setErroShopee(!!shopeeFalhou);
-      setErroShopeeMsg(shopeeFalhou ? (shopeeData?.mensagem ?? null) : null);
-      setShopeeSemDados(!shopeeFalhou && fetchShopee && !!shopeeData?.semDados);
-
-      if (mlFalhou && shopeeFalhou) {
-        setSemConexao(true); setRows([]);
-      } else {
-        setSemConexao(false);
-        setRows(allRows);
-        setTotalPedidos((mlData?.totalPedidos ?? 0) + (shopeeData?.totalPedidos ?? 0));
-        // Usa o primeiro nome disponível (ML e Shopee são a mesma empresa) e normaliza capitalização
-        const rawConta = mlData?.conta || shopeeData?.conta || "";
+      if (!(mlFalhou && shopeeFalhou)) {
+        const dML     = resML?.data;
+        const dShopee = resShopee?.data;
+        setTotalPedidos((dML?.totalPedidos ?? 0) + (dShopee?.totalPedidos ?? 0));
+        const rawConta = dML?.conta || dShopee?.conta || "";
         const contaNorm = rawConta.toLowerCase().replace(/(?:^|\s)\S/g, (c: string) => c.toUpperCase());
         setConta(contaNorm);
         setUltimaSync(new Date().toLocaleTimeString("pt-BR"));
@@ -374,12 +430,152 @@ export default function VendasPage() {
     } finally {
       setLoading(false);
     }
+  }, [lerMarketplace, mlRows.length, shopeeRows.length]); // eslint-disable-line
+
+  // ── Disparo de sincronização (botão "Sincronizar") ──────────────────────
+  // Separado da leitura (refetchTudo/lerMarketplace) — aprovado 2026-07-11.
+  // POST /api/sync/iniciar cria/reaproveita um job persistente; o polling
+  // consulta job_id (nunca loja_id — evita confundir com um job antigo já
+  // concluído). Job concluído → refaz a leitura só daquele marketplace.
+  // Job com erro/timeout → mensagem discreta, dados antigos preservados.
+  function chaveMkt(mkt: "ML" | "Shopee"): "ml" | "shopee" {
+    return mkt === "ML" ? "ml" : "shopee";
+  }
+
+  function pararPolling(mkt: "ML" | "Shopee") {
+    const chave = chaveMkt(mkt);
+    if (pollTimers.current[chave] != null) {
+      clearTimeout(pollTimers.current[chave]!);
+      pollTimers.current[chave] = null;
+    }
+  }
+
+  function pollStatus(mkt: "ML" | "Shopee", jobId: string, tentativa = 0) {
+    const chave = chaveMkt(mkt);
+    const POLL_MS = 3000;
+    const MAX_TENTATIVAS = 200; // ~10 minutos de polling
+
+    fetch(`/api/sync/status?job_id=${jobId}`)
+      .then(res => res.json())
+      .then(data => {
+        if (data.status === "concluido") {
+          setAtualizando(prev => ({ ...prev, [chave]: false }));
+          setSyncMsg(prev => ({ ...prev, [chave]: null }));
+          lerMarketplace(mkt, dateFrom, dateTo, skuTags, [...filtrosCadastro, ...filtrosStatus]);
+          return;
+        }
+        if (data.status === "erro") {
+          setAtualizando(prev => ({ ...prev, [chave]: false }));
+          setSyncMsg(prev => ({ ...prev, [chave]: "Não foi possível atualizar agora. Os dados anteriores continuam disponíveis." }));
+          return;
+        }
+        // "pendente"/"rodando"/"idle" → continua tentando
+        if (tentativa >= MAX_TENTATIVAS) {
+          setAtualizando(prev => ({ ...prev, [chave]: false }));
+          setSyncMsg(prev => ({ ...prev, [chave]: "A atualização está demorando mais que o esperado. Os dados anteriores continuam disponíveis." }));
+          return;
+        }
+        pollTimers.current[chave] = window.setTimeout(() => pollStatus(mkt, jobId, tentativa + 1), POLL_MS);
+      })
+      .catch(() => {
+        if (tentativa >= MAX_TENTATIVAS) {
+          setAtualizando(prev => ({ ...prev, [chave]: false }));
+          setSyncMsg(prev => ({ ...prev, [chave]: "Não foi possível confirmar a atualização. Os dados anteriores continuam disponíveis." }));
+          return;
+        }
+        pollTimers.current[chave] = window.setTimeout(() => pollStatus(mkt, jobId, tentativa + 1), POLL_MS);
+      });
+  }
+
+  async function dispararUm(mkt: "ML" | "Shopee") {
+    const chave  = chaveMkt(mkt);
+    const lojaId = mkt === "ML" ? mlLojaId : shopeeLojaId;
+
+    if (!lojaId) {
+      setSyncMsg(prev => ({ ...prev, [chave]: "Loja não identificada ainda — aguarde o carregamento ou recarregue a página." }));
+      return;
+    }
+
+    pararPolling(mkt);
+    setAtualizando(prev => ({ ...prev, [chave]: true }));
+    setSyncMsg(prev => ({ ...prev, [chave]: null }));
+
+    try {
+      const res  = await fetch("/api/sync/iniciar", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ loja_id: lojaId }),
+      });
+      const data = await res.json();
+
+      if (!data.ok || !data.job_id) {
+        setAtualizando(prev => ({ ...prev, [chave]: false }));
+        setSyncMsg(prev => ({ ...prev, [chave]: "Não foi possível iniciar a atualização. Os dados anteriores continuam disponíveis." }));
+        return;
+      }
+      pollStatus(mkt, data.job_id);
+    } catch {
+      setAtualizando(prev => ({ ...prev, [chave]: false }));
+      setSyncMsg(prev => ({ ...prev, [chave]: "Não foi possível iniciar a atualização. Os dados anteriores continuam disponíveis." }));
+    }
+  }
+
+  // Fluxo antigo (ENABLE_ASYNC_SYNC_JOBS=false — aprovado 2026-07-13, ver
+  // docs/DECISIONS.md): sem job/worker, chama lerMarketplace(force=true)
+  // direto — mesmo comportamento de antes de 2026-07-11 (sync=1 embutido na
+  // rota de leitura), mas já se beneficiando da separação mlRows/shopeeRows
+  // (uma falha num marketplace não derruba o outro nem zera dados antigos).
+  async function dispararSincronizarInline() {
+    const alvosML     = lojaAtiva === "todos" || lojaAtiva === "ML";
+    const alvosShopee = lojaAtiva === "todos" || lojaAtiva === "Shopee";
+
+    setAtualizando(prev => ({
+      ...prev,
+      ml:     alvosML     ? true : prev.ml,
+      shopee: alvosShopee ? true : prev.shopee,
+    }));
+    setSyncMsg(prev => ({
+      ml:     alvosML     ? null : prev.ml,
+      shopee: alvosShopee ? null : prev.shopee,
+    }));
+
+    const filtros = [...filtrosCadastro, ...filtrosStatus];
+    try {
+      await Promise.all([
+        alvosML     ? lerMarketplace("ML",     dateFrom, dateTo, skuTags, filtros, true) : Promise.resolve(),
+        alvosShopee ? lerMarketplace("Shopee", dateFrom, dateTo, skuTags, filtros, true) : Promise.resolve(),
+      ]);
+      setUltimaSync(new Date().toLocaleTimeString("pt-BR"));
+    } finally {
+      setAtualizando(prev => ({
+        ml:     alvosML     ? false : prev.ml,
+        shopee: alvosShopee ? false : prev.shopee,
+      }));
+    }
+  }
+
+  function dispararSincronizar() {
+    if (!ASYNC_SYNC_JOBS_ENABLED) {
+      dispararSincronizarInline();
+      return;
+    }
+    if (lojaAtiva === "todos" || lojaAtiva === "ML")     dispararUm("ML");
+    if (lojaAtiva === "todos" || lojaAtiva === "Shopee") dispararUm("Shopee");
+  }
+
+  // Limpa polling pendente ao desmontar a página (evita setState após unmount).
+  useEffect(() => {
+    return () => {
+      pararPolling("ML");
+      pararPolling("Shopee");
+    };
   }, []);
 
-  // Auto-sync ao montar E toda vez que o período ou marketplace mudar
+  // Leitura ao montar E toda vez que o período, marketplace ou date_field mudar
+  // (NÃO dispara sync — só lê o cache atual; ver dispararSincronizar para o botão).
   useEffect(() => {
-    sync(dateFrom, dateTo, skuTags, [...filtrosCadastro, ...filtrosStatus], lojaAtiva);
-  }, [dateFrom, dateTo, lojaAtiva]); // eslint-disable-line
+    refetchTudo(dateFrom, dateTo, skuTags, [...filtrosCadastro, ...filtrosStatus], lojaAtiva);
+  }, [dateFrom, dateTo, lojaAtiva, dateField]); // eslint-disable-line
 
   const OPCOES_CADASTRO = [
     { key: "cadastrados",     label: "Cadastrados",     icone: "✅", cor: "#00D97E", bg: "rgba(0,217,126,0.12)" },
@@ -411,7 +607,7 @@ export default function VendasPage() {
       const precisava = prev.includes("canceladas") || prev.includes("devolucoes");
       const precisa   = next.includes("canceladas") || next.includes("devolucoes");
       if (precisava !== precisa) {
-        sync(dateFrom, dateTo, skuTags, [...filtrosCadastro, ...next]);
+        refetchTudo(dateFrom, dateTo, skuTags, [...filtrosCadastro, ...next]);
       }
       return next;
     });
@@ -536,6 +732,11 @@ export default function VendasPage() {
           <div style={{ color: "#9099aa", fontSize: "13px", marginTop: "4px" }}>
             {conta ? `● ${conta}` : "Mercado Livre"}{ultimaSync ? ` · Sincronizado às ${ultimaSync}` : ""}
           </div>
+          {(syncMsg.ml || syncMsg.shopee) && (
+            <div style={{ color: "#9099aa", fontSize: "11px", marginTop: "3px", fontStyle: "italic" }}>
+              {[syncMsg.ml, syncMsg.shopee].filter(Boolean).join(" · ")}
+            </div>
+          )}
         </div>
 
         <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
@@ -556,26 +757,26 @@ export default function VendasPage() {
             🗂 Histórico
           </button>
           <button
-            onClick={() => sync(dateFrom, dateTo, skuTags, [...filtrosCadastro, ...filtrosStatus], lojaAtiva, true)}
-            disabled={loading}
+            onClick={dispararSincronizar}
+            disabled={atualizando.ml || atualizando.shopee}
             style={{
               padding: "10px 20px",
-              background: loading ? "rgba(255,255,255,0.06)" : "linear-gradient(135deg,#ff6b00,#ffb800)",
+              background: (atualizando.ml || atualizando.shopee) ? "rgba(255,255,255,0.06)" : "linear-gradient(135deg,#ff6b00,#ffb800)",
               border: "none",
               borderRadius: "12px",
-              color: loading ? "#9099aa" : "#10131b",
+              color: (atualizando.ml || atualizando.shopee) ? "#9099aa" : "#10131b",
               fontWeight: 800,
               fontSize: "13px",
-              cursor: loading ? "not-allowed" : "pointer",
+              cursor: (atualizando.ml || atualizando.shopee) ? "not-allowed" : "pointer",
               display: "flex",
               alignItems: "center",
               gap: "7px",
             }}
           >
-            {loading ? (
+            {(atualizando.ml || atualizando.shopee) ? (
               <>
                 <span style={{ display: "inline-block", animation: "spin 1s linear infinite" }}>⟳</span>
-                Sincronizando...
+                Atualizando...
               </>
             ) : "⟳ Sincronizar"}
           </button>
@@ -593,7 +794,7 @@ export default function VendasPage() {
           <DateRangePicker
             from={dateFrom}
             to={dateTo}
-            onChange={(f, t) => { setDateFrom(f); setDateTo(t); sync(f, t, skuTags, [...filtrosCadastro, ...filtrosStatus]); }}
+            onChange={(f, t) => { setDateFrom(f); setDateTo(t); refetchTudo(f, t, skuTags, [...filtrosCadastro, ...filtrosStatus]); }}
           />
         </div>
         {/* Plataforma */}
@@ -699,7 +900,7 @@ export default function VendasPage() {
                 {/* Limpar */}
                 {filtrosCadastro.length > 0 && (
                   <button
-                    onClick={() => { setFiltrosCadastro([]); sync(dateFrom, dateTo, skuTags, [...filtrosStatus]); }}
+                    onClick={() => { setFiltrosCadastro([]); refetchTudo(dateFrom, dateTo, skuTags, [...filtrosStatus]); }}
                     style={{ padding: "6px 12px", borderRadius: "8px", border: "none", background: "transparent", color: "#9099aa", fontSize: "11px", cursor: "pointer", textAlign: "left", marginBottom: "4px" }}
                   >
                     ✕ Limpar seleção
@@ -788,7 +989,7 @@ export default function VendasPage() {
               }}>
                 {filtrosStatus.length > 0 && (
                   <button
-                    onClick={() => { setFiltrosStatus([]); sync(dateFrom, dateTo, skuTags, [...filtrosCadastro]); }}
+                    onClick={() => { setFiltrosStatus([]); refetchTudo(dateFrom, dateTo, skuTags, [...filtrosCadastro]); }}
                     style={{ padding: "6px 12px", borderRadius: "8px", border: "none", background: "transparent", color: "#9099aa", fontSize: "11px", cursor: "pointer", textAlign: "left", marginBottom: "4px" }}
                   >
                     ✕ Limpar seleção
@@ -973,7 +1174,7 @@ export default function VendasPage() {
         </div>
 
         <button
-          onClick={() => { addSkuTag(); sync(dateFrom, dateTo, skuInput.trim() ? [...skuTags, skuInput.trim().toUpperCase()] : skuTags, [...filtrosCadastro, ...filtrosStatus]); setSkuInput(""); }}
+          onClick={() => { addSkuTag(); refetchTudo(dateFrom, dateTo, skuInput.trim() ? [...skuTags, skuInput.trim().toUpperCase()] : skuTags, [...filtrosCadastro, ...filtrosStatus]); setSkuInput(""); }}
           disabled={loading}
           style={{
             padding: "9px 18px", borderRadius: "10px", alignSelf: "flex-end",
@@ -985,7 +1186,7 @@ export default function VendasPage() {
         </button>
         {(skuTags.length > 0 || skuInput || dateFrom !== hoje || dateTo !== hoje || lojaAtiva !== "todos" || filtrosCadastro.length > 0 || filtrosStatus.length > 0 || filtrosEnvio.length > 0) && (
           <button
-            onClick={() => { const h = hoje; setDateFrom(h); setDateTo(h); setSkuTags([]); setSkuInput(""); setLojaAtiva("todos"); setFiltrosCadastro([]); setFiltrosStatus([]); setFiltrosEnvio([]); sync(h, h, [], []); }}
+            onClick={() => { const h = hoje; setDateFrom(h); setDateTo(h); setSkuTags([]); setSkuInput(""); setLojaAtiva("todos"); setFiltrosCadastro([]); setFiltrosStatus([]); setFiltrosEnvio([]); refetchTudo(h, h, [], []); }}
             style={{
               padding: "9px 14px", borderRadius: "10px", alignSelf: "flex-end",
               background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)",
@@ -1089,7 +1290,10 @@ export default function VendasPage() {
       )}
 
       {/* ── Estados: erro / sem conexão / vazio ─────────────────────────── */}
-      {semConexao && !loading && (
+      {/* rows.length === 0 (aprovado 2026-07-11): se já havia dados na tela,
+          uma falha dupla e temporária não deve trocar a tabela pela tela de
+          "desconectado" — mesma regra de preservação aplicada a este estado. */}
+      {semConexao && !loading && rows.length === 0 && (
         <div style={{
           textAlign: "center", padding: "60px 20px",
           background: "#111318", border: "1px solid rgba(255,255,255,0.07)", borderRadius: "20px",
@@ -1433,7 +1637,7 @@ export default function VendasPage() {
                               if (quickSyncFrom && quickSyncTo) {
                                 setDateFrom(quickSyncFrom);
                                 setDateTo(quickSyncTo);
-                                sync(quickSyncFrom, quickSyncTo, skuTags, [...filtrosCadastro, ...filtrosStatus]);
+                                refetchTudo(quickSyncFrom, quickSyncTo, skuTags, [...filtrosCadastro, ...filtrosStatus]);
                               }
                               setHistoricoOpen(false);
                               setQuickSyncDias([]);
@@ -1452,35 +1656,101 @@ export default function VendasPage() {
               })()
             ) : (
               /* ── Seleção de preset ── */
+              /* Presets (aprovado 2026-07-10): Hoje/Ontem/Últimos 7 dias/
+                 Últimos 30 dias vêm de lib/date-range-utils.ts (mesma fonte
+                 usada pelo Dashboard, Vendas e DateRangePicker) — nenhuma
+                 lógica de data local aqui. "Personalizado" abre 2 campos de
+                 data (sem cálculo, só o que o usuário escolher). Removido
+                 "Este mês", que não faz parte da regra aprovada. */
               <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-                {([
-                  { label: "Ontem",          emoji: "📅", desc: "Sincroniza 1 dia",
-                    get: () => { const d = new Date(Date.now() - 3*3600000); d.setDate(d.getDate()-1); const s = d.toISOString().split("T")[0]; return [s, s] as [string,string]; } },
-                  { label: "Últimos 7 dias", emoji: "📆", desc: "Sincroniza dia a dia (7 requests)",
-                    get: () => { const hoje = new Date(Date.now() - 3*3600000).toISOString().split("T")[0]; const d7 = new Date(Date.now() - 3*3600000); d7.setDate(d7.getDate()-7); return [d7.toISOString().split("T")[0], hoje] as [string,string]; } },
-                  { label: "Este mês",       emoji: "🗓", desc: "Do dia 1 até hoje",
-                    get: () => { const hoje = new Date(Date.now() - 3*3600000).toISOString().split("T")[0]; return [hoje.slice(0,7)+"-01", hoje] as [string,string]; } },
-                ] as { label: string; emoji: string; desc: string; get: () => [string,string] }[]).map(p => (
-                  <button
-                    key={p.label}
-                    onClick={() => { const [f, t] = p.get(); iniciarSyncRapido(f, t, p.label); }}
-                    style={{
-                      display: "flex", alignItems: "center", gap: "14px",
-                      padding: "16px 20px", borderRadius: "14px",
-                      background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)",
-                      color: "#fff", fontWeight: 700, fontSize: "15px", cursor: "pointer", textAlign: "left",
-                    }}
-                    onMouseEnter={e => { e.currentTarget.style.background = "rgba(255,107,0,0.1)"; e.currentTarget.style.borderColor = "rgba(255,107,0,0.3)"; }}
-                    onMouseLeave={e => { e.currentTarget.style.background = "rgba(255,255,255,0.04)"; e.currentTarget.style.borderColor = "rgba(255,255,255,0.1)"; }}
-                  >
-                    <span style={{ fontSize: "22px" }}>{p.emoji}</span>
-                    <div>
-                      <div>{p.label}</div>
-                      <div style={{ fontSize: "12px", color: "#9099aa", fontWeight: 500, marginTop: "2px" }}>{p.desc}</div>
+                {DATE_PRESETS.map(p => {
+                  const emoji = p.label === "Hoje" ? "🔵" : p.label === "Ontem" ? "📅" : p.label === "Últimos 7 dias" ? "📆" : "🗓";
+                  const desc  = p.label === "Hoje" ? "Sincroniza o dia de hoje"
+                    : p.label === "Ontem" ? "Sincroniza 1 dia"
+                    : p.label === "Últimos 7 dias" ? "Sincroniza dia a dia (7 requests)"
+                    : "Sincroniza dia a dia (30 requests)";
+                  return (
+                    <button
+                      key={p.label}
+                      onClick={() => { const r = p.get(); iniciarSyncRapido(r.from, r.to, p.label); }}
+                      style={{
+                        display: "flex", alignItems: "center", gap: "14px",
+                        padding: "16px 20px", borderRadius: "14px",
+                        background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)",
+                        color: "#fff", fontWeight: 700, fontSize: "15px", cursor: "pointer", textAlign: "left",
+                      }}
+                      onMouseEnter={e => { e.currentTarget.style.background = "rgba(255,107,0,0.1)"; e.currentTarget.style.borderColor = "rgba(255,107,0,0.3)"; }}
+                      onMouseLeave={e => { e.currentTarget.style.background = "rgba(255,255,255,0.04)"; e.currentTarget.style.borderColor = "rgba(255,255,255,0.1)"; }}
+                    >
+                      <span style={{ fontSize: "22px" }}>{emoji}</span>
+                      <div>
+                        <div>{p.label}</div>
+                        <div style={{ fontSize: "12px", color: "#9099aa", fontWeight: 500, marginTop: "2px" }}>{desc}</div>
+                      </div>
+                      <span style={{ marginLeft: "auto", color: "#ff6b00", fontSize: "18px" }}>→</span>
+                    </button>
+                  );
+                })}
+
+                {/* Personalizado */}
+                <button
+                  onClick={() => setPersonalizadoAberto(v => !v)}
+                  style={{
+                    display: "flex", alignItems: "center", gap: "14px",
+                    padding: "16px 20px", borderRadius: "14px",
+                    background: personalizadoAberto ? "rgba(255,107,0,0.1)" : "rgba(255,255,255,0.04)",
+                    border: personalizadoAberto ? "1px solid rgba(255,107,0,0.3)" : "1px solid rgba(255,255,255,0.1)",
+                    color: "#fff", fontWeight: 700, fontSize: "15px", cursor: "pointer", textAlign: "left",
+                  }}
+                >
+                  <span style={{ fontSize: "22px" }}>🗂️</span>
+                  <div>
+                    <div>Personalizado</div>
+                    <div style={{ fontSize: "12px", color: "#9099aa", fontWeight: 500, marginTop: "2px" }}>Escolher data inicial e final</div>
+                  </div>
+                  <span style={{ marginLeft: "auto", color: "#ff6b00", fontSize: "18px" }}>{personalizadoAberto ? "▲" : "→"}</span>
+                </button>
+
+                {personalizadoAberto && (
+                  <div style={{ padding: "14px 16px", borderRadius: "14px", background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)" }}>
+                    <div style={{ display: "flex", gap: "10px", marginBottom: "10px" }}>
+                      <div style={{ flex: 1 }}>
+                        <label style={{ fontSize: "11px", color: "#9099aa", display: "block", marginBottom: "4px" }}>De</label>
+                        <input
+                          type="date"
+                          value={personalizadoFrom}
+                          onChange={e => setPersonalizadoFrom(e.target.value)}
+                          style={{ width: "100%", padding: "8px", borderRadius: "8px", background: "#0c0e13", border: "1px solid rgba(255,255,255,0.12)", color: "#fff", fontSize: "13px" }}
+                        />
+                      </div>
+                      <div style={{ flex: 1 }}>
+                        <label style={{ fontSize: "11px", color: "#9099aa", display: "block", marginBottom: "4px" }}>Até</label>
+                        <input
+                          type="date"
+                          value={personalizadoTo}
+                          min={personalizadoFrom || undefined}
+                          onChange={e => setPersonalizadoTo(e.target.value)}
+                          style={{ width: "100%", padding: "8px", borderRadius: "8px", background: "#0c0e13", border: "1px solid rgba(255,255,255,0.12)", color: "#fff", fontSize: "13px" }}
+                        />
+                      </div>
                     </div>
-                    <span style={{ marginLeft: "auto", color: "#ff6b00", fontSize: "18px" }}>→</span>
-                  </button>
-                ))}
+                    {/* Garante início <= fim (aprovado 2026-07-10): min no campo "Até" já
+                        impede escolher visualmente uma data anterior a "De"; a checagem
+                        abaixo é a barreira real antes de disparar a sincronização. */}
+                    <button
+                      disabled={!personalizadoFrom || !personalizadoTo || personalizadoTo < personalizadoFrom}
+                      onClick={() => iniciarSyncRapido(personalizadoFrom, personalizadoTo, "Personalizado")}
+                      style={{
+                        width: "100%", padding: "10px", borderRadius: "10px", border: "none",
+                        background: (!personalizadoFrom || !personalizadoTo || personalizadoTo < personalizadoFrom)
+                          ? "rgba(255,255,255,0.08)" : "linear-gradient(135deg,#ff6b00,#ffb800)",
+                        color: (!personalizadoFrom || !personalizadoTo || personalizadoTo < personalizadoFrom) ? "#666" : "#10131b",
+                        fontWeight: 800, fontSize: "13px",
+                        cursor: (!personalizadoFrom || !personalizadoTo || personalizadoTo < personalizadoFrom) ? "default" : "pointer",
+                      }}
+                    >Sincronizar período escolhido</button>
+                  </div>
+                )}
               </div>
             )}
 

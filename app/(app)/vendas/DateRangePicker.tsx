@@ -1,5 +1,6 @@
 "use client";
 import { useState } from "react";
+import { DATE_PRESETS, hojeISOBrasilia } from "@/lib/date-range-utils";
 
 interface Props {
   from: string; // YYYY-MM-DD
@@ -19,59 +20,14 @@ function parseISO(s: string) {
   return new Date(y, m - 1, d);
 }
 
-function hojeISO() {
-  const now = new Date();
-  const br  = new Date(now.getTime() - 3 * 60 * 60 * 1000);
-  return br.toISOString().split("T")[0];
-}
-
-const PRESETS = [
-  { label: "Hoje",        get: () => { const h = hojeISO(); return [h, h]; } },
-  { label: "Ontem",       get: () => { const d = new Date(parseISO(hojeISO())); d.setDate(d.getDate()-1); const s = toISO(d); return [s,s]; } },
-  { label: "Esta semana", get: () => {
-    const hoje = parseISO(hojeISO());
-    const seg  = new Date(hoje);
-    const day  = hoje.getDay(); // 0=dom, 1=seg, ..., 6=sáb
-    const diasAteSeg = day === 0 ? 6 : day === 1 ? 0 : day - 1;
-    seg.setDate(hoje.getDate() - diasAteSeg);
-    return [toISO(seg), hojeISO()];
-  }},
-  { label: "Últimos 7 dias", get: () => {
-    const d = new Date(parseISO(hojeISO()));
-    d.setDate(d.getDate() - 7);
-    return [toISO(d), hojeISO()];
-  }},
-  { label: "Últimos 15 dias", get: () => {
-    const d = new Date(parseISO(hojeISO()));
-    d.setDate(d.getDate() - 15);
-    return [toISO(d), hojeISO()];
-  }},
-  { label: "Últimos 30 dias", get: () => {
-    const d = new Date(parseISO(hojeISO()));
-    d.setDate(d.getDate() - 30);
-    return [toISO(d), hojeISO()];
-  }},
-  { label: "Últimos 90 dias", get: () => {
-    const d = new Date(parseISO(hojeISO()));
-    d.setDate(d.getDate() - 90);
-    return [toISO(d), hojeISO()];
-  }},
-  { label: "Este mês",    get: () => {
-    const hoje = parseISO(hojeISO());
-    const ini  = new Date(hoje.getFullYear(), hoje.getMonth(), 1);
-    return [toISO(ini), hojeISO()];
-  }},
-  { label: "Mês passado", get: () => {
-    const hoje = parseISO(hojeISO());
-    const ini  = new Date(hoje.getFullYear(), hoje.getMonth() - 1, 1);
-    const fim  = new Date(hoje.getFullYear(), hoje.getMonth(), 0);
-    return [toISO(ini), toISO(fim)];
-  }},
-  { label: "Este ano",    get: () => {
-    const hoje = parseISO(hojeISO());
-    return [`${hoje.getFullYear()}-01-01`, hojeISO()];
-  }},
-];
+// Presets (aprovado 2026-07-10): Hoje, Ontem, Últimos 7 dias, Últimos 30 dias
+// — únicos permitidos, calculados por lib/date-range-utils.ts (fonte única,
+// compartilhada com dashboard/page.tsx e vendas/page.tsx). "Personalizado"
+// é a própria seleção livre no calendário abaixo, não é uma função de preset.
+const PRESETS = DATE_PRESETS.map(p => ({
+  label: p.label,
+  get: (): [string, string] => { const r = p.get(); return [r.from, r.to]; },
+}));
 
 export default function DateRangePicker({ from, to, onChange }: Props) {
   const [open,         setOpen]         = useState(false);
@@ -87,7 +43,7 @@ export default function DateRangePicker({ from, to, onChange }: Props) {
     return null;
   });
 
-  const today = parseISO(hojeISO());
+  const today = parseISO(hojeISOBrasilia());
   const [viewYear,  setViewYear]  = useState(today.getFullYear());
   const [viewMonth, setViewMonth] = useState(today.getMonth());
 
@@ -142,7 +98,7 @@ export default function DateRangePicker({ from, to, onChange }: Props) {
     const isStart   = iso === tempFrom;
     const isEnd     = iso === (selecting === "end" && hover ? (hover < tempFrom ? tempFrom : hover) : tempTo);
     const inRange   = iso > rangeMin && iso < rangeEnd;
-    const isToday   = iso === hojeISO();
+    const isToday   = iso === hojeISOBrasilia();
     const isHover   = hover === iso;
     const future    = iso > toISO(today);
 

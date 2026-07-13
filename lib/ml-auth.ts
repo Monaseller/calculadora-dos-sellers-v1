@@ -136,6 +136,48 @@ export async function getMLLojaAtiva(userId: string): Promise<{
   };
 }
 
+/**
+ * Busca uma loja ML específica pelo id (não "a mais recente ativa").
+ * Adicionado 2026-07-11 para o worker de sincronização (sync_jobs) poder
+ * sincronizar exatamente a loja do job — getMLLojaAtiva sempre resolveria
+ * para a mais recente, o que quebraria o contrato "job por loja_id
+ * específico" quando o usuário tem mais de uma loja ML. Mesma lógica de
+ * refresh de token de getMLLojaAtiva, sem o filtro "mais recente ativa".
+ */
+export async function getMLLojaById(lojaId: string): Promise<{
+  lojaId:      string;
+  accessToken: string;
+  sellerId:    string;
+  nickname:    string;
+} | null> {
+  const { data: loja } = await supabase
+    .from("lojas")
+    .select("id, seller_id, nickname, access_token, refresh_token, token_expires_at")
+    .eq("id", lojaId)
+    .maybeSingle();
+
+  if (!loja || !loja.access_token) return null;
+
+  let accessToken = loja.access_token;
+  const expired = loja.token_expires_at &&
+    new Date(loja.token_expires_at).getTime() - 5 * 60 * 1000 < Date.now();
+
+  if (expired && loja.refresh_token) {
+    const result = await refreshMLToken(loja.refresh_token);
+    if (result) {
+      accessToken = result.newAccessToken!;
+      await saveTokensToDB(loja.id, result);
+    }
+  }
+
+  return {
+    lojaId:      loja.id,
+    accessToken,
+    sellerId:    loja.seller_id ?? "",
+    nickname:    loja.nickname ?? "ML",
+  };
+}
+
 /** Aplica cookies novos numa NextResponse após refresh */
 export function applyMLCookies(res: any, result: MLTokenResult) {
   if (!result.newAccessToken) return;

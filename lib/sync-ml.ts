@@ -20,6 +20,9 @@
 import { createClient } from "@supabase/supabase-js";
 import { CATEGORIAS_ML } from "@/lib/comissoes-mercado-livre";
 import { getMLLojaAtiva } from "@/lib/ml-auth";
+import { LojaIdIntegrityError } from "@/lib/sync-errors";
+// import { atualizarResumosDosDias } from "@/lib/resumos-diarios"; — desativado
+// temporariamente 2026-07-13 (ver bloco de chamada removido mais abaixo).
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -78,7 +81,7 @@ function inferLogistica(order: any): string {
   const shTags: string[] = order.shipping?.tags ?? [];
   if (shTags.some((t: string) => t.includes("fulfillment")))  return "Full";
   if (shTags.some((t: string) => t.includes("self_service"))) return "Flex";
-  return "\u2014";
+  return "—";
 }
 
 function mapLogisticType(t: string): string {
@@ -157,9 +160,10 @@ export async function syncMLForUser(
   dateFrom:    string,
   dateTo:      string,
   cookieToken?: string,
-  noBuffer     = false
+  noBuffer     = false,
+  lojaOverride?: { lojaId: string; accessToken: string; sellerId: string; nickname: string }
 ): Promise<number> {
-  const result = await syncMLForUserV2(userId, dateFrom, dateTo, cookieToken, noBuffer);
+  const result = await syncMLForUserV2(userId, dateFrom, dateTo, cookieToken, noBuffer, lojaOverride);
   return result.inserted;
 }
 
@@ -168,18 +172,68 @@ export async function syncMLForUserV2(
   dateFrom:    string,
   dateTo:      string,
   cookieToken?: string,
-  noBuffer     = false
+  noBuffer     = false,
+  // Adicionado 2026-07-11 (worker de sync_jobs): quando informado, sincroniza
+  // EXATAMENTE esta loja (id conhecido, já resolvido por getMLLojaById),
+  // sem passar pelo fluxo de cookie nem por getMLLojaAtiva ("mais recente
+  // ativa") — necessário para o worker atender um job de uma loja_id
+  // específica quando o usuário tem mais de uma loja ML. Não afeta nenhum
+  // caller existente (cron, rota legada por cookie), que continuam sem
+  // passar este argumento.
+  lojaOverride?: { lojaId: string; accessToken: string; sellerId: string; nickname: string }
 ): Promise<SyncMLResult> {
   let token    = cookieToken;
   let sellerId = "";
   let conta    = "ML";
+  let lojaId: string | null = null;
 
-  if (token) {
+  // Regra de integridade (aprovada 2026-07-11): loja_id é obrigatório para
+  // gravar qualquer pedido, resolvido pelo identificador oficial do ML
+  // (seller_id = me.id via /users/me), NUNCA por access_token (credencial
+  // rotativa, muda em refresh/reconexão). Se não achar exatamente 1 loja
+  // correspondente, o sync PARA (lança erro) — nenhum upsert parcial,
+  // nenhum pedido com loja_id NULL. LojaIdIntegrityError agora vem de
+  // lib/sync-errors.ts (2026-07-11) — precisa ser reconhecível fora
+  // deste arquivo por app/api/internal/sync/executar/route.ts, que usa
+  // `instanceof` para decidir se o erro é permanente (sem retry) ou
+  // transitório (retry via sync_jobs.tentativas).
+
+  if (lojaOverride) {
+    // Caminho do worker (job com loja_id explícito) — pula cookie e
+    // getMLLojaAtiva por completo. Nada de ambiguidade: a loja já foi
+    // resolvida e seu token já validado/atualizado por getMLLojaById.
+    token    = lojaOverride.accessToken;
+    sellerId = lojaOverride.sellerId;
+    conta    = lojaOverride.nickname;
+    lojaId   = lojaOverride.lojaId;
+  } else if (token) {
     try {
       const me = await mlFetch("https://api.mercadolibre.com/users/me", token);
       sellerId = String(me.id);
       conta    = me.nickname || me.first_name || "ML";
-    } catch {
+
+      const { data: lojasEncontradas, error: lojaErr } = await supabase
+        .from("lojas")
+        .select("id")
+        .eq("user_id", userId)
+        .eq("marketplace", "ML")
+        .eq("seller_id", sellerId);
+
+      if (lojaErr) {
+        throw new LojaIdIntegrityError(`[sync-ml] erro ao resolver loja_id via seller_id=${sellerId}: ${lojaErr.message}`);
+      }
+      if (!lojasEncontradas || lojasEncontradas.length !== 1) {
+        throw new LojaIdIntegrityError(
+          `[sync-ml] loja_id nao resolvido (fluxo cookie legado): seller_id=${sellerId} encontrou ${lojasEncontradas?.length ?? 0} loja(s) em vez de exatamente 1 — sync interrompido, nenhum pedido gravado.`
+        );
+      }
+      lojaId = lojasEncontradas[0].id;
+    } catch (err) {
+      // Erro de integridade de loja_id nunca cai para o fallback abaixo —
+      // usar getMLLojaAtiva aqui poderia resolver para uma loja DIFERENTE
+      // da que o token do cookie realmente pertence. Só falha de rede/auth
+      // do /users/me (token invalido/expirado) cai no fallback por banco.
+      if (err instanceof LojaIdIntegrityError) throw err;
       token = undefined;
     }
   }
@@ -190,6 +244,11 @@ export async function syncMLForUserV2(
     token    = loja.accessToken;
     sellerId = loja.sellerId;
     conta    = loja.nickname;
+    lojaId   = loja.lojaId;
+  }
+
+  if (!lojaId) {
+    throw new LojaIdIntegrityError(`[sync-ml] loja_id ausente apos resolucao para userId=${userId} — sync interrompido, nenhum pedido gravado.`);
   }
 
   // CORRECAO BUG 2:
@@ -280,6 +339,33 @@ export async function syncMLForUserV2(
 
     if (dataPedido < dateFrom || dataPedido > dateTo) continue;
 
+    // ── Fase B (2026-07-06): data_criacao / data_pagamento / data_atualizacao_marketplace ──
+    // Regra oficial: docs/BUSINESS_RULES.md ("Arquitetura de três datas"). Mesma arquitetura
+    // aplicada em lib/sync-shopee.ts, adaptada aos campos nativos do ML. Não altera `dataPedido`
+    // nem a regra de relatório existente (coluna `data` continua exatamente como antes).
+
+    // data_criacao: sempre a partir de date_created, mesma extração de data que o
+    // código já usa nos ramos de fallback acima (sem shift extra de timezone —
+    // date_created do ML já vem com offset embutido no ISO string).
+    const dataCriacaoML = order.date_created ? String(order.date_created).split("T")[0] : null;
+
+    // data_pagamento: só quando existe pagamento aprovado (mesmo critério do bloco
+    // acima: status "approved" ou "partially_refunded" com date_approved). NULL sem
+    // fallback quando não há pagamento — mesma regra estrita usada na Shopee.
+    const approvedPaymentML = (order.payments ?? []).find(
+      (p: any) => p.status === "approved" || p.status === "partially_refunded"
+    );
+    const dataPagamentoML = approvedPaymentML?.date_approved
+      ? new Date(new Date(approvedPaymentML.date_approved).getTime() - 3 * 60 * 60 * 1000).toISOString().split("T")[0]
+      : null;
+
+    // data_atualizacao_marketplace: ML expõe `last_updated` no recurso de Order (não
+    // verificado empiricamente nesta sessão contra uma resposta real da API — se o
+    // campo não vier, fica NULL de propósito, conforme instrução do usuário).
+    const dataAtualizacaoMarketplaceML = order.last_updated
+      ? new Date(order.last_updated).toISOString()
+      : null;
+
     const logistica = inferLogistica(order);
 
     for (const orderItem of (order.order_items ?? [])) {
@@ -320,10 +406,14 @@ export async function syncMLForUserV2(
         marketplace:     "ML",
         order_id:        String(order.id),
         data:            dataPedido,
+        data_criacao:    dataCriacaoML,
+        data_pagamento:  dataPagamentoML,
+        data_atualizacao_marketplace: dataAtualizacaoMarketplaceML,
         anuncio:         anuncio?.nome ?? orderItem.item?.title ?? mlItemId,
         ml_item_id:      mlItemId,
         variation_id:    null,
         conta,
+        loja_id:         lojaId,
         sku:             anuncio?.sku ?? null,
         status:          order._status ?? "paid",
         frete:           freteGratis ? "gratis" : "comprador",
@@ -352,6 +442,16 @@ export async function syncMLForUserV2(
       .from("pedidos")
       .upsert(rows.slice(i, i + UPSERT_BATCH), { onConflict: "id" });
   }
+
+  // Fase 4 Parte 2 (recalculo de dashboard_resumos_diarios) REMOVIDA
+  // TEMPORARIAMENTE em 2026-07-13 (ver docs/DECISIONS.md e docs/ROADMAP.md).
+  // Motivo: dashboard_resumos_diarios ainda não existe no banco, a
+  // funcionalidade pertence à Fase 4/Grupo C (não faz parte deste deploy), e
+  // mesmo protegida por try/catch gerava log de erro conhecido em todo sync
+  // de produção. lib/resumos-diarios.ts e a migration continuam no repo,
+  // só não são chamados daqui até a Fase 4 estar completa e a migration
+  // executada — reativar então (reintroduzir o bloco de coleta por conta +
+  // a chamada a atualizarResumosDosDias, removidos nesta edição).
 
   return { found, inserted: rows.length };
 }

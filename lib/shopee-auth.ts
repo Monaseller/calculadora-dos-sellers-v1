@@ -148,3 +148,76 @@ export async function getShopeeLojaAtiva(userId: string): Promise<{
     nickname:   loja.nickname ?? `Shopee ${loja.shop_id}`,
   };
 }
+
+/**
+ * Busca uma loja Shopee específica pelo id (não "a mais recente ativa").
+ * Adicionado 2026-07-11 para o worker de sincronização (sync_jobs) poder
+ * sincronizar exatamente a loja do job, mesmo quando o usuário tem mais
+ * de uma loja Shopee — getShopeeLojaAtiva sempre resolveria para a mais
+ * recente, o que quebraria o contrato "job por loja_id específico".
+ * Mesma lógica de refresh de token de getShopeeLojaAtiva, sem o filtro
+ * "mais recente ativa".
+ */
+export async function getShopeeLojaById(lojaId: string): Promise<{
+  lojaId:      string;
+  partnerId:   string;
+  partnerKey:  string;
+  accessToken: string;
+  shopId:      number;
+  nickname:    string;
+} | null> {
+  const { data: loja, error: dbErr } = await supabase
+    .from("lojas")
+    .select("id, shop_id, partner_id, partner_key, access_token, refresh_token, token_expires_at, nickname, ativo")
+    .eq("id", lojaId)
+    .maybeSingle();
+
+  if (dbErr) {
+    console.error("[shopee-auth] db error (getShopeeLojaById):", dbErr.message, "lojaId:", lojaId);
+    return null;
+  }
+  if (!loja) {
+    console.error("[shopee-auth] loja não encontrada (getShopeeLojaById):", lojaId);
+    return null;
+  }
+  if (!loja.partner_id || !loja.partner_key) {
+    console.error("[shopee-auth] loja sem partner_id/partner_key:", loja.id);
+    return null;
+  }
+
+  let accessToken: string = loja.access_token;
+
+  const expiredOrMissing = !loja.access_token ||
+    (loja.token_expires_at && new Date(loja.token_expires_at).getTime() - 5 * 60 * 1000 < Date.now());
+
+  if (expiredOrMissing && loja.refresh_token) {
+    const refreshed = await refreshShopeeToken(
+      loja.partner_id,
+      loja.partner_key,
+      Number(loja.shop_id),
+      loja.refresh_token
+    );
+    if (refreshed) {
+      accessToken = refreshed.access_token;
+      await supabase.from("lojas").update({
+        access_token:     refreshed.access_token,
+        refresh_token:    refreshed.refresh_token ?? loja.refresh_token,
+        token_expires_at: new Date(Date.now() + (refreshed.expire_in ?? 14400) * 1000).toISOString(),
+      }).eq("id", loja.id);
+    } else {
+      console.error("[shopee-auth] refresh FALHOU (getShopeeLojaById) para loja:", loja.id, "- reconecte a Shopee");
+      return null;
+    }
+  }
+
+  if (!accessToken) return null;
+
+  return {
+    lojaId:     loja.id,
+    partnerId:  loja.partner_id,
+    partnerKey: loja.partner_key,
+    accessToken,
+    shopId:     Number(loja.shop_id),
+    nickname:   loja.nickname ?? `Shopee ${loja.shop_id}`,
+  };
+}

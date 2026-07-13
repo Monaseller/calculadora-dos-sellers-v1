@@ -31,6 +31,9 @@ import { createClient } from "@supabase/supabase-js";
 import { shopeeGet } from "@/lib/shopee-api";
 import { obterFaixaShopee, TAXA_CAMPANHA_SHOPEE } from "@/lib/comissoes-shopee";
 import { getShopeeLojaAtiva } from "@/lib/shopee-auth";
+import { LojaIdIntegrityError } from "@/lib/sync-errors";
+// import { atualizarResumosDosDias } from "@/lib/resumos-diarios"; — desativado
+// temporariamente 2026-07-13 (ver bloco de chamada removido mais abaixo).
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -140,7 +143,21 @@ export async function syncShopeeForUserV2(
   const loja = lojaOverride ?? await getShopeeLojaAtiva(userId);
   if (!loja) return { found: 0, inserted: 0, upsertErrors: 0 };
 
-  const { partnerId: partner_id, partnerKey: partner_key, accessToken: access_token, shopId, nickname } = loja;
+  const { partnerId: partner_id, partnerKey: partner_key, accessToken: access_token, shopId, nickname, lojaId } = loja;
+
+  // Regra de integridade (aprovada 2026-07-11): loja_id é obrigatório para
+  // gravar qualquer pedido. Se não resolver, o sync desta loja PARA aqui —
+  // nunca upsert parcial com loja_id NULL. Pedidos já existentes não são
+  // tocados. Estruturalmente `loja.lojaId` sempre vem preenchido (é o `id`
+  // da própria linha em `lojas`, PK nunca nula) — este check é uma trava
+  // defensiva explícita, não um caminho esperado de falha.
+  if (!lojaId) {
+    // LojaIdIntegrityError (lib/sync-errors.ts, 2026-07-11): classe
+    // reconhecível por app/api/internal/sync/executar/route.ts via
+    // `instanceof`, para marcar este erro como PERMANENTE (sem retry)
+    // na fila sync_jobs — diferente de uma falha transitória de rede.
+    throw new LojaIdIntegrityError(`[sync-shopee] loja_id ausente para userId=${userId}, nickname=${nickname} — sync interrompido, nenhum pedido gravado.`);
+  }
 
   // noBuffer=true  → Historico: create_time (todos os status validos no range)
   // noBuffer=false → Cron diario: update_time (filtra COMPLETED = entregues antigos)
@@ -215,6 +232,7 @@ export async function syncShopeeForUserV2(
     "order_status",
     "create_time",
     "pay_time",
+    "update_time",           // Fase B (2026-07-06): data_atualizacao_marketplace
     "total_amount",
     "actual_shipping_fee",
     "estimated_shipping_fee",
@@ -264,12 +282,33 @@ export async function syncShopeeForUserV2(
 
       // P5 + BUG-PIPE-1 FIX: usar create_time quando noBuffer=true
       // (API foi consultada por create_time — pay_time pode estar fora do range para boletos)
+      // NOTA (Fase B, 2026-07-06): esta lógica de `dataBrt`/`refTs` decide só o RANGE da
+      // busca (fetch não muda) e alimenta a coluna legada `data` (fallback, ver DATABASE.md).
+      // NÃO é a mesma coisa que data_criacao/data_pagamento abaixo, que são sempre
+      // calculadas a partir do campo bruto correspondente, independente de noBuffer.
       const refTs   = noBuffer
         ? (order.create_time || 0)
         : (order.pay_time || order.create_time || 0);
       const dataBrt = new Date((refTs - 3 * 3600) * 1000).toISOString().split("T")[0];
 
       if (dataBrt < dateFrom || dataBrt > dateTo) continue;
+
+      // ── Fase B (2026-07-06): data_criacao / data_pagamento / data_atualizacao_marketplace ──
+      // Regra oficial: docs/BUSINESS_RULES.md ("Arquitetura de três datas").
+      // data_criacao: SEMPRE a partir de create_time, nunca muda com o modo de sync.
+      const dataCriacao = order.create_time
+        ? new Date((Number(order.create_time) - 3 * 3600) * 1000).toISOString().split("T")[0]
+        : null;
+      // data_pagamento: só quando existe pay_time de verdade. Sem fallback automático —
+      // pedido nunca pago fica NULL (decisão do usuário, ver DECISIONS.md ponto 2).
+      const dataPagamento = order.pay_time
+        ? new Date((Number(order.pay_time) - 3 * 3600) * 1000).toISOString().split("T")[0]
+        : null;
+      // data_atualizacao_marketplace: timestamp bruto (não só a data) da última alteração
+      // do pedido na Shopee — preparação para a reconciliação de status (ver BUGS.md).
+      const dataAtualizacaoMarketplace = order.update_time
+        ? new Date(Number(order.update_time) * 1000).toISOString()
+        : null;
 
       // ── Campos de endereco e logistica ──────────────────────────────────────
       const freteReal      = Number(order.actual_shipping_fee    ?? 0);
@@ -304,7 +343,15 @@ export async function syncShopeeForUserV2(
       const incBuyerTotal    = Number(incDist.buyer_total_amount  ?? order.total_amount        ?? 0);
 
       // income_distribution considerado disponivel quando tem pelo menos um valor significativo
-      const hasIncomeData = incEscrow > 0 || incCommission > 0 || incBuyerTotal > 0;
+      // Fase F (2026-07-07): CORRECAO DE BUG - a versao anterior usava `incBuyerTotal > 0`,
+      // mas incBuyerTotal cai no fallback `order.total_amount` quando a Shopee NAO manda
+      // income_distribution (linha acima). Isso fazia hasIncomeData dar true quase sempre,
+      // mesmo sem nenhum dado real de income_distribution (confirmado matematicamente:
+      // voucher_from_shopee/voucher_from_seller/escrow_amount = 0 em 100% das linhas
+      // marcadas has_income_data=true no dia 06/07/2026). A correcao usa o valor BRUTO de
+      // buyer_total_amount, sem fallback, para decidir se o dado e real.
+      const incBuyerTotalRaw = Number(incDist.buyer_total_amount ?? 0);
+      const hasIncomeData = incEscrow > 0 || incCommission > 0 || incBuyerTotalRaw > 0;
 
       // Total Shopee fees (ordem inteira) — distribui por item proporcionalmente
       const incPlataformaTotalOrder = incCommission + incServiceFee + incCampaignFee + incTxFee;
@@ -327,12 +374,17 @@ export async function syncShopeeForUserV2(
           marketplace:      "Shopee",
           order_id:         order.order_sn,
           data:             dataBrt,
+          data_criacao:     dataCriacao,
+          data_pagamento:   dataPagamento,
+          data_atualizacao_marketplace: dataAtualizacaoMarketplace,
           anuncio:          "(sem item_list)",
           ml_item_id:       "",
           variation_id:     null,
           conta:            nickname,
+          loja_id:          lojaId,
           sku:              null,
           status:           mapStatus(status),
+          status_shopee_raw: status,
           frete:            "comprador",
           logistica:        fulfillmentFlag === "fulfilled_by_shopee" ? "SFS" : "Shopee",
           valor_unit:       0,
@@ -455,12 +507,17 @@ export async function syncShopeeForUserV2(
           marketplace:      "Shopee",
           order_id:         order.order_sn,
           data:             dataBrt,
+          data_criacao:     dataCriacao,
+          data_pagamento:   dataPagamento,
+          data_atualizacao_marketplace: dataAtualizacaoMarketplace,
           anuncio:          item.item_name ?? itemIdStr,
           ml_item_id:       itemIdStr,
           variation_id:     variationId,
           conta:            nickname,
+          loja_id:          lojaId,
           sku:              itemSku ?? anuncio?.sku ?? null,
           status:           mapStatus(status),
+          status_shopee_raw: status,
           frete:            "comprador",
           logistica:        fulfillmentFlag === "fulfilled_by_shopee" ? "SFS" : "Shopee",
           valor_unit:       valorUnit,
@@ -527,6 +584,16 @@ export async function syncShopeeForUserV2(
       );
     }
   }
+
+  // Fase 4 Parte 2 (recalculo de dashboard_resumos_diarios) REMOVIDA
+  // TEMPORARIAMENTE em 2026-07-13 (ver docs/DECISIONS.md e docs/ROADMAP.md).
+  // Motivo: dashboard_resumos_diarios ainda não existe no banco, a
+  // funcionalidade pertence à Fase 4/Grupo C (não faz parte deste deploy), e
+  // mesmo protegida por try/catch gerava log de erro conhecido em todo sync
+  // de produção. lib/resumos-diarios.ts e a migration continuam no repo,
+  // só não são chamados daqui até a Fase 4 estar completa e a migration
+  // executada — reativar então (reintroduzir o bloco de coleta por conta +
+  // a chamada a atualizarResumosDosDias, removidos nesta edição).
 
   return { found, inserted: rows.length, upsertErrors };
 }
