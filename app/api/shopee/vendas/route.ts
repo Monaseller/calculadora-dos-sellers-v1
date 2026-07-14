@@ -158,7 +158,14 @@ export async function GET(request: Request) {
   for (let page = 0; page < MAX_PAGES; page++) {
     const from = page * PAGE_SIZE;
     const to = from + PAGE_SIZE - 1;
-    const pageResult = await buildPedidosQuery("*").order("data", { ascending: false }).range(from, to);
+    // Desempate por "id" (2026-07-13, ver docs/BUGS.md): "data" tem milhares
+    // de linhas empatadas, e sem uma chave única de desempate o Postgres/
+    // PostgREST não garante ordem estável entre chamadas de paginação
+    // sucessivas — confirmado que id é único e NOT NULL em toda a tabela.
+    const pageResult = await buildPedidosQuery("*")
+      .order("data", { ascending: false })
+      .order("id",   { ascending: true })
+      .range(from, to);
     const pageData = pageResult.data;
     const pageErr = pageResult.error;
 

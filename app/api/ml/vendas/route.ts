@@ -193,8 +193,11 @@ export async function GET(request: Request) {
   for (let page = 0; page < MAX_PAGES; page++) {
     const from = page * PAGE_SIZE;
     const to   = from + PAGE_SIZE - 1;
+    // Desempate por "id" (2026-07-13, ver docs/BUGS.md) — mesmo fix aplicado
+    // em shopee/vendas: id é único e NOT NULL em toda a tabela (confirmado).
     const { data: pageData, error: pageErr } = await buildPedidosQuery("*")
       .order("data", { ascending: false })
+      .order("id",   { ascending: true })
       .range(from, to);
 
     if (pageErr) {

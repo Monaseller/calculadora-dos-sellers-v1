@@ -619,6 +619,11 @@ export default function DashboardPage() {
   const [shopeeConectado, setShopeeConectado] = useState(false);
   const [lojas,            setLojas]            = useState<Loja[]>([]);
   const [lojasSelecionadas, setLojasSelecionadas] = useState<Set<string>>(new Set());
+  // Corrige a race condition do carregamento inicial (2026-07-13, ver
+  // docs/BUGS.md): so passa a chamar carregar() depois que /api/lojas
+  // respondeu pelo menos uma vez (sucesso, vazio ou falha) — elimina o
+  // primeiro carregar() "as cegas" que disparava antes das lojas existirem.
+  const [lojasProntas, setLojasProntas] = useState(false);
 
   const [kpis, setKpis] = useState({
     faturamento: 0, pedidos: 0, ticket: 0, lucro: 0,
@@ -635,6 +640,14 @@ export default function DashboardPage() {
   // Refs estáveis — evitam double-load quando anuncios carrega de forma assíncrona
   const anunciosRef = useRef<Anuncio[]>([]);
   const lojasRef    = useRef<Loja[]>([]);
+  // Correção da race condition (2026-07-13, ver docs/BUGS.md e
+  // docs/DECISIONS.md): reqCounterRef identifica de forma incremental cada
+  // chamada de carregar(); abortRef guarda o AbortController da chamada em
+  // andamento. Juntos garantem que só a chamada mais recente possa aplicar
+  // setState, e que a chamada anterior seja efetivamente cancelada (aparece
+  // como "canceled"/"aborted" no Network) em vez de só ser ignorada.
+  const reqCounterRef = useRef(0);
+  const abortRef      = useRef<AbortController | null>(null);
   const [score,    setScore]    = useState(0);
   const [sparkFat, setSparkFat] = useState<number[]>([]);
   const [sparkLuc, setSparkLuc] = useState<number[]>([]);
@@ -662,10 +675,22 @@ export default function DashboardPage() {
           setLojasSelecionadas(new Set(data.map(l => l.id)));
         }
       })
-      .catch(() => {});
+      .catch(() => {})
+      // Correção (2026-07-13): independente de sucesso/vazio/falha, libera o
+      // carregamento principal só depois desta resposta — elimina o
+      // carregar() "as cegas" que disparava antes de saber quais lojas existem.
+      .finally(() => setLojasProntas(true));
   }, []);
 
   const carregar = useCallback(async (from: string, to: string, lojasAtivas?: Set<string>) => {
+    // Cancela a chamada anterior (se ainda estiver em voo) e assume esta
+    // como a única válida a partir de agora.
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    const reqId = ++reqCounterRef.current;
+    const ehAtual = () => reqId === reqCounterRef.current;
+
     setLoading(true);
     setErro(null);
     const sel = lojasAtivas ?? lojasSelecionadas;
@@ -678,9 +703,13 @@ export default function DashboardPage() {
     try {
       // Fase D (2026-07-06): date_field propagado às duas APIs (Fase C já suporta o parâmetro)
       const [mlData, shopeeData] = await Promise.all([
-        buscarML     ? fetch(`/api/ml/vendas?date_from=${from}&date_to=${to}&date_field=${dateField}`).then(r => r.json()).catch(() => null)     : Promise.resolve(null),
-        buscarShopee ? fetch(`/api/shopee/vendas?date_from=${from}&date_to=${to}&date_field=${dateField}`).then(r => r.json()).catch(() => null) : Promise.resolve(null),
+        buscarML     ? fetch(`/api/ml/vendas?date_from=${from}&date_to=${to}&date_field=${dateField}`, { signal: controller.signal }).then(r => r.json()).catch(err => { if (err?.name === "AbortError") throw err; return null; })     : Promise.resolve(null),
+        buscarShopee ? fetch(`/api/shopee/vendas?date_from=${from}&date_to=${to}&date_field=${dateField}`, { signal: controller.signal }).then(r => r.json()).catch(err => { if (err?.name === "AbortError") throw err; return null; }) : Promise.resolve(null),
       ]);
+
+      // Uma chamada mais nova já começou enquanto esta esperava a rede —
+      // esta resposta é obsoleta, não aplica nenhum setState.
+      if (!ehAtual()) return;
 
       const mlOk     = mlData     && !mlData.erro;
       const shopeeOk = shopeeData && !shopeeData.erro && !shopeeData.semConexao;
@@ -793,6 +822,11 @@ export default function DashboardPage() {
         } catch { /* silencioso */ }
       }
 
+      // Segundo ponto de checagem: o fetch de thumbnails acima é outro
+      // "await" — uma chamada mais nova pode ter começado enquanto ele
+      // rodava. Se sim, não aplica este segundo lote de setState.
+      if (!ehAtual()) return;
+
       setTops(topsSorted);
       setLoss(lossSorted);
       setTopsML(builtML.tops);
@@ -808,12 +842,28 @@ export default function DashboardPage() {
       if (!al.length && pedidos > 0) al.push({ icon: "✅", title: "Tudo certo por aqui!", msg: "Seus anuncios estao com boa saude financeira.", color: "#22C55E" });
       setAlertas(al);
 
-    } catch (e) { console.error("[dashboard] carregar error:", e); setErro("Erro ao carregar dados."); }
-    setLoading(false);
+    } catch (e) {
+      // AbortError = esta chamada foi cancelada por uma mais nova — não é
+      // erro real, não deve aparecer para o usuário nem mexer em nenhum estado.
+      if ((e as any)?.name === "AbortError") return;
+      console.error("[dashboard] carregar error:", e);
+      if (ehAtual()) setErro("Erro ao carregar dados.");
+    }
+    if (ehAtual()) setLoading(false);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dateField]); // anuncios e lojas acessados via ref; dateField é dependência real (Fase D) — nova referência força refetch ao trocar o seletor
 
-  useEffect(() => { carregar(dateFrom, dateTo, lojasSelecionadas); }, [dateFrom, dateTo, lojasSelecionadas, carregar]);
+  useEffect(() => {
+    // Só carrega depois que /api/lojas respondeu (ver setLojasProntas) —
+    // elimina o carregar() inicial "as cegas" que rodava antes de saber
+    // quais lojas existem, e que causava o duplo-fetch na carga da página.
+    if (!lojasProntas) return;
+    carregar(dateFrom, dateTo, lojasSelecionadas);
+    // Cleanup: cancela a requisição em andamento se as deps mudarem de novo
+    // (nova troca de filtro/loja) antes desta terminar, ou se a página
+    // desmontar. Reforça o abort já feito no início de carregar().
+    return () => { abortRef.current?.abort(); };
+  }, [dateFrom, dateTo, lojasSelecionadas, lojasProntas, carregar]);
 
   const totalCusto    = dias.reduce((s, d) => s + d.custo, 0);
   const totalComissao = dias.reduce((s, d) => s + d.comissao, 0);
