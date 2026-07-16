@@ -71,6 +71,32 @@ Contexto: auditoria da arquitetura de múltiplas lojas (motivada pelo pedido de 
 
 ## Em aberto
 
+### 189 pedidos Shopee de 07/07/2026 — RECUPERADOS via backfill (2026-07-15)
+
+**Backfill executado e validado com sucesso.** Rota `app/api/admin/shopee/backfill-pedidos-0707/route.ts` (busca pontual via `get_order_detail` para os 189 `order_sn` conhecidos — nunca chama `get_order_list`, então estruturalmente não pode tocar em nenhum pedido fora da lista). Reaproveita, sem duplicar, `montarLinhasDoPedido()` e `carregarMapaAnuncios()` já existentes em `lib/sync-shopee.ts` — mesma lógica oficial do sync normal, nenhuma fórmula nova.
+
+Processo de validação (aprovado pelo usuário antes da execução completa): 1 pedido canário gravado primeiro e conferido campo a campo no Supabase; dry-run repetido confirmando que o upsert reconhece corretamente "já existente" vs "novo"; só depois disso o restante foi gravado.
+
+**Resultado:** 189/189 pedidos recuperados, 222 linhas, R$4.924,83 de faturamento recuperado, 0 erros, 0 duplicação (validado por `count(distinct order_id)=189` e `group by id having count(*)>1`=0 em toda a tabela `pedidos`, não só nos 189).
+
+Nenhum código de sync, cron, paginação ou filtro foi alterado neste processo — só a extração pura (sem mudança de comportamento) de `montarLinhasDoPedido`/`carregarMapaAnuncios` para fora de `syncShopeeForUserV2`, e a rota de backfill nova (candidata a remoção do repositório depois de uso, é pontual — ver `ROADMAP.md`, checklist de limpeza de endpoints administrativos).
+
+**Prevenção (Etapa 2) continua em aberto, decisão não tomada.** Causa raiz do evento original de 07/07 nunca foi 100% identificada (ver investigação abaixo) — a recuperação não dependeu disso. Opções A-F do plano de 2026-07-14 seguem candidatas; nenhuma implementada.
+
+### 189 pedidos Shopee perdidos em 07/07/2026 — causa raiz NÃO é (só) o filtro COMPLETED (2026-07-14)
+
+**Fato confirmado:** 189 `order_sn` pagos em 07/07/2026 (~20:43–23:17 BRT) nunca chegaram à tabela `pedidos` — ver `BUGS.md`.
+
+**Investigação concluída via rota de diagnóstico temporária** (`get_order_list` real, por `create_time` e por `update_time`, rodada localmente em 2026-07-14 — rota removida depois de usada, não fica no repositório). Resultado:
+
+- Os 189 aparecem tanto na listagem por `create_time` (janela 07/05–07/09) quanto na listagem por `update_time` (janela 07/06–07/14) — 0 não encontrados nas duas. **Descarta as hipóteses "nunca aparecem no get_order_list" e "aparecem só por um dos dois campos de tempo".**
+- Status atual (ao vivo): 88 dos 189 estão `COMPLETED`; os outros 101 estão `TO_CONFIRM_RECEIVE` (85), `SHIPPED` (11) ou `TO_RETURN` (5).
+- O filtro `filtrarCompleted` (`lib/sync-shopee.ts`) só poderia explicar os **88 que hoje estão `COMPLETED`** — e mesmo isso exigiria que tivessem virado `COMPLETED` rápido demais para o cron pegá-los antes, o que não foi confirmado (não temos o status histórico do dia 07-08/07, só o de hoje). **Para os outros 101, o filtro não é sequer aplicável**: nenhum está `COMPLETED` hoje, então em nenhum dia dos últimos 7 o filtro deveria tê-los bloqueado — e mesmo assim nunca foram gravados.
+
+**Conclusão: o filtro `filtrarCompleted` não é causa suficiente para os 189 — no máximo explicaria uma fração deles (até 88), e não explica os outros 101.** A causa comum aos 189 (todos pagos na mesma janela de ~2h40 em 07/07) ainda não foi identificada. Hipóteses mais prováveis, não verificadas: falha de execução do cron `/api/sync` especificamente nesse dia (sem acesso a logs de execução da Vercel a partir deste ambiente), ou um bug de paginação/cursor em `get_order_list`/`get_order_detail` que descartou esse lote específico de `order_sn` silenciosamente.
+
+**Consequência para a Etapa 2 (prevenção):** a Opção B do plano original (comparar `update_time` dentro da própria listagem de `get_order_list`) foi testada e **não é viável** — a API da Shopee rejeita `update_time` como `response_optional_field` desse endpoint ("does not support [update_time]"), só está disponível via `get_order_detail`. As opções que **não dependem de identificar a causa exata** (C — reconciliação periódica por `create_time` comparando contra o banco; D — alerta de queda anormal de volume) continuam candidatas. Nenhuma implementada — decisão de qual seguir ainda pendente do usuário, e a causa raiz específica de 07/07 segue em aberto (precisaria de acesso a logs de execução do cron na Vercel para fechar).
+
 ### Gap residual de 10 pedidos / ≈R$350 (02/07/2026) — retomar só se houver novo sinal
 
 Decisão (2026-07-06): **encerrar a investigação ativa** do gap entre painel Shopee (989 pedidos/R$22.339,82) e CDS (979 pedidos/R$21.990,48).

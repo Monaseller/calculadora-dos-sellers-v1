@@ -80,3 +80,21 @@ Contexto: auditoria pré-deploy (Parte 6 do pedido de organização do deploy, v
 Resultado prático: se um usuário tem 2 lojas Shopee conectadas e usa o dropdown pra "trocar" para a mais antiga, o ✓ verde no menu muda, mas Vendas/Dashboard continuam mostrando os dados da loja conectada/reconectada mais recentemente — a troca é cosmética para leitura de dados. Isso não é uma limitação de "falta implementar seleção múltipla" — é um mecanismo de UI que hoje não faz o que aparenta fazer.
 
 **Por que não foi corrigido agora:** decisão explícita do usuário (2026-07-13) de tratar multi-lojas (incluindo este bug) como frente própria, depois do deploy atual — ver arquitetura proposta em `ROADMAP.md` ("Fase 6 — Seleção de lojas").
+
+## ✅ 189 pedidos Shopee ausentes de `pedidos` — 07/07/2026, janela ~20:43–23:17 — RECUPERADOS (2026-07-15)
+
+**Recuperação concluída e validada.** Backfill pontual via `app/api/admin/shopee/backfill-pedidos-0707/route.ts` (busca direta por `get_order_detail` para os 189 `order_sn` conhecidos, reaproveitando `montarLinhasDoPedido()`/`carregarMapaAnuncios()` do sync oficial, upsert `onConflict:"id"`). Testado em 3 etapas: (1) 1 pedido canário gravado e validado campo a campo no Supabase (`loja_id`, `status`, `status_shopee_raw`, `data_pagamento`, `data_criacao`, `item_subtotal`, sem duplicação, Dashboard refletindo o pedido); (2) dry-run confirmando 188 novos / 1 já existente (upsert funcionando); (3) backfill completo dos 188 restantes.
+
+**Resultado final:** 189/189 pedidos recuperados, 222 linhas gravadas, R$4.924,83 de faturamento recuperado, 0 erros de gravação, 0 duplicação (confirmado via `count(distinct order_id)=189` e `group by id having count(*)>1` = 0 linhas em toda a tabela). Nenhum pedido fora da lista foi tocado (rota nunca chama `get_order_list`, só `get_order_detail` para os order_sn explicitamente solicitados).
+
+Detalhe original da investigação (mantido para histórico):
+
+**Confirmado (fato, não hipótese):** 189 `order_sn` da loja Shopee Monamor (419809235), todos com pagamento em 07/07/2026 entre ~20:43 e ~23:17 (horário de Brasília), estão **totalmente ausentes** da tabela `pedidos` — confirmado por uma busca `order_id IN (...)` cobrindo os 189 IDs, sem nenhum filtro de data ou status, na tabela inteira (0 linhas retornadas).
+
+**Método de detecção:** cruzamento entre o export oficial da Shopee Seller Center (`Order.all.order_creation_date`, nível item/pedido) e os `order_id` pagos gravados no banco para 07/07/2026. Lista completa dos 189 `order_sn` em `lib/backfill-0707-order-ids.ts` (`DEFAULT_ORDER_IDS_0707`).
+
+**Status atual desses pedidos na Shopee (live, 2026-07-14):** 88 dos 189 já `COMPLETED`; os outros 101 em `TO_CONFIRM_RECEIVE` (85), `SHIPPED` (11) ou `TO_RETURN` (5).
+
+**Causa raiz: confirmado que o filtro `filtrarCompleted` NÃO explica a maioria dos casos.** Diagnóstico direto via `get_order_list` (rodado localmente em 2026-07-14, rota temporária removida depois de usada) confirma que os 189 aparecem normalmente na listagem da Shopee, tanto por `create_time` quanto por `update_time` — não é um problema de "a Shopee nunca lista esse pedido". O filtro `filtrarCompleted` só poderia explicar os 88 hoje `COMPLETED` (e isso não está confirmado — exigiria que tivessem completado rápido demais para o cron pegar antes); os outros 101 não estão `COMPLETED` e mesmo assim nunca foram gravados, então o filtro nem se aplica a eles. Causa real ainda não identificada — ver `DECISIONS.md` para o detalhe completo e hipóteses remanescentes (falha do cron nesse dia específico, ou bug de paginação/cursor).
+
+**Recuperação:** plano de backfill pontual desenhado (rota admin `dry_run`-first, reaproveitando a lógica de montagem de linha extraída para `montarLinhasDoPedido()` em `lib/sync-shopee.ts`, sem tocar em nenhum pedido fora desta lista) — implementação ainda pendente de aprovação final do usuário.
