@@ -20,22 +20,22 @@
 **Commit `3486448`** (branch `main`) congela o módulo inteiro: código,
 39 migrations, 13 suítes (692 testes) e documentação.
 
-**O deploy está bloqueado por dois motivos ambientais, nenhum de código:**
+**O deploy segue bloqueado, agora por dois motivos diferentes:**
 
-1. **Não se sabe qual projeto Supabase a produção usa.** As variáveis são
-   *Sensitive* na Vercel e o `env pull` devolve valores vazios; o bundle
-   público não expõe a URL. Sem essa prova, nenhuma migration foi
-   aplicada em produção.
-2. **Falta `SUPABASE_SERVICE_ROLE_KEY`** — provado pelo código, é a
-   **única** das 24 variáveis ausentes que quebra o Estúdio. As chaves de
-   IA só habilitam o pipeline; sem elas os flags ficam desligados.
+1. **`SUPABASE_SERVICE_ROLE_KEY` não está configurada** em nenhum ambiente
+   do projeto Vercel — provado pelo `vercel env ls`, que lista 11
+   variáveis e nenhuma delas. É a única das 24 ausentes que quebra o
+   Estúdio: toda rota dele usa service role.
+2. **Incidente de credencial aberto:** o `ML_CLIENT_SECRET` está exposto
+   em repositório público desde o commit `ebd4400`. Precisa ser
+   rotacionado. Ver `BUGS.md`.
 
-As 11 rotas `app/api/debug/*` foram removidas antes do deploy (sem
-consumidor real), com dois testes impedindo o retorno. Ver `BUGS.md`.
-
-**Neste repositório, `git push` para `main` dispara deploy de produção**
-(projeto Vercel conectado ao Git). Isso muda onde o gate precisa ficar:
-antes do push, não entre push e deploy.
+**Resolvido nesta rodada:** o projeto Supabase de produção foi **provado**
+como sendo o mesmo de desenvolvimento (comparação de *project ref*), o
+que significa que o banco onde tudo foi construído **é** produção — 39
+migrations aplicadas, 14/14 tabelas, 8/8 RPCs críticas, 3 buckets
+privados. E `/api/sync`, que ficava aberta sem `CRON_SECRET`, passou a
+falhar fechada.
 
 ## COMO CONTINUAR ESTE PROJETO
 

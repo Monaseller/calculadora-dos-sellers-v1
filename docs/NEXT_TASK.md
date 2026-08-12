@@ -20,7 +20,31 @@ O canal está travado — `podePublicarML = false` daqui em diante.
 
 ## Última sessão encerrada em
 
-2026-09-01
+2026-09-01 (2)
+
+## 🔴 AÇÃO URGENTE — rotacionar credencial
+
+**O `ML_CLIENT_SECRET` está exposto em repositório PÚBLICO** desde o
+commit `ebd4400` (arquivo `4-configurar-env-vercel.vbs`, que passava
+credenciais por `echo` para `vercel env add`). Os valores foram removidos
+da working tree, mas **o histórico é público** e não foi reescrito —
+reescrever não desfaz exposição, e quebraria clones existentes.
+
+**Rotacione o segredo no painel do Mercado Livre e atualize a variável na
+Vercel.** Considere tornar o repositório privado. Ver `BUGS.md`.
+
+## O que falta para o deploy
+
+1. ~~Confirmar qual Supabase produção usa~~ — **PROVADO: mesmo projeto de
+   dev.** O banco onde tudo foi desenvolvido **é** produção; por isso as
+   39 migrations já estão aplicadas (14/14 tabelas, 8/8 RPCs críticas) e
+   os 3 buckets existem e são privados.
+2. **Reconfigurar `SUPABASE_SERVICE_ROLE_KEY`** — não aparece em nenhum
+   ambiente do projeto Vercel `calculadora-dos-sellers-v1`. Conferido
+   também o outro projeto da conta: também não está lá. Verifique se a
+   edição foi salva.
+3. **Configurar `CRON_SECRET`** — sem ela o cron das 3h **não roda mais**
+   (a rota passou a falhar fechada, de propósito).
 
 ## Checkpoint
 
@@ -181,7 +205,15 @@ publicar. Validar ≠ publicar.
 
 **Nenhuma autorizada.** Duas coisas esperam por você, nesta ordem:
 
-1. **Confirmar qual projeto Supabase a produção usa** (painel da Vercel →
+1. ~~Confirmar qual projeto Supabase a produção usa~~ — **PROVADO:
+   mesmo projeto de dev.** O banco onde tudo foi desenvolvido É produção,
+   então as 39 migrations já estão aplicadas e os 3 buckets existem e são
+   privados.
+2. **Reconfigurar ** — ela não aparece em
+   nenhum ambiente do projeto Vercel correto. Verifique se salvou.
+3. **Configurar ** — sem ela o cron das 3h não roda mais
+   (agora falha fechada, de propósito).
+4. ~~item antigo~~ (painel da Vercel →
    valor de `NEXT_PUBLIC_SUPABASE_URL`). Sem isso não dá para saber se as
    39 migrations precisam ser aplicadas lá.
 2. **Configurar `SUPABASE_SERVICE_ROLE_KEY`** em produção — a única

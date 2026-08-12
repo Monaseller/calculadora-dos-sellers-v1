@@ -22,9 +22,30 @@ function brtDate(offsetDays = 0): string {
 export const maxDuration = 300; // Vercel Pro: até 5 min
 
 export async function GET(request: Request) {
-  // Verifica secret do cron (Vercel injeta automaticamente)
+  // ── Autenticação do cron — FAIL CLOSED (2026-09-01) ────────────────
+  //
+  // A versão anterior era `if (process.env.CRON_SECRET && auth !== ...)`.
+  // O `&&` fazia a guarda inteira desaparecer quando a variável não
+  // estava configurada: sem segredo, a condição era falsa e a rota ficava
+  // ABERTA. E ela não é inofensiva — varre `lojas` de TODOS os usuários
+  // ativos e dispara sync contra Shopee e Mercado Livre para cada um.
+  //
+  // Agora a ausência de configuração é o caso mais seguro, não o mais
+  // permissivo: sem `CRON_SECRET`, ninguém entra — nem o cron. Isso é
+  // deliberado. Uma sincronização que não roda é um incidente visível e
+  // reversível; uma rota multi-tenant aberta, não.
+  //
+  // O formato é o OFICIAL do Vercel Cron: quando `CRON_SECRET` existe nas
+  // variáveis do projeto, o agendador envia `Authorization: Bearer <ela>`
+  // sozinho. Por isso não há header próprio, query param nem cookie aqui
+  // — inventar um só criaria uma segunda porta para manter fechada.
+  const segredo = process.env.CRON_SECRET;
   const auth = request.headers.get("authorization");
-  if (process.env.CRON_SECRET && auth !== `Bearer ${process.env.CRON_SECRET}`) {
+
+  // Resposta genérica e idêntica nos três casos: quem chama não precisa
+  // saber se o que faltou foi a configuração do servidor ou o header
+  // dele.
+  if (!segredo || !auth || auth !== `Bearer ${segredo}`) {
     return NextResponse.json({ erro: true }, { status: 401 });
   }
 
