@@ -122,7 +122,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ erro: true, mensagem: "Mercado Livre não conectado." });
   }
   if (!userId) {
-    return NextResponse.json({ erro: true, mensagem: "Sessão inválida." });
+    return NextResponse.json({ erro: true, mensagem: "Sessão inválida." }, { status: 401 });
   }
   const token = tokenResult.token;
 
@@ -134,7 +134,17 @@ export async function POST(request: Request) {
     .eq("user_id", userId)
     .not("ml_item_id", "is", null);
 
-  if (error) return NextResponse.json({ erro: true, mensagem: "Erro Supabase: " + error.message });
+  if (error) {
+    // A mensagem crua do Supabase pode conter nome de tabela, coluna e
+    // esquema — fica no log, nunca na resposta. E falha de banco e 5xx,
+    // não 200 com `erro:true` (o corpo é preservado porque a tela lê
+    // `data.erro` e `data.mensagem`).
+    console.error("[POST /api/ml/sync-precos] falha ao ler anúncios:", error.message);
+    return NextResponse.json(
+      { erro: true, mensagem: "Não foi possível carregar os anúncios agora." },
+      { status: 503 }
+    );
+  }
   if (!anuncios?.length) return NextResponse.json({ erro: false, atualizados: 0, mensagem: "Nenhum anúncio ML encontrado." });
 
   let atualizados = 0;

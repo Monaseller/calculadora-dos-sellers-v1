@@ -40,7 +40,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ erro: true, mensagem: "Conta ML não conectada." });
   }
   if (!userId) {
-    return NextResponse.json({ erro: true, mensagem: "Sessão inválida." });
+    return NextResponse.json({ erro: true, mensagem: "Sessão inválida." }, { status: 401 });
   }
 
   // Busca anúncios com ml_item_id mas sem SKU (ou SKU vazio) — apenas deste usuário

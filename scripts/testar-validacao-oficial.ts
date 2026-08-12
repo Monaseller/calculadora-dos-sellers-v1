@@ -662,13 +662,29 @@ async function rodar() {
   });
 
   // ── Superfície de produção (2026-08-31) ─────────────────────────────
-  await t("64. nenhuma rota de DEPURAÇÃO vai a produção", () => {
+  await t("64. nenhuma rota de DIAGNÓSTICO vai a produção", () => {
     // As 11 rotas app/api/debug/* foram removidas antes do deploy: GET
     // apenas, sem consumidor real, e a de refresh de token era redundante
     // (getShopeeLojaAtiva já renova sozinha 5 min antes de expirar). Ficam
     // no histórico, no commit 3486448.
-    assert(!fs.existsSync(path.join(process.cwd(), "app/api/debug")),
-      "app/api/debug voltou a existir — rota de depuração não vai a produção");
+    // Removidas em duas rodadas: as 11 de app/api/debug (2026-09-01) e
+    // as 4 de diagnóstico Shopee/ML (2026-09-03). Todas tinham ZERO
+    // consumidores; ficam no histórico do Git.
+    const proibidas = [
+      "app/api/debug",
+      "app/api/shopee/ping",
+      "app/api/shopee/status",
+      "app/api/ml/debug-item",
+      "app/api/ml/test-collections",
+    ];
+    for (const rel of proibidas) {
+      assert(!fs.existsSync(path.join(process.cwd(), rel)),
+        rel + " voltou a existir — rota de diagnóstico não vai a produção");
+    }
+    // E as rotas Shopee LEGÍTIMAS continuam de pé.
+    for (const rel of ["app/api/shopee/vendas", "app/api/shopee/importar-anuncios"]) {
+      assert(fs.existsSync(path.join(process.cwd(), rel)), rel + " foi removida por engano");
+    }
   });
   await t("65. nenhuma rota de produção expõe token ou service role na resposta", () => {
     const rotas: string[] = [];

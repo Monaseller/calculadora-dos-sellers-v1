@@ -11,38 +11,37 @@
 
 ## STATUS
 
-**🟢 EM PRODUÇÃO — estabilizada.**
+**🟢 EM PRODUÇÃO — APIs normalizadas.**
 
-Commit `4fc3764` no ar em `www.ligadossellers.com.br`, Estúdio operacional,
-`MLB7395781296` `active` e portão fechado para ele.
+Estúdio operacional, `MLB7395781296` `active` e portão fechado para ele.
 
-**Estabilização de 2026-09-02:** `/api/lojas` e `/api/perfil` pararam de
-responder **200 em falha de infraestrutura** — era isso que escondia a
-queda do Supabase há ~54 dias. Agora 200 é sucesso ou ausência legítima,
-401 é falta de sessão, 5xx é infraestrutura. Os consumidores passaram a
-conferir `res.ok`, senão continuariam mostrando "nenhuma loja" diante de
-um 5xx.
+**Limpeza de 2026-09-03:** auditadas as 13 rotas mapeadas (o registro dizia
+"12", mas enumerava 13). Apenas **6 tinham defeito real** — 2 corrigidas
+(`ml/sync-precos`, `ml/sync-skus`) mais `anuncio` e o callback OAuth com
+entrada inválida, e **4 rotas de diagnóstico sem consumidor removidas**
+(`ml/debug-item`, `ml/test-collections`, `shopee/ping`, `shopee/status`).
 
-15 suítes · 718 testes · `tsc` limpo · build verde · zero `/api/debug`.
+As outras **7 eram falso positivo**: sucesso com a palavra "erro" no corpo
+(`erros: 0`, `erro: false`) ou **estado de negócio** — "conta não
+conectada", "token expirado", "sync assíncrono desativado". Esses seguem
+200 de propósito: carregam flags que a tela consome, e virar 4xx/5xx
+quebraria o consumidor afirmando uma falha que não existe. Há teste que
+falha se alguém converter.
+
+15 suítes · 723 testes · `tsc` limpo · build verde · smoke local 16/16.
 
 ## O que ficou pendente
 
-1. **O mesmo anti-pattern em outras 12 rotas** — mapeadas nominalmente em
-   `BUGS.md`. Não corrigidas de propósito: ampliar para 12 rotas mudaria
-   o escopo de uma tarefa de estabilização.
-2. **`/api/shopee/ping` e `/api/shopee/status`** — diagnóstico sem
-   consumidor, recomendadas para remoção numa tarefa própria.
-3. **Primeira execução do cron** (3h) ainda não observada. Conferir status
+1. **Primeira execução do cron** (3h) ainda não observada. Conferir status
    e duração; não disparar manualmente (é multi-tenant).
-4. **Exposição histórica do `ML_CLIENT_SECRET`** no Git público — o
+2. **Exposição histórica do `ML_CLIENT_SECRET`** no Git público — o
    segredo já foi rotacionado e validado. Considere tornar o repositório
    privado.
-5. **Lint não configurado** no projeto — nenhuma ferramenta foi instalada
-   só para isso.
+3. **Lint não configurado** no projeto.
 
 ## Última sessão encerrada em
 
-2026-09-02 — estabilizacao pos-deploy
+2026-09-03 — limpeza de APIs
 
 ## ⚠️ Incidente de credencial — rotação declarada, conferir
 

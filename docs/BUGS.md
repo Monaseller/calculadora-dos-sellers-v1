@@ -35,13 +35,34 @@
   **Teste comportamental — 26/26 verificações, custo zero:** cenário isolado (projeto `b5f916fb-…`, job `7a3981a9-…`, etapa `busca_externa`, que está no catálogo mas fora de `ETAPAS_SUPORTADAS_FASE1` e por isso falha em `validation` no executor, antes de qualquer provedor). Tentativa 1: job volta a `pendente`, `tentativas=1`, `erro_tipo='validation'` **preservado**, `erro_mensagem` preservada, pipeline em `aguardando` com erro próprio limpo. Tentativa 2: mesmo job, `tentativas=2`, erro segue observável e reflete a falha mais recente. Tentativa 3 (terminal): job em `erro` com `tentativas=3/3` e causa preservada, pipeline em `erro` com `erro_tipo`/`erro_mensagem` preenchidos e **coerentes com o job**. `claim_next_estudio_anuncios_job()` reivindicou normalmente nas três execuções. Zero prompts e zero consumo de IA em todo o teste.
   **Resíduo neutralizado, nunca apagado:** projeto de teste marcado `cancelado`; job e pipeline preservados como evidência; fila global com 0 jobs reivindicáveis e 0 rodando.
 
+## Corrigido — Normalizacao de status HTTP (2026-09-03)
+
+- ✅ **Auditadas as 13 rotas mapeadas (o registro dizia "12", mas enumerava 13).** Resultado: **6 com defeito real, 7 falsos positivos**.
+
+  **Corrigidas (4 pontos, 2 rotas):**
+  - `ml/sync-precos` — falha do Supabase respondia **200** e concatenava `"Erro Supabase: " + error.message` na resposta → agora **503** com mensagem generica, detalhe no log. Sessao invalida → **401**.
+  - `ml/sync-skus` — sessao invalida → **401**.
+  - `anuncio` — entrada invalida (link ausente / sem ID de produto) → **400** (2 pontos).
+  - `auth/mercadolivre/callback` — code ausente → **400**.
+  O corpo `{erro, mensagem}` foi preservado em todos, porque as telas leem `data.erro`; so o status mudou.
+
+  **Removidas (4 rotas de diagnostico, zero consumidores):** `ml/debug-item`, `ml/test-collections`, `shopee/ping`, `shopee/status`. Nenhuma referencia de codigo em `app/`, `components/`, `lib/`, `scripts/` ou `*.json` — so documentacao e um comentario de teste. `shopee/status` vazava `dbErr.message` e ecoava `userId`; `shopee/ping` devolvia respostas cruas da Shopee. Preservadas no historico do Git.
+
+  **Falsos positivos, NAO alterados de proposito (7):**
+  - **Sucesso**, pego pelo regex por conter a palavra "erro": `ml/importar-anuncios` (`erros: 0` e o retorno final) e dois pontos de `ml/sync-precos` (`erro: false`).
+  - **Estado de NEGOCIO, nao falha de servidor:** "conta nao conectada" (`ml/vendas`, `ml/vendas-hoje`, `shopee/vendas`), "token expirado" (`ml/vendas-hoje`) e "sincronizacao assincrona desativada" (`sync/iniciar`). Todos carregam flags que a tela consome (`semConexao`, `tokenExpirado`, `disabled`). Transformar em 4xx/5xx quebraria o consumidor e afirmaria uma falha que nao existe. Ha teste que **falha se alguem converter esses casos em erro HTTP**.
+
+## Observacao — Cron (2026-09-03)
+
+- ⏳ **O cron de `/api/sync` continua sem execucao automatica observada.** Agendado para 3h; guarda fail-closed e `CRON_SECRET` configurado. Segue como pendencia observacional — basta conferir status e duracao na proxima janela, sem disparar manualmente (a rota e multi-tenant).
+
 ## Corrigido — Tratamento de erro (2026-09-02)
 
 - ✅ **`/api/lojas` e `/api/perfil` devolviam HTTP 200 em falha de infraestrutura — CORRIGIDO.** Era o bug que escondeu por ~54 dias uma `NEXT_PUBLIC_SUPABASE_URL` malformada em producao. `/api/lojas` respondia `{erro:true, mensagem}` **sem `status`** (200 por omissao); `/api/perfil` descartava o erro na desestruturacao e respondia `{}`, alem de devolver **200 sem sessao**. Agora: 200 para sucesso e para ausencia legitima (zero lojas, perfil inexistente), 401 sem sessao, 5xx para infraestrutura e excecao. `single()` virou `maybeSingle()` para separar "nao achou" de "quebrou" sem depender de codigo de erro. A mensagem crua do Supabase parou de ir ao cliente (fica no log). Os consumidores — `TopBar`, `configuracoes`, `dashboard` — passaram a conferir `res.ok`, senao continuariam mostrando "nenhuma loja" diante de um 5xx. Suite nova `testar-rotas-erro.ts` com 15 testes e duas regressoes que falham se o padrao voltar.
 
 ## Aberto — Tratamento de erro no restante do sistema (2026-09-02)
 
-- 🟠 **O mesmo anti-pattern existe em outras 12 rotas.** Devolvem erro com `NextResponse.json({ erro... })` sem `status`, ou seja, **200 para falha**: `anuncio`, `auth/mercadolivre/callback`, `ml/debug-item`, `ml/importar-anuncios`, `ml/sync-precos`, `ml/sync-skus`, `ml/test-collections`, `ml/vendas`, `ml/vendas-hoje`, `shopee/ping`, `shopee/status`, `shopee/vendas`, `sync/iniciar`. **Nao corrigidas de proposito:** a tarefa era estabilizar `/api/lojas` e `/api/perfil`, e ampliar para 12 rotas mudaria o escopo e o risco. Cada uma precisa da mesma classificacao explicita (sucesso / ausencia legitima / sem sessao / infraestrutura) e de conferir o consumidor antes de mudar o status. `shopee/status` tambem vaza `dbErr.message` e ecoa o `userId` na resposta.
+- ✅ **(RESOLVIDO em 2026-09-03, ver acima) O mesmo anti-pattern existia em outras rotas.** Devolvem erro com `NextResponse.json({ erro... })` sem `status`, ou seja, **200 para falha**: `anuncio`, `auth/mercadolivre/callback`, `ml/debug-item`, `ml/importar-anuncios`, `ml/sync-precos`, `ml/sync-skus`, `ml/test-collections`, `ml/vendas`, `ml/vendas-hoje`, `shopee/ping`, `shopee/status`, `shopee/vendas`, `sync/iniciar`. **Nao corrigidas de proposito:** a tarefa era estabilizar `/api/lojas` e `/api/perfil`, e ampliar para 12 rotas mudaria o escopo e o risco. Cada uma precisa da mesma classificacao explicita (sucesso / ausencia legitima / sem sessao / infraestrutura) e de conferir o consumidor antes de mudar o status. `shopee/status` tambem vaza `dbErr.message` e ecoa o `userId` na resposta.
 
 ## Aberto — Superficie de diagnostico (2026-09-02)
 

@@ -5,7 +5,7 @@ export async function GET(request: Request) {
   const code = url.searchParams.get("code");
 
   if (!code) {
-    return NextResponse.json({ erro: true, mensagem: "Code não recebido" });
+    return NextResponse.json({ erro: true, mensagem: "Code não recebido" }, { status: 400 });
   }
 
   const response = await fetch("https://api.mercadolibre.com/oauth/token", {

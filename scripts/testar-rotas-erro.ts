@@ -192,6 +192,61 @@ async function rodar() {
     const lojas = fs.readFileSync(path.join(process.cwd(), "app/api/lojas/route.ts"), "utf-8");
     assert(!/\.(insert|update|upsert|delete)\(/.test(lojas), "GET /api/lojas passou a escrever");
   });
+
+  console.log("\n[normalização das demais rotas — 2026-09-03]");
+
+  await t("16. as 4 rotas de diagnóstico sem consumidor foram removidas", () => {
+    for (const rel of ["app/api/ml/debug-item", "app/api/ml/test-collections",
+                       "app/api/shopee/ping", "app/api/shopee/status"]) {
+      assert(!fs.existsSync(path.join(process.cwd(), rel)), `${rel} voltou a existir`);
+    }
+    // As rotas Shopee/ML LEGÍTIMAS continuam de pé — a limpeza não pode
+    // ter levado junto o que o produto usa.
+    for (const rel of ["app/api/shopee/vendas", "app/api/ml/vendas", "app/api/ml/sync-precos"]) {
+      assert(fs.existsSync(path.join(process.cwd(), rel)), `${rel} foi removida por engano`);
+    }
+  });
+
+  await t("17. sessão inválida responde 401, não 200", () => {
+    for (const rel of ["app/api/ml/sync-precos/route.ts", "app/api/ml/sync-skus/route.ts"]) {
+      const f = fs.readFileSync(path.join(process.cwd(), rel), "utf-8");
+      const linha = f.split("\n").find(l => l.includes("Sessão inválida"));
+      assert(!!linha, `${rel}: não achei o caso de sessão inválida`);
+      assert(/status: 401/.test(linha!), `${rel} não devolve 401 para sessão inválida`);
+    }
+  });
+
+  await t("18. entrada inválida responde 400, não 200", () => {
+    const anuncio = fs.readFileSync(path.join(process.cwd(), "app/api/anuncio/route.ts"), "utf-8");
+    assert((anuncio.match(/status: 400/g) ?? []).length >= 2, "/api/anuncio deveria usar 400 para entrada inválida");
+    const cb = fs.readFileSync(path.join(process.cwd(), "app/api/auth/mercadolivre/callback/route.ts"), "utf-8");
+    const linha = cb.split("\n").find(l => l.includes("Code não recebido"));
+    assert(!!linha && /status: 400/.test(linha), "callback deveria usar 400 quando falta o code");
+  });
+
+  await t("19. falha do Supabase em sync-precos é 5xx e não vaza a mensagem", () => {
+    const f = fs.readFileSync(path.join(process.cwd(), "app/api/ml/sync-precos/route.ts"), "utf-8");
+    assert(/status: 503/.test(f), "falha de banco deveria ser 5xx");
+    assert(!/Erro Supabase/.test(f), "ainda vaza a mensagem crua do Supabase");
+    assert(/console\.error\("\[POST \/api\/ml\/sync-precos\]/.test(f), "o diagnóstico deveria ir para o log");
+  });
+
+  await t("20. estado de NEGÓCIO segue 200 — não virou erro HTTP", () => {
+    // "Conta não conectada" e "token expirado" são estados legítimos do
+    // usuário, com flags que a tela consome (`semConexao`, `tokenExpirado`).
+    // Transformá-los em 4xx/5xx quebraria o consumidor e mentiria sobre a
+    // natureza do problema: não há falha nenhuma no servidor.
+    for (const rel of ["app/api/ml/vendas/route.ts", "app/api/ml/vendas-hoje/route.ts",
+                       "app/api/shopee/vendas/route.ts"]) {
+      const f = fs.readFileSync(path.join(process.cwd(), rel), "utf-8");
+      // Especificamente a linha de "não conectada". `ml/vendas` também
+      // usa `semConexao` num 401 de sessão inválida — que está CERTO, e
+      // não pode ser confundido com este caso.
+      const linha = f.split("\n").find(l => l.includes("semConexao: true") && /n[ãa]o conectada/i.test(l));
+      assert(!!linha, `${rel}: não achei o caso de conta não conectada`);
+      assert(!/status: [45]/.test(linha!), `${rel} transformou estado de negócio em erro HTTP`);
+    }
+  });
 }
 
 rodar().then(() => {

@@ -25,15 +25,20 @@
 500. O anuncio real `MLB7395781296` esta `active` e o portao de publicacao
 esta fechado para ele — nao ha caminho para um segundo.
 
-**Estabilizacao de 2026-09-02:** duas rotas antigas devolviam **HTTP 200
-em falha de infraestrutura** — `/api/lojas` respondia erro sem `status`, e
-`/api/perfil` descartava o erro do Supabase e ainda respondia 200 sem
-sessao. Foi esse padrao que escondeu por ~54 dias uma
-`NEXT_PUBLIC_SUPABASE_URL` malformada em producao, ate o Estudio (que
-devolve 500 honesto) torna-lo visivel. Corrigido nas duas, com os
-consumidores conferindo `res.ok`. O mesmo padrao existe em outras **12
-rotas**, mapeadas em `BUGS.md` e deliberadamente nao alteradas nesta
-etapa.
+**Estabilizacao (2026-09-02) e limpeza (2026-09-03):** rotas antigas
+devolviam **HTTP 200 em falha de infraestrutura** — foi esse padrao que
+escondeu por ~54 dias uma `NEXT_PUBLIC_SUPABASE_URL` malformada em
+producao. Corrigido em `/api/lojas`, `/api/perfil`, `ml/sync-precos`,
+`ml/sync-skus`, `anuncio` e no callback OAuth. **4 rotas de diagnostico
+sem consumidor foram removidas** (`ml/debug-item`, `ml/test-collections`,
+`shopee/ping`, `shopee/status`), somando-se as 11 de `app/api/debug`.
+
+Da lista de 13 rotas mapeadas, **7 eram falso positivo**: sucesso com a
+palavra "erro" no corpo (`erros: 0`, `erro: false`), ou **estado de
+negocio** ("conta nao conectada", "token expirado", "sync assincrono
+desativado"). Esses seguem 200 de proposito — carregam flags que a tela
+consome — e ha teste que falha se alguem converte-los em erro HTTP:
+uniformizar estilo ali quebraria o contrato das telas.
 
 ## COMO CONTINUAR ESTE PROJETO
 

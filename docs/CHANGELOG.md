@@ -2,6 +2,24 @@
 
 > Ordem cronológica reversa. Toda tarefa que criar, corrigir ou remover funcionalidade deve adicionar uma entrada aqui antes de finalizar.
 
+## 2026-09-03 — Limpeza: APIs normalizadas e diagnostico sem consumidor removido
+
+- **Primeiro achado: a lista de "12 rotas" tinha 13 nomes.** O registro anterior dizia 12 mas enumerava `anuncio`, `auth/mercadolivre/callback`, `ml/debug-item`, `ml/importar-anuncios`, `ml/sync-precos`, `ml/sync-skus`, `ml/test-collections`, `ml/vendas`, `ml/vendas-hoje`, `shopee/ping`, `shopee/status`, `shopee/vendas`, `sync/iniciar` — treze. A auditoria trabalhou sobre os nomes reais, nao sobre o numero.
+- **A maioria era falso positivo, e isso e o resultado mais util da auditoria.** Das 13, apenas **6 tinham defeito real**. As outras 7 caem em duas categorias legitimas que o regex do mapeamento nao sabia distinguir:
+  - **sucesso disfarcado de erro:** `ml/importar-anuncios` (`{importados, atualizados, erros: 0}` — a palavra "erros" no contador) e dois pontos de `ml/sync-precos` com `erro: false`;
+  - **estado de NEGOCIO, nao falha:** "Conta nao conectada" (`ml/vendas`, `ml/vendas-hoje`, `shopee/vendas`, `ml/sync-precos`, `ml/sync-skus`), "token expirado" (`ml/vendas-hoje`) e "sincronizacao assincrona desativada" (`sync/iniciar`). Todos vem com flags que a tela consome (`semConexao`, `tokenExpirado`, `disabled`). **Nao foram alterados de proposito:** transformar isso em 4xx/5xx quebraria o consumidor e mentiria sobre a natureza do problema — nao ha falha nenhuma no servidor quando o usuario simplesmente nao conectou a conta.
+- **Corrigido de verdade (2 rotas, 4 pontos):**
+  - `ml/sync-precos` — falha do Supabase respondia **200** e ainda concatenava `"Erro Supabase: " + error.message` na resposta. Virou **503** com mensagem generica e o detalhe no log. Sessao invalida virou **401**.
+  - `ml/sync-skus` — sessao invalida virou **401**.
+  - `anuncio` — "Link nao informado" e "Nao encontrei um ID de produto ML no link" viraram **400**: o cliente pediu errado, o servidor esta bem.
+  - `auth/mercadolivre/callback` — "Code nao recebido" virou **400**.
+  Em todos, o **corpo foi preservado** (`{erro, mensagem}`), porque as telas leem `data.erro` e `data.mensagem` — mudar so o status manteve os consumidores intactos.
+- **Removidas 4 rotas de diagnostico sem consumidor:** `ml/debug-item`, `ml/test-collections`, `shopee/ping`, `shopee/status`. Busca em `app/`, `components/`, `lib/`, `scripts/` e `*.json` nao achou **nenhuma** referencia de codigo — so mencoes em documentacao e um comentario de teste. `shopee/status` ainda vazava `dbErr.message` e ecoava o `userId`; `shopee/ping` devolvia respostas cruas da Shopee. Ficam no historico do Git.
+- **A guarda contra retorno foi ampliada.** O teste que impedia `app/api/debug` de voltar agora cobre as quatro removidas — e verifica, no mesmo passo, que as rotas Shopee/ML **legitimas** (`shopee/vendas`, `ml/vendas`, `ml/sync-precos`) continuam existindo: uma limpeza que leva junto o que o produto usa tambem e defeito.
+- **5 testes novos** em `testar-rotas-erro.ts` (total 20): remocao efetiva, 401 para sessao invalida, 400 para entrada invalida, 5xx sem vazamento em `sync-precos`, e um que **falha se estado de negocio virar erro HTTP** — a protecao na direcao oposta, para a proxima limpeza nao "uniformizar estilo" e quebrar o contrato das telas.
+- **Varredura final:** os matches que sobraram sao exatamente os falsos positivos classificados acima, mais a linha de comentario em `/api/lojas` que documenta o padrao antigo. **Zero vazamento de `error.message`** em qualquer rota.
+- **Regressao:** 15 suites, **723 testes** (+5), 0 falhas; `tsc` limpo; `next build` verde com `.next` reconstruido — 0 ocorrencias das quatro rotas removidas, e as rotas Shopee legitimas presentes. Smoke local 16/16.
+
 ## 2026-09-02 — Estabilizacao pos-deploy: falha de infraestrutura deixa de responder 200
 
 - **O anti-pattern que escondeu a queda do Supabase por ~54 dias foi corrigido nas duas rotas onde ele mais custou.** `/api/lojas` respondia `{erro:true, mensagem}` **sem `status`** — 200 por omissao. `/api/perfil` era pior: descartava o erro na desestruturacao (`const { data } = ...`) e respondia `{}`, e ainda devolvia **200 sem sessao**. Nenhum monitoramento acusa 200, e todo consumidor lia o resultado como "nenhuma loja" / "perfil sem dados".

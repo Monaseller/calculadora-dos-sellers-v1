@@ -399,11 +399,12 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const link = url.searchParams.get("link");
 
-  if (!link) return NextResponse.json({ erro: true, mensagem: "Link não informado" });
+  // Entrada inválida é 400: o cliente pediu errado, o servidor está bem.
+  if (!link) return NextResponse.json({ erro: true, mensagem: "Link não informado" }, { status: 400 });
 
   const parsed = extrairItemId(link);
   if (!parsed) {
-    return NextResponse.json({ erro: true, mensagem: "Não encontrei um ID de produto ML no link." });
+    return NextResponse.json({ erro: true, mensagem: "Não encontrei um ID de produto ML no link." }, { status: 400 });
   }
 
   // Normaliza o link para ter scheme (scraping e fallback dependem de link.startsWith("http"))
