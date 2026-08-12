@@ -15,6 +15,20 @@
 
 ---
 
+## CHECKPOINT E DEPLOY (2026-08-31)
+
+**Commit `3486448`** (branch `main`) congela o módulo inteiro: código,
+39 migrations, 13 suítes (692 testes) e documentação.
+
+**O deploy está bloqueado**, e o motivo é ambiental, não de código:
+produção tem 11 das 29 variáveis exigidas pelo `.env.example`. Falta
+`SUPABASE_SERVICE_ROLE_KEY`, que toda rota do Estúdio usa, e as chaves de
+IA. Ver `BUGS.md`.
+
+**Neste repositório, `git push` para `main` dispara deploy de produção**
+(projeto Vercel conectado ao Git). Isso muda onde o gate precisa ficar:
+antes do push, não entre push e deploy.
+
 ## COMO CONTINUAR ESTE PROJETO
 
 **Antes de escrever qualquer código, toda nova sessão deve seguir esta ordem:**

@@ -22,6 +22,19 @@ O canal está travado — `podePublicarML = false` daqui em diante.
 
 2026-08-31
 
+## Checkpoint
+
+- **Commit `3486448`** na branch `main` — 186 arquivos, código + 39
+  migrations + 13 suítes + documentação. Working tree limpa.
+- **PUSH E DEPLOY NÃO EXECUTADOS.** Faltam **24 variáveis de ambiente**
+  em produção (`SUPABASE_SERVICE_ROLE_KEY`, `GOOGLE_AI_API_KEY`,
+  `ANTHROPIC_API_KEY`, …). Ver `BUGS.md`.
+- ⚠️ **`git push` = deploy** neste repositório: o projeto Vercel está
+  conectado ao Git na `main`. O gate vale para o push, não só para o
+  deploy.
+- Produção hoje: `www.ligadossellers.com.br` saudável; o Estúdio
+  responde **404** lá (nunca foi deployado).
+
 ## Separação de papéis
 
 ```
@@ -161,8 +174,13 @@ publicar. Validar ≠ publicar.
 
 ## Próxima tarefa
 
-**Nenhuma autorizada.** O stop-gate desta sessão pede sua revisão do
-primeiro anúncio real antes de **qualquer** segunda operação externa.
+**Nenhuma autorizada.** Duas coisas esperam por você, nesta ordem:
+
+1. **Configurar as 24 variáveis ausentes em produção** (painel da Vercel).
+   São segredos — a configuração é sua. Só depois disso o push/deploy
+   pode acontecer, e o Estúdio funcionará em produção.
+2. **Revisar o primeiro anúncio real** antes de qualquer segunda operação
+   externa.
 
 Explicitamente NÃO autorizado até você decidir: publicar outro anúncio,
 editar, pausar, fechar, excluir, sincronizar estoque ou preço, iniciar

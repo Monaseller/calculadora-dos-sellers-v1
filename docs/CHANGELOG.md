@@ -2,6 +2,18 @@
 
 > Ordem cronológica reversa. Toda tarefa que criar, corrigir ou remover funcionalidade deve adicionar uma entrada aqui antes de finalizar.
 
+## 2026-08-31 — Checkpoint Git `3486448` · DEPLOY BLOQUEADO
+
+- **Commit de checkpoint criado: `3486448`** (`34864487c532823c0a70d733291bf4ce82700a57`), branch `main`, 186 arquivos, +51.260 linhas. Working tree limpa. Inclui codigo, 39 migrations, 13 suites de teste e documentacao.
+- **PUSH E DEPLOY NAO EXECUTADOS — stop-gate acionado.** Faltam **24 variaveis de ambiente obrigatorias** em producao, entre elas `SUPABASE_SERVICE_ROLE_KEY`, `GOOGLE_AI_API_KEY` e `ANTHROPIC_API_KEY`. Producao hoje tem 11 variaveis; `.env.example` exige 29.
+- **Por que o push tambem foi bloqueado, e nao so o deploy.** O projeto Vercel esta conectado ao Git na branch `main` — confirmado pelo alias `calculadora-dos-sellers-v1-git-main-liga-dos-sellers.vercel.app` e pela coincidencia entre o ultimo commit (16/07) e o ultimo deploy de producao (mesma data). **`git push` dispara deploy automatico**, entao empurrar seria deployar, e o gate de ambiente vale para os dois.
+- **O que aconteceria se tivesse ido:** `getSupabaseServidor()` e sob demanda, entao a app atual (dashboard/vendas) continuaria de pe — mas **todo o Estudio responderia 500**, porque cada rota dele usa service role. Publicar isso seria entregar uma funcionalidade quebrada.
+- **Auditoria de segredos: limpa.** Nenhum valor real de `sk-ant-`, `AIzaSy`, JWT, `postgres://`, `APP_USR-`, `client_secret` ou `Bearer` em arquivo rastreavel. `.env.example` e template com **valores vazios** em todas as chaves sensiveis.
+- **~14 MB de dumps locais ficaram fora do commit** (`TESTE*.JSON`, `body*.json`, `dryrun*.json`, `verify-*.json`, `testesite*.json`, `faltantes_*.txt`) via `.gitignore`. **Nada foi apagado do disco** — o ignore so impede que entrem no historico.
+- **Estado de producao conferido:** dominio `www.ligadossellers.com.br` saudavel (`/login` 200). O Estudio responde **404** la — nunca foi deployado. O ultimo deploy de producao e de 27 dias atras.
+- **Verificacao pre-checkpoint:** 13 suites, **692 testes**, 0 falhas; `tsc --noEmit` limpo; `next build` verde (exit 0, "Compiled successfully"). 39 migrations locais, todas aplicadas e conferidas no banco de desenvolvimento — incluindo `pg_get_functiondef()` nas RPCs de publicacao (1 overload cada, `SECURITY INVOKER`, grants so para `postgres`/`service_role`, `search_path` fixo, sem `DELETE`).
+- **Nenhum `POST /items`. Nenhum segundo anuncio.** O item `MLB7395781296` nao foi tocado.
+
 ## 2026-08-31 — PRIMEIRA PUBLICACAO REAL no Mercado Livre
 
 - **UM anuncio criado: `MLB7395781296`, status `active`.** Projeto de teste `TESTE_REVISAO_CLAUDE_REAL_20260814`, conta MONAMOR (seller 744240004). Permalink gravado. **Exatamente um `POST /items` foi executado**, e nenhum segundo anuncio existe.
