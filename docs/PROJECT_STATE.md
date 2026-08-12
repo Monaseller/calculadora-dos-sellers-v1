@@ -25,11 +25,15 @@
 500. O anuncio real `MLB7395781296` esta `active` e o portao de publicacao
 esta fechado para ele — nao ha caminho para um segundo.
 
-**Percalco do deploy, resolvido:** o primeiro smoke test achou 5 rotas em
-500 por `NEXT_PUBLIC_SUPABASE_URL` com path extra. Era problema **anterior
-ao deploy**, escondido ha 54 dias porque `/api/lojas` e `/api/perfil`
-devolviam 200 com erro no corpo. Corrigido manualmente e aplicado por
-redeploy do mesmo commit — `NEXT_PUBLIC_*` e inlinada em build.
+**Estabilizacao de 2026-09-02:** duas rotas antigas devolviam **HTTP 200
+em falha de infraestrutura** — `/api/lojas` respondia erro sem `status`, e
+`/api/perfil` descartava o erro do Supabase e ainda respondia 200 sem
+sessao. Foi esse padrao que escondeu por ~54 dias uma
+`NEXT_PUBLIC_SUPABASE_URL` malformada em producao, ate o Estudio (que
+devolve 500 honesto) torna-lo visivel. Corrigido nas duas, com os
+consumidores conferindo `res.ok`. O mesmo padrao existe em outras **12
+rotas**, mapeadas em `BUGS.md` e deliberadamente nao alteradas nesta
+etapa.
 
 ## COMO CONTINUAR ESTE PROJETO
 

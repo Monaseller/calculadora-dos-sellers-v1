@@ -11,38 +11,38 @@
 
 ## STATUS
 
-**🟢 EM PRODUÇÃO — Estúdio validado e operacional.**
+**🟢 EM PRODUÇÃO — estabilizada.**
 
-Commit `4fc3764` no ar em `www.ligadossellers.com.br`. Smoke test **24/24**,
-zero erros 500. O anúncio `MLB7395781296` está `active` e reconhecido pelo
-vínculo local; o portão de publicação está fechado para ele
-(*"Este anúncio já foi publicado"*), então não há caminho para um segundo.
+Commit `4fc3764` no ar em `www.ligadossellers.com.br`, Estúdio operacional,
+`MLB7395781296` `active` e portão fechado para ele.
 
-Validado com dados reais em produção: pipeline `concluido`, score 96, as 3
-imagens servidas por URL assinada (uma baixada de fato: 459.049 bytes),
-versão editorial aprovada, 2 pacotes de exportação, compliance
-`aprovado_com_alertas`, validação oficial `validado_com_alertas`.
+**Estabilização de 2026-09-02:** `/api/lojas` e `/api/perfil` pararam de
+responder **200 em falha de infraestrutura** — era isso que escondia a
+queda do Supabase há ~54 dias. Agora 200 é sucesso ou ausência legítima,
+401 é falta de sessão, 5xx é infraestrutura. Os consumidores passaram a
+conferir `res.ok`, senão continuariam mostrando "nenhuma loja" diante de
+um 5xx.
 
-**Percalço do deploy, já resolvido:** o primeiro smoke test achou 5 rotas em
-500 por `NEXT_PUBLIC_SUPABASE_URL` com path extra — problema **anterior ao
-deploy**, escondido há 54 dias porque `/api/lojas` e `/api/perfil` devolviam
-200 com erro no corpo. Corrigido manualmente e aplicado por redeploy do
-mesmo commit.
+15 suítes · 718 testes · `tsc` limpo · build verde · zero `/api/debug`.
 
 ## O que ficou pendente
 
-1. **Um commit local de documentação** (este) aguardando push — só docs.
-2. **`/api/lojas` e `/api/perfil` devolvem 200 em falha de infraestrutura.**
-   Foi o que mascarou o problema. Vale corrigir para 5xx. Ver `BUGS.md`.
-3. **Exposição histórica do `ML_CLIENT_SECRET`** segue no Git público (o
-   segredo já foi rotacionado e validado com HTTP 200). Considere tornar o
-   repositório privado.
-4. **Cron das 3h** volta a rodar autenticado — vale conferir a primeira
-   execução.
+1. **O mesmo anti-pattern em outras 12 rotas** — mapeadas nominalmente em
+   `BUGS.md`. Não corrigidas de propósito: ampliar para 12 rotas mudaria
+   o escopo de uma tarefa de estabilização.
+2. **`/api/shopee/ping` e `/api/shopee/status`** — diagnóstico sem
+   consumidor, recomendadas para remoção numa tarefa própria.
+3. **Primeira execução do cron** (3h) ainda não observada. Conferir status
+   e duração; não disparar manualmente (é multi-tenant).
+4. **Exposição histórica do `ML_CLIENT_SECRET`** no Git público — o
+   segredo já foi rotacionado e validado. Considere tornar o repositório
+   privado.
+5. **Lint não configurado** no projeto — nenhuma ferramenta foi instalada
+   só para isso.
 
 ## Última sessão encerrada em
 
-2026-09-01 (4) — DEPLOY
+2026-09-02 — estabilizacao pos-deploy
 
 ## ⚠️ Incidente de credencial — rotação declarada, conferir
 

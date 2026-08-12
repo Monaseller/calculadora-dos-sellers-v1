@@ -48,7 +48,10 @@ export default function TopBar() {
   async function carregarLojas() {
     try {
       const res = await fetch("/api/lojas");
-      const data = await res.json();
+      // `res.ok` antes do corpo: desde 2026-09-01 a rota devolve 5xx em
+      // falha de infraestrutura, e tratar isso como "nenhuma loja"
+      // esconderia a queda atrás de um seletor vazio.
+      const data = res.ok ? await res.json() : null;
       if (Array.isArray(data)) setLojas(data);
     } catch {}
     setLojaAtiva(getCookieClient("loja_ativa_id"));
@@ -56,7 +59,7 @@ export default function TopBar() {
     // Busca inicial do perfil para mostrar letra dinâmica no avatar
     try {
       const perfilRes = await fetch("/api/perfil");
-      const perfil = await perfilRes.json();
+      const perfil = perfilRes.ok ? await perfilRes.json() : null;
       const nome = perfil?.nome_completo || perfil?.usuario || "";
       if (nome) setAvatarLetra(nome.trim()[0].toUpperCase());
     } catch {}

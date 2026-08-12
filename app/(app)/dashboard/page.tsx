@@ -667,7 +667,9 @@ export default function DashboardPage() {
       .catch(() => {});
 
     fetch("/api/lojas")
-      .then(r => r.json())
+      // 5xx não é "zero lojas": sem esta checagem, uma queda do banco
+      // faria o dashboard carregar como se a conta não tivesse loja.
+      .then(r => (r.ok ? r.json() : Promise.reject(new Error("falha ao carregar lojas"))))
       .then((data: Loja[]) => {
         if (Array.isArray(data) && data.length > 0) {
           lojasRef.current = data;

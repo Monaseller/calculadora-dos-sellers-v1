@@ -174,8 +174,10 @@ export default function ConfiguracoesPage() {
     setLoading(true);
     try {
       const res = await fetch("/api/lojas");
-      const data = await res.json();
-      setLojas(Array.isArray(data) ? data : []);
+      // Falha de infraestrutura (5xx) não pode virar "nenhuma loja" na
+      // tela — a rota passou a distinguir os dois casos em 2026-09-01.
+      const data = res.ok ? await res.json() : null;
+      if (Array.isArray(data)) setLojas(data);
     } catch {}
     setLojaAtiva(getCookieClient("loja_ativa_id"));
     setShopeeAtiva(getCookieClient("shopee_loja_id"));
@@ -185,7 +187,9 @@ export default function ConfiguracoesPage() {
   async function carregarPerfil() {
     try {
       const res  = await fetch("/api/perfil");
-      const data = await res.json();
+      // Sem `res.ok`, um corpo de erro (`{ erro: ... }`) seria espalhado
+      // dentro do estado do perfil.
+      const data = res.ok ? await res.json() : null;
       if (data) setPerfil(p => ({ ...p, ...data, senha: "" }));
     } catch {}
   }

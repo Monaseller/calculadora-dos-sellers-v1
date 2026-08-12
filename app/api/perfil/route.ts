@@ -1,3 +1,31 @@
+/**
+ * /api/perfil — perfil do usuário da sessão.
+ *
+ * TRATAMENTO DE ERRO (corrigido em 2026-09-01). O GET somava dois
+ * problemas:
+ *
+ *   if (!userId) return NextResponse.json({});   // 200 sem sessão
+ *   const { data } = await supabase...single();  // erro DESCARTADO
+ *
+ * Sem sessão respondia **200 com objeto vazio**, indistinguível de
+ * "perfil sem dados"; e o erro do Supabase era literalmente ignorado na
+ * desestruturação, então banco fora do ar também virava 200 e `{}`.
+ * Junto com o mesmo padrão em `/api/lojas`, foi isso que manteve
+ * invisível por ~54 dias uma `NEXT_PUBLIC_SUPABASE_URL` malformada em
+ * produção — nenhum monitoramento acusa 200.
+ *
+ * Agora: sem sessão é 401, falha de infraestrutura é 5xx, e **perfil
+ * inexistente continua 200 com `{}`** — essa última é ausência legítima,
+ * não erro, e a semântica foi preservada de propósito.
+ *
+ * `maybeSingle()` no lugar de `single()`: com `single()`, zero linhas é
+ * erro (`PGRST116`), o que obrigaria a separar "não achou" de "quebrou"
+ * por código. `maybeSingle()` devolve `null` sem erro, e aí só sobra
+ * erro de verdade.
+ *
+ * A mensagem crua do Supabase nunca vai ao cliente — pode conter nome de
+ * tabela, coluna e detalhe de esquema. Fica no log do servidor.
+ */
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { getUserId } from "@/lib/session";
@@ -9,15 +37,26 @@ const supabase = createClient(
 
 export async function GET(request: Request) {
   const userId = getUserId(request);
-  if (!userId) return NextResponse.json({});
+  if (!userId) return NextResponse.json({ erro: "Não autenticado." }, { status: 401 });
 
-  const { data } = await supabase
-    .from("perfil")
-    .select("id, nome_completo, usuario, email, documento, email_verificado, user_uuid")
-    .eq("user_uuid", userId)
-    .single();
+  try {
+    const { data, error } = await supabase
+      .from("perfil")
+      .select("id, nome_completo, usuario, email, documento, email_verificado, user_uuid")
+      .eq("user_uuid", userId)
+      .maybeSingle();
 
-  return NextResponse.json(data ?? {});
+    if (error) {
+      console.error("[GET /api/perfil] falha ao consultar perfil:", error.message);
+      return NextResponse.json({ erro: "Não foi possível carregar o perfil." }, { status: 503 });
+    }
+
+    // Perfil ausente é ausência LEGÍTIMA, não erro: segue 200 com {}.
+    return NextResponse.json(data ?? {});
+  } catch (err: any) {
+    console.error("[GET /api/perfil] erro inesperado:", err?.message);
+    return NextResponse.json({ erro: "Não foi possível carregar o perfil." }, { status: 500 });
+  }
 }
 
 export async function POST(request: Request) {
@@ -53,7 +92,9 @@ export async function POST(request: Request) {
     });
 
     if (error) {
-      return NextResponse.json({ erro: true, mensagem: error.message }, { status: 500 });
+      // Mensagem crua do Supabase fica no log, não na resposta.
+      console.error("[POST /api/perfil] falha ao criar conta:", error.message);
+      return NextResponse.json({ erro: true, mensagem: "Não foi possível criar a conta." }, { status: 500 });
     }
 
     // Envia email de verificação
@@ -108,7 +149,9 @@ export async function POST(request: Request) {
     .update(campos)
     .eq("user_uuid", userId);
 
-  if (error) {    return NextResponse.json({ erro: true, mensagem: error.message }, { status: 500 });
+  if (error) {
+    console.error("[POST /api/perfil] falha ao atualizar perfil:", error.message);
+    return NextResponse.json({ erro: true, mensagem: "Não foi possível salvar o perfil." }, { status: 500 });
   }
 
   return NextResponse.json({ ok: true });

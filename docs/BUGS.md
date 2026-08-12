@@ -35,6 +35,22 @@
   **Teste comportamental — 26/26 verificações, custo zero:** cenário isolado (projeto `b5f916fb-…`, job `7a3981a9-…`, etapa `busca_externa`, que está no catálogo mas fora de `ETAPAS_SUPORTADAS_FASE1` e por isso falha em `validation` no executor, antes de qualquer provedor). Tentativa 1: job volta a `pendente`, `tentativas=1`, `erro_tipo='validation'` **preservado**, `erro_mensagem` preservada, pipeline em `aguardando` com erro próprio limpo. Tentativa 2: mesmo job, `tentativas=2`, erro segue observável e reflete a falha mais recente. Tentativa 3 (terminal): job em `erro` com `tentativas=3/3` e causa preservada, pipeline em `erro` com `erro_tipo`/`erro_mensagem` preenchidos e **coerentes com o job**. `claim_next_estudio_anuncios_job()` reivindicou normalmente nas três execuções. Zero prompts e zero consumo de IA em todo o teste.
   **Resíduo neutralizado, nunca apagado:** projeto de teste marcado `cancelado`; job e pipeline preservados como evidência; fila global com 0 jobs reivindicáveis e 0 rodando.
 
+## Corrigido — Tratamento de erro (2026-09-02)
+
+- ✅ **`/api/lojas` e `/api/perfil` devolviam HTTP 200 em falha de infraestrutura — CORRIGIDO.** Era o bug que escondeu por ~54 dias uma `NEXT_PUBLIC_SUPABASE_URL` malformada em producao. `/api/lojas` respondia `{erro:true, mensagem}` **sem `status`** (200 por omissao); `/api/perfil` descartava o erro na desestruturacao e respondia `{}`, alem de devolver **200 sem sessao**. Agora: 200 para sucesso e para ausencia legitima (zero lojas, perfil inexistente), 401 sem sessao, 5xx para infraestrutura e excecao. `single()` virou `maybeSingle()` para separar "nao achou" de "quebrou" sem depender de codigo de erro. A mensagem crua do Supabase parou de ir ao cliente (fica no log). Os consumidores — `TopBar`, `configuracoes`, `dashboard` — passaram a conferir `res.ok`, senao continuariam mostrando "nenhuma loja" diante de um 5xx. Suite nova `testar-rotas-erro.ts` com 15 testes e duas regressoes que falham se o padrao voltar.
+
+## Aberto — Tratamento de erro no restante do sistema (2026-09-02)
+
+- 🟠 **O mesmo anti-pattern existe em outras 12 rotas.** Devolvem erro com `NextResponse.json({ erro... })` sem `status`, ou seja, **200 para falha**: `anuncio`, `auth/mercadolivre/callback`, `ml/debug-item`, `ml/importar-anuncios`, `ml/sync-precos`, `ml/sync-skus`, `ml/test-collections`, `ml/vendas`, `ml/vendas-hoje`, `shopee/ping`, `shopee/status`, `shopee/vendas`, `sync/iniciar`. **Nao corrigidas de proposito:** a tarefa era estabilizar `/api/lojas` e `/api/perfil`, e ampliar para 12 rotas mudaria o escopo e o risco. Cada uma precisa da mesma classificacao explicita (sucesso / ausencia legitima / sem sessao / infraestrutura) e de conferir o consumidor antes de mudar o status. `shopee/status` tambem vaza `dbErr.message` e ecoa o `userId` na resposta.
+
+## Aberto — Superficie de diagnostico (2026-09-02)
+
+- 🟡 **`/api/shopee/ping` e `/api/shopee/status`: diagnostico sem consumidor, recomendadas para remocao.** Auditadas nesta data: **zero consumidores reais** no repositorio, nenhuma participa de fluxo de tela, e ambas devolvem **respostas cruas da Shopee** (`shopInfo`, `orderListRaw`) alem de timings e identificadores de loja. Nenhum token vaza — o `access_token` so aparece na montagem do query string da requisicao, nunca no objeto devolvido (falso positivo ja conferido em 2026-08-31). **Mantidas nesta etapa** porque a instrucao era auditar e nao remover automaticamente; decidir sobre as duas juntas merece tarefa propria, no mesmo espirito da remocao das 11 rotas `/api/debug`.
+
+## Observacao — Cron (2026-09-02)
+
+- ⏳ **O cron de `/api/sync` ainda nao executou desde o deploy.** Agendado para 3h (`vercel.json`), guarda fail-closed confirmada e `CRON_SECRET` configurado. Vale conferir a primeira execucao automatica: status HTTP e duracao bastam, sem disparar manualmente — a rota e multi-tenant.
+
 ## Corrigido — Producao (2026-09-01)
 
 - ✅ **`NEXT_PUBLIC_SUPABASE_URL` de producao tinha um PATH EXTRA — corrigida manualmente.** Toda consulta ao Supabase no runtime de producao falhava com `Invalid path specified in request URL`. Reproduzido localmente: a origem com `/rest/v1` no fim gera exatamente essa mensagem, enquanto espaco a direita, barra final e barra dupla funcionam. Corrigida no painel da Vercel e aplicada por **redeploy do mesmo commit** (`NEXT_PUBLIC_*` e inlinada em build, entao nao bastava salvar a variavel). Smoke test posterior: 24/24, zero ocorrencias do erro.
@@ -42,7 +58,7 @@
 
 ## Aberto — Qualidade de erro (2026-09-01)
 
-- 🟠 **`/api/lojas` e `/api/perfil` devolvem HTTP 200 com corpo de erro.** Foi isso que escondeu a falha do Supabase por 54 dias: em vez de 500, essas rotas respondiam `{"erro":true,"mensagem":"..."}` com status 200, entao nenhum monitoramento acusaria. As rotas do Estudio, que devolvem 500 honesto, expuseram o problema em minutos. **Nao alterado nesta tarefa** — mudar codigo de rota durante validacao de deploy seria trocar o escopo. Vale uma passada: falha de infraestrutura deve ser 5xx, nao 200.
+- ✅ **(CORRIGIDO em 2026-09-02, ver acima) `/api/lojas` e `/api/perfil` devolviam HTTP 200 com corpo de erro.** Foi isso que escondeu a falha do Supabase por 54 dias: em vez de 500, essas rotas respondiam `{"erro":true,"mensagem":"..."}` com status 200, entao nenhum monitoramento acusaria. As rotas do Estudio, que devolvem 500 honesto, expuseram o problema em minutos. **Nao alterado nesta tarefa** — mudar codigo de rota durante validacao de deploy seria trocar o escopo. Vale uma passada: falha de infraestrutura deve ser 5xx, nao 200.
 
 ## 🔴 INCIDENTE DE CREDENCIAL — ML_CLIENT_SECRET publico no GitHub (2026-09-01)
 
