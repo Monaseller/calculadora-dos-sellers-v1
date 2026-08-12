@@ -3,11 +3,18 @@
     {
       "path": "/api/sync",
       "schedule": "0 3 * * *"
+    },
+    {
+      "path": "/api/internal/estudio-anuncios/worker",
+      "schedule": "* * * * *"
     }
   ],
   "functions": {
     "app/api/**": {
       "maxDuration": 60
+    },
+    "app/api/internal/estudio-anuncios/worker/route.ts": {
+      "maxDuration": 300
     }
   }
 }

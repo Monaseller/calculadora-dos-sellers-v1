@@ -73,6 +73,35 @@ const ROTULO_TIPO_ANUNCIO: Record<string, string> = {
 };
 const TIPOS_ANUNCIO = ["gold_special", "gold_pro", "silver", "bronze"];
 
+/**
+ * Atributos que o compliance cobra em praticamente todo anúncio, mesmo
+ * quando a categoria não os devolve na lista de obrigatórios. Ficam
+ * sempre visíveis porque a alternativa — só aparecer depois que o
+ * Mercado Livre reclama — foi exatamente o que travou o fluxo antes.
+ *
+ * `nome` é rótulo de tela; o `id` enviado é sempre o oficial da API.
+ */
+const ATRIBUTOS_UNIVERSAIS: { id: string; nome: string; exemplo: string }[] = [
+  { id: "BRAND", nome: "Marca", exemplo: "Ex.: Tramontina" },
+  { id: "MODEL", nome: "Modelo", exemplo: "Ex.: 44320/108" },
+  { id: "GTIN", nome: "Código de barras (EAN/GTIN)", exemplo: "Ex.: 7891234567895" },
+  { id: "SELLER_SKU", nome: "SKU interno", exemplo: "Seu código de controle" },
+];
+
+/**
+ * Exemplos por atributo conhecido. Sem entrada aqui, o campo fica sem
+ * placeholder — melhor vazio do que um exemplo inventado, que a pessoa
+ * poderia copiar como se fosse valor válido.
+ */
+const EXEMPLO_ATRIBUTO: Record<string, string> = {
+  ...Object.fromEntries(ATRIBUTOS_UNIVERSAIS.map(a => [a.id, a.exemplo])),
+  EAN: "Ex.: 7891234567895",
+  COLOR: "Ex.: Vermelho",
+  MATERIAL: "Ex.: Aço inox",
+  LENGTH: "Ex.: 20 cm",
+  ITEM_CONDITION: "Ex.: Novo",
+};
+
 const rotulo: React.CSSProperties = {
   display: "block", fontSize: "11px", fontWeight: 700, color: "#9099aa",
   textTransform: "uppercase", letterSpacing: "0.4px", marginBottom: "6px",
@@ -123,6 +152,11 @@ export function FormularioPublicacao({
   const [alturaEmb, setAlturaEmb] = useState(num(canal.embalagemAlturaCm));
   const [larguraEmb, setLarguraEmb] = useState(num(canal.embalagemLarguraCm));
   const [comprimentoEmb, setComprimentoEmb] = useState(num(canal.embalagemComprimentoCm));
+  // Atributos gravados, indexados por id oficial do Mercado Livre. Vem do
+  // que já foi salvo — nunca de valor inventado pela tela.
+  const [atributos, setAtributos] = useState<Record<string, string>>(() =>
+    Object.fromEntries(canal.atributos.map(a => [a.id, a.value_name]))
+  );
   const [busca, setBusca] = useState("");
   const [sugestoes, setSugestoes] = useState<SugestaoCategoria[] | null>(null);
   const [buscando, setBuscando] = useState(false);
@@ -131,6 +165,42 @@ export function FormularioPublicacao({
   const [aviso, setAviso] = useState<string | null>(null);
 
   const base = `/api/estudio-anuncios/projetos/${projetoId}/marketplaces/mercado-livre`;
+
+  /**
+   * Campos de atributo mostrados na tela, nesta ordem:
+   * 1. os exigidos pela categoria escolhida (fonte: API do Mercado Livre);
+   * 2. os universais que ainda não apareceram em (1);
+   * 3. os já gravados que não estão em nenhum dos anteriores — sem isto,
+   *    trocar de categoria esconderia um valor salvo sem apagá-lo, e a
+   *    pessoa não teria como editar o que continuaria sendo enviado.
+   */
+  const camposAtributos: { id: string; nome: string; obrigatorio: boolean; exemplo: string }[] = (() => {
+    const vistos = new Set<string>();
+    const lista: { id: string; nome: string; obrigatorio: boolean; exemplo: string }[] = [];
+
+    for (const a of canal.atributosObrigatorios) {
+      vistos.add(a.id);
+      lista.push({
+        id: a.id,
+        nome: a.nome + (a.condicional ? " (condicional)" : ""),
+        // Condicional não é obrigatório sempre — marcar com * seria
+        // pedir como certo o que o Mercado Livre trata como "depende".
+        obrigatorio: !a.condicional,
+        exemplo: EXEMPLO_ATRIBUTO[a.id] ?? "",
+      });
+    }
+    for (const a of ATRIBUTOS_UNIVERSAIS) {
+      if (vistos.has(a.id)) continue;
+      vistos.add(a.id);
+      lista.push({ id: a.id, nome: a.nome, obrigatorio: false, exemplo: a.exemplo });
+    }
+    for (const a of canal.atributos) {
+      if (vistos.has(a.id)) continue;
+      vistos.add(a.id);
+      lista.push({ id: a.id, nome: a.id, obrigatorio: false, exemplo: EXEMPLO_ATRIBUTO[a.id] ?? "" });
+    }
+    return lista;
+  })();
 
   async function buscarCategorias() {
     setBuscando(true);
@@ -235,6 +305,20 @@ export function FormularioPublicacao({
       const v = medida(texto, rotuloCampo);
       if (v === "erro") return;
       if (v != null) corpo[chave] = v;
+    }
+
+    // Atributos: só entram no corpo se mudaram. Campo em branco significa
+    // "não informado" e some da lista — apagar é uma edição legítima, não
+    // um valor vazio para o Mercado Livre.
+    const atributosLimpos = Object.entries(atributos)
+      .map(([id, valor]) => ({ id, value_name: valor.trim() }))
+      .filter(a => a.value_name !== "")
+      .sort((a, b) => a.id.localeCompare(b.id));
+    const atributosAtuais = [...canal.atributos]
+      .map(a => ({ id: a.id, value_name: a.value_name }))
+      .sort((a, b) => a.id.localeCompare(b.id));
+    if (JSON.stringify(atributosLimpos) !== JSON.stringify(atributosAtuais)) {
+      corpo.atributos = atributosLimpos;
     }
 
     if (Object.keys(corpo).length === 0) {
@@ -432,15 +516,46 @@ export function FormularioPublicacao({
         </div>
       </div>
 
-      {canal.atributosObrigatorios.length > 0 && (
-        <p style={{ fontSize: "11.5px", color: "#9099aa", margin: "12px 0 0", lineHeight: 1.5 }}>
-          Esta categoria exige:{" "}
-          <strong style={{ color: "#cdd3dd" }}>
-            {canal.atributosObrigatorios.map(a => a.nome + (a.condicional ? " (condicional)" : "")).join(", ")}
-          </strong>
-          . Marca e modelo vêm da ficha do produto.
+      {/* ── Atributos do produto ────────────────────────────────────
+          Até 2026-09-04 este bloco era um parágrafo que apenas LISTAVA
+          o que a categoria exige — a tela dizia o que faltava e não
+          dava onde escrever. Como `ml_atributo_obrigatorio_ausente` e
+          GTIN/marca/modelo são cobrados pelo compliance, o fluxo travava
+          num requisito que a interface não permitia atender. Agora cada
+          atributo tem campo próprio. */}
+      <div style={{ marginTop: "16px", paddingTop: "14px", borderTop: "1px solid rgba(255,255,255,0.07)" }}>
+        <h4 style={{ fontSize: "12px", fontWeight: 800, color: "#fff", margin: "0 0 4px" }}>Atributos do produto</h4>
+        <p style={{ fontSize: "11px", color: "#9099aa", margin: "0 0 10px", lineHeight: 1.5 }}>
+          Preencha o que você sabe do produto. Os marcados com{" "}
+          <strong style={{ color: "#ff6b6b" }}>*</strong> são exigidos pela categoria escolhida —
+          sem eles o Mercado Livre recusa o anúncio. Campo em branco não é enviado.
         </p>
-      )}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: "12px" }}>
+          {camposAtributos.map(atr => (
+            <div key={atr.id}>
+              <label style={rotulo}>
+                {atr.nome}
+                {atr.obrigatorio && <span style={{ color: "#ff6b6b" }}> *</span>}
+              </label>
+              <input
+                style={atr.obrigatorio && !(atributos[atr.id] ?? "").trim()
+                  ? { ...campo, borderColor: "rgba(255,107,107,0.45)" }
+                  : campo}
+                value={atributos[atr.id] ?? ""}
+                onChange={e => setAtributos(a => ({ ...a, [atr.id]: e.target.value }))}
+                placeholder={atr.exemplo}
+                maxLength={255}
+              />
+            </div>
+          ))}
+        </div>
+        {canal.atributosObrigatorios.some(a => a.condicional) && (
+          <p style={{ fontSize: "11px", color: "#9099aa", margin: "10px 0 0", lineHeight: 1.5 }}>
+            Atributos marcados como <em>condicional</em> pelo Mercado Livre podem ser exigidos
+            dependendo dos outros valores informados.
+          </p>
+        )}
+      </div>
 
       <button
         type="button"
