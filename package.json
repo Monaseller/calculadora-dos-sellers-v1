@@ -8,7 +8,11 @@
     "start": "next start"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.115.0",
+    "@google/genai": "^2.15.0",
     "@supabase/supabase-js": "^2.108.2",
+    "file-type": "^22.0.1",
+    "image-size": "^2.0.2",
     "next": "14.2.5",
     "react": "18.3.1",
     "react-dom": "18.3.1",
@@ -16,8 +20,10 @@
   },
   "devDependencies": {
     "@types/node": "20.14.12",
+    "@types/pg": "^8.20.4",
     "@types/react": "18.3.3",
     "@types/react-dom": "18.3.0",
+    "pg": "^8.22.0",
     "typescript": "5.5.4"
   }
 }

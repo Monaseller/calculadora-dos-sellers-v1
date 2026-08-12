@@ -15,6 +15,11 @@ build/
 .env.development.local
 .env.test.local
 .env.production.local
+# Backups de .env — contêm credenciais reais e NUNCA podem ser commitados.
+# Os padrões acima são exatos e não cobriam sufixos (ex.:
+# .env.local.bak-directurl ficou fora do ignore até 2026-08-13).
+.env*.bak*
+.env.local.*
 
 # Logs
 npm-debug.log*
@@ -36,3 +41,15 @@ yarn-error.log*
 
 .vercel
 tsconfig.tsbuildinfo
+
+# Artefatos LOCAIS de depuração (2026-08-31).
+# Dumps de resposta de API e saídas de conferência gerados durante
+# investigações — não são fonte de nada, somam ~14 MB e não pertencem ao
+# histórico. Ficam no disco de quem os gerou; o ignore só impede que
+# entrem num commit por engano.
+/body*.json
+/dryrun*.json
+/verify-*.json
+/faltantes_*.txt
+/TESTE*.JSON
+/testesite*.json

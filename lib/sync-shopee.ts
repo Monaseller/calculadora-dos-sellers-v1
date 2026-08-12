@@ -32,8 +32,7 @@ import { shopeeGet } from "@/lib/shopee-api";
 import { obterFaixaShopee, TAXA_CAMPANHA_SHOPEE } from "@/lib/comissoes-shopee";
 import { getShopeeLojaAtiva } from "@/lib/shopee-auth";
 import { LojaIdIntegrityError } from "@/lib/sync-errors";
-// import { atualizarResumosDosDias } from "@/lib/resumos-diarios"; — desativado
-// temporariamente 2026-07-13 (ver bloco de chamada removido mais abaixo).
+import { atualizarResumosDosDias } from "@/lib/resumos-diarios";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -104,10 +103,20 @@ export const DETAIL_FIELDS = [
 export const DETAIL_BATCH       = 50;
 export const DETAIL_CONCURRENCY = 10;
 
+// Etapa 4.2 (2026-07-29, proteção imediata do recálculo inline) — ver
+// comentário completo no ponto de uso, dentro de syncShopeeForUserV2.
+// Exportado para reuso em testes/diagnóstico sem duplicar o número.
+export const LIMITE_RECALCULO_INLINE_DIAS = 3;
+
 export async function withRetry<T>(
   fn: () => Promise<T>,
   tentativas = 3,
-  delayMs = 1000
+  delayMs = 1000,
+  // Opção B (2026-07-30) — callback opcional pra quem chama contar retries
+  // por escopo próprio (ex: por janela de listagem), sem duplicar lógica.
+  // Retrocompatível: parâmetro novo, opcional, no fim — nenhuma chamada
+  // existente precisa mudar.
+  onRetry?: (tentativa: number, erro: unknown) => void
 ): Promise<T> {
   let ultimoErro: unknown;
   for (let i = 0; i < tentativas; i++) {
@@ -115,6 +124,17 @@ export async function withRetry<T>(
       return await fn();
     } catch (e) {
       ultimoErro = e;
+      // [DIAG-SYNC-SHOPEE] temporário (2026-07-30) — investigação do gargalo
+      // do sync inline (ver Fase 4, proteção imediata: o recálculo de resumo
+      // foi descartado como causa e o próprio sync com a Shopee ficou
+      // suspeito). Revela se o tempo gasto vem de retry por falha
+      // transitória/rate limit — remover depois que a causa for confirmada.
+      console.warn("[DIAG-SYNC-SHOPEE] retry", {
+        tentativa: i + 1,
+        de: tentativas,
+        erro: e instanceof Error ? e.message : String(e),
+      });
+      onRetry?.(i + 1, e);
       if (i < tentativas - 1) {
         await new Promise(r => setTimeout(r, delayMs * Math.pow(2, i)));
       }
@@ -140,10 +160,189 @@ function gerarChunks(from: string, to: string): Array<{ from: string; to: string
   return chunks;
 }
 
+// ── Opção B (2026-07-30) — listagem paralela por dia ────────────────────────
+// Ver docs/DECISIONS.md. Investigação da Fase 4 mostrou que o gargalo real do
+// sync inline não é o recálculo de resumo (já protegido pela Etapa 4.2), e
+// sim a listagem via get_order_list: um sync de "ontem+hoje" com volume alto
+// gera ~15 páginas SEQUENCIAIS (cursor único pro intervalo inteiro), medido
+// em ~31s de ~49s totais. Como get_order_list usa cursor (cada página
+// depende da anterior), não dá pra paralelizar páginas dentro de uma mesma
+// janela contínua — mas dá pra rodar duas janelas INDEPENDENTES (ontem, hoje)
+// em paralelo, cada uma com seu próprio cursor.
+//
+// Escopo desta mudança: só ativa quando o intervalo pedido é EXATAMENTE 2
+// dias (o caso do botão Sincronizar). Qualquer outro intervalo (1 dia, ou
+// mais de 2 — backfill histórico, cron, worker) continua usando o algoritmo
+// antigo dentro de syncShopeeForUserV2, sem nenhuma alteração de
+// comportamento. Concorrência fixa em 2 (nunca mais que as duas janelas
+// diárias) — nunca generalizado para 7/30 dias nem para N janelas.
+export interface ContextoListagemShopee {
+  partnerId:        string;
+  partnerKey:       string;
+  accessToken:      string;
+  shopId:           number;
+  timeRangeField:   string;
+  filtrarCompleted: boolean;
+}
+
+export interface ListagemResultado {
+  orderSns: string[];
+  paginas:  number;
+  tempoMs:  number;
+  retries:  number;
+  erro:     string | null;
+}
+
+export function contarDiasNoIntervalo(dateFrom: string, dateTo: string): number {
+  const d1 = new Date(`${dateFrom}T00:00:00Z`).getTime();
+  const d2 = new Date(`${dateTo}T00:00:00Z`).getTime();
+  return Math.round((d2 - d1) / 86400000) + 1;
+}
+
+/**
+ * listarOrderSnsDaJanela — lista todos os order_sn de UMA janela contínua,
+ * com cursor próprio (nunca compartilhado com outra janela). Usada pelo
+ * caminho novo (intervalo == 2 dias) dentro de syncShopeeForUserV2, chamada
+ * 2x via Promise.all (ontem, hoje). Nunca lança exceção — erro vem no campo
+ * `erro` do retorno, pra permitir que uma janela falhe sem derrubar a
+ * Promise.all da outra (a decisão de abortar o sync inteiro é de quem
+ * chama, não desta função).
+ */
+export async function listarOrderSnsDaJanela(
+  ctx: ContextoListagemShopee, janelaFrom: string, janelaTo: string
+): Promise<ListagemResultado> {
+  const inicioMs = Date.now();
+  let retries = 0;
+  try {
+    const chunkFrom = Math.floor(new Date(`${janelaFrom}T00:00:00-03:00`).getTime() / 1000);
+    const chunkTo   = Math.floor(new Date(`${janelaTo}T23:59:59-03:00`).getTime() / 1000);
+    let cursor = "";
+    const orderSns: string[] = [];
+    let paginas = 0;
+
+    for (;;) {
+      const params: Record<string, string | number> = {
+        time_range_field:         ctx.timeRangeField,
+        time_from:                chunkFrom,
+        time_to:                  chunkTo,
+        page_size:                100,
+        response_optional_fields: "order_status",
+      };
+      if (cursor) params.cursor = cursor;
+
+      const data = await withRetry(
+        () => shopeeGet("/api/v2/order/get_order_list", ctx.partnerId, ctx.partnerKey, ctx.accessToken, ctx.shopId, params),
+        3, 1000,
+        () => { retries++; }
+      );
+      paginas++;
+
+      if (data?.error && data.error !== "") {
+        throw new Error(`Shopee get_order_list error: ${data.error} -- ${data.message ?? ""}`);
+      }
+
+      const list: any[] = data?.response?.order_list ?? [];
+      const sns = ctx.filtrarCompleted
+        ? list.filter((o: any) => (o.order_status ?? "") !== "COMPLETED").map((o: any) => o.order_sn)
+        : list.map((o: any) => o.order_sn);
+      orderSns.push(...sns);
+
+      if (!data?.response?.more || !data?.response?.next_cursor) break;
+      cursor = data.response.next_cursor;
+    }
+
+    return { orderSns, paginas, tempoMs: Date.now() - inicioMs, retries, erro: null };
+  } catch (err: any) {
+    return { orderSns: [], paginas: 0, tempoMs: Date.now() - inicioMs, retries, erro: err?.message ?? String(err) };
+  }
+}
+
+/**
+ * listarOrderSnsSequencialParaTeste — cópia fiel do algoritmo ANTIGO (1
+ * cursor sequencial pro intervalo inteiro, chunks de até 14 dias), mantida
+ * exclusivamente para a rota de debug temporária
+ * app/api/debug/comparar-listagem-shopee/route.ts poder comparar contra o
+ * caminho novo. NUNCA é chamada pelo fluxo real de sync — syncShopeeForUserV2
+ * continua com o algoritmo antigo embutido inline, inalterado, para
+ * qualquer intervalo != 2 dias. Esta função existe só pra reproduzir, sob
+ * demanda, o que o algoritmo antigo produziria para a MESMA janela de 2
+ * dias que o caminho novo processa, permitindo o diff dos dois conjuntos de
+ * order_sn (Teste C).
+ */
+export async function listarOrderSnsSequencialParaTeste(
+  ctx: ContextoListagemShopee, dateFrom: string, dateTo: string
+): Promise<ListagemResultado> {
+  const inicioMs = Date.now();
+  let retries = 0;
+  const orderSns: string[] = [];
+  let paginas = 0;
+  try {
+    const chunks = gerarChunks(dateFrom, dateTo);
+    for (const chunk of chunks) {
+      const chunkFrom = Math.floor(new Date(`${chunk.from}T00:00:00-03:00`).getTime() / 1000);
+      const chunkTo   = Math.floor(new Date(`${chunk.to}T23:59:59-03:00`).getTime() / 1000);
+      let cursor = "";
+
+      for (;;) {
+        const params: Record<string, string | number> = {
+          time_range_field:         ctx.timeRangeField,
+          time_from:                chunkFrom,
+          time_to:                  chunkTo,
+          page_size:                100,
+          response_optional_fields: "order_status",
+        };
+        if (cursor) params.cursor = cursor;
+
+        const data = await withRetry(
+          () => shopeeGet("/api/v2/order/get_order_list", ctx.partnerId, ctx.partnerKey, ctx.accessToken, ctx.shopId, params),
+          3, 1000,
+          () => { retries++; }
+        );
+        paginas++;
+
+        if (data?.error && data.error !== "") {
+          throw new Error(`Shopee get_order_list error: ${data.error} -- ${data.message ?? ""}`);
+        }
+
+        const list: any[] = data?.response?.order_list ?? [];
+        const sns = ctx.filtrarCompleted
+          ? list.filter((o: any) => (o.order_status ?? "") !== "COMPLETED").map((o: any) => o.order_sn)
+          : list.map((o: any) => o.order_sn);
+        orderSns.push(...sns);
+
+        if (!data?.response?.more || !data?.response?.next_cursor) break;
+        cursor = data.response.next_cursor;
+      }
+    }
+    return { orderSns, paginas, tempoMs: Date.now() - inicioMs, retries, erro: null };
+  } catch (err: any) {
+    return { orderSns, paginas, tempoMs: Date.now() - inicioMs, retries, erro: err?.message ?? String(err) };
+  }
+}
+
 export interface SyncShopeeResult {
   found:        number;
   inserted:     number;
   upsertErrors: number;
+  // Etapa 4.2 (2026-07-29) — proteção imediata do recálculo inline de
+  // dashboard_resumos_diarios. resumoPendente=true significa que o sync
+  // gravou os pedidos normalmente, mas o recálculo do resumo foi ADIADO
+  // (não executado) por exceder LIMITE_RECALCULO_INLINE_DIAS — nunca
+  // silencioso, sempre acompanhado de motivoResumoPendente e de um log
+  // "[SYNC_RESUMO_PENDENTE]".
+  resumoAtualizado:     boolean;
+  resumoPendente:       boolean;
+  diasAfetados:         number;
+  motivoResumoPendente: string | null;
+  // Opção B (2026-07-30) — só usados no caminho novo (intervalo == 2 dias)
+  // quando uma das duas janelas (ontem/hoje) falha; ausentes (undefined) em
+  // qualquer outro caso. Aprovação do usuário 2026-07-30: NÃO propagar estes
+  // 3 campos pela API pública (app/api/shopee/vendas/route.ts) nesta fase —
+  // existem só para consumo interno/rota de debug, até a estratégia estar
+  // validada e aprovada para virar contrato público.
+  syncIncompleto?: boolean;
+  janelaFalhou?:   "ontem" | "hoje" | null;
+  motivoFalha?:    string | null;
 }
 
 /**
@@ -515,7 +714,7 @@ export async function syncShopeeForUserV2(
   }
 ): Promise<SyncShopeeResult> {
   const loja = lojaOverride ?? await getShopeeLojaAtiva(userId);
-  if (!loja) return { found: 0, inserted: 0, upsertErrors: 0 };
+  if (!loja) return { found: 0, inserted: 0, upsertErrors: 0, resumoAtualizado: false, resumoPendente: false, diasAfetados: 0, motivoResumoPendente: null };
 
   const { partnerId: partner_id, partnerKey: partner_key, accessToken: access_token, shopId, nickname, lojaId } = loja;
 
@@ -540,55 +739,132 @@ export async function syncShopeeForUserV2(
 
   const chunks = gerarChunks(dateFrom, dateTo);
 
+  // [DIAG-SYNC-SHOPEE] temporário (2026-07-30) — ver comentário em withRetry.
+  const _syncInicioMs = Date.now();
+
   // ── ETAPA 1: Listar todos os order_sn via cursor paginado ──────────────────
-  const allOrderSns: string[] = [];
+  let allOrderSns: string[] = [];
+  let _paginasListagem = 0;
+  const _etapa1InicioMs = Date.now();
+  const diasNoIntervalo = contarDiasNoIntervalo(dateFrom, dateTo);
 
-  for (const chunk of chunks) {
-    const chunkFrom = Math.floor(new Date(`${chunk.from}T00:00:00-03:00`).getTime() / 1000);
-    const chunkTo   = Math.floor(new Date(`${chunk.to}T23:59:59-03:00`).getTime() / 1000);
-    let cursor = "";
+  if (diasNoIntervalo === 2) {
+    // Opção B (2026-07-30) — ver comentário completo acima de
+    // ContextoListagemShopee. Só entra aqui quando o intervalo pedido é
+    // EXATAMENTE 2 dias (sempre o caso do botão Sincronizar/forceSync).
+    const ctxListagem: ContextoListagemShopee = {
+      partnerId: partner_id, partnerKey: partner_key, accessToken: access_token, shopId,
+      timeRangeField, filtrarCompleted,
+    };
 
-    for (;;) {
-      const params: Record<string, string | number> = {
-        time_range_field:         timeRangeField,
-        time_from:                chunkFrom,
-        time_to:                  chunkTo,
-        page_size:                100,
-        response_optional_fields: "order_status",
+    const [resOntem, resHoje] = await Promise.all([
+      listarOrderSnsDaJanela(ctxListagem, dateFrom, dateFrom),
+      listarOrderSnsDaJanela(ctxListagem, dateTo,   dateTo),
+    ]);
+
+    // [DIAG-SYNC-SHOPEE] temporário (2026-07-30) — ver comentário em withRetry.
+    console.log("[DIAG-SYNC-SHOPEE] etapa1_janela_ontem", {
+      paginas: resOntem.paginas, tempoMs: resOntem.tempoMs, retries: resOntem.retries,
+      pedidosEncontrados: resOntem.orderSns.length, erro: resOntem.erro,
+    });
+    console.log("[DIAG-SYNC-SHOPEE] etapa1_janela_hoje", {
+      paginas: resHoje.paginas, tempoMs: resHoje.tempoMs, retries: resHoje.retries,
+      pedidosEncontrados: resHoje.orderSns.length, erro: resHoje.erro,
+    });
+
+    if (resOntem.erro || resHoje.erro) {
+      // Etapa 5 (aprovada 2026-07-30): nunca fallback silencioso pra
+      // resultado parcial — se uma janela falhar, o sync inteiro é
+      // considerado incompleto e aborta aqui, sem seguir pra detalhes/upsert
+      // com só metade dos pedidos.
+      const janelaFalhou: "ontem" | "hoje" = resOntem.erro ? "ontem" : "hoje";
+      const motivoFalha = resOntem.erro ?? resHoje.erro ?? "erro_desconhecido";
+      console.error("[DIAG-SYNC-SHOPEE] etapa1_abortando_sync_incompleto", { janelaFalhou, motivoFalha });
+      return {
+        found: 0, inserted: 0, upsertErrors: 0,
+        resumoAtualizado: false, resumoPendente: false, diasAfetados: 0, motivoResumoPendente: null,
+        syncIncompleto: true, janelaFalhou, motivoFalha,
       };
-      if (cursor) params.cursor = cursor;
+    }
 
-      const data = await withRetry(() =>
-        shopeeGet("/api/v2/order/get_order_list", partner_id, partner_key, access_token, shopId, params)
-      );
+    const totalAntesDedup = resOntem.orderSns.length + resHoje.orderSns.length;
+    const setUnico = new Set([...resOntem.orderSns, ...resHoje.orderSns]);
+    allOrderSns = Array.from(setUnico);
+    _paginasListagem = resOntem.paginas + resHoje.paginas;
 
-      if (data?.error && data.error !== "") {
-        throw new Error(`Shopee get_order_list error: ${data.error} -- ${data.message ?? ""}`);
+    // [DIAG-SYNC-SHOPEE] temporário (2026-07-30) — ver comentário em withRetry.
+    console.log("[DIAG-SYNC-SHOPEE] etapa1_dedup", {
+      totalAntesDedup,
+      totalDepoisDedup: allOrderSns.length,
+      duplicadosRemovidos: totalAntesDedup - allOrderSns.length,
+    });
+  } else {
+    // ── Caminho antigo (qualquer intervalo != 2 dias) — sem NENHUMA alteração
+    // de comportamento em relação ao código original.
+    for (const chunk of chunks) {
+      const chunkFrom = Math.floor(new Date(`${chunk.from}T00:00:00-03:00`).getTime() / 1000);
+      const chunkTo   = Math.floor(new Date(`${chunk.to}T23:59:59-03:00`).getTime() / 1000);
+      let cursor = "";
+
+      for (;;) {
+        const params: Record<string, string | number> = {
+          time_range_field:         timeRangeField,
+          time_from:                chunkFrom,
+          time_to:                  chunkTo,
+          page_size:                100,
+          response_optional_fields: "order_status",
+        };
+        if (cursor) params.cursor = cursor;
+
+        const _paginaInicioMs = Date.now();
+        const data = await withRetry(() =>
+          shopeeGet("/api/v2/order/get_order_list", partner_id, partner_key, access_token, shopId, params)
+        );
+        _paginasListagem++;
+        // [DIAG-SYNC-SHOPEE] temporário (2026-07-30) — ver comentário em withRetry.
+        console.log("[DIAG-SYNC-SHOPEE] etapa1_pagina", {
+          pagina: _paginasListagem,
+          tempoMs: Date.now() - _paginaInicioMs,
+          acumulado: allOrderSns.length,
+        });
+
+        if (data?.error && data.error !== "") {
+          throw new Error(`Shopee get_order_list error: ${data.error} -- ${data.message ?? ""}`);
+        }
+
+        const list: any[] = data?.response?.order_list ?? [];
+
+        // Cron (update_time): exclui COMPLETED para nao buscar pedidos antigos entregues hoje
+        const sns = filtrarCompleted
+          ? list.filter((o: any) => (o.order_status ?? "") !== "COMPLETED").map((o: any) => o.order_sn)
+          : list.map((o: any) => o.order_sn);
+
+        allOrderSns.push(...sns);
+
+        // Paginacao: para quando mais=false OU cursor vazio
+        if (!data?.response?.more || !data?.response?.next_cursor) break;
+        cursor = data.response.next_cursor;
       }
-
-      const list: any[] = data?.response?.order_list ?? [];
-
-      // Cron (update_time): exclui COMPLETED para nao buscar pedidos antigos entregues hoje
-      const sns = filtrarCompleted
-        ? list.filter((o: any) => (o.order_status ?? "") !== "COMPLETED").map((o: any) => o.order_sn)
-        : list.map((o: any) => o.order_sn);
-
-      allOrderSns.push(...sns);
-
-      // Paginacao: para quando mais=false OU cursor vazio
-      if (!data?.response?.more || !data?.response?.next_cursor) break;
-      cursor = data.response.next_cursor;
     }
   }
 
   const found = allOrderSns.length;
-  if (found === 0) return { found: 0, inserted: 0, upsertErrors: 0 };
+  // [DIAG-SYNC-SHOPEE] temporário (2026-07-30) — ver comentário em withRetry.
+  console.log("[DIAG-SYNC-SHOPEE] etapa1_total", {
+    tempoMs: Date.now() - _etapa1InicioMs,
+    paginas: _paginasListagem,
+    orderSnsEncontrados: found,
+    modo: diasNoIntervalo === 2 ? "paralelo_2_janelas" : "sequencial_legado",
+  });
+  if (found === 0) return { found: 0, inserted: 0, upsertErrors: 0, resumoAtualizado: false, resumoPendente: false, diasAfetados: 0, motivoResumoPendente: null };
 
   // ── ETAPA 2: Carregar anuncios cadastrados (para custos) ───────────────────
   // Extraído para `carregarMapaAnuncios()` em 2026-07-14 (backfill dos 189
   // pedidos de 07/07) — mesma query, zero mudança de comportamento, só
   // reaproveitável pela rota de backfill sem duplicar.
+  const _etapa2InicioMs = Date.now();
   const mapaAnuncios = await carregarMapaAnuncios(userId);
+  console.log("[DIAG-SYNC-SHOPEE] etapa2_anuncios", { tempoMs: Date.now() - _etapa2InicioMs });
 
   // ── ETAPA 3: Buscar detalhes em paralelo (50/batch, 10 concurrent) ─────────
   // P1: income_distribution adicionado para valores financeiros oficiais
@@ -600,8 +876,10 @@ export async function syncShopeeForUserV2(
   }
 
   const allDetails: any[] = [];
+  const _etapa3InicioMs = Date.now();
   for (let i = 0; i < batches.length; i += DETAIL_CONCURRENCY) {
     const grupo = batches.slice(i, i + DETAIL_CONCURRENCY);
+    const _ondaInicioMs = Date.now();
     const results = await Promise.all(
       grupo.map(batch =>
         withRetry(() =>
@@ -613,12 +891,25 @@ export async function syncShopeeForUserV2(
       )
     );
     allDetails.push(...results);
+    // [DIAG-SYNC-SHOPEE] temporário (2026-07-30) — ver comentário em withRetry.
+    console.log("[DIAG-SYNC-SHOPEE] etapa3_onda", {
+      onda: Math.floor(i / DETAIL_CONCURRENCY) + 1,
+      lotesNaOnda: grupo.length,
+      pedidosNaOnda: grupo.reduce((s, b) => s + b.length, 0),
+      tempoMsDaOnda: Date.now() - _ondaInicioMs,
+    });
   }
+  console.log("[DIAG-SYNC-SHOPEE] etapa3_total", {
+    tempoMs: Date.now() - _etapa3InicioMs,
+    totalLotes: batches.length,
+    totalOndas: Math.ceil(batches.length / DETAIL_CONCURRENCY),
+  });
 
   // ── ETAPA 4: Montar linhas ──────────────────────────────────────────────────
   // Extraída para `montarLinhasDoPedido()` em 2026-07-14 (backfill dos 189
   // pedidos perdidos de 07/07) — mesma lógica, zero mudança de comportamento,
   // só reaproveitável pela rota de backfill pontual sem duplicar código.
+  const _etapa4InicioMs = Date.now();
   const rows: any[] = [];
 
   for (const detail of allDetails) {
@@ -628,10 +919,12 @@ export async function syncShopeeForUserV2(
       }));
     }
   }
+  console.log("[DIAG-SYNC-SHOPEE] etapa4_montarlinhas", { tempoMs: Date.now() - _etapa4InicioMs, rows: rows.length });
 
   // ── ETAPA 5: Upsert com verificacao de erro (P4) ──────────────────────────
   const UPSERT_BATCH = 250;
   let upsertErrors   = 0;
+  const _etapa5InicioMs = Date.now();
 
   for (let i = 0; i < rows.length; i += UPSERT_BATCH) {
     const { error } = await supabase
@@ -647,16 +940,89 @@ export async function syncShopeeForUserV2(
       );
     }
   }
+  // [DIAG-SYNC-SHOPEE] temporário (2026-07-30) — ver comentário em withRetry.
+  console.log("[DIAG-SYNC-SHOPEE] etapa5_upsert", { tempoMs: Date.now() - _etapa5InicioMs, upsertErrors });
 
-  // Fase 4 Parte 2 (recalculo de dashboard_resumos_diarios) REMOVIDA
-  // TEMPORARIAMENTE em 2026-07-13 (ver docs/DECISIONS.md e docs/ROADMAP.md).
-  // Motivo: dashboard_resumos_diarios ainda não existe no banco, a
-  // funcionalidade pertence à Fase 4/Grupo C (não faz parte deste deploy), e
-  // mesmo protegida por try/catch gerava log de erro conhecido em todo sync
-  // de produção. lib/resumos-diarios.ts e a migration continuam no repo,
-  // só não são chamados daqui até a Fase 4 estar completa e a migration
-  // executada — reativar então (reintroduzir o bloco de coleta por conta +
-  // a chamada a atualizarResumosDosDias, removidos nesta edição).
+  // Fase 4 Parte 2 — REATIVADA em 2026-07-29 (ver Fase 3 desta sessão:
+  // dashboard_resumos_diarios existe, migration executada, validada com
+  // backfill de 7 e 30 dias consecutivos sem erro nem divergência
+  // financeira material). Recalcula só os dias efetivamente afetados por
+  // ESTE sync (nunca o período inteiro) — protegido por try/catch: falha
+  // aqui nunca derruba o sync principal, resumo é cache, não fonte de
+  // verdade (regra permanente, ver migration 20260710).
+  //
+  // Etapa 4.1 (2026-07-29): estas datas já vêm exclusivamente dos pedidos
+  // efetivamente processados neste sync (`rows`, montado a partir dos
+  // order_sn retornados pela Shopee para o range pedido) — NUNCA do
+  // dateFrom/dateTo inteiro. Um sync de 7 dias corridos só recalcula os
+  // dias em que de fato existiu pedido com data_pagamento/data_criacao
+  // naquele dia; dias sem pedido novo/alterado no meio do range não entram
+  // aqui. Isso já era verdade antes desta etapa — não precisou de correção.
+  const datasPagamento = Array.from(new Set(rows.map(r => r.data_pagamento).filter(Boolean)));
+  const datasCriacao   = Array.from(new Set(rows.map(r => r.data_criacao).filter(Boolean)));
 
-  return { found, inserted: rows.length, upsertErrors };
+  // Etapa 4.2 (2026-07-29) — limitador de recálculo inline. Cada data em
+  // datasPagamento/datasCriacao custa 1 chamada a atualizarResumoDia (1
+  // query paginada + upsert em dashboard_resumos_diarios), medido em
+  // 1.5-5.5s cada na Fase 4 original. Isso roda dentro do fluxo síncrono
+  // (inline, usado sempre que ENABLE_ASYNC_SYNC_JOBS está off — confirmado
+  // em 2026-07-29 que a variável não existe nem em produção/Vercel), e soma
+  // direto ao tempo de resposta da rota, que tem 45s de limite no frontend
+  // (AbortController em vendas/page.tsx). Um teste real com janela efetiva
+  // de 7 dias empurrou o total da requisição para 59.7s.
+  //
+  // "dias afetados" = datasPagamento.length + datasCriacao.length, ou seja,
+  // o número de chamadas individuais a atualizarResumoDia que este sync
+  // executaria — não a contagem de dias de calendário únicos. Um mesmo
+  // pedido pode ter data_pagamento e data_criacao em dias diferentes; cada
+  // data em cada eixo é 1 query+upsert separado, e é isso que custa tempo,
+  // não o dia de calendário em si.
+  const diasAfetados = datasPagamento.length + datasCriacao.length;
+
+  let resumoAtualizado = false;
+  let resumoPendente = false;
+  let motivoResumoPendente: string | null = null;
+
+  if (diasAfetados > LIMITE_RECALCULO_INLINE_DIAS) {
+    // Etapa 4.3 — nunca pular em silêncio: log estruturado (Etapa 4.4) +
+    // retorno da rota (app/api/shopee/vendas/route.ts) expõe
+    // resumo_pendente=true e o motivo em código estável. Os pedidos em si
+    // já foram gravados normalmente acima (upsert em `pedidos`) — só o
+    // recálculo do resumo/cache fica pendente.
+    resumoPendente = true;
+    motivoResumoPendente = "LIMITE_RECALCULO_INLINE_EXCEDIDO";
+    console.warn("[SYNC_RESUMO_PENDENTE]", {
+      userId,
+      lojaId,
+      marketplace: "Shopee",
+      dataInicial: dateFrom,
+      dataFinal: dateTo,
+      diasAfetados,
+      quantidadePedidos: rows.length,
+      motivo: motivoResumoPendente,
+    });
+  } else if (diasAfetados > 0) {
+    const _resumoInicioMs = Date.now();
+    try {
+      await atualizarResumosDosDias(userId, lojaId, "Shopee", nickname, datasPagamento, datasCriacao);
+      resumoAtualizado = true;
+    } catch (err: any) {
+      console.error("[sync-shopee] erro ao atualizar dashboard_resumos_diarios (não afeta o sync):", err?.message ?? err);
+    }
+    // [DIAG-SYNC-SHOPEE] temporário (2026-07-30) — ver comentário em withRetry.
+    console.log("[DIAG-SYNC-SHOPEE] etapa6_resumo", { tempoMs: Date.now() - _resumoInicioMs, diasAfetados });
+  }
+
+  // [DIAG-SYNC-SHOPEE] temporário (2026-07-30) — ver comentário em withRetry.
+  // Fecha o quadro: tempo total do sync inteiro, pra comparar com a soma das
+  // etapas acima e confirmar que não sobra tempo "invisível" fora delas.
+  console.log("[DIAG-SYNC-SHOPEE] sync_total", {
+    tempoMsTotal: Date.now() - _syncInicioMs,
+    found,
+    inserted: rows.length,
+    diasAfetados,
+    resumoPendente,
+  });
+
+  return { found, inserted: rows.length, upsertErrors, resumoAtualizado, resumoPendente, diasAfetados, motivoResumoPendente };
 }

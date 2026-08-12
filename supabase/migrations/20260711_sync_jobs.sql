@@ -188,5 +188,24 @@ COMMENT ON FUNCTION claim_next_sync_job() IS
 
 -- Só o worker (service role) pode chamar esta função — nunca a API
 -- pública (ANON_KEY) nem o frontend.
-REVOKE EXECUTE ON FUNCTION claim_next_sync_job() FROM PUBLIC;
+--
+-- CORREÇÃO REGISTRADA EM 2026-08-03 (não reexecute este arquivo — a
+-- correção já foi aplicada separadamente no banco, este comentário só
+-- mantém o arquivo local fiel ao estado real): validação de leitura
+-- durante a Fase 0 da Central de IA encontrou EXECUTE concedido também
+-- a anon e authenticated nesta função, mesmo com o REVOKE FROM PUBLIC
+-- abaixo — causa: uma regra de ALTER DEFAULT PRIVILEGES no schema
+-- public deste projeto Supabase concede EXECUTE automaticamente a
+-- anon/authenticated/service_role em toda função nova, no momento da
+-- criação, independente do REVOKE FROM PUBLIC (que só afeta o
+-- pseudo-role PUBLIC). Corrigido em produção com:
+--   REVOKE EXECUTE ON FUNCTION public.claim_next_sync_job()
+--   FROM PUBLIC, anon, authenticated;
+--   GRANT EXECUTE ON FUNCTION public.claim_next_sync_job()
+--   TO service_role;
+-- Validado por leitura (information_schema.routine_privileges) e por
+-- impersonação transacional (SET LOCAL ROLE anon/authenticated dentro
+-- de BEGIN/ROLLBACK, retornando 42501 permission denied nos dois
+-- casos). Ver docs/BUGS.md e docs/CHANGELOG.md.
+REVOKE EXECUTE ON FUNCTION claim_next_sync_job() FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION claim_next_sync_job() TO service_role;

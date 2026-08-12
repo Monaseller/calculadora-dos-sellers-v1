@@ -8,7 +8,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { getUserId } from "@/lib/session";
 import { getShopeeLojaAtiva } from "@/lib/shopee-auth";
-import { syncShopeeForUser } from "@/lib/sync-shopee";
+import { syncShopeeForUserV2 } from "@/lib/sync-shopee";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -17,6 +17,18 @@ const supabase = createClient(
 
 function hojeISO() {
   return new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString().split("T")[0];
+}
+
+// Etapa 1 (ajuste pós-aprovação — ver docs/BUGS.md): classifica a mensagem
+// crua de erro de página num código estável, pra o front nunca precisar
+// comparar texto de erro. Novos padrões podem ser acrescentados aqui sem
+// mudar o formato da resposta.
+function classificarErroPagina(mensagem: string | null | undefined): string {
+  const msg = (mensagem ?? "").toLowerCase();
+  if (msg.includes("statement timeout")) return "statement_timeout";
+  if (msg.includes("econnreset") || msg.includes("connection") || msg.includes("network")) return "connection_error";
+  if (msg.includes("rate limit") || msg.includes("too many requests")) return "rate_limit";
+  return "erro_desconhecido";
 }
 
 function pedidoToRow(p: any) {
@@ -76,6 +88,15 @@ export async function GET(request: Request) {
 
   const forceSync = searchParams.get("sync") === "1";
   const hoje = hojeISO();
+  const _reqid = searchParams.get("_reqid") ?? "(sem reqid)";
+  const _inicioMs = Date.now();
+
+  // [DIAG-DATAS] temporário — remover após a auditoria
+  console.log(`[DIAG-DATAS][shopee/vendas] req #${_reqid} recebida`, {
+    querystringCompleta: request.url,
+    dateFrom, dateTo, dateField, forceSync, hoje,
+    rangeInvalido: dateFrom > dateTo,
+  });
 
   // RESTAURADO em 2026-07-13 (ver docs/DECISIONS.md, feature flag
   // ENABLE_ASYNC_SYNC_JOBS): tinha sido removido em 2026-07-11 assumindo que
@@ -85,6 +106,19 @@ export async function GET(request: Request) {
   // em produção precisa continuar usando exatamente este caminho enquanto
   // ENABLE_ASYNC_SYNC_JOBS=false. O front só envia ?sync=1 quando a flag
   // está desligada (ver app/(app)/vendas/page.tsx, lerMarketplace).
+  // Etapa 4.3 (2026-07-29, proteção imediata do recálculo inline) — nunca
+  // pular o recálculo do resumo em silêncio: quando o sync ocorre, o
+  // resultado (resumo atualizado ou adiado) é sempre exposto na resposta
+  // desta rota via os campos abaixo. null = nenhum sync foi disparado nesta
+  // leitura (cache já estava fresco, ou fora do range de hoje).
+  let resumoSyncInfo: {
+    sync_concluido: boolean;
+    resumo_atualizado: boolean;
+    resumo_pendente: boolean;
+    dias_afetados: number;
+    resumo_motivo: string | null;
+  } | null = null;
+
   try {
     if (forceSync) {
       // Botão Sincronizar (fluxo antigo): sincroniza ontem + hoje (máx 2 dias, cabe em 55s)
@@ -92,7 +126,14 @@ export async function GET(request: Request) {
       ontem.setDate(ontem.getDate() - 1);
       const ontemISO = ontem.toISOString().split("T")[0];
       const syncFrom = dateFrom > ontemISO ? dateFrom : ontemISO;
-      await syncShopeeForUser(userId, syncFrom, hoje, true); // noBuffer=true → create_time
+      const r = await syncShopeeForUserV2(userId, syncFrom, hoje, true); // noBuffer=true → create_time
+      resumoSyncInfo = {
+        sync_concluido: true,
+        resumo_atualizado: r.resumoAtualizado,
+        resumo_pendente: r.resumoPendente,
+        dias_afetados: r.diasAfetados,
+        resumo_motivo: r.motivoResumoPendente,
+      };
     } else if (dateFrom <= hoje && hoje <= dateTo) {
       // Auto: só sincroniza hoje se stale
       const { data: probeHoje } = await supabase
@@ -104,12 +145,36 @@ export async function GET(request: Request) {
       const lastSyncHoje = probeHoje?.[0]?.synced_at
         ? new Date(probeHoje[0].synced_at).getTime() : 0;
 
+      const staleMinutos = (Date.now() - lastSyncHoje) / 60000;
+      console.log(`[DIAG-DATAS][shopee/vendas] req #${_reqid} range inclui hoje — checando staleness`, {
+        lastSyncHoje: lastSyncHoje ? new Date(lastSyncHoje).toISOString() : null, staleMinutos,
+        vaiSincronizar: Date.now() - lastSyncHoje > 30 * 60 * 1000,
+      });
       if (Date.now() - lastSyncHoje > 30 * 60 * 1000) {
-        await syncShopeeForUser(userId, hoje, hoje, true); // noBuffer=true -> create_time
+        console.log(`[DIAG-DATAS][shopee/vendas] req #${_reqid} disparando auto-sync de hoje (stale)`);
+        const r = await syncShopeeForUserV2(userId, hoje, hoje, true); // noBuffer=true -> create_time
+        resumoSyncInfo = {
+          sync_concluido: true,
+          resumo_atualizado: r.resumoAtualizado,
+          resumo_pendente: r.resumoPendente,
+          dias_afetados: r.diasAfetados,
+          resumo_motivo: r.motivoResumoPendente,
+        };
+        console.log(`[DIAG-DATAS][shopee/vendas] req #${_reqid} auto-sync de hoje concluido`);
       }
     }
   } catch (syncErr) {
     console.error("[shopee/vendas] sync error:", syncErr instanceof Error ? syncErr.message : syncErr);
+    console.log(`[DIAG-DATAS][shopee/vendas] req #${_reqid} SYNC FALHOU (capturado, segue lendo cache)`, {
+      erro: syncErr instanceof Error ? syncErr.message : String(syncErr),
+    });
+    resumoSyncInfo = {
+      sync_concluido: false,
+      resumo_atualizado: false,
+      resumo_pendente: false,
+      dias_afetados: 0,
+      resumo_motivo: "SYNC_FALHOU",
+    };
     // Não retorna erro - lê do cache mesmo que sync falhe
   }
 
@@ -154,7 +219,16 @@ export async function GET(request: Request) {
 
   const PAGE_SIZE = 1000;
   const MAX_PAGES = 50; // guarda de seguranca: ate 50.000 linhas
+  // Etapa 1 (correção de integridade — ver docs/BUGS.md, "timeout silencioso
+  // na paginação"): até 3 tentativas por página, backoff curto e crescente.
+  // Um erro persistente NUNCA é tratado como fim normal da paginação — só
+  // página vazia ou página menor que PAGE_SIZE encerram normalmente.
+  const RETRY_BACKOFF_MS = [400, 900, 1500];
   let pedidos: any[] = [];
+  let paginacaoFalhou = false;
+  let paginaQueFalhou: number | null = null;
+  let erroResumido: string | null = null;
+  const _paginaInicioMs = Date.now();
   for (let page = 0; page < MAX_PAGES; page++) {
     const from = page * PAGE_SIZE;
     const to = from + PAGE_SIZE - 1;
@@ -162,23 +236,110 @@ export async function GET(request: Request) {
     // de linhas empatadas, e sem uma chave única de desempate o Postgres/
     // PostgREST não garante ordem estável entre chamadas de paginação
     // sucessivas — confirmado que id é único e NOT NULL em toda a tabela.
-    const pageResult = await buildPedidosQuery("*")
-      .order("data", { ascending: false })
-      .order("id",   { ascending: true })
-      .range(from, to);
-    const pageData = pageResult.data;
-    const pageErr = pageResult.error;
+    let pageData: any[] | null = null;
+    let pageErr: any = null;
+
+    for (let tentativa = 1; tentativa <= 3; tentativa++) {
+      const _pagMs = Date.now();
+      const pageResult = await buildPedidosQuery("*")
+        .order("data", { ascending: false })
+        .order("id",   { ascending: true })
+        .range(from, to);
+      pageData = pageResult.data;
+      pageErr = pageResult.error;
+
+      // [DIAG-DATAS] temporário — remover após a auditoria
+      console.log(`[DIAG-DATAS][shopee/vendas] req #${_reqid} pagina ${page} tentativa ${tentativa}`, {
+        marketplace: "Shopee", from, to,
+        linhasRetornadas: pageData?.length ?? 0,
+        totalAcumuladoAntes: pedidos.length,
+        erro: pageErr?.message ?? null,
+        tempoMsDaPagina: Date.now() - _pagMs,
+      });
+
+      if (!pageErr) break; // sucesso nesta tentativa — sai do loop de retry
+
+      console.error(`[shopee/vendas] erro na pagina ${page} (tentativa ${tentativa}/3)`, pageErr.message);
+      if (tentativa < 3) {
+        const espera = RETRY_BACKOFF_MS[tentativa - 1];
+        console.log(`[DIAG-DATAS][shopee/vendas] req #${_reqid} pagina ${page} nova tentativa em ${espera}ms`, {
+          marketplace: "Shopee", proximaTentativa: tentativa + 1,
+        });
+        await new Promise(resolve => setTimeout(resolve, espera));
+      }
+    }
 
     if (pageErr) {
-      console.error("[shopee/vendas] erro na pagina", page, pageErr.message);
+      // Persistiu erro após as 3 tentativas — não é fim normal da paginação.
+      paginacaoFalhou = true;
+      paginaQueFalhou = page;
+      erroResumido = pageErr.message ?? String(pageErr);
+      console.log(`[DIAG-DATAS][shopee/vendas] req #${_reqid} PAGINACAO FALHOU DEFINITIVAMENTE na pagina ${page} apos 3 tentativas`, {
+        marketplace: "Shopee", totalAcumulado: pedidos.length, erro: erroResumido,
+      });
       break;
     }
-    if (!pageData || pageData.length === 0) break;
+    if (!pageData || pageData.length === 0) {
+      console.log(`[DIAG-DATAS][shopee/vendas] req #${_reqid} SAIU DO LOOP por pagina vazia (${page})`, {
+        totalAcumulado: pedidos.length,
+      });
+      break;
+    }
     pedidos = pedidos.concat(pageData);
-    if (pageData.length < PAGE_SIZE) break; // ultima pagina (veio incompleta)
+    if (pageData.length < PAGE_SIZE) {
+      console.log(`[DIAG-DATAS][shopee/vendas] req #${_reqid} SAIU DO LOOP por pagina curta (${page}, ${pageData.length} < ${PAGE_SIZE})`, {
+        totalAcumulado: pedidos.length,
+      });
+      break; // ultima pagina (veio incompleta)
+    }
+    if (page === MAX_PAGES - 1) {
+      console.log(`[DIAG-DATAS][shopee/vendas] req #${_reqid} ATINGIU MAX_PAGES (${MAX_PAGES}) — pode haver mais dados nao lidos`, {
+        totalAcumulado: pedidos.length,
+      });
+    }
+  }
+  console.log(`[DIAG-DATAS][shopee/vendas] req #${_reqid} paginacao concluida`, {
+    totalPaginas: Math.ceil(pedidos.length / PAGE_SIZE) || 0,
+    totalLinhas: pedidos.length,
+    paginacaoFalhou, paginaQueFalhou, erroResumido,
+    tempoMsTotalPaginacao: Date.now() - _paginaInicioMs,
+  });
+
+  if (paginacaoFalhou) {
+    // Etapa 1: nunca devolver linhas parciais nem totais como se fossem
+    // definitivos. O front (Etapa 2) decide o que fazer com "incompleto".
+    // "motivo" é a categoria ampla de por que veio incompleto (hoje só existe
+    // "paginacao_falhou" — deixa espaço pra futuras causas sem quebrar o
+    // formato). "erro" é um código estável específico da falha de leitura;
+    // "erro_detalhe" é a mensagem crua, só pra log/debug.
+    const erroCodigo = classificarErroPagina(erroResumido);
+    console.log(`[DIAG-DATAS][shopee/vendas] req #${_reqid} RESPOSTA (incompleto)`, {
+      dateFrom, dateTo, dateField, linhasLidas: pedidos.length, paginaQueFalhou,
+      erro: erroCodigo, erro_detalhe: erroResumido,
+      tempoMs: Date.now() - _inicioMs,
+    });
+    return NextResponse.json({
+      incompleto: true,
+      motivo: "paginacao_falhou",
+      linhas_lidas: pedidos.length,
+      pagina_falhou: paginaQueFalhou,
+      erro: erroCodigo,
+      erro_detalhe: erroResumido,
+      dateFrom,
+      dateTo,
+      dateField,
+      lojaId: loja.lojaId,
+      conta: loja.nickname ?? "Shopee",
+      ...(resumoSyncInfo ?? {}),
+    });
   }
 
   if (!pedidos || pedidos.length === 0) {
+    // [DIAG-DATAS] temporário — remover após a auditoria
+    console.log(`[DIAG-DATAS][shopee/vendas] req #${_reqid} RESPOSTA (semDados)`, {
+      dateFrom, dateTo, dateField, totalPedidos: 0, rows: 0,
+      tempoMs: Date.now() - _inicioMs,
+    });
     return NextResponse.json({
       semDados: true,
       conta: loja.nickname ?? "Shopee",
@@ -188,6 +349,7 @@ export async function GET(request: Request) {
       dateField,
       totalPedidos: 0,
       rows: [],
+      ...(resumoSyncInfo ?? {}),
     });
   }
 
@@ -205,6 +367,12 @@ export async function GET(request: Request) {
   // P5 FIX: contar apenas pedidos pagos (igual ao pedidosUnicos da página vendas)
   const totalOrders = new Set(rows.filter(r => r.status === 'paid').map(r => r.orderId)).size;
 
+  // [DIAG-DATAS] temporário — remover após a auditoria
+  console.log(`[DIAG-DATAS][shopee/vendas] req #${_reqid} RESPOSTA`, {
+    dateFrom, dateTo, dateField, totalPedidos: totalOrders, rows: rows.length,
+    tempoMs: Date.now() - _inicioMs,
+  });
+
   return NextResponse.json({
     dateFrom,
     dateTo,
@@ -213,5 +381,6 @@ export async function GET(request: Request) {
     lojaId: loja.lojaId,
     totalPedidos: totalOrders,
     rows,
+    ...(resumoSyncInfo ?? {}),
   });
 }

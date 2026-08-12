@@ -690,6 +690,14 @@ export default function DashboardPage() {
     abortRef.current = controller;
     const reqId = ++reqCounterRef.current;
     const ehAtual = () => reqId === reqCounterRef.current;
+    const tInicio = Date.now();
+
+    // [DIAG-DATAS] temporário — remover após a auditoria
+    console.log(`[DIAG-DATAS] carregar() INICIO request #${reqId}`, {
+      from, to, dateField, presetOuManual: "ver DateRangePicker",
+      lojasSelecionadas: Array.from((lojasAtivas ?? lojasSelecionadas)),
+      timestamp: new Date().toISOString(),
+    });
 
     setLoading(true);
     setErro(null);
@@ -700,16 +708,33 @@ export default function DashboardPage() {
     const buscarML     = selecionadasArr.length === 0 || selecionadasArr.some(l => l.marketplace === "ML");
     const buscarShopee = selecionadasArr.length === 0 || selecionadasArr.some(l => l.marketplace === "Shopee");
 
+    console.log(`[DIAG-DATAS] carregar() #${reqId} marketplaces`, {
+      buscarML, buscarShopee, lojasArrLength: lojasArr.length, selecionadasArrLength: selecionadasArr.length,
+      urlML: buscarML ? `/api/ml/vendas?date_from=${from}&date_to=${to}&date_field=${dateField}&_reqid=${reqId}` : null,
+      urlShopee: buscarShopee ? `/api/shopee/vendas?date_from=${from}&date_to=${to}&date_field=${dateField}&_reqid=${reqId}` : null,
+    });
+
     try {
       // Fase D (2026-07-06): date_field propagado às duas APIs (Fase C já suporta o parâmetro)
       const [mlData, shopeeData] = await Promise.all([
-        buscarML     ? fetch(`/api/ml/vendas?date_from=${from}&date_to=${to}&date_field=${dateField}`, { signal: controller.signal }).then(r => r.json()).catch(err => { if (err?.name === "AbortError") throw err; return null; })     : Promise.resolve(null),
-        buscarShopee ? fetch(`/api/shopee/vendas?date_from=${from}&date_to=${to}&date_field=${dateField}`, { signal: controller.signal }).then(r => r.json()).catch(err => { if (err?.name === "AbortError") throw err; return null; }) : Promise.resolve(null),
+        buscarML     ? fetch(`/api/ml/vendas?date_from=${from}&date_to=${to}&date_field=${dateField}&_reqid=${reqId}`, { signal: controller.signal }).then(r => r.json()).catch(err => { if (err?.name === "AbortError") throw err; return null; })     : Promise.resolve(null),
+        buscarShopee ? fetch(`/api/shopee/vendas?date_from=${from}&date_to=${to}&date_field=${dateField}&_reqid=${reqId}`, { signal: controller.signal }).then(r => r.json()).catch(err => { if (err?.name === "AbortError") throw err; return null; }) : Promise.resolve(null),
       ]);
+
+      // [DIAG-DATAS] temporário
+      console.log(`[DIAG-DATAS] carregar() #${reqId} CHECKPOINT 1 (pós Promise.all)`, {
+        ehAtual: ehAtual(), reqCounterAtual: reqCounterRef.current,
+        msDesdeInicio: Date.now() - tInicio,
+        mlData: mlData ? { erro: mlData.erro, semConexao: mlData.semConexao, totalPedidos: mlData.totalPedidos, rowsLength: mlData.rows?.length } : null,
+        shopeeData: shopeeData ? { erro: shopeeData.erro, semConexao: shopeeData.semConexao, totalPedidos: shopeeData.totalPedidos, rowsLength: shopeeData.rows?.length } : null,
+      });
 
       // Uma chamada mais nova já começou enquanto esta esperava a rede —
       // esta resposta é obsoleta, não aplica nenhum setState.
-      if (!ehAtual()) return;
+      if (!ehAtual()) {
+        console.log(`[DIAG-DATAS] carregar() #${reqId} DESCARTADO no checkpoint 1 (obsoleto)`);
+        return;
+      }
 
       const mlOk     = mlData     && !mlData.erro;
       const shopeeOk = shopeeData && !shopeeData.erro && !shopeeData.semConexao;
@@ -748,6 +773,13 @@ export default function DashboardPage() {
       const margem    = fat > 0 ? (lucro / fat) * 100 : 0;
       const roi       = custo > 0 ? (lucro / custo) * 100 : 0;
 
+      // [DIAG-DATAS] temporário — remover após a auditoria
+      console.log(`[DIAG-DATAS] carregar() #${reqId} pré-setKpis`, {
+        mlRowsFullLength: mlRowsFull.length, shopeeRowsFullLength: shopeeRowsFull.length,
+        mlRowsPagasLength: mlRows.length, shopeeRowsPagasLength: shopeeRows.length,
+        totalRowsPagas: rows.length,
+        fat, pedidos, lucro,
+      });
       setKpis({ faturamento: fat, pedidos, ticket, lucro, margem, unidades, roi, comissoes });
 
       let s = 0;
@@ -825,7 +857,14 @@ export default function DashboardPage() {
       // Segundo ponto de checagem: o fetch de thumbnails acima é outro
       // "await" — uma chamada mais nova pode ter começado enquanto ele
       // rodava. Se sim, não aplica este segundo lote de setState.
-      if (!ehAtual()) return;
+      // [DIAG-DATAS] temporário
+      console.log(`[DIAG-DATAS] carregar() #${reqId} CHECKPOINT 2 (pós thumbnails)`, {
+        ehAtual: ehAtual(), reqCounterAtual: reqCounterRef.current, msDesdeInicio: Date.now() - tInicio,
+      });
+      if (!ehAtual()) {
+        console.log(`[DIAG-DATAS] carregar() #${reqId} DESCARTADO no checkpoint 2 (obsoleto)`);
+        return;
+      }
 
       setTops(topsSorted);
       setLoss(lossSorted);
@@ -845,24 +884,42 @@ export default function DashboardPage() {
     } catch (e) {
       // AbortError = esta chamada foi cancelada por uma mais nova — não é
       // erro real, não deve aparecer para o usuário nem mexer em nenhum estado.
-      if ((e as any)?.name === "AbortError") return;
+      if ((e as any)?.name === "AbortError") {
+        console.log(`[DIAG-DATAS] carregar() #${reqId} ABORTADO (AbortError) — cancelado por chamada mais nova`);
+        return;
+      }
       console.error("[dashboard] carregar error:", e);
+      console.log(`[DIAG-DATAS] carregar() #${reqId} ERRO NAO-ABORT`, { erro: String(e), ehAtual: ehAtual() });
       if (ehAtual()) setErro("Erro ao carregar dados.");
     }
+    console.log(`[DIAG-DATAS] carregar() #${reqId} FIM`, {
+      ehAtual: ehAtual(), reqCounterAtual: reqCounterRef.current, msTotal: Date.now() - tInicio,
+    });
     if (ehAtual()) setLoading(false);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dateField]); // anuncios e lojas acessados via ref; dateField é dependência real (Fase D) — nova referência força refetch ao trocar o seletor
 
   useEffect(() => {
+    // [DIAG-DATAS] temporário — remover após a auditoria
+    console.log("[DIAG-DATAS] useEffect(dateFrom,dateTo,lojasSelecionadas,lojasProntas,carregar) DISPAROU", {
+      dateFrom, dateTo, lojasProntas, lojasSelecionadas: Array.from(lojasSelecionadas),
+      timestamp: new Date().toISOString(),
+    });
     // Só carrega depois que /api/lojas respondeu (ver setLojasProntas) —
     // elimina o carregar() inicial "as cegas" que rodava antes de saber
     // quais lojas existem, e que causava o duplo-fetch na carga da página.
-    if (!lojasProntas) return;
+    if (!lojasProntas) {
+      console.log("[DIAG-DATAS] useEffect abortou: lojasProntas ainda false");
+      return;
+    }
     carregar(dateFrom, dateTo, lojasSelecionadas);
     // Cleanup: cancela a requisição em andamento se as deps mudarem de novo
     // (nova troca de filtro/loja) antes desta terminar, ou se a página
     // desmontar. Reforça o abort já feito no início de carregar().
-    return () => { abortRef.current?.abort(); };
+    return () => {
+      console.log("[DIAG-DATAS] useEffect CLEANUP (deps mudaram de novo ou desmontou) — abortando request em andamento");
+      abortRef.current?.abort();
+    };
   }, [dateFrom, dateTo, lojasSelecionadas, lojasProntas, carregar]);
 
   const totalCusto    = dias.reduce((s, d) => s + d.custo, 0);
@@ -996,11 +1053,22 @@ export default function DashboardPage() {
               lojas={lojas}
               selecionadas={lojasSelecionadas}
               onChange={(ids) => {
+                // [DIAG-DATAS] temporário — remover após a auditoria
+                console.log("[DIAG-DATAS] LojasDropdown.onChange — vai chamar carregar() DIRETO e também via useEffect (setLojasSelecionadas)", {
+                  idsNovos: Array.from(ids), dateFrom, dateTo,
+                });
                 setLojasSelecionadas(ids);
                 carregar(dateFrom, dateTo, ids);
               }}
             />
-            <DateRangePicker from={dateFrom} to={dateTo} onChange={(f, t) => { setDateFrom(f); setDateTo(t); }} />
+            <DateRangePicker from={dateFrom} to={dateTo} onChange={(f, t) => {
+              // [DIAG-DATAS] temporário — remover após a auditoria
+              console.log("[DIAG-DATAS] DashboardPage recebeu onChange do DateRangePicker", {
+                fRecebido: f, tRecebido: t, dateFromAntes: dateFrom, dateToAntes: dateTo,
+                rangeInvalido: f > t,
+              });
+              setDateFrom(f); setDateTo(t);
+            }} />
           </div>
         </div>
       </div>

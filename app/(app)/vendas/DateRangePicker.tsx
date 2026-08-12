@@ -57,12 +57,21 @@ export default function DateRangePicker({ from, to, onChange }: Props) {
   }
 
   function handleDayClick(iso: string) {
+    // [DIAG-DATAS] temporário — remover após a auditoria (ver docs/BUGS.md)
+    console.log("[DIAG-DATAS] DateRangePicker.handleDayClick", {
+      iso, selecting, tempFromAntes: tempFrom, tempToAntes: tempTo,
+    });
     setActivePreset(null);
     if (selecting === "start") {
       setTempFrom(iso);
       setTempTo(iso);
       setSelecting("end");
+      console.log("[DIAG-DATAS] handleDayClick ramo START -> fim", {
+        tempFromDepois: iso, tempToDepois: iso, selectingDepois: "end",
+      });
     } else {
+      const finalFrom = iso < tempFrom ? iso : tempFrom;
+      const finalTo   = iso < tempFrom ? tempFrom : iso;
       if (iso < tempFrom) {
         setTempFrom(iso);
         setTempTo(tempFrom);
@@ -70,13 +79,18 @@ export default function DateRangePicker({ from, to, onChange }: Props) {
         setTempTo(iso);
       }
       setSelecting("start");
-      onChange(iso < tempFrom ? iso : tempFrom, iso < tempFrom ? tempFrom : iso);
+      console.log("[DIAG-DATAS] handleDayClick ramo END -> onChange", {
+        iso, tempFromUsado: tempFrom, finalFrom, finalTo,
+        rangeInvalido: finalFrom > finalTo,
+      });
+      onChange(finalFrom, finalTo);
       setOpen(false);
     }
   }
 
   function applyPreset(label: string, getRange: () => string[]) {
     const [f, t] = getRange();
+    console.log("[DIAG-DATAS] DateRangePicker.applyPreset", { label, f, t, rangeInvalido: f > t });
     setTempFrom(f);
     setTempTo(t);
     setSelecting("start");
@@ -137,6 +151,10 @@ export default function DateRangePicker({ from, to, onChange }: Props) {
       {/* Trigger */}
       <button
         onClick={() => {
+          // [DIAG-DATAS] temporário — remover após a auditoria
+          console.log("[DIAG-DATAS] DateRangePicker trigger clicado", {
+            openAntes: open, from, to, tempFromAntes: tempFrom, tempToAntes: tempTo, selectingAntes: selecting,
+          });
           setTempFrom(from);
           setTempTo(to);
           setSelecting("start");
@@ -164,7 +182,13 @@ export default function DateRangePicker({ from, to, onChange }: Props) {
       {open && (
         <>
           <div
-            onClick={() => setOpen(false)}
+            onClick={() => {
+              // [DIAG-DATAS] temporário — remover após a auditoria
+              console.log("[DIAG-DATAS] DateRangePicker backdrop fechou SEM resetar tempFrom/tempTo/selecting", {
+                tempFrom, tempTo, selecting,
+              });
+              setOpen(false);
+            }}
             style={{ position: "fixed", inset: 0, zIndex: 9998 }}
           />
           <div style={{
