@@ -2,6 +2,20 @@
 
 > Ordem cronológica reversa. Toda tarefa que criar, corrigir ou remover funcionalidade deve adicionar uma entrada aqui antes de finalizar.
 
+## 2026-09-01 (3) — Ambiente de producao COMPLETO · pronto para push
+
+- **As tres variaveis que faltavam foram configuradas** e confirmadas por metadado, sem leitura de valor: `NEXT_PUBLIC_SUPABASE_URL` (54d), `SUPABASE_SERVICE_ROLE_KEY` (2h) e `CRON_SECRET` (2h). Producao passou de 11 para 13 variaveis.
+- **Efeito pratico das duas novas:** com o service role, o Estudio deixa de responder 500 em producao — toda rota dele depende dele. Com o `CRON_SECRET`, o cron das 3h volta a rodar, agora **autenticado** (antes ele passava porque a guarda inteira era pulada).
+- **Supabase reconfirmado sem reabrir investigacao:** 14/14 tabelas do Estudio, 8/8 RPCs criticas (20 no total), 3 buckets presentes e **privados**, 0 buckets publicos, 39 migrations ja aplicadas. Nada foi reaplicado. O anuncio `MLB7395781296` segue `publicado`/`active`, intocado.
+- **Cron revalidado:** 9/9 testes. Segredo ausente, header ausente e header errado recusam; o correto passa; o segredo nao aparece na resposta nem em log; `vercel.json` compativel; nenhuma rota vizinha contorna a guarda; e um teste falha se o padrao fail-open voltar.
+- **Auditoria de segredos: ZERO em arquivo rastreavel** — 12 padroes varridos (Anthropic, Supabase secret/publishable, JWT/service_role, Google AI, tokens ML, connection strings, `CRON_SECRET`, Bearer literal, signed URL). O valor que vazou nao existe mais na working tree.
+- **DOIS SINAIS SOBRE A ROTACAO DO ML, que pedem conferencia:**
+  1. O `.env.local` **ainda contem exatamente o segredo que vazou publicamente**. Se a rotacao foi feita no Mercado Livre, esse valor local esta invalido e o refresh de token vai falhar em desenvolvimento.
+  2. Na Vercel, `ML_CLIENT_SECRET` continua marcada como criada ha **47 dias**, enquanto as duas variaveis realmente novas aparecem com **2h**. Pode ser so como a Vercel reporta edicao de valor — mas, junto com o item 1, e sinal suficiente para conferir se a atualizacao foi salva.
+  **Nao e bloqueio de deploy** (a variavel existe), mas se o valor na Vercel estiver desatualizado, a integracao com o Mercado Livre falha em producao no primeiro refresh de token.
+- **Regressao final:** 14 suites, **703 testes**, 0 falhas; `tsc --noEmit` limpo; `next build` verde com `.next` reconstruido do zero, **0 rotas `/api/debug`**, 0 erros e 0 warnings.
+- **Git:** branch `main`, working tree limpa, 4 commits locais nao enviados (`3486448`, `1a839ec`, `2007c52`, `2a9fb0a`), nenhum `.env` rastreado alem do template, nenhum dump, nenhum temporario.
+
 ## 2026-09-01 (2) — Supabase provado · cron fechado · INCIDENTE de credencial
 
 - **🔴 ACHADO MAIS GRAVE DA SESSAO: `ML_CLIENT_SECRET` esta exposto em repositorio PUBLICO.** O arquivo rastreado `4-configurar-env-vercel.vbs` passava credenciais por `echo` para `vercel env add`, com valores em texto puro. Entrou no historico em `ebd4400`, e `github.com/Monaseller/calculadora-dos-sellers-v1` e publico (confirmado pela API do GitHub). Os valores foram removidos da working tree; **o historico NAO foi reescrito**, porque reescrever nao desfaz o que ja e publico e quebraria clones existentes. **A unica correcao real e ROTACIONAR o segredo no Mercado Livre** — enquanto isso nao acontecer, ele deve ser considerado comprometido. Detalhe em `BUGS.md`.

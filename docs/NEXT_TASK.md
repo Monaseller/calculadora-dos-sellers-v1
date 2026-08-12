@@ -11,18 +11,29 @@
 
 ## STATUS
 
-**🏁 Fase 1 · editorial · exportação · ZIP · pré-publicação · dados de
-publicação · loja + `/items/validate` · modelo User Products · dados
-logísticos da embalagem · imagens no CDN do ML · **PUBLICAÇÃO REAL**
-entregues.** O primeiro anúncio existe: **`MLB7395781296`**, status
-`active`, conta MONAMOR. **Exatamente UM `POST /items` foi executado.**
-O canal está travado — `podePublicarML = false` daqui em diante.
+**✅ PRONTO PARA PUSH/DEPLOY — aguardando autorização.**
+
+Ambiente de produção completo: 13 variáveis, Supabase provado como o mesmo
+projeto de dev (39 migrations já aplicadas, 14/14 tabelas, 8/8 RPCs
+críticas, 3 buckets privados), `/api/sync` fail-closed, zero `/api/debug`,
+zero segredo rastreável, 14 suítes / 703 testes verdes, `tsc` limpo,
+build verde, working tree limpa.
+
+**⚠️ Confira antes (ou logo após) o deploy:** dois sinais sugerem que a
+rotação do `ML_CLIENT_SECRET` pode não ter sido salva na Vercel —
+`.env.local` ainda contém o valor que vazou, e a variável na Vercel
+continua marcada como criada há 47 dias enquanto as duas novas aparecem
+com 2h. Se o valor lá estiver desatualizado, a integração com o Mercado
+Livre falha no primeiro refresh de token.
+
+**Lembrete:** `git push` na `main` **é** deploy de produção. São 4 commits
+locais aguardando: `3486448`, `1a839ec`, `2007c52`, `2a9fb0a`.
 
 ## Última sessão encerrada em
 
-2026-09-01 (2)
+2026-09-01 (3)
 
-## 🔴 AÇÃO URGENTE — rotacionar credencial
+## ⚠️ Incidente de credencial — rotação declarada, conferir
 
 **O `ML_CLIENT_SECRET` está exposto em repositório PÚBLICO** desde o
 commit `ebd4400` (arquivo `4-configurar-env-vercel.vbs`, que passava
