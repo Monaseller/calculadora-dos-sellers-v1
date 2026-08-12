@@ -20,15 +20,20 @@ O canal está travado — `podePublicarML = false` daqui em diante.
 
 ## Última sessão encerrada em
 
-2026-08-31
+2026-09-01
 
 ## Checkpoint
 
 - **Commit `3486448`** na branch `main` — 186 arquivos, código + 39
   migrations + 13 suítes + documentação. Working tree limpa.
-- **PUSH E DEPLOY NÃO EXECUTADOS.** Faltam **24 variáveis de ambiente**
-  em produção (`SUPABASE_SERVICE_ROLE_KEY`, `GOOGLE_AI_API_KEY`,
-  `ANTHROPIC_API_KEY`, …). Ver `BUGS.md`.
+- **PUSH E DEPLOY NÃO EXECUTADOS.** Revisado em 2026-09-01 provando pelo
+  código: das 24 ausentes, **só uma é bloqueante** —
+  `SUPABASE_SERVICE_ROLE_KEY`. Ver `BUGS.md`.
+- **STOP-GATE do Supabase:** não foi possível provar qual projeto
+  produção usa. As variáveis são *Sensitive* na Vercel e voltam vazias.
+  Sem essa prova, nenhuma migration foi aplicada em produção.
+- **11 rotas `app/api/debug/*` removidas** — sem consumidor real. Dois
+  testes impedem o retorno.
 - ⚠️ **`git push` = deploy** neste repositório: o projeto Vercel está
   conectado ao Git na `main`. O gate vale para o push, não só para o
   deploy.
@@ -176,9 +181,14 @@ publicar. Validar ≠ publicar.
 
 **Nenhuma autorizada.** Duas coisas esperam por você, nesta ordem:
 
-1. **Configurar as 24 variáveis ausentes em produção** (painel da Vercel).
-   São segredos — a configuração é sua. Só depois disso o push/deploy
-   pode acontecer, e o Estúdio funcionará em produção.
+1. **Confirmar qual projeto Supabase a produção usa** (painel da Vercel →
+   valor de `NEXT_PUBLIC_SUPABASE_URL`). Sem isso não dá para saber se as
+   39 migrations precisam ser aplicadas lá.
+2. **Configurar `SUPABASE_SERVICE_ROLE_KEY`** em produção — a única
+   variável sem a qual o Estúdio responde 500. As chaves de IA são
+   opcionais (sem elas, o pipeline fica desligado, sem erro e sem custo).
+3. **Decidir sobre `CRON_SECRET`** — hoje `/api/sync` está sem
+   autenticação em produção. Ver `BUGS.md`.
 2. **Revisar o primeiro anúncio real** antes de qualquer segunda operação
    externa.
 

@@ -660,6 +660,43 @@ async function rodar() {
     assert(!/Idempotency-Key|X-Request-Id|X-Idempotency/i.test(CLIENTE_PUB), "cabeçalho de idempotência inventado");
     assert(/reservar_publicacao/.test(PUB), "a proteção precisa ser a reserva no banco");
   });
+
+  // ── Superfície de produção (2026-08-31) ─────────────────────────────
+  await t("64. nenhuma rota de DEPURAÇÃO vai a produção", () => {
+    // As 11 rotas app/api/debug/* foram removidas antes do deploy: GET
+    // apenas, sem consumidor real, e a de refresh de token era redundante
+    // (getShopeeLojaAtiva já renova sozinha 5 min antes de expirar). Ficam
+    // no histórico, no commit 3486448.
+    assert(!fs.existsSync(path.join(process.cwd(), "app/api/debug")),
+      "app/api/debug voltou a existir — rota de depuração não vai a produção");
+  });
+  await t("65. nenhuma rota de produção expõe token ou service role na resposta", () => {
+    const rotas: string[] = [];
+    const varrer = (dir: string) => {
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) varrer(full);
+        else if (e.name === "route.ts") rotas.push(full);
+      }
+    };
+    varrer(path.join(process.cwd(), "app/api"));
+    assert(rotas.length > 0, "nenhuma rota encontrada — varredura falhou");
+    for (const r of rotas) {
+      const f = fs.readFileSync(r, "utf-8")
+        .replace(/\/\*[\s\S]*?\*\//g, " ")
+        .replace(/^\s*\/\/.*$/gm, " ")
+        // Montar a REQUISIÇÃO não é vazamento: aí o token vai no query
+        // string que sai para o marketplace, não na resposta ao cliente.
+        // (Falso positivo real em `shopee/ping`, conferido em 2026-08-31:
+        // a URL com token nunca entra no objeto devolvido.)
+        .replace(/new URLSearchParams\([\s\S]*?\}\)/g, " ");
+      const rel = path.relative(process.cwd(), r).replace(/\\/g, "/");
+      // Devolver o objeto inteiro da loja levaria `access_token` junto.
+      assert(!/NextResponse\.json\(\s*\{?\s*loja\s*[,}]/.test(f), `${rel} devolve a loja inteira na resposta`);
+      assert(!/access_token\s*:\s*(loja|conta|data)\./.test(f), `${rel} devolve access_token`);
+      assert(!/SERVICE_ROLE_KEY\s*[,}]/.test(f), `${rel} devolve a chave de service role`);
+    }
+  });
 }
 
 rodar().then(() => {

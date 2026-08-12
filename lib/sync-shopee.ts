@@ -259,10 +259,16 @@ export async function listarOrderSnsDaJanela(
 
 /**
  * listarOrderSnsSequencialParaTeste — cópia fiel do algoritmo ANTIGO (1
- * cursor sequencial pro intervalo inteiro, chunks de até 14 dias), mantida
- * exclusivamente para a rota de debug temporária
- * app/api/debug/comparar-listagem-shopee/route.ts poder comparar contra o
- * caminho novo. NUNCA é chamada pelo fluxo real de sync — syncShopeeForUserV2
+ * cursor sequencial pro intervalo inteiro, chunks de até 14 dias).
+ *
+ * ATENÇÃO (2026-08-31): esta função ficou SEM CHAMADOR. Ela existia
+ * exclusivamente para a rota de debug `comparar-listagem-shopee`, que foi
+ * removida antes do deploy por não ter consumidor real. A função foi
+ * PRESERVADA de propósito — mexer no arquivo do sync numa tarefa de
+ * preparação de deploy seria risco sem benefício —, mas é código morto e
+ * está registrada como dívida em `docs/BUGS.md`.
+ *
+ * NUNCA é chamada pelo fluxo real de sync — syncShopeeForUserV2
  * continua com o algoritmo antigo embutido inline, inalterado, para
  * qualquer intervalo != 2 dias. Esta função existe só pra reproduzir, sob
  * demanda, o que o algoritmo antigo produziria para a MESMA janela de 2

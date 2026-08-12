@@ -2,6 +2,18 @@
 
 > Ordem cronológica reversa. Toda tarefa que criar, corrigir ou remover funcionalidade deve adicionar uma entrada aqui antes de finalizar.
 
+## 2026-09-01 — Preparacao de producao · DEPLOY SEGUE BLOQUEADO
+
+- **A lista de "24 variaveis faltando" estava certa em numero e errada em peso.** Provando pelo codigo, so **UMA** e realmente bloqueante para o Estudio: **`SUPABASE_SERVICE_ROLE_KEY`**. As demais se dividem em: chaves de IA (so precisam existir para RODAR o pipeline — sem elas os flags ficam desligados e nada quebra), variaveis de **script local** que nunca rodam na Vercel (`SYNC_WORKER_BASE_URL`, `ESTUDIO_ANUNCIOS_WORKER_BASE_URL`, `SYNC_JOB_STALE_MINUTES`) e segredos de worker cujas rotas **falham fechadas** sem eles (401, nao 500).
+- **Todos os `*_ENABLED` comparam `=== "true"`**, entao ausente = desligado. Deploy sem chave de IA nao gera custo nem erro: gera recusa explicita.
+- **STOP-GATE do Supabase acionado: nao foi possivel provar qual projeto producao usa.** O bundle publico nao expoe a URL (o browser nunca usa o cliente Supabase), e `vercel env pull --environment production` devolve **todos os valores vazios** — as variaveis estao marcadas como *Sensitive*, legiveis so pelo runtime. O arquivo temporario foi escrito FORA do repositorio, nunca impresso, e removido; `.env.local` ficou intacto (2.350 bytes antes e depois) e `git status` limpo.
+- **Sem essa prova, nada de banco foi tocado:** nenhuma migration aplicada, nenhum schema comparado, nenhum service role configurado por tentativa.
+- **As 11 rotas `app/api/debug/*` foram REMOVIDAS.** Auditadas uma a uma: todas GET, todas exigindo sessao, todas escopadas ao proprio usuario, nenhuma usando service role, nenhuma chamando IA. E **nenhuma tinha consumidor real** — as duas unicas "referencias" eram um comentario e uma string de ajuda. A de refresh de token ainda era **redundante**: `getShopeeLojaAtiva()` ja renova sozinha 5 minutos antes de expirar. Ficam preservadas no historico, no commit `3486448`.
+- **Dois testes novos guardam a superficie de producao:** um falha se `app/api/debug` voltar a existir; outro varre TODAS as rotas de `app/api` e falha se alguma devolver `access_token`, a loja inteira ou a chave de service role na resposta.
+- **O segundo teste pegou um falso positivo instrutivo** em `shopee/ping`: o token aparece ali montando o *query string* da requisicao ao marketplace, nunca na resposta. O teste passou a ignorar construcao de requisicao, em vez de a rota ser "corrigida" sem necessidade.
+- **ACHADO DE SEGURANCA PRE-EXISTENTE, fora do escopo do Estudio:** `/api/sync` protege-se com `if (process.env.CRON_SECRET && auth !== ...)` — **falha ABERTA**. `CRON_SECRET` nao existe em producao, entao a guarda esta inerte e a rota, que dispara sync de **todos os usuarios com loja ativa**, e chamavel por qualquer um. Nao foi alterado: fechar a guarda sem a variavel configurada quebraria o cron das 3h. Registrado em `BUGS.md`.
+- **Verificacao:** 13 suites, **694 testes** (+2), 0 falhas; `tsc --noEmit` limpo apos `.next` reconstruido do zero; `next build` verde e **sem nenhuma rota `/api/debug`**.
+
 ## 2026-08-31 — Checkpoint Git `3486448` · DEPLOY BLOQUEADO
 
 - **Commit de checkpoint criado: `3486448`** (`34864487c532823c0a70d733291bf4ce82700a57`), branch `main`, 186 arquivos, +51.260 linhas. Working tree limpa. Inclui codigo, 39 migrations, 13 suites de teste e documentacao.

@@ -20,10 +20,18 @@
 **Commit `3486448`** (branch `main`) congela o módulo inteiro: código,
 39 migrations, 13 suítes (692 testes) e documentação.
 
-**O deploy está bloqueado**, e o motivo é ambiental, não de código:
-produção tem 11 das 29 variáveis exigidas pelo `.env.example`. Falta
-`SUPABASE_SERVICE_ROLE_KEY`, que toda rota do Estúdio usa, e as chaves de
-IA. Ver `BUGS.md`.
+**O deploy está bloqueado por dois motivos ambientais, nenhum de código:**
+
+1. **Não se sabe qual projeto Supabase a produção usa.** As variáveis são
+   *Sensitive* na Vercel e o `env pull` devolve valores vazios; o bundle
+   público não expõe a URL. Sem essa prova, nenhuma migration foi
+   aplicada em produção.
+2. **Falta `SUPABASE_SERVICE_ROLE_KEY`** — provado pelo código, é a
+   **única** das 24 variáveis ausentes que quebra o Estúdio. As chaves de
+   IA só habilitam o pipeline; sem elas os flags ficam desligados.
+
+As 11 rotas `app/api/debug/*` foram removidas antes do deploy (sem
+consumidor real), com dois testes impedindo o retorno. Ver `BUGS.md`.
 
 **Neste repositório, `git push` para `main` dispara deploy de produção**
 (projeto Vercel conectado ao Git). Isso muda onde o gate precisa ficar:
