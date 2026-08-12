@@ -11,27 +11,38 @@
 
 ## STATUS
 
-**✅ PRONTO PARA PUSH/DEPLOY — aguardando autorização.**
+**🟢 EM PRODUÇÃO — Estúdio validado e operacional.**
 
-Ambiente de produção completo: 13 variáveis, Supabase provado como o mesmo
-projeto de dev (39 migrations já aplicadas, 14/14 tabelas, 8/8 RPCs
-críticas, 3 buckets privados), `/api/sync` fail-closed, zero `/api/debug`,
-zero segredo rastreável, 14 suítes / 703 testes verdes, `tsc` limpo,
-build verde, working tree limpa.
+Commit `4fc3764` no ar em `www.ligadossellers.com.br`. Smoke test **24/24**,
+zero erros 500. O anúncio `MLB7395781296` está `active` e reconhecido pelo
+vínculo local; o portão de publicação está fechado para ele
+(*"Este anúncio já foi publicado"*), então não há caminho para um segundo.
 
-**⚠️ Confira antes (ou logo após) o deploy:** dois sinais sugerem que a
-rotação do `ML_CLIENT_SECRET` pode não ter sido salva na Vercel —
-`.env.local` ainda contém o valor que vazou, e a variável na Vercel
-continua marcada como criada há 47 dias enquanto as duas novas aparecem
-com 2h. Se o valor lá estiver desatualizado, a integração com o Mercado
-Livre falha no primeiro refresh de token.
+Validado com dados reais em produção: pipeline `concluido`, score 96, as 3
+imagens servidas por URL assinada (uma baixada de fato: 459.049 bytes),
+versão editorial aprovada, 2 pacotes de exportação, compliance
+`aprovado_com_alertas`, validação oficial `validado_com_alertas`.
 
-**Lembrete:** `git push` na `main` **é** deploy de produção. São 4 commits
-locais aguardando: `3486448`, `1a839ec`, `2007c52`, `2a9fb0a`.
+**Percalço do deploy, já resolvido:** o primeiro smoke test achou 5 rotas em
+500 por `NEXT_PUBLIC_SUPABASE_URL` com path extra — problema **anterior ao
+deploy**, escondido há 54 dias porque `/api/lojas` e `/api/perfil` devolviam
+200 com erro no corpo. Corrigido manualmente e aplicado por redeploy do
+mesmo commit.
+
+## O que ficou pendente
+
+1. **Um commit local de documentação** (este) aguardando push — só docs.
+2. **`/api/lojas` e `/api/perfil` devolvem 200 em falha de infraestrutura.**
+   Foi o que mascarou o problema. Vale corrigir para 5xx. Ver `BUGS.md`.
+3. **Exposição histórica do `ML_CLIENT_SECRET`** segue no Git público (o
+   segredo já foi rotacionado e validado com HTTP 200). Considere tornar o
+   repositório privado.
+4. **Cron das 3h** volta a rodar autenticado — vale conferir a primeira
+   execução.
 
 ## Última sessão encerrada em
 
-2026-09-01 (3)
+2026-09-01 (4) — DEPLOY
 
 ## ⚠️ Incidente de credencial — rotação declarada, conferir
 

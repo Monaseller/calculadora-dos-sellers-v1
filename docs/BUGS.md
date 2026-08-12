@@ -35,6 +35,15 @@
   **Teste comportamental — 26/26 verificações, custo zero:** cenário isolado (projeto `b5f916fb-…`, job `7a3981a9-…`, etapa `busca_externa`, que está no catálogo mas fora de `ETAPAS_SUPORTADAS_FASE1` e por isso falha em `validation` no executor, antes de qualquer provedor). Tentativa 1: job volta a `pendente`, `tentativas=1`, `erro_tipo='validation'` **preservado**, `erro_mensagem` preservada, pipeline em `aguardando` com erro próprio limpo. Tentativa 2: mesmo job, `tentativas=2`, erro segue observável e reflete a falha mais recente. Tentativa 3 (terminal): job em `erro` com `tentativas=3/3` e causa preservada, pipeline em `erro` com `erro_tipo`/`erro_mensagem` preenchidos e **coerentes com o job**. `claim_next_estudio_anuncios_job()` reivindicou normalmente nas três execuções. Zero prompts e zero consumo de IA em todo o teste.
   **Resíduo neutralizado, nunca apagado:** projeto de teste marcado `cancelado`; job e pipeline preservados como evidência; fila global com 0 jobs reivindicáveis e 0 rodando.
 
+## Corrigido — Producao (2026-09-01)
+
+- ✅ **`NEXT_PUBLIC_SUPABASE_URL` de producao tinha um PATH EXTRA — corrigida manualmente.** Toda consulta ao Supabase no runtime de producao falhava com `Invalid path specified in request URL`. Reproduzido localmente: a origem com `/rest/v1` no fim gera exatamente essa mensagem, enquanto espaco a direita, barra final e barra dupla funcionam. Corrigida no painel da Vercel e aplicada por **redeploy do mesmo commit** (`NEXT_PUBLIC_*` e inlinada em build, entao nao bastava salvar a variavel). Smoke test posterior: 24/24, zero ocorrencias do erro.
+  **Estava quebrado ha ~54 dias, em silencio.** Provavelmente configurada pelo script `4-configurar-env-vercel.vbs`, o mesmo do incidente de credencial.
+
+## Aberto — Qualidade de erro (2026-09-01)
+
+- 🟠 **`/api/lojas` e `/api/perfil` devolvem HTTP 200 com corpo de erro.** Foi isso que escondeu a falha do Supabase por 54 dias: em vez de 500, essas rotas respondiam `{"erro":true,"mensagem":"..."}` com status 200, entao nenhum monitoramento acusaria. As rotas do Estudio, que devolvem 500 honesto, expuseram o problema em minutos. **Nao alterado nesta tarefa** — mudar codigo de rota durante validacao de deploy seria trocar o escopo. Vale uma passada: falha de infraestrutura deve ser 5xx, nao 200.
+
 ## 🔴 INCIDENTE DE CREDENCIAL — ML_CLIENT_SECRET publico no GitHub (2026-09-01)
 
 - 🔴 **`ML_CLIENT_SECRET` esteve (e continua) exposto em repositorio PUBLICO.** O arquivo rastreado `4-configurar-env-vercel.vbs` passava credenciais por `echo` para `vercel env add`, com os valores em texto puro: o **client secret do Mercado Livre**, a URL do projeto Supabase e a chave publishable. Entrou no historico no commit `ebd4400` e o repositorio `github.com/Monaseller/calculadora-dos-sellers-v1` e **publico** (`"private": false`, confirmado pela API do GitHub). Ultimo push publico: 2026-07-16.

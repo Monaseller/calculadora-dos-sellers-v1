@@ -2,6 +2,18 @@
 
 > Ordem cronológica reversa. Toda tarefa que criar, corrigir ou remover funcionalidade deve adicionar uma entrada aqui antes de finalizar.
 
+## 2026-09-01 (4) — DEPLOY EM PRODUCAO · Estudio operacional
+
+- **Commit `4fc3764` no ar, deploy READY, dominio `www.ligadossellers.com.br`.** Push executado (`69da215..4fc3764`, 5 commits), deploy automatico disparado pela conexao Git da Vercel, e todos os aliases de producao apontando para ele.
+- **O primeiro smoke test reprovou, e o achado foi mais antigo que o deploy.** Cinco rotas do Estudio responderam 500 com `Invalid path specified in request URL`. A investigacao isolou a causa: `NEXT_PUBLIC_SUPABASE_URL` em producao continha um **path extra** alem da origem — reproduzido localmente, onde `https://<ref>.supabase.co/rest/v1` gera exatamente essa mensagem, enquanto espaco a direita, barra final e barra dupla funcionam normalmente.
+- **NAO era regressao do deploy.** `/api/lojas` e `/api/perfil` — rotas anteriores ao Estudio — respondiam **HTTP 200 com corpo de erro** (`{"erro":true,"mensagem":"Invalid path specified in request URL"}`). A integracao com o Supabase em producao ja estava quebrada, silenciosamente, desde que a variavel foi configurada ha 54 dias, provavelmente pelo mesmo script `.vbs` do incidente de credencial. O Estudio so tornou o problema visivel porque devolve 500 honesto em vez de 200 com erro dentro.
+- **Correcao manual + redeploy do MESMO commit.** A variavel foi corrigida no painel; nenhum codigo foi alterado, nenhum commit criado para forcar deploy. `vercel redeploy --target production` reconstruiu `4fc3764` com o valor novo — necessario porque `NEXT_PUBLIC_*` e inlinada em build. READY em 1m.
+- **Smoke test final: 24/24, zero 500.** O erro do Supabase aparece **ZERO vezes**. `/login`, `/central-ia` e `/central-ia/estudio-anuncios` em 200; `/api/debug` e as duas subrotas em **404**; `/api/sync` em **401** sem header e com Bearer errado; `/api/estudio-anuncios/projetos` em 401 sem sessao e 200 com sessao.
+- **Estudio validado com dados reais em producao:** projeto carregado, pipeline `concluido`, os 8 blocos da Fase 1, **score 96**, 3 imagens servidas por URL assinada (a primeira baixada de verdade: HTTP 200, `image/jpeg`, 459.049 bytes), 1 versao editorial aprovada, 2 pacotes de exportacao, compliance `aprovado_com_alertas`, categoria resolvida, validacao oficial `validado_com_alertas`, e a publicacao `MLB7395781296` reconhecida como `publicado`/`active`.
+- **O portao continua fechado onde deve:** `podePublicarML = false`, motivo *"Este anuncio ja foi publicado (item MLB7395781296)"*. Nenhum caminho para segundo anuncio.
+- **Mercado Livre, somente leitura:** `GET /items/MLB7395781296` -> HTTP 200, `active`, seller 744240004, preco 99,90, estoque 999, 3 imagens. **Nada alterado.**
+- **Seguranca reconfirmada em producao:** zero rotas de depuracao, `/api/sync` fail-closed no ambiente real, e nenhuma resposta contendo token, `service_role`, `storage_path` ou URL assinada persistida.
+
 ## 2026-09-01 (3) — Ambiente de producao COMPLETO · pronto para push
 
 - **As tres variaveis que faltavam foram configuradas** e confirmadas por metadado, sem leitura de valor: `NEXT_PUBLIC_SUPABASE_URL` (54d), `SUPABASE_SERVICE_ROLE_KEY` (2h) e `CRON_SECRET` (2h). Producao passou de 11 para 13 variaveis.

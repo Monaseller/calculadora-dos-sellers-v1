@@ -20,22 +20,16 @@
 **Commit `3486448`** (branch `main`) congela o módulo inteiro: código,
 39 migrations, 13 suítes (692 testes) e documentação.
 
-**O deploy segue bloqueado, agora por dois motivos diferentes:**
+**O modulo esta EM PRODUCAO.** Commit `4fc3764` no ar em
+`www.ligadossellers.com.br`, deploy READY, smoke test 24/24 com zero erros
+500. O anuncio real `MLB7395781296` esta `active` e o portao de publicacao
+esta fechado para ele — nao ha caminho para um segundo.
 
-1. **`SUPABASE_SERVICE_ROLE_KEY` não está configurada** em nenhum ambiente
-   do projeto Vercel — provado pelo `vercel env ls`, que lista 11
-   variáveis e nenhuma delas. É a única das 24 ausentes que quebra o
-   Estúdio: toda rota dele usa service role.
-2. **Incidente de credencial aberto:** o `ML_CLIENT_SECRET` está exposto
-   em repositório público desde o commit `ebd4400`. Precisa ser
-   rotacionado. Ver `BUGS.md`.
-
-**Resolvido nesta rodada:** o projeto Supabase de produção foi **provado**
-como sendo o mesmo de desenvolvimento (comparação de *project ref*), o
-que significa que o banco onde tudo foi construído **é** produção — 39
-migrations aplicadas, 14/14 tabelas, 8/8 RPCs críticas, 3 buckets
-privados. E `/api/sync`, que ficava aberta sem `CRON_SECRET`, passou a
-falhar fechada.
+**Percalco do deploy, resolvido:** o primeiro smoke test achou 5 rotas em
+500 por `NEXT_PUBLIC_SUPABASE_URL` com path extra. Era problema **anterior
+ao deploy**, escondido ha 54 dias porque `/api/lojas` e `/api/perfil`
+devolviam 200 com erro no corpo. Corrigido manualmente e aplicado por
+redeploy do mesmo commit — `NEXT_PUBLIC_*` e inlinada em build.
 
 ## COMO CONTINUAR ESTE PROJETO
 
