@@ -66,7 +66,7 @@
 
 ## Aberto — Superficie de diagnostico (2026-09-02)
 
-- 🟡 **`/api/shopee/ping` e `/api/shopee/status`: diagnostico sem consumidor, recomendadas para remocao.** Auditadas nesta data: **zero consumidores reais** no repositorio, nenhuma participa de fluxo de tela, e ambas devolvem **respostas cruas da Shopee** (`shopInfo`, `orderListRaw`) alem de timings e identificadores de loja. Nenhum token vaza — o `access_token` so aparece na montagem do query string da requisicao, nunca no objeto devolvido (falso positivo ja conferido em 2026-08-31). **Mantidas nesta etapa** porque a instrucao era auditar e nao remover automaticamente; decidir sobre as duas juntas merece tarefa propria, no mesmo espirito da remocao das 11 rotas `/api/debug`.
+- ✅ **(REMOVIDAS em 2026-09-03, ver a entrada acima) `/api/shopee/ping` e `/api/shopee/status`: diagnostico sem consumidor.** Registro original de 2026-09-02, preservado — auditadas naquela data: **zero consumidores reais** no repositorio, nenhuma participa de fluxo de tela, e ambas devolvem **respostas cruas da Shopee** (`shopInfo`, `orderListRaw`) alem de timings e identificadores de loja. Nenhum token vaza — o `access_token` so aparece na montagem do query string da requisicao, nunca no objeto devolvido (falso positivo ja conferido em 2026-08-31). **Mantidas nesta etapa** porque a instrucao era auditar e nao remover automaticamente; decidir sobre as duas juntas merece tarefa propria, no mesmo espirito da remocao das 11 rotas `/api/debug`.
 
 ## Observacao — Cron (2026-09-02)
 
