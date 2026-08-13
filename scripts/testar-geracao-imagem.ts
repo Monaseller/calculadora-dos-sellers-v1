@@ -293,8 +293,10 @@ async function rodarTestesDeOrigem() {
     lancaAsync(() => validarOrigemEBuscarPrompts(fakeSupabase({ job: okJob, origem: okOrigem, resultados: okRes(envelopePrompts({ prompts: PROMPTS.slice(0, 2) })) }), CTX), "envelope inconsistente"));
   await ta("34. envelope sem exatamente 1 principal é rejeitado", () =>
     lancaAsync(() => validarOrigemEBuscarPrompts(fakeSupabase({ job: okJob, origem: okOrigem, resultados: okRes(envelopePrompts({ prompts: PROMPTS.map(p => ({ ...p, principal: true })) })) }), CTX), "principal"));
+  // "beneficios" virou finalidade VALIDA em 2026-09-04; o exemplo de
+  // invalido passou a ser um valor que nunca existiu no CHECK do banco.
   await ta("35. finalidade inválida no envelope é rejeitada", () =>
-    lancaAsync(() => validarOrigemEBuscarPrompts(fakeSupabase({ job: okJob, origem: okOrigem, resultados: okRes(envelopePrompts({ prompts: [prompt({ tipo: "beneficios" as any })], configuracao: { ...envelopePrompts().configuracao, quantidadeSolicitada: 1 } })) }), CTX), "finalidade inválida"));
+    lancaAsync(() => validarOrigemEBuscarPrompts(fakeSupabase({ job: okJob, origem: okOrigem, resultados: okRes(envelopePrompts({ prompts: [prompt({ tipo: "carrossel_animado" as any })], configuracao: { ...envelopePrompts().configuracao, quantidadeSolicitada: 1 } })) }), CTX), "finalidade inválida"));
   await ta("36. prompt sem texto final é rejeitado (nunca inventa prompt)", () =>
     lancaAsync(() => validarOrigemEBuscarPrompts(fakeSupabase({ job: okJob, origem: okOrigem, resultados: okRes(envelopePrompts({ prompts: [prompt({ promptTexto: "  " })], configuracao: { ...envelopePrompts().configuracao, quantidadeSolicitada: 1 } })) }), CTX), "sem texto final"));
 }

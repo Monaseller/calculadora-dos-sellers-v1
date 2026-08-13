@@ -50,6 +50,19 @@ export interface ProjetoMestre {
   modo: ModoGeracao;
   quantidade_imagens_solicitada: number;
   estilo?: string | null;
+  /**
+   * Direção criativa do ensaio inteiro, escrita pelo usuário (2026-09-04).
+   * `null` é o caso normal e significa "a IA decide a estratégia" — não
+   * é dado faltando. Nunca vai como prompt bruto ao gerador de imagem.
+   */
+  direcao_criativa?: string | null;
+  /**
+   * Instrução por imagem, indexada por posição (posição 0 = imagem 1).
+   * String vazia = "a IA decide esta imagem". Pode ser maior que
+   * `quantidade_imagens_solicitada`: reduzir a quantidade não apaga o
+   * que a pessoa escreveu.
+   */
+  direcoes_imagens?: string[] | null;
   permitir_busca_externa: boolean;
   biblioteca_produto_id?: string | null;
   status: StatusProjeto;
@@ -171,8 +184,16 @@ export interface EditarProjetoInput {
   quantidade_imagens_solicitada?: number;
   modo?: ModoGeracao;
   estilo?: EstiloProjeto | null;
+  /** Ver ProjetoMestre. `null` limpa a direção; ausente não altera. */
+  direcao_criativa?: string | null;
+  direcoes_imagens?: string[] | null;
   permitir_busca_externa?: boolean;
 }
+
+/** Limites das direções — espelham os CHECKs de 20260904. */
+export const MAX_TAMANHO_DIRECAO_CRIATIVA = 2000;
+export const MAX_TAMANHO_DIRECAO_IMAGEM = 500;
+export const MAX_DIRECOES_IMAGENS = 12;
 
 /** Projeto Mestre + suas adaptações por marketplace, para respostas de API. */
 export interface ProjetoComAdaptacoes extends ProjetoMestre {

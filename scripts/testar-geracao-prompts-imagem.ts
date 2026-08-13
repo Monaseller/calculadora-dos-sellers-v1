@@ -179,7 +179,13 @@ t("8. ordem faltando (fora do intervalo) é rejeitada", () =>
 t("9. prompt vazio (campo textual vazio) é rejeitado", () =>
   lanca(() => valida(saidaOk(i => { i[1].cena = "   "; return i; })), 'campo "cena" vazio'));
 t("10. tipo inválido é rejeitado", () =>
-  lanca(() => valida(saidaOk(i => { i[1].tipo = "beneficios"; return i; })), "tipo de imagem inválido"));
+  // "beneficios" deixou de servir como exemplo de invalido em 2026-09-04
+  // (foi liberado). Usa um valor que nunca existiu no CHECK do banco.
+  lanca(() => valida(saidaOk(i => { i[1].tipo = "carrossel_animado"; return i; })), "tipo de imagem inválido"));
+t("10b. `medidas` continua fora enquanto nao houver camada grafica", () =>
+  // Existe no CHECK do banco, mas exige numerais desenhados dentro do
+  // quadro — e texto gerado pelo modelo de imagem ainda erra.
+  lanca(() => valida(saidaOk(i => { i[1].tipo = "medidas"; return i; })), "tipo de imagem inválido"));
 t("11. aspectRatio nunca vem do modelo — é server-side e sempre o padrão", () => {
   assert(!("aspectRatio" in imagensOk()[0]), "modelo não deveria escrever aspectRatio");
   assert(!("aspectRatio" in (GERACAO_PROMPTS_IMAGEM_JSON_SCHEMA.properties.imagens.items.properties as any)), "schema não pode pedir aspectRatio");
@@ -291,9 +297,15 @@ t("30. tipos permitidos são derivados da verdade visual, nunca fixos", () => {
 t("31. taxonomia é subconjunto do CHECK real de imagens_geradas.finalidade", () => {
   const CHECK_BANCO = ["capa_principal", "perspectiva", "beneficios", "medidas", "detalhes", "uso", "embalagem", "promocional_secundaria"];
   for (const tipo of TIPOS_IMAGEM_SUPORTADOS) assert(CHECK_BANCO.includes(tipo), `tipo "${tipo}" não existe no CHECK do banco`);
-  for (const proibido of ["beneficios", "medidas", "promocional_secundaria"]) {
-    assert(!(TIPOS_IMAGEM_SUPORTADOS as readonly string[]).includes(proibido), `"${proibido}" não deveria estar na v1`);
+  // 2026-09-04: `beneficios` e `promocional_secundaria` foram liberados
+  // — o beneficio e MOSTRADO pela cena, nunca escrito, e sem eles o
+  // sistema so sabia fazer variacoes do mesmo retrato. `medidas` segue
+  // fora: exige numeral desenhado, que depende da camada grafica.
+  for (const liberado of ["beneficios", "promocional_secundaria"]) {
+    assert((TIPOS_IMAGEM_SUPORTADOS as readonly string[]).includes(liberado), `"${liberado}" deveria estar liberado`);
   }
+  assert(!(TIPOS_IMAGEM_SUPORTADOS as readonly string[]).includes("medidas"),
+    "`medidas` so pode voltar quando a camada grafica em SVG existir");
 });
 t("32. quantidade vem do projeto, nunca de constante — 1, 8 e o teto funcionam", () => {
   for (const q of [1, 8, LIMITE_MAXIMO_PROMPTS_IMAGEM]) {
@@ -341,7 +353,13 @@ t("38. prompt enviado ao modelo carrega a verdade visual e as proibições", () 
   assert(texto.includes("Composicao mineral exata nao declarada"), "faltou o item não confirmado");
   assert(texto.includes("EXATAMENTE 3"), "faltou a quantidade exata");
   for (const r of RESTRICOES_PROMPTS_IMAGEM) assert(texto.includes(r), `restrição ausente: ${r}`);
-  assert(!texto.includes("beneficios") && !texto.includes("promocional_secundaria"), "tipo proibido oferecido ao modelo");
+  // 2026-09-04: a assercao deixou de ser "estes tipos nunca aparecem" e
+  // passou a ser "so aparecem os tipos calculados para ESTE projeto" —
+  // que e a invariante real. `medidas` continua nunca podendo aparecer.
+  assert(!texto.includes("- medidas:"), "`medidas` nao pode ser oferecido ao modelo");
+  for (const t of CONFIG.tiposPermitidos) {
+    assert(texto.includes(`- ${t}:`), `tipo permitido ausente da instrucao: ${t}`);
+  }
 });
 t("39. resumo curto é curto e não é o envelope inteiro", () => {
   const envelope = { fonteAnaliseVisual: { jobId: "j", resultadoId: "r", schemaVersao: 1 }, configuracao: CONFIG, entrada: ENTRADA, prompts: montarPromptsFinais(valida(saidaOk()), VV, CONFIG) };

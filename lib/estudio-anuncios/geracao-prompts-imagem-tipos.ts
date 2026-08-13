@@ -69,7 +69,24 @@ export const TIPOS_IMAGEM_SUPORTADOS = [
   "detalhes",
   "uso",
   "embalagem",
+  // Liberados em 2026-09-04. A v1 os excluía porque "representar um
+  // benefício exige afirmar um efeito que nenhuma foto confirma" — o
+  // receio era virar alegação. Mas o benefício aqui é MOSTRADO, não
+  // escrito: o produto no contexto real de uso. O que continua proibido
+  // é inventar efeito (ver naoConfirmado, que segue indo ao modelo como
+  // proibição explícita). Sem estes dois tipos o sistema só sabia fazer
+  // variações do mesmo retrato, que foi exatamente a queixa do usuário.
+  "beneficios",
+  "promocional_secundaria",
 ] as const;
+
+/**
+ * `medidas` existe no CHECK do banco mas continua FORA da lista, e por
+ * um motivo que não mudou: uma imagem de dimensões exige numerais
+ * desenhados dentro do quadro, e texto gerado pelo modelo de imagem
+ * ainda erra. Volta quando a camada gráfica em SVG existir.
+ */
+export const TIPOS_IMAGEM_PENDENTES_CAMADA_GRAFICA = ["medidas"] as const;
 
 export type TipoImagem = (typeof TIPOS_IMAGEM_SUPORTADOS)[number];
 
@@ -122,32 +139,96 @@ export const ASPECT_RATIO_PADRAO: AspectRatio = "1:1";
 export const LIMITE_MAXIMO_PROMPTS_IMAGEM = 12;
 
 /**
- * Restrições visuais globais — 100% server-side, nunca escritas pelo
- * modelo. Entram no `negativePrompt` de TODOS os prompts, somadas aos
- * `elementosProibidos` específicos daquela imagem.
+ * ────────────────────────────────────────────────────────────────────
+ * CORREÇÃO DE FIDELIDADE (2026-09-04) — por que este bloco mudou
+ * ────────────────────────────────────────────────────────────────────
+ * No primeiro E2E real, o modelo apagou marca e rótulo da embalagem. A
+ * auditoria mostrou que não foi desobediência: era o sistema PEDINDO.
+ *
+ * A lista antiga trazia "não adicionar marca, logotipo, etiqueta ou
+ * selo" e "não adicionar texto, letras, números ou tipografia". A
+ * intenção era impedir o modelo de INVENTAR marca. Mas um modelo de
+ * imagem não distingue "não invente" de "remova o que está aí" — e a
+ * embalagem real TEM marca e rótulo. Resultado: produto descaracterizado.
+ *
+ * Havia um segundo defeito, de forma. O provedor monta a instrução como
+ * `NÃO INCLUA, em hipótese alguma: <lista>`. A lista era de REGRAS já
+ * negadas, então o texto final lia "não inclua: não alterar as cores do
+ * produto" — negação dupla, semanticamente invertida. Um negative prompt
+ * precisa listar COISAS a evitar, não regras.
+ *
+ * Agora: as regras de preservação vivem em INSTRUCAO_FIDELIDADE_PRODUTO
+ * (prompt positivo, afirmativo) e o negative prompt lista apenas
+ * substantivos — coisas que não devem aparecer no quadro.
  */
 export const RESTRICOES_VISUAIS_GLOBAIS: readonly string[] = [
-  "não alterar o formato, a proporção ou a silhueta do produto",
-  "não inventar acessórios, peças ou componentes que não existam",
-  "não adicionar marca, logotipo, etiqueta ou selo",
-  "não alterar as cores do produto",
-  "não alterar a quantidade de itens",
-  "não adicionar texto, letras, números ou tipografia",
-  "não deformar, derreter ou duplicar o produto",
-  "não adicionar preço, desconto, promoção ou banner",
-  "não adicionar pessoa, mão ou modelo humano",
+  "texto inventado",
+  "marca ou logotipo diferente do que aparece nas fotos de referência",
+  "etiqueta, selo ou adesivo inexistente",
+  "produto redesenhado ou substituído por outro parecido",
+  "produto deformado, derretido ou duplicado",
+  "componentes, peças ou acessórios inexistentes",
+  "marca d'água",
+  "moldura, borda ou colagem",
+  "preço, desconto, porcentagem ou banner promocional",
 ];
 
 /**
- * Textos proibidos dentro da imagem — server-side. Espelha a decisão da
- * v1: NENHUM texto gerado dentro da imagem (modelos de imagem ainda
- * erram ortografia, e texto renderizado vira alegação sem revisão).
+ * Restrições adicionais da IMAGEM PRINCIPAL (capa). Só valem para ela:
+ * a capa prioriza conformidade e leitura imediata do produto, enquanto
+ * as secundárias podem mostrar contexto, uso e cena.
+ *
+ * A proibição de pessoa/mão saiu do escopo global (2026-09-04) porque
+ * era autocontraditória: o próprio sistema oferece o tipo `uso`, e
+ * demonstrar uso quase sempre pede uma mão. Ela continua valendo onde
+ * faz sentido — a capa.
+ */
+export const RESTRICOES_IMAGEM_PRINCIPAL: readonly string[] = [
+  "pessoa, mão ou modelo humano",
+  "cenário elaborado ou props decorativos que disputem atenção",
+  "texto sobreposto",
+];
+
+/**
+ * Instrução de fidelidade — vai no INÍCIO do prompt positivo de toda
+ * imagem, antes de qualquer descrição de cena.
+ *
+ * Existe porque o prompt antigo nunca mencionava as fotos anexadas. Ele
+ * lia como briefing text-to-image ("Fotografia de produto: X. Cena:
+ * ..."), então o modelo tratava a referência como inspiração de estilo,
+ * não como fonte factual — e devolvia "cena gerada por IA" no lugar do
+ * produto real. As fotos SÃO enviadas (base64, antes do texto, ver
+ * lib/ai-gateway/provedores/google-imagem.ts); faltava dizer o que elas
+ * são.
+ */
+export const INSTRUCAO_FIDELIDADE_PRODUTO =
+  "As imagens de referência anexadas mostram o produto REAL e são a fonte factual. " +
+  "Preserve com fidelidade a identidade visual do produto: marca, logotipo, rótulo, " +
+  "textos e símbolos já impressos na embalagem, formato, proporções, quantidade de itens, " +
+  "cores e acabamento. Reproduza o produto exatamente como ele aparece nas referências — " +
+  "não o redesenhe, não o substitua por um parecido e não altere o que está escrito nele. " +
+  "O que você deve criar é o restante: cenário, composição, iluminação, superfície e contexto.";
+
+/**
+ * Texto DENTRO da imagem continua proibido — mas por um motivo
+ * diferente do da v1, e a diferença importa.
+ *
+ * v1 proibia todo texto, inclusive o que já existe na embalagem. Isso
+ * era o bug. Agora a proibição é só de texto NOVO: legenda, chamada,
+ * benefício escrito, preço. Texto que já está impresso no produto é
+ * parte da identidade e deve ser preservado (ver
+ * INSTRUCAO_FIDELIDADE_PRODUTO).
+ *
+ * Texto comercial continua fora do modelo de imagem porque modelos de
+ * imagem ainda erram ortografia em português, e texto errado numa peça
+ * de anúncio é pior que texto nenhum. A camada gráfica de texto (SVG
+ * sobreposto, decidida em 2026-09-04) é o caminho para isso e ainda não
+ * foi implementada.
  */
 export const TEXTOS_PROIBIDOS_NA_IMAGEM: readonly string[] = [
-  "qualquer texto, palavra, letra ou número",
-  "nome de marca ou modelo",
+  "legenda, chamada ou frase publicitária sobreposta",
   "preço, desconto ou porcentagem",
-  "selo, carimbo ou badge",
+  "selo, carimbo ou badge inventado",
 ];
 
 /**
@@ -172,6 +253,18 @@ export interface VerdadeVisual {
   /** origem = "embalagem_fisica" — só desenhável em imagem do tipo `embalagem`. */
   itensDaEmbalagem: string[];
   /**
+   * Textos JÁ IMPRESSOS no produto/embalagem, lidos pela análise visual
+   * (2026-09-04). Não são insumo criativo — o modelo nunca pode pedir
+   * para escrevê-los numa cena. Existem para o lado oposto: são
+   * identidade a PRESERVAR, e entram no prompt de fidelidade.
+   *
+   * Antes desta data iam para `naoConfirmado`, que vira lista de
+   * proibição — ou seja, o sistema mandava o gerador apagar a marca
+   * impressa na embalagem real. Era a causa direta do produto
+   * descaracterizado.
+   */
+  textosImpressosNoProduto: string[];
+  /**
    * Tudo que NÃO pode virar elemento visual: informacoesNaoConfirmadas,
    * alertas e todo item com origem "material_promocional" ou
    * "indeterminado". Vai ao modelo como lista de proibição explícita,
@@ -185,6 +278,21 @@ export interface ConfiguracaoPromptsImagem {
   quantidadeSolicitada: number;
   estilo: string | null;
   modo: string;
+  /**
+   * Direção criativa do ensaio, escrita pelo usuário (2026-09-04).
+   * `null` = a IA decide. NUNCA é usada como prompt bruto: entra como
+   * contexto para o modelo PLANEJAR, e o prompt final continua sendo
+   * composto server-side a partir dos campos estruturados.
+   */
+  direcaoCriativa: string | null;
+  /**
+   * Instrução por imagem, POSICIONAL: índice 0 = imagem 1. Sempre tem
+   * exatamente `quantidadeSolicitada` posições nesta configuração —
+   * posições sem instrução ficam `""`, que significa "a IA decide esta
+   * imagem". Congelar o array já normalizado evita que o resultado
+   * persistido dependa de como o projeto estava no momento da leitura.
+   */
+  direcoesImagens: string[];
   /** Marketplaces do projeto — contexto/rastreabilidade. Ver nota sobre `marketplace` por prompt no cabeçalho de PromptImagem. */
   marketplaces: string[];
   aspectRatio: AspectRatio;
@@ -212,6 +320,13 @@ export interface EntradaPromptsImagem {
 export interface PlanoImagemIA {
   ordem: number;
   tipo: TipoImagem;
+  /**
+   * O que ESTA imagem precisa vender — a decisão comercial, separada de
+   * como o modelo deve produzi-la (2026-09-04). Antes só existia
+   * `objetivo` misturado com a descrição da cena, e o resultado eram N
+   * variações do mesmo retrato. Aqui o modelo é obrigado a declarar por
+   * que esta imagem existe no anúncio.
+   */
   objetivo: string;
   cena: string;
   enquadramento: Enquadramento;
@@ -245,6 +360,13 @@ export interface PromptImagem extends PlanoImagemIA {
   aspectRatio: AspectRatio;
   textosPermitidos: string[];
   textosProibidos: string[];
+  /**
+   * A instrução que o USUÁRIO escreveu para esta imagem, copiada pelo
+   * servidor (nunca escrita pelo modelo). `""` = a IA decidiu sozinha.
+   * Fica registrada para auditoria: permite comparar o que foi pedido
+   * com o que foi planejado.
+   */
+  instrucaoUsuario: string;
   promptTexto: string;
   negativePrompt: string;
 }

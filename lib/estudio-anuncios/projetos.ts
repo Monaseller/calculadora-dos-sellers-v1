@@ -23,7 +23,8 @@ import type { CriarProjetoInput, EditarProjetoInput, ProjetoComAdaptacoes, Proje
 // selecionado.
 const COLUNAS_PROJETO =
   "id, loja_id, nome_produto, marketplace, modo, quantidade_imagens_solicitada, " +
-  "estilo, permitir_busca_externa, biblioteca_produto_id, status, criado_em, atualizado_em, " +
+  "estilo, direcao_criativa, direcoes_imagens, " +
+  "permitir_busca_externa, biblioteca_produto_id, status, criado_em, atualizado_em, " +
   "concluido_em, cancelado_em";
 
 const COLUNAS_ADAPTACAO = "id, projeto_id, marketplace, status, criado_em, atualizado_em, concluido_em";

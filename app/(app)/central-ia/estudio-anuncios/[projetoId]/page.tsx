@@ -45,6 +45,7 @@ import {
   BlocoCustos,
   type ResultadoProjetoDTO,
 } from "./ResultadoProjeto";
+import { DirecaoCriativa } from "./DirecaoCriativa";
 import { BlocoEditorial, type CanalEditorialDTO } from "./EditorConteudo";
 import { BlocoExportacao, type PacoteExportacaoDTO } from "./PacotesExportacao";
 import { BlocoPrePublicacao, type ComplianceDTO } from "./PrePublicacao";
@@ -63,6 +64,8 @@ interface ProjetoDetalhe {
   modo: string;
   quantidade_imagens_solicitada: number;
   estilo?: string | null;
+  direcao_criativa?: string | null;
+  direcoes_imagens?: string[] | null;
   permitir_busca_externa: boolean;
   status: string;
   criado_em: string;
@@ -470,6 +473,19 @@ export default function EstudioAnunciosProjetoPage({ params }: { params: { proje
           <Campo label="Criado em" valor={formatarData(projeto.criado_em)} />
           <Campo label="Última atualização" valor={formatarData(projeto.atualizado_em)} />
         </div>
+      </Cartao>
+
+      <Cartao titulo="Direção criativa das imagens">
+        <DirecaoCriativa
+          projetoId={projeto.id}
+          quantidade={projeto.quantidade_imagens_solicitada}
+          direcaoInicial={projeto.direcao_criativa ?? null}
+          direcoesInicial={projeto.direcoes_imagens ?? null}
+          // Depois que o pipeline existe, o planejamento já foi feito
+          // (ou está em curso) — editar aqui não mudaria nada.
+          editavel={!pipeline && projeto.status !== "cancelado" && projeto.status !== "concluido"}
+          onSalvo={() => buscarDados(true)}
+        />
       </Cartao>
 
       <Cartao

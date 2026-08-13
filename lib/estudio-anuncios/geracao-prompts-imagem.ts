@@ -47,7 +47,9 @@ import type {
 } from "./geracao-prompts-imagem-tipos";
 import {
   ASPECT_RATIO_PADRAO,
+  INSTRUCAO_FIDELIDADE_PRODUTO,
   LIMITE_MAXIMO_PROMPTS_IMAGEM,
+  RESTRICOES_IMAGEM_PRINCIPAL,
   RESTRICOES_VISUAIS_GLOBAIS,
   SCHEMA_VERSAO_GERACAO_PROMPTS_IMAGEM,
   TEXTOS_PROIBIDOS_NA_IMAGEM,
@@ -63,8 +65,13 @@ export const RESTRICOES_PROMPTS_IMAGEM: string[] = [
   "Descrever apenas o que está na VERDADE VISUAL confirmada. Nada além.",
   "Nunca transformar informação incerta em elemento visual confirmado.",
   "Nunca inventar cor, material, medida, quantidade, acessório ou componente.",
-  "Nunca adicionar marca, logotipo, etiqueta ou selo.",
-  "Nunca pedir texto, letra, número ou tipografia dentro da imagem.",
+  // Ajustado em 2026-09-04: a regra antiga dizia "nunca adicionar marca,
+  // logotipo, etiqueta ou selo" e o modelo de imagem a executava como
+  // "remova a marca real". O que se quer proibir é INVENTAR marca —
+  // preservar a que existe é obrigação, não violação.
+  "Nunca inventar marca, logotipo, etiqueta ou selo que não apareça nas fotos do produto.",
+  "A marca, o rótulo e os textos já impressos no produto devem ser PRESERVADOS como estão — nunca peça para removê-los, alterá-los ou reescrevê-los.",
+  "Nunca pedir texto NOVO dentro da imagem (legenda, chamada, benefício escrito, preço).",
   "Nunca adicionar preço, desconto, promoção, garantia ou alegação de saúde.",
   "Nunca usar item marcado como NÃO CONFIRMADO como elemento da cena.",
   "Elemento de embalagem só pode aparecer em imagem do tipo `embalagem`.",
@@ -121,10 +128,16 @@ export function montarVerdadeVisual(analise: AnaliseVisualCompleta): VerdadeVisu
   distribuirDescricao(analise.possiveisUsos, usosConfirmados);
   distribuirDescricao(analise.publicoProvavel, publicoConfirmado);
 
-  // textosLegiveis nunca vira elemento visual — a v1 proíbe texto na
-  // imagem, então todo texto lido nas fotos é, para esta etapa,
-  // informação não desenhável. Vai inteiro para naoConfirmado.
-  for (const t of analise.textosLegiveis ?? []) naoConfirmado.push(t.texto);
+  // textosLegiveis continua NÃO sendo insumo criativo: o modelo não pode
+  // pedir para escrever esses textos numa cena. Mas em 2026-09-04 parou
+  // de ir para `naoConfirmado`, e a distinção é o centro da correção de
+  // fidelidade: `naoConfirmado` vira lista de PROIBIÇÃO no prompt, então
+  // jogar ali o texto impresso na embalagem mandava o gerador apagar a
+  // marca real. São coisas opostas — "não invente este texto" e "não
+  // mostre este texto" — e a v1 tratava as duas como a mesma.
+  //
+  // Ficam registrados à parte, como identidade a PRESERVAR.
+  const textosImpressosNoProduto = (analise.textosLegiveis ?? []).map(t => t.texto);
 
   // atributosAdicionais com origem "produto" entram como característica.
   for (const a of analise.atributosAdicionais ?? []) {
@@ -147,6 +160,7 @@ export function montarVerdadeVisual(analise: AnaliseVisualCompleta): VerdadeVisu
     usosConfirmados,
     publicoConfirmado,
     itensDaEmbalagem,
+    textosImpressosNoProduto,
     naoConfirmado,
   };
 }
@@ -164,6 +178,16 @@ export function calcularTiposPermitidos(vv: VerdadeVisual): TipoImagem[] {
   }
   if (vv.usosConfirmados.length > 0) permitidos.push("uso");
   if (vv.itensDaEmbalagem.length > 0) permitidos.push("embalagem");
+  // `beneficios` exige um uso ou característica JÁ CONFIRMADA para
+  // mostrar — sem isso, a cena teria que afirmar um efeito que nenhuma
+  // foto sustenta, que é a proibição central da etapa.
+  if (vv.usosConfirmados.length > 0 || vv.caracteristicasDoProduto.length > 0) {
+    permitidos.push("beneficios");
+  }
+  // `promocional_secundaria` é composição, não afirmação nova: basta o
+  // produto. Fica disponível sempre — é o tipo que dá variedade
+  // comercial sem inventar nada.
+  permitidos.push("promocional_secundaria");
   // Ordem estável, sempre a mesma de TIPOS_IMAGEM_SUPORTADOS.
   return TIPOS_IMAGEM_SUPORTADOS.filter(t => permitidos.includes(t));
 }
@@ -171,17 +195,49 @@ export function calcularTiposPermitidos(vv: VerdadeVisual): TipoImagem[] {
 // ────────────────────────────────────────────────────────────────────
 // Configuração (Projeto Mestre) e entrada
 // ────────────────────────────────────────────────────────────────────
+/**
+ * Normaliza as instruções por imagem para EXATAMENTE `quantidade`
+ * posições (2026-09-04).
+ *
+ * O array guardado no projeto pode ter tamanho diferente da quantidade
+ * atual: a pessoa escreve 8 instruções e depois baixa para 4, ou o
+ * contrário. Truncar/preencher aqui — e congelar o resultado na
+ * configuração — garante que o índice de cada imagem seja estável e que
+ * o resultado persistido não dependa do estado do projeto no instante
+ * da leitura.
+ *
+ * Excedente é descartado apenas nesta execução; o banco continua com o
+ * texto completo, então aumentar a quantidade de novo o traz de volta.
+ */
+export function normalizarDirecoesImagens(
+  direcoes: string[] | null | undefined,
+  quantidade: number
+): string[] {
+  const origem = Array.isArray(direcoes) ? direcoes : [];
+  const saida: string[] = [];
+  for (let i = 0; i < quantidade; i++) {
+    const item = origem[i];
+    saida.push(typeof item === "string" ? item.trim() : "");
+  }
+  return saida;
+}
+
 export function montarConfiguracao(params: {
   quantidadeSolicitada: number;
   estilo: string | null;
   modo: string;
   marketplaces: string[];
   verdadeVisual: VerdadeVisual;
+  direcaoCriativa?: string | null;
+  direcoesImagens?: string[] | null;
 }): ConfiguracaoPromptsImagem {
+  const direcaoCriativa = params.direcaoCriativa?.trim() ?? "";
   return {
     quantidadeSolicitada: params.quantidadeSolicitada,
     estilo: params.estilo,
     modo: params.modo,
+    direcaoCriativa: direcaoCriativa === "" ? null : direcaoCriativa,
+    direcoesImagens: normalizarDirecoesImagens(params.direcoesImagens, params.quantidadeSolicitada),
     marketplaces: [...params.marketplaces].sort(),
     aspectRatio: ASPECT_RATIO_PADRAO,
     tiposPermitidos: calcularTiposPermitidos(params.verdadeVisual),
@@ -232,8 +288,13 @@ const ROTULO_TIPO: Record<TipoImagem, string> = {
   capa_principal: "imagem principal do anúncio — produto isolado, leitura imediata, composição limpa",
   perspectiva: "outro ângulo do mesmo produto, sem novos elementos",
   detalhes: "close de um componente ou característica já confirmada",
-  uso: "produto em contexto de uso confirmado, sem pessoas",
+  // "sem pessoas" saiu em 2026-09-04: demonstrar uso quase sempre pede
+  // uma mão, e a proibição global de pessoa contradizia o próprio tipo.
+  // A restrição continua valendo na capa (RESTRICOES_IMAGEM_PRINCIPAL).
+  uso: "produto em contexto de uso confirmado; pode incluir mão ou pessoa quando o uso confirmado exigir",
   embalagem: "embalagem física do produto, apenas se ela foi observada",
+  beneficios: "produto no contexto que MOSTRA um benefício já confirmado — o benefício é demonstrado pela cena, nunca escrito",
+  promocional_secundaria: "imagem comercial de apoio: composição mais elaborada, cenário trabalhado, sem texto e sem selo",
 };
 
 const ROTULO_ENQUADRAMENTO: Record<Enquadramento, string> = {
@@ -277,6 +338,10 @@ export function montarPromptGeracaoPromptsImagem(
   lista("Usos confirmados", vv.usosConfirmados);
   lista("Público confirmado", vv.publicoConfirmado);
   lista("Itens da embalagem física (só usáveis em imagem do tipo `embalagem`)", vv.itensDaEmbalagem);
+  lista(
+    "TEXTOS JÁ IMPRESSOS NO PRODUTO — identidade a PRESERVAR (nunca peça para removê-los, e nunca peça para escrevê-los na cena)",
+    vv.textosImpressosNoProduto
+  );
   lista("NÃO CONFIRMADO — proibido virar elemento visual", vv.naoConfirmado);
 
   linhas.push("TIPOS DE IMAGEM PERMITIDOS NESTE PROJETO:");
@@ -291,13 +356,52 @@ export function montarPromptGeracaoPromptsImagem(
     linhas.push(`ESTILO VISUAL DO PROJETO: ${config.estilo}. Ele orienta fundo e iluminação, nunca altera o produto.`, "");
   }
 
+  // ── Direção criativa do usuário (2026-09-04) ──────────────────────
+  // Entra como CONTEXTO para o planejamento, nunca como prompt bruto: o
+  // texto do usuário descreve intenção comercial, e é este modelo que a
+  // traduz em cena concreta usando a verdade visual confirmada. Vem
+  // depois das regras invioláveis de propósito — direção criativa não
+  // pode destravar o que a verdade visual proíbe.
+  if (config.direcaoCriativa) {
+    linhas.push(
+      "DIREÇÃO CRIATIVA DO ENSAIO (escrita pelo vendedor):",
+      config.direcaoCriativa,
+      "",
+      "Use essa direção para orientar clima, paleta, cenário e composição. Ela NUNCA autoriza alterar o produto, inventar atributo ou contrariar as regras acima. Se algum trecho conflitar com a verdade visual, siga a verdade visual e ignore o trecho.",
+      ""
+    );
+  }
+
+  const instrucoesEscritas = config.direcoesImagens
+    .map((texto, i) => ({ imagem: i + 1, texto }))
+    .filter(d => d.texto !== "");
+  if (instrucoesEscritas.length > 0) {
+    linhas.push("INSTRUÇÕES POR IMAGEM (escritas pelo vendedor):");
+    for (const d of instrucoesEscritas) linhas.push(`- Imagem ${d.imagem}: ${d.texto}`);
+    linhas.push(
+      "",
+      "Interprete cada instrução e transforme-a numa cena concreta e coerente com a verdade visual — não a copie literalmente.",
+      "Imagens sem instrução ficam a seu critério: escolha para elas a função comercial que estiver faltando no conjunto.",
+      ""
+    );
+  }
+
   linhas.push(
     `Produza EXATAMENTE ${config.quantidadeSolicitada} imagem(ns).`,
     "`ordem` deve ir de 1 até a quantidade pedida, sem repetir e sem pular.",
     "A imagem de `ordem` 1 tem obrigatoriamente `tipo` = capa_principal, e nenhuma outra pode ter esse tipo.",
     "A imagem principal prioriza o produto: leitura clara, composição limpa, fundo adequado, sem distrações e sem elemento decorativo desnecessário.",
     "",
-    "Nenhuma imagem pode conter texto. Não descreva rótulo, letreiro, banner, selo ou tipografia.",
+    // ── Estratégia comercial (2026-09-04) ───────────────────────────
+    // Antes o modelo recebia só "produza N imagens" e devolvia N
+    // variações do mesmo retrato — a queixa do usuário. Agora precisa
+    // justificar por que cada imagem existe no anúncio.
+    "PLANEJAMENTO COMERCIAL — cada imagem precisa ter uma função DIFERENTE no anúncio.",
+    "Pergunte-se: quais imagens fariam esta pessoa entender e comprar este produto? Decida a combinação a partir do que ESTE produto é, não de uma fórmula fixa.",
+    "Duas imagens com a mesma função são desperdício: se duas ficarem parecidas, troque uma por outra função.",
+    "`objetivo` deve dizer o que a imagem VENDE (a razão comercial), não repetir a descrição da cena.",
+    "",
+    "Nenhuma imagem pode receber texto NOVO: não descreva legenda, chamada, banner, preço ou selo inventado. Os textos já impressos no produto são exceção e devem ser preservados.",
     "`elementosProibidos` deve trazer restrições concretas específicas desta imagem (o restante já é aplicado pelo servidor)."
   );
   return linhas.join("\n");
@@ -740,26 +844,58 @@ export function montarPromptsFinais(
 ): PromptImagem[] {
   const produto = vv.produtoIdentificado ?? "produto";
   return saida.imagens.map(img => {
+    const ehPrincipal = img.tipo === "capa_principal";
+
+    // A instrução de fidelidade vem PRIMEIRO, antes de qualquer
+    // descrição de cena (2026-09-04). A ordem é deliberada: o modelo
+    // precisa saber que as fotos anexadas são o produto a preservar
+    // antes de ler o que deve criar. Com a cena primeiro, ele começa a
+    // compor e trata a referência como estilo.
     const partes: string[] = [
-      `Fotografia de produto: ${produto}.`,
-      `Objetivo: ${img.objetivo}`,
+      INSTRUCAO_FIDELIDADE_PRODUTO,
+      `Produto: ${produto}.`,
+    ];
+    // Nomear os textos impressos torna a preservação verificável pelo
+    // modelo, em vez de uma instrução genérica que ele pode ignorar.
+    if (vv.textosImpressosNoProduto.length > 0) {
+      partes.push(
+        `Estes textos já estão impressos no produto e devem aparecer exatamente como estão, sem reescrever nem traduzir: ${vv.textosImpressosNoProduto.join("; ")}.`
+      );
+    }
+    if (vv.marca) partes.push(`A marca "${vv.marca}" faz parte do produto e deve ser preservada.`);
+    partes.push(
+      `Objetivo comercial desta imagem: ${img.objetivo}`,
       `Cena: ${img.cena}`,
       `Enquadramento: ${ROTULO_ENQUADRAMENTO[img.enquadramento]}.`,
       `Fundo: ${img.fundo}.`,
       `Iluminação: ${img.iluminacao}.`,
-      `Elementos obrigatórios: ${img.elementosObrigatorios.join("; ")}.`,
-    ];
+      `Elementos obrigatórios: ${img.elementosObrigatorios.join("; ")}.`
+    );
     if (config.estilo) partes.push(`Estilo visual: ${config.estilo}.`);
-    partes.push(`Proporção: ${config.aspectRatio}.`, "Sem nenhum texto na imagem.");
+    partes.push(`Proporção: ${config.aspectRatio}.`);
+    // Não diz mais "sem nenhum texto na imagem": isso mandava apagar o
+    // texto impresso na própria embalagem. A proibição agora é de texto
+    // NOVO, e vive no negative prompt como substantivo.
+    partes.push(
+      "Não acrescente nenhum texto novo à imagem; os textos que já existem no produto devem ser mantidos como estão."
+    );
 
     return {
       ...img,
-      principal: img.tipo === "capa_principal",
+      principal: ehPrincipal,
       aspectRatio: config.aspectRatio,
       textosPermitidos: [...config.textosPermitidos],
       textosProibidos: [...config.textosProibidos],
+      instrucaoUsuario: config.direcoesImagens[img.ordem - 1] ?? "",
       promptTexto: partes.join(" "),
-      negativePrompt: [...config.restricoesVisuaisGlobais, ...img.elementosProibidos].join(", "),
+      // Só substantivos — nunca regras negadas. O provedor prefixa
+      // "NÃO INCLUA, em hipótese alguma:", então cada item precisa ser
+      // uma COISA que não deve aparecer no quadro.
+      negativePrompt: [
+        ...config.restricoesVisuaisGlobais,
+        ...(ehPrincipal ? RESTRICOES_IMAGEM_PRINCIPAL : []),
+        ...img.elementosProibidos,
+      ].join(", "),
     };
   });
 }
@@ -851,10 +987,17 @@ export async function validarOrigemEBuscarAnaliseVisual(
 async function buscarConfiguracaoDoProjeto(
   supabase: SupabaseClient,
   projetoId: string
-): Promise<{ quantidadeSolicitada: number; estilo: string | null; modo: string; marketplaces: string[] }> {
+): Promise<{
+  quantidadeSolicitada: number;
+  estilo: string | null;
+  modo: string;
+  marketplaces: string[];
+  direcaoCriativa: string | null;
+  direcoesImagens: string[] | null;
+}> {
   const { data: projeto, error } = await supabase
     .from("estudio_anuncios_projetos")
-    .select("quantidade_imagens_solicitada, estilo, modo")
+    .select("quantidade_imagens_solicitada, estilo, modo, direcao_criativa, direcoes_imagens")
     .eq("id", projetoId)
     .maybeSingle();
   if (error) throw new ErroProvedorIA("validation", `Falha ao ler o projeto: ${error.message}`.slice(0, 300));
@@ -871,6 +1014,10 @@ async function buscarConfiguracaoDoProjeto(
     estilo: (projeto as { estilo: string | null }).estilo ?? null,
     modo: (projeto as { modo: string }).modo,
     marketplaces: (mks ?? []).map(r => (r as { marketplace: string }).marketplace),
+    // Direcao do usuario (2026-09-04). Ausente e o caso NORMAL e
+    // significa "a IA decide" — nunca e tratado como dado faltando.
+    direcaoCriativa: (projeto as { direcao_criativa: string | null }).direcao_criativa ?? null,
+    direcoesImagens: (projeto as { direcoes_imagens: string[] | null }).direcoes_imagens ?? null,
   };
 }
 

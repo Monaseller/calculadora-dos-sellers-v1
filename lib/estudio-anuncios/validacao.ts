@@ -5,6 +5,7 @@
  * erro cru do Postgres). Nenhuma consulta ao banco acontece aqui.
  */
 import type { CriarProjetoInput, EditarProjetoInput, ModoGeracao, EstiloProjeto, Marketplace } from "./tipos";
+import { MAX_TAMANHO_DIRECAO_CRIATIVA, MAX_TAMANHO_DIRECAO_IMAGEM, MAX_DIRECOES_IMAGENS } from "./tipos";
 
 export const MARKETPLACES_VALIDOS: Marketplace[] = ["ML", "Shopee", "Amazon", "TikTok Shop"];
 
@@ -121,6 +122,8 @@ const CAMPOS_EDITAVEIS = new Set([
   "quantidade_imagens_solicitada",
   "modo",
   "estilo",
+  "direcao_criativa",
+  "direcoes_imagens",
   "permitir_busca_externa",
 ]);
 
@@ -176,6 +179,18 @@ export function validarEditarProjeto(
     dados.estilo = estilo.estilo;
   }
 
+  if ("direcao_criativa" in b) {
+    const direcao = validarDirecaoCriativa(b.direcao_criativa);
+    if (!direcao.ok) return { valido: false, erro: direcao.erro };
+    dados.direcao_criativa = direcao.valor;
+  }
+
+  if ("direcoes_imagens" in b) {
+    const direcoes = validarDirecoesImagens(b.direcoes_imagens);
+    if (!direcoes.ok) return { valido: false, erro: direcoes.erro };
+    dados.direcoes_imagens = direcoes.valor;
+  }
+
   if ("permitir_busca_externa" in b) {
     if (typeof b.permitir_busca_externa !== "boolean") {
       return { valido: false, erro: "permitir_busca_externa deve ser um booleano (true/false)." };
@@ -184,4 +199,78 @@ export function validarEditarProjeto(
   }
 
   return { valido: true, dados };
+}
+
+/**
+ * Direção criativa do ensaio (2026-09-04). Texto livre e OPCIONAL:
+ * `null` e string vazia são respostas legítimas, e significam "a IA
+ * decide" — não são dado faltando. Só o formato e o tamanho são
+ * validados; o conteúdo é do usuário e não cabe a esta camada julgar.
+ *
+ * String em branco vira `null` para que "apagar o campo" e "nunca
+ * preenchi" fiquem indistinguíveis no banco, em vez de guardar `"   "`.
+ */
+export function validarDirecaoCriativa(
+  valor: unknown
+): { ok: true; valor: string | null } | { ok: false; erro: string } {
+  if (valor === null || valor === undefined) return { ok: true, valor: null };
+  if (typeof valor !== "string") {
+    return { ok: false, erro: "direcao_criativa deve ser um texto ou null." };
+  }
+  const limpo = valor.trim();
+  if (limpo === "") return { ok: true, valor: null };
+  if (limpo.length > MAX_TAMANHO_DIRECAO_CRIATIVA) {
+    return {
+      ok: false,
+      erro: `A direção criativa deve ter no máximo ${MAX_TAMANHO_DIRECAO_CRIATIVA} caracteres (recebidos ${limpo.length}).`,
+    };
+  }
+  return { ok: true, valor: limpo };
+}
+
+/**
+ * Instruções por imagem. O array é POSICIONAL (posição 0 = imagem 1),
+ * então posições vazias são preservadas como `""` em vez de removidas:
+ * filtrar os vazios deslocaria a instrução da imagem 4 para a imagem 2.
+ *
+ * NÃO valida contra `quantidade_imagens_solicitada` de propósito —
+ * reduzir a quantidade não pode apagar texto que a pessoa escreveu. A
+ * etapa de prompts lê apenas as N primeiras posições.
+ *
+ * Um array inteiramente vazio vira `null`: equivale a nenhuma instrução.
+ */
+export function validarDirecoesImagens(
+  valor: unknown
+): { ok: true; valor: string[] | null } | { ok: false; erro: string } {
+  if (valor === null || valor === undefined) return { ok: true, valor: null };
+  if (!Array.isArray(valor)) {
+    return { ok: false, erro: "direcoes_imagens deve ser uma lista de textos ou null." };
+  }
+  if (valor.length > MAX_DIRECOES_IMAGENS) {
+    return {
+      ok: false,
+      erro: `direcoes_imagens aceita no máximo ${MAX_DIRECOES_IMAGENS} posições (recebidas ${valor.length}).`,
+    };
+  }
+  const limpas: string[] = [];
+  for (let i = 0; i < valor.length; i++) {
+    const item = valor[i];
+    if (item === null || item === undefined) {
+      limpas.push("");
+      continue;
+    }
+    if (typeof item !== "string") {
+      return { ok: false, erro: `A instrução da imagem ${i + 1} deve ser um texto.` };
+    }
+    const limpo = item.trim();
+    if (limpo.length > MAX_TAMANHO_DIRECAO_IMAGEM) {
+      return {
+        ok: false,
+        erro: `A instrução da imagem ${i + 1} deve ter no máximo ${MAX_TAMANHO_DIRECAO_IMAGEM} caracteres (recebidos ${limpo.length}).`,
+      };
+    }
+    limpas.push(limpo);
+  }
+  if (limpas.every(d => d === "")) return { ok: true, valor: null };
+  return { ok: true, valor: limpas };
 }
