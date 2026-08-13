@@ -587,7 +587,10 @@ const TERMOS_SEMPRE_PROIBIDOS = [
   // uso" (adjetivo, não moeda) e "off" barraria "off-white" (fundo neutro
   // legítimo). Preço e desconto continuam cobertos por "preco",
   // "desconto", "promocao", "cupom" e "porcentagem", sem o falso positivo.
-  "preco", "desconto", "promocao", "oferta", "cupom", "gratis", "frete",
+  // "promocional" entrou em 2026-09-07: a lista tinha só "promocao", e
+  // `contemPalavraOuPlural` não cobre derivação — "chamada promocional"
+  // passava. Lacuna pré-existente, achada por teste do DOMÍNIO D.
+  "preco", "desconto", "promocao", "promocional", "oferta", "cupom", "gratis", "frete",
   "garantia", "garantido", "imperdivel", "melhor preco", "compre", "aproveite",
   "porcentagem",
   // alegação clínica
@@ -596,6 +599,9 @@ const TERMOS_SEMPRE_PROIBIDOS = [
   // camada gráfica ADICIONADA — não existe fisicamente no produto, então
   // mencioná-las é sempre pedir para criar algo novo.
   "banner", "letreiro", "legenda", "watermark", "marca dagua", "badge",
+  // "chamada" no sentido publicitario — mesma familia de banner/letreiro:
+  // e texto ADICIONADO, nunca algo que exista fisicamente no produto.
+  "chamada",
 ];
 
 /**
@@ -725,6 +731,29 @@ const MATERIAIS_CONHECIDOS = [
 ];
 
 /** Palavras curtas/comuns ignoradas ao checar reaparecimento de informação proibida. */
+/**
+ * Vocabulario de DIRECAO DE ARTE (2026-09-07).
+ *
+ * Estes substantivos e adjetivos descrevem enquadramento, luz e cena —
+ * e podem, por coincidencia, aparecer dentro de uma alegacao factual
+ * ("composicao quimica", "volume liquido"). Sozinhos nao condenam; em
+ * companhia de outro termo da mesma alegacao, sim.
+ *
+ * A lista NAO perdoa termos distintivos de produto: "mineral",
+ * "hipoalergenico", "vitamina" e afins ficam de fora de proposito e
+ * continuam bloqueando na primeira ocorrencia.
+ */
+const VOCABULARIO_DIRECAO_VISUAL = new Set([
+  "composicao", "completa", "completo", "liquido", "liquida",
+  "premium", "clean", "elegante", "equilibrada", "equilibrado",
+  "fundo", "iluminacao", "cenario", "superficie", "atmosfera",
+  "enquadramento", "perspectiva", "profundidade", "contraste",
+  "sombra", "reflexo", "textura", "angulo", "plano", "quadro",
+  "central", "centralizado", "frontal", "lateral", "diagonal",
+  "suave", "difusa", "natural", "neutro", "neutra", "limpo", "limpa",
+  "destaque", "conjunto", "arranjo", "alinhados", "alinhado",
+]);
+
 const PALAVRAS_IGNORADAS = new Set([
   "para", "como", "com", "sem", "que", "dos", "das", "uma", "por", "pela", "pelo", "nao",
   "esta", "este", "isso", "mais", "menos", "muito", "pouco", "sobre", "entre", "seus", "suas",
@@ -813,17 +842,47 @@ export function validarIntegridadePromptsImagem(
   const corpus = corpusConfirmado(vv);
   const numerosCorpus = extrairNumeros(corpus);
 
-  // Palavras significativas do que NÃO foi confirmado e que não existem
-  // no corpus — se reaparecerem no texto do modelo, é informação
-  // proibida voltando pela porta dos fundos.
-  const palavrasProibidas = new Set<string>();
+  // ── Afirmações não confirmadas, agora por FRASE (2026-09-07) ──────
+  //
+  // A versão anterior quebrava cada item de `naoConfirmado` em PALAVRAS
+  // e proibia cada uma isoladamente. Isso travou o projeto "Cacau shows"
+  // em quatro tentativas seguidas, e o mecanismo é instrutivo:
+  //
+  //   a análise visual registrou como não confirmado
+  //     "Composição química completa da fórmula dos esmaltes"
+  //   o que proibiu, globalmente, as palavras
+  //     composicao · quimica · completa · formula
+  //   e então o planejador escreveu
+  //     "composição premium e clara"   (direção fotográfica)
+  //   e foi rejeitado por "reutilizar informação NÃO CONFIRMADA".
+  //
+  // Uma palavra não é uma alegação. "Composição química completa da
+  // fórmula" é um FATO DO PRODUTO; "composição premium e clara" é
+  // DIREÇÃO DE ARTE. As duas compartilham um substantivo e nada mais.
+  //
+  // A alegação só volta quando volta o CONJUNTO que a caracteriza. Por
+  // isso cada item vira um grupo de palavras significativas, e a
+  // rejeição exige a coocorrência de pelo menos duas delas no mesmo
+  // texto — sem depender de whitelist de vocabulário.
+  // Termos que também pertencem ao vocabulário de DIREÇÃO DE ARTE. Não
+  // é uma whitelist de perdão: um termo daqui continua sendo rejeitado
+  // se vier acompanhado de OUTRO termo da mesma alegação não confirmada.
+  // Sozinho, é ambíguo demais para condenar — "composição" tanto abre
+  // "composição química da fórmula" quanto "composição central e
+  // equilibrada", e só o contexto separa as duas.
+  //
+  // Termos DISTINTIVOS (mineral, hipoalergenico, vitamina...) ficam
+  // fora desta lista e continuam bloqueando na primeira ocorrência.
+  const gruposNaoConfirmados: { item: string; palavras: string[] }[] = [];
   for (const item of vv.naoConfirmado) {
+    const palavras: string[] = [];
     for (const palavra of normalizar(item).split(" ")) {
       if (palavra.length < 5) continue;
       if (PALAVRAS_IGNORADAS.has(palavra)) continue;
       if (contemRadical(corpus, palavra)) continue;
-      palavrasProibidas.add(palavra);
+      if (!palavras.includes(palavra)) palavras.push(palavra);
     }
+    if (palavras.length > 0) gruposNaoConfirmados.push({ item, palavras });
   }
 
   for (const img of saida.imagens) {
@@ -835,6 +894,24 @@ export function validarIntegridadePromptsImagem(
     const textoDescritivo = normalizar(
       [img.objetivo, img.cena, img.fundo, img.iluminacao, ...img.elementosObrigatorios].join(" ")
     );
+
+    // ── Domínios de validação por CAMPO (2026-09-07) ────────────────
+    //
+    // Nem todo campo do plano afirma a mesma coisa, e tratar todos como
+    // se afirmassem fato do produto foi o que produziu quatro rejeições
+    // seguidas por falso positivo.
+    //
+    //   `fundo`, `iluminacao`  → DIREÇÃO DE ARTE. Descrevem o estúdio:
+    //      superfície, luz, atmosfera. Não afirmam nada sobre o produto,
+    //      então não passam pela validação factual.
+    //   `objetivo`, `cena`, `elementosObrigatorios` → podem AFIRMAR algo
+    //      sobre o produto ("frasco de 10ml", "fórmula de secagem
+    //      rápida"), e continuam sob validação factual estrita.
+    //
+    // A separação é por campo, não por palavra: "composição" no `fundo`
+    // é enquadramento; "composição química" nos `elementosObrigatorios`
+    // é alegação. O validador passou a saber a diferença.
+    const textoFactual = normalizar([img.objetivo, img.cena, ...img.elementosObrigatorios].join(" "));
     // Separação essencial: cor e material só são atributos do PRODUTO nos
     // campos que descrevem o produto. `fundo` e `iluminacao` descrevem o
     // cenário e seguem uma regra própria (ver CORES_NEUTRAS_DE_CENARIO).
@@ -932,9 +1009,33 @@ export function validarIntegridadePromptsImagem(
     }
 
     // 6. informação não confirmada reaparecendo
-    for (const palavra of palavrasProibidas) {
-      if (contemPalavra(textoDescritivo, palavra)) {
-        return { valido: false, motivo: `${onde}: reutilizou informação NÃO CONFIRMADA ("${palavra}").` };
+    //
+    // Avaliada só sobre `textoFactual` — os campos onde o modelo AFIRMA
+    // algo sobre o produto. `fundo`, `iluminacao` e `enquadramento` são
+    // direção de arte pura: descrevem o estúdio, não o produto, e não
+    // têm como reintroduzir uma alegação de fórmula química.
+    //
+    // E exige DUAS palavras do mesmo item: uma só é coincidência de
+    // vocabulário (ver o bloco de comentário acima).
+    for (const grupo of gruposNaoConfirmados) {
+      const presentes = grupo.palavras.filter(p => contemRadical(textoFactual, p));
+      if (presentes.length === 0) continue;
+
+      // Um termo DISTINTIVO basta: ele so existe naquela alegacao.
+      const distintivo = presentes.find(p => !VOCABULARIO_DIRECAO_VISUAL.has(p));
+      if (distintivo) {
+        return {
+          valido: false,
+          motivo: `${onde}: reutilizou informação NÃO CONFIRMADA ("${distintivo}").`,
+        };
+      }
+      // So termos de direcao de arte: exige coocorrencia para condenar.
+      // "composicao premium" passa; "composicao ... completa" nao.
+      if (presentes.length >= 2) {
+        return {
+          valido: false,
+          motivo: `${onde}: reutilizou informação NÃO CONFIRMADA ("${grupo.item}") — termos: ${presentes.join(", ")}.`,
+        };
       }
     }
 
