@@ -72,6 +72,12 @@ export const RESTRICOES_PROMPTS_IMAGEM: string[] = [
   "Nunca inventar marca, logotipo, etiqueta ou selo que não apareça nas fotos do produto.",
   "A marca, o rótulo e os textos já impressos no produto devem ser PRESERVADOS como estão — nunca peça para removê-los, alterá-los ou reescrevê-los.",
   "Nunca pedir texto NOVO dentro da imagem (legenda, chamada, benefício escrito, preço).",
+  // Sem esta instrução o planejador escreve "rótulo bem visível" e a
+  // validação rejeita por ambiguidade (ela é fail closed). Foi o que
+  // quebrou o E2E de 2026-09-05: pedimos preservação e depois barramos a
+  // palavra. Aqui ensinamos a FRASE que expressa preservação.
+  "Ao mencionar rótulo, texto impresso, marca ou logotipo, diga SEMPRE que é para PRESERVAR o que já existe — use palavras como \"preservar\", \"manter\", \"original\", \"existente\" ou \"exatamente igual ao original\". Menção solta (ex.: \"rótulo visível\") é rejeitada por ambiguidade.",
+  "Nunca use verbo de criação (adicionar, criar, inserir, escrever, colocar, aplicar) junto de rótulo, texto, marca, logotipo ou selo.",
   "Nunca adicionar preço, desconto, promoção, garantia ou alegação de saúde.",
   "Nunca usar item marcado como NÃO CONFIRMADO como elemento da cena.",
   "Elemento de embalagem só pode aparecer em imagem do tipo `embalagem`.",
@@ -587,10 +593,91 @@ const TERMOS_SEMPRE_PROIBIDOS = [
   // alegação clínica
   "cura", "trata", "tratamento", "terapeutico", "medicinal", "emagrece",
   "anti idade", "rejuvenesce", "clinicamente comprovado", "anvisa",
-  // texto dentro da imagem
+  // camada gráfica ADICIONADA — não existe fisicamente no produto, então
+  // mencioná-las é sempre pedir para criar algo novo.
+  "banner", "letreiro", "legenda", "watermark", "marca dagua", "badge",
+];
+
+/**
+ * ────────────────────────────────────────────────────────────────────
+ * IDENTIDADE FÍSICA vs TEXTO NOVO (2026-09-05)
+ * ────────────────────────────────────────────────────────────────────
+ * Estes termos ESTAVAM em TERMOS_SEMPRE_PROIBIDOS, e a mudança veio de
+ * uma falha real em produção.
+ *
+ * No primeiro E2E da nova arquitetura, o projeto "Cacau shows" quebrou
+ * 3/3 em `geracao_prompts_imagem` com:
+ *   `imagem 1 (capa_principal): usou termo proibido ("rotulo")`
+ *
+ * A causa é uma contradição que nós mesmos criamos. A instrução do
+ * vendedor pedia "preservar perfeitamente todas as embalagens, marcas e
+ * rótulos", e a arquitetura de 2026-09-04 passou a exigir que o
+ * planejador instruísse preservação de identidade. O planejador fez
+ * exatamente isso — e a validação, que só olhava a PALAVRA, rejeitou.
+ *
+ * Enquanto a v1 proibia TODO texto na imagem, banir o substantivo
+ * equivalia a banir a intenção. Isso deixou de ser verdade: agora o
+ * mesmo substantivo carrega duas intenções opostas.
+ *
+ *   (A) "preservar o rótulo original"  -> identidade que JÁ EXISTE
+ *   (B) "adicionar um selo promocional" -> texto NOVO na arte
+ *
+ * (A) precisa passar; (B) precisa continuar barrado. A regra passou a
+ * olhar o CONTEXTO da frase, não só a presença do substantivo.
+ *
+ * FAIL CLOSED: sem marcador explícito de preservação, o termo continua
+ * rejeitado. Ambiguidade não libera.
+ */
+/**
+ * Quebra os campos do plano em trechos avaliáveis. A intenção é decidida
+ * POR FRASE: um "preservar" no `objetivo` não pode autorizar um
+ * "adicionar texto" escrito na `cena`.
+ *
+ * Cada campo já é uma fronteira natural; dentro dele, corta em pontuação
+ * forte. Trechos vazios somem.
+ */
+export function segmentarTrechos(campos: string[]): string[] {
+  return campos
+    // Corta ANTES de normalizar: `normalizar()` troca pontuação por
+    // espaço, então segmentar depois perderia toda fronteira de frase.
+    .flatMap(campo => campo.split(/[.;,]|\se\s|\smas\s|\spor[ée]m\s/i))
+    .map(t => normalizar(t).trim())
+    .filter(t => t.length > 0);
+}
+
+const TERMOS_DE_IDENTIDADE_FISICA = [
   "texto", "letra", "letras", "palavra", "palavras", "numero", "numeros",
-  "tipografia", "fonte tipografica", "banner", "letreiro", "rotulo",
-  "legenda", "watermark", "marca dagua", "badge", "carimbo", "adesivo",
+  "tipografia", "fonte tipografica", "rotulo", "carimbo", "adesivo",
+];
+
+/**
+ * Verbos que denunciam CRIAÇÃO de elemento novo. Presentes no mesmo
+ * trecho, rejeitam o termo mesmo que haja palavra de preservação junto —
+ * "manter o rótulo e adicionar um selo" não pode passar por causa da
+ * primeira metade.
+ */
+const VERBOS_DE_CRIACAO = [
+  "adicionar", "adicione", "acrescentar", "acrescente", "criar", "crie",
+  "inserir", "insira", "escrever", "escreva", "colocar", "coloque",
+  "incluir", "inclua", "sobrepor", "sobreponha", "estampar", "estampe",
+  "aplicar", "aplique", "imprimir", "imprima", "desenhar", "desenhe",
+  "gerar", "gere", "novo", "nova", "novos", "novas",
+];
+
+/**
+ * Marcadores de PRESERVAÇÃO do que já existe. Só a presença de um deles,
+ * no mesmo trecho e sem verbo de criação, autoriza o termo de identidade.
+ */
+const MARCADORES_DE_PRESERVACAO = [
+  "preservar", "preserve", "preservando", "preservada", "preservadas",
+  "preservado", "preservados", "manter", "mantenha", "mantendo", "mantida",
+  "mantidas", "mantido", "mantidos", "conservar", "conserve", "original",
+  "originais", "existente", "existentes", "ja impresso", "ja impressos",
+  "ja impressa", "ja impressas", "impresso", "impressos", "impressa",
+  "impressas", "como esta", "como estao", "sem alterar", "sem alteracao",
+  "sem modificar", "inalterado", "inalterada", "inalterados", "inalteradas",
+  "identico", "identica", "fiel", "fieis", "da referencia", "das referencias",
+  "de referencia", "exatamente igual", "igual ao original",
 ];
 
 /**
@@ -754,10 +841,39 @@ export function validarIntegridadePromptsImagem(
     const textoProduto = normalizar([img.objetivo, img.cena, ...img.elementosObrigatorios].join(" "));
     const textoCenario = normalizar([img.fundo, img.iluminacao].join(" "));
 
-    // 1. termo sempre proibido (promocional, clínico, texto na imagem)
+    // Trechos individuais — a decisão de intenção é POR FRASE, não pelo
+    // texto inteiro concatenado. Sem isso, um "preservar" em `objetivo`
+    // liberaria um "adicionar selo" lá em `cena`.
+    const trechos = segmentarTrechos([img.objetivo, img.cena, img.fundo, img.iluminacao, ...img.elementosObrigatorios]);
+
+    // 1. termo proibido sem exceção (promocional, clínico, camada gráfica)
     for (const termo of TERMOS_SEMPRE_PROIBIDOS) {
       if (contemPalavraOuPlural(textoDescritivo, normalizar(termo))) {
         return { valido: false, motivo: `${onde}: usou termo proibido em prompt de imagem ("${termo}").` };
+      }
+    }
+
+    // 1b. identidade física — permitida SÓ em contexto de preservação.
+    // Ver o bloco de comentário em TERMOS_DE_IDENTIDADE_FISICA: banir o
+    // substantivo quebrou o E2E real de 2026-09-05, porque preservar a
+    // identidade passou a ser exigência da arquitetura.
+    for (const termo of TERMOS_DE_IDENTIDADE_FISICA) {
+      const n = normalizar(termo);
+      for (const trecho of trechos) {
+        if (!contemPalavraOuPlural(trecho, n)) continue;
+        const criacao = VERBOS_DE_CRIACAO.find(v => contemPalavraOuPlural(trecho, normalizar(v)));
+        if (criacao) {
+          return {
+            valido: false,
+            motivo: `${onde}: pediu para CRIAR texto/identidade nova ("${criacao}" + "${termo}"). Só é permitido preservar o que já existe no produto.`,
+          };
+        }
+        if (!MARCADORES_DE_PRESERVACAO.some(m => trecho.includes(normalizar(m)))) {
+          return {
+            valido: false,
+            motivo: `${onde}: citou "${termo}" sem deixar explícito que é para PRESERVAR o que já existe no produto.`,
+          };
+        }
       }
     }
 
@@ -766,6 +882,19 @@ export function validarIntegridadePromptsImagem(
       const n = normalizar(termo);
       if (contemPalavraOuPlural(textoDescritivo, n) && !contemPalavraOuPlural(corpus, n)) {
         return { valido: false, motivo: `${onde}: introduziu "${termo}" sem respaldo na análise visual.` };
+      }
+      // Estar no corpus prova que a marca EXISTE — não autoriza criar
+      // outra. "criar um novo logotipo" continua proibido mesmo com a
+      // marca confirmada na análise.
+      for (const trecho of trechos) {
+        if (!contemPalavraOuPlural(trecho, n)) continue;
+        const criacao = VERBOS_DE_CRIACAO.find(v => contemPalavraOuPlural(trecho, normalizar(v)));
+        if (criacao) {
+          return {
+            valido: false,
+            motivo: `${onde}: pediu para CRIAR "${termo}" ("${criacao}"). Identidade de marca só pode ser preservada, nunca inventada.`,
+          };
+        }
       }
     }
 
@@ -810,9 +939,20 @@ export function validarIntegridadePromptsImagem(
     }
 
     // 7. elemento de embalagem fora de imagem de embalagem
+    //
+    // Ajustado em 2026-09-05 pelo mesmo motivo da regra 1b: a intenção
+    // importa. Introduzir a caixa como elemento de cena continua
+    // proibido, mas "manter a embalagem exatamente como no original" é
+    // PRESERVAÇÃO — o produto já está na embalagem dele, e pedir para
+    // não alterá-la não adiciona nada à cena.
     if (img.tipo !== "embalagem" && vv.itensDaEmbalagem.length > 0) {
-      if (contemPalavra(textoDescritivo, "embalagem") || contemPalavra(textoDescritivo, "caixa")) {
-        return { valido: false, motivo: `${onde}: usou elemento de embalagem fora de uma imagem do tipo "embalagem".` };
+      for (const trecho of trechos) {
+        if (!contemPalavra(trecho, "embalagem") && !contemPalavra(trecho, "caixa")) continue;
+        const preservando = MARCADORES_DE_PRESERVACAO.some(m => trecho.includes(normalizar(m)));
+        const criando = VERBOS_DE_CRIACAO.some(v => contemPalavraOuPlural(trecho, normalizar(v)));
+        if (!preservando || criando) {
+          return { valido: false, motivo: `${onde}: usou elemento de embalagem fora de uma imagem do tipo "embalagem".` };
+        }
       }
     }
 
