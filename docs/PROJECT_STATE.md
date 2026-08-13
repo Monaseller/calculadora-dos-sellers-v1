@@ -1098,3 +1098,12 @@ numerado quando uma fase inteira (como "PARTE 2") se encerra de vez.
 10. **2026-08-06 (data do ambiente, esta tarefa)** — Este documento
     (`docs/PROJECT_STATE.md`) criado, consolidando tudo acima a partir de
     leitura direta do código e das migrations.
+
+## Estudio de Anuncios — capa deterministica (2026-09-06)
+
+- `capa_principal` nao passa mais por IA: recorte da foto real + fundo branco + escala uniforme. Fidelidade por construcao, medida em producao (100,000% dos pixels identicos).
+- Validacao de foto e selecao da referencia principal sem IA, ancoradas no minimo oficial do ML (500px) e no lado util do produto.
+- `estudio_anuncios_pipeline_retomar`: retomada append-only e idempotente de pipeline em erro. Executor continua sendo o cron.
+- Proveniencia de imagem (metodo, versao, houve_ia, 3 checksums) na mesma tabela das imagens de IA.
+- `sharp` em producao (~20MB, limite 250MB/function).
+- Limitacoes abertas: CAPA1 (decoracao vem junto no recorte) e CAPA2 (transparencia parcial) — ver BUGS.md.

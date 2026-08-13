@@ -2,6 +2,20 @@
 
 > Ordem cronológica reversa. Toda tarefa que criar, corrigir ou remover funcionalidade deve adicionar uma entrada aqui antes de finalizar.
 
+## 2026-09-06 — Capa deterministica sem IA + retomada de pipeline em erro
+
+- **Motivo: a auditoria visual de 8 imagens geradas deu 0/8 em fidelidade.** Marca e rotulo apagados, tampa alongada, frasco bojudo, quantidade errada e uma cena fisicamente impossivel (duas tampas flutuando com um unico frasco). A conclusao arquitetural foi que um modelo generativo nao pode ser o responsavel por reconstruir um produto comercial que precisa permanecer fiel.
+- **`capa_principal` deixou de passar por IA.** O caminho agora e recorte da foto real -> fundo branco -> centralizacao -> escala uniforme -> margem de 6%. `lib/estudio-anuncios/recorte.ts` escreve **somente o canal alpha**; R, G e B sao copiados byte a byte. Medido em foto real de producao: **674.349 pixels do produto, 100,000% identicos ao original, maior diferenca de canal = 0**. Marca, rotulo, cor, geometria e quantidade passam a ser preservados POR CONSTRUCAO, nao por instrucao a um modelo.
+- **Sem foto apta, a etapa FALHA.** Nao existe fallback para o Gemini — "nao consegui recortar, entao redesenhei o produto" e exatamente o comportamento que a arquitetura passou a impedir. Verificado por teste que le o bloco na fonte.
+- **Secundarias seguem inalteradas.** Mudanca minima de proposito: permite validar a capa sem mexer em todas as imagens de uma vez.
+- **Validacao de foto sem IA** (`qualidade-foto.ts`): seis papeis derivados de sinal medido do arquivo. A politica de resolucao usa `RESOLUCAO_MINIMA_IMAGEM_ML = 500` — a unica fonte documentada no repositorio ("the minimum is 500px x 500px") — e mede o **lado util**, a caixa do produto, nao o arquivo. Uma foto ruim nao invalida as boas.
+- **Retomada de pipeline em erro** (`estudio_anuncios_pipeline_retomar`): cria UM job novo da etapa que falhou, herdando a origem do job falho. Append-only — o job antigo fica intacto como historico. Idempotente. Nao executa: quem processa continua sendo o cron.
+- **Corrigido durante a validacao:** `projeto_id` e `status` colidiam com os nomes do `RETURNS TABLE`, causando `column reference is ambiguous`. Mesma armadilha registrada na Constituicao (secao 11).
+- **Proveniencia** na mesma tabela das imagens de IA (nao segunda fonte de verdade): `origem_foto_id`, `metodo`, `versao_metodo`, `houve_ia`, `houve_composicao`, tres checksums e `escala_aplicada`. Um CHECK impede a proveniencia mentir — `recorte_fundo_branco` com `houve_ia=true` e recusado pelo banco (verificado).
+- **`sharp` entrou como dependencia permanente** (~20MB com binarios, contra 250MB de limite por function). Nao introduziu vulnerabilidade.
+- **Limitacao encontrada na validacao real, ainda em aberto:** o recorte separa *fundo* de *nao-fundo*, nao *produto* de *decoracao*. Numa foto promocional com respingos de chocolate sobre fundo branco, os respingos vieram junto — fidelidade perfeita, mas a capa carrega elementos que nao sao o produto. Ver `BUGS.md`.
+- 821 testes (+25), tsc limpo, build verde. Migration `20260906` aplicada. Nenhum caminho de publicacao introduzido.
+
 ## 2026-09-03 — Limpeza: APIs normalizadas e diagnostico sem consumidor removido
 
 - **Primeiro achado: a lista de "12 rotas" tinha 13 nomes.** O registro anterior dizia 12 mas enumerava `anuncio`, `auth/mercadolivre/callback`, `ml/debug-item`, `ml/importar-anuncios`, `ml/sync-precos`, `ml/sync-skus`, `ml/test-collections`, `ml/vendas`, `ml/vendas-hoje`, `shopee/ping`, `shopee/status`, `shopee/vendas`, `sync/iniciar` — treze. A auditoria trabalhou sobre os nomes reais, nao sobre o numero.

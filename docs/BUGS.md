@@ -2,6 +2,11 @@
 
 > Status: 🔴 aberto crítico | 🟠 aberto médio | 🟡 aberto baixo | ✅ corrigido | 🔎 em investigação
 
+## Abertos
+
+- 🟠 **CAPA1 — o recorte separa fundo de nao-fundo, nao produto de decoracao.** Descoberto na validacao real de 2026-09-06 (projeto "Cacau shows", foto `f4afccb9`). A foto e uma peca promocional: produto sobre fundo branco **com respingos de chocolate decorativos**. O flood fill fez exatamente o que promete — removeu o fundo branco — e os respingos, por nao serem fundo, vieram para a capa. A fidelidade do produto ficou perfeita (100,000% dos pixels), mas a capa resultante nao serve como imagem principal de marketplace, que pede produto sem decoracao competindo. `qualidade-foto.ts` mede cobertura de fundo, nao "o primeiro plano e so o produto". Nao ha correcao determinista obvia: distinguir produto de objeto decorativo exige segmentacao semantica. **Mitigacao atual:** nenhuma automatica — depende de a foto de origem ser um packshot limpo.
+- 🟡 **CAPA2 — transparencia de vidro nao resolvida (PARCIAL).** O fundo visivel ATRAVES do produto e preservado como opaco (medido: 10,6% dos pixels da faixa inferior quase brancos). Invisivel sobre fundo branco, visivel sobre fundo escuro. O alerta e emitido (`alertaTransparencia`) e composicao sobre fundo escuro **nao** foi liberada.
+
 ## Corrigidos (auditoria 03/07/2026 — ver AUDITORIA_FINAL.md e RELATORIO_FASE1.md para detalhe)
 
 - ✅ H1 — `GET /api/perfil` retornava `senha` em plaintext para o cliente.
