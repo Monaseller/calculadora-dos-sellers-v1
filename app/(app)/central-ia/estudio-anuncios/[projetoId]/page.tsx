@@ -271,6 +271,7 @@ export default function EstudioAnunciosProjetoPage({ params }: { params: { proje
   const [ultimaAtualizacao, setUltimaAtualizacao] = useState<Date | null>(null);
 
   const [iniciando, setIniciando] = useState(false);
+  const [retomando, setRetomando] = useState(false);
   const [erroIniciar, setErroIniciar] = useState<string | null>(null);
 
   const isFetchingRef = useRef(false);
@@ -338,6 +339,27 @@ export default function EstudioAnunciosProjetoPage({ params }: { params: { proje
     };
   }, [pipeline?.status, buscarDados]);
 
+  async function retomarGeracao() {
+    setRetomando(true);
+    setErroIniciar(null);
+    try {
+      const res = await fetch(`/api/estudio-anuncios/projetos/${params.projetoId}/pipeline/retomar`, {
+        method: "POST",
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        setErroIniciar(data.erro || "Não foi possível retomar a geração.");
+        setRetomando(false);
+        return;
+      }
+      await buscarDados();
+      setRetomando(false);
+    } catch {
+      setErroIniciar("Falha de conexão ao retomar a geração.");
+      setRetomando(false);
+    }
+  }
+
   async function iniciarGeracao() {
     setIniciando(true);
     setErroIniciar(null);
@@ -392,6 +414,11 @@ export default function EstudioAnunciosProjetoPage({ params }: { params: { proje
 
   if (!projeto) return null;
 
+  // Retomar so faz sentido em erro. Fora disso a RPC recusa de qualquer
+  // forma — o botao some para nao oferecer acao que nao existe.
+  const podeRetomar =
+    !!pipeline && pipeline.status === "erro" &&
+    projeto.status !== "cancelado" && projeto.status !== "concluido";
   const podeIniciar = !pipeline && projeto.status !== "cancelado" && projeto.status !== "concluido";
   const semFotos = fotos.length === 0;
   const progresso = calcularProgresso(jobs);
@@ -440,6 +467,30 @@ export default function EstudioAnunciosProjetoPage({ params }: { params: { proje
                 Adicione pelo menos uma foto do produto para iniciar a geração.
               </span>
             )}
+          </div>
+        )}
+
+        {/* Retomada de geração em erro (2026-09-06). Antes disto, uma
+            etapa que falhava deixava o projeto parado para sempre e
+            obrigava a refazer tudo, repagando as etapas já concluídas.
+            O botão só cria o job — quem processa continua sendo o cron. */}
+        {podeRetomar && (
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: "6px" }}>
+            <button
+              type="button"
+              onClick={retomarGeracao}
+              disabled={retomando}
+              style={{
+                padding: "10px 24px", borderRadius: "10px", border: "none",
+                background: retomando ? "rgba(255,182,0,0.3)" : "linear-gradient(135deg, #FFB600 0%, #FF6B00 100%)",
+                color: "#000", fontWeight: 800, fontSize: "14px", cursor: retomando ? "not-allowed" : "pointer",
+              }}
+            >
+              {retomando ? "Recolocando na fila..." : "Tentar novamente"}
+            </button>
+            <span style={{ fontSize: "12px", color: "#9099aa", fontWeight: 600, maxWidth: "260px", textAlign: "right" }}>
+              Refaz só a etapa que falhou. O que já foi concluído é aproveitado.
+            </span>
           </div>
         )}
       </div>

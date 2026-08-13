@@ -25,6 +25,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { ErroProvedorIA } from "../ai-gateway/erros";
 import { gerarImagemGoogle, obterModeloImagem } from "../ai-gateway/provedores/google-imagem";
+import { escolherEComporCapa } from "./capa-deterministica";
 import type { ReferenciaVisual } from "../ai-gateway/provedores/google-imagem";
 import type { ContextoExecucaoJob } from "./executar-job";
 import type { EnvelopeGeracaoPromptsImagem, PromptImagem, TipoImagem } from "./geracao-prompts-imagem-tipos";
@@ -512,6 +513,75 @@ export async function executarGeracaoImagemGoogle(
         finalidade: linha!.finalidade as TipoImagem,
         reaproveitada: true,
       });
+      continue;
+    }
+
+    // ── CAPA: caminho determinístico, sem IA (2026-09-06) ───────────
+    // A auditoria de 8 imagens geradas deu 0/8 em fidelidade — marca e
+    // rótulo apagados, geometria alterada. Para a capa, que é a imagem
+    // de conformidade do anúncio, os pixels do produto passam a vir da
+    // fotografia real. Secundárias seguem no caminho atual por enquanto,
+    // o que permite validar a capa sem mexer em tudo de uma vez.
+    if (prompt.tipo === "capa_principal") {
+      const capa = await escolherEComporCapa(
+        referenciasUtilizadas.map((r, i) => ({
+          imagemOrigemId: r.imagemOrigemId,
+          buffer: Buffer.from(referenciasBytes[i].buffer),
+        }))
+      );
+      // NUNCA cai para o Gemini aqui. Sem foto apta, a etapa falha com
+      // motivo legível — redesenhar o produto não é alternativa aceitável.
+      if (!capa.ok) {
+        throw new ErroProvedorIA("conteudo_rejeitado", `Capa (prompt ${prompt.ordem}): ${capa.motivo}`.slice(0, 300));
+      }
+      const p = capa.capa.proveniencia;
+      const imagemId = crypto.randomUUID();
+      const caminho = montarCaminhoImagemGerada(userId, ctx.projetoId, ctx.jobId, imagemId, "image/png");
+      validarCaminhoSeguro(caminho, userId, ctx.projetoId, ctx.jobId);
+      await uploadImagemGerada(supabaseServico, caminho, capa.capa.png, "image/png");
+
+      const { error: erroCapa } = await supabaseServico.from("estudio_anuncios_imagens_geradas").insert({
+        id: imagemId,
+        projeto_id: ctx.projetoId,
+        job_id: ctx.jobId,
+        prompt_ordem: prompt.ordem,
+        finalidade: prompt.tipo,
+        numero_versao: versaoPorOrdem.get(prompt.ordem)!,
+        status: "pronta",
+        e_principal: prompt.principal,
+        storage_path: caminho,
+        prompt_utilizado: prompt.promptTexto,
+        mime_type: "image/png",
+        largura_px: capa.capa.largura,
+        altura_px: capa.capa.altura,
+        tamanho_bytes: capa.capa.png.length,
+        // `internal` já é valor aceito pelo CHECK — é o provedor correto
+        // para um caminho que não chama ninguém de fora.
+        provedor: "internal",
+        modelo: `${p.metodo}@${p.versaoMetodo}`,
+        origem_foto_id: p.origemFotoId,
+        metodo: p.metodo,
+        versao_metodo: p.versaoMetodo,
+        houve_ia: false,
+        houve_composicao: true,
+        checksum_original: p.checksumOriginal,
+        checksum_recorte: p.checksumRecorte,
+        checksum_final: p.checksumFinal,
+        escala_aplicada: p.escala,
+      });
+      if (erroCapa) {
+        await excluirImagemGerada(supabaseServico, caminho);
+        throw new ErroProvedorIA("validation", `Falha ao registrar a capa: ${erroCapa.message}`.slice(0, 300));
+      }
+
+      imagens.push({
+        imagemGeradaId: imagemId,
+        ordem: prompt.ordem,
+        principal: prompt.principal,
+        finalidade: prompt.tipo,
+        reaproveitada: false,
+      });
+      // Sem tokens e sem custo: a capa não passou por provedor de IA.
       continue;
     }
 
