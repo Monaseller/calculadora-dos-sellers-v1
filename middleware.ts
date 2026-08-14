@@ -1,43 +1,63 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
+import { decidirAcesso } from "@/lib/middleware-rotas";
 
-// Rotas públicas — sem sessão OK
-const PUBLIC = [
-  "/",
-  "/login",
-  "/verificar-email",
-  "/api/auth/login",
-  "/api/auth/logout",
-  "/api/auth/verificar-email",
-  "/api/auth/mercadolivre",
-  "/api/auth/shopee",
-  "/api/auth/relay",
-  "/api/auth/shopee/callback",
-  "/api/shopee/status",
-  "/api/sync",
-  "/_next",
-  "/favicon",
-];
-
+/**
+ * F0.b — corrige o ALCANCE do middleware.
+ *
+ * A lista anterior continha "/" e era testada com `startsWith`, o que
+ * liberava toda e qualquer rota. A política agora vive em
+ * `lib/middleware-rotas.ts`, com casamento exato, método considerado e
+ * default deny — e é função pura, testada por
+ * `scripts/testar-middleware.ts`.
+ *
+ * NÃO muda a FORÇA da sessão: o cookie continua sendo verificado apenas
+ * por PRESENÇA. Assinatura, expiração, papel e o tratamento do valor
+ * legado "1" são F0.c.
+ */
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  // Permite rotas públicas
-  if (PUBLIC.some(p => pathname.startsWith(p))) {
-    return NextResponse.next();
-  }
+  const cookie = request.cookies.get("cds_session")?.value;
+  const temSessao = !!cookie;
 
-  // Verifica sessão
-  const session = request.cookies.get("cds_session")?.value;
-  if (!session) {
-    const loginUrl = new URL("/login", request.url);
-    loginUrl.searchParams.set("redirect", pathname);
-    return NextResponse.redirect(loginUrl);
-  }
+  switch (decidirAcesso(pathname, request.method, temSessao)) {
+    case "liberar":
+      return NextResponse.next();
 
-  return NextResponse.next();
+    case "bloquear_api":
+      // Cliente `fetch` precisa de 401 — nunca do HTML da tela de login
+      // devolvido com status 200, que era o comportamento anterior.
+      return NextResponse.json(
+        { erro: true, mensagem: "Sessão inválida." },
+        { status: 401 }
+      );
+
+    case "redirecionar": {
+      const loginUrl = new URL("/login", request.url);
+      loginUrl.searchParams.set("redirect", pathname);
+      return NextResponse.redirect(loginUrl);
+    }
+  }
 }
 
+/**
+ * F0.b.1 — o namespace `_next` inteiro fica FORA do middleware.
+ *
+ * Antes só `_next/static` e `_next/image` eram excluídos, e o resto do
+ * namespace interno do Next.js (ex.: `_next/webpack-hmr` em dev) caía na
+ * política de sessão: um visitante deslogado numa página pública recebia
+ * redirect para /login em infraestrutura do próprio framework.
+ *
+ * `_next` é namespace reservado — nenhuma rota nossa vive lá — então a
+ * exclusão é do prefixo inteiro, não de dois casos conhecidos.
+ *
+ * ⚠ O valor precisa ser um LITERAL: o Next.js extrai `config.matcher`
+ * estaticamente no build e não aceita constante importada. Por isso ele
+ * não é compartilhado com `lib/middleware-rotas.ts` — em vez disso,
+ * `scripts/testar-middleware.ts` lê ESTE arquivo e valida o literal,
+ * impedindo divergência silenciosa.
+ */
 export const config = {
-  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
+  matcher: ["/((?!_next|favicon.ico).*)"],
 };
