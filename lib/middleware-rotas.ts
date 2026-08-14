@@ -113,16 +113,20 @@ export const ROTAS_COM_SEGREDO: Readonly<Record<string, readonly string[]>> = {
 /**
  * DÍVIDA DECLARADA — desaparece em F0.c.
  *
- * Três rotas legadas que hoje não usam `cds_session`: `/api/anuncio` usa
- * app token do ML, e as outras duas autorizam pelo cookie httpOnly
- * `ml_access_token` (uma segunda autenticação paralela). Mantidas com o
- * comportamento ATUAL para reduzir o alcance desta etapa.
+ * Rotas legadas que não usam `cds_session`: elas autorizam pelo cookie
+ * httpOnly `ml_access_token` — uma segunda autenticação paralela.
+ * Mantidas com o comportamento ATUAL para reduzir o alcance da etapa.
+ *
+ * 3 → 2 no cutover de Meus Produtos (F0.c.5): `/api/anuncio` saiu. Ela
+ * passou a exigir sessão porque, sem `userId` confiável, não há como
+ * verificar de quem é a loja nem resolver a credencial no servidor — e
+ * era por ela que a busca de anúncio por link perdia SKU e variações em
+ * silêncio quando o cookie de 6 horas vencia.
  *
  * F0.c só é dada por concluída quando este objeto estiver VAZIO. O teste
- * trava o tamanho em 3 para impedir que a exceção cresça.
+ * trava o tamanho para impedir que a exceção cresça.
  */
 export const EXCECOES_TEMPORARIAS_F0C: Readonly<Record<string, readonly string[]>> = {
-  "/api/anuncio": ["GET"],
   "/api/auth/status": ["GET"],
   "/api/ml/item-thumbnails": ["GET"],
 };

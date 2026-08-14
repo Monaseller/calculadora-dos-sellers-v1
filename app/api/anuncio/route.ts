@@ -1,4 +1,6 @@
 import { NextResponse } from "next/server";
+import { autenticarRequisicao, lerCookie } from "@/lib/autenticacao";
+import { resolverContaML } from "@/lib/ml-conexao";
 
 // Cache do app token (client_credentials) — válido para chamadas de servidor
 let _appTokenCache: { token: string; expiresAt: number } | null = null;
@@ -396,6 +398,18 @@ function parseDimensoesShipping(dim: string | null | undefined): {
 }
 
 export async function GET(request: Request) {
+  // ── SESSÃO OBRIGATÓRIA (F0.c.5, cutover de Meus Produtos) ─────────
+  // Esta rota era pública: estava em `EXCECOES_TEMPORARIAS_F0C` e usava o
+  // cookie `ml_access_token` como única credencial. Sem `userId` confiável
+  // não há como verificar de quem é a loja, e portanto não há como
+  // resolver a credencial no servidor. A sessão vem antes de tudo, para
+  // que nem o parsing do link fique exposto a quem não está autenticado.
+  const auth = await autenticarRequisicao(request);
+  const userId = auth.autenticado ? auth.uid : null;
+  if (!userId) {
+    return NextResponse.json({ erro: true, mensagem: "Sessão inválida." }, { status: 401 });
+  }
+
   const url = new URL(request.url);
   const link = url.searchParams.get("link");
 
@@ -413,9 +427,20 @@ export async function GET(request: Request) {
   console.log(`[anuncio] Link: ${linkNorm.slice(0, 80)}`);
   console.log(`[anuncio] primaryId: ${parsed.primaryId} | catalogId: ${parsed.catalogId}`);
 
-  const cookieHeader = request.headers.get("cookie") || "";
-  const tokenEntry = cookieHeader.split("; ").find((c) => c.startsWith("ml_access_token="));
-  const token = tokenEntry ? tokenEntry.slice("ml_access_token=".length) : null;
+  // ── CREDENCIAL RESOLVIDA NO SERVIDOR ──────────────────────────────
+  // Antes: `token` saía do cookie `ml_access_token` do navegador. Como
+  // esse cookie dura 6 horas, o usuário passava a importar anúncios pelo
+  // caminho público — que funciona, mas **não devolve `seller_custom_field`
+  // nem as variações completas** (ver `fetchItem`). A perda de SKU era
+  // silenciosa: nenhuma mensagem, só um anúncio incompleto.
+  //
+  // Agora a credencial vem do banco, pela loja do próprio usuário. Se não
+  // houver credencial utilizável, `token` continua `null` e todo o
+  // fallback público/scraping segue existindo exatamente como antes — mas
+  // agora isso só acontece quando realmente NÃO há credencial, nunca por
+  // um cookie vencido.
+  const conta = await resolverContaML(userId, lerCookie(request, "loja_ativa_id"));
+  const token = conta.ok ? conta.accessToken : null;
 
   let itemId = parsed.primaryId;
   let response = await fetchItem(parsed.primaryId, token);

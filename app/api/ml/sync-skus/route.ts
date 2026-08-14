@@ -1,17 +1,12 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { autenticarRequisicao } from "@/lib/autenticacao";
+import { autenticarRequisicao, lerCookie } from "@/lib/autenticacao";
+import { resolverContaML } from "@/lib/ml-conexao";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 );
-
-function getToken(request: Request): string | null {
-  const cookieHeader = request.headers.get("cookie") || "";
-  const entry = cookieHeader.split("; ").find(c => c.startsWith("ml_access_token="));
-  return entry ? entry.slice("ml_access_token=".length) : null;
-}
 
 // Busca SKU via user_products API (fallback para itens omnichannel)
 async function buscarSkuUserProducts(
@@ -34,15 +29,35 @@ async function buscarSkuUserProducts(
 }
 
 export async function POST(request: Request) {
-  const token  = getToken(request);
+  // A sessão vem PRIMEIRO. Antes, a rota checava o cookie ANTES da sessão
+  // e devolvia "Conta ML não conectada" — ou seja, um não-autenticado
+  // recebia uma resposta sobre o estado da conta ML.
   const auth = await autenticarRequisicao(request);
   const userId = auth.autenticado ? auth.uid : null;
-  if (!token) {
-    return NextResponse.json({ erro: true, mensagem: "Conta ML não conectada." });
-  }
   if (!userId) {
     return NextResponse.json({ erro: true, mensagem: "Sessão inválida." }, { status: 401 });
   }
+
+  // ── CREDENCIAL RESOLVIDA NO SERVIDOR (F0.c.5) ─────────────────────
+  // Antes: `getToken(request)` lia SÓ o cookie `ml_access_token`, sem
+  // nenhum caminho de banco. Com o cookie de 6 horas vencido, esta rota
+  // falhava sempre — mesmo com credencial válida em `lojas` e com
+  // `/api/ml/conexao` respondendo CONECTADO. Era a inconsistência que o
+  // cutover existe para fechar.
+  const conta = await resolverContaML(userId, lerCookie(request, "loja_ativa_id"));
+  if (!conta.ok) {
+    // Status 200 preservado DE PROPÓSITO nesta etapa: a tela lê
+    // `data.erro`/`data.mensagem` e ignora o status. Trocar para 4xx aqui
+    // é decisão à parte — fica registrado como dívida, não corrigido de
+    // passagem no meio de um cutover.
+    return NextResponse.json({
+      erro: true,
+      mensagem: conta.motivo === "LOJA_NAO_DEFINIDA"
+        ? "Selecione a loja do Mercado Livre."
+        : "Conta ML não conectada.",
+    });
+  }
+  const token = conta.accessToken;
 
   // Busca anúncios com ml_item_id mas sem SKU (ou SKU vazio) — apenas deste usuário
   const { data: anuncios, error } = await supabase

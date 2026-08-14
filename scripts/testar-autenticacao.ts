@@ -329,17 +329,20 @@ function arquivosTs(): string[] {
 const TODOS = arquivosTs();
 
 /**
- * Depois do cutover preparado em F0.c.3a, a camada É usada por 37
- * arquivos: 35 rotas que autenticam + o login (que EMITE o token) + o
+ * Depois do cutover preparado em F0.c.3a, a camada É usada por 38
+ * arquivos: 36 rotas que autenticam + o login (que EMITE o token) + o
  * middleware. O número fica travado: se cair, alguma rota perdeu
  * autenticação; se subir sem revisão, apareceu consumidor novo.
  *
- * 36 → 37 em F0.c.5-B: `app/api/ml/conexao/route.ts`. A trava fez
- * exatamente o que devia — acusou o consumidor novo, e o número só subiu
- * depois de conferir que a rota autentica de verdade (teste "P. sem
- * cookie de sessão -> 401" em `scripts/testar-conexao-ml.ts`).
+ * 36 → 37 em F0.c.5-B: `app/api/ml/conexao/route.ts`.
+ * 37 → 38 no cutover de Meus Produtos: `app/api/anuncio/route.ts`, que
+ * era PÚBLICA e passou a exigir sessão — sem `userId` confiável não há
+ * como resolver a credencial do ML no servidor. Provado pelos testes
+ * "H. /api/anuncio SEM sessão -> 401" em
+ * `scripts/testar-cutover-rotas-ml.ts` e "19." em
+ * `scripts/testar-middleware.ts`.
  */
-const CONSUMIDORES_ESPERADOS_AUTENTICACAO = 37;
+const CONSUMIDORES_ESPERADOS_AUTENTICACAO = 38;
 
 t(`22. exatamente ${CONSUMIDORES_ESPERADOS_AUTENTICACAO} arquivos de produção usam a camada nova`, () => {
   const proprios = [

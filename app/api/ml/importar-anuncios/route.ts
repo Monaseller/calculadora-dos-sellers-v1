@@ -2,8 +2,9 @@ import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { calcularFreteMl, calcularFreteFullMl, calcularFreteFlexMl } from "@/lib/tabela-frete-ml";
 import { CATEGORIAS_ML } from "@/lib/comissoes-mercado-livre";
-import { autenticarRequisicao } from "@/lib/autenticacao";
-import { getMLToken, applyMLCookies } from "@/lib/ml-auth";
+import { autenticarRequisicao, lerCookie } from "@/lib/autenticacao";
+import { applyMLCookies } from "@/lib/ml-auth";
+import { resolverContaML } from "@/lib/ml-conexao";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -77,11 +78,25 @@ export async function POST(request: Request) {
   if (!userId) {
     return NextResponse.json({ erro: true, mensagem: "Sessão inválida." }, { status: 401 });
   }
-  const tokenResult = await getMLToken(request, userId);
-  if (!tokenResult) {
-    return NextResponse.json({ erro: true, mensagem: "Conta do ML não conectada." }, { status: 401 });
+  // ── CREDENCIAL RESOLVIDA NO SERVIDOR (F0.c.5) ─────────────────────
+  // Antes: `getMLToken(request, userId)`, cujo PRIMEIRO caminho devolve o
+  // cookie `ml_access_token` sem sequer verificar de qual loja ele é — e
+  // cujo caminho de banco só existe quando o cookie `loja_ativa_id` está
+  // presente. Sem esse cookie, a rota falhava mesmo com credencial válida
+  // no banco e com `/api/ml/conexao` dizendo CONECTADO.
+  //
+  // Agora a loja e a credencial saem do mesmo resolvedor que responde à
+  // tela, então as duas nunca discordam.
+  const conta = await resolverContaML(userId, lerCookie(request, "loja_ativa_id"));
+  if (!conta.ok) {
+    return NextResponse.json({
+      erro: true,
+      mensagem: conta.motivo === "LOJA_NAO_DEFINIDA"
+        ? "Selecione a loja do Mercado Livre."
+        : "Conta do ML não conectada.",
+    }, { status: 401 });
   }
-  const token = tokenResult.token;
+  const token = conta.accessToken;
 
   const meRes = await fetch("https://api.mercadolibre.com/users/me", {
     headers: { Authorization: `Bearer ${token}` },
@@ -328,7 +343,14 @@ export async function POST(request: Request) {
   }
 
   const res = NextResponse.json({ importados, atualizados, erros, total: allItemIds.length });
-  applyMLCookies(res, tokenResult);
+  // COMPATIBILIDADE TEMPORÁRIA (decisão 2 do cutover). A rota não confia
+  // mais no cookie para decidir NADA, mas continua emitindo-o porque
+  // Dashboard e Vendas ainda dependem dele. Só grava quando o valor mudou
+  // — emitir Set-Cookie a cada requisição seria escrever mais credencial
+  // no navegador do que o código antigo escrevia. Some na fase E.
+  if (lerCookie(request, "ml_access_token") !== token) {
+    applyMLCookies(res, { token, newAccessToken: token });
+  }
   return res;
 }
 

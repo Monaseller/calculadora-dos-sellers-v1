@@ -2,8 +2,9 @@ import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { calcularFreteMl, calcularFreteFullMl, calcularFreteFlexMl } from "@/lib/tabela-frete-ml";
 import { CATEGORIAS_ML } from "@/lib/comissoes-mercado-livre";
-import { autenticarRequisicao } from "@/lib/autenticacao";
-import { getMLToken, applyMLCookies } from "@/lib/ml-auth";
+import { autenticarRequisicao, lerCookie } from "@/lib/autenticacao";
+import { applyMLCookies } from "@/lib/ml-auth";
+import { resolverContaML } from "@/lib/ml-conexao";
 import { getActivePromoPrice } from "@/lib/ml-promotions";
 
 const supabase = createClient(
@@ -123,11 +124,21 @@ export async function POST(request: Request) {
   if (!userId) {
     return NextResponse.json({ erro: true, mensagem: "Sessão inválida." }, { status: 401 });
   }
-  const tokenResult = await getMLToken(request, userId);
-  if (!tokenResult) {
-    return NextResponse.json({ erro: true, mensagem: "Mercado Livre não conectado." });
+  // ── CREDENCIAL RESOLVIDA NO SERVIDOR (F0.c.5) ─────────────────────
+  // Mesma troca de `importar-anuncios`: a loja e a credencial passam a
+  // sair do mesmo resolvedor que responde à tela, em vez do cookie.
+  const conta = await resolverContaML(userId, lerCookie(request, "loja_ativa_id"));
+  if (!conta.ok) {
+    // Status 200 preservado: a tela lê `data.erro`/`data.mensagem`. A
+    // dívida do "200 para erro" é registrada, não corrigida aqui.
+    return NextResponse.json({
+      erro: true,
+      mensagem: conta.motivo === "LOJA_NAO_DEFINIDA"
+        ? "Selecione a loja do Mercado Livre."
+        : "Mercado Livre não conectado.",
+    });
   }
-  const token = tokenResult.token;
+  const token = conta.accessToken;
 
   const { data: anuncios, error } = await supabase
     .from("anuncios")
@@ -285,6 +296,10 @@ export async function POST(request: Request) {
     : `${atualizados} anúncio${atualizados !== 1 ? "s" : ""} atualizado${atualizados !== 1 ? "s" : ""}!`;
 
   const res = NextResponse.json({ erro: false, atualizados, mensagem, detalhes });
-  applyMLCookies(res, tokenResult);
+  // COMPATIBILIDADE TEMPORÁRIA (decisão 2). Ver o comentário equivalente
+  // em `importar-anuncios`. Some na fase E.
+  if (lerCookie(request, "ml_access_token") !== token) {
+    applyMLCookies(res, { token, newAccessToken: token });
+  }
   return res;
 }

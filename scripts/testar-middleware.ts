@@ -158,10 +158,22 @@ t("18. shopee/debug nao consta em nenhuma das listas de excecao", () => {
 });
 
 // ────────────────────────────────────────────────────────────────────
-console.log("\n[5. tres rotas legadas mantem o comportamento atual]");
+console.log("\n[5. rotas legadas: duas mantidas, /api/anuncio migrada]");
 
-t("19. /api/anuncio continua acessivel sem cds_session", () => {
-  assert(sem("/api/anuncio") === "liberar", "comportamento legado foi alterado em F0.b");
+t("19. /api/anuncio PASSA A EXIGIR sessao (cutover F0.c.5)", () => {
+  // Era a terceira excecao temporaria. Saiu da lista porque a rota agora
+  // resolve a credencial do ML no servidor, e isso exige userId confiavel.
+  assert(sem("/api/anuncio") === "bloquear_api",
+    "/api/anuncio continua publica — a excecao nao foi removida");
+  assert(!("/api/anuncio" in EXCECOES_TEMPORARIAS_F0C),
+    "/api/anuncio ainda consta na excecao temporaria");
+});
+
+t("19b. sem sessao, /api/anuncio recebe 401 de API e NAO redirect HTML", () => {
+  // Distincao que importa para o fetch do FormAnuncio: um redirect 307
+  // para /login devolveria HTML e o `res.json()` da tela quebraria com
+  // erro de parse em vez de uma mensagem util.
+  assert(sem("/api/anuncio") !== "redirecionar", "rota de API caiu no fluxo de redirect de pagina");
 });
 
 t("20. /api/auth/status continua acessivel sem cds_session", () => {
@@ -172,10 +184,11 @@ t("21. /api/ml/item-thumbnails continua acessivel sem cds_session", () => {
   assert(sem("/api/ml/item-thumbnails") === "liberar", "comportamento legado foi alterado em F0.b");
 });
 
-t("22. a excecao temporaria tem EXATAMENTE 3 entradas", () => {
-  // Trava contra crescimento silencioso. F0.c so termina com este objeto vazio.
+t("22. a excecao temporaria tem EXATAMENTE 2 entradas", () => {
+  // Trava contra crescimento silencioso. F0.c so termina com este objeto
+  // vazio. 3 → 2 no cutover de Meus Produtos: so /api/anuncio saiu.
   const n = Object.keys(EXCECOES_TEMPORARIAS_F0C).length;
-  assert(n === 3, `excecao temporaria cresceu para ${n} — F0.b autorizou 3`);
+  assert(n === 2, `excecao temporaria tem ${n} — o cutover F0.c.5 autorizou 2`);
 });
 
 // ────────────────────────────────────────────────────────────────────
@@ -272,10 +285,11 @@ const INVENTARIO: [string, string, Decisao][] = [
   ["/api/internal/estudio-anuncios/worker", "GET", "liberar"],
   ["/api/internal/estudio-anuncios/executar", "POST", "liberar"],
   ["/api/internal/sync/executar", "POST", "liberar"],
-  // — excecoes temporarias F0.c (3)
-  ["/api/anuncio", "GET", "liberar"],
+  // — excecoes temporarias F0.c (2, era 3 ate o cutover F0.c.5)
   ["/api/auth/status", "GET", "liberar"],
   ["/api/ml/item-thumbnails", "GET", "liberar"],
+  // — migrada em F0.c.5: exige sessao como qualquer rota de API
+  ["/api/anuncio", "GET", "bloquear_api"],
   // — protegidas: auth e perfil (3)
   ["/api/auth/me", "GET", "bloquear_api"],
   ["/api/auth/status-session", "GET", "bloquear_api"],

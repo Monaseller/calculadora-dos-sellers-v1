@@ -2,6 +2,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { supabase, type Anuncio } from "@/lib/supabase";
 import { moeda } from "@/lib/cds-engine";
+import {
+  interpretarConexaoML,
+  podeOperarML,
+  motivoBloqueioML,
+  avisoConexaoML,
+  CONEXAO_ML_CARREGANDO,
+  type ConexaoML,
+} from "@/lib/conexao-ml-cliente";
 import FormAnuncio from "./FormAnuncio";
 import CardAnuncio from "./CardAnuncio";
 import CardAnuncioVariacoes from "./CardAnuncioVariacoes";
@@ -11,8 +19,31 @@ export default function AnunciosPage() {
   const [loading,     setLoading]     = useState(true);
   const [showForm,    setShowForm]    = useState(false);
   const [editando,    setEditando]    = useState<Anuncio | null>(null);
-  const [mlConectado, setMlConectado] = useState(false);
   const [userId,      setUserId]      = useState<string | null>(null);
+
+  /**
+   * Estado da conexão ML — F0.c.5 fase C.
+   *
+   * Antes isto era um booleano vindo de `/api/auth/status`, que responde
+   * olhando o cookie `ml_access_token` do NAVEGADOR. Como esse cookie
+   * dura 6 horas e só é renovado pelas ações que esta tela desabilita
+   * quando ele falta, o usuário ficava preso: "não conectado" com a
+   * credencial válida no banco.
+   *
+   * Agora a fonte de verdade é o servidor (`GET /api/ml/conexao`), que
+   * parte da sessão da CDS, confirma a propriedade da loja, lê a
+   * credencial no banco e renova sozinho quando preciso.
+   */
+  const [conexao, setConexao] = useState<ConexaoML>(CONEXAO_ML_CARREGANDO);
+
+  /**
+   * Único portão das ações que falam com o ML. O nome antigo é mantido
+   * porque toda a estilização existente depende dele — a migração troca
+   * a FONTE do valor, não o visual.
+   */
+  const mlConectado = podeOperarML(conexao);
+  const bloqueioML  = motivoBloqueioML(conexao);
+  const avisoML     = avisoConexaoML(conexao);
 
   // ── Filtros ─────────────────────────────────────────────────────────────
   const [painelFiltros,      setPainelFiltros]      = useState(false);
@@ -51,13 +82,23 @@ export default function AnunciosPage() {
   }
 
   useEffect(() => {
-    // Busca user_id e ML status em paralelo
+    // Busca user_id e estado da conexão ML em paralelo.
+    //
+    // UMA chamada, no ciclo normal da tela: sem polling, sem timer e sem
+    // refresh no cliente. Quando a credencial está vencida, quem renova é
+    // o próprio endpoint, no servidor.
+    //
+    // O status HTTP entra na interpretação junto com o corpo: 401 e 5xx
+    // têm estados próprios e NÃO podem virar "Mercado Livre desconectado".
     Promise.all([
       fetch("/api/auth/me").then(r => r.json()).catch(() => ({ userId: null })),
-      fetch("/api/auth/status").then(r => r.json()).catch(() => ({ conectado: false })),
-    ]).then(([me, status]) => {
+      fetch("/api/ml/conexao")
+        .then(async r => interpretarConexaoML(r.status, await r.json().catch(() => null)))
+        // `status 0` = a requisição nem completou (rede, CORS, aborto).
+        .catch(() => interpretarConexaoML(0, null)),
+    ]).then(([me, conexaoML]) => {
       setUserId(me.userId ?? null);
-      setMlConectado(!!status.conectado);
+      setConexao(conexaoML);
       if (me.userId) carregar(me.userId);
     });
   }, []);
@@ -324,7 +365,7 @@ export default function AnunciosPage() {
           <button
             onClick={sincronizarPrecos}
             disabled={sincronizando || !mlConectado}
-            title={!mlConectado ? "Conecte o Mercado Livre primeiro" : "Sincronizar preços e dados com o ML"}
+            title={bloqueioML ?? "Sincronizar preços e dados com o ML"}
             style={{
               padding: "12px 20px",
               background: sincronizando ? "rgba(0,217,126,0.12)" : mlConectado ? "rgba(0,217,126,0.08)" : "rgba(255,255,255,0.04)",
@@ -676,7 +717,7 @@ export default function AnunciosPage() {
             <button
               onClick={atualizarSkus}
               disabled={atualizandoSkus || !mlConectado}
-              title={!mlConectado ? "Conecte o Mercado Livre primeiro" : "Buscar SKU automaticamente para anúncios sem SKU"}
+              title={bloqueioML ?? "Buscar SKU automaticamente para anúncios sem SKU"}
               style={{
                 padding: "9px 16px",
                 background: mlConectado ? "rgba(100,160,255,0.08)" : "rgba(255,255,255,0.03)",
@@ -813,29 +854,46 @@ export default function AnunciosPage() {
         </div>
       )}
 
-      {/* ── Aviso ML desconectado ──────────────────────────────── */}
-      {!mlConectado && (
-        <div style={{
-          background: "rgba(255,180,0,0.06)", border: "1px solid rgba(255,180,0,0.18)",
-          borderRadius: "16px", padding: "14px 18px", marginBottom: "24px",
-          display: "flex", alignItems: "center", justifyContent: "space-between", gap: "16px", flexWrap: "wrap",
-        }}>
-          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-            <span style={{ fontSize: "20px" }}>⚡</span>
-            <div>
-              <div style={{ fontWeight: 800, fontSize: "14px", color: "#ffb800" }}>Mercado Livre não conectado</div>
-              <div style={{ color: "#9099aa", fontSize: "13px" }}>Conecte para buscar anúncios pelo link automaticamente.</div>
-            </div>
-          </div>
-          <a href="/api/auth/mercadolivre" style={{
-            padding: "10px 18px", textDecoration: "none",
-            background: "#FFE600", borderRadius: "12px",
-            fontWeight: 900, color: "#10131b", fontSize: "13px", whiteSpace: "nowrap",
+      {/* ── Aviso do estado da conexão ML ──────────────────────── */}
+      {/*
+          Mesmo bloco visual de antes, agora com um estado por causa. O
+          aviso some enquanto carrega (antes ele piscava "não conectado"
+          em toda visita) e some quando está tudo certo. As cores mudam
+          só pelo `tom`: aviso é o amarelo original, erro é vermelho,
+          info é azul — porque "falta escolher a loja" e "não consegui
+          verificar" não são a mesma notícia que "não conectado".
+      */}
+      {avisoML && (() => {
+        const cores = {
+          aviso: { fundo: "rgba(255,180,0,0.06)",  borda: "rgba(255,180,0,0.18)",  titulo: "#ffb800", icone: "⚡" },
+          erro:  { fundo: "rgba(255,60,60,0.06)",  borda: "rgba(255,60,60,0.18)",  titulo: "#ff6b6b", icone: "⚠️" },
+          info:  { fundo: "rgba(100,160,255,0.06)", borda: "rgba(100,160,255,0.18)", titulo: "#6fa3ff", icone: "🛒" },
+        }[avisoML.tom];
+        return (
+          <div style={{
+            background: cores.fundo, border: `1px solid ${cores.borda}`,
+            borderRadius: "16px", padding: "14px 18px", marginBottom: "24px",
+            display: "flex", alignItems: "center", justifyContent: "space-between", gap: "16px", flexWrap: "wrap",
           }}>
-            Conectar ML
-          </a>
-        </div>
-      )}
+            <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+              <span style={{ fontSize: "20px" }}>{cores.icone}</span>
+              <div>
+                <div style={{ fontWeight: 800, fontSize: "14px", color: cores.titulo }}>{avisoML.titulo}</div>
+                <div style={{ color: "#9099aa", fontSize: "13px" }}>{avisoML.descricao}</div>
+              </div>
+            </div>
+            {avisoML.acao && (
+              <a href={avisoML.acao.href} style={{
+                padding: "10px 18px", textDecoration: "none",
+                background: "#FFE600", borderRadius: "12px",
+                fontWeight: 900, color: "#10131b", fontSize: "13px", whiteSpace: "nowrap",
+              }}>
+                {avisoML.acao.texto}
+              </a>
+            )}
+          </div>
+        );
+      })()}
 
       {/* ── Modal ──────────────────────────────────────────────── */}
       {showForm && (
