@@ -436,8 +436,10 @@ async function rodar() {
     assert(/else erros\.push\(item\)/.test(CONTA), "na dúvida precisa bloquear");
   });
   await t("33. rotas preservam a ordem de segurança e não vazam 403", () => {
-    for (const [nome, f] of [["val", ROTA_VAL], ["lojas", ROTA_LOJAS]] as const) {
-      assert(/getUserId/.test(f) && /buscarProjetoPorId/.test(f), `${nome} sem checagem de sessão/projeto`);
+    for (const [nome, bruto] of [["val", ROTA_VAL], ["lojas", ROTA_LOJAS]] as const) {
+      // Sem comentários: a checagem tem de estar no CÓDIGO (F0.c.3a).
+      const f = bruto.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/^\s*\/\/.*$/gm, " ");
+      assert(/autenticarRequisicao/.test(f) && /buscarProjetoPorId/.test(f), `${nome} sem checagem de sessão/projeto`);
       assert(/status: 401/.test(f) && /status: 404/.test(f), `${nome} sem códigos de erro`);
       assert(!/status: 403/.test(f), `${nome} usa 403 — deveria ser 404`);
       assert(!/body\.(userId|user_id)/.test(f), `${nome} aceita user do corpo`);
@@ -603,8 +605,11 @@ async function rodar() {
     }
   });
   await t("56. a rota preserva a ordem de segurança e não expõe segredo", () => {
-    const corpo = ROTA_PUB.slice(ROTA_PUB.indexOf("export async function POST"));
-    const iSessao = corpo.indexOf("getUserId");
+    const corpo = ROTA_PUB
+      .slice(ROTA_PUB.indexOf("export async function POST"))
+      .replace(/\/\*[\s\S]*?\*\//g, " ")
+      .replace(/^\s*\/\/.*$/gm, " ");
+    const iSessao = corpo.indexOf("autenticarRequisicao");
     const iUuid = corpo.indexOf("UUID_REGEX");
     const iDono = corpo.indexOf("buscarProjetoPorId");
     const iServico = corpo.indexOf("getSupabaseServidor()");

@@ -5,7 +5,7 @@
  */
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { getUserId } from "@/lib/session";
+import { autenticarRequisicao } from "@/lib/autenticacao";
 import { syncMLForUser } from "@/lib/sync-ml";
 
 const supabase = createClient(
@@ -63,7 +63,8 @@ function pedidoToRow(p: any) {
 
 export async function GET(request: Request) {
   const token  = getToken(request);
-  const userId = getUserId(request);
+  const auth = await autenticarRequisicao(request);
+  const userId = auth.autenticado ? auth.uid : null;
 
   if (!userId) {
     return NextResponse.json({ erro: true, semConexao: true, mensagem: "Sessão inválida." }, { status: 401 });

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { getUserId } from "@/lib/session";
+import { autenticarRequisicao } from "@/lib/autenticacao";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -8,7 +8,8 @@ const supabase = createClient(
 );
 
 export async function GET(request: NextRequest) {
-  const userId = getUserId(request);
+  const auth = await autenticarRequisicao(request);
+  const userId = auth.autenticado ? auth.uid : null;
   if (!userId) return NextResponse.json({ userId: null }, { status: 401 });
 
   // Confirma que o UUID existe no banco

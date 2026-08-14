@@ -340,10 +340,12 @@ async function rodar() {
     assert(!/createBucket|updateBucket/.test(LIB + ROTA + ler("lib/estudio-anuncios/storage.ts")), "código cria ou reconfigura bucket");
   });
   await t("30. a rota preserva a ordem de segurança e não vaza caminho", () => {
-    const iSessao = ROTA.indexOf("getUserId");
-    const iDono = ROTA.indexOf("buscarProjetoPorId");
-    const iPacote = ROTA.indexOf("buscarPacoteDoProjeto");
-    const iServico = ROTA.indexOf("getSupabaseServidor()");
+    // Comentários fora: a docstring lista a MESMA ordem (F0.c.3a).
+    const CODIGO = ROTA.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/^\s*\/\/.*$/gm, " ");
+    const iSessao = CODIGO.indexOf("autenticarRequisicao");
+    const iDono = CODIGO.indexOf("buscarProjetoPorId");
+    const iPacote = CODIGO.indexOf("buscarPacoteDoProjeto");
+    const iServico = CODIGO.indexOf("getSupabaseServidor()");
     assert(iSessao >= 0 && iDono > iSessao && iPacote > iDono && iServico > iPacote, "ordem de segurança quebrada");
     assert(/status: 401/.test(ROTA) && /status: 400/.test(ROTA) && /status: 404/.test(ROTA) && /status: 409/.test(ROTA), "faltam códigos de erro");
     assert(!/403/.test(ROTA), "pacote de outro usuário deveria ser 404, nunca 403");

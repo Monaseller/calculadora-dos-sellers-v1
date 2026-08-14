@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { calcularFreteMl, calcularFreteFullMl, calcularFreteFlexMl } from "@/lib/tabela-frete-ml";
 import { CATEGORIAS_ML } from "@/lib/comissoes-mercado-livre";
-import { getUserId } from "@/lib/session";
+import { autenticarRequisicao } from "@/lib/autenticacao";
 import { getMLToken, applyMLCookies } from "@/lib/ml-auth";
 import { getActivePromoPrice } from "@/lib/ml-promotions";
 
@@ -117,7 +117,8 @@ function recalcularLucroMargem(
 
 export async function POST(request: Request) {
   const tokenResult = await getMLToken(request);
-  const userId      = getUserId(request);
+  const auth        = await autenticarRequisicao(request);
+  const userId      = auth.autenticado ? auth.uid : null;
   if (!tokenResult) {
     return NextResponse.json({ erro: true, mensagem: "Mercado Livre não conectado." });
   }

@@ -5,7 +5,7 @@
  * já existente no banco. NÃO chama nenhuma API de marketplace — só lê e
  * escreve no Supabase (regra aprovada 2026-07-10, Parte 7 do backfill).
  *
- * Rota operacional, não exposta em tela/menu — gated pela sessão (getUserId),
+ * Rota operacional, não exposta em tela/menu — gated pela sessão (autenticarRequisicao),
  * mesmo padrão dos outros endpoints /api/admin/*.
  *
  * Query params:
@@ -48,7 +48,7 @@
  */
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { getUserId } from "@/lib/session";
+import { autenticarRequisicao } from "@/lib/autenticacao";
 import { atualizarResumoDia } from "@/lib/resumos-diarios";
 
 export const maxDuration = 60;
@@ -66,7 +66,8 @@ function proximoDiaISO(iso: string): string {
 }
 
 export async function GET(request: Request) {
-  const userId = getUserId(request);
+  const auth = await autenticarRequisicao(request);
+  const userId = auth.autenticado ? auth.uid : null;
   if (!userId) {
     return NextResponse.json({ erro: true, mensagem: "Sessao invalida." }, { status: 401 });
   }

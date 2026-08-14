@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { getUserId } from "@/lib/session";
+import { autenticarRequisicao } from "@/lib/autenticacao";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -25,7 +25,9 @@ function hojeISO() {
 // ── GET /api/ml/vendas-hoje ────────────────────────────────────────────────
 export async function GET(request: Request) {
   const token  = getToken(request);
-  const userId = getUserId(request);
+  // Sessão OPCIONAL aqui, como antes: `userId` só refina a consulta.
+  const auth = await autenticarRequisicao(request);
+  const userId = auth.autenticado ? auth.uid : null;
 
   if (!token) {
     return NextResponse.json({ erro: true, semConexao: true, mensagem: "Conta do Mercado Livre não conectada." });

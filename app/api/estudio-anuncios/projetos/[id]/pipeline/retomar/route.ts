@@ -26,7 +26,7 @@
  */
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { getUserId } from "@/lib/session";
+import { autenticarRequisicao } from "@/lib/autenticacao";
 import { buscarProjetoPorId } from "@/lib/estudio-anuncios/projetos";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { buscarPipelinePorProjeto } from "@/lib/estudio-anuncios/pipeline/pipeline";
@@ -39,7 +39,8 @@ const supabase = createClient(
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export async function POST(request: Request, { params }: { params: { id: string } }) {
-  const userId = getUserId(request);
+  const auth = await autenticarRequisicao(request);
+  const userId = auth.autenticado ? auth.uid : null;
   if (!userId) {
     return NextResponse.json({ ok: false, erro: "Não autenticado." }, { status: 401 });
   }

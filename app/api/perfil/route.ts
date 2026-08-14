@@ -28,7 +28,7 @@
  */
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { getUserId } from "@/lib/session";
+import { autenticarRequisicao } from "@/lib/autenticacao";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -36,7 +36,8 @@ const supabase = createClient(
 );
 
 export async function GET(request: Request) {
-  const userId = getUserId(request);
+  const auth = await autenticarRequisicao(request);
+  const userId = auth.autenticado ? auth.uid : null;
   if (!userId) return NextResponse.json({ erro: "Não autenticado." }, { status: 401 });
 
   try {
@@ -132,7 +133,8 @@ export async function POST(request: Request) {
   }
 
   // ── Atualização de perfil existente ──────────────────────────────────────
-  const userId = getUserId(request);
+  const auth = await autenticarRequisicao(request);
+  const userId = auth.autenticado ? auth.uid : null;
   if (!userId) {
     return NextResponse.json({ erro: true, mensagem: "Não autorizado." }, { status: 401 });
   }

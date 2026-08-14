@@ -40,7 +40,7 @@
  */
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { getUserId } from "@/lib/session";
+import { autenticarRequisicao } from "@/lib/autenticacao";
 import { buscarProjetoPorId, editarProjeto, cancelarProjetoLogicamente } from "@/lib/estudio-anuncios/projetos";
 import { validarEditarProjeto } from "@/lib/estudio-anuncios/validacao";
 import { buscarPipelinePorProjeto } from "@/lib/estudio-anuncios/pipeline/pipeline";
@@ -81,7 +81,8 @@ export async function GET(
   request: Request,
   { params }: { params: { id: string } }
 ) {
-  const userId = getUserId(request);
+  const auth = await autenticarRequisicao(request);
+  const userId = auth.autenticado ? auth.uid : null;
   if (!userId) {
     return NextResponse.json({ ok: false, erro: "Não autenticado." }, { status: 401 });
   }
@@ -266,7 +267,8 @@ export async function PATCH(
   request: Request,
   { params }: { params: { id: string } }
 ) {
-  const userId = getUserId(request);
+  const auth = await autenticarRequisicao(request);
+  const userId = auth.autenticado ? auth.uid : null;
   if (!userId) {
     return NextResponse.json({ ok: false, erro: "Não autenticado." }, { status: 401 });
   }
@@ -313,7 +315,8 @@ export async function DELETE(
   request: Request,
   { params }: { params: { id: string } }
 ) {
-  const userId = getUserId(request);
+  const auth = await autenticarRequisicao(request);
+  const userId = auth.autenticado ? auth.uid : null;
   if (!userId) {
     return NextResponse.json({ ok: false, erro: "Não autenticado." }, { status: 401 });
   }

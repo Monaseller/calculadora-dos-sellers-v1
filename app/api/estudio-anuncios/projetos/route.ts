@@ -3,7 +3,7 @@
  *
  * CRUD mínimo do Projeto Mestre (Central de IA — Estúdio de Anúncios).
  * Mesmo padrão de autenticação do resto do CDS: sessão via cookie
- * cds_session (getUserId), sem Supabase Auth, sem RLS — autorização
+ * cds_session (autenticarRequisicao), sem Supabase Auth, sem RLS — autorização
  * 100% em código de aplicação, sempre filtrando por user_id da sessão.
  * Nunca usa service role aqui (só worker/rota interna usam).
  *
@@ -16,7 +16,7 @@
  */
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { getUserId } from "@/lib/session";
+import { autenticarRequisicao } from "@/lib/autenticacao";
 import { listarProjetos, criarProjeto } from "@/lib/estudio-anuncios/projetos";
 import { validarCriarProjeto } from "@/lib/estudio-anuncios/validacao";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
@@ -35,7 +35,8 @@ function paraResposta(p: ProjetoComAdaptacoes) {
 }
 
 export async function GET(request: Request) {
-  const userId = getUserId(request);
+  const auth = await autenticarRequisicao(request);
+  const userId = auth.autenticado ? auth.uid : null;
   if (!userId) {
     return NextResponse.json({ ok: false, erro: "Não autenticado." }, { status: 401 });
   }
@@ -65,7 +66,8 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  const userId = getUserId(request);
+  const auth = await autenticarRequisicao(request);
+  const userId = auth.autenticado ? auth.uid : null;
   if (!userId) {
     return NextResponse.json({ ok: false, erro: "Não autenticado." }, { status: 401 });
   }

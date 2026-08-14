@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { getUserId } from "@/lib/session";
+import { autenticarRequisicao } from "@/lib/autenticacao";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -15,7 +15,10 @@ export async function GET(request: Request) {
 
   if (!token) return NextResponse.redirect(new URL("/configuracoes", request.url));
 
-  const userId = getUserId(request);
+  // Sessão OPCIONAL aqui, como antes: sem ela, `userId` fica null e o
+  // fluxo segue. Alterar isso é F0.c.7 (OAuth/relay), fora desta etapa.
+  const auth = await autenticarRequisicao(request);
+  const userId = auth.autenticado ? auth.uid : null;
   let lojaId: string | null = null;
 
   try {

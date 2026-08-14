@@ -9,7 +9,7 @@
  * privado; o download é sempre por URL assinada curta gerada na hora.
  *
  * Mesma ordem de segurança imutável do módulo:
- *   1) getUserId(request) — 401 se ausente;
+ *   1) autenticarRequisicao(request) — 401 se ausente;
  *   2) formato UUID dos DOIS ids — 400 se inválido;
  *   3) buscarProjetoPorId(anon, userId, id) — inexistente e "de outro
  *      usuário" devolvem o MESMO 404;
@@ -22,7 +22,7 @@
  */
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { getUserId } from "@/lib/session";
+import { autenticarRequisicao } from "@/lib/autenticacao";
 import { buscarProjetoPorId } from "@/lib/estudio-anuncios/projetos";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { buscarPacoteDoProjeto, paraDTOPublico } from "@/lib/estudio-anuncios/exportacao";
@@ -49,7 +49,8 @@ type Autorizacao =
 
 /** Passos 1–4 acima, uma vez só, para POST e GET não divergirem. */
 async function autorizar(request: Request, params: Params["params"]): Promise<Autorizacao> {
-  const userId = getUserId(request);
+  const auth = await autenticarRequisicao(request);
+  const userId = auth.autenticado ? auth.uid : null;
   if (!userId) return { erro: NextResponse.json({ ok: false, erro: "Não autenticado." }, { status: 401 }) };
   if (!UUID_REGEX.test(params.id) || !UUID_REGEX.test(params.pacoteId)) {
     return { erro: NextResponse.json({ ok: false, erro: "id inválido." }, { status: 400 }) };

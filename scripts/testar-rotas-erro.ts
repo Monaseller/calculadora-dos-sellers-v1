@@ -68,12 +68,29 @@ const requireOriginal = (Module as any).prototype.require;
   return requireOriginal.apply(this, arguments as any);
 };
 
-const COOKIE = "cds_session=d35ebb79-f37f-4a42-b7a2-ba1986c6d600";
+/**
+ * Sessão de teste — F0.c.3a.
+ *
+ * Antes bastava um UUID cru no cookie. Com a sessão assinada, o cookie
+ * precisa ser um token válido, então a suíte passa a EMITIR um pelo
+ * mesmo caminho da produção. O segredo é local e existe só aqui.
+ *
+ * Isto não afrouxa nada: o teste "sem sessão → 401" continua mandando
+ * requisição sem cookie nenhum.
+ */
+const UID_TESTE = "d35ebb79-f37f-4a42-b7a2-ba1986c6d600";
+process.env.SESSION_SECRET ??= "segredo-de-teste-rotas-erro-32bytes";
+
+async function cookieDeSessao(): Promise<string> {
+  const { emitirTokenSessao, COOKIE_SESSAO } = await import("../lib/autenticacao");
+  const { token } = await emitirTokenSessao(UID_TESTE);
+  return `${COOKIE_SESSAO}=${token}`;
+}
 
 async function chamarGET(rota: "lojas" | "perfil", comSessao: boolean) {
   const mod = await import(`../app/api/${rota}/route.ts?t=${Date.now()}${Math.random()}`);
   const headers = new Headers();
-  if (comSessao) headers.set("cookie", COOKIE);
+  if (comSessao) headers.set("cookie", await cookieDeSessao());
   const res = await mod.GET(new Request(`https://exemplo.test/api/${rota}`, { headers }));
   let corpo: any = null;
   try { corpo = await res.clone().json(); } catch { }

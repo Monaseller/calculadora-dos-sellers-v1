@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { getUserId } from "@/lib/session";
+import { autenticarRequisicao } from "@/lib/autenticacao";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -35,7 +35,8 @@ async function buscarSkuUserProducts(
 
 export async function POST(request: Request) {
   const token  = getToken(request);
-  const userId = getUserId(request);
+  const auth = await autenticarRequisicao(request);
+  const userId = auth.autenticado ? auth.uid : null;
   if (!token) {
     return NextResponse.json({ erro: true, mensagem: "Conta ML não conectada." });
   }

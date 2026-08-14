@@ -14,7 +14,7 @@
  */
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { getUserId } from "@/lib/session";
+import { autenticarRequisicao } from "@/lib/autenticacao";
 import { buscarProjetoPorId } from "@/lib/estudio-anuncios/projetos";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { resolverMarketplacePorSlug } from "@/lib/estudio-anuncios/compliance/tipos";
@@ -28,7 +28,8 @@ const supabase = createClient(
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 async function autorizar(request: Request, params: { id: string; marketplace: string }) {
-  const userId = getUserId(request);
+  const auth = await autenticarRequisicao(request);
+  const userId = auth.autenticado ? auth.uid : null;
   if (!userId) return { erro: NextResponse.json({ ok: false, erro: "Não autenticado." }, { status: 401 }) };
   if (!UUID_REGEX.test(params.id)) {
     return { erro: NextResponse.json({ ok: false, erro: "id inválido." }, { status: 400 }) };

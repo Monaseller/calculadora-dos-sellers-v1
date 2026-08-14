@@ -329,7 +329,9 @@ async function rodar() {
       path.join(process.cwd(), "app/api/estudio-anuncios/projetos/[id]/pipeline/retomar/route.ts"), "utf-8");
     assert(!/worker|executar|processarJob/i.test(rota.replace(/^\s*\*.*$/gm, "")),
       "a rota não pode acionar execução — quem processa é o cron");
-    assert(/getUserId/.test(rota) && /buscarProjetoPorId/.test(rota), "precisa validar sessão e propriedade");
+    const codigo = rota.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/^\s*\/\/.*$/gm, " ");
+    assert(/autenticarRequisicao/.test(codigo) && /buscarProjetoPorId/.test(codigo),
+      "precisa validar sessão e propriedade");
     assert(/estudio_anuncios_pipeline_retomar/.test(rota), "precisa chamar a RPC");
   });
 

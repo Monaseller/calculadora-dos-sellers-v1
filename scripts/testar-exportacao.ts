@@ -252,9 +252,12 @@ async function rodar() {
     assert(!/createClient|SUPABASE|SERVICE_ROLE/.test(UI), "UI acessa Supabase/segredo");
   });
   t("22. a rota preserva a ordem de segurança e 409 sem aprovação", () => {
-    const iSessao = ROTA.indexOf("getUserId");
-    const iDono = ROTA.indexOf("buscarProjetoPorId");
-    const iServico = ROTA.indexOf("getSupabaseServidor()");
+    // Comentários fora: a docstring da rota lista a MESMA ordem, então
+    // sem isto o teste provaria a prosa, não o código (F0.c.3a).
+    const CODIGO = ROTA.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/^\s*\/\/.*$/gm, " ");
+    const iSessao = CODIGO.indexOf("autenticarRequisicao");
+    const iDono = CODIGO.indexOf("buscarProjetoPorId");
+    const iServico = CODIGO.indexOf("getSupabaseServidor()");
     assert(iSessao >= 0 && iDono > iSessao && iServico > iDono, "ordem de segurança quebrada");
     assert(/status: 401/.test(ROTA) && /status: 400/.test(ROTA) && /status: 404/.test(ROTA) && /status: 409/.test(ROTA), "faltam códigos de erro");
     assert(/geradoPor: userId/.test(ROTA), "gerado_por deveria vir da sessão");

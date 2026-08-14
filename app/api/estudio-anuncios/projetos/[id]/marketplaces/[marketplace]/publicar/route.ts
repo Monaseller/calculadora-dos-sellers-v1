@@ -22,7 +22,7 @@
  */
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { getUserId } from "@/lib/session";
+import { autenticarRequisicao } from "@/lib/autenticacao";
 import { buscarProjetoPorId } from "@/lib/estudio-anuncios/projetos";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { resolverMarketplacePorSlug } from "@/lib/estudio-anuncios/compliance/tipos";
@@ -43,7 +43,8 @@ export async function POST(
   request: Request,
   { params }: { params: { id: string; marketplace: string } }
 ) {
-  const userId = getUserId(request);
+  const auth = await autenticarRequisicao(request);
+  const userId = auth.autenticado ? auth.uid : null;
   if (!userId) {
     return NextResponse.json({ ok: false, erro: "Não autenticado." }, { status: 401 });
   }

@@ -274,16 +274,19 @@ async function rodar() {
     }
   });
   t("25. autor vem SEMPRE da sessão, nunca do corpo", () => {
-    for (const [nome, f] of [["versoes", ROTA_VERSOES], ["aprovar", ROTA_APROVAR]] as const) {
-      assert(/getUserId\(request\)/.test(f), `${nome} não lê a sessão`);
+    for (const [nome, bruto] of [["versoes", ROTA_VERSOES], ["aprovar", ROTA_APROVAR]] as const) {
+      // Sem comentários: a leitura da sessão tem de estar no CÓDIGO (F0.c.3a).
+      const f = bruto.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/^\s*\/\/.*$/gm, " ");
+      assert(/autenticarRequisicao\(request\)/.test(f), `${nome} não lê a sessão`);
       assert(!/body\.(userId|user_id|criadoPor|aprovadoPor)/.test(f), `${nome} aceita autor do corpo`);
     }
     assert(/criadoPor: userId/.test(ROTA_VERSOES), "criado_por deveria vir do userId da sessão");
     assert(/aprovarVersaoEditorial\(getSupabaseServidor\(\), versaoId, userId\)/.test(ROTA_APROVAR), "aprovado_por deveria vir do userId");
   });
   t("26. ordem de segurança preservada nas duas rotas", () => {
-    for (const [nome, f] of [["versoes", ROTA_VERSOES], ["aprovar", ROTA_APROVAR]] as const) {
-      const iSessao = f.indexOf("getUserId");
+    for (const [nome, bruto] of [["versoes", ROTA_VERSOES], ["aprovar", ROTA_APROVAR]] as const) {
+      const f = bruto.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/^\s*\/\/.*$/gm, " ");
+      const iSessao = f.indexOf("autenticarRequisicao");
       const iDono = f.indexOf("buscarProjetoPorId");
       const iCanal = f.indexOf("buscarCanalDoProjeto");
       const iServico = f.indexOf("getSupabaseServidor()");

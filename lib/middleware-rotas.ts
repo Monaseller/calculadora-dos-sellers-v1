@@ -142,6 +142,22 @@ function casa(
  *
  * `temSessao` é presença de cookie, nada além disso (F0.b).
  */
+/**
+ * Este caminho precisa de sessão para seguir?
+ *
+ * Acrescentada em F0.c.3a. Com a sessão assinada, verificar custa uma
+ * operação de HMAC e **lança** se `SESSION_SECRET` estiver ausente. Sem
+ * esta pergunta, o middleware verificaria sessão até para `/login` — o
+ * que, num ambiente sem o segredo configurado, deixaria a própria tela
+ * de login inacessível e sem caminho de recuperação.
+ *
+ * Derivada de `decidirAcesso` de propósito: a política de rotas continua
+ * existindo em UM lugar só.
+ */
+export function precisaDeSessao(caminho: string, metodo: string): boolean {
+  return decidirAcesso(caminho, metodo, false) !== "liberar";
+}
+
 export function decidirAcesso(caminho: string, metodo: string, temSessao: boolean): Decisao {
   if (PAGINAS_PUBLICAS.has(caminho)) return "liberar";
   if (ASSETS_PUBLICOS.has(caminho)) return "liberar";

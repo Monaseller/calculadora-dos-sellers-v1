@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { getUserId } from "@/lib/session";
+import { autenticarRequisicao } from "@/lib/autenticacao";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -9,7 +9,8 @@ const supabase = createClient(
 
 export async function POST(request: Request) {
   const { loja_id } = await request.json();
-  const userId = getUserId(request);
+  const auth = await autenticarRequisicao(request);
+  const userId = auth.autenticado ? auth.uid : null;
   if (!userId) return NextResponse.json({ erro: true, mensagem: "Sessão inválida." }, { status: 401 });
 
   const { data: loja } = await supabase

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { emitirTokenSessao, COOKIE_SESSAO, OPCOES_COOKIE_SESSAO } from "@/lib/autenticacao";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -44,14 +45,16 @@ export async function POST(request: Request) {
     await supabase.from("perfil").update({ user_uuid: userId }).eq("id", perfil.id);
   }
 
+  // F0.c.3 — o cookie deixa de carregar o user_uuid em texto puro e passa
+  // a carregar um token assinado (HMAC-SHA-256, 7 dias, sem renovação).
+  // Trocar o UUID no cookie deixa de autenticar como outra pessoa.
+  //
+  // Nada mais deste fluxo muda: validação de email, de senha, de
+  // email_verificado e o formato da resposta seguem iguais.
+  const { token } = await emitirTokenSessao(userId);
+
   const res = NextResponse.json({ ok: true, nome: perfil.nome_completo });
-  res.cookies.set("cds_session", userId, {
-    httpOnly: true,
-    secure:   process.env.NODE_ENV === "production",
-    sameSite: "lax",
-    path:     "/",
-    maxAge:   86400 * 30,
-  });
+  res.cookies.set(COOKIE_SESSAO, token, OPCOES_COOKIE_SESSAO);
 
   return res;
 }

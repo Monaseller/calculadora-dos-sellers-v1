@@ -26,7 +26,7 @@
  * de order_sn. Sem parâmetro, usa DEFAULT_ORDER_IDS_0707 (os 189 confirmados
  * — ver lib/backfill-0707-order-ids.ts).
  *
- * Gated só por sessão (getUserId), mesmo padrão dos outros endpoints admin.
+ * Gated só por sessão (autenticarRequisicao), mesmo padrão dos outros endpoints admin.
  * Não aparece em nenhum menu.
  *
  * NÃO altera: cron (/api/sync), paginação de shopee/vendas ou ml/vendas,
@@ -34,7 +34,7 @@
  */
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { getUserId } from "@/lib/session";
+import { autenticarRequisicao } from "@/lib/autenticacao";
 import { getShopeeLojaAtiva } from "@/lib/shopee-auth";
 import { shopeeGet } from "@/lib/shopee-api";
 import {
@@ -65,7 +65,8 @@ const DATE_TO   = "2026-07-08";
 export async function GET(request: Request) {
   const inicioMs = Date.now();
 
-  const userId = getUserId(request);
+  const auth = await autenticarRequisicao(request);
+  const userId = auth.autenticado ? auth.uid : null;
   if (!userId) {
     return NextResponse.json({ ok: false, erro: "Sessão inválida." }, { status: 401 });
   }

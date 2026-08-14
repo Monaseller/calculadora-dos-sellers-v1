@@ -1,25 +1,37 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
-import { decidirAcesso } from "@/lib/middleware-rotas";
+import { decidirAcesso, precisaDeSessao } from "@/lib/middleware-rotas";
+import { autenticarRequisicao } from "@/lib/autenticacao";
 
 /**
- * F0.b — corrige o ALCANCE do middleware.
+ * F0.b — ALCANCE: a lista anterior continha "/" e era testada com
+ * `startsWith`, o que liberava toda e qualquer rota. A política passou a
+ * viver em `lib/middleware-rotas.ts`, com casamento exato, método
+ * considerado e default deny.
  *
- * A lista anterior continha "/" e era testada com `startsWith`, o que
- * liberava toda e qualquer rota. A política agora vive em
- * `lib/middleware-rotas.ts`, com casamento exato, método considerado e
- * default deny — e é função pura, testada por
+ * F0.c.3 — FORÇA: "cookie presente" deixa de ser sessão. Agora vale a
+ * verificação criptográfica de `lib/autenticacao.ts` — assinatura HMAC,
+ * expiração e formato. Cookie forjado, adulterado, expirado, o formato
+ * antigo (UUID cru) e o legado "1" passam a ser recusados.
+ *
+ * **A política de rotas de F0.b não muda em nada**: páginas públicas,
+ * rotas públicas, rotas com segredo próprio, exceções temporárias,
+ * default deny, 401 JSON para API e redirect para página continuam
+ * exatamente como estão, e seguem cobertos por
  * `scripts/testar-middleware.ts`.
  *
- * NÃO muda a FORÇA da sessão: o cookie continua sendo verificado apenas
- * por PRESENÇA. Assinatura, expiração, papel e o tratamento do valor
- * legado "1" são F0.c.
+ * A sessão só é verificada quando a rota exige — ver `precisaDeSessao`.
  */
-export function middleware(request: NextRequest) {
+export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  const cookie = request.cookies.get("cds_session")?.value;
-  const temSessao = !!cookie;
+  // Rota liberada pela política não paga verificação criptográfica, e
+  // continua acessível mesmo se SESSION_SECRET faltar no ambiente.
+  let temSessao = false;
+  if (precisaDeSessao(pathname, request.method)) {
+    const auth = await autenticarRequisicao(request);
+    temSessao = auth.autenticado;
+  }
 
   switch (decidirAcesso(pathname, request.method, temSessao)) {
     case "liberar":

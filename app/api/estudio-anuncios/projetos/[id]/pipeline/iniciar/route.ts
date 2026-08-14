@@ -5,11 +5,11 @@
  *
  * Rota nova (nenhuma rota paralela/duplicada — este é o único ponto de
  * entrada para iniciar um Pipeline). Mesmo padrão de autenticação do
- * resto do módulo: sessão via cookie cds_session (getUserId), sem
+ * resto do módulo: sessão via cookie cds_session (autenticarRequisicao), sem
  * Supabase Auth, sem RLS — autorização 100% em código de aplicação.
  *
  * Segurança (nesta ordem, nunca invertida):
- *   1) getUserId(request) — 401 se ausente;
+ *   1) autenticarRequisicao(request) — 401 se ausente;
  *   2) valida formato UUID de params.id — 400 se inválido;
  *   3) buscarProjetoPorId(supabase, userId, params.id) — já filtra por
  *      user_id da sessão; projeto inexistente OU de outro usuário
@@ -46,7 +46,7 @@
  */
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { getUserId } from "@/lib/session";
+import { autenticarRequisicao } from "@/lib/autenticacao";
 import { buscarProjetoPorId } from "@/lib/estudio-anuncios/projetos";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { iniciarPipelineAtomico } from "@/lib/estudio-anuncios/pipeline/pipeline";
@@ -64,7 +64,8 @@ export async function POST(
   request: Request,
   { params }: { params: { id: string } }
 ) {
-  const userId = getUserId(request);
+  const auth = await autenticarRequisicao(request);
+  const userId = auth.autenticado ? auth.uid : null;
   if (!userId) {
     return NextResponse.json({ ok: false, erro: "Não autenticado." }, { status: 401 });
   }

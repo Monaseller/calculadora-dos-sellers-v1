@@ -6,7 +6,7 @@
  */
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { getUserId } from "@/lib/session";
+import { autenticarRequisicao } from "@/lib/autenticacao";
 import { getShopeeLojaAtiva } from "@/lib/shopee-auth";
 import { syncShopeeForUserV2 } from "@/lib/sync-shopee";
 
@@ -65,7 +65,8 @@ function pedidoToRow(p: any) {
 }
 
 export async function GET(request: Request) {
-  const userId = getUserId(request);
+  const auth = await autenticarRequisicao(request);
+  const userId = auth.autenticado ? auth.uid : null;
   if (!userId) return NextResponse.json({ erro: true, mensagem: "Sessão inválida." }, { status: 401 });
 
   const { searchParams } = new URL(request.url);

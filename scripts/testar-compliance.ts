@@ -1529,7 +1529,7 @@ async function rodar() {
     // Só o CORPO do handler: a ordem dos imports no topo não diz nada
     // sobre a ordem em que as checagens rodam.
     const corpo = ROTA.slice(ROTA.indexOf("export async function POST"));
-    const iSessao = corpo.indexOf("getUserId");
+    const iSessao = corpo.indexOf("autenticarRequisicao");
     const iSlug = corpo.indexOf("resolverMarketplacePorSlug");
     const iDono = corpo.indexOf("buscarProjetoPorId");
     const iServico = corpo.indexOf("getSupabaseServidor()");

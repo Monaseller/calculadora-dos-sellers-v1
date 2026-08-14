@@ -4,7 +4,7 @@
  * Body: { dateFrom: "YYYY-MM-DD", dateTo: "YYYY-MM-DD", marketplace?: "ML" | "Shopee" | "todos" }
  */
 import { NextResponse } from "next/server";
-import { getUserId } from "@/lib/session";
+import { autenticarRequisicao } from "@/lib/autenticacao";
 import { getShopeeLojaAtiva } from "@/lib/shopee-auth";
 import { getMLLojaAtiva } from "@/lib/ml-auth";
 import { syncShopeeForUser } from "@/lib/sync-shopee";
@@ -13,7 +13,8 @@ import { syncMLForUser } from "@/lib/sync-ml";
 export const maxDuration = 60; // Vercel Pro: 60s por chamada (1 mês por request)
 
 export async function POST(request: Request) {
-  const userId = getUserId(request);
+  const auth = await autenticarRequisicao(request);
+  const userId = auth.autenticado ? auth.uid : null;
   if (!userId) {
     return NextResponse.json({ erro: true, mensagem: "Sessão inválida." }, { status: 401 });
   }

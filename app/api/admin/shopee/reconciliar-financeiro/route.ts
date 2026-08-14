@@ -7,7 +7,7 @@
  * e nao devem travar a sincronizacao normal de pedidos.
  *
  * NAO exposto em nenhuma tela/menu — rota operacional, gated apenas pela sessao
- * (getUserId), igual aos outros endpoints do projeto. So processa pedidos do
+ * (autenticarRequisicao), igual aos outros endpoints do projeto. So processa pedidos do
  * proprio usuario logado.
  *
  * Query params:
@@ -42,7 +42,7 @@
  */
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { getUserId } from "@/lib/session";
+import { autenticarRequisicao } from "@/lib/autenticacao";
 import { getShopeeLojaAtiva } from "@/lib/shopee-auth";
 import { shopeeGet } from "@/lib/shopee-api";
 import { atualizarResumosDosDias } from "@/lib/resumos-diarios";
@@ -74,7 +74,8 @@ export async function GET(request: Request) {
   // execucao sao seguros antes de criar o script de orquestracao em lotes.
   const inicioLoteMs = Date.now();
 
-  const userId = getUserId(request);
+  const auth = await autenticarRequisicao(request);
+  const userId = auth.autenticado ? auth.uid : null;
   if (!userId) {
     return NextResponse.json({ erro: true, mensagem: "Sessao invalida." }, { status: 401 });
   }

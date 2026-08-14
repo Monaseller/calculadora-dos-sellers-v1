@@ -146,7 +146,7 @@ async function rodar() {
       const f = fs.readFileSync(r, "utf-8").replace(/\/\*[\s\S]*?\*\//g, " ").replace(/^\s*\/\/.*$/gm, " ");
       const rel = path.relative(process.cwd(), r).replace(/\\/g, "/");
       // Toda irmã exige sessão de usuário; nenhuma roda sync global sem dono.
-      assert(/getUserId\(/.test(f), `${rel} não exige sessão`);
+      assert(/autenticarRequisicao\(/.test(f), `${rel} não exige sessão`);
     }
     // E a rota interna do worker também falha fechada.
     const interna = fs.readFileSync(path.join(process.cwd(), "app/api/internal/sync/executar/route.ts"), "utf-8");

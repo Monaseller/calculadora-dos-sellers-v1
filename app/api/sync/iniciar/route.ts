@@ -22,7 +22,7 @@
  */
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { getUserId } from "@/lib/session";
+import { autenticarRequisicao } from "@/lib/autenticacao";
 import { ASYNC_SYNC_JOBS_ENABLED } from "@/lib/feature-flags";
 
 const supabase = createClient(
@@ -52,7 +52,8 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: false, disabled: true, erro: "Sincronização assíncrona desativada (ENABLE_ASYNC_SYNC_JOBS=false)." });
   }
 
-  const userId = getUserId(request);
+  const auth = await autenticarRequisicao(request);
+  const userId = auth.autenticado ? auth.uid : null;
   if (!userId) {
     return NextResponse.json({ ok: false, erro: "Sessão inválida." }, { status: 401 });
   }

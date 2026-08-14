@@ -14,7 +14,7 @@
  * Pipeline ou score.
  *
  * Mesma ordem de segurança imutável do módulo:
- *   1) getUserId(request) — 401 se ausente;
+ *   1) autenticarRequisicao(request) — 401 se ausente;
  *   2) UUID do projeto — 400 se inválido;
  *   3) slug de marketplace conhecido — 404 se não;
  *   4) buscarProjetoPorId(anon, userId, id) — 404 igual para inexistente
@@ -24,7 +24,7 @@
  */
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { getUserId } from "@/lib/session";
+import { autenticarRequisicao } from "@/lib/autenticacao";
 import { buscarProjetoPorId } from "@/lib/estudio-anuncios/projetos";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { resolverMarketplacePorSlug } from "@/lib/estudio-anuncios/compliance/tipos";
@@ -44,7 +44,8 @@ export async function PATCH(
   request: Request,
   { params }: { params: { id: string; marketplace: string } }
 ) {
-  const userId = getUserId(request);
+  const auth = await autenticarRequisicao(request);
+  const userId = auth.autenticado ? auth.uid : null;
   if (!userId) {
     return NextResponse.json({ ok: false, erro: "Não autenticado." }, { status: 401 });
   }
