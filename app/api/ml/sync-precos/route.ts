@@ -116,14 +116,16 @@ function recalcularLucroMargem(
 }
 
 export async function POST(request: Request) {
-  const tokenResult = await getMLToken(request);
+  // A sessão vem PRIMEIRO: o token do ML só é resolvido para uma loja que
+  // pertence a este usuário (F0.c.4).
   const auth        = await autenticarRequisicao(request);
   const userId      = auth.autenticado ? auth.uid : null;
-  if (!tokenResult) {
-    return NextResponse.json({ erro: true, mensagem: "Mercado Livre não conectado." });
-  }
   if (!userId) {
     return NextResponse.json({ erro: true, mensagem: "Sessão inválida." }, { status: 401 });
+  }
+  const tokenResult = await getMLToken(request, userId);
+  if (!tokenResult) {
+    return NextResponse.json({ erro: true, mensagem: "Mercado Livre não conectado." });
   }
   const token = tokenResult.token;
 

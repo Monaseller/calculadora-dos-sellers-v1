@@ -19,19 +19,71 @@ export interface MLTokenResult {
   lojaId?: string;
 }
 
-/** Tenta obter um token ML válido, com fallback para refresh automático */
-export async function getMLToken(request: Request): Promise<MLTokenResult | null> {
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * A loja indicada pelo cookie pertence a este usuário?
+ *
+ * Devolve o id só quando a linha existe, é de marketplace ML e tem
+ * `user_id` igual ao da sessão. Loja de outro dono, loja órfã
+ * (`user_id NULL`), loja de outro marketplace, id inexistente e id
+ * malformado produzem o MESMO resultado: `null`. Quem chama não
+ * consegue distinguir os casos, então não há enumeração.
+ */
+async function resolverLojaDoUsuario(lojaIdBruto: string, userId: string): Promise<string | null> {
+  if (!UUID_REGEX.test(lojaIdBruto)) return null;
+
+  const { data } = await supabase
+    .from("lojas")
+    .select("id")
+    .eq("id", lojaIdBruto)
+    .eq("user_id", userId)
+    .eq("marketplace", "ML")
+    .maybeSingle();
+
+  return data?.id ?? null;
+}
+
+/**
+ * Tenta obter um token ML válido, com fallback para refresh automático.
+ *
+ * ── ISOLAMENTO DE PROPRIEDADE (F0.c.4) ──────────────────────────────
+ * `userId` é OBRIGATÓRIO e vem da sessão — nunca do cliente. Antes desta
+ * correção, a função resolvia a loja apenas por `loja_ativa_id`, um
+ * cookie que qualquer cliente pode enviar com qualquer valor, e
+ * consultava `lojas` só por `id`. Um usuário autenticado que informasse
+ * o id da loja de outro recebia o **token de Mercado Livre alheio** — e,
+ * pelo caminho de refresh, ainda **sobrescrevia os tokens daquela loja**
+ * no banco.
+ *
+ * Agora a propriedade é validada UMA vez, antes de qualquer uso, e o
+ * fracasso é fechado: cookie apontando para loja que não é do usuário
+ * não cai em outra loja nem segue adiante — devolve `null`, e a rota
+ * responde o mesmo "Conta do ML não conectada" de sempre.
+ */
+export async function getMLToken(request: Request, userId: string): Promise<MLTokenResult | null> {
+  if (!userId) return null;
+
+  const lojaIdCookie = getCookie(request, "loja_ativa_id");
+  let lojaId: string | null = null;
+  if (lojaIdCookie) {
+    lojaId = await resolverLojaDoUsuario(lojaIdCookie, userId);
+    // Loja declarada mas não pertencente ao usuário: nega tudo. Ignorar o
+    // cookie e seguir seria aceitar uma tentativa de usar loja alheia.
+    if (!lojaId) return null;
+  }
+
   // 1. Cookie ml_access_token presente → usa direto
   const existing = getCookie(request, "ml_access_token");
   if (existing) return { token: existing };
 
-  const lojaId      = getCookie(request, "loja_ativa_id");
   const refreshCookie = getCookie(request, "ml_refresh_token");
 
   // 2. Tenta refresh pelo cookie ml_refresh_token
   if (refreshCookie) {
     const result = await refreshMLToken(refreshCookie);
     if (result) {
+      // Só grava na loja já validada como do usuário.
       if (lojaId) await saveTokensToDB(lojaId, result);
       return { ...result, lojaId: lojaId ?? undefined };
     }
@@ -43,6 +95,7 @@ export async function getMLToken(request: Request): Promise<MLTokenResult | null
       .from("lojas")
       .select("access_token, refresh_token, token_expires_at")
       .eq("id", lojaId)
+      .eq("user_id", userId)
       .maybeSingle();
 
     if (loja?.access_token && new Date(loja.token_expires_at) > new Date()) {
