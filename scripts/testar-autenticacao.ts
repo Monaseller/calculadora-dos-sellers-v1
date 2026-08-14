@@ -329,8 +329,8 @@ function arquivosTs(): string[] {
 const TODOS = arquivosTs();
 
 /**
- * Depois do cutover preparado em F0.c.3a, a camada É usada por 38
- * arquivos: 36 rotas que autenticam + o login (que EMITE o token) + o
+ * Depois do cutover preparado em F0.c.3a, a camada É usada por 39
+ * arquivos: 37 rotas que autenticam + o login (que EMITE o token) + o
  * middleware. O número fica travado: se cair, alguma rota perdeu
  * autenticação; se subir sem revisão, apareceu consumidor novo.
  *
@@ -341,8 +341,12 @@ const TODOS = arquivosTs();
  * "H. /api/anuncio SEM sessão -> 401" em
  * `scripts/testar-cutover-rotas-ml.ts` e "19." em
  * `scripts/testar-middleware.ts`.
+ * 38 → 39 em F0.c.6a: `app/api/lojas/desconectar/route.ts`. Ela não era
+ * consumidora nova por acréscimo de escopo — estava PRESA no mecanismo
+ * V1, comparando o cookie cru com `user_id`, e por isso não desconectava
+ * nada. Ver `scripts/testar-desconectar.ts`.
  */
-const CONSUMIDORES_ESPERADOS_AUTENTICACAO = 38;
+const CONSUMIDORES_ESPERADOS_AUTENTICACAO = 39;
 
 t(`22. exatamente ${CONSUMIDORES_ESPERADOS_AUTENTICACAO} arquivos de produção usam a camada nova`, () => {
   const proprios = [
@@ -425,7 +429,10 @@ t("26. nenhum código de produção lê o cookie de sessão por conta própria",
   // Conhecidos e fora do escopo de F0.c.3a — cada um tem microetapa própria.
   const CONHECIDOS = [
     path.join("app", "api", "auth", "shopee", "callback", "route.ts"), // F0.c.7 (OAuth)
-    path.join("app", "api", "lojas", "desconectar", "route.ts"),       // microetapa própria
+    // `lojas/desconectar` SAIU desta lista em F0.c.6a: migrou para a
+    // camada e não lê mais o cookie. A entrada foi removida em vez de
+    // deixada por segurança — allowlist com item obsoleto é exatamente
+    // como uma rota volta a ler o cookie sem ninguém perceber.
     path.join("app", "api", "auth", "status-session", "route.ts"),     // sem consumidor
     // Logout cita o nome do cookie para LIMPÁ-LO — não para autenticar.
     // Trocar pela constante COOKIE_SESSAO fica para a microetapa do
