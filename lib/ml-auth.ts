@@ -115,7 +115,43 @@ export async function getMLToken(request: Request, userId: string): Promise<MLTo
   return null;
 }
 
-async function refreshMLToken(refreshToken: string): Promise<MLTokenResult | null> {
+/**
+ * Margem aplicada à expiração: um token que vence em menos de 5 minutos é
+ * tratado como já vencido, para não iniciar uma chamada ao ML que expira
+ * no meio. Valor extraído de `getMLLojaAtiva`/`getMLLojaById`, que já
+ * usavam exatamente `5 * 60 * 1000` — aqui ele ganha um nome só.
+ */
+export const MARGEM_EXPIRACAO_SEGUNDOS = 300;
+
+/**
+ * A credencial precisa ser renovada? (F0.c.5-A)
+ *
+ * DIFERENÇA DELIBERADA EM RELAÇÃO AO LEGADO: `token_expires_at` ausente
+ * conta como **expirado**. As funções antigas fazem
+ * `const expired = loja.token_expires_at && …`, o que trata "não sei
+ * quando vence" como "ainda vale" e usa um token possivelmente morto. Sem
+ * data não há como afirmar validade, e a resposta segura é renovar.
+ *
+ * As chamadas antigas NÃO foram reescritas nesta etapa: mudá-las alteraria
+ * o comportamento de rotas que a F0.c.5-A não deve tocar (§14). A migração
+ * delas é das fases seguintes.
+ */
+export function credencialExpirada(
+  tokenExpiresAt: string | null | undefined,
+  agoraMs: number = Date.now()
+): boolean {
+  if (!tokenExpiresAt) return true;
+  const vence = new Date(tokenExpiresAt).getTime();
+  if (!Number.isFinite(vence)) return true;
+  return vence - MARGEM_EXPIRACAO_SEGUNDOS * 1000 < agoraMs;
+}
+
+/**
+ * `export` acrescentado em F0.c.5-A. O corpo é o mesmo — o resolvedor novo
+ * (`lib/ml-conexao.ts`) precisa do MESMO refresh, e não de uma segunda
+ * implementação que possa divergir desta.
+ */
+export async function refreshMLToken(refreshToken: string): Promise<MLTokenResult | null> {
   try {
     const res = await fetch("https://api.mercadolibre.com/oauth/token", {
       method: "POST",
@@ -141,13 +177,45 @@ async function refreshMLToken(refreshToken: string): Promise<MLTokenResult | nul
   }
 }
 
-async function saveTokensToDB(lojaId: string, result: MLTokenResult) {
+/**
+ * Grava a credencial renovada. `export` e o 3º parâmetro foram
+ * acrescentados em F0.c.5-A; os 4 chamadores antigos continuam passando 2
+ * argumentos e ignorando o retorno, então o comportamento deles é idêntico.
+ *
+ * `refreshTokenAnterior` liga uma escrita CONDICIONAL (compare-and-swap):
+ * só grava se a linha ainda contiver o refresh_token de onde partimos. É a
+ * proteção contra sobrescrita cega quando duas requisições renovam a mesma
+ * loja ao mesmo tempo — usando as colunas que já existem, sem migration.
+ * Devolve `false` quando nada foi gravado porque outra requisição chegou
+ * primeiro; quem chama deve reler a linha em vez de reescrever por cima.
+ */
+export async function saveTokensToDB(
+  lojaId: string,
+  result: MLTokenResult,
+  refreshTokenAnterior?: string | null
+): Promise<boolean> {
   const updates: Record<string, unknown> = {
     access_token:     result.newAccessToken,
     token_expires_at: new Date(Date.now() + (result.expires ?? 21600) * 1000).toISOString(),
   };
   if (result.newRefreshToken) updates.refresh_token = result.newRefreshToken;
-  await supabase.from("lojas").update(updates).eq("id", lojaId);
+
+  if (!refreshTokenAnterior) {
+    // Caminho legado, preservado byte a byte: escrita incondicional, sem
+    // `.select()`. O `true` diz "gravou até onde esta chamada sabe" — os
+    // chamadores antigos não leem o retorno.
+    await supabase.from("lojas").update(updates).eq("id", lojaId);
+    return true;
+  }
+
+  const { data } = await supabase
+    .from("lojas")
+    .update(updates)
+    .eq("id", lojaId)
+    .eq("refresh_token", refreshTokenAnterior)
+    .select("id");
+
+  return Array.isArray(data) && data.length > 0;
 }
 
 /** Busca loja ML ativa pelo userId (para sync server-side sem cookie) */
