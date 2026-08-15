@@ -247,6 +247,10 @@ const ERROS: Readonly<Record<string, string>> = {
   oauth_cancelado: "Autorização cancelada. Nenhuma alteração foi feita.",
   state_expirado: "A autorização expirou. Tente novamente.",
   state_invalido: "Não foi possível validar esta autorização. Tente novamente.",
+  // PKCE (F0.c.7). O usuário não precisa saber o que é `code_verifier`:
+  // na prática os dois casos significam "recomece a autorização".
+  pkce_cookie_ausente: "Não foi possível validar a autorização do Mercado Livre. Tente novamente.",
+  pkce_invalido: "A autorização do Mercado Livre não pôde ser validada. Tente novamente.",
   sessao_invalida: "Sua sessão expirou durante a autorização. Entre novamente e repita.",
   loja_nao_pertence_usuario: "Esta loja não está disponível na sua conta.",
   conta_ml_diferente: "A conta do Mercado Livre autorizada não corresponde à loja que você quis reconectar. Nada foi alterado.",

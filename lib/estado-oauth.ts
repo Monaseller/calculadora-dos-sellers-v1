@@ -44,8 +44,17 @@
  * `used_at`.
  */
 
-/** Versão do formato. `state` de outra versão é recusado. */
-export const VERSAO_ESTADO = 1;
+/**
+ * Versão do formato. `state` de outra versão é recusado.
+ *
+ * 1 → 2 em F0.c.7, com a entrada do PKCE: o payload passou a carregar
+ * `chal` (o `code_challenge`), e o parser é estrito por CONJUNTO de
+ * chaves — um `state` da versão 1 não tem esse campo e não pode ser
+ * aceito. States em voo são invalidados, o que é aceitável porque duram
+ * 10 minutos; a alternativa (aceitar as duas formas) criaria um caminho
+ * sem PKCE, que é exatamente o que esta etapa fecha.
+ */
+export const VERSAO_ESTADO = 2;
 
 /**
  * Prefixo da separação de domínio. Trocar isto invalida todo `state` em
@@ -76,15 +85,22 @@ export const TAMANHO_MAXIMO_ESTADO = 512;
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const BASE64URL_REGEX = /^[A-Za-z0-9_-]+$/;
 
+/**
+ * `code_challenge` de SHA-256 em base64url sem padding tem exatamente 43
+ * caracteres. O formato é validado tanto para recusar lixo quanto porque
+ * ele vira parte do NOME do cookie do PKCE — ver `nomeCookiePkce`.
+ */
+const CHALLENGE_REGEX = /^[A-Za-z0-9_-]{43}$/;
+
 /** Conjuntos de chaves ACEITOS — exatamente estes, nem a mais nem a menos. */
-const CAMPOS_CONNECT = ["v", "uid", "intent", "iat", "exp"] as const;
-const CAMPOS_RECONNECT = ["v", "uid", "intent", "loja", "iat", "exp"] as const;
+const CAMPOS_CONNECT = ["v", "uid", "intent", "chal", "iat", "exp"] as const;
+const CAMPOS_RECONNECT = ["v", "uid", "intent", "loja", "chal", "iat", "exp"] as const;
 
 export type IntencaoOAuth = "connect" | "reconnect";
 
 export type EstadoOAuth =
-  | { v: number; uid: string; intent: "connect"; iat: number; exp: number }
-  | { v: number; uid: string; intent: "reconnect"; loja: string; iat: number; exp: number };
+  | { v: number; uid: string; intent: "connect"; chal: string; iat: number; exp: number }
+  | { v: number; uid: string; intent: "reconnect"; loja: string; chal: string; iat: number; exp: number };
 
 /** Erro de CONFIGURAÇÃO — nunca causado por entrada de usuário. */
 export class ErroConfiguracaoEstado extends Error {
@@ -151,7 +167,7 @@ async function importarChave(segredo: string): Promise<CryptoKey> {
 function serializar(e: EstadoOAuth): string {
   const cabeca = `{"v":${e.v},"uid":${JSON.stringify(e.uid)},"intent":${JSON.stringify(e.intent)}`;
   const loja = e.intent === "reconnect" ? `,"loja":${JSON.stringify(e.loja)}` : "";
-  return `${cabeca}${loja},"iat":${e.iat},"exp":${e.exp}}`;
+  return `${cabeca}${loja},"chal":${JSON.stringify(e.chal)},"iat":${e.iat},"exp":${e.exp}}`;
 }
 
 function inteiroPositivoValido(valor: unknown): valor is number {
@@ -175,26 +191,98 @@ function validarPayload(bruto: unknown): EstadoOAuth | null {
 
   const registro = bruto as Record<string, unknown>;
   const chaves = Object.keys(registro);
-  const { v, uid, intent, iat, exp, loja } = registro;
+  const { v, uid, intent, iat, exp, loja, chal } = registro;
 
   if (v !== VERSAO_ESTADO) return null;
   if (typeof uid !== "string" || !UUID_REGEX.test(uid)) return null;
+  if (typeof chal !== "string" || !CHALLENGE_REGEX.test(chal)) return null;
   if (!inteiroPositivoValido(iat) || !inteiroPositivoValido(exp)) return null;
   if (exp <= iat) return null;
   if (exp - iat > TTL_MAXIMO_SEGUNDOS) return null;
 
   if (intent === "connect") {
     if (!mesmasChaves(chaves, CAMPOS_CONNECT)) return null;
-    return { v, uid, intent: "connect", iat, exp };
+    return { v, uid, intent: "connect", chal, iat, exp };
   }
 
   if (intent === "reconnect") {
     if (!mesmasChaves(chaves, CAMPOS_RECONNECT)) return null;
     if (typeof loja !== "string" || !UUID_REGEX.test(loja)) return null;
-    return { v, uid, intent: "reconnect", loja, iat, exp };
+    return { v, uid, intent: "reconnect", loja, chal, iat, exp };
   }
 
   return null;
+}
+
+// ── PKCE (RFC 7636) ──────────────────────────────────────────────────
+
+/** Prefixo do cookie que guarda o `code_verifier`. */
+export const PREFIXO_COOKIE_PKCE = "ml_pkce_";
+
+/**
+ * Nome do cookie de UMA tentativa.
+ *
+ * O `code_challenge` entra no NOME porque ele é PÚBLICO — viaja na URL
+ * de autorização, o Mercado Livre o recebe — e porque é único por
+ * tentativa. Isso resolve a concorrência sem inventar identificador
+ * novo: duas abas geram challenges diferentes, logo cookies diferentes,
+ * e o callback acha o verifier da SUA tentativa a partir do `state` que
+ * recebeu. O `code_verifier` NUNCA aparece no nome.
+ */
+export function nomeCookiePkce(chal: string): string {
+  return PREFIXO_COOKIE_PKCE + chal;
+}
+
+/**
+ * `code_verifier` conforme RFC 7636 §4.1: 32 bytes aleatórios em
+ * base64url (43 caracteres, dentro da faixa 43–128 exigida), usando só
+ * caracteres do conjunto `unreserved`.
+ *
+ * `crypto.getRandomValues` é a fonte criptográfica — nunca `Math.random`.
+ */
+export function gerarCodeVerifier(): string {
+  const cripto = globalThis.crypto;
+  if (!cripto?.getRandomValues) {
+    throw new ErroConfiguracaoEstado("Web Crypto indisponível — não é possível gerar o code_verifier.");
+  }
+  const bytes = new Uint8Array(32);
+  cripto.getRandomValues(bytes);
+  return bytesParaBase64url(bytes);
+}
+
+/** `code_challenge = BASE64URL(SHA256(ASCII(code_verifier)))`, sem padding. */
+export async function calcularCodeChallenge(verifier: string): Promise<string> {
+  if (typeof verifier !== "string" || verifier.length < 43 || verifier.length > 128) {
+    throw new ErroConfiguracaoEstado("code_verifier fora da faixa exigida pelo RFC 7636 (43–128).");
+  }
+  const digest = await obterSubtle().digest("SHA-256", codificador.encode(verifier));
+  return bytesParaBase64url(new Uint8Array(digest));
+}
+
+/** Comparação de tempo constante — não vaza onde duas strings divergem. */
+function iguaisTempoConstante(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diferenca = 0;
+  for (let i = 0; i < a.length; i++) diferenca |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diferenca === 0;
+}
+
+/**
+ * O verifier do cookie corresponde ao challenge do `state`?
+ *
+ * É o que impede parear o cookie de uma tentativa com o `state` de
+ * outra. Entrada malformada devolve `false` — nunca lança.
+ */
+export async function verifierConfere(verifier: unknown, chal: unknown): Promise<boolean> {
+  if (typeof verifier !== "string" || typeof chal !== "string") return false;
+  if (!CHALLENGE_REGEX.test(chal)) return false;
+  if (verifier.length < 43 || verifier.length > 128) return false;
+  if (!BASE64URL_REGEX.test(verifier)) return false;
+  try {
+    return iguaisTempoConstante(await calcularCodeChallenge(verifier), chal);
+  } catch {
+    return false;
+  }
 }
 
 // ── API pública ──────────────────────────────────────────────────────
@@ -208,8 +296,8 @@ export interface OpcoesAssinaturaEstado {
 }
 
 export type DadosEstado =
-  | { intent: "connect" }
-  | { intent: "reconnect"; loja: string };
+  | { intent: "connect"; chal: string }
+  | { intent: "reconnect"; loja: string; chal: string };
 
 /**
  * Assina um `state`.
@@ -237,11 +325,14 @@ export async function assinarEstado(
   if (dados.intent === "reconnect" && (typeof dados.loja !== "string" || !UUID_REGEX.test(dados.loja))) {
     throw new ErroConfiguracaoEstado("loja não é um UUID válido.");
   }
+  if (typeof dados.chal !== "string" || !CHALLENGE_REGEX.test(dados.chal)) {
+    throw new ErroConfiguracaoEstado("code_challenge ausente ou fora do formato S256/base64url.");
+  }
 
   const estado: EstadoOAuth =
     dados.intent === "reconnect"
-      ? { v: VERSAO_ESTADO, uid, intent: "reconnect", loja: dados.loja, iat: agoraSegundos, exp: agoraSegundos + ttlSegundos }
-      : { v: VERSAO_ESTADO, uid, intent: "connect", iat: agoraSegundos, exp: agoraSegundos + ttlSegundos };
+      ? { v: VERSAO_ESTADO, uid, intent: "reconnect", loja: dados.loja, chal: dados.chal, iat: agoraSegundos, exp: agoraSegundos + ttlSegundos }
+      : { v: VERSAO_ESTADO, uid, intent: "connect", chal: dados.chal, iat: agoraSegundos, exp: agoraSegundos + ttlSegundos };
 
   const payloadB64 = bytesParaBase64url(codificador.encode(serializar(estado)));
   const chave = await importarChave(segredo);

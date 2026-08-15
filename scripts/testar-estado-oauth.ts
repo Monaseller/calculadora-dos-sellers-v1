@@ -16,6 +16,11 @@ import {
   TTL_PADRAO_SEGUNDOS,
   TTL_MAXIMO_SEGUNDOS,
   TAMANHO_MAXIMO_ESTADO,
+  gerarCodeVerifier,
+  calcularCodeChallenge,
+  verifierConfere,
+  nomeCookiePkce,
+  PREFIXO_COOKIE_PKCE,
 } from "../lib/estado-oauth";
 import { assinarSessao } from "../lib/sessao-assinada";
 
@@ -38,8 +43,13 @@ const OUTRO_UID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const LOJA = "11111111-1111-4111-8111-111111111111";
 const AGORA = 1_800_000_000;
 
+/** Verifier e challenge REAIS, calculados uma vez (ver `principal`). */
+let VERIFIER = "";
+let CHAL = "";
+
+/** Injeta o challenge quando o caso de teste não se importa com ele. */
 const assinar = (dados: any, agora = AGORA, ttl?: number) =>
-  assinarEstado(UID, dados, { segredo: SEGREDO, agoraSegundos: agora, ttlSegundos: ttl });
+  assinarEstado(UID, { chal: CHAL, ...dados }, { segredo: SEGREDO, agoraSegundos: agora, ttlSegundos: ttl });
 const verificar = (estado: unknown, agora = AGORA, segredo = SEGREDO) =>
   verificarEstado(estado, { segredo, agoraSegundos: agora });
 
@@ -51,6 +61,60 @@ function trocarPayload(estado: string, novoPayloadJson: string): string {
 }
 
 async function principal() {
+  VERIFIER = gerarCodeVerifier();
+  CHAL = await calcularCodeChallenge(VERIFIER);
+
+  secao("\n[0. PKCE — RFC 7636]");
+
+  t("0a. verifier: aleatório, dentro da faixa e no alfabeto do RFC", () => {
+    // RFC 7636 §4.1: 43–128 caracteres do conjunto `unreserved`.
+    for (let i = 0; i < 50; i++) {
+      const v = gerarCodeVerifier();
+      assert(v.length >= 43 && v.length <= 128, `comprimento fora da faixa: ${v.length}`);
+      assert(/^[A-Za-z0-9\-._~]+$/.test(v), `caractere fora do RFC: ${v}`);
+    }
+    const amostra = new Set(Array.from({ length: 200 }, () => gerarCodeVerifier()));
+    assert(amostra.size === 200, "🔴 verifier repetiu — a fonte não é aleatória");
+  });
+
+  t("0b. challenge = BASE64URL(SHA256(verifier)), sem padding", async () => {
+    const { createHash } = await import("node:crypto");
+    for (const v of [VERIFIER, gerarCodeVerifier(), gerarCodeVerifier()]) {
+      const esperado = createHash("sha256").update(v, "ascii").digest("base64url");
+      assert(await calcularCodeChallenge(v) === esperado, "S256 divergente da referência do Node");
+    }
+    assert(!CHAL.includes("="), "challenge com padding");
+    assert(CHAL.length === 43, `challenge deveria ter 43 chars, tem ${CHAL.length}`);
+  });
+
+  t("0c. verifierConfere: aceita o par certo, recusa qualquer outro", async () => {
+    assert(await verifierConfere(VERIFIER, CHAL), "recusou o par correto");
+    const outro = gerarCodeVerifier();
+    assert(!(await verifierConfere(outro, CHAL)), "🔴 aceitou verifier de outra tentativa");
+    assert(!(await verifierConfere(VERIFIER, await calcularCodeChallenge(outro))), "🔴 aceitou challenge trocado");
+  });
+
+  t("0d. verifierConfere devolve false para lixo, nunca lança", async () => {
+    for (const mau of [null, undefined, 42, {}, "", "curto", "a".repeat(200), VERIFIER + "x"]) {
+      assert(await verifierConfere(mau as any, CHAL) === false, `aceitou verifier inválido: ${String(mau)}`);
+    }
+    for (const mauChal of [null, "", "nao-e-base64url!", CHAL.slice(0, 42), CHAL + "A"]) {
+      assert(await verifierConfere(VERIFIER, mauChal as any) === false, `aceitou challenge inválido: ${String(mauChal)}`);
+    }
+  });
+
+  t("0e. o nome do cookie deriva do CHALLENGE, nunca do verifier", async () => {
+    const nome = nomeCookiePkce(CHAL);
+    assert(nome === PREFIXO_COOKIE_PKCE + CHAL, `nome inesperado: ${nome}`);
+    assert(!nome.includes(VERIFIER), "🔴 o verifier vazou para o nome do cookie");
+    // Duas tentativas simultâneas produzem cookies distintos — é o que
+    // impede uma aba sobrescrever o verifier da outra.
+    const outroChal = await calcularCodeChallenge(gerarCodeVerifier());
+    assert(nomeCookiePkce(outroChal) !== nome, "🔴 duas tentativas colidiriam no mesmo cookie");
+    // E o nome é sempre válido como nome de cookie (base64url + prefixo).
+    assert(/^[A-Za-z0-9_-]+$/.test(nome), `nome de cookie inválido: ${nome}`);
+  });
+
   secao("\n[1. caminho feliz]");
 
   t("1. connect: assina e verifica", async () => {
@@ -88,7 +152,7 @@ async function principal() {
   t("5. payload adulterado -> null", async () => {
     const s = await assinar({ intent: "connect" });
     const forjado = trocarPayload(s,
-      `{"v":1,"uid":"${OUTRO_UID}","intent":"connect","iat":${AGORA},"exp":${AGORA + 600}}`);
+      `{"v":2,"uid":"${OUTRO_UID}","intent":"connect","chal":"${CHAL}","iat":${AGORA},"exp":${AGORA + 600}}`);
     assert(await verificar(forjado) === null, "🔴 payload trocado foi aceito");
   });
 
@@ -100,7 +164,7 @@ async function principal() {
   });
 
   t("7. assinado com OUTRO segredo -> null", async () => {
-    const s = await assinarEstado(UID, { intent: "connect" },
+    const s = await assinarEstado(UID, { intent: "connect", chal: CHAL },
       { segredo: OUTRO_SEGREDO, agoraSegundos: AGORA });
     assert(await verificar(s) === null, "🔴 aceitou state de outro segredo");
   });
@@ -147,7 +211,7 @@ async function principal() {
     // Reproduz exatamente o que um assinador ingênuo faria: HMAC só do
     // payload. Se isto passasse, a separação de domínio seria decorativa.
     const { createHmac } = await import("node:crypto");
-    const payload = `{"v":1,"uid":"${UID}","intent":"connect","iat":${AGORA},"exp":${AGORA + 600}}`;
+    const payload = `{"v":${VERSAO_ESTADO},"uid":"${UID}","intent":"connect","chal":"${CHAL}","iat":${AGORA},"exp":${AGORA + 600}}`;
     const p64 = Buffer.from(payload, "utf8").toString("base64url");
     const semContexto = createHmac("sha256", SEGREDO).update(p64).digest("base64url");
     assert(await verificar(`${p64}.${semContexto}`) === null,
@@ -187,7 +251,7 @@ async function principal() {
     // state de duração absurda não vale.
     const { createHmac } = await import("node:crypto");
     const exp = AGORA + TTL_MAXIMO_SEGUNDOS + 3600;
-    const payload = `{"v":1,"uid":"${UID}","intent":"connect","iat":${AGORA},"exp":${exp}}`;
+    const payload = `{"v":${VERSAO_ESTADO},"uid":"${UID}","intent":"connect","chal":"${CHAL}","iat":${AGORA},"exp":${exp}}`;
     const p64 = Buffer.from(payload, "utf8").toString("base64url");
     const sig = createHmac("sha256", SEGREDO).update(CONTEXTO_ASSINATURA + p64).digest("base64url");
     assert(await verificar(`${p64}.${sig}`) === null, "🔴 aceitou state de duração acima do teto");
@@ -203,41 +267,48 @@ async function principal() {
   };
 
   t("19. campo EXTRA derruba o state, mesmo bem assinado", async () => {
-    const s = await forjar(`{"v":1,"uid":"${UID}","intent":"connect","iat":${AGORA},"exp":${AGORA + 600},"admin":true}`);
+    const s = await forjar(`{"v":${VERSAO_ESTADO},"uid":"${UID}","intent":"connect","chal":"${CHAL}","iat":${AGORA},"exp":${AGORA + 600},"admin":true}`);
     assert(await verificar(s) === null, "🔴 campo extra aceito");
   });
 
   t("20. CONNECT com loja -> rejeitado", async () => {
-    const s = await forjar(`{"v":1,"uid":"${UID}","intent":"connect","loja":"${LOJA}","iat":${AGORA},"exp":${AGORA + 600}}`);
+    const s = await forjar(`{"v":${VERSAO_ESTADO},"uid":"${UID}","intent":"connect","loja":"${LOJA}","chal":"${CHAL}","iat":${AGORA},"exp":${AGORA + 600}}`);
     assert(await verificar(s) === null, "🔴 connect com loja aceito");
   });
 
   t("21. RECONNECT sem loja -> rejeitado", async () => {
-    const s = await forjar(`{"v":1,"uid":"${UID}","intent":"reconnect","iat":${AGORA},"exp":${AGORA + 600}}`);
+    const s = await forjar(`{"v":${VERSAO_ESTADO},"uid":"${UID}","intent":"reconnect","chal":"${CHAL}","iat":${AGORA},"exp":${AGORA + 600}}`);
     assert(await verificar(s) === null, "🔴 reconnect sem loja aceito");
   });
 
   t("22. intent desconhecido -> rejeitado", async () => {
     for (const intent of ["delete", "", "CONNECT", "admin"]) {
-      const s = await forjar(`{"v":1,"uid":"${UID}","intent":"${intent}","iat":${AGORA},"exp":${AGORA + 600}}`);
+      const s = await forjar(`{"v":${VERSAO_ESTADO},"uid":"${UID}","intent":"${intent}","chal":"${CHAL}","iat":${AGORA},"exp":${AGORA + 600}}`);
       assert(await verificar(s) === null, `intent "${intent}" aceito`);
     }
   });
 
   t("23. versão diferente -> rejeitado", async () => {
-    const s = await forjar(`{"v":2,"uid":"${UID}","intent":"connect","iat":${AGORA},"exp":${AGORA + 600}}`);
+    const s = await forjar(`{"v":3,"uid":"${UID}","intent":"connect","chal":"${CHAL}","iat":${AGORA},"exp":${AGORA + 600}}`);
     assert(await verificar(s) === null, "🔴 versão desconhecida aceita");
   });
 
+  t("23b. state da VERSÃO 1 (sem PKCE) é rejeitado — F0.c.7", async () => {
+    // O formato antigo não tem `chal`. Aceitá-lo reabriria um caminho sem
+    // PKCE, que é exatamente o que esta etapa fecha.
+    const s = await forjar(`{"v":1,"uid":"${UID}","intent":"connect","iat":${AGORA},"exp":${AGORA + 600}}`);
+    assert(await verificar(s) === null, "🔴 state v1 aceito — caminho sem PKCE reaberto");
+  });
+
   t("24. uid ou loja fora do formato UUID -> rejeitado", async () => {
-    const s1 = await forjar(`{"v":1,"uid":"nao-e-uuid","intent":"connect","iat":${AGORA},"exp":${AGORA + 600}}`);
+    const s1 = await forjar(`{"v":${VERSAO_ESTADO},"uid":"nao-e-uuid","intent":"connect","chal":"${CHAL}","iat":${AGORA},"exp":${AGORA + 600}}`);
     assert(await verificar(s1) === null, "uid inválido aceito");
-    const s2 = await forjar(`{"v":1,"uid":"${UID}","intent":"reconnect","loja":"x","iat":${AGORA},"exp":${AGORA + 600}}`);
+    const s2 = await forjar(`{"v":${VERSAO_ESTADO},"uid":"${UID}","intent":"reconnect","loja":"x","chal":"${CHAL}","iat":${AGORA},"exp":${AGORA + 600}}`);
     assert(await verificar(s2) === null, "loja inválida aceita");
   });
 
   t("25. exp <= iat -> rejeitado", async () => {
-    const s = await forjar(`{"v":1,"uid":"${UID}","intent":"connect","iat":${AGORA},"exp":${AGORA}}`);
+    const s = await forjar(`{"v":${VERSAO_ESTADO},"uid":"${UID}","intent":"connect","chal":"${CHAL}","iat":${AGORA},"exp":${AGORA}}`);
     assert(await verificar(s) === null, "exp igual a iat aceito");
   });
 
@@ -251,7 +322,7 @@ async function principal() {
 
   t("27. segredo curto demais LANÇA na assinatura e na verificação", async () => {
     let l1 = false, l2 = false;
-    try { await assinarEstado(UID, { intent: "connect" }, { segredo: "curto", agoraSegundos: AGORA }); }
+    try { await assinarEstado(UID, { intent: "connect", chal: CHAL }, { segredo: "curto", agoraSegundos: AGORA }); }
     catch (e) { l1 = e instanceof ErroConfiguracaoEstado; }
     try { await verificarEstado("a.b", { segredo: "curto", agoraSegundos: AGORA }); }
     catch (e) { l2 = e instanceof ErroConfiguracaoEstado; }
@@ -260,7 +331,7 @@ async function principal() {
 
   t("28. a mensagem de erro NUNCA cita o segredo", async () => {
     try {
-      await assinarEstado(UID, { intent: "connect" }, { segredo: "curto", agoraSegundos: AGORA });
+      await assinarEstado(UID, { intent: "connect", chal: CHAL }, { segredo: "curto", agoraSegundos: AGORA });
     } catch (e: any) {
       assert(!String(e.message).includes("curto-"), "mensagem vazou o segredo");
       assert(/32/.test(e.message), "mensagem não informa o mínimo exigido");
@@ -269,14 +340,14 @@ async function principal() {
 
   t("29. uid inválido na assinatura LANÇA (erro de programação)", async () => {
     let lancou = false;
-    try { await assinarEstado("nao-e-uuid", { intent: "connect" }, { segredo: SEGREDO, agoraSegundos: AGORA }); }
+    try { await assinarEstado("nao-e-uuid", { intent: "connect", chal: CHAL }, { segredo: SEGREDO, agoraSegundos: AGORA }); }
     catch (e) { lancou = e instanceof ErroConfiguracaoEstado; }
     assert(lancou, "assinou com uid inválido");
   });
 
   t("30. loja inválida em reconnect LANÇA na assinatura", async () => {
     let lancou = false;
-    try { await assinarEstado(UID, { intent: "reconnect", loja: "x" } as any, { segredo: SEGREDO, agoraSegundos: AGORA }); }
+    try { await assinarEstado(UID, { intent: "reconnect", loja: "x", chal: CHAL } as any, { segredo: SEGREDO, agoraSegundos: AGORA }); }
     catch (e) { lancou = e instanceof ErroConfiguracaoEstado; }
     assert(lancou, "assinou reconnect com loja inválida");
   });

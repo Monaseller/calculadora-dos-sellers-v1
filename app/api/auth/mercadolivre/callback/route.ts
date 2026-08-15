@@ -28,8 +28,8 @@
  */
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { autenticarRequisicao, agoraEmSegundos } from "@/lib/autenticacao";
-import { verificarEstado } from "@/lib/estado-oauth";
+import { autenticarRequisicao, agoraEmSegundos, lerCookie } from "@/lib/autenticacao";
+import { verificarEstado, verifierConfere, nomeCookiePkce } from "@/lib/estado-oauth";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -47,6 +47,8 @@ type CodigoErroOAuth =
   | "oauth_cancelado"
   | "state_invalido"
   | "state_expirado"
+  | "pkce_cookie_ausente"
+  | "pkce_invalido"
   | "loja_nao_pertence_usuario"
   | "conta_ml_diferente"
   | "duplicidade_loja"
@@ -55,17 +57,34 @@ type CodigoErroOAuth =
   | "persistencia_falhou"
   | "configuracao_invalida";
 
-function erro(request: Request, codigo: CodigoErroOAuth) {
-  const destino = new URL("/configuracoes", request.url);
-  destino.searchParams.set("ml_erro", codigo);
-  return NextResponse.redirect(destino);
+/**
+ * Expira o cookie do PKCE. Chamado em TODO desfecho terminal em que o
+ * challenge já é conhecido — o `code_verifier` é de uso único, e deixá-lo
+ * no navegador o tornaria reaproveitável numa tentativa seguinte.
+ *
+ * `path` tem de ser idêntico ao da emissão, senão a remoção falha em
+ * silêncio e o cookie sobrevive.
+ */
+function limparCookiePkce(res: NextResponse, chal: string | null) {
+  if (!chal) return;
+  res.cookies.set(nomeCookiePkce(chal), "", { maxAge: 0, path: "/api/auth/mercadolivre" });
 }
 
-function sucesso(request: Request, resultado: "connected" | "reconnected", lojaId: string) {
+function erro(request: Request, codigo: CodigoErroOAuth, chal: string | null = null) {
+  const destino = new URL("/configuracoes", request.url);
+  destino.searchParams.set("ml_erro", codigo);
+  const res = NextResponse.redirect(destino);
+  limparCookiePkce(res, chal);
+  return res;
+}
+
+function sucesso(request: Request, resultado: "connected" | "reconnected", lojaId: string, chal: string | null) {
   const destino = new URL("/configuracoes", request.url);
   destino.searchParams.set("ml", resultado);
   destino.searchParams.set("loja", lojaId);
-  return NextResponse.redirect(destino);
+  const res = NextResponse.redirect(destino);
+  limparCookiePkce(res, chal);
+  return res;
 }
 
 export async function GET(request: Request) {
@@ -103,12 +122,27 @@ export async function GET(request: Request) {
     // `verificarEstado` não distingue expirado de adulterado, de
     // propósito. Só damos a pista mais útil quando ela não revela nada:
     // um payload legível e bem-assinado que apenas venceu.
-    const expirado = await estadoApenasExpirado(stateBruto, segredo, agora);
-    return erro(request, expirado ? "state_expirado" : "state_invalido");
+    //
+    // Num state expirado ainda conseguimos o challenge — e com ele o
+    // cookie do PKCE daquela tentativa, que aproveitamos para limpar.
+    const vencido = await estadoApenasExpirado(stateBruto, segredo, agora);
+    return vencido
+      ? erro(request, "state_expirado", vencido.chal)
+      : erro(request, "state_invalido");
   }
 
   // 7. Binding: quem voltou é quem começou.
-  if (state.uid !== userId) return erro(request, "state_invalido");
+  if (state.uid !== userId) return erro(request, "state_invalido", state.chal);
+
+  // 7b. PKCE — o cookie desta tentativa precisa existir e casar com o
+  //     challenge que o `state` carrega. Isso impede parear o verifier de
+  //     uma tentativa com o `state` de outra, e roda ANTES de gastar o
+  //     `code`. Nenhum dos dois valores aparece em erro, log ou URL.
+  const verifier = lerCookie(request, nomeCookiePkce(state.chal));
+  if (!verifier) return erro(request, "pkce_cookie_ausente", state.chal);
+  if (!(await verifierConfere(verifier, state.chal))) {
+    return erro(request, "pkce_invalido", state.chal);
+  }
 
   // 8-9. RECONNECT revalida a propriedade da loja ANTES de gastar o code.
   let lojaAlvo: { id: string; seller_id: string | null } | null = null;
@@ -123,19 +157,19 @@ export async function GET(request: Request) {
 
     if (error) {
       console.error("[callback ML] falha ao revalidar a loja:", error.message);
-      return erro(request, "persistencia_falhou");
+      return erro(request, "persistencia_falhou", state.chal);
     }
-    if (!data) return erro(request, "loja_nao_pertence_usuario");
+    if (!data) return erro(request, "loja_nao_pertence_usuario", state.chal);
     lojaAlvo = data as { id: string; seller_id: string | null };
   }
 
   // 10-11. Troca do code por token — SERVER-SIDE, nada disso sai daqui.
-  const credencial = await trocarCodePorToken(code);
-  if (!credencial) return erro(request, "token_exchange_falhou");
+  const credencial = await trocarCodePorToken(code, verifier);
+  if (!credencial) return erro(request, "token_exchange_falhou", state.chal);
 
   // 12-13. Quem autorizou?
   const identidade = await obterIdentidadeML(credencial.accessToken);
-  if (!identidade) return erro(request, "identidade_falhou");
+  if (!identidade) return erro(request, "identidade_falhou", state.chal);
 
   const expiraEm = new Date(Date.now() + credencial.expiresIn * 1000).toISOString();
 
@@ -144,7 +178,7 @@ export async function GET(request: Request) {
     // O seller que voltou tem de ser o da loja pretendida. Autorizar
     // outra conta NÃO transforma esta loja naquela conta.
     if ((lojaAlvo!.seller_id ?? "") !== identidade.sellerId) {
-      return erro(request, "conta_ml_diferente");
+      return erro(request, "conta_ml_diferente", state.chal);
     }
 
     const gravou = await gravarCredencial(
@@ -153,9 +187,9 @@ export async function GET(request: Request) {
       identidade.nickname,
       expiraEm
     );
-    if (gravou === "erro") return erro(request, "persistencia_falhou");
-    if (gravou === "vazio") return erro(request, "persistencia_falhou");
-    return sucesso(request, "reconnected", lojaAlvo!.id);
+    if (gravou === "erro") return erro(request, "persistencia_falhou", state.chal);
+    if (gravou === "vazio") return erro(request, "persistencia_falhou", state.chal);
+    return sucesso(request, "reconnected", lojaAlvo!.id, state.chal);
   }
 
   // CONNECT. A busca é SEMPRE escopada pelo usuário: o mesmo seller pode
@@ -170,7 +204,7 @@ export async function GET(request: Request) {
 
   if (erroBusca) {
     console.error("[callback ML] falha ao buscar loja do usuário:", erroBusca.message);
-    return erro(request, "persistencia_falhou");
+    return erro(request, "persistencia_falhou", state.chal);
   }
 
   const linhas = proprias ?? [];
@@ -178,7 +212,7 @@ export async function GET(request: Request) {
   // Duplicidade DENTRO do mesmo usuário: fail-closed. Escolher uma linha
   // arbitrariamente esconderia a inconsistência e gravaria credencial num
   // registro que talvez não seja o que a interface mostra.
-  if (linhas.length > 1) return erro(request, "duplicidade_loja");
+  if (linhas.length > 1) return erro(request, "duplicidade_loja", state.chal);
 
   if (linhas.length === 1) {
     const gravou = await gravarCredencial(
@@ -187,8 +221,8 @@ export async function GET(request: Request) {
       identidade.nickname,
       expiraEm
     );
-    if (gravou !== "ok") return erro(request, "persistencia_falhou");
-    return sucesso(request, "connected", linhas[0].id);
+    if (gravou !== "ok") return erro(request, "persistencia_falhou", state.chal);
+    return sucesso(request, "connected", linhas[0].id, state.chal);
   }
 
   // Nenhuma linha própria: cria uma, sempre com o dono da sessão.
@@ -213,11 +247,11 @@ export async function GET(request: Request) {
 
   if (erroInsert) {
     console.error("[callback ML] falha ao criar a loja:", erroInsert.message);
-    return erro(request, "persistencia_falhou");
+    return erro(request, "persistencia_falhou", state.chal);
   }
-  if (!criada || criada.length === 0) return erro(request, "persistencia_falhou");
+  if (!criada || criada.length === 0) return erro(request, "persistencia_falhou", state.chal);
 
-  return sucesso(request, "connected", criada[0].id);
+  return sucesso(request, "connected", criada[0].id, state.chal);
 }
 
 /** O Mercado Livre também chama por POST em algumas configurações. */
@@ -239,7 +273,7 @@ interface CredencialML {
  *
  * Nada do corpo da resposta é logado — ele contém as duas credenciais.
  */
-async function trocarCodePorToken(code: string): Promise<CredencialML | null> {
+async function trocarCodePorToken(code: string, codeVerifier: string): Promise<CredencialML | null> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
   try {
@@ -254,11 +288,20 @@ async function trocarCodePorToken(code: string): Promise<CredencialML | null> {
         // Precisa ser IDÊNTICO ao usado na autorização — o Mercado Livre
         // recusa a troca se divergir, inclusive por uma barra final.
         redirect_uri: process.env.ML_REDIRECT_URI!.trim(),
+        // PKCE: prova de que quem troca o code é quem iniciou o fluxo.
+        // O `client_secret` CONTINUA sendo enviado — o app é confidencial,
+        // e PKCE se soma a ele, não o substitui.
+        code_verifier: codeVerifier,
       }),
       signal: ctrl.signal,
     });
     if (!res.ok) {
-      console.error(`[callback ML] token endpoint respondeu ${res.status}`);
+      // Registra o CÓDIGO enumerado do erro (`invalid_client`,
+      // `invalid_grant`, …), nunca o corpo bruto: ele pode trazer
+      // `error_description` com conteúdo inesperado. Sem esse campo, a
+      // investigação anterior ficou sem distinguir "credencial errada" de
+      // "code/PKCE inválido" — foi o que mais custou tempo.
+      console.error(`[callback ML] token endpoint respondeu ${res.status} · error=${await lerErroEnumerado(res)}`);
       return null;
     }
     const data = await res.json();
@@ -273,6 +316,25 @@ async function trocarCodePorToken(code: string): Promise<CredencialML | null> {
     return null;
   } finally {
     clearTimeout(timer);
+  }
+}
+
+/**
+ * Extrai SOMENTE o campo `error` de uma resposta de erro do OAuth, e só
+ * se ele parecer um código enumerado (minúsculas e `_`, curto). Qualquer
+ * outra coisa vira `"unknown"`.
+ *
+ * O corpo inteiro nunca é logado: além de `error_description` poder
+ * trazer texto arbitrário, respostas de erro de OAuth não têm formato
+ * garantido.
+ */
+async function lerErroEnumerado(res: Response): Promise<string> {
+  try {
+    const corpo: any = await res.json();
+    const codigo = corpo?.error;
+    return typeof codigo === "string" && /^[a-z_]{1,40}$/.test(codigo) ? codigo : "unknown";
+  } catch {
+    return "unknown";
   }
 }
 
@@ -364,11 +426,10 @@ async function estadoApenasExpirado(
   stateBruto: string | null,
   segredo: string,
   agora: number
-): Promise<boolean> {
-  if (!stateBruto) return false;
-  const comoSeFosseAntes = await verificarEstado(stateBruto, {
+) {
+  if (!stateBruto) return null;
+  return verificarEstado(stateBruto, {
     segredo,
     agoraSegundos: Math.max(1, agora - 24 * 60 * 60),
   });
-  return comoSeFosseAntes !== null;
 }

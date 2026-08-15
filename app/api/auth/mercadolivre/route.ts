@@ -26,7 +26,13 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { autenticarRequisicao, agoraEmSegundos } from "@/lib/autenticacao";
-import { assinarEstado } from "@/lib/estado-oauth";
+import {
+  assinarEstado,
+  gerarCodeVerifier,
+  calcularCodeChallenge,
+  nomeCookiePkce,
+  TTL_PADRAO_SEGUNDOS,
+} from "@/lib/estado-oauth";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -86,9 +92,23 @@ export async function GET(request: Request) {
     return erro(request, "configuracao_invalida");
   }
 
+  // ── PKCE (RFC 7636) — F0.c.7 ──────────────────────────────────────
+  // A aplicação no Mercado Livre está com PKCE exigido. Sem estes dois
+  // campos, o `code` é emitido normalmente e a TROCA por token falha com
+  // HTTP 400 — foi o que o log de produção mostrou.
+  //
+  // O verifier é o segredo: fica só num cookie HttpOnly. O challenge é
+  // público (vai na URL) e viaja também dentro do `state` assinado, para
+  // que o callback consiga provar que o cookie que recebeu pertence a
+  // ESTA tentativa.
+  const codeVerifier = gerarCodeVerifier();
+  const codeChallenge = await calcularCodeChallenge(codeVerifier);
+
   const state = await assinarEstado(
     userId,
-    ehReconexao ? { intent: "reconnect", loja: lojaId } : { intent: "connect" },
+    ehReconexao
+      ? { intent: "reconnect", loja: lojaId, chal: codeChallenge }
+      : { intent: "connect", chal: codeChallenge },
     { segredo, agoraSegundos: agoraEmSegundos() }
   );
 
@@ -101,7 +121,23 @@ export async function GET(request: Request) {
     `&client_id=${clientId}` +
     `&redirect_uri=${encodeURIComponent(redirectUri)}` +
     `&scope=read_catalog%20write_items%20offline_access` +
-    `&state=${encodeURIComponent(state)}`;
+    `&state=${encodeURIComponent(state)}` +
+    `&code_challenge=${encodeURIComponent(codeChallenge)}` +
+    `&code_challenge_method=S256`;
 
-  return NextResponse.redirect(authUrl);
+  const res = NextResponse.redirect(authUrl);
+
+  // O cookie é nomeado pelo challenge: duas abas produzem challenges
+  // diferentes e portanto cookies diferentes, sem uma sobrescrever a
+  // outra. `path` cobre só o próprio fluxo do ML — o callback está sob
+  // ele, e nenhuma outra rota recebe este cookie.
+  res.cookies.set(nomeCookiePkce(codeChallenge), codeVerifier, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    path: "/api/auth/mercadolivre",
+    maxAge: TTL_PADRAO_SEGUNDOS,
+  });
+
+  return res;
 }
