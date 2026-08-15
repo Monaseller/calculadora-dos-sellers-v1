@@ -85,9 +85,13 @@ export const ROTAS_PUBLICAS: Readonly<Record<string, readonly string[]>> = {
   "/api/auth/verificar-email": ["GET", "POST"],
   // As três abaixo passam a exigir sessão em F0.c. Em F0.b o fluxo OAuth
   // fica EXATAMENTE como está hoje.
+  // `/api/auth/mercadolivre` permanece aqui, mas NÃO é mais pública de
+  // fato: desde F0.c.6c ela exige sessão dentro da própria rota e manda
+  // para `/login` quando não há. Ela fica na lista porque é NAVEGAÇÃO —
+  // o middleware responderia 401 em JSON, que seria um beco sem saída na
+  // tela, em vez do redirect que a rota sabe fazer.
   "/api/auth/mercadolivre": ["GET"],
   "/api/auth/shopee": ["GET", "POST"],
-  "/api/auth/relay": ["GET"],
   // Callbacks continuam públicos de forma permanente: quem chama é o
   // marketplace. A proteção deles é a validação do code/assinatura
   // dentro da própria rota.

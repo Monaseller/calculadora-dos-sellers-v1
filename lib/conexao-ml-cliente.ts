@@ -126,6 +126,14 @@ export function motivoBloqueioML(conexao: ConexaoML): string | null {
   }
 }
 
+/** Início do OAuth. Sem loja é CONNECT; com loja é RECONNECT daquela loja. */
+export const CAMINHO_OAUTH_ML = "/api/auth/mercadolivre";
+
+function hrefReconexao(lojaId: string | undefined): string {
+  if (!lojaId) return CAMINHO_OAUTH_ML;
+  return `${CAMINHO_OAUTH_ML}?loja_id=${encodeURIComponent(lojaId)}`;
+}
+
 export interface AvisoConexaoML {
   tom: "aviso" | "erro" | "info";
   titulo: string;
@@ -164,7 +172,12 @@ export function avisoConexaoML(conexao: ConexaoML): AvisoConexaoML | null {
         tom: "aviso",
         titulo: "A autorização do Mercado Livre expirou",
         descricao: "Sua conta continua cadastrada — só é preciso autorizar de novo para voltar a sincronizar.",
-        acao: { texto: "Reconectar ML", href: "/api/auth/mercadolivre" },
+        // A loja vai no link (F0.c.6c). Antes o botão mandava para o
+        // OAuth genérico, e o servidor não tinha como saber QUAL conta
+        // estava sendo reautorizada — com duas lojas, reconectava a
+        // errada. O `loja_id` vem do navegador, mas a propriedade é
+        // validada no servidor ANTES de o `state` ser assinado.
+        acao: { texto: "Reconectar ML", href: hrefReconexao(conexao.loja?.id) },
       };
 
     case "LOJA_NAO_DEFINIDA":
@@ -198,4 +211,72 @@ export function avisoConexaoML(conexao: ConexaoML): AvisoConexaoML | null {
         descricao: "Isto não quer dizer que o Mercado Livre está desconectado. Tente novamente em instantes.",
       };
   }
+}
+
+// ────────────────────────────────────────────────────────────────────
+// RETORNO DO OAUTH — F0.c.6e
+//
+// O callback volta para `/configuracoes` com `?ml=` ou `?ml_erro=`. Esta
+// é a única tradução desses códigos.
+//
+// REGRA: a query NUNCA é renderizada. O que a tela mostra sai da tabela
+// abaixo, indexada por um código conhecido; qualquer valor fora dela
+// vira `null` e a tela não exibe nada. Sem isso, `?ml_erro=<html>` seria
+// texto do atacante dentro da nossa interface.
+// ────────────────────────────────────────────────────────────────────
+
+export interface RetornoOAuthML {
+  tom: "sucesso" | "erro";
+  texto: string;
+}
+
+const SUCESSOS: Readonly<Record<string, string>> = {
+  connected: "Mercado Livre conectado com sucesso.",
+  reconnected: "Mercado Livre reconectado com sucesso.",
+};
+
+/**
+ * Mensagens de erro.
+ *
+ * Nenhuma cita token, seller, nome de tabela, status HTTP do provedor ou
+ * mensagem do Mercado Livre. Vários códigos distintos compartilham texto
+ * de propósito — `state_invalido` cobre desde assinatura adulterada até
+ * usuário divergente, e explicar a diferença ajudaria só quem tentou.
+ */
+const ERROS: Readonly<Record<string, string>> = {
+  oauth_cancelado: "Autorização cancelada. Nenhuma alteração foi feita.",
+  state_expirado: "A autorização expirou. Tente novamente.",
+  state_invalido: "Não foi possível validar esta autorização. Tente novamente.",
+  sessao_invalida: "Sua sessão expirou durante a autorização. Entre novamente e repita.",
+  loja_nao_pertence_usuario: "Esta loja não está disponível na sua conta.",
+  conta_ml_diferente: "A conta do Mercado Livre autorizada não corresponde à loja que você quis reconectar. Nada foi alterado.",
+  duplicidade_loja: "Foi detectada uma inconsistência na vinculação desta conta. Nenhuma alteração foi realizada.",
+  token_exchange_falhou: "O Mercado Livre não concluiu a autorização. Tente novamente.",
+  identidade_falhou: "Não foi possível confirmar a conta no Mercado Livre. Tente novamente.",
+  persistencia_falhou: "Não foi possível salvar a conexão agora. Tente novamente em instantes.",
+  configuracao_invalida: "A conexão com o Mercado Livre está indisponível no momento.",
+};
+
+/**
+ * Lê `?ml=` / `?ml_erro=` e devolve o que a tela deve mostrar, ou `null`.
+ *
+ * Recebe um `URLSearchParams` — não a string crua — para deixar explícito
+ * que a decodificação é do navegador e que aqui só há consulta por chave.
+ */
+export function interpretarRetornoOAuthML(params: URLSearchParams): RetornoOAuthML | null {
+  const erro = params.get("ml_erro");
+  if (erro !== null) {
+    const texto = ERROS[erro];
+    // Código desconhecido: mensagem genérica, NUNCA o valor recebido.
+    return { tom: "erro", texto: texto ?? "Não foi possível concluir a conexão com o Mercado Livre." };
+  }
+
+  const ok = params.get("ml");
+  if (ok !== null) {
+    const texto = SUCESSOS[ok];
+    // Sucesso desconhecido não é sucesso: não afirmamos o que não sabemos.
+    return texto ? { tom: "sucesso", texto } : null;
+  }
+
+  return null;
 }

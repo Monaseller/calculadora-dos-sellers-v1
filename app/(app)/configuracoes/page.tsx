@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { interpretarRetornoOAuthML } from "@/lib/conexao-ml-cliente";
 
 type Loja = {
   id: string;
@@ -195,6 +196,28 @@ export default function ConfiguracoesPage() {
   }
 
   useEffect(() => { carregarLojas(); carregarPerfil(); }, []);
+
+  /**
+   * Retorno do OAuth do Mercado Livre — F0.c.6e.
+   *
+   * O callback volta para cá com `?ml=` ou `?ml_erro=`. Antes desta
+   * etapa o parâmetro de erro JÁ existia e simplesmente não era lido:
+   * o usuário era mandado de volta para uma tela muda, sem saber se a
+   * autorização tinha funcionado. Foi o que fez a reconexão parecer um
+   * beco sem saída no incidente de 2026-08-14.
+   *
+   * A query NUNCA é renderizada: `interpretarRetornoOAuthML` só devolve
+   * texto de uma tabela de códigos conhecidos. Um `?ml_erro=` arbitrário
+   * vira mensagem genérica, nunca o conteúdo recebido.
+   */
+  useEffect(() => {
+    const retorno = interpretarRetornoOAuthML(new URLSearchParams(window.location.search));
+    if (!retorno) return;
+    setMsg({ ok: retorno.tom === "sucesso", texto: retorno.texto });
+    // Limpa a query para que um F5 não repita a mensagem de um fluxo que
+    // já terminou. `replace` não empilha histórico.
+    router.replace("/configuracoes");
+  }, [router]);
 
   async function salvarPerfil() {
     setSalvandoPerfil(true);

@@ -1,0 +1,328 @@
+/**
+ * `state` assinado do OAuth Mercado Livre — F0.c.6c.
+ *
+ * ── O que este módulo impede ────────────────────────────────────────
+ * O fluxo OAuth do CDS não tinha `state`. Sem ele, qualquer pessoa podia
+ * fazer o navegador de um usuário autenticado completar uma autorização
+ * que ela iniciou (CSRF), e não havia como o callback saber QUAL loja
+ * estava sendo reconectada — o `loja_id` simplesmente não trafegava.
+ *
+ * Este módulo produz um token que:
+ *   · só pode ser fabricado por quem tem o segredo;
+ *   · carrega o `uid` de quem iniciou, para o callback comparar com a
+ *     sessão de quem voltou;
+ *   · carrega a loja pretendida quando é reconexão;
+ *   · expira em minutos.
+ *
+ * ── Por que não reaproveitar `assinarSessao` ────────────────────────
+ * O parser de `lib/sessao-assinada.ts` exige EXATAMENTE os campos
+ * `v/uid/iat/exp` e recusa qualquer chave a mais — `intent` e `loja`
+ * seriam rejeitados. O desenho é copiado; a função, não.
+ *
+ * ── SEPARAÇÃO DE DOMÍNIO ────────────────────────────────────────────
+ * A chave é a mesma da sessão (`SESSION_SECRET`), então a assinatura NÃO
+ * cobre só o payload: ela cobre `CONTEXTO + payload`. Sem isso, um token
+ * de sessão e um `state` seriam artefatos do mesmo formato assinados com
+ * a mesma chave, e a separação dependeria apenas de os dois parsers
+ * discordarem — o que é verdade hoje e pode deixar de ser amanhã. Com o
+ * contexto, um token de sessão é estruturalmente inválido como `state`,
+ * e vice-versa, mesmo que os parsers convirjam.
+ *
+ * ── Mesmas invariantes de `sessao-assinada.ts` ──────────────────────
+ * Web Crypto apenas (vale em Node e Edge) · nunca lê o relógio · nunca
+ * lê variável de ambiente · a assinatura cobre a STRING TRANSMITIDA, não
+ * um JSON reserializado · entrada hostil devolve `null` em silêncio ·
+ * erro de configuração **lança** · parser estrito.
+ *
+ * ── O que este módulo NÃO resolve ───────────────────────────────────
+ * REPLAY. Sendo stateless, não há onde marcar "já usado": o mesmo
+ * `state` pode ser reapresentado dentro da validade. Isso é aceito com
+ * três condições, todas verdadeiras no fluxo atual: o callback exige
+ * sessão, o `code` do Mercado Livre é de uso único, e a propriedade da
+ * loja é revalidada no banco. Se qualquer uma dessas cair, este módulo
+ * deixa de ser suficiente e o caminho é uma tabela `oauth_attempts` com
+ * `used_at`.
+ */
+
+/** Versão do formato. `state` de outra versão é recusado. */
+export const VERSAO_ESTADO = 1;
+
+/**
+ * Prefixo da separação de domínio. Trocar isto invalida todo `state` em
+ * voo — o que é aceitável, porque eles duram minutos.
+ */
+export const CONTEXTO_ASSINATURA = "cds.oauth.state.v1:";
+
+/**
+ * 10 minutos. O caminho real inclui login no Mercado Livre, 2FA e a tela
+ * de permissões; 5 minutos reprovaria gente legítima. Curto o bastante
+ * para a janela de replay ser irrelevante.
+ */
+export const TTL_PADRAO_SEGUNDOS = 600;
+
+/**
+ * Teto absoluto, validado também na VERIFICAÇÃO: um `state` assinado com
+ * duração maior é recusado mesmo com assinatura boa. Impede que um erro
+ * futuro no emissor produza `state` quase eterno.
+ */
+export const TTL_MAXIMO_SEGUNDOS = 600;
+
+/** 256 bits. Segredo menor é erro de configuração, não aviso. */
+export const SEGREDO_MINIMO_BYTES = 32;
+
+/** Um `state` real tem ~200 caracteres. Entrada hostil enorme cai antes. */
+export const TAMANHO_MAXIMO_ESTADO = 512;
+
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const BASE64URL_REGEX = /^[A-Za-z0-9_-]+$/;
+
+/** Conjuntos de chaves ACEITOS — exatamente estes, nem a mais nem a menos. */
+const CAMPOS_CONNECT = ["v", "uid", "intent", "iat", "exp"] as const;
+const CAMPOS_RECONNECT = ["v", "uid", "intent", "loja", "iat", "exp"] as const;
+
+export type IntencaoOAuth = "connect" | "reconnect";
+
+export type EstadoOAuth =
+  | { v: number; uid: string; intent: "connect"; iat: number; exp: number }
+  | { v: number; uid: string; intent: "reconnect"; loja: string; iat: number; exp: number };
+
+/** Erro de CONFIGURAÇÃO — nunca causado por entrada de usuário. */
+export class ErroConfiguracaoEstado extends Error {
+  constructor(mensagem: string) {
+    super(mensagem);
+    this.name = "ErroConfiguracaoEstado";
+  }
+}
+
+// ── Codificação (sem Buffer, para valer no Edge) ─────────────────────
+// Duplicada de `lib/sessao-assinada.ts` de propósito: aquele módulo não
+// exporta estes utilitários, e alterá-lo — o mais crítico e mais testado
+// do repositório — não é escopo desta etapa.
+
+const codificador = new TextEncoder();
+const decodificador = new TextDecoder("utf-8", { fatal: true });
+
+function bytesParaBase64url(bytes: Uint8Array): string {
+  let binario = "";
+  for (let i = 0; i < bytes.length; i++) binario += String.fromCharCode(bytes[i]);
+  return btoa(binario).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function base64urlParaBytes(texto: string): Uint8Array | null {
+  if (!texto || !BASE64URL_REGEX.test(texto)) return null;
+  const padded = texto.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - (texto.length % 4)) % 4);
+  try {
+    const binario = atob(padded);
+    const bytes = new Uint8Array(binario.length);
+    for (let i = 0; i < binario.length; i++) bytes[i] = binario.charCodeAt(i);
+    return bytes;
+  } catch {
+    return null;
+  }
+}
+
+function obterSubtle(): SubtleCrypto {
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) {
+    throw new ErroConfiguracaoEstado(
+      "Web Crypto (crypto.subtle) indisponível neste runtime — state do OAuth não pode operar."
+    );
+  }
+  return subtle;
+}
+
+async function importarChave(segredo: string): Promise<CryptoKey> {
+  if (typeof segredo !== "string" || segredo.length === 0) {
+    throw new ErroConfiguracaoEstado("Segredo do state ausente.");
+  }
+  const bytes = codificador.encode(segredo);
+  if (bytes.length < SEGREDO_MINIMO_BYTES) {
+    // A mensagem cita o tamanho exigido, nunca o segredo.
+    throw new ErroConfiguracaoEstado(
+      `Segredo do state curto demais: ${bytes.length} bytes, mínimo ${SEGREDO_MINIMO_BYTES}.`
+    );
+  }
+  return obterSubtle().importKey("raw", bytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
+}
+
+// ── Payload ──────────────────────────────────────────────────────────
+
+/** Serialização determinística: ordem fixa, escrita à mão. */
+function serializar(e: EstadoOAuth): string {
+  const cabeca = `{"v":${e.v},"uid":${JSON.stringify(e.uid)},"intent":${JSON.stringify(e.intent)}`;
+  const loja = e.intent === "reconnect" ? `,"loja":${JSON.stringify(e.loja)}` : "";
+  return `${cabeca}${loja},"iat":${e.iat},"exp":${e.exp}}`;
+}
+
+function inteiroPositivoValido(valor: unknown): valor is number {
+  return typeof valor === "number" && Number.isSafeInteger(valor) && valor > 0;
+}
+
+function mesmasChaves(chaves: string[], esperadas: readonly string[]): boolean {
+  if (chaves.length !== esperadas.length) return false;
+  for (const c of esperadas) if (!chaves.includes(c)) return false;
+  return true;
+}
+
+/**
+ * Valida a forma do payload. `null` em qualquer desvio — fail-closed.
+ *
+ * A checagem de conjunto de chaves é o que faz `loja` em connect e `loja`
+ * ausente em reconnect serem recusados sem nenhuma regra extra.
+ */
+function validarPayload(bruto: unknown): EstadoOAuth | null {
+  if (typeof bruto !== "object" || bruto === null || Array.isArray(bruto)) return null;
+
+  const registro = bruto as Record<string, unknown>;
+  const chaves = Object.keys(registro);
+  const { v, uid, intent, iat, exp, loja } = registro;
+
+  if (v !== VERSAO_ESTADO) return null;
+  if (typeof uid !== "string" || !UUID_REGEX.test(uid)) return null;
+  if (!inteiroPositivoValido(iat) || !inteiroPositivoValido(exp)) return null;
+  if (exp <= iat) return null;
+  if (exp - iat > TTL_MAXIMO_SEGUNDOS) return null;
+
+  if (intent === "connect") {
+    if (!mesmasChaves(chaves, CAMPOS_CONNECT)) return null;
+    return { v, uid, intent: "connect", iat, exp };
+  }
+
+  if (intent === "reconnect") {
+    if (!mesmasChaves(chaves, CAMPOS_RECONNECT)) return null;
+    if (typeof loja !== "string" || !UUID_REGEX.test(loja)) return null;
+    return { v, uid, intent: "reconnect", loja, iat, exp };
+  }
+
+  return null;
+}
+
+// ── API pública ──────────────────────────────────────────────────────
+
+export interface OpcoesAssinaturaEstado {
+  segredo: string;
+  /** Instante de referência, em segundos. O módulo nunca lê o relógio. */
+  agoraSegundos: number;
+  /** Padrão: TTL_PADRAO_SEGUNDOS. Nunca acima do teto. */
+  ttlSegundos?: number;
+}
+
+export type DadosEstado =
+  | { intent: "connect" }
+  | { intent: "reconnect"; loja: string };
+
+/**
+ * Assina um `state`.
+ *
+ * **Lança** para uid inválido, loja inválida, instante inválido, TTL fora
+ * do permitido ou segredo inadequado — todos erros de programação ou de
+ * configuração, nunca entrada de usuário.
+ */
+export async function assinarEstado(
+  uid: string,
+  dados: DadosEstado,
+  opcoes: OpcoesAssinaturaEstado
+): Promise<string> {
+  const { segredo, agoraSegundos, ttlSegundos = TTL_PADRAO_SEGUNDOS } = opcoes;
+
+  if (typeof uid !== "string" || !UUID_REGEX.test(uid)) {
+    throw new ErroConfiguracaoEstado("uid não é um UUID válido.");
+  }
+  if (!inteiroPositivoValido(agoraSegundos)) {
+    throw new ErroConfiguracaoEstado("agoraSegundos deve ser um inteiro positivo (segundos).");
+  }
+  if (!inteiroPositivoValido(ttlSegundos) || ttlSegundos > TTL_MAXIMO_SEGUNDOS) {
+    throw new ErroConfiguracaoEstado(`ttlSegundos deve ser inteiro positivo até ${TTL_MAXIMO_SEGUNDOS}.`);
+  }
+  if (dados.intent === "reconnect" && (typeof dados.loja !== "string" || !UUID_REGEX.test(dados.loja))) {
+    throw new ErroConfiguracaoEstado("loja não é um UUID válido.");
+  }
+
+  const estado: EstadoOAuth =
+    dados.intent === "reconnect"
+      ? { v: VERSAO_ESTADO, uid, intent: "reconnect", loja: dados.loja, iat: agoraSegundos, exp: agoraSegundos + ttlSegundos }
+      : { v: VERSAO_ESTADO, uid, intent: "connect", iat: agoraSegundos, exp: agoraSegundos + ttlSegundos };
+
+  const payloadB64 = bytesParaBase64url(codificador.encode(serializar(estado)));
+  const chave = await importarChave(segredo);
+  const assinatura = await obterSubtle().sign(
+    "HMAC",
+    chave,
+    codificador.encode(CONTEXTO_ASSINATURA + payloadB64)
+  );
+
+  return `${payloadB64}.${bytesParaBase64url(new Uint8Array(assinatura))}`;
+}
+
+export interface OpcoesVerificacaoEstado {
+  segredo: string;
+  agoraSegundos: number;
+}
+
+/**
+ * Verifica um `state`.
+ *
+ * Devolve `null` para QUALQUER state inválido — ausente, adulterado,
+ * expirado, malformado, de outra versão, assinado com outro segredo,
+ * assinado sem a separação de domínio, ou com o par intent/loja
+ * inconsistente. Quem chama não precisa saber o motivo, e não deve
+ * contar essa diferença para fora.
+ *
+ * **Lança** apenas quando o problema é de configuração.
+ */
+export async function verificarEstado(
+  estado: unknown,
+  opcoes: OpcoesVerificacaoEstado
+): Promise<EstadoOAuth | null> {
+  const { segredo, agoraSegundos } = opcoes;
+
+  // A chave vem primeiro, de propósito: segredo inadequado tem de
+  // estourar mesmo quando o state é lixo.
+  const chave = await importarChave(segredo);
+
+  if (!inteiroPositivoValido(agoraSegundos)) {
+    throw new ErroConfiguracaoEstado("agoraSegundos deve ser um inteiro positivo (segundos).");
+  }
+
+  if (typeof estado !== "string" || estado.length === 0) return null;
+  if (estado.length > TAMANHO_MAXIMO_ESTADO) return null;
+
+  const partes = estado.split(".");
+  if (partes.length !== 2) return null;
+
+  const [payloadB64, assinaturaB64] = partes;
+  if (!payloadB64 || !assinaturaB64) return null;
+
+  const assinatura = base64urlParaBytes(assinaturaB64);
+  if (!assinatura) return null;
+  // HMAC-SHA-256 produz exatamente 32 bytes. Truncada ou inflada, cai aqui.
+  if (assinatura.length !== 32) return null;
+
+  // Comparação timing-safe por construção: quem compara é o `verify` do
+  // Web Crypto, nunca um `===` entre assinaturas neste código.
+  const assinaturaConfere = await obterSubtle().verify(
+    "HMAC",
+    chave,
+    assinatura,
+    codificador.encode(CONTEXTO_ASSINATURA + payloadB64)
+  );
+  if (!assinaturaConfere) return null;
+
+  const payloadBytes = base64urlParaBytes(payloadB64);
+  if (!payloadBytes) return null;
+
+  let bruto: unknown;
+  try {
+    bruto = JSON.parse(decodificador.decode(payloadBytes));
+  } catch {
+    return null; // UTF-8 inválido ou JSON inválido
+  }
+
+  const validado = validarPayload(bruto);
+  if (!validado) return null;
+
+  // `exp` é EXCLUSIVO: no instante exato de exp o state já expirou.
+  if (agoraSegundos >= validado.exp) return null;
+
+  return validado;
+}

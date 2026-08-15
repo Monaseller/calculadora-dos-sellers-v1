@@ -206,17 +206,27 @@ const OAUTH_PUBLICAS: [string, string][] = [
   ["/api/auth/shopee", "GET"],
   ["/api/auth/shopee", "POST"],
   ["/api/auth/shopee/callback", "GET"],
-  ["/api/auth/relay", "GET"],
 ];
 
-t("23. as 12 combinacoes de auth/OAuth passam sem cookie", () => {
+t("23. as 11 combinacoes de auth/OAuth passam sem cookie", () => {
+  // 12 → 11 em F0.c.6d: `/api/auth/relay` foi DELETADA. O callback do ML
+  // passou a persistir sozinho, e ela era o unico consumidor.
   for (const [caminho, metodo] of OAUTH_PUBLICAS)
     assert(sem(caminho, metodo) === "liberar", `${metodo} ${caminho} foi bloqueada`);
 });
 
-t("24. as rotas publicas sao exatamente as 8 previstas", () => {
+t("24. as rotas publicas sao exatamente as 7 previstas", () => {
+  // 8 → 7 em F0.c.6d, pela remocao do relay.
   const n = Object.keys(ROTAS_PUBLICAS).length;
-  assert(n === 8, `esperado 8 rotas publicas, encontrado ${n}`);
+  assert(n === 7, `esperado 7 rotas publicas, encontrado ${n}`);
+});
+
+t("24b. o relay nao existe mais em lugar nenhum", () => {
+  // Ele aceitava access_token e refresh_token por QUERY STRING. Enquanto
+  // o arquivo existir, alguem pode reativa-lo sem perceber o que ele fazia.
+  assert(!("/api/auth/relay" in ROTAS_PUBLICAS), "relay ainda listado como rota publica");
+  assert(!fs.existsSync(path.join(process.cwd(), "app", "api", "auth", "relay", "route.ts")),
+    "o arquivo do relay continua no repositorio");
 });
 
 t("25. /api/auth/status-session NAO e publica (nao tem consumidor)", () => {
@@ -267,11 +277,11 @@ t("29. asset marcado 'publico' precisa constar em ASSETS_PUBLICOS", () => {
 });
 
 // ────────────────────────────────────────────────────────────────────
-console.log("\n[8. cobertura: as 51 rotas do inventario F0.a]");
+console.log("\n[8. cobertura: as 50 rotas do inventario F0.a]");
 
 /** caminho, metodo, decisao esperada SEM sessao. */
 const INVENTARIO: [string, string, Decisao][] = [
-  // — publicas (8)
+  // — publicas (7; era 8 ate o relay ser deletado em F0.c.6d)
   ["/api/auth/login", "POST", "liberar"],
   ["/api/auth/logout", "POST", "liberar"],
   ["/api/auth/verificar-email", "GET", "liberar"],
@@ -279,7 +289,6 @@ const INVENTARIO: [string, string, Decisao][] = [
   ["/api/auth/mercadolivre/callback", "GET", "liberar"],
   ["/api/auth/shopee", "GET", "liberar"],
   ["/api/auth/shopee/callback", "GET", "liberar"],
-  ["/api/auth/relay", "GET", "liberar"],
   // — com segredo proprio (4)
   ["/api/sync", "GET", "liberar"],
   ["/api/internal/estudio-anuncios/worker", "GET", "liberar"],
@@ -334,8 +343,9 @@ const INVENTARIO: [string, string, Decisao][] = [
   [`/api/estudio-anuncios/projetos/${UUID}/exportacao/${UUID}/arquivo`, "GET", "bloquear_api"],
 ];
 
-t("30. as 51 rotas do inventario caem na classe correta", () => {
-  assert(INVENTARIO.length === 51, `inventario tem ${INVENTARIO.length} rotas, esperado 51`);
+t("30. as 50 rotas do inventario caem na classe correta", () => {
+  // 51 → 50 em F0.c.6d: `/api/auth/relay` deixou de existir.
+  assert(INVENTARIO.length === 50, `inventario tem ${INVENTARIO.length} rotas, esperado 50`);
   for (const [caminho, metodo, esperado] of INVENTARIO) {
     const obtido = sem(caminho, metodo);
     assert(obtido === esperado, `${metodo} ${caminho}: esperado ${esperado}, obtido ${obtido}`);

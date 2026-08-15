@@ -394,6 +394,13 @@ t("41. o módulo só é importado pela camada de autenticação, que também nã
     path.join("lib", "autenticacao.ts"),
     path.join("scripts", "testar-sessao.ts"),
     path.join("scripts", "testar-autenticacao.ts"),
+    // Exceção NOMINAL de F0.c.6c. `scripts/testar-estado-oauth.ts`
+    // importa este módulo de propósito, e só para provar a SEPARAÇÃO DE
+    // DOMÍNIO: que um token de sessão não passa como `state` do OAuth e
+    // vice-versa, mesmo os dois usando `SESSION_SECRET`. É a única
+    // evidência de que compartilhar a chave é seguro — sem esse import,
+    // a garantia deixaria de ser testável.
+    path.join("scripts", "testar-estado-oauth.ts"),
   ];
   const alvos: string[] = [];
   const varrer = (dir: string) => {
@@ -404,10 +411,29 @@ t("41. o módulo só é importado pela camada de autenticação, que também nã
     }
   };
   varrer(process.cwd());
-  const importadores = alvos.filter(f =>
-    !permitidos.some(p => f.endsWith(p)) &&
-    /sessao-assinada/.test(fs.readFileSync(f, "utf8"))
-  );
+
+  /**
+   * IMPORT REAL, não menção textual — corrigido em F0.c.6c.
+   *
+   * A versão anterior testava `/sessao-assinada/` no arquivo inteiro e
+   * acusou `lib/estado-oauth.ts`, que apenas EXPLICA num comentário por
+   * que não reaproveita este módulo. É a mesma armadilha que o teste 40
+   * já tinha corrigido: um teste precisa afirmar algo sobre o código, e
+   * não sobre a prosa que o descreve.
+   *
+   * Agora comentários saem antes da varredura, e o que resta só conta
+   * como consumidor se tiver forma de import/require de verdade — o que
+   * torna a trava mais estrita, não mais frouxa: uma menção em comentário
+   * deixa de esconder-se atrás de um teste que já falhava por outro motivo.
+   */
+  const ehImportReal = (arquivo: string): boolean => {
+    const codigo = fs.readFileSync(arquivo, "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^[ \t]*\/\/.*$/gm, "");
+    return /(?:from|import|require)\s*\(?\s*["'][^"']*sessao-assinada["']/.test(codigo);
+  };
+
+  const importadores = alvos.filter(f => !permitidos.some(p => f.endsWith(p)) && ehImportReal(f));
   assert(importadores.length === 0, `módulo importado fora da camada prevista: ${importadores.join(", ")}`);
 });
 

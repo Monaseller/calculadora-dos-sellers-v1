@@ -345,8 +345,19 @@ const TODOS = arquivosTs();
  * consumidora nova por acréscimo de escopo — estava PRESA no mecanismo
  * V1, comparando o cookie cru com `user_id`, e por isso não desconectava
  * nada. Ver `scripts/testar-desconectar.ts`.
+ *
+ * 39 → 40 no checkpoint F0.c.6c+6d+6e, saldo de três movimentos:
+ *   −1  `app/api/auth/relay/route.ts` DELETADO (o callback passou a
+ *       persistir sozinho; o relay levava os tokens em query string);
+ *   +1  `app/api/auth/mercadolivre/route.ts` — o início do OAuth passou
+ *       a exigir sessão para poder assinar o `state` com o `uid`;
+ *   +1  `app/api/auth/mercadolivre/callback/route.ts` — o callback passou
+ *       a exigir sessão, que é o binding contra CSRF.
+ * Ambas as rotas provadas por `scripts/testar-oauth-ml.ts` (testes 1, 2
+ * e 8). A trava continua servindo ao mesmo fim: acusar consumidor novo
+ * que apareça sem revisão.
  */
-const CONSUMIDORES_ESPERADOS_AUTENTICACAO = 39;
+const CONSUMIDORES_ESPERADOS_AUTENTICACAO = 40;
 
 t(`22. exatamente ${CONSUMIDORES_ESPERADOS_AUTENTICACAO} arquivos de produção usam a camada nova`, () => {
   const proprios = [
@@ -391,6 +402,12 @@ t("23. nenhum arquivo de produção importa sessao-assinada", () => {
     path.join("lib", "autenticacao.ts"),
     path.join("scripts", "testar-sessao.ts"),
     path.join("scripts", "testar-autenticacao.ts"), // esta própria suíte
+    // Exceção NOMINAL de F0.c.6c — um arquivo, não um padrão. O `state`
+    // do OAuth é assinado com o MESMO `SESSION_SECRET` da sessão, e o que
+    // separa os dois é o prefixo de domínio na assinatura. Essa garantia
+    // só é demonstrável importando os dois módulos lado a lado, que é o
+    // que `scripts/testar-estado-oauth.ts` faz (testes 11, 12 e 13).
+    path.join("scripts", "testar-estado-oauth.ts"),
   ];
   const importadores = TODOS.filter(f =>
     !permitidos.some(p => f.endsWith(p)) && /from ["'].*sessao-assinada["']/.test(fs.readFileSync(f, "utf8"))
