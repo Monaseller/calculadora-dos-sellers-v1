@@ -16,7 +16,12 @@ import CardAnuncioVariacoes from "./CardAnuncioVariacoes";
 // Leitura paginada e recorte por marketplace. Vivem fora deste arquivo
 // porque o Next.js valida os exports de um `page.tsx` — ver o cabeçalho de
 // `paginacao.ts`.
-import { buscarPaginado, aplicarFiltroMarketplace } from "./paginacao";
+import {
+  buscarPaginado,
+  aplicarFiltroMarketplace,
+  desativarEmLotes,
+  type ResultadoDesativacao,
+} from "./paginacao";
 
 export default function AnunciosPage() {
   const [anuncios,    setAnuncios]    = useState<Anuncio[]>([]);
@@ -65,6 +70,7 @@ export default function AnunciosPage() {
   const [modoSelecao,        setModoSelecao]        = useState(false);
   const [selectedIds,        setSelectedIds]        = useState<Set<string>>(new Set());
   const [deletandoSelecionados, setDeletandoSelecionados] = useState(false);
+  const [msgExclusao,        setMsgExclusao]        = useState<{ ok: boolean; texto: string } | null>(null);
   const [msgSync,            setMsgSync]            = useState<{ ok: boolean; texto: string; detalhes?: string[] } | null>(null);
   const [importando,         setImportando]         = useState(false);
   const [msgImport,          setMsgImport]          = useState<{ ok: boolean; texto: string } | null>(null);
@@ -144,14 +150,71 @@ export default function AnunciosPage() {
     setSelectedIds(new Set(anunciosFiltrados.map(a => a.id)));
   }
 
+  /**
+   * Exclusão = soft delete (`ativo:false`), coerente com a listagem, que
+   * filtra `.eq("ativo", true)`. O histórico da linha é preservado.
+   *
+   * Três garantias que faltavam e causaram o incidente de 2026-08-17:
+   *
+   * 1. LOTES. `.in("id", ids)` com a seleção inteira montava uma URL de
+   *    ~39.877 bytes e voltava 400 Bad Request. Lotes de 200 mantêm cada
+   *    URL em ~7,5 KB.
+   * 2. OWNERSHIP. `.eq("user_id", ...)` em TODA escrita. Não há RLS nesta
+   *    tabela: sem esse filtro, conhecer um id bastava para desativar
+   *    anúncio de outro usuário.
+   * 3. CONFIRMAÇÃO. `.select("id")` devolve as linhas realmente
+   *    alteradas. Só elas saem da tela — antes os cards sumiam mesmo com
+   *    o banco recusando, e voltavam no F5.
+   */
+  async function desativarAnuncios(ids: string[]): Promise<ResultadoDesativacao> {
+    if (!userId) {
+      return { confirmados: [], naoConfirmados: [...new Set(ids)], erro: "Sessão não identificada. Recarregue a página." };
+    }
+    return desativarEmLotes(async (lote) => {
+      const { data, error } = await supabase
+        .from("anuncios")
+        .update({ ativo: false })
+        .in("id", lote)
+        .eq("user_id", userId)
+        .select("id");
+      if (error) return { ids: null, erro: error.message };
+      return { ids: (data ?? []).map((r: { id: string }) => r.id), erro: null };
+    }, ids);
+  }
+
+  /** Aplica o resultado: só os confirmados saem da lista. */
+  function aplicarResultadoExclusao(r: ResultadoDesativacao) {
+    if (r.confirmados.length) {
+      const confirmados = new Set(r.confirmados);
+      setAnuncios(prev => prev.filter(a => !confirmados.has(a.id)));
+    }
+    if (r.naoConfirmados.length === 0) {
+      const n = r.confirmados.length;
+      setMsgExclusao({ ok: true, texto: `${n} anúncio${n !== 1 ? "s" : ""} excluído${n !== 1 ? "s" : ""}.` });
+      return;
+    }
+    // Falha parcial ou total: nunca anunciar sucesso.
+    setMsgExclusao({
+      ok: false,
+      texto: `${r.confirmados.length} excluído(s), mas ${r.naoConfirmados.length} não foi(ram) confirmado(s) pelo banco e continuam na lista.`
+        + (r.erro ? ` Motivo: ${r.erro}` : ""),
+    });
+  }
+
   async function deletarSelecionados() {
     if (!selectedIds.size) return;
     setDeletandoSelecionados(true);
-    const ids = [...selectedIds];
-    await supabase.from("anuncios").update({ ativo: false }).in("id", ids);
-    setAnuncios(prev => prev.filter(a => !selectedIds.has(a.id)));
-    setSelectedIds(new Set());
-    setModoSelecao(false);
+    setMsgExclusao(null);
+    const r = await desativarAnuncios([...selectedIds]);
+    aplicarResultadoExclusao(r);
+    if (r.naoConfirmados.length === 0) {
+      setSelectedIds(new Set());
+      setModoSelecao(false);
+    } else {
+      // Mantém selecionado exatamente o que falhou, para o usuário poder
+      // tentar de novo sem reconstruir a seleção.
+      setSelectedIds(new Set(r.naoConfirmados));
+    }
     setDeletandoSelecionados(false);
   }
 
@@ -234,17 +297,20 @@ export default function AnunciosPage() {
   }
 
   async function excluir(id: string) {
-    await supabase.from("anuncios").update({ ativo: false }).eq("id", id);
-    setAnuncios(prev => prev.filter(a => a.id !== id));
+    // Um id só não estoura URL, mas os outros dois defeitos valiam aqui
+    // também: erro não verificado e ownership ausente. Mesmo caminho.
+    setMsgExclusao(null);
+    aplicarResultadoExclusao(await desativarAnuncios([id]));
   }
 
   async function excluirTodosDuplicados() {
     if (!idsAntigosDuplicados.size) return;
     setDeletandoDuplicados(true);
-    const ids = [...idsAntigosDuplicados];
-    await supabase.from("anuncios").update({ ativo: false }).in("id", ids);
-    setAnuncios(prev => prev.filter(a => !idsAntigosDuplicados.has(a.id)));
-    setFiltroDuplicados(false);
+    setMsgExclusao(null);
+    const r = await desativarAnuncios([...idsAntigosDuplicados]);
+    aplicarResultadoExclusao(r);
+    // Só abandona o filtro de duplicados se não sobrou nada a resolver.
+    if (r.naoConfirmados.length === 0) setFiltroDuplicados(false);
     setDeletandoDuplicados(false);
   }
 
@@ -806,6 +872,22 @@ export default function AnunciosPage() {
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {/* ── Feedback Exclusão ─────────────────────────────────── */}
+      {msgExclusao && (
+        <div style={{
+          background: msgExclusao.ok ? "rgba(0,217,126,0.06)" : "rgba(255,60,60,0.07)",
+          border: `1px solid ${msgExclusao.ok ? "rgba(0,217,126,0.2)" : "rgba(255,60,60,0.2)"}`,
+          borderRadius: "14px", padding: "14px 18px",
+          marginBottom: "16px",
+          display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px",
+        }}>
+          <span style={{ color: msgExclusao.ok ? "#00D97E" : "#ff4d4d", fontWeight: 800, fontSize: "14px" }}>
+            {msgExclusao.ok ? "🗑️" : "⚠️"} {msgExclusao.texto}
+          </span>
+          <button onClick={() => setMsgExclusao(null)} style={{ background: "none", border: "none", color: "#9099aa", cursor: "pointer", fontSize: "18px", opacity: 0.6 }}>×</button>
         </div>
       )}
 

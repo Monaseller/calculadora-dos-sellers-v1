@@ -86,3 +86,93 @@ export function aplicarFiltroMarketplace<T extends { marketplace: string }>(
   if (filtro === "todos") return linhas;
   return linhas.filter(a => a.marketplace === filtro);
 }
+
+// ────────────────────────────────────────────────────────────────────
+// ESCRITA EM LOTE — a outra face do mesmo limite do PostgREST
+//
+// A exclusao em massa montava `.in("id", ids)` com a selecao inteira. Com
+// 1076 anuncios isso vira um filtro de 39.819 bytes numa URL de ~39.877 —
+// e a requisicao volta 400 Bad Request. Medido em 2026-08-17 contra os
+// IDs reais: 200 ids passam (7.475 bytes), 400 ja falham na rede, 800+
+// respondem 400. O maximo observado foi 398 ids.
+//
+// O codigo antigo nao lia o erro e removia os cards da tela na linha
+// seguinte ao await. Os anuncios "sumiam" e voltavam no F5, porque o
+// banco nunca foi tocado: `ativo=false` tinha ZERO linhas no catalogo.
+// ────────────────────────────────────────────────────────────────────
+
+/**
+ * Metade do maximo medido (398). A folga e deliberada: o teto real
+ * depende de proxy e CDN no caminho, que podem mudar sem aviso, e o custo
+ * de um lote a mais e uma requisicao — o de um lote grande demais e uma
+ * exclusao que nao acontece em silencio.
+ */
+export const LOTE_MAXIMO_IDS = 200;
+
+/** Divide em lotes de no maximo `tamanho`, preservando ordem. */
+export function dividirEmLotes<T>(itens: T[], tamanho: number = LOTE_MAXIMO_IDS): T[][] {
+  if (!Number.isInteger(tamanho) || tamanho < 1) {
+    throw new Error(`tamanho de lote invalido: ${tamanho}`);
+  }
+  const lotes: T[][] = [];
+  for (let i = 0; i < itens.length; i += tamanho) lotes.push(itens.slice(i, i + tamanho));
+  return lotes;
+}
+
+export interface ResultadoDesativacao {
+  /** IDs que o BANCO devolveu como efetivamente alterados. */
+  confirmados: string[];
+  /** Pedidos que nao voltaram confirmados — por erro ou por nao casarem. */
+  naoConfirmados: string[];
+  /** Primeira mensagem de erro encontrada, ou `null`. */
+  erro: string | null;
+}
+
+/**
+ * Desativa em lotes e devolve o que o banco CONFIRMOU.
+ *
+ * Recebe a escrita como funcao: nao conhece Supabase, o que permite provar
+ * sucesso total, erro no primeiro lote, erro intermediario e falha parcial
+ * sem tocar em banco nenhum.
+ *
+ * ── Estrategia em falha parcial: CONTINUAR os lotes restantes ───────
+ * Nao e fail-fast. Os lotes sao independentes, e uma falha no lote 3 nao
+ * diz nada sobre o 4 — pode ser instabilidade momentanea. Parar ali
+ * deixaria de excluir itens que o usuario pediu para excluir, sem ganho:
+ * como cada ID e classificado como confirmado ou nao, continuar nunca
+ * perde informacao nem finge sucesso. O custo maximo de insistir sao
+ * poucas requisicoes; o custo de parar cedo e trabalho nao feito.
+ *
+ * IDs repetidos na entrada sao deduplicados antes da divisao, para que um
+ * mesmo ID nunca apareca em dois lotes.
+ */
+export async function desativarEmLotes(
+  desativarLote: (ids: string[]) => Promise<{ ids: string[] | null; erro: string | null }>,
+  ids: string[],
+  tamanho: number = LOTE_MAXIMO_IDS,
+): Promise<ResultadoDesativacao> {
+  const unicos = [...new Set(ids)];
+  const confirmados = new Set<string>();
+  let erro: string | null = null;
+
+  for (const lote of dividirEmLotes(unicos, tamanho)) {
+    let resposta: { ids: string[] | null; erro: string | null };
+    try {
+      resposta = await desativarLote(lote);
+    } catch (e: any) {
+      // Excecao NAO e confirmacao. Registra e segue para o proximo lote.
+      erro = erro ?? (e?.message ?? String(e));
+      continue;
+    }
+    if (resposta.erro) { erro = erro ?? resposta.erro; continue; }
+    for (const id of resposta.ids ?? []) confirmados.add(id);
+  }
+
+  const naoConfirmados = unicos.filter(id => !confirmados.has(id));
+  // Pedido que nao voltou e falha, mesmo sem o banco ter reclamado: pode
+  // ser ownership negando a linha. Nunca tratar ausencia como sucesso.
+  if (!erro && naoConfirmados.length > 0) {
+    erro = "Algumas linhas não foram confirmadas pelo banco.";
+  }
+  return { confirmados: [...confirmados], naoConfirmados, erro };
+}
