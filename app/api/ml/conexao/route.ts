@@ -3,19 +3,24 @@
  * no servidor. F0.c.5, fase B.
  *
  * ── Por que existe ──────────────────────────────────────────────────
- * `/api/auth/status`, que hoje governa a tela Meus Produtos, responde
- * "conectado" perguntando ao navegador se ele tem o cookie
- * `ml_access_token`. O cookie vive 6 horas; quando vence, a tela declara
- * desconexão e desabilita justamente os botões que renovariam o token.
- * O usuário fica preso com a credencial intacta no banco.
+ * `/api/auth/status`, a rota que governava esse estado até então,
+ * respondia "conectado" perguntando ao navegador se ele tinha o cookie
+ * `ml_access_token`. O cookie vivia 6 horas; quando vencia, a tela
+ * declarava desconexão e desabilitava justamente os botões que
+ * renovariam o token. O usuário ficava preso com a credencial intacta no
+ * banco — foi o incidente de 2026-08-14.
  *
  * Aqui a decisão sai da sessão do CDS: quem é o usuário, qual loja é
  * dele, o que existe no banco — e, se preciso, uma renovação
  * server-side. O navegador não guarda nem fornece credencial.
  *
- * ── Esta rota ainda não é consumida ─────────────────────────────────
- * `/api/auth/status` continua existindo e nenhuma tela foi migrada. A
- * troca é da fase C.
+ * ── Quem consome ────────────────────────────────────────────────────
+ * Meus Produtos (F0.c.5, fase C) e Precificação (F0.c.16). Com a segunda
+ * migração `/api/auth/status` perdeu o último consumidor e foi REMOVIDA
+ * do repositório: esta é a única fonte do estado de conexão com o ML.
+ *
+ * A interpretação da resposta no navegador é de `lib/conexao-ml-cliente.ts`
+ * — uma só, compartilhada pelas duas telas.
  *
  * ── O que nunca sai daqui ───────────────────────────────────────────
  * access_token, refresh_token, header Authorization, client_secret. A

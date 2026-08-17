@@ -3,6 +3,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { CATEGORIAS_ML, type TipoAnuncio } from "@/lib/comissoes-mercado-livre";
 import { calcularPrecoIdealShopee, type TipoContaShopee, FAIXAS_SHOPEE, TAXA_CAMPANHA_SHOPEE } from "@/lib/comissoes-shopee";
 import { moeda } from "@/lib/cds-engine";
+import {
+  interpretarConexaoML,
+  podeOperarML,
+  avisoConexaoML,
+  CONEXAO_ML_CARREGANDO,
+  type ConexaoML,
+} from "@/lib/conexao-ml-cliente";
 
 type Marketplace = "ML" | "Shopee";
 
@@ -61,7 +68,29 @@ export default function PrecificacaoPage() {
   const [promocao,        setPromocao]        = useState(20);
   const [customPct,       setCustomPct]       = useState("");
   const [showCustom,      setShowCustom]      = useState(false);
-  const [mlConectado,     setMlConectado]     = useState<boolean | null>(null);
+
+  /**
+   * Estado da conexão ML — F0.c.16.
+   *
+   * Antes isto era `boolean | null` vindo de `/api/auth/status`, que
+   * respondia olhando o cookie `ml_access_token` do NAVEGADOR. Depois da
+   * F0.c.6c o callback do OAuth não escreve mais esse cookie: quem
+   * acabava de conectar pelo OAuth continuava vendo "Conectar ao Mercado
+   * Livre" aqui, com a credencial íntegra no banco.
+   *
+   * A fonte de verdade agora é o servidor (`GET /api/ml/conexao`), que
+   * parte da sessão da CDS, confirma a propriedade da loja, lê a
+   * credencial no banco e renova sozinho quando preciso. A interpretação
+   * é a MESMA de Meus Produtos — `lib/conexao-ml-cliente.ts`, sem cópia.
+   */
+  const [conexao, setConexao] = useState<ConexaoML>(CONEXAO_ML_CARREGANDO);
+
+  /**
+   * Nome antigo preservado: toda a estilização deste bloco depende dele.
+   * A migração troca a FONTE do valor, não o visual.
+   */
+  const mlConectado = podeOperarML(conexao);
+  const avisoML     = avisoConexaoML(conexao);
 
   // ── Simulador "e se?" ──────────────────────────────────────────────────────
   const [simMode,         setSimMode]         = useState<"preco" | "margem">("preco");
@@ -69,10 +98,17 @@ export default function PrecificacaoPage() {
   const [simMargem,       setSimMargem]       = useState("");
 
   useEffect(() => {
-    fetch("/api/auth/status")
-      .then(r => r.json())
-      .then(d => setMlConectado(d.conectado))
-      .catch(() => setMlConectado(false));
+    // UMA chamada, no ciclo normal da tela: sem polling, sem timer e sem
+    // refresh no cliente. Quando a credencial está vencida, quem renova é
+    // o próprio endpoint, no servidor.
+    //
+    // O status HTTP entra na interpretação junto com o corpo: 401 e 5xx
+    // têm estados próprios e NÃO podem virar "Mercado Livre desconectado".
+    fetch("/api/ml/conexao")
+      .then(async r => interpretarConexaoML(r.status, await r.json().catch(() => null)))
+      // `status 0` = a requisição nem completou (rede, CORS, aborto).
+      .catch(() => interpretarConexaoML(0, null))
+      .then(setConexao);
   }, []);
 
   // ── Cálculo ML ─────────────────────────────────────────────────────────────
@@ -351,7 +387,7 @@ export default function PrecificacaoPage() {
           {/* ML status */}
           {marketplace === "ML" && (
             <div style={{ marginBottom: "16px" }}>
-              {mlConectado === null ? (
+              {conexao.estado === "CARREGANDO" ? (
                 <span style={{ fontSize: "12px", color: "#9099aa" }}>Verificando conexão ML...</span>
               ) : mlConectado ? (
                 <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
@@ -359,12 +395,26 @@ export default function PrecificacaoPage() {
                   <a href="/api/auth/logout" style={{ fontSize: "11px", color: "#888", textDecoration: "underline" }}>Desconectar</a>
                 </div>
               ) : (
-                <a href="/api/auth/mercadolivre" style={{
-                  display: "inline-flex", alignItems: "center", gap: "6px",
-                  fontSize: "13px", background: "#FFE600", color: "#000",
-                  padding: "8px 16px", borderRadius: "10px",
-                  textDecoration: "none", fontWeight: 800,
-                }}>Conectar ao Mercado Livre</a>
+                // Todo estado que não é CONECTADO nem CARREGANDO. Texto e
+                // destino saem de `avisoConexaoML` — a mesma tabela de Meus
+                // Produtos, sem cópia. "Não consegui verificar" (401, 5xx,
+                // rede) mostra o motivo real e NÃO oferece "Conectar", que
+                // afirmaria uma desconexão que não chegou a ser constatada.
+                <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+                  {avisoML && (
+                    <span style={{ fontSize: "12px", color: avisoML.tom === "erro" ? "#f87171" : "#9099aa" }}>
+                      {avisoML.titulo}
+                    </span>
+                  )}
+                  {avisoML?.acao && (
+                    <a href={avisoML.acao.href} style={{
+                      display: "inline-flex", alignItems: "center", gap: "6px",
+                      fontSize: "13px", background: "#FFE600", color: "#000",
+                      padding: "8px 16px", borderRadius: "10px",
+                      textDecoration: "none", fontWeight: 800,
+                    }}>{avisoML.acao.texto}</a>
+                  )}
+                </div>
               )}
             </div>
           )}

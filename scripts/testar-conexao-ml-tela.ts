@@ -59,6 +59,18 @@ function semComentarios(arquivo: string): string {
 
 const CODIGO_TELA = semComentarios(TELA);
 
+/**
+ * A SEGUNDA tela que consumia o estado da conexão — F0.c.16.
+ *
+ * Até esta etapa ela era o último consumidor de `/api/auth/status`. Os
+ * testes 8 e 9 eram guardas de escopo da fase C ("a Precificação NÃO foi
+ * migrada junto"); agora provam o contrário, porque migrá-la passou a ser
+ * o escopo. A varredura ignora comentários de propósito: o texto abaixo
+ * cita a rota antiga, e um teste tem de falar sobre o código.
+ */
+const PRECIFICACAO = path.join(RAIZ, "app", "(app)", "precificacao", "page.tsx");
+const CODIGO_PRECIFICACAO = semComentarios(PRECIFICACAO);
+
 console.log("\n[1. a tela deixou de perguntar ao navegador]");
 
 t("1. Meus Produtos NÃO usa mais /api/auth/status", () => {
@@ -97,17 +109,48 @@ t("7. a tela não faz refresh por conta própria", () => {
   assert(!/oauth\/token/.test(CODIGO_TELA), "🔴 a tela fala direto com o OAuth do ML");
 });
 
-console.log("\n[2. escopo — o que esta fase NÃO podia tocar]");
+console.log("\n[2. fronteiras: rota legada removida, Precificação migrada]");
 
-t("8. /api/auth/status continua existindo", () => {
-  assert(fs.existsSync(path.join(RAIZ, "app", "api", "auth", "status", "route.ts")),
-    "a rota antiga foi removida — não era escopo da fase C");
+t("8. a rota legada /api/auth/status NÃO existe mais", () => {
+  // F0.c.16. Enquanto ela existisse, existia um segundo caminho de
+  // autorização — o cookie `ml_access_token` — capaz de responder sobre
+  // conexão sem passar pela sessão da CDS.
+  assert(!fs.existsSync(path.join(RAIZ, "app", "api", "auth", "status", "route.ts")),
+    "🔴 a rota legada voltou a existir");
 });
 
-t("9. Precificação continua usando /api/auth/status, intocada", () => {
-  const outra = fs.readFileSync(path.join(RAIZ, "app", "(app)", "precificacao", "page.tsx"), "utf8");
-  assert(outra.includes("/api/auth/status"),
-    "outro consumidor foi migrado junto — a fase C é só Meus Produtos");
+t("9. Precificação migrou de /api/auth/status para /api/ml/conexao", () => {
+  assert(!CODIGO_PRECIFICACAO.includes("/api/auth/status"),
+    "🔴 a Precificação ainda consulta a rota legada");
+  assert(CODIGO_PRECIFICACAO.includes("/api/ml/conexao"),
+    "a Precificação não consulta o endpoint canônico");
+  assert(!/ml_access_token|ml_refresh_token/.test(CODIGO_PRECIFICACAO),
+    "🔴 a Precificação passou a olhar cookie de credencial do navegador");
+});
+
+t("9b. Precificação reusa os helpers canônicos, sem reinterpretar a conexão", () => {
+  assert(/from\s+["']@\/lib\/conexao-ml-cliente["']/.test(CODIGO_PRECIFICACAO),
+    "a tela não importa lib/conexao-ml-cliente");
+  assert(/interpretarConexaoML\(/.test(CODIGO_PRECIFICACAO),
+    "a resposta não passa por interpretarConexaoML");
+  assert(/const\s+mlConectado\s*=\s*podeOperarML\(/.test(CODIGO_PRECIFICACAO),
+    "mlConectado não é derivado de podeOperarML");
+  assert(!/setMlConectado/.test(CODIGO_PRECIFICACAO),
+    "sobrou o setter booleano antigo — há duas fontes de verdade");
+  // O destino do OAuth sai de `avisoConexaoML`, que já sabe anexar o
+  // `loja_id` no caso de reconexão. Href fixo na tela seria a terceira
+  // cópia dessa decisão — e a que reconectava a loja errada.
+  assert(!/href=["']\/api\/auth\/mercadolivre["']/.test(CODIGO_PRECIFICACAO),
+    "🔴 a tela voltou a decidir o destino do OAuth por conta própria");
+  assert(!/from\s+["']@\/lib\/ml-conexao["']/.test(CODIGO_PRECIFICACAO),
+    "🔴 módulo de servidor importado por componente de cliente");
+});
+
+t("9c. Precificação não introduziu polling, timer nem storage", () => {
+  assert(!/setInterval/.test(CODIGO_PRECIFICACAO), "🔴 polling introduzido na tela");
+  assert(!/localStorage|sessionStorage/.test(CODIGO_PRECIFICACAO), "🔴 estado de conexão em storage");
+  assert(!/document\.cookie\s*=/.test(CODIGO_PRECIFICACAO), "🔴 a tela passou a escrever cookie");
+  assert(!/refresh_token|refreshToken/.test(CODIGO_PRECIFICACAO), "🔴 refresh no cliente");
 });
 
 t("10. a tela não importa o módulo de servidor lib/ml-conexao", () => {

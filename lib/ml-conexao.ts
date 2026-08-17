@@ -1,13 +1,14 @@
 /**
  * Resolvedor server-side de conta Mercado Livre — F0.c.5, fase A.
  *
- * ── O que este módulo substitui (no futuro) ─────────────────────────
- * Hoje o CDS tem QUATRO definições de "conectado ao Mercado Livre", e a
- * mais visível — a de Meus Produtos — pergunta ao NAVEGADOR: existe o
- * cookie `ml_access_token`? Como esse cookie vive 6 horas e só é renovado
- * por rotas que a própria tela desabilita quando ele falta, o usuário
- * entra num impasse: a UI diz "não conectado" justamente porque nada pode
- * renovar a credencial. Foi o incidente de 2026-08-14.
+ * ── O que este módulo substitui ─────────────────────────────────────
+ * O CDS tinha várias definições de "conectado ao Mercado Livre", e as
+ * mais visíveis — Meus Produtos e Precificação — perguntavam ao
+ * NAVEGADOR: existe o cookie `ml_access_token`? Como esse cookie vive 6
+ * horas e só é renovado por rotas que a própria tela desabilita quando
+ * ele falta, o usuário entrava num impasse: a UI dizia "não conectado"
+ * justamente porque nada podia renovar a credencial. Foi o incidente de
+ * 2026-08-14.
  *
  * Aqui a pergunta muda de lugar:
  *
@@ -16,11 +17,21 @@
  * O navegador deixa de ser fonte de verdade. Ele continua podendo dizer
  * QUAL loja (`loja_ativa_id`), que é identidade, nunca credencial.
  *
- * ── Esta fase não migra nada ────────────────────────────────────────
- * Nenhuma tela, rota legada, cookie ou fluxo OAuth é alterado. Este
- * módulo e `GET /api/ml/conexao` são fundação nova, sem consumidores em
- * produção. `getMLToken`, `applyMLCookies` e `/api/auth/status` seguem
- * exatamente como estavam.
+ * ── Quem já migrou, e o que sobrou ──────────────────────────────────
+ * A fase A não migrou nada: este módulo e `GET /api/ml/conexao` nasceram
+ * como fundação, sem consumidores. Desde então:
+ *
+ *   • F0.c.5 fase C — Meus Produtos passou a ler `/api/ml/conexao`;
+ *   • F0.c.5 cutover — 4 rotas de ML passaram a usar `resolverContaML`;
+ *   • F0.c.16 — Precificação migrou e `/api/auth/status`, sem consumidor,
+ *     foi REMOVIDA do repositório.
+ *
+ * O que AINDA não migrou, e continua autorizando pelo cookie legado
+ * `ml_access_token`: `/api/ml/item-thumbnails` (última entrada de
+ * `EXCECOES_TEMPORARIAS_F0C`). `getMLToken` e `applyMLCookies` seguem
+ * existindo para os consumidores restantes — `getMLToken` mantém o
+ * caminho que devolve o cookie ANTES de verificar de qual loja ele é,
+ * razão pela qual código novo usa `resolverContaML`, nunca ele.
  *
  * ── O que é reusado, e por quê ──────────────────────────────────────
  * `refreshMLToken`, `saveTokensToDB` e `credencialExpirada` vêm de

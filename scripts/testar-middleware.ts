@@ -176,19 +176,33 @@ t("19b. sem sessao, /api/anuncio recebe 401 de API e NAO redirect HTML", () => {
   assert(sem("/api/anuncio") !== "redirecionar", "rota de API caiu no fluxo de redirect de pagina");
 });
 
-t("20. /api/auth/status continua acessivel sem cds_session", () => {
-  assert(sem("/api/auth/status") === "liberar", "comportamento legado foi alterado em F0.b");
+t("20. /api/auth/status NAO e mais excecao — rota removida em F0.c.16", () => {
+  // A rota foi deletada do repositorio: seu unico consumidor, a
+  // Precificacao, passou a ler /api/ml/conexao. O caminho precisa cair no
+  // default deny — se alguem recriar o arquivo, ele nao pode nascer
+  // publico por uma entrada esquecida na tabela.
+  assert(!("/api/auth/status" in EXCECOES_TEMPORARIAS_F0C),
+    "/api/auth/status ainda consta na excecao temporaria");
+  assert(sem("/api/auth/status") === "bloquear_api",
+    "/api/auth/status continua acessivel sem cds_session");
+  assert(com("/api/auth/status") === "liberar",
+    "com sessao o caminho deveria seguir o fluxo normal");
 });
 
 t("21. /api/ml/item-thumbnails continua acessivel sem cds_session", () => {
   assert(sem("/api/ml/item-thumbnails") === "liberar", "comportamento legado foi alterado em F0.b");
 });
 
-t("22. a excecao temporaria tem EXATAMENTE 2 entradas", () => {
+t("22. a excecao temporaria tem EXATAMENTE 1 entrada", () => {
   // Trava contra crescimento silencioso. F0.c so termina com este objeto
-  // vazio. 3 → 2 no cutover de Meus Produtos: so /api/anuncio saiu.
+  // vazio. 3 → 2 no cutover de Meus Produtos (so /api/anuncio saiu);
+  // 2 → 1 em F0.c.16 (/api/auth/status migrada para /api/ml/conexao e
+  // deletada). A entrada restante e nomeada de proposito: reduzir a
+  // contagem trocando UMA rota por outra passaria despercebido.
   const n = Object.keys(EXCECOES_TEMPORARIAS_F0C).length;
-  assert(n === 2, `excecao temporaria tem ${n} — o cutover F0.c.5 autorizou 2`);
+  assert(n === 1, `excecao temporaria tem ${n} — F0.c.16 deixou exatamente 1`);
+  assert("/api/ml/item-thumbnails" in EXCECOES_TEMPORARIAS_F0C,
+    "a unica entrada restante deveria ser /api/ml/item-thumbnails");
 });
 
 // ────────────────────────────────────────────────────────────────────
@@ -277,7 +291,7 @@ t("29. asset marcado 'publico' precisa constar em ASSETS_PUBLICOS", () => {
 });
 
 // ────────────────────────────────────────────────────────────────────
-console.log("\n[8. cobertura: as 50 rotas do inventario F0.a]");
+console.log("\n[8. cobertura: as 49 rotas do inventario F0.a]");
 
 /** caminho, metodo, decisao esperada SEM sessao. */
 const INVENTARIO: [string, string, Decisao][] = [
@@ -294,8 +308,9 @@ const INVENTARIO: [string, string, Decisao][] = [
   ["/api/internal/estudio-anuncios/worker", "GET", "liberar"],
   ["/api/internal/estudio-anuncios/executar", "POST", "liberar"],
   ["/api/internal/sync/executar", "POST", "liberar"],
-  // — excecoes temporarias F0.c (2, era 3 ate o cutover F0.c.5)
-  ["/api/auth/status", "GET", "liberar"],
+  // — excecao temporaria F0.c (1; era 3 ate o cutover F0.c.5 e 2 ate a
+  //   F0.c.16, quando /api/auth/status saiu do inventario por ter sido
+  //   DELETADA — o caminho segue coberto pelo teste 20)
   ["/api/ml/item-thumbnails", "GET", "liberar"],
   // — migrada em F0.c.5: exige sessao como qualquer rota de API
   ["/api/anuncio", "GET", "bloquear_api"],
@@ -343,9 +358,10 @@ const INVENTARIO: [string, string, Decisao][] = [
   [`/api/estudio-anuncios/projetos/${UUID}/exportacao/${UUID}/arquivo`, "GET", "bloquear_api"],
 ];
 
-t("30. as 50 rotas do inventario caem na classe correta", () => {
+t("30. as 49 rotas do inventario caem na classe correta", () => {
   // 51 → 50 em F0.c.6d: `/api/auth/relay` deixou de existir.
-  assert(INVENTARIO.length === 50, `inventario tem ${INVENTARIO.length} rotas, esperado 50`);
+  // 50 → 49 em F0.c.16: `/api/auth/status` deixou de existir.
+  assert(INVENTARIO.length === 49, `inventario tem ${INVENTARIO.length} rotas, esperado 49`);
   for (const [caminho, metodo, esperado] of INVENTARIO) {
     const obtido = sem(caminho, metodo);
     assert(obtido === esperado, `${metodo} ${caminho}: esperado ${esperado}, obtido ${obtido}`);

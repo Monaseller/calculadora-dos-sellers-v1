@@ -127,11 +127,21 @@ export const ROTAS_COM_SEGREDO: Readonly<Record<string, readonly string[]>> = {
  * era por ela que a busca de anúncio por link perdia SKU e variações em
  * silêncio quando o cookie de 6 horas vencia.
  *
+ * 2 → 1 em F0.c.16: `/api/auth/status` saiu e a rota foi REMOVIDA do
+ * repositório. Seu único consumidor, a Precificação, passou a ler
+ * `GET /api/ml/conexao`, que parte da sessão da CDS em vez do cookie do
+ * navegador. A rota antiga respondia "conectado" perguntando ao
+ * navegador se ele tinha `ml_access_token` — cookie que o callback do
+ * OAuth deixou de escrever na F0.c.6c, de modo que quem acabara de
+ * conectar era informado do contrário.
+ *
+ * RESTA APENAS `/api/ml/item-thumbnails`, que continua autorizando pelo
+ * cookie legado e ainda não foi migrada.
+ *
  * F0.c só é dada por concluída quando este objeto estiver VAZIO. O teste
  * trava o tamanho para impedir que a exceção cresça.
  */
 export const EXCECOES_TEMPORARIAS_F0C: Readonly<Record<string, readonly string[]>> = {
-  "/api/auth/status": ["GET"],
   "/api/ml/item-thumbnails": ["GET"],
 };
 
