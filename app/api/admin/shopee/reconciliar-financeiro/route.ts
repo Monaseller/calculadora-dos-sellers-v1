@@ -98,10 +98,86 @@ export async function GET(request: Request) {
   const limitParamRaw = url.searchParams.get("limit");
   const limitParsed   = limitParamRaw !== null ? Number(limitParamRaw) : null;
   const limitValido    = limitParsed !== null && Number.isFinite(limitParsed) && limitParsed > 0 ? limitParsed : 5;
-  const limit          = Math.min(limitValido, MAX_LIMIT);
-  const limitFoiReduzido = limitValido > MAX_LIMIT;
   const dryRun          = url.searchParams.get("dry_run") !== "0"; // default seguro = dry-run
   const force           = url.searchParams.get("force") === "1";
+
+  // ── MODO PERIODO (F0.c.19) ───────────────────────────────────────────────
+  // Antes so era possivel selecionar por `limit` (sem data) ou por order_id.
+  // Reconciliar UM dia exigia varias execucoes que escolhiam pedidos
+  // arbitrarios — na pratica, impossivel. Aqui entram date_from/date_to +
+  // cursor estavel.
+  const dateFrom   = url.searchParams.get("date_from");
+  const dateTo     = url.searchParams.get("date_to");
+  const cursorParam = url.searchParams.get("cursor");
+  const modoPeriodo = !orderIdParam && !usandoListaEspecifica
+    && (dateFrom !== null || dateTo !== null || cursorParam !== null);
+
+  // ── SO SELECAO (F0.c.19) ─────────────────────────────────────────────────
+  // `dry_run` desta rota NAO e livre de chamada externa: ele existe para
+  // mostrar o que SERIA gravado, e para isso precisa do dado real da Shopee
+  // — 754 chamadas a get_escrow_detail para um unico dia.
+  //
+  // Para auditar a PAGINACAO isso e custo puro: a selecao e o cursor nao
+  // dependem de nenhum dado financeiro. `so_selecao=1` executa selecao,
+  // cursor e resposta, e para antes do laco. Zero chamada externa, zero
+  // escrita.
+  const soSelecao = url.searchParams.get("so_selecao") === "1";
+
+  /** Teto por request no modo periodo. Menor que MAX_LIMIT de proposito. */
+  const MAX_LIMIT_PERIODO = 100;
+  const MAX_DIAS_JANELA    = 7;
+  const ehDataISO = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(Date.parse(`${s}T00:00:00Z`));
+  const erro400 = (mensagem: string) =>
+    NextResponse.json({ ok: false, erro: mensagem }, { status: 400 });
+
+  interface Cursor { d: string; o: string }
+  let cursor: Cursor | null = null;
+
+  if (soSelecao && !modoPeriodo) {
+    return erro400("so_selecao=1 so existe no modo periodo (exige date_from e date_to).");
+  }
+  // Combinacao contraditoria falha alto em vez de ser ignorada em silencio:
+  // quem pede escrita e leitura-pura na mesma chamada esta enganado sobre
+  // uma das duas, e adivinhar qual seria pior que recusar.
+  if (soSelecao && url.searchParams.get("dry_run") === "0") {
+    return erro400("so_selecao=1 e read-only e nao aceita dry_run=0.");
+  }
+
+  if (modoPeriodo) {
+    if (!dateFrom || !dateTo) {
+      return erro400("No modo periodo, date_from e date_to sao obrigatorios.");
+    }
+    if (!ehDataISO(dateFrom) || !ehDataISO(dateTo)) {
+      return erro400("date_from e date_to devem estar em YYYY-MM-DD.");
+    }
+    if (dateFrom > dateTo) {
+      return erro400("date_from nao pode ser maior que date_to.");
+    }
+    const dias = Math.round(
+      (Date.parse(`${dateTo}T00:00:00Z`) - Date.parse(`${dateFrom}T00:00:00Z`)) / 86400000
+    ) + 1;
+    if (dias > MAX_DIAS_JANELA) {
+      return erro400(`Janela maxima de ${MAX_DIAS_JANELA} dias (pedida: ${dias}).`);
+    }
+    if (cursorParam) {
+      // Cursor e opaco para o cliente, mas NUNCA confiavel: decodifica,
+      // valida formato e exige que pertenca ao periodo pedido. Sem isso,
+      // um cursor forjado leria pedidos fora da janela autorizada.
+      try {
+        const bruto = JSON.parse(Buffer.from(cursorParam, "base64url").toString("utf8"));
+        if (typeof bruto?.d !== "string" || typeof bruto?.o !== "string") throw new Error("forma");
+        if (!ehDataISO(bruto.d)) throw new Error("data");
+        if (bruto.d < dateFrom || bruto.d > dateTo) throw new Error("fora do periodo");
+        cursor = { d: bruto.d, o: bruto.o };
+      } catch {
+        return erro400("cursor invalido ou fora do periodo solicitado.");
+      }
+    }
+  }
+
+  const tetoLimit      = modoPeriodo ? MAX_LIMIT_PERIODO : MAX_LIMIT;
+  const limit          = Math.min(limitValido, tetoLimit);
+  const limitFoiReduzido = limitValido > tetoLimit;
 
   const loja = await getShopeeLojaAtiva(userId);
   if (!loja) {
@@ -129,15 +205,33 @@ export async function GET(request: Request) {
     sel = sel.eq("has_income_data", false).eq("escrow_amount", 0);
   }
 
+  if (modoPeriodo) {
+    sel = sel.gte("data_pagamento", dateFrom!).lte("data_pagamento", dateTo!);
+    if (cursor) {
+      // Cursor estavel em (data_pagamento, order_id). NAO usar OFFSET: a
+      // propria reconciliacao grava has_income_data=true, entao as linhas
+      // saem do filtro entre uma pagina e outra e o offset passaria a
+      // apontar para o lugar errado, PULANDO pedidos em silencio.
+      // `data_pagamento` e `order_id` sao imutaveis — a escrita nunca os
+      // toca —, entao a posicao nao se move.
+      sel = sel.or(
+        `data_pagamento.gt.${cursor.d},and(data_pagamento.eq.${cursor.d},order_id.gt.${cursor.o})`
+      );
+    }
+    // Teto de linhas: um pedido tem varias linhas (maximo observado: 7).
+    // 20 por pedido e folga larga; o corte real e por PEDIDO, abaixo.
+    sel = sel.range(0, limit * 20 - 1);
+  }
+
   const { data: rowsRaw, error: selErr } = await sel;
   if (selErr) {
     return NextResponse.json({ ok: false, erro: "Erro ao selecionar pedidos: " + selErr.message }, { status: 500 });
   }
 
-  const rows = (rowsRaw ?? []) as PedidoRow[];
+  let rows = (rowsRaw ?? []) as PedidoRow[];
 
   // Agrupa por order_id — pedidos com mais de 1 item tem varias linhas na tabela
-  const porPedido = new Map<string, PedidoRow[]>();
+  let porPedido = new Map<string, PedidoRow[]>();
   for (const r of rows) {
     const arr = porPedido.get(r.order_id) ?? [];
     arr.push(r);
@@ -145,7 +239,45 @@ export async function GET(request: Request) {
   }
 
   let orderIds = Array.from(porPedido.keys());
-  if (!orderIdParam && !usandoListaEspecifica) {
+  let temMais = false;
+  let proximoCursor: string | null = null;
+
+  if (modoPeriodo) {
+    temMais  = orderIds.length > limit;
+    orderIds = orderIds.slice(0, limit);
+
+    // Segunda leitura, restrita aos pedidos desta pagina: garante que TODAS
+    // as linhas de cada pedido estao presentes. Sem isto, um pedido cortado
+    // na fronteira da janela de linhas teria o escrow rateado sobre parte
+    // dos itens — erro financeiro silencioso.
+    if (orderIds.length > 0) {
+      const { data: completasRaw, error: erroCompletas } = await supabase
+        .from("pedidos")
+        .select("id, order_id, item_subtotal, has_income_data, escrow_amount, data_pagamento, data_criacao")
+        .eq("user_id", userId)
+        .eq("marketplace", "Shopee")
+        .eq("status_shopee_raw", "COMPLETED")
+        .in("order_id", orderIds)
+        .order("data_pagamento", { ascending: true })
+        .order("order_id", { ascending: true });
+      if (erroCompletas) {
+        return NextResponse.json({ ok: false, erro: "Erro ao completar itens: " + erroCompletas.message }, { status: 500 });
+      }
+      rows = (completasRaw ?? []) as PedidoRow[];
+      porPedido = new Map<string, PedidoRow[]>();
+      for (const r of rows) {
+        const arr = porPedido.get(r.order_id) ?? [];
+        arr.push(r);
+        porPedido.set(r.order_id, arr);
+      }
+
+      const ultimo = orderIds[orderIds.length - 1];
+      const dataUltimo = porPedido.get(ultimo)?.[0]?.data_pagamento ?? null;
+      if (dataUltimo) {
+        proximoCursor = Buffer.from(JSON.stringify({ d: dataUltimo, o: ultimo }), "utf8").toString("base64url");
+      }
+    }
+  } else if (!orderIdParam && !usandoListaEspecifica) {
     orderIds = orderIds.slice(0, limit);
   }
 
@@ -163,7 +295,11 @@ export async function GET(request: Request) {
   const diasPagamentoAfetados = new Set<string>();
   const diasCriacaoAfetados   = new Set<string>();
 
-  for (const orderId of orderIds) {
+  // `so_selecao` esvazia a lista de trabalho: o laco abaixo — unico lugar
+  // que chama a Shopee e unico lugar que grava — simplesmente nao roda.
+  const orderIdsParaProcessar = soSelecao ? [] : orderIds;
+
+  for (const orderId of orderIdsParaProcessar) {
     const rowsPedido = porPedido.get(orderId)!;
     consultados++;
 
@@ -294,7 +430,12 @@ export async function GET(request: Request) {
   // Fase 4 Parte 2 (aprovado 2026-07-10): recalcula dashboard_resumos_diarios
   // só para os dias efetivamente afetados por esta reconciliação. Falha aqui
   // NUNCA derruba a reconciliação — resumos é cache, não fonte de verdade.
-  if (diasPagamentoAfetados.size > 0 || diasCriacaoAfetados.size > 0) {
+  //
+  // F0.c.19: guardado por `!dryRun`. Antes ficava fora de qualquer condicional
+  // e, se os Sets fossem preenchidos, `dry_run=1` gravava em
+  // `dashboard_resumos_diarios` — um upsert real numa execucao que promete
+  // ser leitura pura. "dry-run com uma escrita só" nao e dry-run.
+  if (!dryRun && (diasPagamentoAfetados.size > 0 || diasCriacaoAfetados.size > 0)) {
     try {
       await atualizarResumosDosDias(
         userId, loja.lojaId, "Shopee", loja.nickname,
@@ -310,6 +451,22 @@ export async function GET(request: Request) {
     tempo_lote_ms:            Date.now() - inicioLoteMs,
     dry_run:                  dryRun,
     force,
+    // ── modo periodo (F0.c.19) ────────────────────────────────────────────
+    modo:                     modoPeriodo ? "periodo" : (orderIdParam || usandoListaEspecifica ? "order_id" : "legado"),
+    so_selecao:               modoPeriodo ? soSelecao : null,
+    date_from:                modoPeriodo ? dateFrom : null,
+    date_to:                  modoPeriodo ? dateTo   : null,
+    encontrados:              modoPeriodo ? orderIds.length : null,
+    processados:              modoPeriodo ? consultados : null,
+    ignorados:                modoPeriodo ? ignoradosIdempotencia : null,
+    erros:                    modoPeriodo ? (soSelecao ? 0 : consultados - gravados - ignoradosIdempotencia) : null,
+    // Contagem apenas — nenhum dado de comprador, financeiro ou credencial.
+    linhas_da_pagina:         modoPeriodo ? rows.length : null,
+    proximo_cursor:           modoPeriodo ? proximoCursor : null,
+    has_more:                 modoPeriodo ? temMais : null,
+    // Em dry_run devolve os order_ids da pagina para auditar a paginacao.
+    // Somente identificadores de pedido — nenhum dado financeiro ou pessoal.
+    order_ids_da_pagina:      modoPeriodo && dryRun ? orderIds : null,
     limit_solicitado:         (orderIdParam || usandoListaEspecifica) ? null : limitParsed,
     limit_aplicado:           (orderIdParam || usandoListaEspecifica) ? null : limit,
     max_limit_permitido:      MAX_LIMIT,
