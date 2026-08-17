@@ -13,6 +13,10 @@ import {
 import FormAnuncio from "./FormAnuncio";
 import CardAnuncio from "./CardAnuncio";
 import CardAnuncioVariacoes from "./CardAnuncioVariacoes";
+// Leitura paginada e recorte por marketplace. Vivem fora deste arquivo
+// porque o Next.js valida os exports de um `page.tsx` — ver o cabeçalho de
+// `paginacao.ts`.
+import { buscarPaginado, aplicarFiltroMarketplace } from "./paginacao";
 
 export default function AnunciosPage() {
   const [anuncios,    setAnuncios]    = useState<Anuncio[]>([]);
@@ -71,13 +75,33 @@ export default function AnunciosPage() {
     setLoading(true);
     const id = uid ?? userId;
     if (!id) { setLoading(false); return; }
-    const { data } = await supabase
-      .from("anuncios")
-      .select("*")
-      .eq("ativo", true)
-      .eq("user_id", id)
-      .order("created_at", { ascending: false });
-    if (data) setAnuncios(data as Anuncio[]);
+    // Filtros preservados: `ativo` e `user_id`, exatamente como antes.
+    //
+    // O desempate por `id` é NOVO e é obrigatório: `created_at DESC`
+    // sozinho não é ordem total, e páginas pedidas em requisições
+    // separadas podem repetir ou perder linhas empatadas na fronteira
+    // entre elas. Uma importação grava muitas linhas em sequência, então
+    // o empate não é hipotético. Sem desempate a paginação seria uma
+    // troca de um bug de contagem por um de duplicidade.
+    //
+    // `houveResposta` preserva a semântica do código anterior, que era
+    // `if (data) setAnuncios(...)`: consulta falha NÃO substitui a lista
+    // já exibida por uma vazia. Sem esta guarda, trocaríamos "some 76
+    // anúncios" por "somem todos quando a rede oscila".
+    let houveResposta = false;
+    const dados = await buscarPaginado<Anuncio>(async (de, ate) => {
+      const { data } = await supabase
+        .from("anuncios")
+        .select("*")
+        .eq("ativo", true)
+        .eq("user_id", id)
+        .order("created_at", { ascending: false })
+        .order("id", { ascending: false })
+        .range(de, ate);
+      if (data) houveResposta = true;
+      return (data as Anuncio[] | null);
+    });
+    if (houveResposta) setAnuncios(dados);
     setLoading(false);
   }
 
@@ -256,7 +280,7 @@ export default function AnunciosPage() {
         a.ml_item_id?.toLowerCase().includes(q)
       );
     }
-    if (filtroMarketplace !== "todos") base = base.filter(a => a.marketplace === filtroMarketplace);
+    base = aplicarFiltroMarketplace(base, filtroMarketplace);
     if (filtroDuplicados) base = base.filter(a => idsAntigosDuplicados.has(a.id));
     if (filtroVariacao)   base = base.filter(a => !!a.variation_id);
     if (filtroLogistic === "full")   base = base.filter(a => (a as any).logistic_type === "fulfillment");
