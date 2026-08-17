@@ -168,6 +168,12 @@ export default function AnunciosPage() {
           ok: true,
           texto: `✅ ${data.importados} importados, ${data.atualizados} atualizados${data.erros > 0 ? `, ${data.erros} erros` : ""} — total ${data.total} anúncios no ML`,
         });
+        // Foca o marketplace que acabou de ser importado. A lista é
+        // unificada e abre em "todos"; com 802 anúncios Shopee no meio, o
+        // resultado de um import ML ficava invisível e o import parecia
+        // não ter funcionado. Só no caminho de SUCESSO — em erro o filtro
+        // fica como o usuário deixou.
+        setFiltroMarketplace("ML");
         await carregar();
       }
     } catch {
@@ -189,6 +195,8 @@ export default function AnunciosPage() {
           ok: true,
           texto: `🟠 ${data.importados} importados, ${data.atualizados} atualizados — total ${data.total} anúncios na Shopee`,
         });
+        // Simétrico ao import do ML. Só no caminho de SUCESSO.
+        setFiltroMarketplace("Shopee");
         await carregar();
       }
     } catch {

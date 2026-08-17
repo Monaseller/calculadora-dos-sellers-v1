@@ -314,7 +314,64 @@ async function principal() {
     assert(!/fetch\(/.test(CARREGAR), "carregar() passou a chamar um endpoint — fora do escopo desta etapa");
   });
 
-  secao("\n[8. o que esta etapa NÃO podia mudar]");
+  secao("\n[8. UX pós-import: foca o marketplace importado]");
+
+  const IMP_ML = corpoDaFuncao(CODIGO, "importarDoML");
+  const IMP_SP = corpoDaFuncao(CODIGO, "importarDaShopee");
+
+  /** Trecho do ramo de ERRO: entre `if (data.erro) {` e o `} else {`. */
+  function ramoErro(corpo: string): string {
+    const i = corpo.indexOf("if (data.erro)");
+    assert(i >= 0, "ramo de erro não encontrado");
+    const j = corpo.indexOf("} else {", i);
+    assert(j > i, "else do ramo de erro não encontrado");
+    return corpo.slice(i, j);
+  }
+
+  t("25. import ML com sucesso seleciona o filtro ML", () => {
+    assert(/setFiltroMarketplace\("ML"\)/.test(IMP_ML), "não seleciona ML após importar do ML");
+  });
+
+  t("26. import ML recarrega a lista depois de trocar o filtro", () => {
+    const iFiltro = IMP_ML.indexOf('setFiltroMarketplace("ML")');
+    const iCarregar = IMP_ML.indexOf("carregar()", iFiltro);
+    assert(iCarregar > iFiltro, "carregar() deveria vir depois de setFiltroMarketplace");
+  });
+
+  t("27. import ML NÃO troca o filtro no ramo de erro", () => {
+    assert(!/setFiltroMarketplace/.test(ramoErro(IMP_ML)),
+      "troca de filtro no caminho de erro — o usuário perderia o filtro escolhido");
+  });
+
+  t("28. import Shopee com sucesso seleciona o filtro Shopee", () => {
+    assert(/setFiltroMarketplace\("Shopee"\)/.test(IMP_SP), "não seleciona Shopee após importar da Shopee");
+  });
+
+  t("29. import Shopee recarrega a lista depois de trocar o filtro", () => {
+    const iFiltro = IMP_SP.indexOf('setFiltroMarketplace("Shopee")');
+    const iCarregar = IMP_SP.indexOf("carregar()", iFiltro);
+    assert(iCarregar > iFiltro, "carregar() deveria vir depois de setFiltroMarketplace");
+  });
+
+  t("30. import Shopee NÃO troca o filtro no ramo de erro", () => {
+    assert(!/setFiltroMarketplace/.test(ramoErro(IMP_SP)),
+      "troca de filtro no caminho de erro");
+  });
+
+  t("31. nenhum import cruza o marketplace do outro", () => {
+    assert(!/setFiltroMarketplace\("Shopee"\)/.test(IMP_ML), "import do ML seleciona Shopee");
+    assert(!/setFiltroMarketplace\("ML"\)/.test(IMP_SP), "import da Shopee seleciona ML");
+  });
+
+  t("32. falha de rede (catch) não troca o filtro", () => {
+    for (const [nome, corpo] of [["ML", IMP_ML], ["Shopee", IMP_SP]] as const) {
+      const i = corpo.lastIndexOf("catch");
+      assert(i >= 0, `catch de ${nome} não encontrado`);
+      assert(!/setFiltroMarketplace/.test(corpo.slice(i)), `catch de ${nome} troca o filtro`);
+    }
+  });
+
+  secao("\n[9. o que esta etapa NÃO podia mudar]");
 
   t("33. a tela abre com o filtro em 'todos'", () => {
     assert(/filtroMarketplace,\s*setFiltroMarketplace\s*\]\s*=\s*useState<[^>]*>\("todos"\)/.test(CODIGO),
