@@ -224,13 +224,16 @@ export async function POST(request: Request) {
           const custoFrete = calcularFreteParaItem(pesoKg, preco, logisticType, freteGratis);
 
           if (existente) {
+            // `ativo` NÃO entra no update (F0.c.18A). Exclusão na CDS é
+            // decisão do usuário: importar não pode ressuscitar o que ele
+            // apagou. Linha ativa continua ativa; linha soft-deleted tem
+            // os dados atualizados e permanece `ativo=false`.
             const upd: any = {
               nome: titulo,
               preco_anuncio: preco,
               tipo_anuncio: tipoAnuncio,
               logistic_type: logisticType,
               frete_gratis: freteGratis,
-              ativo: true,
               thumbnail,
               permalink,
             };
@@ -289,13 +292,13 @@ export async function POST(request: Request) {
             const existente = existMap.get(key);
 
             if (existente) {
+              // Ver comentário acima: `ativo` fora do update.
               const upd: any = {
                 nome: nomeVar,
                 preco_anuncio: preco,
                 tipo_anuncio: tipoAnuncio,
                 logistic_type: logisticType,
                 frete_gratis: freteGratis,
-                ativo: true,
                 thumbnail: varThumb,
                 permalink,
               };

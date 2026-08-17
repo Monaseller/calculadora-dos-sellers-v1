@@ -88,6 +88,91 @@ export function aplicarFiltroMarketplace<T extends { marketplace: string }>(
 }
 
 // ────────────────────────────────────────────────────────────────────
+// RESPOSTA DA IMPORTACAO — de quem e a culpa quando falha
+//
+// O handler antigo tinha UM try/catch cobrindo `fetch` e `res.json()`, e
+// chamava os dois de "Falha na conexao com a Shopee". Em 2026-08-17 a
+// rota morreu por `Vercel Runtime Timeout Error: Task timed out after 60
+// seconds`; a Vercel devolveu uma pagina de erro, o `res.json()` lancou, e
+// a tela acusou a Shopee por um timeout NOSSO.
+//
+// Atribuir falha ao provedor errado custa caro: manda investigar o lado
+// de fora quando o problema e de dentro.
+// ────────────────────────────────────────────────────────────────────
+
+export type ClasseRespostaImportacao =
+  /** O backend respondeu JSON com `erro: true`. A mensagem e dele. */
+  | "ERRO_DO_BACKEND"
+  /** Corpo ilegivel: funcao interrompida, timeout, pagina de erro do proxy. */
+  | "RESPOSTA_INVALIDA"
+  /** HTTP nao-OK com corpo JSON, mas sem `erro` reconhecivel. */
+  | "HTTP_NAO_OK"
+  /** Sucesso. */
+  | "SUCESSO";
+
+export interface RespostaImportacao {
+  classe: ClasseRespostaImportacao;
+  /** Texto pronto para a tela. Em SUCESSO, vazio: quem monta e a tela. */
+  mensagem: string;
+  /** Corpo ja parseado, quando houve JSON. */
+  dados: any | null;
+}
+
+/**
+ * Classifica `(status, corpo cru)` da importacao.
+ *
+ * Recebe o TEXTO, nao o objeto: e justamente o corpo ilegivel que
+ * precisamos distinguir, e `res.json()` o transformaria em excecao antes
+ * de podermos olha-lo.
+ *
+ * Falha de rede (o `fetch` nem completar) nao chega aqui — e um caso
+ * distinto, tratado no `catch` de quem chama.
+ */
+export function classificarRespostaImportacao(
+  status: number,
+  corpoCru: string,
+  marketplace: string,
+): RespostaImportacao {
+  let dados: any = null;
+  try { dados = JSON.parse(corpoCru); } catch { dados = null; }
+
+  // `typeof [] === "object"`, então array precisa ser recusado à parte:
+  // um corpo `[1,2]` passaria como sucesso e `dados.importados` viraria
+  // `undefined` na tela.
+  if (dados === null || typeof dados !== "object" || Array.isArray(dados)) {
+    return {
+      classe: "RESPOSTA_INVALIDA",
+      mensagem: "A importação não foi concluída porque o processamento excedeu o tempo disponível no servidor. Nenhuma falha do marketplace foi detectada.",
+      dados: null,
+    };
+  }
+
+  if (dados.erro) {
+    return {
+      classe: "ERRO_DO_BACKEND",
+      mensagem: typeof dados.mensagem === "string" && dados.mensagem
+        ? dados.mensagem
+        : `Erro ao importar do ${marketplace}.`,
+      dados,
+    };
+  }
+
+  if (status < 200 || status >= 300) {
+    return {
+      classe: "HTTP_NAO_OK",
+      mensagem: `A importação falhou no servidor (HTTP ${status}).`,
+      dados,
+    };
+  }
+
+  return { classe: "SUCESSO", mensagem: "", dados };
+}
+
+/** Texto do caso em que o `fetch` nem completa — aí sim é rede. */
+export const MENSAGEM_FALHA_DE_REDE =
+  "Não foi possível falar com o servidor. Verifique sua conexão e tente novamente.";
+
+// ────────────────────────────────────────────────────────────────────
 // ESCRITA EM LOTE — a outra face do mesmo limite do PostgREST
 //
 // A exclusao em massa montava `.in("id", ids)` com a selecao inteira. Com

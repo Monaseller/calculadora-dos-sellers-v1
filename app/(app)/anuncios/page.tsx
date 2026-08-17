@@ -20,6 +20,8 @@ import {
   buscarPaginado,
   aplicarFiltroMarketplace,
   desativarEmLotes,
+  classificarRespostaImportacao,
+  MENSAGEM_FALHA_DE_REDE,
   type ResultadoDesativacao,
 } from "./paginacao";
 
@@ -222,11 +224,15 @@ export default function AnunciosPage() {
     setImportando(true);
     setMsgImport(null);
     try {
-      const res  = await fetch("/api/ml/importar-anuncios", { method: "POST" });
-      const data = await res.json();
-      if (data.erro) {
-        setMsgImport({ ok: false, texto: data.mensagem ?? "Erro ao importar." });
+      const res = await fetch("/api/ml/importar-anuncios", { method: "POST" });
+      // `text()` e não `json()`: é o corpo ilegível — função interrompida
+      // por timeout, página de erro do proxy — que precisamos reconhecer,
+      // e `json()` o transformaria em exceção antes de podermos vê-lo.
+      const r = classificarRespostaImportacao(res.status, await res.text(), "Mercado Livre");
+      if (r.classe !== "SUCESSO") {
+        setMsgImport({ ok: false, texto: r.mensagem });
       } else {
+        const data = r.dados;
         setMsgImport({
           ok: true,
           texto: `✅ ${data.importados} importados, ${data.atualizados} atualizados${data.erros > 0 ? `, ${data.erros} erros` : ""} — total ${data.total} anúncios no ML`,
@@ -240,7 +246,8 @@ export default function AnunciosPage() {
         await carregar();
       }
     } catch {
-      setMsgImport({ ok: false, texto: "Falha na conexão." });
+      // Só aqui é rede de verdade: o fetch nem completou.
+      setMsgImport({ ok: false, texto: MENSAGEM_FALHA_DE_REDE });
     }
     setImportando(false);
   }
@@ -249,11 +256,14 @@ export default function AnunciosPage() {
     setImportandoShopee(true);
     setMsgImportShopee(null);
     try {
-      const res  = await fetch("/api/shopee/importar-anuncios", { method: "POST" });
-      const data = await res.json();
-      if (data.erro) {
-        setMsgImportShopee({ ok: false, texto: data.mensagem ?? "Erro ao importar da Shopee." });
+      const res = await fetch("/api/shopee/importar-anuncios", { method: "POST" });
+      // Ver comentário em importarDoML: o corpo cru é que distingue
+      // timeout nosso de erro do marketplace.
+      const r = classificarRespostaImportacao(res.status, await res.text(), "Shopee");
+      if (r.classe !== "SUCESSO") {
+        setMsgImportShopee({ ok: false, texto: r.mensagem });
       } else {
+        const data = r.dados;
         setMsgImportShopee({
           ok: true,
           texto: `🟠 ${data.importados} importados, ${data.atualizados} atualizados — total ${data.total} anúncios na Shopee`,
@@ -263,7 +273,9 @@ export default function AnunciosPage() {
         await carregar();
       }
     } catch {
-      setMsgImportShopee({ ok: false, texto: "Falha na conexão com a Shopee." });
+      // Só aqui é rede de verdade. A mensagem antiga culpava a Shopee por
+      // um timeout do nosso servidor.
+      setMsgImportShopee({ ok: false, texto: MENSAGEM_FALHA_DE_REDE });
     }
     setImportandoShopee(false);
   }

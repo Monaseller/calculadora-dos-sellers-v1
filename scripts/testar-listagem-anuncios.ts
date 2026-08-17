@@ -319,9 +319,17 @@ async function principal() {
   const IMP_ML = corpoDaFuncao(CODIGO, "importarDoML");
   const IMP_SP = corpoDaFuncao(CODIGO, "importarDaShopee");
 
-  /** Trecho do ramo de ERRO: entre `if (data.erro) {` e o `} else {`. */
+  /**
+   * Trecho do ramo de ERRO, entre a condição de falha e o `} else {`.
+   *
+   * A condição mudou em F0.c.18A: era `if (data.erro)`, e passou a ser
+   * `if (r.classe !== "SUCESSO")`, porque o handler agora distingue erro
+   * do backend, resposta ilegível (timeout nosso) e HTTP não-OK. O
+   * invariante testado é o mesmo — o filtro não pode mudar quando o
+   * import falha.
+   */
   function ramoErro(corpo: string): string {
-    const i = corpo.indexOf("if (data.erro)");
+    const i = corpo.indexOf('if (r.classe !== "SUCESSO")');
     assert(i >= 0, "ramo de erro não encontrado");
     const j = corpo.indexOf("} else {", i);
     assert(j > i, "else do ramo de erro não encontrado");

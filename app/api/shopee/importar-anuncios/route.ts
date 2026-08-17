@@ -91,7 +91,11 @@ export async function POST(request: Request) {
         const existente = existMap.get(key);
 
         if (existente) {
-          const upd: any = { nome: titulo, preco_anuncio: preco, thumbnail, ativo: true };
+          // `ativo` NÃO entra no update (F0.c.18A). Exclusão na CDS é
+          // decisão do usuário: importar não pode ressuscitar o que ele
+          // apagou. Linha ativa continua ativa; linha soft-deleted tem os
+          // dados atualizados e permanece `ativo=false`.
+          const upd: any = { nome: titulo, preco_anuncio: preco, thumbnail };
           if (!existente.sku && sku) upd.sku = sku;
           await supabase.from("anuncios").update(upd).eq("id", existente.id);
           atualizados++;
@@ -122,7 +126,8 @@ export async function POST(request: Request) {
           const existente   = existMap.get(key);
 
           if (existente) {
-            const upd: any = { nome: nomeVar, preco_anuncio: preco, thumbnail, ativo: true };
+            // Ver comentário acima: `ativo` fora do update.
+            const upd: any = { nome: nomeVar, preco_anuncio: preco, thumbnail };
             if (!existente.sku && sku) upd.sku = sku;
             await supabase.from("anuncios").update(upd).eq("id", existente.id);
             atualizados++;
