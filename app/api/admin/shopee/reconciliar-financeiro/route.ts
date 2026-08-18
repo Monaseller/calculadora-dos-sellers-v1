@@ -46,6 +46,12 @@ import { autenticarRequisicao } from "@/lib/autenticacao";
 import { getShopeeLojaAtiva } from "@/lib/shopee-auth";
 import { shopeeGet } from "@/lib/shopee-api";
 import { atualizarResumosDosDias } from "@/lib/resumos-diarios";
+import {
+  ELEGIVEIS_FINANCEIRO,
+  extrairCamposFinanceiros,
+  montarSnapshotsFinanceirosDoPedido,
+  round2,
+} from "@/lib/shopee-financeiro";
 
 export const maxDuration = 60;
 
@@ -54,9 +60,8 @@ const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 );
 
-function round2(n: number): number {
-  return Math.round(n * 100) / 100;
-}
+// round2 vem de lib/shopee-financeiro.ts — uma implementacao so, para a rota e
+// os testes arredondarem exatamente igual.
 
 interface PedidoRow {
   id: string;
@@ -123,8 +128,25 @@ export async function GET(request: Request) {
   // escrita.
   const soSelecao = url.searchParams.get("so_selecao") === "1";
 
-  /** Teto por request no modo periodo. Menor que MAX_LIMIT de proposito. */
-  const MAX_LIMIT_PERIODO = 100;
+  /**
+   * Teto por request no modo periodo. Menor que MAX_LIMIT de proposito.
+   *
+   * 2026-08-18: reduzido de 100 para 30, com base em MEDICAO, nao em estimativa.
+   * Duas execucoes reais de 50 pedidos (37 multi-line) deram 70,5 s e 67,4 s —
+   * media de 1.410 e 1.348 ms/pedido, ja ESTOURANDO o `maxDuration = 60` desta
+   * rota. O limite anterior de 100 era fisicamente impossivel de completar.
+   *
+   * Por que 30 e nao 42 (= 60 / 1,41):
+   *   42 seria o teto teorico com latencia MEDIA e nenhuma folga. O tempo por
+   *   pedido nao e constante — depende de latencia da Shopee, do Supabase, do
+   *   numero de linhas do pedido (um UPDATE por linha) e de cold start da
+   *   funcao. Um unico pedido lento no fim do lote perde o request inteiro, e
+   *   com ele o progresso nao carimbado.
+   *   30 x 1,41 s = ~42 s, deixando ~18 s (30% do orcamento) de margem.
+   *   O custo de ser conservador e uma requisicao a mais; o custo de ser
+   *   agressivo e um lote perdido.
+   */
+  const MAX_LIMIT_PERIODO = 30;
   const MAX_DIAS_JANELA    = 7;
   const ehDataISO = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(Date.parse(`${s}T00:00:00Z`));
   const erro400 = (mensagem: string) =>
@@ -188,12 +210,19 @@ export async function GET(request: Request) {
   // Ordenacao: data_pagamento ASC, depois order_id ASC — reconciliacao sempre
   // retoma dos pedidos mais antigos sem dado financeiro, de forma previsivel
   // e auditavel (aprovado explicitamente, nao mudar sem pedido novo).
+  // Elegibilidade (2026-08-18): so pedidos em estado FINAL entram na fila
+  // financeira. Pedido em transito (PROCESSED/SHIPPED/READY_TO_SHIP/
+  // TO_CONFIRM_RECEIVE) ainda nao tem escrow definitivo — reconcilia-lo agora e
+  // trabalho jogado fora, porque o valor muda quando ele concluir. Na janela de
+  // 30 dias auditada isso e 23.387 de 31.463 linhas (81%).
+  // CANCELLED entra: escrow 0 + seller_return_refund < 0 e dado financeiro REAL
+  // (a venda comercial existiu, o repasse foi zerado), nao ausencia de dado.
   let sel = supabase
     .from("pedidos")
     .select("id, order_id, item_subtotal, has_income_data, escrow_amount, data_pagamento, data_criacao")
     .eq("user_id", userId)
     .eq("marketplace", "Shopee")
-    .eq("status_shopee_raw", "COMPLETED")
+    .in("status_shopee_raw", ELEGIVEIS_FINANCEIRO)
     .order("data_pagamento", { ascending: true })
     .order("order_id", { ascending: true });
 
@@ -202,7 +231,12 @@ export async function GET(request: Request) {
   } else if (orderIdParam) {
     sel = sel.eq("order_id", orderIdParam);
   } else if (!force) {
-    sel = sel.eq("has_income_data", false).eq("escrow_amount", 0);
+    // 2026-08-18: fila = "ainda nao reconciliado", medido por
+    // financial_reconciled_at IS NULL. O criterio antigo
+    // (has_income_data=false E escrow_amount=0) excluia por engano o pedido
+    // legitimamente reconciliado com escrow 0 — devolucao total —, que ficaria
+    // sendo reprocessado para sempre.
+    sel = sel.is("financial_reconciled_at", null);
   }
 
   if (modoPeriodo) {
@@ -344,14 +378,11 @@ export async function GET(request: Request) {
     // escrow_amount sozinho pode ser o valor PRE-ajuste, divergindo do que a
     // Shopee de fato repassa ao vendedor (confirmado com pedido real 2605018U9BKYSA:
     // escrow_amount=8.56 vs escrow_amount_after_adjustment=6.68, diff = order_adjustment -1.88).
-    const escrowAmount   = Number(income.escrow_amount_after_adjustment ?? income.escrow_amount ?? 0);
-    const buyerTotal      = Number(income.buyer_total_amount ?? 0);
-    const voucherSeller   = Number(income.voucher_from_seller ?? 0);
-    const voucherShopee   = Number(income.voucher_from_shopee ?? 0);
-    const commissionFee   = Number(income.commission_fee ?? 0);
-    const serviceFee       = Number(income.service_fee ?? 0);
-    const transactionFee   = Number(income.seller_transaction_fee ?? income.transaction_fee ?? 0);
-    const campaignFee      = Number(income.campaign_fee ?? 0);
+    // 2026-08-18: leitura centralizada em lib/shopee-financeiro.ts — mesma
+    // regra usada pelos testes, sem copia. `escrowAmount` ja e o repasse FINAL
+    // (after_adjustment com fallback), preservando a decisao da Fase G.
+    const campos = extrairCamposFinanceiros(income);
+    const escrowAmount = campos.escrowAmount;
 
     // Fase H (2026-07-07): CORRECAO DE CRITERIO. Antes: hasRealIncome = escrowAmount > 0,
     // o que tratava devolucao total (escrow=0) e ajuste negativo pos-reembolso
@@ -369,24 +400,19 @@ export async function GET(request: Request) {
     const vaiIgnorarPorIdempotencia = jaTemDadoReal && !force;
 
     const orderItemsSubtotal = rowsPedido.reduce((acc, r) => acc + (Number(r.item_subtotal) || 0), 0);
+    // Um unico carimbo por pedido: todas as linhas do mesmo order_id recebem o
+    // mesmo instante, para que o snapshot seja identificavel como uma unidade.
+    const agoraISO = new Date().toISOString();
 
-    const wouldWriteRows = rowsPedido.map(r => {
-      const ratio = orderItemsSubtotal > 0
-        ? (Number(r.item_subtotal) || 0) / orderItemsSubtotal
-        : 1 / rowsPedido.length;
-      return {
-        id:                  r.id,
-        escrow_amount:       round2(escrowAmount * ratio),
-        buyer_paid_amount:   round2(buyerTotal * ratio),
-        voucher_from_seller: round2(voucherSeller * ratio),
-        voucher_from_shopee: round2(voucherShopee * ratio),
-        commission_fee:      round2(commissionFee * ratio),
-        service_fee:         round2(serviceFee * ratio),
-        transaction_fee:     round2(transactionFee * ratio),
-        campaign_fee:        round2(campaignFee * ratio),
-        has_income_data:     hasRealIncome,
-      };
-    });
+    // Snapshot SUBSTITUI o anterior — nunca acumula. Reexecutar o mesmo pedido
+    // reescreve os mesmos campos com o valor oficial mais recente.
+    //
+    // 2026-08-18 (versao 2): o rateio passou a ser calculado com TODAS as linhas
+    // do pedido de uma vez. Fechar a soma exatamente exige conhecer todas as
+    // partes ao mesmo tempo — uma funcao linha-a-linha nao sabe quanto de
+    // residuo sobrou para as outras. `rowsPedido` ja e o conjunto completo do
+    // order_id (agrupado acima), entao nenhuma linha fica fora do rateio.
+    const wouldWriteRows = montarSnapshotsFinanceirosDoPedido(campos, rowsPedido, agoraISO);
 
     let statusGravacao = dryRun ? "dry_run" : "pendente";
 

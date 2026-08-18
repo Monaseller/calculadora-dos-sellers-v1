@@ -702,7 +702,14 @@ export function montarLinhasDoPedido(order: any, ctx: MontarLinhasCtx): any[] {
 
     // ── P1: campos income_distribution proporcionais ───────────────────────
     const escrowItem        = hasIncomeData ? incEscrow        * ratioItem : 0;
-    const commissionItem    = hasIncomeData ? incCommission    * ratioItem : tarifaVenda;
+    // 2026-08-18: ANTES este fallback era `: tarifaVenda`, ou seja, gravava a
+    // ESTIMATIVA do CDS numa coluna cujo nome promete dado oficial da Shopee.
+    // Com 0% de escrow em producao, 100% das linhas ficavam com commission_fee
+    // estimado — indistinguivel de valor real sem olhar has_income_data.
+    // Agora segue a mesma regra das irmas abaixo (`: 0`): commission_fee so
+    // existe quando a Shopee informou. A estimativa continua em `tarifa_venda`,
+    // que e o que o Dashboard exibe — nada muda para o usuario.
+    const commissionItem    = hasIncomeData ? incCommission    * ratioItem : 0;
     const serviceFeeItem    = hasIncomeData ? incServiceFee    * ratioItem : 0;
     const txFeeItem         = hasIncomeData ? incTxFee         * ratioItem : 0;
     const campaignFeeItem   = hasIncomeData ? incCampaignFee   * ratioItem : 0;

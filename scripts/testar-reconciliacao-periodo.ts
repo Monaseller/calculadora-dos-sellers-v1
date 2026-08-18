@@ -221,8 +221,13 @@ t("14. cursor com data anterior ao período não ressuscita pedidos já passados
 
 secao("\n[5. contrato da rota — leitura do código]");
 
-t("15. teto de 100 por request no modo período", () => {
-  assert(/MAX_LIMIT_PERIODO\s*=\s*100/.test(FONTE), "teto de 100 ausente");
+t("15. teto de 30 por request no modo período", () => {
+  // 2026-08-18: era 100. Reduzido para 30 por MEDIÇÃO, não estimativa: duas
+  // execuções reais de 50 pedidos levaram 70,5 s e 67,4 s (~1,4 s/pedido), já
+  // estourando o `maxDuration = 60` da rota — o teto de 100 era fisicamente
+  // impossível de completar. 30 × 1,4 s ≈ 42 s, deixando ~30% de margem para
+  // latência variável, cold start e pedidos com muitas linhas.
+  assert(/MAX_LIMIT_PERIODO\s*=\s*30/.test(FONTE), "teto de 30 ausente");
   assert(/tetoLimit\s*=\s*modoPeriodo\s*\?\s*MAX_LIMIT_PERIODO/.test(FONTE), "teto não é aplicado no modo período");
 });
 t("16. janela máxima de 7 dias", () => {
