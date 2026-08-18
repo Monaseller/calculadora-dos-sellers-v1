@@ -187,10 +187,96 @@ export interface ContextoListagemShopee {
 
 export interface ListagemResultado {
   orderSns: string[];
+  /**
+   * Recuperacao de lacunas (2026-08-18): os order_sn COMPLETED que o caminho
+   * do cron (update_time) ANTES simplesmente descartava. Agora saem separados
+   * em vez de sumir, para que quem chama decida o que fazer com eles. Quando
+   * `filtrarCompleted` e false (historico/backfill) este array vem sempre
+   * vazio e todos os order_sn continuam em `orderSns` — zero mudanca de
+   * comportamento nesse caminho.
+   */
+  completedSns: string[];
   paginas:  number;
   tempoMs:  number;
   retries:  number;
   erro:     string | null;
+}
+
+/**
+ * Tamanho do lote ao consultar quais order_sn ja existem no banco.
+ * order_sn tem 14 caracteres; 200 por consulta da ~3KB de querystring, bem
+ * abaixo do limite de URL do PostgREST que ja causou HTTP 400 neste projeto
+ * com lotes grandes (ver app/(app)/anuncios/paginacao.ts).
+ */
+export const LOTE_CONSULTA_ORDER_SN = 200;
+
+/**
+ * separarCompleted — decide, para UMA pagina de get_order_list, quais order_sn
+ * seguem o fluxo normal e quais sao COMPLETED segregados.
+ *
+ * Funcao PURA (sem rede, sem banco) exatamente para ser testavel: e ela que
+ * carrega a regra que causou a lacuna historica corrigida em 2026-08-18.
+ */
+export function separarCompleted(
+  list: any[], filtrarCompleted: boolean
+): { orderSns: string[]; completedSns: string[] } {
+  if (!filtrarCompleted) {
+    return { orderSns: list.map((o: any) => o.order_sn), completedSns: [] };
+  }
+  const orderSns: string[] = [];
+  const completedSns: string[] = [];
+  for (const o of list) {
+    if ((o?.order_status ?? "") === "COMPLETED") completedSns.push(o.order_sn);
+    else orderSns.push(o.order_sn);
+  }
+  return { orderSns, completedSns };
+}
+
+/** Divide uma lista de order_sn em lotes para consulta ao banco. Pura. */
+export function lotesDeOrderSn(sns: string[], tamanho = LOTE_CONSULTA_ORDER_SN): string[][] {
+  if (tamanho < 1) throw new Error("lotesDeOrderSn: tamanho de lote deve ser >= 1");
+  const lotes: string[][] = [];
+  for (let i = 0; i < sns.length; i += tamanho) lotes.push(sns.slice(i, i + tamanho));
+  return lotes;
+}
+
+/**
+ * filtrarOrderSnsAusentes — dado um conjunto de order_sn, devolve APENAS os
+ * que ainda nao existem em `pedidos` para este usuario/marketplace.
+ *
+ * Motivo (2026-08-18): o cron por update_time descartava todo COMPLETED. Isso
+ * fazia com que um pedido perdido no sync original e depois concluido nunca
+ * mais pudesse entrar — falha pontual virava buraco permanente. Buscar o
+ * detalhe de TODO COMPLETED do dia seria caro sem beneficio: pedido concluido
+ * que ja esta no banco raramente muda. Entao buscamos o detalhe so dos
+ * ausentes, que e exatamente o conjunto que falta.
+ *
+ * `buscarExistentes` e injetavel para permitir teste sem banco.
+ */
+export async function filtrarOrderSnsAusentes(
+  userId: string,
+  sns: string[],
+  buscarExistentes?: (lote: string[]) => Promise<string[]>,
+): Promise<string[]> {
+  if (sns.length === 0) return [];
+  const consultar = buscarExistentes ?? (async (lote: string[]) => {
+    const { data, error } = await supabase
+      .from("pedidos")
+      .select("order_id")
+      .eq("user_id", userId)
+      .eq("marketplace", "Shopee")
+      .in("order_id", lote);
+    // Erro de consulta NUNCA vira "esta ausente" — isso reprocessaria o dia
+    // inteiro. Falha explicita, o sync trata como qualquer outro erro.
+    if (error) throw new Error(`[sync-shopee] consulta de order_sn existentes falhou: ${error.message}`);
+    return (data ?? []).map((r: any) => r.order_id);
+  });
+
+  const existentes = new Set<string>();
+  for (const lote of lotesDeOrderSn(sns)) {
+    for (const oid of await consultar(lote)) existentes.add(oid);
+  }
+  return sns.filter(sn => !existentes.has(sn));
 }
 
 export function contarDiasNoIntervalo(dateFrom: string, dateTo: string): number {
@@ -218,6 +304,7 @@ export async function listarOrderSnsDaJanela(
     const chunkTo   = Math.floor(new Date(`${janelaTo}T23:59:59-03:00`).getTime() / 1000);
     let cursor = "";
     const orderSns: string[] = [];
+    const completedSns: string[] = [];
     let paginas = 0;
 
     for (;;) {
@@ -242,18 +329,18 @@ export async function listarOrderSnsDaJanela(
       }
 
       const list: any[] = data?.response?.order_list ?? [];
-      const sns = ctx.filtrarCompleted
-        ? list.filter((o: any) => (o.order_status ?? "") !== "COMPLETED").map((o: any) => o.order_sn)
-        : list.map((o: any) => o.order_sn);
-      orderSns.push(...sns);
+      // 2026-08-18: COMPLETED deixa de ser DESCARTADO e passa a ser SEPARADO.
+      const separados = separarCompleted(list, ctx.filtrarCompleted);
+      orderSns.push(...separados.orderSns);
+      completedSns.push(...separados.completedSns);
 
       if (!data?.response?.more || !data?.response?.next_cursor) break;
       cursor = data.response.next_cursor;
     }
 
-    return { orderSns, paginas, tempoMs: Date.now() - inicioMs, retries, erro: null };
+    return { orderSns, completedSns, paginas, tempoMs: Date.now() - inicioMs, retries, erro: null };
   } catch (err: any) {
-    return { orderSns: [], paginas: 0, tempoMs: Date.now() - inicioMs, retries, erro: err?.message ?? String(err) };
+    return { orderSns: [], completedSns: [], paginas: 0, tempoMs: Date.now() - inicioMs, retries, erro: err?.message ?? String(err) };
   }
 }
 
@@ -281,6 +368,7 @@ export async function listarOrderSnsSequencialParaTeste(
   const inicioMs = Date.now();
   let retries = 0;
   const orderSns: string[] = [];
+  const completedSns: string[] = [];
   let paginas = 0;
   try {
     const chunks = gerarChunks(dateFrom, dateTo);
@@ -311,18 +399,19 @@ export async function listarOrderSnsSequencialParaTeste(
         }
 
         const list: any[] = data?.response?.order_list ?? [];
-        const sns = ctx.filtrarCompleted
-          ? list.filter((o: any) => (o.order_status ?? "") !== "COMPLETED").map((o: any) => o.order_sn)
-          : list.map((o: any) => o.order_sn);
-        orderSns.push(...sns);
+        // 2026-08-18: mesma separacao do caminho real, para que esta funcao
+        // continue reproduzindo fielmente o que o fluxo de sync produz.
+        const separados = separarCompleted(list, ctx.filtrarCompleted);
+        orderSns.push(...separados.orderSns);
+        completedSns.push(...separados.completedSns);
 
         if (!data?.response?.more || !data?.response?.next_cursor) break;
         cursor = data.response.next_cursor;
       }
     }
-    return { orderSns, paginas, tempoMs: Date.now() - inicioMs, retries, erro: null };
+    return { orderSns, completedSns, paginas, tempoMs: Date.now() - inicioMs, retries, erro: null };
   } catch (err: any) {
-    return { orderSns, paginas, tempoMs: Date.now() - inicioMs, retries, erro: err?.message ?? String(err) };
+    return { orderSns, completedSns, paginas, tempoMs: Date.now() - inicioMs, retries, erro: err?.message ?? String(err) };
   }
 }
 
@@ -388,6 +477,20 @@ export interface MontarLinhasCtx {
   dateFrom:     string;
   dateTo:       string;
   mapaAnuncios: Map<string, any>;
+  /**
+   * Recuperacao de lacunas (2026-08-18). Pedidos que a Shopee tem e o banco
+   * NAO tem, encontrados via update_time fora da janela pedida.
+   *
+   * Por que precisa existir: o corte `dataBrt < dateFrom || dataBrt > dateTo`
+   * abaixo e um SEGUNDO portao, independente do filtro de COMPLETED. Um pedido
+   * pago em 24/07 e concluido em 27/07 e encontrado pelo cron de 27/07 via
+   * update_time, mas seria descartado aqui porque seu dia de pagamento esta
+   * fora da janela — e continuaria ausente para sempre. Para os order_sn deste
+   * conjunto (e SO para eles) o corte nao se aplica: sao dado que falta, e o
+   * dia final da linha continua vindo do proprio pay_time/create_time do
+   * pedido, nunca da janela do sync.
+   */
+  orderSnsRecuperados?: Set<string>;
 }
 
 /**
@@ -403,6 +506,7 @@ export interface MontarLinhasCtx {
  */
 export function montarLinhasDoPedido(order: any, ctx: MontarLinhasCtx): any[] {
   const { userId, lojaId, nickname, noBuffer, dateFrom, dateTo, mapaAnuncios } = ctx;
+  const ehRecuperado = ctx.orderSnsRecuperados?.has(order?.order_sn) ?? false;
   const now = new Date().toISOString();
   const rows: any[] = [];
 
@@ -419,7 +523,9 @@ export function montarLinhasDoPedido(order: any, ctx: MontarLinhasCtx): any[] {
     : (order.pay_time || order.create_time || 0);
   const dataBrt = new Date((refTs - 3 * 3600) * 1000).toISOString().split("T")[0];
 
-  if (dataBrt < dateFrom || dataBrt > dateTo) return rows;
+  // Recuperacao de lacunas (2026-08-18): o corte por janela nao se aplica a
+  // pedido comprovadamente ausente do banco — ver `orderSnsRecuperados`.
+  if (!ehRecuperado && (dataBrt < dateFrom || dataBrt > dateTo)) return rows;
 
   // ── Fase B (2026-07-06): data_criacao / data_pagamento / data_atualizacao_marketplace ──
   // Regra oficial: docs/BUSINESS_RULES.md ("Arquitetura de três datas").
@@ -750,6 +856,8 @@ export async function syncShopeeForUserV2(
 
   // ── ETAPA 1: Listar todos os order_sn via cursor paginado ──────────────────
   let allOrderSns: string[] = [];
+  // COMPLETED separados pelo caminho do cron — candidatos a recuperacao.
+  let completedSegregados: string[] = [];
   let _paginasListagem = 0;
   const _etapa1InicioMs = Date.now();
   const diasNoIntervalo = contarDiasNoIntervalo(dateFrom, dateTo);
@@ -796,6 +904,7 @@ export async function syncShopeeForUserV2(
     const totalAntesDedup = resOntem.orderSns.length + resHoje.orderSns.length;
     const setUnico = new Set([...resOntem.orderSns, ...resHoje.orderSns]);
     allOrderSns = Array.from(setUnico);
+    completedSegregados = Array.from(new Set([...resOntem.completedSns, ...resHoje.completedSns]));
     _paginasListagem = resOntem.paginas + resHoje.paginas;
 
     // [DIAG-SYNC-SHOPEE] temporário (2026-07-30) — ver comentário em withRetry.
@@ -840,12 +949,13 @@ export async function syncShopeeForUserV2(
 
         const list: any[] = data?.response?.order_list ?? [];
 
-        // Cron (update_time): exclui COMPLETED para nao buscar pedidos antigos entregues hoje
-        const sns = filtrarCompleted
-          ? list.filter((o: any) => (o.order_status ?? "") !== "COMPLETED").map((o: any) => o.order_sn)
-          : list.map((o: any) => o.order_sn);
-
-        allOrderSns.push(...sns);
+        // Cron (update_time): COMPLETED sai do fluxo normal para nao buscar
+        // detalhe de pedido antigo ja entregue. 2026-08-18: passa a ser
+        // SEGREGADO em vez de descartado — os que nao existem no banco sao
+        // recuperados adiante (lacuna historica provada).
+        const separados = separarCompleted(list, filtrarCompleted);
+        allOrderSns.push(...separados.orderSns);
+        completedSegregados.push(...separados.completedSns);
 
         // Paginacao: para quando mais=false OU cursor vazio
         if (!data?.response?.more || !data?.response?.next_cursor) break;
@@ -854,12 +964,32 @@ export async function syncShopeeForUserV2(
     }
   }
 
+  // ── ETAPA 1.5: recuperacao de lacunas (2026-08-18) ────────────────────────
+  // Dos COMPLETED segregados acima, busca o detalhe APENAS dos que nao existem
+  // no banco. Em regime normal esse conjunto e vazio ou minusculo (pedido
+  // concluido ja sincronizado), entao o custo extra e ~1 consulta ao banco por
+  // lote de 200 order_sn e nenhuma chamada a mais na Shopee. Quando NAO for
+  // vazio, e exatamente a lacuna que antes ficava permanente.
+  const orderSnsRecuperados = new Set<string>();
+  if (completedSegregados.length > 0) {
+    const _recInicioMs = Date.now();
+    const ausentes = await filtrarOrderSnsAusentes(userId, Array.from(new Set(completedSegregados)));
+    for (const sn of ausentes) orderSnsRecuperados.add(sn);
+    allOrderSns.push(...ausentes);
+    console.log("[DIAG-SYNC-SHOPEE] etapa1_5_recuperacao", {
+      completedSegregados: completedSegregados.length,
+      ausentesRecuperados: ausentes.length,
+      tempoMs: Date.now() - _recInicioMs,
+    });
+  }
+
   const found = allOrderSns.length;
   // [DIAG-SYNC-SHOPEE] temporário (2026-07-30) — ver comentário em withRetry.
   console.log("[DIAG-SYNC-SHOPEE] etapa1_total", {
     tempoMs: Date.now() - _etapa1InicioMs,
     paginas: _paginasListagem,
     orderSnsEncontrados: found,
+    recuperados: orderSnsRecuperados.size,
     modo: diasNoIntervalo === 2 ? "paralelo_2_janelas" : "sequencial_legado",
   });
   if (found === 0) return { found: 0, inserted: 0, upsertErrors: 0, resumoAtualizado: false, resumoPendente: false, diasAfetados: 0, motivoResumoPendente: null };
@@ -922,6 +1052,7 @@ export async function syncShopeeForUserV2(
     for (const order of (detail?.response?.order_list ?? [])) {
       rows.push(...montarLinhasDoPedido(order, {
         userId, lojaId, nickname, noBuffer, dateFrom, dateTo, mapaAnuncios,
+        orderSnsRecuperados,
       }));
     }
   }

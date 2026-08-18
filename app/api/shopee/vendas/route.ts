@@ -136,11 +136,16 @@ export async function GET(request: Request) {
         resumo_motivo: r.motivoResumoPendente,
       };
     } else if (dateFrom <= hoje && hoje <= dateTo) {
-      // Auto: só sincroniza hoje se stale
+      // Auto: só sincroniza hoje se stale.
+      // 2026-08-18: a sonda usava a coluna legada `data`, que não é nenhuma das
+      // duas dimensões oficiais (ver BUSINESS_RULES.md, "Arquitetura de três
+      // datas"). Passa a perguntar pelas duas dimensões reais: "quando gravamos
+      // pela última vez uma linha que pertence a hoje", seja por criação, seja
+      // por pagamento. Sem linha de hoje ainda → lastSync=0 → sincroniza.
       const { data: probeHoje } = await supabase
         .from("pedidos").select("synced_at")
         .eq("user_id", userId).eq("marketplace", "Shopee")
-        .eq("data", hoje)
+        .or(`data_criacao.eq.${hoje},data_pagamento.eq.${hoje}`)
         .order("synced_at", { ascending: false }).limit(1);
 
       const lastSyncHoje = probeHoje?.[0]?.synced_at
@@ -153,7 +158,15 @@ export async function GET(request: Request) {
       });
       if (Date.now() - lastSyncHoje > 30 * 60 * 1000) {
         console.log(`[DIAG-DATAS][shopee/vendas] req #${_reqid} disparando auto-sync de hoje (stale)`);
-        const r = await syncShopeeForUserV2(userId, hoje, hoje, true); // noBuffer=true -> create_time
+        // 2026-08-18: noBuffer=false -> janela de BUSCA por update_time.
+        // Antes era noBuffer=true (create_time), e por isso um pedido criado
+        // ontem e pago hoje NÃO era buscado — o Dashboard filtra por
+        // data_pagamento, então ele simplesmente não aparecia em "Hoje".
+        // Pagamento altera update_time, então update_time captura os dois casos
+        // (criado hoje e criado antes/pago hoje). A CLASSIFICAÇÃO da linha
+        // continua vindo do pay_time do próprio pedido (data_pagamento), nunca
+        // da janela de busca — busca e exibição são dimensões separadas.
+        const r = await syncShopeeForUserV2(userId, hoje, hoje, false); // noBuffer=false -> update_time
         resumoSyncInfo = {
           sync_concluido: true,
           resumo_atualizado: r.resumoAtualizado,
