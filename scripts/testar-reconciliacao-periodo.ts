@@ -287,6 +287,98 @@ t("15f. aviso descreve a elegibilidade atual, não a antiga", () => {
     "aviso deveria mencionar o critério de fila atual");
 });
 
+/**
+ * 2026-08-18 — coerência entre a FILA e a TRAVA de idempotência.
+ *
+ * Por que existem: a primeira escrita real de 30 pedidos consultou 30/30 com
+ * `order_income`, 0 erros — e gravou ZERO. A fila selecionava por
+ * `financial_reconciled_at IS NULL`, mas a trava ainda recusava por
+ * `has_income_data === true`. Pedido reconciliado pelo sistema ANTIGO satisfaz
+ * as duas condições ao mesmo tempo: entra na fila e é bloqueado pela trava.
+ *
+ * Não era atraso, era travamento permanente — `has_income_data` nunca volta a
+ * false. Nenhum teste pegou porque os dois critérios estão em linhas distantes
+ * e cada um, isolado, estava correto.
+ */
+const CRITERIO_OFICIAL = "financial_reconciled_at";
+
+t("15g. TESTE C — fila e trava usam o MESMO campo", () => {
+  const fila = /sel = sel\.is\("financial_reconciled_at", null\)/.test(FONTE);
+  assert(fila, "a fila deveria selecionar por financial_reconciled_at IS NULL");
+  const trava = /jaReconciliado\s*=\s*rowsPedido\.some\(r => r\.financial_reconciled_at != null\)/.test(FONTE);
+  assert(trava, `a trava deveria decidir por ${CRITERIO_OFICIAL}`);
+});
+
+t("15h. TESTE C — has_income_data não decide mais idempotência v2", () => {
+  assert(!/some\(r => r\.has_income_data === true\)/.test(FONTE),
+    "has_income_data voltou a decidir se o pedido já foi reconciliado");
+  assert(!/vaiIgnorarPorIdempotencia\s*=\s*\w*[Hh]asIncome/.test(FONTE),
+    "a trava não pode depender de has_income_data");
+  // a coluna continua existindo — não foi removida nem limpa
+  assert(/has_income_data/.test(FONTE), "has_income_data deveria continuar sendo gravada como dado legado");
+});
+
+t("15i. TESTE A — armadilha legada: has_income_data=true + reconciled_at NULL é GRAVÁVEL", () => {
+  // Simula a decisão da rota sobre as linhas de um pedido, com o mesmo predicado.
+  const decidir = (linhas: Array<{ has_income_data: boolean; financial_reconciled_at: string | null }>, force: boolean) => {
+    const jaReconciliado = linhas.some(r => r.financial_reconciled_at != null);
+    return { ignora: jaReconciliado && !force };
+  };
+  const legado = [{ has_income_data: true, financial_reconciled_at: null }];
+  assert(decidir(legado, false).ignora === false,
+    "pedido legado (has_income_data=true, reconciled_at NULL) NÃO pode ser ignorado — é exatamente o bug de produção");
+  const multi = [
+    { has_income_data: true, financial_reconciled_at: null },
+    { has_income_data: true, financial_reconciled_at: null },
+  ];
+  assert(decidir(multi, false).ignora === false, "multi-linha legado também deve ser gravável");
+  const virgem = [{ has_income_data: false, financial_reconciled_at: null }];
+  assert(decidir(virgem, false).ignora === false, "pedido nunca tocado deve ser gravável");
+});
+
+t("15j. TESTE B — já reconciliado é ignorado sem force", () => {
+  const decidir = (linhas: Array<{ has_income_data: boolean; financial_reconciled_at: string | null }>, force: boolean) => {
+    const jaReconciliado = linhas.some(r => r.financial_reconciled_at != null);
+    return { ignora: jaReconciliado && !force };
+  };
+  const rec = [{ has_income_data: true, financial_reconciled_at: "2026-08-18T12:00:00.000Z" }];
+  assert(decidir(rec, false).ignora === true, "pedido já reconciliado deveria ser ignorado sem force");
+  // basta UMA linha reconciliada para proteger o pedido inteiro
+  const parcial = [
+    { has_income_data: false, financial_reconciled_at: "2026-08-18T12:00:00.000Z" },
+    { has_income_data: false, financial_reconciled_at: null },
+  ];
+  assert(decidir(parcial, false).ignora === true,
+    "pedido com qualquer linha já reconciliada deve ser protegido");
+  // has_income_data=false não desprotege um pedido já reconciliado
+  assert(decidir([{ has_income_data: false, financial_reconciled_at: "x" }], false).ignora === true,
+    "has_income_data não pode desfazer a proteção de reconciled_at");
+});
+
+t("15k. TESTE D — force continua com o mesmo poder, nem mais nem menos", () => {
+  const decidir = (linhas: Array<{ has_income_data: boolean; financial_reconciled_at: string | null }>, force: boolean) => {
+    const jaReconciliado = linhas.some(r => r.financial_reconciled_at != null);
+    return { ignora: jaReconciliado && !force };
+  };
+  assert(decidir([{ has_income_data: true, financial_reconciled_at: "x" }], true).ignora === false,
+    "force deveria permitir reprocessar pedido já reconciliado");
+  assert(decidir([{ has_income_data: true, financial_reconciled_at: null }], true).ignora === false,
+    "force sobre pedido não reconciliado continua gravável");
+  // force NÃO amplia a elegibilidade: continua limitado aos status elegíveis
+  assert(/\.in\("status_shopee_raw", ELEGIVEIS_FINANCEIRO\)/.test(FONTE),
+    "force não pode contornar o filtro de status elegível");
+  assert(/const force\s*=\s*url\.searchParams\.get\("force"\) === "1"/.test(FONTE),
+    "force deveria continuar sendo lido do mesmo jeito");
+});
+
+t("15l. lote consultado que grava zero emite aviso de anomalia", () => {
+  assert(/ANOMALIA:/.test(FONTE), "falta o aviso de anomalia");
+  assert(/gravados === 0 && ignoradosIdempotencia > 0/.test(FONTE),
+    "a condição do aviso deveria detectar consultado-sem-gravar");
+  assert(/!dryRun && !soSelecao/.test(FONTE),
+    "o aviso não deveria disparar em dry_run nem em so_selecao, onde gravar zero é o esperado");
+});
+
 t("16. janela máxima de 7 dias", () => {
   assert(/MAX_DIAS_JANELA\s*=\s*7/.test(FONTE), "janela máxima ausente");
   assert(/dias > MAX_DIAS_JANELA/.test(FONTE), "janela não é validada");

@@ -15,11 +15,14 @@
  *   limit     - quantos pedidos processar quando `order_id` nao for passado. Default 5, max 100.
  *   dry_run   - "0" grava de fato no banco. QUALQUER outro valor (ou ausencia do param)
  *               = dry-run (nao grava). Default seguro: dry-run.
- *   force     - "1" reprocessa e sobrescreve pedidos que ja tem has_income_data=true.
- *               Sem esse param, esses pedidos sao ignorados (idempotencia).
+ *   force     - "1" reprocessa e sobrescreve pedidos JA RECONCILIADOS
+ *               (financial_reconciled_at preenchido). Sem esse param, esses
+ *               pedidos sao ignorados (idempotencia).
  *
- * Selecao: apenas pedidos Shopee com status_shopee_raw='COMPLETED'. Sem `force`,
- * so pedidos com has_income_data=false E escrow_amount=0 (ainda nao reconciliados).
+ * Selecao (2026-08-18): pedidos Shopee com status_shopee_raw em COMPLETED ou
+ * CANCELLED. Sem `force`, so os que ainda tem financial_reconciled_at IS NULL.
+ * A fila e a trava de idempotencia usam ESTE MESMO campo — `has_income_data` e
+ * legado e nao decide mais nada aqui.
  *
  * O que grava (quando dry_run=0): SOMENTE as colunas brutas de income —
  * escrow_amount, buyer_paid_amount, voucher_from_seller, voucher_from_shopee,
@@ -67,11 +70,26 @@ interface PedidoRow {
   id: string;
   order_id: string;
   item_subtotal: number;
+  /**
+   * LEGADO/informativo. Continua sendo gravado e lido, mas NAO decide mais se
+   * um pedido ja foi reconciliado na v2 — ver `financial_reconciled_at`.
+   */
   has_income_data: boolean;
   escrow_amount: number;
+  /**
+   * Criterio OFICIAL de "ja reconciliado" (2026-08-18).
+   * NULL     -> elegivel para reconciliacao v2
+   * NOT NULL -> ja reconciliado, protegido pela idempotencia (salvo `force`)
+   * A fila e a trava de idempotencia usam ESTE campo, e so ele.
+   */
+  financial_reconciled_at: string | null;
   data_pagamento: string | null;
   data_criacao: string | null;
 }
+
+/** Colunas que a selecao precisa. Uma definicao so, usada nas duas queries. */
+const COLUNAS_SELECAO =
+  "id, order_id, item_subtotal, has_income_data, escrow_amount, financial_reconciled_at, data_pagamento, data_criacao";
 
 export async function GET(request: Request) {
   // Fase K (2026-07-08): medicao de tempo do lote (aprovado) — so instrumentacao,
@@ -219,7 +237,7 @@ export async function GET(request: Request) {
   // (a venda comercial existiu, o repasse foi zerado), nao ausencia de dado.
   let sel = supabase
     .from("pedidos")
-    .select("id, order_id, item_subtotal, has_income_data, escrow_amount, data_pagamento, data_criacao")
+    .select(COLUNAS_SELECAO)
     .eq("user_id", userId)
     .eq("marketplace", "Shopee")
     .in("status_shopee_raw", ELEGIVEIS_FINANCEIRO)
@@ -287,7 +305,7 @@ export async function GET(request: Request) {
     if (orderIds.length > 0) {
       const { data: completasRaw, error: erroCompletas } = await supabase
         .from("pedidos")
-        .select("id, order_id, item_subtotal, has_income_data, escrow_amount, data_pagamento, data_criacao")
+        .select(COLUNAS_SELECAO)
         .eq("user_id", userId)
         .eq("marketplace", "Shopee")
         .eq("status_shopee_raw", "COMPLETED")
@@ -414,8 +432,20 @@ export async function GET(request: Request) {
     const hasRealIncome = true;
     if (hasRealIncome) comIncome++; else semIncome++;
 
-    const jaTemDadoReal            = rowsPedido.some(r => r.has_income_data === true);
-    const vaiIgnorarPorIdempotencia = jaTemDadoReal && !force;
+    // 2026-08-18: a trava passa a usar o MESMO campo da fila.
+    //
+    // Antes era `has_income_data === true`, enquanto a fila ja selecionava por
+    // `financial_reconciled_at IS NULL`. Os dois criterios discordam para todo
+    // pedido reconciliado pelo sistema ANTIGO: ele tem has_income_data=true com
+    // financial_reconciled_at NULL. A fila o selecionava e a trava o recusava —
+    // travamento permanente, nao atraso: `has_income_data` nunca volta a false.
+    // Medido em producao: lote de 30 com consultados=30, com_income=30,
+    // gravados=0, ignorados=30, e as 30 chamadas a Shopee desperdicadas.
+    //
+    // `has_income_data` continua existindo como dado legado/informativo — so
+    // deixou de decidir se um pedido v2 deve ser gravado.
+    const jaReconciliado            = rowsPedido.some(r => r.financial_reconciled_at != null);
+    const vaiIgnorarPorIdempotencia = jaReconciliado && !force;
 
     const orderItemsSubtotal = rowsPedido.reduce((acc, r) => acc + (Number(r.item_subtotal) || 0), 0);
     // Um unico carimbo por pedido: todas as linhas do mesmo order_id recebem o
@@ -465,7 +495,9 @@ export async function GET(request: Request) {
       order_id:              orderId,
       sucesso:               true,
       tem_income_real:       hasRealIncome,
-      ja_possuia_dado_real:  jaTemDadoReal,
+      // Nome mantido por compatibilidade de contrato da resposta; a semantica
+      // agora e "ja reconciliado na v2" (financial_reconciled_at preenchido).
+      ja_possuia_dado_real:  jaReconciliado,
       status_gravacao:       statusGravacao,
       order_income_bruto:    income,
       seria_gravado:         wouldWriteRows,
@@ -528,9 +560,19 @@ export async function GET(request: Request) {
     sem_income:               semIncome,
     gravados,
     ignorados_idempotencia:   ignoradosIdempotencia,
-    // 2026-08-18: texto atualizado — a elegibilidade deixou de ser so COMPLETED
-    // e a fila deixou de ser has_income_data/escrow_amount.
-    aviso: orderIds.length === 0
+    // 2026-08-18: observabilidade, nao erro HTTP.
+    //
+    // O bug da trava de idempotencia so foi descoberto porque alguem conferiu a
+    // resposta a mao: `ok: true`, `erros: 0`, `aviso` vazio — e nenhuma linha
+    // gravada. Um lote consultado integralmente que grava zero e anomalo por
+    // definicao: pagou o custo das chamadas a Shopee e nao produziu dado.
+    // Continua HTTP 200 de proposito; e sinal para o operador, nao falha.
+    aviso: (!dryRun && !soSelecao && consultados > 0 && comIncome > 0
+            && gravados === 0 && ignoradosIdempotencia > 0)
+      ? `ANOMALIA: ${consultados} pedidos consultados com dado financeiro, ${ignoradosIdempotencia} ignorados por idempotencia e NENHUMA linha gravada. `
+        + `Verificar se o criterio de elegibilidade da fila (financial_reconciled_at IS NULL) esta coerente com a trava de idempotencia. `
+        + `As chamadas a Shopee foram consumidas sem produzir dado.`
+      : orderIds.length === 0
       ? `Nenhum pedido encontrado com os criterios atuais (status_shopee_raw IN (${ELEGIVEIS_FINANCEIRO.join(", ")}) + financial_reconciled_at IS NULL, ou filtros de order_id/order_ids).`
       : (usandoListaEspecifica && orderIds.length < orderIdsListParam.length)
         ? `Atencao: ${orderIdsListParam.length - orderIds.length} order_id(s) solicitados nao foram encontrados no banco (status_shopee_raw fora de ${ELEGIVEIS_FINANCEIRO.join("/")} ou order_id inexistente).`
