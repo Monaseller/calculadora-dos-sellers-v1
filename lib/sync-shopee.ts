@@ -33,6 +33,11 @@ import { obterFaixaShopee, TAXA_CAMPANHA_SHOPEE } from "@/lib/comissoes-shopee";
 import { getShopeeLojaAtiva } from "@/lib/shopee-auth";
 import { LojaIdIntegrityError } from "@/lib/sync-errors";
 import { atualizarResumosDosDias } from "@/lib/resumos-diarios";
+import {
+  protegerSnapshotFinanceiro,
+  decidirAtualizacaoDeStatus,
+  agruparMudancasDeStatus,
+} from "@/lib/shopee-financeiro";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -196,6 +201,13 @@ export interface ListagemResultado {
    * comportamento nesse caminho.
    */
   completedSns: string[];
+  /**
+   * 2026-08-18: `(order_sn, order_status)` de TODAS as paginas listadas, sem
+   * filtro nenhum. A listagem ja pede `response_optional_fields: "order_status"`
+   * e essas paginas ja sao buscadas — expor o par nao custa chamada alguma e
+   * permite corrigir o status de pedido existente sem `get_order_detail`.
+   */
+  statusListados: Array<{ order_sn: string; order_status: string }>;
   paginas:  number;
   tempoMs:  number;
   retries:  number;
@@ -305,6 +317,7 @@ export async function listarOrderSnsDaJanela(
     let cursor = "";
     const orderSns: string[] = [];
     const completedSns: string[] = [];
+    const statusListados: Array<{ order_sn: string; order_status: string }> = [];
     let paginas = 0;
 
     for (;;) {
@@ -333,14 +346,16 @@ export async function listarOrderSnsDaJanela(
       const separados = separarCompleted(list, ctx.filtrarCompleted);
       orderSns.push(...separados.orderSns);
       completedSns.push(...separados.completedSns);
+      for (const o of list) if (o?.order_sn && o?.order_status)
+        statusListados.push({ order_sn: o.order_sn, order_status: o.order_status });
 
       if (!data?.response?.more || !data?.response?.next_cursor) break;
       cursor = data.response.next_cursor;
     }
 
-    return { orderSns, completedSns, paginas, tempoMs: Date.now() - inicioMs, retries, erro: null };
+    return { orderSns, completedSns, statusListados, paginas, tempoMs: Date.now() - inicioMs, retries, erro: null };
   } catch (err: any) {
-    return { orderSns: [], completedSns: [], paginas: 0, tempoMs: Date.now() - inicioMs, retries, erro: err?.message ?? String(err) };
+    return { orderSns: [], completedSns: [], statusListados: [], paginas: 0, tempoMs: Date.now() - inicioMs, retries, erro: err?.message ?? String(err) };
   }
 }
 
@@ -369,6 +384,7 @@ export async function listarOrderSnsSequencialParaTeste(
   let retries = 0;
   const orderSns: string[] = [];
   const completedSns: string[] = [];
+  const statusListados: Array<{ order_sn: string; order_status: string }> = [];
   let paginas = 0;
   try {
     const chunks = gerarChunks(dateFrom, dateTo);
@@ -409,9 +425,9 @@ export async function listarOrderSnsSequencialParaTeste(
         cursor = data.response.next_cursor;
       }
     }
-    return { orderSns, completedSns, paginas, tempoMs: Date.now() - inicioMs, retries, erro: null };
+    return { orderSns, completedSns, statusListados, paginas, tempoMs: Date.now() - inicioMs, retries, erro: null };
   } catch (err: any) {
-    return { orderSns, completedSns, paginas, tempoMs: Date.now() - inicioMs, retries, erro: err?.message ?? String(err) };
+    return { orderSns, completedSns, statusListados, paginas, tempoMs: Date.now() - inicioMs, retries, erro: err?.message ?? String(err) };
   }
 }
 
@@ -429,6 +445,16 @@ export interface SyncShopeeResult {
   resumoPendente:       boolean;
   diasAfetados:         number;
   motivoResumoPendente: string | null;
+  /**
+   * Etapa 1.6 (2026-08-18) — correcao de status de pedidos existentes.
+   *  = algum chunk de UPDATE falhou, ou a etapa abortou.
+   * O sync comercial continua valido; isto sinaliza que a correcao de status
+   * ficou parcial e nao deve ser lida como "tudo em dia".
+   * Opcionais: caminhos que nao executam a etapa 1.6 nao os preenchem.
+   */
+  statusCorrigidos?:  number;
+  statusIncompleto?:  boolean;
+  chunksStatusFalhos?: number;
   // Opção B (2026-07-30) — só usados no caminho novo (intervalo == 2 dias)
   // quando uma das duas janelas (ontem/hoje) falha; ausentes (undefined) em
   // qualquer outro caso. Aprovação do usuário 2026-07-30: NÃO propagar estes
@@ -865,6 +891,8 @@ export async function syncShopeeForUserV2(
   let allOrderSns: string[] = [];
   // COMPLETED separados pelo caminho do cron — candidatos a recuperacao.
   let completedSegregados: string[] = [];
+  // 2026-08-18: (order_sn, order_status) de TODAS as paginas, sem filtro.
+  let statusListadosTodos: Array<{ order_sn: string; order_status: string }> = [];
   let _paginasListagem = 0;
   const _etapa1InicioMs = Date.now();
   const diasNoIntervalo = contarDiasNoIntervalo(dateFrom, dateTo);
@@ -912,6 +940,7 @@ export async function syncShopeeForUserV2(
     const setUnico = new Set([...resOntem.orderSns, ...resHoje.orderSns]);
     allOrderSns = Array.from(setUnico);
     completedSegregados = Array.from(new Set([...resOntem.completedSns, ...resHoje.completedSns]));
+    statusListadosTodos = [...resOntem.statusListados, ...resHoje.statusListados];
     _paginasListagem = resOntem.paginas + resHoje.paginas;
 
     // [DIAG-SYNC-SHOPEE] temporário (2026-07-30) — ver comentário em withRetry.
@@ -963,6 +992,8 @@ export async function syncShopeeForUserV2(
         const separados = separarCompleted(list, filtrarCompleted);
         allOrderSns.push(...separados.orderSns);
         completedSegregados.push(...separados.completedSns);
+        for (const o of list) if (o?.order_sn && o?.order_status)
+          statusListadosTodos.push({ order_sn: o.order_sn, order_status: o.order_status });
 
         // Paginacao: para quando mais=false OU cursor vazio
         if (!data?.response?.more || !data?.response?.next_cursor) break;
@@ -988,6 +1019,103 @@ export async function syncShopeeForUserV2(
       ausentesRecuperados: ausentes.length,
       tempoMs: Date.now() - _recInicioMs,
     });
+  }
+
+  // ── ETAPA 1.6: correcao de STATUS de pedidos existentes (2026-08-18) ──────
+  //
+  // Problema medido: 98,5% dos pedidos pagos nos ultimos 7 dias estavam em
+  // transito no CDS, e 68% dos em transito nao eram atualizados havia mais de
+  // uma semana. Dois portoes impediam a correcao no caminho do cron:
+  //   1. `filtrarCompleted` tirava COMPLETED da listagem;
+  //   2. o corte `dataBrt fora de [dateFrom, dateTo]` de montarLinhasDoPedido
+  //      descartava qualquer pedido cujo dia de PAGAMENTO estivesse fora da
+  //      janela curta do cron — 87.804 pedidos COMPLETED nessa situacao.
+  //
+  // Esta etapa contorna os dois SEM passar pelo upsert: `get_order_list` ja
+  // devolve `order_status` (o sync pede `response_optional_fields`) e essas
+  // paginas JA foram buscadas. Corrigir o status de um pedido existente custa
+  // ZERO chamada extra a Shopee — nem listagem, nem detalhe.
+  //
+  // O UPDATE e dirigido e minimo: toca `status` e `status_shopee_raw`, mais
+  // nada. `data_pagamento`, `data_criacao`, `item_subtotal` e todo o snapshot
+  // financeiro ficam intactos por construcao — nao estao na instrucao.
+  //
+  // `data_atualizacao_marketplace` NAO e atualizada aqui de proposito: a
+  // listagem nao devolve `update_time`, e inventar um timestamp seria pior que
+  // deixar o antigo. Quem precisa do valor exato passa pelo detalhe.
+  //
+  // So roda no caminho do cron (`filtrarCompleted`), que e onde os dois portoes
+  // existem. O historico (noBuffer=true) nao precisa: ele nao filtra COMPLETED
+  // e corta por create_time.
+  let statusCorrigidos  = 0;
+  let chunksExecutados  = 0;
+  let chunksFalhos      = 0;
+  // Marca a etapa 1.6 como incompleta quando qualquer chunk falha. Nao derruba
+  // o sync comercial (funcao principal), mas nao deixa a falha passar calada.
+  let statusIncompleto  = false;
+  if (filtrarCompleted && statusListadosTodos.length > 0) {
+    const _stInicioMs = Date.now();
+    try {
+      const snsListados = Array.from(new Set(statusListadosTodos.map(x => x.order_sn)));
+      const noBanco = new Map<string, string | null>();
+      for (const lote of lotesDeOrderSn(snsListados)) {
+        const { data, error } = await supabase
+          .from("pedidos")
+          .select("order_id, status_shopee_raw")
+          .eq("user_id", userId)
+          .eq("marketplace", "Shopee")
+          .in("order_id", lote);
+        // Erro aqui NUNCA vira "nao existe": isso reescreveria status a esmo.
+        if (error) throw new Error(`consulta de status existentes falhou: ${error.message}`);
+        for (const r of data ?? []) noBanco.set((r as any).order_id, (r as any).status_shopee_raw ?? null);
+      }
+      const mudancas = decidirAtualizacaoDeStatus(statusListadosTodos, noBanco);
+
+      // UPDATE em LOTE, agrupado pelo par (status comercial, status bruto).
+      // Antes era 1 round-trip por pedido alterado: 1.075 mudancas = 1.075
+      // requests em serie, o que estourava o maxDuration de 60 s da rota.
+      // Agora e (grupos x chunks) requests — ~6 para o mesmo volume.
+      const grupos = agruparMudancasDeStatus(mudancas, mapStatus);
+      const porStatus: Record<string, number> = {};
+      for (const g of grupos) porStatus[g.statusRaw] = (porStatus[g.statusRaw] ?? 0) + g.orderSns.length;
+
+      for (const g of grupos) {
+        const { error } = await supabase
+          .from("pedidos")
+          // SOMENTE status. Nenhum campo financeiro, nenhuma data, nenhum valor
+          // comercial entra nesta instrucao — a protecao e estrutural.
+          .update({ status: g.statusComercial, status_shopee_raw: g.statusRaw })
+          .eq("user_id", userId)          // isolamento entre usuarios
+          .eq("marketplace", "Shopee")    // isolamento entre marketplaces
+          .in("order_id", g.orderSns);
+        chunksExecutados++;
+        if (error) {
+          // Falha NUNCA e contabilizada como sucesso: `statusCorrigidos` so
+          // cresce quando o chunk inteiro deu certo.
+          chunksFalhos++;
+          console.error(`[sync-shopee] chunk de status falhou (${g.statusRaw}, ${g.orderSns.length} pedidos):`, error.message);
+        } else {
+          statusCorrigidos += g.orderSns.length;
+        }
+      }
+      console.log("[DIAG-SYNC-SHOPEE] etapa1_6_status", {
+        listados: snsListados.length,
+        existentesNoBanco: noBanco.size,
+        mudancasDetectadas: mudancas.length,
+        statusCorrigidos,
+        grupos: grupos.length,
+        chunksExecutados,
+        chunksFalhos,
+        porStatus,                        // contagem por status, nunca os order_ids
+        tempoMs: Date.now() - _stInicioMs,
+      });
+      if (chunksFalhos > 0) statusIncompleto = true;
+    } catch (err: any) {
+      // Correcao de status e complementar: falha aqui NUNCA derruba o sync
+      // comercial, que e a funcao principal desta rotina.
+      console.error("[sync-shopee] etapa 1.6 (correcao de status) falhou, sync segue:", err?.message ?? err);
+      statusIncompleto = true;
+    }
   }
 
   const found = allOrderSns.length;
@@ -1064,6 +1192,65 @@ export async function syncShopeeForUserV2(
     }
   }
   console.log("[DIAG-SYNC-SHOPEE] etapa4_montarlinhas", { tempoMs: Date.now() - _etapa4InicioMs, rows: rows.length });
+
+  // ── ETAPA 4.5: PROTECAO DO SNAPSHOT FINANCEIRO v2 (2026-08-18) ────────────
+  //
+  // O upsert abaixo envia o OBJETO COMPLETO da linha. O sync comercial nunca
+  // chama get_escrow_detail, entao `hasIncomeData` e false e todos os campos de
+  // income saem ZERADOS (`escrow_amount`, `commission_fee`, `service_fee`,
+  // `voucher_*`, `has_income_data`...). Rebuscar um pedido JA RECONCILIADO
+  // apagaria seu snapshot oficial.
+  //
+  // Ate hoje isso nao acontecia por ACIDENTE: o cron filtrava justamente os
+  // COMPLETED, que sao os pedidos reconciliados. Com a etapa 1.6 corrigindo
+  // status e a 1.5 recuperando lacunas, a protecao passa a ser obrigatoria.
+  //
+  // Nao bloqueia a linha inteira: campos comerciais e operacionais continuam
+  // sendo atualizados. So os campos de CAMPOS_SNAPSHOT_FINANCEIRO sao removidos
+  // do payload, e apenas nas linhas que ja tem financial_reconciled_at.
+  let linhasProtegidas = 0;
+  if (rows.length > 0) {
+    const _protInicioMs = Date.now();
+    try {
+      const idsReconciliados = new Set<string>();
+      const todosIds = rows.map(r => r.id).filter(Boolean);
+      for (const lote of lotesDeOrderSn(todosIds)) {
+        const { data, error } = await supabase
+          .from("pedidos")
+          .select("id")
+          .in("id", lote)
+          .not("financial_reconciled_at", "is", null);
+        // Erro NUNCA vira "nao reconciliado" — isso apagaria dado financeiro.
+        if (error) throw new Error(`consulta de linhas reconciliadas falhou: ${error.message}`);
+        for (const r of data ?? []) idsReconciliados.add((r as any).id);
+      }
+      if (idsReconciliados.size > 0) {
+        for (let i = 0; i < rows.length; i++) {
+          if (!idsReconciliados.has(rows[i].id)) continue;
+          rows[i] = protegerSnapshotFinanceiro(rows[i], true) as any;
+          linhasProtegidas++;
+        }
+      }
+      console.log("[DIAG-SYNC-SHOPEE] etapa4_5_protecao_financeira", {
+        linhasNoLote: rows.length,
+        jaReconciliadas: idsReconciliados.size,
+        linhasProtegidas,
+        tempoMs: Date.now() - _protInicioMs,
+      });
+    } catch (err: any) {
+      // Falha aqui NAO pode virar upsert desprotegido: sem saber quais linhas
+      // estao reconciliadas, gravar apagaria snapshot financeiro oficial.
+      // Aborta o upsert e devolve resultado explicito de sync incompleto.
+      console.error("[sync-shopee] protecao financeira falhou — upsert ABORTADO:", err?.message ?? err);
+      return {
+        found, inserted: 0, upsertErrors: 1,
+        resumoAtualizado: false, resumoPendente: false, diasAfetados: 0,
+        motivoResumoPendente: null,
+        syncIncompleto: true, janelaFalhou: "hoje",
+        motivoFalha: "PROTECAO_FINANCEIRA_INDISPONIVEL: " + (err?.message ?? String(err)),
+      };
+    }
+  }
 
   // ── ETAPA 5: Upsert com verificacao de erro (P4) ──────────────────────────
   const UPSERT_BATCH = 250;
@@ -1166,7 +1353,13 @@ export async function syncShopeeForUserV2(
     inserted: rows.length,
     diasAfetados,
     resumoPendente,
+    statusCorrigidos,
+    statusIncompleto,
   });
 
-  return { found, inserted: rows.length, upsertErrors, resumoAtualizado, resumoPendente, diasAfetados, motivoResumoPendente };
+  return {
+    found, inserted: rows.length, upsertErrors,
+    resumoAtualizado, resumoPendente, diasAfetados, motivoResumoPendente,
+    statusCorrigidos, statusIncompleto, chunksStatusFalhos: chunksFalhos,
+  };
 }

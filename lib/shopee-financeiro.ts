@@ -261,3 +261,156 @@ export function montarSnapshotsFinanceirosDoPedido(
 export function ehCancelamentoOuDevolucao(campos: CamposFinanceirosShopee): boolean {
   return campos.escrowAmount === 0 && campos.returnRefund < 0;
 }
+
+/**
+ * CAMPOS_SNAPSHOT_FINANCEIRO — FONTE UNICA das colunas que pertencem ao snapshot
+ * financeiro v2. Derivada do proprio retorno de
+ * `montarSnapshotsFinanceirosDoPedido` (menos `id`), e um teste garante que as
+ * duas listas nunca divergem — se alguem adicionar um campo ao snapshot e
+ * esquecer daqui, o teste quebra.
+ *
+ * Por que precisa existir (2026-08-18): o upsert do sync comercial envia o
+ * OBJETO COMPLETO da linha. Sem `income_distribution` — que e o caso do sync,
+ * que nunca chama get_escrow_detail — esses campos vao a ZERO. Rebuscar um
+ * pedido ja reconciliado APAGARIA seu snapshot oficial.
+ *
+ * Hoje isso nao acontece por acidente: o cron filtra justamente os COMPLETED,
+ * que sao os pedidos reconciliados. Ao remover esse filtro, a protecao passa a
+ * ser obrigatoria.
+ */
+export const CAMPOS_SNAPSHOT_FINANCEIRO: readonly string[] = [
+  "escrow_amount", "escrow_amount_bruto", "buyer_paid_amount",
+  "voucher_from_seller", "voucher_from_shopee",
+  "commission_fee", "net_commission_fee",
+  "service_fee", "net_service_fee",
+  "order_ams_commission_fee", "transaction_fee", "campaign_fee",
+  "seller_product_rebate", "seller_return_refund", "total_adjustment_amount",
+  "shopee_shipping_rebate",
+  "has_income_data",
+  "financial_reconciled_at", "financial_source", "financial_version",
+];
+
+/**
+ * protegerSnapshotFinanceiro — remove de uma linha a gravar TODOS os campos do
+ * snapshot financeiro, quando aquela linha ja foi reconciliada.
+ *
+ * Nao bloqueia a linha inteira de proposito: `status`, `status_shopee_raw`,
+ * `data_atualizacao_marketplace` e os demais campos comerciais continuam sendo
+ * atualizados normalmente. O sync comercial mantem sua funcao; so perde o
+ * direito de escrever sobre dado financeiro oficial.
+ *
+ * PURA: nao muta a entrada, devolve um objeto novo.
+ */
+export function protegerSnapshotFinanceiro<T extends Record<string, unknown>>(
+  linha: T, jaReconciliada: boolean
+): Partial<T> {
+  if (!jaReconciliada) return { ...linha };
+  const saida: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(linha)) {
+    if (!CAMPOS_SNAPSHOT_FINANCEIRO.includes(k)) saida[k] = v;
+  }
+  return saida as Partial<T>;
+}
+
+/**
+ * decidirAtualizacaoDeStatus — dado o que a LISTAGEM devolveu e o que o banco
+ * tem, decide quais pedidos existentes precisam de correcao de status.
+ *
+ * Por que existe (2026-08-18): `get_order_list` ja devolve `order_status` junto
+ * de `order_sn` (o sync pede `response_optional_fields: "order_status"`), e as
+ * paginas dessa listagem JA sao buscadas. Corrigir o status de um pedido que ja
+ * existe no banco nao custa NENHUMA chamada extra a Shopee — nem listagem, nem
+ * detalhe.
+ *
+ * Isso resolve os dois portoes de uma vez, sem passar pelo upsert:
+ *   - o pedido COMPLETED deixa de desaparecer;
+ *   - o corte `dataBrt fora de [dateFrom, dateTo]` de montarLinhasDoPedido nao
+ *     se aplica, porque nao ha montagem de linha — e um UPDATE dirigido de
+ *     status. `data_pagamento` e `data_criacao` nao sao tocadas.
+ *
+ * Devolve so os que REALMENTE mudaram, para nao gerar escrita inutil.
+ */
+export function decidirAtualizacaoDeStatus(
+  listados: Array<{ order_sn: string; order_status: string }>,
+  noBanco: Map<string, string | null>,
+): Array<{ order_sn: string; de: string | null; para: string }> {
+  const mudancas: Array<{ order_sn: string; de: string | null; para: string }> = [];
+  const vistos = new Set<string>();
+  for (const l of listados) {
+    if (!l?.order_sn || !l?.order_status) continue;
+    if (!noBanco.has(l.order_sn)) continue;          // nao existe: nao e caso de correcao
+    if (vistos.has(l.order_sn)) continue;            // mesmo pedido em 2 paginas: uma vez so
+    const atual = noBanco.get(l.order_sn) ?? null;
+    if (atual === l.order_status) continue;          // nada mudou
+    vistos.add(l.order_sn);
+    mudancas.push({ order_sn: l.order_sn, de: atual, para: l.order_status });
+  }
+  return mudancas;
+}
+
+/**
+ * Quantos order_id por UPDATE em lote. 200 e o mesmo tamanho ja usado em
+ * `LOTE_CONSULTA_ORDER_SN` aqui e em `LOTE_MAXIMO_IDS` de
+ * app/(app)/anuncios/paginacao.ts — mantido igual de proposito, para o projeto
+ * ter um unico numero de referencia.
+ *
+ * Dimensionamento: order_sn tem 14 caracteres, entao 200 deles geram ~3,4 KB de
+ * querystring no `.in()`. O HTTP 400 por URL longa que este projeto ja sofreu
+ * aconteceu perto de 40 KB — folga de mais de 10x.
+ */
+export const LOTE_UPDATE_STATUS = 200;
+
+export interface GrupoDeStatus {
+  /** Valor a gravar em `status` (comercial, derivado do raw). */
+  statusComercial: string;
+  /** Valor a gravar em `status_shopee_raw` (bruto da Shopee). */
+  statusRaw: string;
+  /** order_id deste chunk. Nunca maior que LOTE_UPDATE_STATUS. */
+  orderSns: string[];
+}
+
+/**
+ * agruparMudancasDeStatus — transforma N mudancas individuais em poucos UPDATEs
+ * em lote.
+ *
+ * POR QUE AGRUPAR PELO PAR (statusComercial, statusRaw) e nao so pelo raw:
+ *   `mapStatus` COLAPSA 16 status brutos da Shopee em 5 comerciais — seis raws
+ *   diferentes (READY_TO_SHIP, RETRY_SHIP, PROCESSED, SHIPPED,
+ *   TO_CONFIRM_RECEIVE, COMPLETED) viram todos "paid". Agrupar apenas pelo
+ *   comercial gravaria o raw errado; agrupar apenas pelo raw funcionaria, mas o
+ *   par deixa explicito que os dois valores gravados vem da mesma origem.
+ *
+ * POR QUE ISSO IMPORTA: antes era 1 round-trip ao Supabase por pedido alterado.
+ * No cenario medido (1.075 candidatos num sync de 1 dia) isso seriam 1.075
+ * requests em serie — estourando o `maxDuration` de 60 s da rota. Agrupado, o
+ * mesmo volume cabe em (grupos x chunks) requests.
+ *
+ * PURA e DETERMINISTICA: ordena os grupos e os order_sn, entao a mesma entrada
+ * sempre produz os mesmos chunks, na mesma ordem. `mapear` e injetado para que
+ * o teste use exatamente o `mapStatus` de producao, sem copia.
+ */
+export function agruparMudancasDeStatus(
+  mudancas: Array<{ order_sn: string; para: string }>,
+  mapear: (raw: string) => string,
+  tamanhoChunk: number = LOTE_UPDATE_STATUS,
+): GrupoDeStatus[] {
+  if (tamanhoChunk < 1) throw new Error("agruparMudancasDeStatus: tamanho de chunk deve ser >= 1");
+  const porRaw = new Map<string, string[]>();
+  for (const m of mudancas) {
+    if (!m?.order_sn || !m?.para) continue;
+    if (!porRaw.has(m.para)) porRaw.set(m.para, []);
+    porRaw.get(m.para)!.push(m.order_sn);
+  }
+  const grupos: GrupoDeStatus[] = [];
+  for (const raw of [...porRaw.keys()].sort()) {
+    const sns = [...new Set(porRaw.get(raw)!)].sort();
+    for (let i = 0; i < sns.length; i += tamanhoChunk) {
+      grupos.push({
+        statusComercial: mapear(raw),
+        statusRaw: raw,
+        orderSns: sns.slice(i, i + tamanhoChunk),
+      });
+    }
+  }
+  return grupos;
+}
