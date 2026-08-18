@@ -357,7 +357,12 @@ const TODOS = arquivosTs();
  * e 8). A trava continua servindo ao mesmo fim: acusar consumidor novo
  * que apareça sem revisão.
  */
-const CONSUMIDORES_ESPERADOS_AUTENTICACAO = 40;
+// 40 -> 41 em 2026-08-18: app/api/admin/shopee/status/route.ts (sync de status
+// Shopee dirigido pelo banco) entrou usando `autenticarRequisicao`. Este numero
+// e uma trava de inventario deliberada — ele SOBE quando uma rota autenticada e
+// adicionada, e a falha existe para que ninguem adicione rota sem passar por
+// aqui. Baixa-lo ou deixa-lo "flexivel" derrotaria o proposito.
+const CONSUMIDORES_ESPERADOS_AUTENTICACAO = 41;
 
 t(`22. exatamente ${CONSUMIDORES_ESPERADOS_AUTENTICACAO} arquivos de produção usam a camada nova`, () => {
   const proprios = [

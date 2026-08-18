@@ -46,7 +46,13 @@ const supabase = createClient(
 
 // ── P5: mapeamento completo de status ────────────────────────────────────────
 // NUNCA usar "paid" como default — status desconhecido nao deve inflar faturamento
-function mapStatus(s: string): string {
+/**
+ * Exportada em 2026-08-18 para que `lib/shopee-status.ts` (sync de status
+ * dirigido pelo banco) use EXATAMENTE este mapa, em vez de manter uma segunda
+ * copia que pudesse divergir em silencio. Nenhuma entrada do mapa mudou; a
+ * unica alteracao e a palavra `export`.
+ */
+export function mapStatus(s: string): string {
   const m: Record<string, string> = {
     // Aguardando pagamento (nao conta em faturamento)
     UNPAID: "pending",

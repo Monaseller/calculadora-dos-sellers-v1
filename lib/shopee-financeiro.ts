@@ -360,6 +360,40 @@ export function decidirAtualizacaoDeStatus(
  */
 export const LOTE_UPDATE_STATUS = 200;
 
+/**
+ * separarStatusDesconhecidos — barreira contra gravar `status = "unknown"`.
+ *
+ * DEFEITO QUE ISTO CORRIGE (2026-08-18): `mapStatus` devolve "unknown" para
+ * qualquer raw fora dos 16 conhecidos — corretamente, porque nao inventa
+ * mapeamento. Mas `agruparMudancasDeStatus` gravava esse "unknown" na coluna
+ * `status`. Um pedido PAGO cujo raw a Shopee renomeasse sumiria de todo filtro
+ * `status='paid'` — Dashboard, Vendas e faturamento subnotificados, sem erro
+ * nenhum aparecendo. O dado da Shopee estaria certo e o nosso, errado.
+ *
+ * A protecao vive AQUI, na camada compartilhada, e nao no consumidor: assim
+ * valem de uma vez o sync de status novo (lib/shopee-status.ts) E a etapa 1.6
+ * ja publicada em lib/sync-shopee.ts.
+ *
+ * Nao havendo o que gravar com seguranca, a escolha e NAO GRAVAR. O pedido
+ * continua com o status que tinha, e a ocorrencia e contada por raw.
+ */
+export function separarStatusDesconhecidos(
+  mudancas: Array<{ order_sn: string; para: string }>,
+  mapear: (raw: string) => string,
+): { conhecidas: Array<{ order_sn: string; para: string }>; desconhecidos: Record<string, number> } {
+  const conhecidas: Array<{ order_sn: string; para: string }> = [];
+  const desconhecidos: Record<string, number> = {};
+  for (const m of mudancas ?? []) {
+    if (!m?.order_sn || !m?.para) continue;
+    if (mapear(m.para) === "unknown") {
+      desconhecidos[m.para] = (desconhecidos[m.para] ?? 0) + 1;
+      continue;
+    }
+    conhecidas.push(m);
+  }
+  return { conhecidas, desconhecidos };
+}
+
 export interface GrupoDeStatus {
   /** Valor a gravar em `status` (comercial, derivado do raw). */
   statusComercial: string;
@@ -395,8 +429,14 @@ export function agruparMudancasDeStatus(
   tamanhoChunk: number = LOTE_UPDATE_STATUS,
 ): GrupoDeStatus[] {
   if (tamanhoChunk < 1) throw new Error("agruparMudancasDeStatus: tamanho de chunk deve ser >= 1");
+  const { conhecidas, desconhecidos } = separarStatusDesconhecidos(mudancas, mapear);
+  if (Object.keys(desconhecidos).length > 0) {
+    // Nao e fallback silencioso: o pedido fica INTACTO e a ocorrencia aparece
+    // no log com a contagem por raw (nunca com order_id).
+    console.warn("[shopee-status] status bruto desconhecido — pedidos ignorados, nada gravado:", desconhecidos);
+  }
   const porRaw = new Map<string, string[]>();
-  for (const m of mudancas) {
+  for (const m of conhecidas) {
     if (!m?.order_sn || !m?.para) continue;
     if (!porRaw.has(m.para)) porRaw.set(m.para, []);
     porRaw.get(m.para)!.push(m.order_sn);

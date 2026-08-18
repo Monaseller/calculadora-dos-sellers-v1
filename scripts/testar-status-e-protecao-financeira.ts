@@ -312,8 +312,24 @@ console.log("\n=== G. UPDATE EM LOTE — agrupamento por (status comercial, stat
   let lancou = false;
   try { agruparMudancasDeStatus([{order_sn:"F",para:"COMPLETED"}], mapear, 0); } catch { lancou = true; }
   ok("70. chunk invalido lanca", lancou);
-  eq("71. status desconhecido cai em 'unknown', nao em 'paid'",
-     agruparMudancasDeStatus([{order_sn:"G",para:"STATUS_NOVO_DA_SHOPEE"}], mapear)[0].statusComercial, "unknown");
+  // CORRIGIDO em 2026-08-18. O assert anterior afirmava que um raw desconhecido
+  // gerava grupo com statusComercial "unknown" — e isso CODIFICAVA UM DEFEITO:
+  // gravar `status = "unknown"` num pedido pago o retiraria de todo filtro
+  // `status='paid'`, subnotificando faturamento no Dashboard e em Vendas, sem
+  // erro nenhum aparecendo. A protecao passou para a camada compartilhada
+  // (separarStatusDesconhecidos), entao vale tanto para o sync de status novo
+  // quanto para a etapa 1.6 ja publicada.
+  eq("71. status desconhecido NAO gera grupo (nada e gravado)",
+     agruparMudancasDeStatus([{order_sn:"G",para:"STATUS_NOVO_DA_SHOPEE"}], mapear), []);
+  eq("72. raw desconhecido nao contamina os conhecidos do mesmo lote",
+     agruparMudancasDeStatus(
+       [{order_sn:"G",para:"STATUS_NOVO_DA_SHOPEE"},{order_sn:"H",para:"COMPLETED"}], mapear)
+       .map(g => [g.statusRaw, g.statusComercial, g.orderSns]),
+     [["COMPLETED", "paid", ["H"]]]);
+  ok("73. NENHUM grupo pode carregar statusComercial 'unknown'",
+     agruparMudancasDeStatus(
+       [{order_sn:"I",para:"XPTO"},{order_sn:"J",para:"SHIPPED"}], mapear)
+       .every(g => g.statusComercial !== "unknown"));
 }
 
 console.log("\n=== H. UPDATE em lote: o que a instrucao TOCA e o que NAO toca ===\n");
