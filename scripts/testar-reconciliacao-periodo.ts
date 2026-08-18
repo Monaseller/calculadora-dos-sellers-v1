@@ -230,6 +230,63 @@ t("15. teto de 30 por request no modo período", () => {
   assert(/MAX_LIMIT_PERIODO\s*=\s*30/.test(FONTE), "teto de 30 ausente");
   assert(/tetoLimit\s*=\s*modoPeriodo\s*\?\s*MAX_LIMIT_PERIODO/.test(FONTE), "teto não é aplicado no modo período");
 });
+/**
+ * 2026-08-18 — testes de contrato da CONTAGEM da resposta.
+ *
+ * Por que existem: o primeiro dry_run real em produção devolveu
+ * `erros: 30` com `com_income: 30` e os 30 detalhes com `sucesso: true`.
+ * Nenhuma falha havia ocorrido — `erros` era DERIVADO por
+ * `consultados - gravados - ignorados`, e em dry_run `gravados` e `ignorados`
+ * nunca incrementam (ficam dentro de `if (!dryRun)`), então a conta sempre
+ * devolvia `erros == consultados`.
+ *
+ * Nenhum teste anterior pegou isso porque todos liam a FONTE ou exercitavam o
+ * módulo puro — nenhum verificava a aritmética dos contadores da resposta.
+ */
+t("15b. `erros` é contado, nunca derivado por subtração", () => {
+  assert(!/consultados\s*-\s*gravados\s*-\s*ignoradosIdempotencia/.test(FONTE),
+    "`erros` ainda é derivado por subtração — em dry_run isso reporta erro que não houve");
+  assert(/erros:\s*modoPeriodo\s*\?\s*falhas\s*:\s*null/.test(FONTE),
+    "`erros` deveria vir do contador explícito `falhas`");
+  assert(/let falhas\s*=/.test(FONTE), "contador `falhas` não declarado");
+});
+
+t("15c. toda falha real incrementa o contador", () => {
+  // 3 ramos de `sucesso: false` (rede, erro da API, sem order_income)
+  // + 1 de erro de gravação = 4 pontos de incremento.
+  const incrementos = (FONTE.match(/falhas\+\+/g) ?? []).length;
+  assert(incrementos >= 4, `esperado ao menos 4 pontos de incremento, achei ${incrementos}`);
+  const ramosFalha = (FONTE.match(/sucesso:\s*false/g) ?? []).length;
+  assert(incrementos >= ramosFalha,
+    `há ${ramosFalha} ramos de falha mas só ${incrementos} incrementos — algum ramo não conta`);
+});
+
+t("15d. dry_run não pode incrementar `gravados` nem `ignorados`", () => {
+  // Garante a premissa que quebrou a fórmula antiga: em dry_run esses dois
+  // contadores ficam em zero por construção, então nada pode depender deles
+  // para medir sucesso.
+  assert(/if \(!dryRun\)/.test(FONTE), "bloco de escrita não está guardado por !dryRun");
+  const idxGuard = FONTE.indexOf("if (!dryRun)");
+  const idxGravados = FONTE.indexOf("gravados++");
+  const idxIgnorados = FONTE.indexOf("ignoradosIdempotencia++");
+  assert(idxGravados > idxGuard, "`gravados++` deveria estar dentro do bloco !dryRun");
+  assert(idxIgnorados > idxGuard, "`ignoradosIdempotencia++` deveria estar dentro do bloco !dryRun");
+});
+
+t("15e. max_limit_permitido reflete o teto EFETIVO do modo", () => {
+  assert(/max_limit_permitido:\s*tetoLimit/.test(FONTE),
+    "max_limit_permitido deveria ser tetoLimit (30 no modo período), não o teto global");
+  assert(/max_limit_global:\s*MAX_LIMIT/.test(FONTE),
+    "o teto global deveria continuar visível em campo próprio");
+});
+
+t("15f. aviso descreve a elegibilidade atual, não a antiga", () => {
+  assert(!/status_shopee_raw='COMPLETED'\s*\+\s*filtros de has_income_data/.test(FONTE),
+    "texto do aviso ficou desatualizado após a mudança de elegibilidade");
+  assert(/financial_reconciled_at IS NULL/.test(FONTE),
+    "aviso deveria mencionar o critério de fila atual");
+});
+
 t("16. janela máxima de 7 dias", () => {
   assert(/MAX_DIAS_JANELA\s*=\s*7/.test(FONTE), "janela máxima ausente");
   assert(/dias > MAX_DIAS_JANELA/.test(FONTE), "janela não é validada");
@@ -343,7 +400,12 @@ t("29. so_selecao fora do modo período devolve 400", () => {
 
 t("30. o contrato da resposta do modo seleção", () => {
   assert(/so_selecao:\s*modoPeriodo \? soSelecao : null/.test(FONTE), "resposta sem so_selecao");
-  assert(/erros:\s*modoPeriodo \? \(soSelecao \? 0 :/.test(FONTE), "erros deveria ser 0 em so_selecao");
+  // 2026-08-18: a garantia deixou de vir de um ternário na fórmula e passou a
+  // ser ESTRUTURAL — em so_selecao o laço percorre uma lista vazia, então
+  // `falhas` nunca é incrementado e `erros` sai 0 por construção.
+  assert(/orderIdsParaProcessar = soSelecao \? \[\] : orderIds/.test(FONTE),
+    "so_selecao deveria esvaziar a lista processada, garantindo erros=0");
+  assert(/erros:\s*modoPeriodo \? falhas : null/.test(FONTE), "erros deveria vir do contador falhas");
   assert(/linhas_da_pagina:\s*modoPeriodo \? rows\.length : null/.test(FONTE), "falta linhas_da_pagina");
 });
 

@@ -321,6 +321,21 @@ export async function GET(request: Request) {
   let semIncome                = 0;
   let gravados                 = 0;
   let ignoradosIdempotencia    = 0;
+  /**
+   * Falhas REAIS, contadas onde acontecem (2026-08-18).
+   *
+   * Antes `erros` era DERIVADO: `consultados - gravados - ignorados`. Em
+   * dry_run isso e estruturalmente errado: `gravados` e `ignorados` so sao
+   * incrementados dentro de `if (!dryRun)`, entao a conta sempre devolvia
+   * `erros == consultados`. O primeiro dry_run em producao reportou
+   * "erros: 30" com "com_income: 30" e todos os 30 detalhes com
+   * `sucesso: true` — nenhuma falha havia ocorrido.
+   *
+   * A derivacao tambem confundia causas diferentes (rede, erro da API, sem
+   * order_income, erro de gravacao) num numero so. Agora cada uma incrementa
+   * este contador no ponto em que ocorre.
+   */
+  let falhas                   = 0;
 
   // Fase 4 Parte 2 (aprovado 2026-07-10): dias efetivamente escritos nesta
   // reconciliação, para invalidar SÓ esses dias em dashboard_resumos_diarios
@@ -345,6 +360,7 @@ export async function GET(request: Request) {
         { order_sn: orderId }
       );
     } catch (err: any) {
+      falhas++;
       detalhes.push({
         order_id: orderId,
         sucesso:  false,
@@ -354,6 +370,7 @@ export async function GET(request: Request) {
     }
 
     if (resp?.error) {
+      falhas++;
       detalhes.push({
         order_id: orderId,
         sucesso:  false,
@@ -365,6 +382,7 @@ export async function GET(request: Request) {
 
     const income = resp?.response?.order_income ?? null;
     if (!income) {
+      falhas++;
       detalhes.push({
         order_id: orderId,
         sucesso:  false,
@@ -429,6 +447,7 @@ export async function GET(request: Request) {
         }
         if (erroGravacao) {
           statusGravacao = "erro_gravacao: " + erroGravacao;
+          falhas++;
         } else {
           statusGravacao = "gravado";
           gravados++;
@@ -485,7 +504,7 @@ export async function GET(request: Request) {
     encontrados:              modoPeriodo ? orderIds.length : null,
     processados:              modoPeriodo ? consultados : null,
     ignorados:                modoPeriodo ? ignoradosIdempotencia : null,
-    erros:                    modoPeriodo ? (soSelecao ? 0 : consultados - gravados - ignoradosIdempotencia) : null,
+    erros:                    modoPeriodo ? falhas : null,
     // Contagem apenas — nenhum dado de comprador, financeiro ou credencial.
     linhas_da_pagina:         modoPeriodo ? rows.length : null,
     proximo_cursor:           modoPeriodo ? proximoCursor : null,
@@ -495,7 +514,11 @@ export async function GET(request: Request) {
     order_ids_da_pagina:      modoPeriodo && dryRun ? orderIds : null,
     limit_solicitado:         (orderIdParam || usandoListaEspecifica) ? null : limitParsed,
     limit_aplicado:           (orderIdParam || usandoListaEspecifica) ? null : limit,
-    max_limit_permitido:      MAX_LIMIT,
+    // Teto EFETIVO do modo em uso, nao o teto global. No modo periodo o maximo
+    // e MAX_LIMIT_PERIODO (30); reportar MAX_LIMIT (500) fazia a resposta
+    // prometer um limite que a rota nunca aceitaria.
+    max_limit_permitido:      tetoLimit,
+    max_limit_global:         MAX_LIMIT,
     limit_foi_reduzido:       (orderIdParam || usandoListaEspecifica) ? false : limitFoiReduzido,
     order_ids_solicitados:    usandoListaEspecifica ? orderIdsListParam.length : null,
     order_ids_encontrados:    usandoListaEspecifica ? orderIds.length : null,
@@ -505,10 +528,12 @@ export async function GET(request: Request) {
     sem_income:               semIncome,
     gravados,
     ignorados_idempotencia:   ignoradosIdempotencia,
+    // 2026-08-18: texto atualizado — a elegibilidade deixou de ser so COMPLETED
+    // e a fila deixou de ser has_income_data/escrow_amount.
     aviso: orderIds.length === 0
-      ? "Nenhum pedido encontrado com os criterios atuais (status_shopee_raw='COMPLETED' + filtros de has_income_data/escrow_amount/order_id/order_ids)."
+      ? `Nenhum pedido encontrado com os criterios atuais (status_shopee_raw IN (${ELEGIVEIS_FINANCEIRO.join(", ")}) + financial_reconciled_at IS NULL, ou filtros de order_id/order_ids).`
       : (usandoListaEspecifica && orderIds.length < orderIdsListParam.length)
-        ? `Atencao: ${orderIdsListParam.length - orderIds.length} order_id(s) solicitados nao foram encontrados no banco (status_shopee_raw != COMPLETED ou order_id inexistente).`
+        ? `Atencao: ${orderIdsListParam.length - orderIds.length} order_id(s) solicitados nao foram encontrados no banco (status_shopee_raw fora de ${ELEGIVEIS_FINANCEIRO.join("/")} ou order_id inexistente).`
         : undefined,
     detalhes,
   });
