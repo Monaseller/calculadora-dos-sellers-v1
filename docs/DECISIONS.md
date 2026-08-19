@@ -162,3 +162,79 @@ Regra de produto adotada desde o início do projeto (ver `PROJECT_CONTEXT.md`). 
 ### Contagem de pedidos = apenas `status = 'paid'`
 
 Decidido e implementado (`RELATORIO_FASE1.md` P5, `AUDITORIA_FINAL.md` BUG-PIPE-3) para bater com a forma como a Shopee/ML contam "pedidos" no painel oficial.
+
+## SEC-1 — redução de privilégio no schema public (aplicada 2026-08-19)
+
+**Contexto.** Auditoria de metadados encontrou as **33 tabelas** de `public` concedendo os
+**oito** privilégios possíveis a `anon` e `authenticated` — comportamento padrão do Supabase
+para toda tabela criada, nunca revogado por este projeto. A chave `anon` é pública por
+construção (vai no bundle do navegador). Zero policies, zero ACL de coluna.
+
+**Decisão.** Revogar de `anon` e `authenticated`, nas 33 tabelas, apenas os cinco privilégios
+que a auditoria provou não serem usados por nenhum caminho da aplicação: `DELETE`, `TRUNCATE`,
+`TRIGGER`, `REFERENCES`, `MAINTAIN`. Na mesma migration, corrigir o
+`ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public ON TABLES` para que tabelas
+futuras não recebam esses cinco de volta.
+
+**Preservado deliberadamente:** `SELECT`, `INSERT` e `UPDATE` para `anon`/`authenticated` — 13
+rotas de produção ainda dependem deles. `service_role` e `postgres`/owner **inalterados**.
+Sequences, functions/RPCs, RLS e policies **não tocadas**.
+
+**Alternativas consideradas.** (a) Corrigir só `public.lojas`: descartada, o defeito é sistêmico
+e idêntico nas 33. (b) Revogar também `SELECT`/`INSERT`/`UPDATE`: descartada, derrubaria a
+aplicação — é escopo da PR #2. (c) SQL dinâmico varrendo `pg_class`: descartada, passaria a
+alterar tabelas futuras em silêncio; a lista das 33 é explícita para representar exatamente o
+inventário revisado no gate.
+
+**`supabase_admin` fora de escopo, com prova:** default privileges são específicos do role
+criador; as 33 tabelas têm owner `postgres` e a sessão de migration roda como `postgres`. Além
+disso `postgres` não é membro de `supabase_admin` e tem `rolsuper=false`, então o comando nem
+seria permitido.
+
+**Mecanismo de aplicação.** Executada como SQL manual, não via `apply_migration` — o histórico
+de migrations do Supabase está vazio enquanto o repositório tem 43 arquivos, e usar
+`apply_migration` inauguraria um segundo histórico divergente. A escolha entre CLI com baseline
+e aplicação manual documentada **continua pendente**.
+
+**Verificação.** Antes/depois por `has_table_privilege`, sem nenhuma operação destrutiva:
+`anon` e `authenticated` passaram de 8 privilégios para exatamente `SELECT, INSERT, UPDATE` nas
+33; `service_role` e `postgres` idênticos ao baseline; default privilege de tabelas novas agora
+`INSERT, SELECT, UPDATE`; defaults de sequences e RLS conferidos e inalterados.
+
+**Risco residual, explícito:** a SEC-1 impede que apaguem os dados; **não** impede que os leiam
+nem que os alterem. Ver "Em aberto" e `NEXT_TASK.md`.
+
+## SEC-2a — remoção da role `authenticated` do schema public (aplicada 2026-08-19)
+
+**Contexto.** Análise estática provou que o CDS **não usa Supabase Auth**: zero ocorrências de
+`supabase.auth`, `auth.getUser`, `auth.signIn` ou `@supabase/auth` no repositório. A
+autenticação é própria — tabela `perfil` + cookie assinado `cds_session`. Nenhuma requisição
+real assume a role `authenticated`; a chave pública do projeto resolve para `anon`. A auditoria
+de dependências mapeou 13 rotas e 5 componentes de browser, **todos** via `anon`.
+
+**Decisão.** Revogar de `authenticated` os três privilégios restantes após a SEC-1 — `SELECT`,
+`INSERT`, `UPDATE` — nas mesmas 33 tabelas, e corrigir o default privilege de `postgres` para
+que tabelas futuras não os concedam de volta. A role fica **sem nenhum privilégio de tabela**
+em `public`.
+
+**Preservado:** `anon` com `SELECT, INSERT, UPDATE` (é a role que a aplicação realmente usa);
+`service_role` e `postgres`/owner inalterados. Sequences, functions/RPCs, RLS e policies não
+tocadas.
+
+**Por que separada da SEC-1.** Migration própria, com gate próprio: a SEC-1 removeu privilégios
+comprovadamente inertes de duas roles; a SEC-2a remove uma role inteira. Escopos e riscos
+distintos não devem compartilhar revisão.
+
+**Verificação.** `authenticated` passou de `SIU` para **nenhum privilégio** nas 33; teste
+negativo estrutural confirma `SELECT`/`INSERT`/`UPDATE` = `false` em 33/33, com `anon` = `true`
+em 33/33 simultaneamente. Default privilege de `authenticated` desapareceu da lista. Nenhuma
+mutação de dado foi executada para provar isso. `pg_auth_members` confirma que `authenticated`
+não é membro de role alguma — não há caminho de herança que reconceda.
+
+**Ganho e limite.** O ganho é defesa em profundidade: elimina uma role inteira como vetor
+futuro, inclusive no cenário em que o projeto adote Supabase Auth sem revisar privilégios — que
+é exatamente como o problema original nasceu. **Não** reduz a superfície explorada hoje, que é
+`anon`.
+
+**Resíduo conhecido:** `authenticated` mantém os defaults de **sequences** (`SELECT, UPDATE,
+USAGE`), deliberadamente fora deste escopo — gate próprio.

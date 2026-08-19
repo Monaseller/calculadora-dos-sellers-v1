@@ -102,3 +102,13 @@ Quando o marketplace alterou qualquer informação do pedido. Uso exclusivo: sin
 ## Timezone dos pedidos (BRT vs UTC) — resolvido para fins de exibição, mecanismo permanece
 
 A data é sempre gravada/exibida em BRT (UTC-3), calculada a partir do epoch do campo relevante (`data_criacao` ou `data_pagamento`, conforme o contexto). A Shopee usa UTC no prefixo do `order_sn` — isso é só uma característica do identificador, não afeta mais a regra de exibição de data. Casos de fronteira 21h-24h BRT (pedido "muda de dia" no prefixo do order_sn vs data BRT real) foram confirmados com pedidos reais durante a investigação de 2026-07-06 (ver `BUGS.md`) — não são bug, são o comportamento esperado do fuso.
+
+## Integridade dos dados financeiros no banco — garantia parcial desde 2026-08-19
+
+A partir da SEC-1 (ver `DECISIONS.md`), **nenhum dado do CDS pode ser apagado com a chave pública**. `anon` e `authenticated` perderam `DELETE` e `TRUNCATE` nas 33 tabelas de `public`, incluindo `pedidos`, `lojas`, `perfil` e `dashboard_resumos_diarios`. A garantia vale também para tabelas criadas no futuro por `postgres` neste schema.
+
+**A garantia é de não-destruição, não de integridade.** `SELECT`, `INSERT` e `UPDATE` continuam disponíveis a `anon` — logo, com a chave pública ainda é possível **ler** e **alterar** valor financeiro em `pedidos`, e escrever em `dashboard_resumos_diarios`. Nenhum número financeiro deve ser tratado como inviolável no banco enquanto essa superfície existir. As regras que protegem o valor financeiro continuam sendo as da aplicação: origem em API oficial, cálculo determinístico, e o snapshot financeiro v2 preservado por `protegerSnapshotFinanceiro`.
+
+Fechar `SELECT`/`INSERT`/`UPDATE` anônimos é a próxima frente (PR #2), e só ela transforma esta garantia parcial em integridade real.
+
+**SEC-2a (2026-08-19):** a role `authenticated` do Supabase perdeu **todos** os privilégios de tabela nas 33. Ela não era usada pelo CDS — a autenticação é própria (`perfil` + cookie `cds_session`), e a chave pública do projeto resolve para `anon`. Isso não altera nenhuma regra de negócio nem o acesso atual; registra-se porque fecha uma porta que se abriria sozinha caso o projeto passasse a usar Supabase Auth sem revisar privilégios. **A superfície que ainda alcança dado financeiro continua sendo `anon`.**
