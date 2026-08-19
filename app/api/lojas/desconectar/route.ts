@@ -33,13 +33,8 @@
  * impediria reconectar a loja depois.
  */
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
 import { autenticarRequisicao, lerCookie } from "@/lib/autenticacao";
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+import { desconectarLojaDoDono } from "@/lib/marketplace/credenciais";
 
 /** Mesmo formato canônico já exigido em `lib/ml-auth.ts` (F0.c.4). */
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -73,37 +68,24 @@ export async function POST(request: Request) {
   }
 
   // ── A escrita ─────────────────────────────────────────────────────
-  // `user_id` e `ativo` entram no MESMO update. Consequências:
-  //  • loja de outro dono não é alcançada (o filtro de dono é da própria
-  //    escrita, não de uma checagem anterior que alguém possa remover);
-  //  • desconectar duas vezes não produz falso sucesso — a segunda vez
-  //    não casa nenhuma linha.
-  // `.select("id")` é o que torna "quantas linhas mudaram" observável;
-  // sem ele, o Supabase não devolve as linhas afetadas.
-  const { data, error } = await supabase
-    .from("lojas")
-    .update({
-      ativo: false,
-      access_token: null,
-      refresh_token: null,
-      token_expires_at: null,
-    })
-    .eq("id", lojaId)
-    .eq("user_id", userId)
-    .eq("ativo", true)
-    .select("id");
+  // A rota NÃO fala com o banco: quem escreve é a capability server-only,
+  // e é lá que vive o filtro privilegiado (`id + user_id + ativo=true`) —
+  // dono na própria instrução de UPDATE, não numa checagem anterior que
+  // alguém possa remover ao refatorar. Aqui só sobra a tradução do
+  // resultado para HTTP.
+  const { desconectadas, erro } = await desconectarLojaDoDono(lojaId, userId);
 
-  if (error) {
+  if (erro) {
     // A mensagem crua do Supabase pode conter nome de tabela, coluna e
     // esquema — fica no log, nunca na resposta.
-    console.error("[POST /api/lojas/desconectar] falha ao desconectar:", error.message);
+    console.error("[POST /api/lojas/desconectar] falha ao desconectar:", erro);
     return NextResponse.json(
       { erro: true, mensagem: "Não foi possível desconectar a loja agora." },
       { status: 503 }
     );
   }
 
-  if (!data || data.length === 0) {
+  if (desconectadas === 0) {
     // Não existe, não é sua, ou já estava desconectada — MESMA resposta.
     // Distinguir os casos permitiria descobrir se uma loja alheia existe.
     return NextResponse.json(

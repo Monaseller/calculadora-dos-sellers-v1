@@ -17,8 +17,23 @@
  * Sem rede, sem banco real, sem credencial: todos os valores são
  * marcadores em `<colchetes>`. Nenhuma loja de produção é tocada.
  *
+ * ── PR #2b-2 ───────────────────────────────────────────────────────
+ * A rota deixou de falar com o banco: quem escreve é
+ * `desconectarLojaDoDono()`, na capability server-only. Os testes de
+ * EFEITO abaixo não mudaram uma linha — e é esse o ponto, porque provam
+ * que a migração preservou o comportamento. Os testes novos (26–33)
+ * guardam a fronteira nova.
+ *
+ * O duplo de `@supabase/supabase-js` continua valendo: a capability usa
+ * `getSupabaseServidor()`, que chama o mesmo `createClient` interceptado
+ * aqui. Muda o chamador, não o ponto de interceptação.
+ *
  * Uso: npx tsx scripts/testar-desconectar.ts
  */
+// Primeiro import do arquivo, antes de qualquer `lib/`: a capability é
+// marcada `server-only` e o pacote LANÇA fora da condição `react-server`.
+// O duplo de `require` instalado abaixo encadeia sobre este.
+import "./_server-only-inerte";
 import Module from "node:module";
 
 let ok = 0, falhou = 0;
@@ -36,6 +51,10 @@ function assert(c: boolean, m: string) { if (!c) throw new Error(m); }
 process.env.NEXT_PUBLIC_SUPABASE_URL ??= "https://placeholder-de-teste.invalid";
 process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ??= "chave-de-teste-invalida";
 process.env.SESSION_SECRET ??= "segredo-de-teste-com-mais-de-32-bytes-000000";
+// `getSupabaseServidor()` é fail-closed: sem esta variável ele LANÇA antes
+// de qualquer consulta. Valor inválido de propósito — o cliente real nunca
+// chega a ser construído, porque `createClient` está interceptado.
+process.env.SUPABASE_SERVICE_ROLE_KEY ??= "chave-de-teste-invalida";
 
 const UID_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const UID_OUTRO = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -386,6 +405,91 @@ async function principal() {
       .replace(/(^|[^:])\/\/.*$/gm, "$1");
     assert(!/cds_session/.test(fonte), "🔴 voltou a interpretar o cookie de sessão à mão");
     assert(/autenticarRequisicao/.test(fonte), "não usa a camada oficial de autenticação");
+  });
+
+  secao("\n[8. fronteira da capability — PR #2b-2]");
+
+  const fs = await import("node:fs");
+  /** Fonte sem comentários: evita casar com prosa em vez de código. */
+  const codigo = (caminho: string) =>
+    fs.readFileSync(caminho, "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/(^|[^:])\/\/.*$/gm, "$1");
+
+  const ROTA = "app/api/lojas/desconectar/route.ts";
+  const CAP = "lib/marketplace/credenciais.ts";
+
+  t("26. a rota NÃO constrói mais cliente Supabase", async () => {
+    const fonte = codigo(ROTA);
+    assert(!/@supabase\/supabase-js/.test(fonte), "🔴 a rota voltou a importar o SDK do Supabase");
+    assert(!/createClient/.test(fonte), "🔴 a rota voltou a criar cliente próprio");
+    assert(!/ANON_KEY/.test(fonte), "🔴 a rota voltou a usar a chave anon");
+    assert(!/\.from\(/.test(fonte), "🔴 a rota voltou a consultar tabela diretamente");
+  });
+
+  t("27. a rota escreve pela capability", async () => {
+    assert(/desconectarLojaDoDono/.test(codigo(ROTA)), "a rota não usa a capability");
+  });
+
+  t("28. a capability continua marcada server-only", async () => {
+    assert(/import\s+["']server-only["']/.test(codigo(CAP)),
+      "🔴 a barreira server-only sumiu da capability");
+  });
+
+  t("29. o UPDATE altera EXATAMENTE os 4 campos de sessão", async () => {
+    reiniciar();
+    await rotaPOST(req(LOJA_SHOPEE_A, { cds_session: tokenA }));
+    const w = escritas();
+    assert(w.length === 1, `esperava 1 escrita, houve ${w.length}`);
+    const chaves = Object.keys(w[0].patch).sort();
+    assert(JSON.stringify(chaves) === JSON.stringify(
+      ["access_token", "ativo", "refresh_token", "token_expires_at"]),
+      `🔴 o patch mudou: ${chaves.join(", ")}`);
+  });
+
+  t("30. o UPDATE filtra por id, user_id E ativo=true", async () => {
+    reiniciar();
+    await rotaPOST(req(LOJA_A, { cds_session: tokenA }));
+    const f = escritas()[0].filtros;
+    assert(f.id === LOJA_A, "perdeu o filtro de id");
+    assert(f.user_id === UID_A, "🔴 perdeu o filtro de dono");
+    assert(f.ativo === true, "🔴 perdeu `ativo=true` — desconexão dupla vira falso sucesso");
+  });
+
+  t("31. o patch NUNCA menciona identidade da loja", async () => {
+    reiniciar();
+    await rotaPOST(req(LOJA_SHOPEE_A, { cds_session: tokenA }));
+    const patch = escritas()[0].patch;
+    for (const proibido of ["partner_key", "partner_id", "seller_id", "shop_id",
+                            "user_id", "marketplace", "nome", "nickname"]) {
+      assert(!(proibido in patch), `🔴 a desconexão escreveu em ${proibido}`);
+    }
+  });
+
+  const { desconectarLojaDoDono } = await import("../lib/marketplace/credenciais");
+
+  t("32. a capability exige os DOIS argumentos", async () => {
+    assert(desconectarLojaDoDono.length === 2,
+      `🔴 assinatura permite chamada sem dono: aridade ${desconectarLojaDoDono.length}`);
+  });
+
+  t("33. userId vazio não alcança o banco (nem desconecta nada)", async () => {
+    for (const [loja, dono] of [[LOJA_A, ""], ["", UID_A], ["", ""]] as [string, string][]) {
+      reiniciar();
+      const r = await desconectarLojaDoDono(loja, dono);
+      assert(r.desconectadas === 0, `🔴 desconectou com argumento vazio: ${loja}/${dono}`);
+      assert(consultas.length === 0, "🔴 argumento vazio chegou ao banco");
+      assert(linha(LOJA_A).ativo === true, "🔴 alterou linha com argumento vazio");
+    }
+  });
+
+  t("34. erro de banco vira `erro` preenchido, nunca desconexão silenciosa", async () => {
+    reiniciar();
+    erroDeBanco = { message: 'relation "lojas" does not exist' };
+    const r = await desconectarLojaDoDono(LOJA_A, UID_A);
+    erroDeBanco = null;
+    assert(r.erro !== null, "🔴 engoliu o erro do banco");
+    assert(r.desconectadas === 0, "🔴 contou linhas com o banco em erro");
   });
 
   await fila;

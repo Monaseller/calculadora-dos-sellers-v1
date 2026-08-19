@@ -288,6 +288,62 @@ export async function lerCredencialShopeeDoDono(
 }
 
 /**
+ * Desconexao de loja — PR #2b-2.
+ *
+ * ── Agnostica de marketplace, de proposito ──────────────────────────
+ * A operacao e identica para ML e Shopee: apaga a credencial de sessao
+ * e desativa a loja. Nao ha ramo por marketplace aqui — o que difere
+ * entre eles e a limpeza de COOKIES, que e assunto de HTTP e fica na
+ * rota, nao no acesso ao banco.
+ *
+ * ── O que NAO e apagado, e por que ──────────────────────────────────
+ * `partner_key` permanece. Apesar do nome, ela nao e credencial de
+ * sessao: e a chave de APLICACAO da Shopee, lida do banco para assinar
+ * cada requisicao (`lib/shopee-auth.ts`). Ela nao volta por
+ * reautorizacao — apaga-la impediria reconectar a loja depois.
+ * `seller_id`, `shop_id`, `nome`, `nickname` e `created_at` tambem
+ * ficam: a loja continua existindo, apenas desconectada.
+ *
+ * ── Ownership na propria escrita ────────────────────────────────────
+ * O filtro de dono e da instrucao de UPDATE, nao de uma checagem
+ * anterior que alguem possa remover ao refatorar. `ativo = true` entra
+ * junto para que desconectar duas vezes NAO produza falso sucesso: a
+ * segunda passagem nao casa linha nenhuma.
+ *
+ * Devolve a CONTAGEM de linhas afetadas em vez de um booleano: quem
+ * chama precisa distinguir "desconectei" de "nao havia o que
+ * desconectar" para escolher entre 200 e 404 — e essa distincao tem de
+ * vir do banco, nunca de uma suposicao.
+ */
+export interface ResultadoDesconexao {
+  desconectadas: number;
+  erro: string | null;
+}
+
+export async function desconectarLojaDoDono(
+  lojaId: string,
+  userId: string
+): Promise<ResultadoDesconexao> {
+  if (!lojaId || !userId) return { desconectadas: 0, erro: null };
+
+  const { data, error } = await getSupabaseServidor()
+    .from("lojas")
+    .update({
+      ativo: false,
+      access_token: null,
+      refresh_token: null,
+      token_expires_at: null,
+    })
+    .eq("id", lojaId)
+    .eq("user_id", String(userId))
+    .eq("ativo", true)
+    .select("id");
+
+  if (error) return { desconectadas: 0, erro: error.message };
+  return { desconectadas: Array.isArray(data) ? data.length : 0, erro: null };
+}
+
+/**
  * Registro de loja Shopee vindo do callback OAuth — PR #2b-1.
  *
  * ── Por que existe uma função só para isto ──────────────────────────

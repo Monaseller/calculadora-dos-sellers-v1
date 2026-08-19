@@ -255,6 +255,10 @@ console.log("── 9 a 13. Superfície privilegiada ─────────
     ["ml-auth", codigo("lib/ml-auth.ts")],
     ["shopee-auth", codigo("lib/shopee-auth.ts")],
     ["ml-conexao", codigo("lib/ml-conexao.ts")],
+    // PR #2b-2: a rota de desconexão passou a escrever pela capability.
+    // Entra neste registro para que uma regressão futura — voltar a
+    // montar `.update()` em `lojas` na rota — quebre aqui.
+    ["rota-desconectar", codigo("app/api/lojas/desconectar/route.ts")],
   ] as const) {
     const temSelectDeCredencial = COLUNAS_SENSIVEIS.some((c) =>
       new RegExp(`\\.select\\([^)]*${c}`).test(src)
