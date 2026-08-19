@@ -288,6 +288,172 @@ export async function lerCredencialShopeeDoDono(
 }
 
 /**
+ * Registro de loja Shopee vindo do callback OAuth — PR #2b-1.
+ *
+ * ── Por que existe uma função só para isto ──────────────────────────
+ * As demais operações desta capability pressupõem uma loja que JÁ
+ * existe: exigem `lojaId + userId`. O callback OAuth é o único ponto em
+ * que a loja pode ainda não existir — o `lojaId` NASCE aqui. Por isso
+ * esta é a única função sem `lojaId` de entrada: a identidade vem do
+ * `userId` (autenticado pelo servidor) somado ao `shopId` (devolvido
+ * pela Shopee). Ela nunca aceita `lojaId`, justamente para não virar
+ * uma porta lateral de escrita em loja arbitrária.
+ *
+ * ── MODELO A de ownership ───────────────────────────────────────────
+ * A mesma conta de marketplace PODE pertencer a mais de um usuário CDS,
+ * uma linha por dono. Não é suposição: o callback do ML registra a
+ * medição em producao — "3 donos distintos para o mesmo seller" — e a
+ * constraint do banco e `UNIQUE (seller_id, user_id)`, ou seja, seller
+ * unico POR USUARIO, nunca global.
+ *
+ * Consequencia: a busca e SEMPRE escopada pelo dono. Linha de outro
+ * usuario nao e lida, nao e alterada e nao tem sua existencia revelada.
+ * Conectar a mesma shop noutro tenant e permitido e cria linha propria.
+ *
+ * ── Por que NAO usa upsert ──────────────────────────────────────────
+ * `upsert(..., { onConflict: "seller_id,user_id" })` seria mais curto e
+ * esta PROIBIDO. A unique NAO inclui `marketplace`, e `seller_id` e a
+ * coluna generica entre marketplaces — no ML guarda o seller do ML, no
+ * Shopee guarda `String(shopId)`. Um upsert cego casaria pelo par
+ * (seller_id, user_id) e poderia SOBRESCREVER a linha de ML do proprio
+ * usuario cujo seller_id coincidisse numericamente com o shopId Shopee.
+ * Improvavel, e destrutivo quando ocorre — e um upsert nao tem como
+ * perceber. Por isso o caminho e SELECT escopado por marketplace,
+ * depois UPDATE ou INSERT.
+ *
+ * A unique continua sendo a rede de seguranca: ela e o que torna o
+ * tratamento de `23505` confiavel no passo de corrida.
+ *
+ * ── Fail-closed em todos os ramos ───────────────────────────────────
+ * Nenhum erro e engolido. Nenhum caminho devolve `lojaId` sem linha
+ * confirmada pelo banco. Duplicidade DENTRO do proprio usuario nao
+ * escolhe linha arbitraria — devolve `duplicidade_loja`, como o ML ja
+ * faz, porque gravar credencial na linha errada e pior que falhar.
+ */
+export interface DadosRegistroShopee {
+  shopId: string;
+  nickname: string;
+  nome: string;
+  partnerId: string;
+  partnerKey: string;
+  accessToken: string;
+  refreshToken: string | null;
+  expiraEm: string;
+}
+
+export interface ResultadoRegistroLoja {
+  lojaId: string | null;
+  erro: string | null;
+  motivo?: "duplicidade_loja";
+}
+
+export async function registrarLojaShopeeOAuth(
+  userId: string,
+  dados: DadosRegistroShopee
+): Promise<ResultadoRegistroLoja> {
+  if (!userId || !dados?.shopId) {
+    return { lojaId: null, erro: "userId e shopId sao obrigatorios." };
+  }
+
+  const supabase = getSupabaseServidor();
+  const sellerId = String(dados.shopId);
+  const dono = String(userId);
+
+  // Campos gravados tanto no UPDATE quanto no INSERT. `partner_key`
+  // permanece persistida TEMPORARIAMENTE: tres rotas admin ainda a leem
+  // do banco. Remove-la e frente propria (ela e um segredo GLOBAL de
+  // ambiente replicado por linha, nao dado por loja).
+  const credenciais = {
+    nickname: dados.nickname,
+    nome: dados.nome,
+    partner_id: dados.partnerId,
+    partner_key: dados.partnerKey,
+    access_token: dados.accessToken,
+    refresh_token: dados.refreshToken,
+    token_expires_at: dados.expiraEm,
+    ativo: true,
+  };
+
+  /** Busca escopada. `marketplace` entra SEMPRE — ver "Por que NAO usa upsert". */
+  async function localizar(): Promise<{ ids: string[]; erro: string | null }> {
+    const { data, error } = await supabase
+      .from("lojas")
+      .select("id")
+      .eq("user_id", dono)
+      .eq("marketplace", MARKETPLACE_SHOPEE)
+      .eq("seller_id", sellerId);
+    if (error) return { ids: [], erro: error.message };
+    return { ids: ((data ?? []) as { id: string }[]).map((l) => l.id), erro: null };
+  }
+
+  /** UPDATE tenant-aware, confirmado pela linha afetada. */
+  async function atualizar(lojaId: string): Promise<ResultadoRegistroLoja> {
+    const { data, error } = await supabase
+      .from("lojas")
+      .update(credenciais)
+      .eq("id", lojaId)
+      .eq("user_id", dono)
+      .select("id");
+    if (error) return { lojaId: null, erro: error.message };
+    if (!Array.isArray(data) || data.length === 0) {
+      // Zero linhas confirmadas: o par (id, user_id) nao casou. Nunca
+      // tratar como sucesso — foi exatamente esse falso positivo que
+      // deixou a tela dizendo "conectado" sem gravar nada.
+      return { lojaId: null, erro: "nenhuma linha confirmada no update" };
+    }
+    return { lojaId: data[0].id, erro: null };
+  }
+
+  // PASSO 1-3 — localizar, escopado pelo dono.
+  const inicial = await localizar();
+  if (inicial.erro) return { lojaId: null, erro: inicial.erro };
+  if (inicial.ids.length > 1) {
+    return { lojaId: null, erro: "duplicidade", motivo: "duplicidade_loja" };
+  }
+
+  // PASSO 4 — exatamente uma: atualiza.
+  if (inicial.ids.length === 1) return atualizar(inicial.ids[0]);
+
+  // PASSO 5 — nenhuma: cria, sempre com o dono da sessao.
+  const { data: criada, error: erroInsert } = await supabase
+    .from("lojas")
+    .insert({
+      user_id: dono,
+      marketplace: MARKETPLACE_SHOPEE,
+      seller_id: sellerId,
+      shop_id: sellerId,
+      ...credenciais,
+    })
+    .select("id");
+
+  if (!erroInsert) {
+    if (!Array.isArray(criada) || criada.length === 0) {
+      return { lojaId: null, erro: "insert sem linha confirmada" };
+    }
+    return { lojaId: criada[0].id, erro: null };
+  }
+
+  // PASSO 6 — corrida. `23505` significa que outra requisicao criou a
+  // linha entre o SELECT e o INSERT. NAO e sucesso automatico: relemos e
+  // atualizamos a linha que passou a existir.
+  if ((erroInsert as { code?: string }).code !== "23505") {
+    return { lojaId: null, erro: erroInsert.message };
+  }
+
+  const relido = await localizar();
+  if (relido.erro) return { lojaId: null, erro: relido.erro };
+  if (relido.ids.length > 1) {
+    return { lojaId: null, erro: "duplicidade", motivo: "duplicidade_loja" };
+  }
+  if (relido.ids.length === 0) {
+    // 23505 sem linha visivel: a violacao veio de outro indice (por
+    // exemplo, uma linha de ML com o mesmo seller_id). Falha fechada.
+    return { lojaId: null, erro: "conflito sem linha correspondente" };
+  }
+  return atualizar(relido.ids[0]);
+}
+
+/**
  * Grava credencial Shopee renovada.
  *
  * NÃO há compare-and-swap aqui, e isso é intencional nesta PR: a

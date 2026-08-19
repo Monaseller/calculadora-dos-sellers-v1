@@ -76,3 +76,28 @@ Cenario hibrido, camada grafica (@vercel/og), regeneracao individual e score vis
 
 ### Proxima etapa
 **PR #2b** — fechar os quatro bypasses de credencial (`auth/mercadolivre/callback`, `auth/shopee/callback`, `lojas/desconectar`, `lojas/ativar`), estendendo a capability `lib/marketplace/credenciais.ts` com criacao e anulacao. E pre-requisito de qualquer reducao de privilegio de `anon` em `lojas` (PR #2c).
+
+---
+
+## CDS — PR #2b-1: callback OAuth Shopee — 2026-08-19
+
+**IMPLEMENTADA, NAO COMMITADA.** Nenhuma alteracao de banco.
+
+### Concluido
+- **Bug corrigido (`SHOPEE-OAUTH1` em `BUGS.md`):** o callback derivava o dono de `cds_session` lido CRU. Desde o cutover esse cookie carrega token assinado, nao UUID, e `lojas.user_id` e `uuid` — a comparacao nunca casava. Com os erros do Supabase descartados, a rota devolvia `?ok=shopee` sem gravar. Medido: 3 lojas Shopee, **2 com `user_id` NULL**, ultima criacao 2026-07-02.
+- `userId` agora vem **exclusivamente** de `autenticarRequisicao`, e **antes** da troca do `code`.
+- Persistencia movida para a capability server-only **`registrarLojaShopeeOAuth`**: `SELECT` escopado por `user_id`+`marketplace`+`seller_id`, `UPDATE` tenant-aware confirmado pela linha afetada, `INSERT` com o dono da sessao, e `23505` tratado como criacao concorrente (rele e atualiza).
+- **`upsert` deliberadamente NAO usado:** `UNIQUE (seller_id, user_id)` nao inclui `marketplace`, e `seller_id` e generica entre marketplaces — um upsert cego poderia sobrescrever a linha de ML do proprio usuario.
+- **Modelo A de ownership confirmado** (medicao do ML: 3 donos distintos para o mesmo seller): mesma conta externa pode ter uma linha por usuario CDS.
+- Falha de persistencia **nunca** termina em `?ok=shopee` — novos `?erro=shopee_sessao`, `shopee_persistencia`, `shopee_duplicidade`.
+- Fallback de `partner_id`/`partner_key` por cookie removido (era codigo morto — nada emitia `shopee_partner_*`).
+- Logs saneados: nenhum recebe `tokenData`, token, `partner_key` ou corpo bruto do provedor.
+- Trava de inventario de `testar-autenticacao.ts` subiu 41 -> 42, registrando a entrada da rota na camada.
+
+### NAO concluido — nao registrar como feito
+- **`SHOPEE-OAUTH2` (aberto):** o fluxo Shopee **nao tem `state`**. Permite associacao induzida (CSRF) da loja do atacante a conta da vitima. Exige comprovar que a Shopee preserva parametros no `redirect` do `auth_partner`. **PKCE nao se aplica** ao fluxo usado.
+- `partner_key` continua persistida em `lojas` (3 rotas admin ainda a leem do banco) — e um segredo GLOBAL de ambiente replicado por linha.
+- ML callback, `lojas/desconectar` e `lojas/ativar` seguem como bypass arquitetural de capability — **PR #2b** propriamente dita.
+
+### Proxima etapa
+**PR #2b** (restante): migrar os tres bypasses remanescentes para a capability. Depois, **PR #2c** — reduzir privilegio de `anon` em `lojas`.

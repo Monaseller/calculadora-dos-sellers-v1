@@ -343,3 +343,29 @@ Detalhe original da investigação (mantido para histórico):
 **Causa raiz: confirmado que o filtro `filtrarCompleted` NÃO explica a maioria dos casos.** Diagnóstico direto via `get_order_list` (rodado localmente em 2026-07-14, rota temporária removida depois de usada) confirma que os 189 aparecem normalmente na listagem da Shopee, tanto por `create_time` quanto por `update_time` — não é um problema de "a Shopee nunca lista esse pedido". O filtro `filtrarCompleted` só poderia explicar os 88 hoje `COMPLETED` (e isso não está confirmado — exigiria que tivessem completado rápido demais para o cron pegar antes); os outros 101 não estão `COMPLETED` e mesmo assim nunca foram gravados, então o filtro nem se aplica a eles. Causa real ainda não identificada — ver `DECISIONS.md` para o detalhe completo e hipóteses remanescentes (falha do cron nesse dia específico, ou bug de paginação/cursor).
 
 **Recuperação:** plano de backfill pontual desenhado (rota admin `dry_run`-first, reaproveitando a lógica de montagem de linha extraída para `montarLinhasDoPedido()` em `lib/sync-shopee.ts`, sem tocar em nenhum pedido fora desta lista) — implementação ainda pendente de aprovação final do usuário.
+
+---
+
+## ✅ SHOPEE-OAUTH1 — callback da Shopee derivava a identidade do cookie cru e falhava em silêncio (corrigido 2026-08-19, PR #2b-1)
+
+**Sintoma.** Conectar uma loja Shopee redirecionava para `/configuracoes?ok=shopee` — tela de sucesso — sem gravar nada de forma confiável.
+
+**Causa raiz.** `app/api/auth/shopee/callback/route.ts` ficou no mecanismo de sessão V1: derivava o dono com `getCookie(request, "cds_session")`, lendo o cookie **cru**. Desde o cutover, `cds_session` carrega um **token assinado** (`payloadB64.assinatura`), não um UUID — e `lojas.user_id` é `uuid`. Comparar (`.eq("user_id", …)`) ou gravar esse token numa coluna `uuid` não casa nunca. Agravante decisivo: os erros do Supabase eram **descartados** (`const { data } = await …`, sem `error`) nos três caminhos (SELECT, UPDATE, INSERT), e o redirect de sucesso vinha de qualquer forma.
+
+É a **mesma classe de falha** que `lojas/desconectar` já havia corrigido na F0.c.6a. Esta rota escapou daquele inventário porque lia o cookie com um helper próprio, em vez de `autenticarRequisicao` — exatamente o risco que o cabeçalho de `desconectar` registrou.
+
+**Evidência medida (2026-08-19, consulta agregada, sem valores):** 3 lojas Shopee, **2 com `user_id` NULL**, última criação em 2026-07-02.
+
+**Correção.** `userId` passa a vir exclusivamente de `autenticarRequisicao`, **antes** da troca do `code` (para não gastar uma autorização de uso único sem dono confiável). A persistência saiu da rota e foi para a capability server-only `registrarLojaShopeeOAuth`, com `SELECT` escopado por `user_id` + `marketplace='Shopee'` + `seller_id`, `UPDATE` tenant-aware confirmado pela linha afetada, `INSERT` com o dono da sessão e tratamento explícito de `23505` como criação concorrente. Todo erro é checado: **falha de persistência nunca mais termina em `?ok=shopee`**.
+
+**Por que NÃO se usou `upsert`.** `UNIQUE (seller_id, user_id)` **não inclui `marketplace`**, e `seller_id` é a coluna genérica entre marketplaces — no Shopee ela recebe `String(shopId)`. Um `upsert` com conflict target `(seller_id, user_id)` poderia casar a linha de **ML** do próprio usuário cujo `seller_id` coincidisse numericamente com o `shopId`, sobrescrevendo-a com dados Shopee. Improvável e destrutivo; um upsert não teria como perceber.
+
+**Ownership — Modelo A.** A mesma conta de marketplace pode pertencer a mais de um usuário CDS, uma linha por dono. Não é suposição: o callback do ML registra a medição em produção (*"3 donos distintos para o mesmo seller"*) e a constraint codifica seller único **por usuário**. Loja de outro dono não é lida, alterada nem tem a existência revelada.
+
+**Também corrigido junto:** removido o fallback de `partner_id`/`partner_key` por cookie (`shopee_partner_*` não era emitido por nenhum código — era código morto e vetor de injeção caso a env faltasse) e removidos os logs que podiam receber `tokenData`, corpo bruto da Shopee ou a exceção da chamada assinada (que carrega `access_token` na query string).
+
+### 🟠 SHOPEE-OAUTH2 — ausência de `state` no fluxo Shopee (aberto)
+
+O fluxo `auth_partner` não envia `state`, e o callback não valida nenhum. Sem isso, um atacante pode induzir um usuário autenticado a visitar o callback com `code`/`shop_id` da conta **dele**, associando a loja do atacante à conta da vítima — que passaria a ver e sincronizar pedidos alheios. O Modelo A **amplia** esse impacto, e nenhum modelo de ownership o resolve: só `state` resolve.
+
+**Não corrigido na PR #2b-1 por decisão explícita:** exige comprovar que a Shopee preserva parâmetros extras no `redirect` do `auth_partner`, o que não está documentado no repositório. Introduzir uma suposição de protocolo não verificada dentro de uma correção de bug arriscaria quebrar o único fluxo de conexão existente. **PKCE não se aplica** — o fluxo é um redirect assinado por parceiro, não *authorization code* OAuth2; não há `code_challenge` em nenhum ponto.

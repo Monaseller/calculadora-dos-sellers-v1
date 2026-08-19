@@ -344,6 +344,36 @@ console.log("── 9 a 13. Superfície privilegiada ─────────
     !/access_token|partner_key|accessToken|partnerKey/.test(rotaSync));
 }
 
+console.log("── PR #2b-1: registrarLojaShopeeOAuth ─────────────────────");
+{
+  const cred = fonte("lib/marketplace/credenciais.ts");
+  const credCodigo = codigo("lib/marketplace/credenciais.ts");
+  const trecho = credCodigo.slice(credCodigo.indexOf("registrarLojaShopeeOAuth"));
+
+  ok("77. bootstrap OAuth exige userId e NÃO aceita lojaId",
+    /registrarLojaShopeeOAuth\(\s*userId: string,\s*dados: DadosRegistroShopee\s*\)/.test(credCodigo));
+  ok("78. SELECT escopado por user_id + marketplace + seller_id",
+    /\.eq\("user_id", dono\)[\s\S]{0,120}\.eq\("marketplace", MARKETPLACE_SHOPEE\)[\s\S]{0,120}\.eq\("seller_id", sellerId\)/.test(trecho));
+  ok("79. SELECT pede somente id", /\.select\("id"\)/.test(trecho) && !/select\("\*"\)/.test(trecho));
+  ok("80. UPDATE é tenant-aware (id + user_id)",
+    /\.update\(credenciais\)[\s\S]{0,120}\.eq\("id", lojaId\)[\s\S]{0,80}\.eq\("user_id", dono\)/.test(trecho));
+  ok("81. UPDATE confirma linha afetada", /nenhuma linha confirmada no update/.test(trecho));
+  ok("82. INSERT grava user_id da sessão", /user_id: dono/.test(trecho));
+  ok("83. INSERT grava marketplace e seller_id explícitos",
+    /marketplace: MARKETPLACE_SHOPEE/.test(trecho) && /seller_id: sellerId/.test(trecho));
+  ok("84. trata 23505 como corrida, não como sucesso", /!== "23505"/.test(trecho));
+  ok("85. releitura vazia após 23505 falha fechado", /conflito sem linha correspondente/.test(trecho));
+  ok("86. duplicidade do próprio usuário falha fechada",
+    /motivo: "duplicidade_loja"/.test(trecho));
+  ok("87. NÃO usa upsert nem onConflict", !/\.upsert\(/.test(credCodigo) && !/onConflict/.test(credCodigo));
+  ok("88. resultado não devolve credencial",
+    !/interface ResultadoRegistroLoja[\s\S]{0,220}(access_token|refresh_token|partner_key)/.test(cred));
+  ok("89. o motivo de não usar upsert está documentado",
+    /Por que NAO usa upsert/.test(cred));
+  ok("90. partner_key segue persistida temporariamente, com justificativa",
+    /partner_key: dados\.partnerKey/.test(trecho) && /TEMPORARIAMENTE/.test(cred));
+}
+
 console.log("── Caller do Estúdio permanece tenant-aware ───────────────");
 {
   const conta = fonte("lib/estudio-anuncios/compliance/ml-conta.ts");

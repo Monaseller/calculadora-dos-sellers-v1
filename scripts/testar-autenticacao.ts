@@ -362,7 +362,14 @@ const TODOS = arquivosTs();
 // e uma trava de inventario deliberada — ele SOBE quando uma rota autenticada e
 // adicionada, e a falha existe para que ninguem adicione rota sem passar por
 // aqui. Baixa-lo ou deixa-lo "flexivel" derrotaria o proposito.
-const CONSUMIDORES_ESPERADOS_AUTENTICACAO = 41;
+//
+// 41 -> 42 em 2026-08-19 (PR #2b-1): app/api/auth/shopee/callback/route.ts.
+// Nao e rota nova — e uma rota que estava FORA da camada. Ela derivava o
+// `userId` de `cds_session` lido cru, e desde o cutover esse cookie carrega
+// um token assinado, nao um UUID: a comparacao com `lojas.user_id` (uuid)
+// nunca casava e os erros eram descartados, devolvendo `?ok=shopee` sem
+// gravar nada. A trava subir aqui e a prova de que ela entrou na camada.
+const CONSUMIDORES_ESPERADOS_AUTENTICACAO = 42;
 
 t(`22. exatamente ${CONSUMIDORES_ESPERADOS_AUTENTICACAO} arquivos de produção usam a camada nova`, () => {
   const proprios = [
