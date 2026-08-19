@@ -57,15 +57,20 @@ export async function POST(request: Request) {
   const noBuffer = tipo === "backfill";
 
   try {
+    // PR #1 — o par (user_id, loja_id) vai INTEIRO para a busca de
+    // credencial. `x-worker-secret` autentica o worker, não prova
+    // propriedade da loja: se o job trouxer um par incoerente (cenário
+    // possível enquanto `sync_jobs` não tem RLS), a credencial não é
+    // resolvida e o sync falha fechado, sem tocar loja alheia.
     if (marketplace === "Shopee") {
-      const loja = await getShopeeLojaById(loja_id);
+      const loja = await getShopeeLojaById(loja_id, user_id);
       if (!loja) {
         return NextResponse.json({ ok: false, erro: "Loja Shopee não encontrada ou sem token válido." }, { status: 400 });
       }
       const resultado = await syncShopeeForUserV2(user_id, date_from, date_to, noBuffer, loja);
       return NextResponse.json({ ok: true, pedidosProcessados: resultado.inserted, encontrados: resultado.found });
     } else {
-      const loja = await getMLLojaById(loja_id);
+      const loja = await getMLLojaById(loja_id, user_id);
       if (!loja) {
         return NextResponse.json({ ok: false, erro: "Loja ML não encontrada ou sem token válido." }, { status: 400 });
       }

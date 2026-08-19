@@ -17,6 +17,7 @@
  * E havia um terceiro risco: o upsert do sync envia o objeto completo e zeraria
  * o snapshot financeiro de pedido ja reconciliado.
  */
+import "./_server-only-inerte";
 import "./_env-inerte";
 import fs from "node:fs";
 import {

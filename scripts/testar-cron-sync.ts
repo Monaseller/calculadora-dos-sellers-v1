@@ -18,6 +18,9 @@
  *
  * Uso: npx tsx scripts/testar-cron-sync.ts
  */
+// Ver nota em _server-only-inerte.ts: a capability de credenciais é
+// `server-only`, que lança fora da condição `react-server`.
+import "./_server-only-inerte";
 import fs from "node:fs";
 import path from "node:path";
 

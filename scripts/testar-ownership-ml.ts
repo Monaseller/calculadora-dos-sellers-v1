@@ -19,6 +19,10 @@
  *
  * Uso: npx tsx scripts/testar-ownership-ml.ts
  */
+// Antes de qualquer módulo de `lib/`: a capability de credenciais é
+// marcada com `server-only`, que lança fora da condição `react-server`.
+// O duplo de `@supabase/supabase-js` instalado abaixo encadeia sobre este.
+import "./_server-only-inerte";
 import Module from "node:module";
 
 let ok = 0, falhou = 0;
@@ -33,6 +37,13 @@ function assert(c: boolean, m: string) { if (!c) throw new Error(m); }
 
 process.env.NEXT_PUBLIC_SUPABASE_URL ??= "https://placeholder-de-teste.invalid";
 process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ??= "chave-de-teste-invalida";
+// PR #1: a leitura de credencial passou a usar o cliente privilegiado
+// (`getSupabaseServidor`), que é FAIL-CLOSED e lança se a variável faltar.
+// O duplo instalado abaixo intercepta `@supabase/supabase-js`, então o
+// cliente devolvido continua sendo o falso — esta variável só precisa
+// existir para a guarda não abortar antes disso. Valor deliberadamente
+// inválido para tráfego real.
+process.env.SUPABASE_SERVICE_ROLE_KEY ??= "chave-de-teste-invalida";
 process.env.ML_CLIENT_ID ??= "ficticio";
 process.env.ML_CLIENT_SECRET ??= "ficticio";
 

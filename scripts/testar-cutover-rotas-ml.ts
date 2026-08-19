@@ -21,6 +21,9 @@
  *
  * Uso: npx tsx scripts/testar-cutover-rotas-ml.ts
  */
+// Ver nota em testar-ownership-ml.ts: a capability de credenciais é
+// `server-only`, que lança fora da condição `react-server`.
+import "./_server-only-inerte";
 import Module from "node:module";
 
 let ok = 0, falhou = 0;
@@ -46,6 +49,10 @@ function assert(c: boolean, m: string) { if (!c) throw new Error(m); }
 
 process.env.NEXT_PUBLIC_SUPABASE_URL ??= "https://placeholder-de-teste.invalid";
 process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ??= "chave-de-teste-invalida";
+// PR #1: ver nota em testar-ownership-ml.ts — o caminho de credencial
+// passou pelo cliente privilegiado, que é fail-closed. O duplo de
+// `@supabase/supabase-js` continua sendo o que responde às consultas.
+process.env.SUPABASE_SERVICE_ROLE_KEY ??= "chave-de-teste-invalida";
 process.env.ML_CLIENT_ID ??= "ficticio";
 process.env.ML_CLIENT_SECRET ??= "ficticio";
 process.env.SESSION_SECRET ??= "segredo-de-teste-com-mais-de-32-bytes-000000";

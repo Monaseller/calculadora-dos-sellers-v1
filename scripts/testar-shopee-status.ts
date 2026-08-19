@@ -27,6 +27,7 @@
  * no Postgres para uma amostra. Esta suite nao acessa o banco, entao ela prova
  * as propriedades da funcao TS, nao a igualdade com o SQL.
  */
+import "./_server-only-inerte";
 import "./_env-inerte";
 import {
   BUCKETS,

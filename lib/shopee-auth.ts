@@ -2,13 +2,11 @@
  * Gerenciamento de token Shopee com refresh automático.
  * Access token expira em ~4h. Refresh token dura 30 dias.
  */
-import { createClient } from "@supabase/supabase-js";
 import { shopeeSign, SHOPEE_BASE } from "@/lib/shopee-api";
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+import {
+  lerCredencialShopeeDoDono,
+  gravarCredencialShopee,
+} from "@/lib/marketplace/credenciais";
 
 export interface ShopeeTokenResult {
   access_token: string;
@@ -81,18 +79,10 @@ export async function getShopeeLojaAtiva(userId: string): Promise<{
   shopId:      number;
   nickname:    string;
 } | null> {
-  const { data: loja, error: dbErr } = await supabase
-    .from("lojas")
-    .select("id, shop_id, partner_id, partner_key, access_token, refresh_token, token_expires_at, nickname, ativo")
-    .eq("user_id", userId)
-    .eq("marketplace", "Shopee")
-    .eq("ativo", true)
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  const { linha: loja, erro: dbErr } = await lerCredencialShopeeDoDono(userId);
 
   if (dbErr) {
-    console.error("[shopee-auth] db error:", dbErr.message, "userId:", userId);
+    console.error("[shopee-auth] db error:", dbErr, "userId:", userId);
     return null;
   }
   if (!loja) {
@@ -104,7 +94,10 @@ export async function getShopeeLojaAtiva(userId: string): Promise<{
     return null;
   }
 
-  let accessToken: string = loja.access_token;
+  // `?? ""` preserva o comportamento anterior: a variável era tipada como
+  // `string` mas podia chegar nula, e a guarda `if (!accessToken)` adiante
+  // tratava isso. String vazia é falsy do mesmo modo.
+  let accessToken: string = loja.access_token ?? "";
 
   // Verifica se token expirou (com 5 min de margem)
   const expiredOrMissing = !loja.access_token ||
@@ -122,11 +115,11 @@ export async function getShopeeLojaAtiva(userId: string): Promise<{
       console.log("[shopee-auth] refresh OK para loja:", loja.id);
       accessToken = refreshed.access_token;
       // Salva novo token no banco
-      await supabase.from("lojas").update({
+      await gravarCredencialShopee(loja.id, userId, {
         access_token:     refreshed.access_token,
         refresh_token:    refreshed.refresh_token ?? loja.refresh_token,
         token_expires_at: new Date(Date.now() + (refreshed.expire_in ?? 14400) * 1000).toISOString(),
-      }).eq("id", loja.id);
+      });
     } else {
       // Refresh falhou → token expirado e não renovável → não tenta usar token inválido
       console.error("[shopee-auth] refresh FALHOU para loja:", loja.id, "- reconecte a Shopee");
@@ -157,8 +150,14 @@ export async function getShopeeLojaAtiva(userId: string): Promise<{
  * recente, o que quebraria o contrato "job por loja_id específico".
  * Mesma lógica de refresh de token de getShopeeLojaAtiva, sem o filtro
  * "mais recente ativa".
+ *
+ * ── PR #1: `userId` passou a ser OBRIGATÓRIO ────────────────────────
+ * Esta função consultava `lojas` SÓ por `id` e devolvia `partnerKey` (o
+ * app secret da Shopee) além do access_token. O par agora entra na
+ * query: par incoerente devolve `null` em vez de credencial alheia. O
+ * critério de seleção da loja não mudou.
  */
-export async function getShopeeLojaById(lojaId: string): Promise<{
+export async function getShopeeLojaById(lojaId: string, userId: string): Promise<{
   lojaId:      string;
   partnerId:   string;
   partnerKey:  string;
@@ -166,14 +165,10 @@ export async function getShopeeLojaById(lojaId: string): Promise<{
   shopId:      number;
   nickname:    string;
 } | null> {
-  const { data: loja, error: dbErr } = await supabase
-    .from("lojas")
-    .select("id, shop_id, partner_id, partner_key, access_token, refresh_token, token_expires_at, nickname, ativo")
-    .eq("id", lojaId)
-    .maybeSingle();
+  const { linha: loja, erro: dbErr } = await lerCredencialShopeeDoDono(userId, lojaId);
 
   if (dbErr) {
-    console.error("[shopee-auth] db error (getShopeeLojaById):", dbErr.message, "lojaId:", lojaId);
+    console.error("[shopee-auth] db error (getShopeeLojaById):", dbErr, "lojaId:", lojaId);
     return null;
   }
   if (!loja) {
@@ -185,7 +180,10 @@ export async function getShopeeLojaById(lojaId: string): Promise<{
     return null;
   }
 
-  let accessToken: string = loja.access_token;
+  // `?? ""` preserva o comportamento anterior: a variável era tipada como
+  // `string` mas podia chegar nula, e a guarda `if (!accessToken)` adiante
+  // tratava isso. String vazia é falsy do mesmo modo.
+  let accessToken: string = loja.access_token ?? "";
 
   const expiredOrMissing = !loja.access_token ||
     (loja.token_expires_at && new Date(loja.token_expires_at).getTime() - 5 * 60 * 1000 < Date.now());
@@ -199,11 +197,11 @@ export async function getShopeeLojaById(lojaId: string): Promise<{
     );
     if (refreshed) {
       accessToken = refreshed.access_token;
-      await supabase.from("lojas").update({
+      await gravarCredencialShopee(loja.id, userId, {
         access_token:     refreshed.access_token,
         refresh_token:    refreshed.refresh_token ?? loja.refresh_token,
         token_expires_at: new Date(Date.now() + (refreshed.expire_in ?? 14400) * 1000).toISOString(),
-      }).eq("id", loja.id);
+      });
     } else {
       console.error("[shopee-auth] refresh FALHOU (getShopeeLojaById) para loja:", loja.id, "- reconecte a Shopee");
       return null;

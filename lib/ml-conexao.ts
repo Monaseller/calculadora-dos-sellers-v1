@@ -47,18 +47,17 @@
  * objeto campo a campo — nunca por espalhamento do resultado — para que
  * um campo novo no resolvedor não vaze sozinho para a resposta.
  */
-import { createClient } from "@supabase/supabase-js";
 import {
   refreshMLToken,
   saveTokensToDB,
   credencialExpirada,
   type MLTokenResult,
 } from "@/lib/ml-auth";
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+import {
+  lerCredencialMLPorLojaEDono,
+  listarCredenciaisMLDoDono,
+  type LinhaCredencialML,
+} from "@/lib/marketplace/credenciais";
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -100,16 +99,12 @@ export type ResultadoContaML =
   | { ok: false; motivo: "LOJA_NAO_DEFINIDA"; lojas: LojaPublicaML[] }
   | { ok: false; motivo: "PRECISA_RECONECTAR"; loja: LojaPublicaML };
 
-interface LinhaLoja {
-  id: string;
-  nickname: string | null;
-  seller_id: string | null;
-  access_token: string | null;
-  refresh_token: string | null;
-  token_expires_at: string | null;
-}
-
-const COLUNAS = "id, nickname, seller_id, access_token, refresh_token, token_expires_at";
+/**
+ * A forma da linha e a lista de colunas sensíveis passaram a viver em
+ * `lib/marketplace/credenciais.ts` na PR #1 — uma definição só, no mesmo
+ * lugar em que a query é montada.
+ */
+type LinhaLoja = LinhaCredencialML;
 
 function publica(loja: { id: string; nickname: string | null }): LojaPublicaML {
   return { id: loja.id, nickname: loja.nickname ?? "", marketplace: MARKETPLACE_ML };
@@ -163,7 +158,8 @@ const renovacoesEmVoo = new Map<string, Promise<MLTokenResult | null>>();
  */
 async function renovarCredencial(
   lojaId: string,
-  refreshToken: string
+  refreshToken: string,
+  userId: string
 ): Promise<{ token: string } | null> {
   let promessa = renovacoesEmVoo.get(lojaId);
   const souOOriginal = !promessa;
@@ -172,7 +168,10 @@ async function renovarCredencial(
     promessa = (async () => {
       const resultado = await refreshMLToken(refreshToken);
       if (!resultado) return null;
-      const gravou = await saveTokensToDB(lojaId, resultado, refreshToken);
+      // PR #1: a gravação passou a exigir `id + user_id`. O filtro
+      // soma-se ao compare-and-swap (`refresh_token` anterior) — a
+      // semântica de "não gravei, outra requisição venceu" é a mesma.
+      const gravou = await saveTokensToDB(lojaId, userId, resultado, refreshToken);
       // Não gravou = outra requisição rotacionou antes. O token que
       // recebemos pode até funcionar, mas o do banco é o oficial.
       return gravou ? resultado : null;
@@ -190,17 +189,12 @@ async function renovarCredencial(
 
 /** Releitura pontual, sempre com o filtro de dono. */
 async function relerLoja(lojaId: string, userId: string): Promise<LinhaLoja | null> {
-  const { data, error } = await supabase
-    .from("lojas")
-    .select(COLUNAS)
-    .eq("id", lojaId)
-    .eq("user_id", userId)
-    .eq("marketplace", MARKETPLACE_ML)
-    .eq("ativo", true)
-    .maybeSingle();
+  const { linha, erro } = await lerCredencialMLPorLojaEDono(lojaId, userId, {
+    somenteAtiva: true,
+  });
 
-  if (error) throw new ErroConsultaConexaoML(error.message);
-  return (data as LinhaLoja | null) ?? null;
+  if (erro) throw new ErroConsultaConexaoML(erro);
+  return linha;
 }
 
 /**
@@ -232,20 +226,15 @@ export async function resolverContaML(
     return { ok: false, motivo: "LOJA_INVALIDA" };
   }
 
-  let consulta = supabase
-    .from("lojas")
-    .select(COLUNAS)
-    .eq("user_id", userId)
-    .eq("marketplace", MARKETPLACE_ML)
-    .eq("ativo", true);
-
   const lojaIndicada = lojaId != null && lojaId !== "";
-  if (lojaIndicada) consulta = consulta.eq("id", lojaId);
 
-  const { data, error } = await consulta.order("created_at", { ascending: true });
-  if (error) throw new ErroConsultaConexaoML(error.message);
-
-  const linhas = (data ?? []) as LinhaLoja[];
+  // `lojaId` SOMA-SE aos filtros de dono dentro da capability — nunca os
+  // substitui. É a mesma regra de antes, agora estrutural.
+  const { linhas, erro } = await listarCredenciaisMLDoDono(
+    userId,
+    lojaIndicada ? lojaId : null
+  );
+  if (erro) throw new ErroConsultaConexaoML(erro);
 
   if (linhas.length === 0) {
     // Cliente indicou uma loja que não é dele (ou não existe): recusa
@@ -281,7 +270,7 @@ async function resolverCredencial(loja: LinhaLoja, userId: string): Promise<Resu
   }
 
   // CASO B — renova server-side e persiste.
-  const renovado = await renovarCredencial(loja.id, loja.refresh_token);
+  const renovado = await renovarCredencial(loja.id, loja.refresh_token, userId);
   if (renovado) return emUso(renovado.token);
 
   // CASO D — o refresh não serviu, OU outra requisição venceu a corrida.

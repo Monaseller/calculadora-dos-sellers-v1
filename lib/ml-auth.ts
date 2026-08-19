@@ -1,5 +1,18 @@
 import { createClient } from "@supabase/supabase-js";
+import {
+  lerCredencialMLPorLojaEDono,
+  lerCredencialMLAtivaDoDono,
+  gravarCredencialML,
+} from "@/lib/marketplace/credenciais";
 
+/**
+ * Cliente ANON — menor privilégio, e é tudo de que `resolverLojaDoUsuario`
+ * precisa: ela lê APENAS `id`, nunca uma coluna de credencial. Dar-lhe
+ * service_role seria privilégio gratuito.
+ *
+ * Toda leitura ou escrita de credencial deste módulo passa por
+ * `lib/marketplace/credenciais.ts` — ver a invariante lá.
+ */
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
@@ -84,21 +97,16 @@ export async function getMLToken(request: Request, userId: string): Promise<MLTo
     const result = await refreshMLToken(refreshCookie);
     if (result) {
       // Só grava na loja já validada como do usuário.
-      if (lojaId) await saveTokensToDB(lojaId, result);
+      if (lojaId) await saveTokensToDB(lojaId, userId, result);
       return { ...result, lojaId: lojaId ?? undefined };
     }
   }
 
   // 3. Fallback: lê access_token/refresh_token do banco pela loja ativa
   if (lojaId) {
-    const { data: loja } = await supabase
-      .from("lojas")
-      .select("access_token, refresh_token, token_expires_at")
-      .eq("id", lojaId)
-      .eq("user_id", userId)
-      .maybeSingle();
+    const { linha: loja } = await lerCredencialMLPorLojaEDono(lojaId, userId);
 
-    if (loja?.access_token && new Date(loja.token_expires_at) > new Date()) {
+    if (loja?.access_token && new Date(loja.token_expires_at as string) > new Date()) {
       // Token do banco ainda válido → usa e re-emite o cookie
       return { token: loja.access_token, newAccessToken: loja.access_token, lojaId };
     }
@@ -106,7 +114,7 @@ export async function getMLToken(request: Request, userId: string): Promise<MLTo
     if (loja?.refresh_token) {
       const result = await refreshMLToken(loja.refresh_token);
       if (result) {
-        await saveTokensToDB(lojaId, result);
+        await saveTokensToDB(lojaId, userId, result);
         return { ...result, lojaId };
       }
     }
@@ -188,9 +196,13 @@ export async function refreshMLToken(refreshToken: string): Promise<MLTokenResul
  * loja ao mesmo tempo — usando as colunas que já existem, sem migration.
  * Devolve `false` quando nada foi gravado porque outra requisição chegou
  * primeiro; quem chama deve reler a linha em vez de reescrever por cima.
+ *
+ * `userId` acrescentado na PR #1 e OBRIGATÓRIO: a escrita passa a ser
+ * `id + user_id`, nunca só `id`. O filtro soma-se ao CAS sem alterá-lo.
  */
 export async function saveTokensToDB(
   lojaId: string,
+  userId: string,
   result: MLTokenResult,
   refreshTokenAnterior?: string | null
 ): Promise<boolean> {
@@ -200,22 +212,7 @@ export async function saveTokensToDB(
   };
   if (result.newRefreshToken) updates.refresh_token = result.newRefreshToken;
 
-  if (!refreshTokenAnterior) {
-    // Caminho legado, preservado byte a byte: escrita incondicional, sem
-    // `.select()`. O `true` diz "gravou até onde esta chamada sabe" — os
-    // chamadores antigos não leem o retorno.
-    await supabase.from("lojas").update(updates).eq("id", lojaId);
-    return true;
-  }
-
-  const { data } = await supabase
-    .from("lojas")
-    .update(updates)
-    .eq("id", lojaId)
-    .eq("refresh_token", refreshTokenAnterior)
-    .select("id");
-
-  return Array.isArray(data) && data.length > 0;
+  return gravarCredencialML(lojaId, userId, updates, refreshTokenAnterior);
 }
 
 /** Busca loja ML ativa pelo userId (para sync server-side sem cookie) */
@@ -225,15 +222,7 @@ export async function getMLLojaAtiva(userId: string): Promise<{
   sellerId:    string;
   nickname:    string;
 } | null> {
-  const { data: loja } = await supabase
-    .from("lojas")
-    .select("id, seller_id, nickname, access_token, refresh_token, token_expires_at")
-    .eq("user_id", userId)
-    .eq("marketplace", "ML")
-    .eq("ativo", true)
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  const { linha: loja } = await lerCredencialMLAtivaDoDono(userId);
 
   if (!loja || !loja.access_token) return null;
 
@@ -245,7 +234,7 @@ export async function getMLLojaAtiva(userId: string): Promise<{
     const result = await refreshMLToken(loja.refresh_token);
     if (result) {
       accessToken = result.newAccessToken!;
-      await saveTokensToDB(loja.id, result);
+      await saveTokensToDB(loja.id, userId, result);
     }
   }
 
@@ -264,18 +253,25 @@ export async function getMLLojaAtiva(userId: string): Promise<{
  * para a mais recente, o que quebraria o contrato "job por loja_id
  * específico" quando o usuário tem mais de uma loja ML. Mesma lógica de
  * refresh de token de getMLLojaAtiva, sem o filtro "mais recente ativa".
+ *
+ * ── PR #1: `userId` passou a ser OBRIGATÓRIO ────────────────────────
+ * Esta função consultava `lojas` SÓ por `id` e devolvia token — o que a
+ * tornava uma capability cross-tenant cuja segurança dependia
+ * inteiramente da disciplina de quem chamava. Agora o par entra na
+ * query: par coerente devolve credencial, par incoerente devolve `null`.
+ * O `userId` não precisa vir provado — ele RESTRINGE a consulta, e é
+ * isso que faz um job forjado em `sync_jobs` falhar fechado.
+ *
+ * O critério de SELEÇÃO da loja não mudou: continua sendo "exatamente
+ * esta loja", nunca "a mais recente".
  */
-export async function getMLLojaById(lojaId: string): Promise<{
+export async function getMLLojaById(lojaId: string, userId: string): Promise<{
   lojaId:      string;
   accessToken: string;
   sellerId:    string;
   nickname:    string;
 } | null> {
-  const { data: loja } = await supabase
-    .from("lojas")
-    .select("id, seller_id, nickname, access_token, refresh_token, token_expires_at")
-    .eq("id", lojaId)
-    .maybeSingle();
+  const { linha: loja } = await lerCredencialMLPorLojaEDono(lojaId, userId);
 
   if (!loja || !loja.access_token) return null;
 
@@ -287,7 +283,7 @@ export async function getMLLojaById(lojaId: string): Promise<{
     const result = await refreshMLToken(loja.refresh_token);
     if (result) {
       accessToken = result.newAccessToken!;
-      await saveTokensToDB(loja.id, result);
+      await saveTokensToDB(loja.id, userId, result);
     }
   }
 

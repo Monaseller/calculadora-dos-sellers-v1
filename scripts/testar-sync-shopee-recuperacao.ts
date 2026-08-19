@@ -15,6 +15,7 @@
 // PRIMEIRA linha de import, obrigatoriamente: lib/sync-shopee puxa
 // lib/shopee-auth, que constroi o cliente Supabase no carregamento do modulo.
 // Nenhum teste aqui faz IO — o consultor de banco e injetado.
+import "./_server-only-inerte";
 import "./_env-inerte";
 import {
   separarCompleted,

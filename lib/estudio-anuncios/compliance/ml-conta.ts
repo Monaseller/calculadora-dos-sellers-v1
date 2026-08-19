@@ -94,7 +94,10 @@ export async function carregarContaML(
   if (loja.ativo !== true) return null;
 
   // Só aqui o token é pedido — e `getMLLojaById` cuida do refresh.
-  const comToken = await getMLLojaById(params.lojaId);
+  // PR #1: `userId` repassado. As checagens acima continuam valendo; o
+  // par vai agora TAMBÉM para dentro da query da credencial, de modo que
+  // o isolamento deixa de depender só da disciplina deste chamador.
+  const comToken = await getMLLojaById(params.lojaId, params.userId);
   if (!comToken?.accessToken) return null;
 
   return {
