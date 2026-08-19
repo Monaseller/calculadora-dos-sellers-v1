@@ -144,9 +144,22 @@ t("16. pagina nunca recebe bloquear_api e API nunca recebe redirecionar", () => 
 console.log("\n[4. shopee/debug bloqueada]");
 
 t("17. GET /api/auth/shopee/debug sem cookie e bloqueada", () => {
-  // Rota devolve partner_id, tamanho da chave, fragmentos dela e
-  // assinaturas HMAC validas. Remocao definitiva em F0.d.
+  // A rota FOI REMOVIDA em SHOPEE-DEBUG1 (2026-08-19) — ver teste 19.
+  // Este assert permanece de proposito: se o caminho voltar a existir,
+  // ele tem de nascer bloqueado, nunca publico.
   assert(sem("/api/auth/shopee/debug") === "bloquear_api", "debug da Shopee continua publica");
+});
+
+t("19. o arquivo da rota shopee/debug nao existe mais", () => {
+  // Ela devolvia, a qualquer usuario autenticado: tamanho, 8 primeiros e
+  // 8 ultimos caracteres da SHOPEE_PARTNER_KEY (segredo GLOBAL), o
+  // baseString da assinatura, TRES assinaturas HMAC validas sobre ele e
+  // DUAS URLs de autorizacao Shopee ja assinadas e prontas para uso.
+  // Autenticacao reduzia a superficie; nao tornava aceitavel.
+  assert(
+    !fs.existsSync(path.join(process.cwd(), "app", "api", "auth", "shopee", "debug", "route.ts")),
+    "app/api/auth/shopee/debug/route.ts voltou a existir — ela expunha material derivado da partner_key"
+  );
 });
 
 t("18. shopee/debug nao consta em nenhuma das listas de excecao", () => {

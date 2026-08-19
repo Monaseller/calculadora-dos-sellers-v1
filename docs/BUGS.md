@@ -369,3 +369,26 @@ Detalhe original da investigação (mantido para histórico):
 O fluxo `auth_partner` não envia `state`, e o callback não valida nenhum. Sem isso, um atacante pode induzir um usuário autenticado a visitar o callback com `code`/`shop_id` da conta **dele**, associando a loja do atacante à conta da vítima — que passaria a ver e sincronizar pedidos alheios. O Modelo A **amplia** esse impacto, e nenhum modelo de ownership o resolve: só `state` resolve.
 
 **Não corrigido na PR #2b-1 por decisão explícita:** exige comprovar que a Shopee preserva parâmetros extras no `redirect` do `auth_partner`, o que não está documentado no repositório. Introduzir uma suposição de protocolo não verificada dentro de uma correção de bug arriscaria quebrar o único fluxo de conexão existente. **PKCE não se aplica** — o fluxo é um redirect assinado por parceiro, não *authorization code* OAuth2; não há `code_challenge` em nenhum ponto.
+
+## ✅ SHOPEE-DEBUG1 — rota de diagnóstico expunha material derivado da `partner_key` (corrigido 2026-08-19)
+
+**Rota removida:** `app/api/auth/shopee/debug/route.ts`.
+
+**Não possuía consumidor legítimo.** Zero referências em frontend, script ou código de produção. As únicas menções estavam em `scripts/testar-middleware.ts`, que assertava o bloqueio da rota — não a consumia. A remoção já constava como planejada no comentário do teste 17 ("Remocao definitiva em F0.d").
+
+**O que devolvia em JSON, a qualquer usuário autenticado:**
+- `partnerKeyLength` — comprimento da `SHOPEE_PARTNER_KEY`, que é **segredo global da aplicação**, não por loja;
+- `partnerKeyStart` e `partnerKeyEnd` — os 8 primeiros e os 8 últimos caracteres da chave;
+- `baseString` da assinatura;
+- **três HMACs válidos** calculados com a chave real sobre esse baseString;
+- **duas URLs de autorização Shopee já assinadas** (`url_sign1`, `url_sign3`).
+
+Os pares (baseString, HMAC) funcionam como oráculo para verificação offline de uma chave adivinhada, e o espaço de busca já vinha reduzido pelo comprimento e pelos 16 caracteres expostos.
+
+**Sobre o `redirect` — hipótese condicional, não comprovada.** A implementação local calcula a assinatura sobre `partner_id + path + timestamp`, e o `redirect` não entra nessa baseString local. Isso levanta a hipótese de que uma URL assinada exposta pudesse ter o `redirect` alterado. **Nada disso foi comprovado.** Depende da política server-side da Shopee — se aceita `redirect` arbitrário, se há whitelist ou correspondência exata, e se a assinatura seguiria válida após a troca. A documentação oficial não esteve acessível durante a auditoria. Classificado como **vetor potencial condicionado à política de validação de `redirect` da Shopee**, mesma família de evidência pendente do `SHOPEE-OAUTH2`.
+
+**Correção:** remoção completa da rota. Uma versão sanitizada não teria conteúdo — tudo que ela produzia era material derivado do segredo. Exigir sessão reduzia a superfície, mas não tornava aceitável expor esse material.
+
+**Regressão coberta:** `scripts/testar-middleware.ts`, teste **19**, falha se o arquivo voltar a existir. Os testes 17 e 18 foram mantidos: se o caminho reaparecer, tem de nascer bloqueado e fora de qualquer lista de exceção.
+
+**Status:** corrigido. Severidade e decisão de remover **não dependem** da hipótese do `redirect`.

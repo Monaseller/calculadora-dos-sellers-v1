@@ -101,3 +101,33 @@ Cenario hibrido, camada grafica (@vercel/og), regeneracao individual e score vis
 
 ### Proxima etapa
 **PR #2b** (restante): migrar os tres bypasses remanescentes para a capability. Depois, **PR #2c** — reduzir privilegio de `anon` em `lojas`.
+
+---
+
+## CDS — SHOPEE-DEBUG1: rota de diagnostico removida — 2026-08-19
+
+**IMPLEMENTADA, NAO COMMITADA.** Nenhuma alteracao de banco.
+
+### O que a rota expunha
+`app/api/auth/shopee/debug/route.ts` devolvia, em JSON, **a qualquer usuario autenticado**:
+- `partnerKeyLength`, `partnerKeyStart` (8 primeiros) e `partnerKeyEnd` (8 ultimos) da `SHOPEE_PARTNER_KEY` — **segredo GLOBAL da aplicacao**, nao por loja;
+- `baseString` da assinatura;
+- **tres assinaturas HMAC validas** sobre esse baseString (`sign_key_as_string`, `sign_no_shpk_string`, `sign_no_shpk_hex_decoded`);
+- **duas URLs de autorizacao Shopee ja assinadas e prontas para uso** (`url_sign1`, `url_sign3`).
+
+Os pares (baseString, HMAC) servem de oraculo para verificacao offline de chave adivinhada — combinados com o comprimento e os 16 caracteres conhecidos.
+
+**Vetor adicional POTENCIAL, nao comprovado.** A implementacao local calcula a assinatura sobre `partner_id + path + timestamp` (`app/api/auth/shopee/route.ts:22`), e a `redirect` **nao entra nessa baseString local**. Isso levanta a hipotese de que uma URL assinada exposta pudesse ter o `redirect` trocado. **Nao esta comprovado** — depende inteiramente da politica server-side da Shopee: se ela aceita `redirect` arbitrario, se ha whitelist/matching exato, e se a assinatura permaneceria valida apos a troca. Nenhum desses pontos foi verificado; a documentacao oficial (`open.shopee.com`) nao esteve acessivel na auditoria. Fica classificado como **vetor potencial condicionado a politica de validacao de redirect da Shopee**, na mesma familia de evidencia pendente do `SHOPEE-OAUTH2`.
+
+A severidade e a decisao de remover a rota **nao dependem** dessa hipotese: a exposicao de fragmentos da chave, do baseString e de HMACs validos ja basta.
+
+### Decisao
+**Rota REMOVIDA integralmente.** Nenhum consumidor legitimo: zero referencias em frontend, script ou codigo de producao. A remocao ja estava planejada pelo proprio projeto — o teste 17 de `testar-middleware.ts` registrava "Remocao definitiva em F0.d".
+
+Exigir sessao **nao** era solucao: reduzia a superficie, nao tornava aceitavel expor material derivado de segredo global.
+
+### Guarda de regressao
+`scripts/testar-middleware.ts` ganhou o teste **19**, que falha se o arquivo voltar a existir — mesmo padrao do assert "lib/session.ts nao existe mais" em `testar-autenticacao.ts`. Os testes 17 e 18 foram **mantidos** de proposito: se o caminho reaparecer, tem de nascer bloqueado.
+
+### NAO alterado nesta tarefa
+Callback OAuth, fluxo de conexao, `SHOPEE-OAUTH2`, banco, credenciais.
