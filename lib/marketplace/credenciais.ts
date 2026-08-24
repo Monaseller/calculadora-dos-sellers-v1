@@ -767,6 +767,129 @@ export async function registrarLojaShopeeOAuth(
   return atualizar(relido.ids[0]);
 }
 
+// ─── Cursor de cobertura do sync Shopee — TIMEOUT1a ───────────────────
+//
+// `lojas.shopee_sincronizado_ate` responde a UMA pergunta: ate que
+// instante o sync desta loja ja cobriu com sucesso. Ele nao e derivavel
+// de `pedidos.synced_at` — sync com zero pedidos nao grava linha alguma,
+// e sync parcial gravaria as linhas que conseguiu, fazendo
+// `MAX(synced_at)` avancar sobre periodo que ficou de fora.
+//
+// O acesso vive aqui, e nao no motor de sync, pela mesma razao que as
+// credenciais vivem: toda leitura e toda escrita em `lojas` passam por
+// um par (id, user_id) explicito, e nenhuma rota monta essa query por
+// conta propria.
+
+/** Nome da coluna, num lugar so — a suite trava o valor. */
+const COLUNA_CURSOR_SHOPEE = "shopee_sincronizado_ate";
+
+export interface ResultadoCursorShopee {
+  /** ISO-8601, ou `null` para "nunca completou um sync" (bootstrap). */
+  cursor: string | null;
+  /** Codigo estavel. `null` em sucesso — inclusive quando `cursor` e null. */
+  erro: string | null;
+}
+
+export interface ResultadoAvancoCursor {
+  /**
+   * `true` = esta execucao moveu o cursor.
+   *
+   * `false` COM `erro: null` NAO e falha: significa que o cursor ja
+   * estava igual ou adiante, tipicamente porque outra execucao
+   * concorrente terminou depois mas cobriu mais. E o desfecho saudavel
+   * do compare-and-swap, e o chamador nao deve trata-lo como problema.
+   */
+  avancou: boolean;
+  erro: string | null;
+}
+
+/**
+ * Le o cursor de cobertura de UMA loja Shopee do dono informado.
+ *
+ * Nao distingue "loja inexistente" de "loja sem cursor": os dois casos
+ * devolvem `cursor: null`, e os dois levam ao mesmo comportamento
+ * (bootstrap). O sync ja resolveu e validou a loja antes de chegar aqui
+ * — mas a consulta continua tenant-aware de qualquer forma, porque a
+ * invariante do modulo e essa, e nao "confie em quem chamou".
+ *
+ * Erro de persistencia devolve codigo estavel e `cursor: null`. O texto
+ * do Postgres nao sai daqui: ele nomeia esquema, tabela e as vezes
+ * detalhe de conexao. O log e linha ESTATICA, sem `lojaId` nem `userId`
+ * — identificam tenant sem acrescentar nada ao diagnostico.
+ */
+export async function lerCursorSyncShopee(
+  lojaId: string,
+  userId: string
+): Promise<ResultadoCursorShopee> {
+  if (!lojaId || !userId) return { cursor: null, erro: null };
+
+  const { data, error } = await aplicarFiltros(
+    getSupabaseServidor().from("lojas").select(COLUNA_CURSOR_SHOPEE),
+    { ...filtrosGravacaoPorLojaEDono(lojaId, userId), marketplace: MARKETPLACE_SHOPEE }
+  ).maybeSingle();
+
+  if (error) {
+    console.error("[marketplace/credenciais] falha ao ler cursor de sync Shopee");
+    return { cursor: null, erro: "erro_leitura_cursor_shopee" };
+  }
+
+  const linha = data as Record<string, unknown> | null;
+  const valor = linha?.[COLUNA_CURSOR_SHOPEE];
+  return { cursor: typeof valor === "string" ? valor : null, erro: null };
+}
+
+/**
+ * Avanca o cursor — compare-and-swap, monotonico.
+ *
+ * ── Por que a condicao vai no UPDATE, e nao em JavaScript ───────────
+ * Ler o cursor, comparar em memoria e gravar cria um TOCTOU classico:
+ *
+ *     A comeca (cobertura ate 15:00)   B comeca (cobertura ate 15:05)
+ *     B termina, grava 15:05
+ *     A termina, leu "14:00" la atras, grava 15:00   ← REGRESSAO
+ *
+ * O cursor teria voltado no tempo, e a execucao seguinte re-listaria um
+ * periodo ja coberto. Com a condicao dentro da instrucao, o UPDATE de A
+ * simplesmente nao encontra linha — o Postgres avalia o predicado sobre
+ * a linha ja travada pela escrita de B.
+ *
+ * O `.or()` produz `WHERE (col IS NULL OR col < X)` combinado por AND
+ * com os `.eq()` de tenant. `coberturaAte` vem de `toISOString()`, que
+ * sempre termina em `Z`: sem virgula (que separaria os termos do `or`)
+ * e sem `+` (que a query string interpretaria como espaco).
+ *
+ * ── Quem garante que so sync COMPLETO chega aqui ────────────────────
+ * Nao esta funcao. Ela e monotonicidade e nada mais. A decisao de
+ * completude e de `syncCobriuJanelaCompletamente()`, no motor de sync —
+ * separada de proposito, para que cada uma seja testavel sozinha.
+ */
+export async function avancarCursorSyncShopee(
+  lojaId: string,
+  userId: string,
+  coberturaAte: Date
+): Promise<ResultadoAvancoCursor> {
+  if (!lojaId || !userId) return { avancou: false, erro: null };
+
+  const alvo = coberturaAte.toISOString();
+
+  const { data, error } = await aplicarFiltros(
+    getSupabaseServidor()
+      .from("lojas")
+      .update({ [COLUNA_CURSOR_SHOPEE]: alvo }),
+    { ...filtrosGravacaoPorLojaEDono(lojaId, userId), marketplace: MARKETPLACE_SHOPEE }
+  )
+    .or(`${COLUNA_CURSOR_SHOPEE}.is.null,${COLUNA_CURSOR_SHOPEE}.lt.${alvo}`)
+    .select("id");
+
+  if (error) {
+    console.error("[marketplace/credenciais] falha ao avancar cursor de sync Shopee");
+    return { avancou: false, erro: "erro_avanco_cursor_shopee" };
+  }
+
+  // Zero linhas = o cursor ja estava igual ou adiante. Sucesso.
+  return { avancou: Array.isArray(data) && data.length > 0, erro: null };
+}
+
 /**
  * Grava credencial Shopee renovada.
  *

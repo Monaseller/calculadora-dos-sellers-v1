@@ -28,6 +28,14 @@
  *   Status "unknown" não entra em faturamento nem contagem de pedidos.
  */
 import { createClient } from "@supabase/supabase-js";
+import {
+  calcularJanelaIncremental,
+  fatiarJanelaEmChunks,
+  syncCobriuJanelaCompletamente,
+  type JanelaEpoch,
+  type OpcoesSyncShopee,
+} from "./sync-shopee-janela";
+import { lerCursorSyncShopee, avancarCursorSyncShopee } from "./marketplace/credenciais";
 import { shopeeGet } from "@/lib/shopee-api";
 import { obterFaixaShopee, TAXA_CAMPANHA_SHOPEE } from "@/lib/comissoes-shopee";
 import { getShopeeLojaAtiva } from "@/lib/shopee-auth";
@@ -313,13 +321,18 @@ export function contarDiasNoIntervalo(dateFrom: string, dateTo: string): number 
  * chama, não desta função).
  */
 export async function listarOrderSnsDaJanela(
-  ctx: ContextoListagemShopee, janelaFrom: string, janelaTo: string
+  ctx: ContextoListagemShopee, janelaFrom: string, janelaTo: string,
+  // TIMEOUT1a — quando presente, a janela vem em epoch ABSOLUTO e as duas
+  // datas acima sao ignoradas para efeito de `time_from`/`time_to`. E como
+  // o modo incremental pede um intervalo que nao comeca a meia-noite.
+  // Ausente = caminho historico, byte a byte.
+  epoch?: JanelaEpoch
 ): Promise<ListagemResultado> {
   const inicioMs = Date.now();
   let retries = 0;
   try {
-    const chunkFrom = Math.floor(new Date(`${janelaFrom}T00:00:00-03:00`).getTime() / 1000);
-    const chunkTo   = Math.floor(new Date(`${janelaTo}T23:59:59-03:00`).getTime() / 1000);
+    const chunkFrom = epoch ? epoch.de  : Math.floor(new Date(`${janelaFrom}T00:00:00-03:00`).getTime() / 1000);
+    const chunkTo   = epoch ? epoch.ate : Math.floor(new Date(`${janelaTo}T23:59:59-03:00`).getTime() / 1000);
     let cursor = "";
     const orderSns: string[] = [];
     const completedSns: string[] = [];
@@ -854,6 +867,28 @@ export async function syncShopeeForUser(
   return result.inserted;
 }
 
+/**
+ * Entrada publica do sync Shopee. TIMEOUT1a acrescentou o parametro
+ * `opcoes` — e SO ele.
+ *
+ * ── Modo "intervalo" (default, e o que toda producao usa hoje) ──────
+ * Delegacao direta, sem ler cursor, sem grava-lo, sem consulta extra.
+ * O caminho e o mesmo de antes desta PR; nenhum chamador atual passa
+ * `opcoes`, entao nenhum comportamento de producao muda.
+ *
+ * ── Modo "incremental" (implementado, NAO ativado) ──────────────────
+ * Le o cursor de cobertura da loja, lista a partir dele em vez de a
+ * partir da meia-noite, e so entao avanca o cursor — se a execucao
+ * cobriu a janela inteira.
+ *
+ * `dateFrom`/`dateTo` continuam obrigatorios mesmo no incremental, e
+ * NAO sao redundantes: eles nao definem o que e listado, definem o
+ * corte por data de pagamento em `montarLinhasDoPedido`
+ * (`dataBrt < dateFrom || dataBrt > dateTo`). Sao dimensoes distintas —
+ * a janela diz "o que mudou nesse periodo", o corte diz "de que dias
+ * aceitamos gravar". O incremental mexe na primeira e deixa a segunda
+ * exatamente como esta, para nao alterar semantica financeira.
+ */
 export async function syncShopeeForUserV2(
   userId:      string,
   dateFrom:    string,
@@ -862,7 +897,81 @@ export async function syncShopeeForUserV2(
   lojaOverride?: {
     lojaId: string; partnerId: string; partnerKey: string;
     accessToken: string; shopId: number; nickname: string;
+  },
+  opcoes?: OpcoesSyncShopee
+): Promise<SyncShopeeResult> {
+  if ((opcoes?.modo ?? "intervalo") === "intervalo") {
+    return executarSyncShopee(userId, dateFrom, dateTo, noBuffer, lojaOverride);
   }
+
+  // ── Modo incremental ───────────────────────────────────────────────
+  // A loja e resolvida AQUI e repassada, para nao consultar duas vezes.
+  const loja = lojaOverride ?? await getShopeeLojaAtiva(userId);
+  if (!loja) return RESULTADO_VAZIO();
+
+  // Congelado UMA vez, antes de qualquer chamada a Shopee. Tudo o que
+  // mudar depois deste instante fica, por construcao, para a proxima
+  // rodada — que e o que torna a cobertura demonstravel.
+  const coberturaAte = new Date();
+
+  const { cursor, erro: erroCursor } = await lerCursorSyncShopee(loja.lojaId, userId);
+
+  // Falha de leitura NAO vira bootstrap silencioso: bootstrap re-lista o
+  // dia inteiro, mascarando o problema e pagando o custo que o
+  // incremental existe para evitar. Falhou, para.
+  if (erroCursor) {
+    console.error("[DIAG-SYNC-SHOPEE] incremental_cursor_indisponivel");
+    return { ...RESULTADO_VAZIO(), syncIncompleto: true, janelaFalhou: "hoje", motivoFalha: erroCursor };
+  }
+
+  const janela = calcularJanelaIncremental(cursor, coberturaAte);
+  // Sem cursor = bootstrap: usa a janela historica (ontem+hoje) desta
+  // vez. Se ela completar, o cursor passa a existir e a execucao
+  // SEGUINTE ja e incremental de verdade.
+  const chunks = janela ? fatiarJanelaEmChunks(janela) : undefined;
+
+  const resultado = await executarSyncShopee(userId, dateFrom, dateTo, noBuffer, loja, chunks);
+
+  if (syncCobriuJanelaCompletamente(resultado)) {
+    const { avancou, erro } = await avancarCursorSyncShopee(loja.lojaId, userId, coberturaAte);
+    // `avancou: false` sem erro e saudavel — outro sync ja cobriu mais.
+    console.log("[DIAG-SYNC-SHOPEE] incremental_cursor", {
+      tinhaCursor: !!cursor, chunks: chunks?.length ?? 0, avancou, erro,
+    });
+  } else {
+    console.warn("[DIAG-SYNC-SHOPEE] incremental_cursor_nao_avancou_sync_incompleto");
+  }
+
+  return resultado;
+}
+
+/** Resultado neutro. Extraido porque tres caminhos devolvem o mesmo. */
+function RESULTADO_VAZIO(): SyncShopeeResult {
+  return {
+    found: 0, inserted: 0, upsertErrors: 0,
+    resumoAtualizado: false, resumoPendente: false,
+    diasAfetados: 0, motivoResumoPendente: null,
+  };
+}
+
+/**
+ * Motor do sync. Era o corpo de `syncShopeeForUserV2` antes de
+ * TIMEOUT1a; segue identico, exceto pelo parametro
+ * `chunksIncrementais` e pelo ramo de listagem que ele habilita.
+ *
+ * Nao sabe o que e cursor, e isso e proposital: quem decide cobertura e
+ * o chamador, olhando o resultado. Este motor so lista e grava.
+ */
+async function executarSyncShopee(
+  userId:      string,
+  dateFrom:    string,
+  dateTo:      string,
+  noBuffer     = false,
+  lojaOverride?: {
+    lojaId: string; partnerId: string; partnerKey: string;
+    accessToken: string; shopId: number; nickname: string;
+  },
+  chunksIncrementais?: JanelaEpoch[]
 ): Promise<SyncShopeeResult> {
   const loja = lojaOverride ?? await getShopeeLojaAtiva(userId);
   if (!loja) return { found: 0, inserted: 0, upsertErrors: 0, resumoAtualizado: false, resumoPendente: false, diasAfetados: 0, motivoResumoPendente: null };
@@ -903,7 +1012,54 @@ export async function syncShopeeForUserV2(
   const _etapa1InicioMs = Date.now();
   const diasNoIntervalo = contarDiasNoIntervalo(dateFrom, dateTo);
 
-  if (diasNoIntervalo === 2) {
+  if (chunksIncrementais) {
+    // ── TIMEOUT1a — listagem incremental ────────────────────────────
+    // Janela absoluta vinda do cursor, ja fatiada em pedacos que cabem
+    // no limite da API. No caso normal e UM chunk de poucos minutos; a
+    // pluralidade so aparece quando a loja ficou dias sem sincronizar.
+    //
+    // Sequencial de proposito: os chunks sao contiguos no tempo e o
+    // caso comum tem tamanho 1. Paralelizar aqui otimizaria o cenario
+    // de backlog — que e raro — as custas de multiplicar a pressao
+    // sobre o rate limit da Shopee justamente quando ela ja esta sendo
+    // mais exigida.
+    const ctxListagem: ContextoListagemShopee = {
+      partnerId: partner_id, partnerKey: partner_key, accessToken: access_token, shopId,
+      timeRangeField, filtrarCompleted,
+    };
+
+    for (const chunk of chunksIncrementais) {
+      const res = await listarOrderSnsDaJanela(ctxListagem, dateFrom, dateTo, chunk);
+      console.log("[DIAG-SYNC-SHOPEE] etapa1_chunk_incremental", {
+        paginas: res.paginas, tempoMs: res.tempoMs, retries: res.retries,
+        pedidosEncontrados: res.orderSns.length, erro: res.erro,
+      });
+
+      if (res.erro) {
+        // Mesma regra do caminho de 2 janelas: um pedaco que falha torna
+        // o sync inteiro incompleto. O cursor NAO avanca, e a proxima
+        // execucao reprocessa o periodo do zero — que e seguro, porque
+        // o upsert e idempotente.
+        console.error("[DIAG-SYNC-SHOPEE] etapa1_abortando_sync_incompleto", {
+          janelaFalhou: "incremental", motivoFalha: res.erro,
+        });
+        return {
+          ...RESULTADO_VAZIO(),
+          syncIncompleto: true, janelaFalhou: "hoje", motivoFalha: res.erro,
+        };
+      }
+
+      allOrderSns.push(...res.orderSns);
+      completedSegregados.push(...res.completedSns);
+      statusListadosTodos.push(...res.statusListados);
+      _paginasListagem += res.paginas;
+    }
+
+    // Chunks contiguos podem devolver o mesmo pedido na borda; o overlap
+    // garante inclusive que isso aconteca.
+    allOrderSns = Array.from(new Set(allOrderSns));
+    completedSegregados = Array.from(new Set(completedSegregados));
+  } else if (diasNoIntervalo === 2) {
     // Opção B (2026-07-30) — ver comentário completo acima de
     // ContextoListagemShopee. Só entra aqui quando o intervalo pedido é
     // EXATAMENTE 2 dias (sempre o caso do botão Sincronizar/forceSync).
@@ -1131,7 +1287,7 @@ export async function syncShopeeForUserV2(
     paginas: _paginasListagem,
     orderSnsEncontrados: found,
     recuperados: orderSnsRecuperados.size,
-    modo: diasNoIntervalo === 2 ? "paralelo_2_janelas" : "sequencial_legado",
+    modo: chunksIncrementais ? "incremental" : diasNoIntervalo === 2 ? "paralelo_2_janelas" : "sequencial_legado",
   });
   if (found === 0) return { found: 0, inserted: 0, upsertErrors: 0, resumoAtualizado: false, resumoPendente: false, diasAfetados: 0, motivoResumoPendente: null };
 

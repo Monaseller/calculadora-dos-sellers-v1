@@ -1,0 +1,87 @@
+-- ═══════════════════════════════════════════════════════════════════════
+-- SHOPEE-SYNC-TIMEOUT1a — cursor de COBERTURA do sync Shopee
+-- ═══════════════════════════════════════════════════════════════════════
+--
+-- ── O problema que esta coluna resolve ─────────────────────────────────
+-- A janela de listagem da Shopee nasce sempre da meia-noite:
+--
+--     `${chunk.from}T00:00:00-03:00`
+--
+-- Com `time_range_field = update_time`, isso significa que TODA execucao
+-- re-lista tudo o que mudou desde 00:00. As 03:00 sao ~1 pagina; as 17:00
+-- sao ~30. Foi o que estourou o limite de 60s do GET /api/shopee/vendas.
+--
+-- Aumentar a frequencia do cron NAO resolve: a janela nunca avanca, entao
+-- cada execucao continua pagando o dia inteiro. O que resolve e guardar
+-- ate QUE INSTANTE o sync ja cobriu, e comecar dali na proxima vez.
+--
+-- ── Por que NAO usar `pedidos.synced_at` ───────────────────────────────
+-- Foi a primeira hipotese, e ela e errada por tres motivos independentes,
+-- cada um suficiente para descarta-la:
+--
+--   1. `synced_at` recebe `new Date()` capturado no INICIO da montagem
+--      das linhas. Ele diz "quando gravei", nao "ate quando cobri".
+--
+--   2. Sync com ZERO pedidos nao grava linha nenhuma. Um sync completo
+--      que nao encontrou nada ficaria indistinguivel de um sync que
+--      nunca rodou — e o cursor jamais avancaria em loja parada.
+--
+--   3. Sync PARCIAL gravaria as linhas que conseguiu, com o mesmo
+--      timestamp. `MAX(synced_at)` avancaria como se tudo tivesse sido
+--      coberto, e o periodo faltante seria perdido em silencio.
+--
+-- Ainda: a correcao de status (etapa 1.6) atualiza `status` e
+-- `status_shopee_raw` e NAO toca `synced_at`.
+--
+-- O cursor precisa significar "esta execucao terminou com sucesso
+-- cobrindo ate T" — uma propriedade da EXECUCAO, nao dos dados que ela
+-- por acaso encontrou. Por isso ele mora aqui, e nao em `pedidos`.
+--
+-- ── Por que em `lojas`, e por loja ─────────────────────────────────────
+-- Duas lojas Shopee do mesmo dono tem ritmos independentes: cada uma tem
+-- credencial, `shop_id` e volume proprios, e `syncShopeeForUserV2` opera
+-- uma loja por vez (via `lojaOverride`). Um cursor por USUARIO misturaria
+-- lojas distintas — a mais lenta arrastaria a rapida para tras, ou a
+-- rapida faria a lenta pular periodo nao coberto.
+--
+-- ── Nullable, sem default, deliberadamente ─────────────────────────────
+-- NULL tem significado proprio: "esta loja nunca completou um sync
+-- incremental". E o sinal de BOOTSTRAP, e o codigo cai na janela atual
+-- (ontem+hoje) nesse caso. Um default (`now()`) seria um erro grave:
+-- toda loja existente passaria a afirmar cobertura que nunca teve, e o
+-- primeiro incremental pularia todo o periodo anterior.
+--
+-- ── Avanco monotonico ──────────────────────────────────────────────────
+-- A escrita e um compare-and-swap:
+--
+--     UPDATE lojas SET shopee_sincronizado_ate = :coberturaAte
+--      WHERE id = :lojaId AND user_id = :userId
+--        AND (shopee_sincronizado_ate IS NULL
+--             OR shopee_sincronizado_ate < :coberturaAte)
+--
+-- A condicao esta na propria instrucao, nao em JavaScript: duas execucoes
+-- concorrentes que terminem fora de ordem nao podem fazer o cursor
+-- REGREDIR — e regressao aqui significaria re-listar periodo ja coberto,
+-- ou pior, num desenho futuro, considerar coberto o que nao esta.
+-- Nenhuma linha afetada NAO e erro: e "outro sync ja avancou mais".
+--
+-- ── Rollout ────────────────────────────────────────────────────────────
+-- TIMEOUT1a (esta migration) apenas CRIA o estado e o codigo que sabe
+-- le-lo e avanca-lo. Nenhum chamador real passa a usar modo incremental
+-- nesta etapa: cron, GET e botao manual continuam em modo "intervalo",
+-- byte a byte como hoje. A coluna fica NULL em todas as lojas ate que
+-- TIMEOUT1b ative o incremental no cron.
+--
+-- Consequencia pratica: aplicar esta migration NAO muda comportamento
+-- nenhum. Ela e aditiva e inerte.
+-- ═══════════════════════════════════════════════════════════════════════
+
+ALTER TABLE public.lojas
+  ADD COLUMN IF NOT EXISTS shopee_sincronizado_ate timestamptz;
+
+-- ── Rollback (nao executar sem decisao explicita) ──────────────────────
+-- Perder esta coluna faz toda loja voltar ao estado de bootstrap. Nao ha
+-- perda de dado financeiro: o proximo sync re-lista ontem+hoje.
+--
+-- ALTER TABLE public.lojas
+--   DROP COLUMN shopee_sincronizado_ate;
