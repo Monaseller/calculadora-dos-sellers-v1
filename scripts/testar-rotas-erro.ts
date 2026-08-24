@@ -19,6 +19,10 @@
  *
  * Uso: npx tsx scripts/testar-rotas-erro.ts
  */
+// PERFIL-SENHA1a: `/api/perfil` passou a importar a capability, marcada
+// `server-only` — pacote que LANÇA fora da condição `react-server`.
+// Precisa vir antes do duplo de `require` abaixo, que encadeia sobre ele.
+import "./_server-only-inerte";
 import fs from "node:fs";
 import path from "node:path";
 import Module from "node:module";
@@ -34,6 +38,11 @@ function assert(c: boolean, m: string) { if (!c) throw new Error(m); }
 // propósito — nenhuma consulta real deve sair daqui.
 process.env.NEXT_PUBLIC_SUPABASE_URL ??= "https://placeholder-de-teste.invalid";
 process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ??= "chave-de-teste-invalida";
+// PERFIL-SENHA1a: `/api/perfil` lê pela capability, e
+// `getSupabaseServidor()` é fail-closed — sem esta variável ele LANÇA, o
+// `catch` da rota converte em 500 e os testes de 200 quebram. Valor
+// inválido de propósito: `createClient` está interceptado pelo duplo.
+process.env.SUPABASE_SERVICE_ROLE_KEY ??= "chave-de-teste-invalida";
 
 /** Resultado que o duplo do Supabase vai devolver na próxima consulta. */
 let proximaResposta: { data: unknown; error: { message: string } | null } | (() => never) = { data: [], error: null };

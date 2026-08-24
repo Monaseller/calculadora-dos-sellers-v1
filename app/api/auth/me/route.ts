@@ -1,11 +1,10 @@
+/**
+ * PERFIL-SENHA1a: leitura migrada para a capability server-only.
+ * Contrato HTTP e campos devolvidos permanecem idênticos.
+ */
 import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
 import { autenticarRequisicao } from "@/lib/autenticacao";
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+import { lerPerfilDaSessao } from "@/lib/perfil/credenciais";
 
 export async function GET(request: NextRequest) {
   const auth = await autenticarRequisicao(request);
@@ -13,11 +12,7 @@ export async function GET(request: NextRequest) {
   if (!userId) return NextResponse.json({ userId: null }, { status: 401 });
 
   // Confirma que o UUID existe no banco
-  const { data } = await supabase
-    .from("perfil")
-    .select("user_uuid, nome_completo, email")
-    .eq("user_uuid", userId)
-    .single();
+  const { perfil: data } = await lerPerfilDaSessao(userId);
 
   if (!data) return NextResponse.json({ userId: null }, { status: 401 });
 

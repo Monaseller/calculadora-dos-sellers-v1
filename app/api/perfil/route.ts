@@ -27,13 +27,13 @@
  * tabela, coluna e detalhe de esquema. Fica no log do servidor.
  */
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
 import { autenticarRequisicao } from "@/lib/autenticacao";
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+import {
+  lerPerfilDoDono,
+  emailJaCadastrado,
+  criarPerfil,
+  atualizarPerfilDoDono,
+} from "@/lib/perfil/credenciais";
 
 export async function GET(request: Request) {
   const auth = await autenticarRequisicao(request);
@@ -41,14 +41,10 @@ export async function GET(request: Request) {
   if (!userId) return NextResponse.json({ erro: "Não autenticado." }, { status: 401 });
 
   try {
-    const { data, error } = await supabase
-      .from("perfil")
-      .select("id, nome_completo, usuario, email, documento, email_verificado, user_uuid")
-      .eq("user_uuid", userId)
-      .maybeSingle();
+    const { perfil: data, erro } = await lerPerfilDoDono(userId);
 
-    if (error) {
-      console.error("[GET /api/perfil] falha ao consultar perfil:", error.message);
+    if (erro) {
+      // O texto do Postgres fica na capability; aqui só o código estável.
       return NextResponse.json({ erro: "Não foi possível carregar o perfil." }, { status: 503 });
     }
 
@@ -66,13 +62,9 @@ export async function POST(request: Request) {
 
   if (isNovaConta) {
     // Verifica se email já existe
-    const { data: existente } = await supabase
-      .from("perfil")
-      .select("id")
-      .eq("email", body.email)
-      .single();
+    const { existe } = await emailJaCadastrado(body.email);
 
-    if (existente) {
+    if (existe) {
       return NextResponse.json({ erro: true, mensagem: "Este email já está cadastrado." }, { status: 409 });
     }
 
@@ -80,21 +72,21 @@ export async function POST(request: Request) {
     const token    = crypto.randomUUID();
     const expiracao = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 
-    const { error } = await supabase.from("perfil").insert({
-      nome_completo:     body.nome_completo,
-      usuario:           body.usuario,
-      email:             body.email,
-      documento:         body.documento,
-      senha:             body.senha,
-      email_verificado:  false, // verificação via email obrigatória antes do primeiro acesso
-      token_verificacao: token,
-      token_expiracao:   expiracao,
-      user_uuid:         userUuid,
+    // `email_verificado: false` é fixado DENTRO da capability — não vem
+    // do corpo da requisição, e verificação por email segue obrigatória.
+    const { criado } = await criarPerfil({
+      nomeCompleto:     body.nome_completo,
+      usuario:          body.usuario,
+      email:            body.email,
+      documento:        body.documento,
+      senha:            body.senha,
+      tokenVerificacao: token,
+      tokenExpiracao:   expiracao,
+      userUuid,
     });
 
-    if (error) {
-      // Mensagem crua do Supabase fica no log, não na resposta.
-      console.error("[POST /api/perfil] falha ao criar conta:", error.message);
+    if (!criado) {
+      // Mensagem crua do Supabase fica no log da capability, não aqui.
       return NextResponse.json({ erro: true, mensagem: "Não foi possível criar a conta." }, { status: 500 });
     }
 
@@ -139,20 +131,18 @@ export async function POST(request: Request) {
     return NextResponse.json({ erro: true, mensagem: "Não autorizado." }, { status: 401 });
   }
 
-  const campos: Record<string, unknown> = {};
-  if (body.nome_completo !== undefined) campos.nome_completo = body.nome_completo;
-  if (body.usuario       !== undefined) campos.usuario       = body.usuario;
-  if (body.email         !== undefined) campos.email         = body.email;
-  if (body.documento     !== undefined) campos.documento     = body.documento;
-  if (body.senha         !== undefined) campos.senha         = body.senha;
+  // A capability recopia campo a campo de uma lista fechada e aplica
+  // `user_uuid` no filtro da própria escrita — com service_role, é o
+  // que impede alcançar o perfil de outro usuário.
+  const { atualizado } = await atualizarPerfilDoDono(userId, {
+    nome_completo: body.nome_completo,
+    usuario:       body.usuario,
+    email:         body.email,
+    documento:     body.documento,
+    senha:         body.senha,
+  });
 
-  const { error } = await supabase
-    .from("perfil")
-    .update(campos)
-    .eq("user_uuid", userId);
-
-  if (error) {
-    console.error("[POST /api/perfil] falha ao atualizar perfil:", error.message);
+  if (!atualizado) {
     return NextResponse.json({ erro: true, mensagem: "Não foi possível salvar o perfil." }, { status: 500 });
   }
 

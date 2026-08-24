@@ -1,0 +1,95 @@
+-- =====================================================================
+-- PERFIL-SENHA1a — `anon` perde TODO acesso a public.perfil
+-- =====================================================================
+--
+-- 1. OBJETIVO
+-- ---------------------------------------------------------------------
+-- Remover de `anon` os tres privilegios que ela tem hoje em
+-- `public.perfil`:
+--
+--     SELECT, INSERT, UPDATE
+--
+--
+-- 2. O QUE ESTAVA ABERTO — MEDIDO EM PRODUCAO
+-- ---------------------------------------------------------------------
+-- PRE-CHECK read-only (PostgreSQL 17.6), via has_table_privilege:
+--
+--   anon           SELECT=true  INSERT=true  UPDATE=true
+--                  DELETE=false TRUNCATE=false REFERENCES=false TRIGGER=false
+--   authenticated  todos false                            (SEC-2a)
+--   service_role   todos true
+--
+-- `public.perfil` NAO tem RLS — nenhuma tabela deste projeto tem. E a
+-- chave `anon` e publica por natureza: vai no bundle do navegador. Somados,
+-- os dois fatos significavam que qualquer visitante do site podia:
+--
+--   - LER a coluna `senha` de todos os usuarios (hoje em PLAINTEXT);
+--   - CRIAR perfis;
+--   - ALTERAR o perfil de qualquer pessoa.
+--
+-- Este e o defeito mais grave que restava no projeto.
+--
+--
+-- 3. POR QUE E SEGURO AGORA
+-- ---------------------------------------------------------------------
+-- As quatro rotas que tocavam `perfil` passaram a usar a capability
+-- server-only `lib/perfil/credenciais.ts`, que opera com service_role:
+--
+--   app/api/auth/login/route.ts            -> lerCredencialDeLogin,
+--                                             gravarUserUuid
+--   app/api/auth/me/route.ts               -> lerPerfilDaSessao
+--   app/api/auth/verificar-email/route.ts  -> lerPerfilPorTokenVerificacao,
+--                                             marcarEmailVerificado,
+--                                             lerPerfilPorEmailParaReenvio,
+--                                             gravarTokenVerificacao
+--   app/api/perfil/route.ts                -> lerPerfilDoDono,
+--                                             emailJaCadastrado,
+--                                             criarPerfil,
+--                                             atualizarPerfilDoDono
+--
+-- Verificado por varredura global de `app/` e `lib/`:
+--
+--     .from("perfil") fora da capability = 0
+--
+-- A guarda 41 de `scripts/testar-perfil-capability.ts` reprova qualquer
+-- ocorrencia nova. Diferente da guarda de `lojas`, aqui a regra e
+-- absoluta — nenhum acesso direto e legitimo — entao nao ha janela de
+-- distancia nem lista manual para dar ponto cego.
+--
+--
+-- 4. ESCOPO — E O QUE ESTA MIGRATION NAO FAZ
+-- ---------------------------------------------------------------------
+-- Esta e a PERFIL-SENHA1a: migracao de PRIVILEGIO. A senha continua
+-- PLAINTEXT no banco, e continua comparada por igualdade de string na
+-- rota de login. Isso e o defeito que a PERFIL-SENHA1b corrige, com
+-- `senha_hash`, Argon2id e migracao progressiva no login.
+--
+-- A ordem e deliberada: fechar a leitura publica primeiro. Hashear com
+-- a coluna ainda legivel por `anon` apenas trocaria "senha em claro" por
+-- "hash para quebrar offline a vontade".
+--
+-- NAO toca:
+--   - `authenticated` — a SEC-2a ja a zerou;
+--   - `service_role` — e quem executa as escritas pela capability;
+--   - ALTER DEFAULT PRIVILEGES — o escopo aqui e UMA tabela;
+--   - qualquer outra tabela;
+--   - RLS, policy, schema, indice, constraint.
+--
+--
+-- 5. IDEMPOTENCIA
+-- ---------------------------------------------------------------------
+-- `REVOKE` de privilegio ausente e no-op silencioso no PostgreSQL, nao
+-- erro. Reaplicar e seguro.
+--
+--
+-- 6. ROLLBACK (MANUAL — NAO EXECUTADO AQUI)
+-- ---------------------------------------------------------------------
+-- Se for preciso desfazer:
+--
+--     GRANT SELECT, INSERT, UPDATE ON TABLE public.perfil TO anon;
+--
+-- Isto e comentario, nao comando. Reverter reabre a leitura publica das
+-- senhas — so faca com decisao explicita.
+-- =====================================================================
+
+REVOKE SELECT, INSERT, UPDATE ON TABLE public.perfil FROM anon;

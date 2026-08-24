@@ -1,10 +1,19 @@
+/**
+ * PERFIL-SENHA1a: os quatro acessos a `perfil` saíram do cliente ANON e
+ * passaram pela capability server-only.
+ *
+ * Este fluxo NÃO tem sessão — o escopo vem do token de uso único que
+ * chega pelo link do email. Por isso as operações da capability aqui
+ * são as mais estreitas do módulo: nenhuma aceita escolher colunas.
+ * O contrato HTTP não mudou em nada.
+ */
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+import {
+  lerPerfilPorTokenVerificacao,
+  marcarEmailVerificado,
+  lerPerfilPorEmailParaReenvio,
+  gravarTokenVerificacao,
+} from "@/lib/perfil/credenciais";
 
 // GET /api/auth/verificar-email?token=xxx — confirma o token
 export async function GET(request: Request) {
@@ -15,11 +24,7 @@ export async function GET(request: Request) {
     return NextResponse.json({ erro: "Token inválido." }, { status: 400 });
   }
 
-  const { data: perfil } = await supabase
-    .from("perfil")
-    .select("id, token_verificacao, token_expiracao, email_verificado")
-    .eq("token_verificacao", token)
-    .single();
+  const { perfil } = await lerPerfilPorTokenVerificacao(token);
 
   if (!perfil) {
     return NextResponse.json({ erro: "Token inválido ou expirado." }, { status: 400 });
@@ -33,10 +38,7 @@ export async function GET(request: Request) {
     return NextResponse.json({ erro: "Token expirado. Solicite um novo link." }, { status: 400 });
   }
 
-  await supabase
-    .from("perfil")
-    .update({ email_verificado: true, token_verificacao: null, token_expiracao: null })
-    .eq("id", perfil.id);
+  await marcarEmailVerificado(perfil.id);
 
   return NextResponse.json({ ok: true });
 }
@@ -45,11 +47,7 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   const { email } = await request.json();
 
-  const { data: perfil } = await supabase
-    .from("perfil")
-    .select("id, email, email_verificado")
-    .eq("email", email)
-    .single();
+  const { perfil } = await lerPerfilPorEmailParaReenvio(email);
 
   if (!perfil) {
     return NextResponse.json({ erro: "Email não encontrado." }, { status: 404 });
@@ -62,10 +60,7 @@ export async function POST(request: Request) {
   const token    = crypto.randomUUID();
   const expiracao = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 
-  await supabase
-    .from("perfil")
-    .update({ token_verificacao: token, token_expiracao: expiracao })
-    .eq("id", perfil.id);
+  await gravarTokenVerificacao(perfil.id, token, expiracao);
 
   await enviarEmailVerificacao(email, token);
 
