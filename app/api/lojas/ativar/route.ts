@@ -1,11 +1,6 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
 import { autenticarRequisicao } from "@/lib/autenticacao";
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+import { lerLojaParaAtivacao } from "@/lib/marketplace/credenciais";
 
 export async function POST(request: Request) {
   const { loja_id } = await request.json();
@@ -13,12 +8,22 @@ export async function POST(request: Request) {
   const userId = auth.autenticado ? auth.uid : null;
   if (!userId) return NextResponse.json({ erro: true, mensagem: "Sessão inválida." }, { status: 401 });
 
-  const { data: loja } = await supabase
-    .from("lojas")
-    .select("*")
-    .eq("id", loja_id)
-    .eq("user_id", userId)
-    .single();
+  // A rota não monta query: a leitura privilegiada vive na capability
+  // server-only, com o filtro de dono (`id + user_id`) na própria
+  // consulta e projeção fechada — sem `refresh_token`, `partner_key`
+  // nem `token_expires_at`, que a rota nunca usou.
+  const { loja, erro } = await lerLojaParaAtivacao(loja_id, userId);
+
+  // Banco falhou é DIFERENTE de loja não encontrada. Antes os dois casos
+  // colapsavam em 404, e uma indisponibilidade se disfarçava de "não é
+  // sua". O código interno fica no log da capability; ao cliente vai uma
+  // mensagem estável, sem detalhe de esquema.
+  if (erro) {
+    return NextResponse.json(
+      { erro: true, mensagem: "Não foi possível ativar a loja agora." },
+      { status: 503 }
+    );
+  }
 
   if (!loja) return NextResponse.json({ erro: true, mensagem: "Loja não encontrada." }, { status: 404 });
 

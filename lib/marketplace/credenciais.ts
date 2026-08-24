@@ -288,6 +288,70 @@ export async function lerCredencialShopeeDoDono(
 }
 
 /**
+ * Leitura de loja para ativacao — PR #2b-3.
+ *
+ * ── Projecao minima, nao `*` ────────────────────────────────────────
+ * A rota pedia a linha INTEIRA e usava CINCO campos. A projecao aberta
+ * trazia junto `refresh_token`, `partner_key` e `token_expires_at` — as
+ * tres colunas mais sensiveis da tabela — para a memoria de uma rota
+ * que nunca as usou. A projecao aqui e literal e fechada.
+ *
+ * `access_token` PERMANECE na projecao: a rota o emite como cookie
+ * `ml_access_token`, do qual `/api/ml/item-thumbnails` e
+ * `/api/ml/vendas-hoje` dependem como fonte UNICA de credencial.
+ * Retirar daqui quebraria as duas. A aposentadoria desse cookie e
+ * frente propria.
+ *
+ * ── Por que `maybeSingle()` e nao `single()` ────────────────────────
+ * Detalhe que decide o contrato HTTP: `single()` trata "zero linhas"
+ * como ERRO (`PGRST116`). Como esta funcao agora distingue
+ * "nao encontrada" de "banco falhou", usar `single()` faria toda loja
+ * inexistente virar 503. `maybeSingle()` devolve `data: null` sem erro
+ * — que e exatamente a semantica de 404 que a rota precisa.
+ *
+ * ── O texto do Postgres nao sai daqui, nem para a rota nem para o log ─
+ * A rota recebe um CODIGO estavel. E o log e uma linha ESTATICA: o
+ * texto cru do Postgres nomeia tabela, coluna, esquema e as vezes
+ * detalhe de conexao ou configuracao, e log de producao e superficie
+ * de leitura como qualquer outra. `lojaId` e `userId` tambem ficam de
+ * fora — identificam tenant sem acrescentar nada ao diagnostico.
+ * O que resta e a informacao util: ESTA consulta falhou.
+ */
+export interface LojaParaAtivacao {
+  id: string;
+  nome: string | null;
+  nickname: string | null;
+  marketplace: string;
+  access_token: string | null;
+}
+
+export interface ResultadoLojaParaAtivacao {
+  loja: LojaParaAtivacao | null;
+  erro: string | null;
+}
+
+export async function lerLojaParaAtivacao(
+  lojaId: string,
+  userId: string
+): Promise<ResultadoLojaParaAtivacao> {
+  if (!lojaId || !userId) return { loja: null, erro: null };
+
+  const { data, error } = await getSupabaseServidor()
+    .from("lojas")
+    .select("id, nome, nickname, marketplace, access_token")
+    .eq("id", lojaId)
+    .eq("user_id", String(userId))
+    .maybeSingle();
+
+  if (error) {
+    console.error("[credenciais] falha ao consultar loja para ativacao");
+    return { loja: null, erro: "erro_consulta_loja" };
+  }
+
+  return { loja: (data as LojaParaAtivacao | null) ?? null, erro: null };
+}
+
+/**
  * Desconexao de loja — PR #2b-2.
  *
  * ── Agnostica de marketplace, de proposito ──────────────────────────

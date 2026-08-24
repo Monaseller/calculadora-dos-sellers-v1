@@ -259,6 +259,9 @@ console.log("── 9 a 13. Superfície privilegiada ─────────
     // Entra neste registro para que uma regressão futura — voltar a
     // montar `.update()` em `lojas` na rota — quebre aqui.
     ["rota-desconectar", codigo("app/api/lojas/desconectar/route.ts")],
+    // PR #2b-3: a ativação passou a ler pela capability, com projeção
+    // mínima no lugar de `select("*")`.
+    ["rota-ativar", codigo("app/api/lojas/ativar/route.ts")],
   ] as const) {
     const temSelectDeCredencial = COLUNAS_SENSIVEIS.some((c) =>
       new RegExp(`\\.select\\([^)]*${c}`).test(src)
@@ -266,6 +269,11 @@ console.log("── 9 a 13. Superfície privilegiada ─────────
     ok(`47/${nome}: não monta .select() de coluna de credencial`, !temSelectDeCredencial);
     const temUpdateDeCredencial = /\.from\("lojas"\)[\s\S]{0,80}\.update\(/.test(src);
     ok(`48/${nome}: não monta .update() direto em lojas`, !temUpdateDeCredencial);
+    // O guard de COLUNAS_SENSIVEIS acima é cego a `select("*")`: o `*`
+    // traz `refresh_token` e `partner_key` sem citá-los pelo nome. Sem
+    // esta linha, o registro daria falsa sensação de cobertura.
+    const temSelectEstrela = /\.select\(\s*["'`]\s*\*\s*["'`]\s*\)/.test(src);
+    ok(`48b/${nome}: não usa select("*")`, !temSelectEstrela);
   }
   ok("49. shopee-auth não instancia mais createClient",
     !/createClient/.test(codigo("lib/shopee-auth.ts")));
