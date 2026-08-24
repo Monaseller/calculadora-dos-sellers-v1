@@ -30,7 +30,7 @@
  */
 import "./_server-only-inerte";
 import "./_env-inerte";
-import { readFileSync } from "fs";
+import { readFileSync, readdirSync } from "fs";
 import { join } from "path";
 
 import {
@@ -403,6 +403,90 @@ console.log("── PR #2b-1: registrarLojaShopeeOAuth ────────�
     /Por que NAO usa upsert/.test(cred));
   ok("90. partner_key segue persistida temporariamente, com justificativa",
     /partner_key: dados\.partnerKey/.test(trecho) && /TEMPORARIAMENTE/.test(cred));
+}
+
+console.log("── PR #2c — escrita em `lojas` só existe na capability ────");
+{
+  // ── Por que esta guarda é GLOBAL, e não mais uma lista ────────────
+  // O inventário acima (47/48/48b/48c/48d) nomeia consumidores um a um:
+  // pega regressão em arquivo CONHECIDO, mas é cego a arquivo NOVO. Como
+  // a PR #2c revoga INSERT/UPDATE de `anon` no banco, a premissa passou
+  // a ser "nenhum código runtime escreve em lojas fora da capability" —
+  // e premissa de banco precisa de prova que não dependa de alguém
+  // lembrar de registrar o arquivo. Esta varre `app/` e `lib/` inteiros.
+  //
+  // `scripts/` fica FORA de propósito: suítes montam duplos em memória
+  // que imitam `.from("lojas").insert(...)`, e isso não é runtime.
+  const CAPABILITY_CANONICA = "lib/marketplace/credenciais.ts";
+
+  const arquivosRuntime = (dir: string): string[] => {
+    const saida: string[] = [];
+    for (const entrada of readdirSync(join(RAIZ, dir), { withFileTypes: true })) {
+      const rel = `${dir}/${entrada.name}`;
+      if (entrada.isDirectory()) saida.push(...arquivosRuntime(rel));
+      else if (/\.tsx?$/.test(entrada.name)) saida.push(rel);
+    }
+    return saida;
+  };
+
+  const alvos = [...arquivosRuntime("app"), ...arquivosRuntime("lib")]
+    .filter((rel) => rel !== CAPABILITY_CANONICA);
+
+  // `codigo()` remove comentários — prosa citando `.insert(` não conta.
+  const ESCRITAS = ["insert", "update", "upsert", "delete"] as const;
+  const infratores: string[] = [];
+  for (const rel of alvos) {
+    const src = codigo(rel);
+    if (!/\.from\("lojas"\)/.test(src)) continue;
+    for (const op of ESCRITAS) {
+      // Janela generosa: a cadeia pode quebrar linha entre `.from()` e a
+      // operação, como o próprio callback ML fazia antes da PR #2b-4.
+      if (new RegExp(`\\.from\\("lojas"\\)[\\s\\S]{0,200}\\.${op}\\(`).test(src)) {
+        infratores.push(`${rel} :: ${op}`);
+      }
+    }
+  }
+
+  ok(
+    `91. nenhuma escrita direta em lojas fora da capability` +
+      ` (varreu ${alvos.length} arquivos)` +
+      (infratores.length ? ` — INFRATORES: ${infratores.join(" | ")}` : ""),
+    infratores.length === 0
+  );
+
+  // A guarda só vale se o varredor de fato enxerga a tabela. Sem isto,
+  // um erro no filtro faria a asserção passar por não olhar nada.
+  const tocamLojas = alvos.filter((rel) => /\.from\("lojas"\)/.test(codigo(rel)));
+  ok("92. o varredor enxerga os leitores conhecidos de lojas",
+    tocamLojas.length >= 8);
+  ok("93. a capability canônica ficou fora da varredura",
+    !alvos.includes(CAPABILITY_CANONICA));
+}
+
+console.log("── PR #2c — conteúdo da migration ─────────────────────────");
+{
+  const MIGRATION = "supabase/migrations/20260907_sec2c_revogar_escrita_anon_lojas.sql";
+  const sql = fonte(MIGRATION);
+  // Só os comandos: tudo que não é linha de comentário `--`.
+  const comandos = sql
+    .split("\n")
+    .filter((l) => !/^\s*--/.test(l))
+    .join("\n");
+
+  ok("94. contém o REVOKE exato de INSERT e UPDATE",
+    /REVOKE\s+INSERT,\s*UPDATE\s+ON\s+TABLE\s+public\.lojas\s+FROM\s+anon;/i.test(comandos));
+  ok("95. NÃO revoga SELECT", !/REVOKE[\s\S]*\bSELECT\b/i.test(comandos));
+  ok("96. NÃO altera default privileges", !/ALTER\s+DEFAULT\s+PRIVILEGES/i.test(comandos));
+  ok("97. NÃO concede nada de volta", !/\bGRANT\b/i.test(comandos));
+  ok("98. NÃO toca authenticated", !/authenticated/i.test(comandos));
+  ok("99. NÃO toca outra tabela além de public.lojas",
+    (comandos.match(/ON\s+TABLE\s+([a-z_.]+)/gi) ?? [])
+      .every((m) => /public\.lojas/i.test(m)));
+  ok("100. é um único comando", comandos.split(";").filter((c) => c.trim()).length === 1);
+  // O rollback é documentação; se virasse comando, desfaria a própria PR.
+  ok("101. o rollback existe SOMENTE como comentário",
+    /GRANT INSERT, UPDATE ON TABLE public\.lojas TO anon;/.test(sql) &&
+    !/\bGRANT\b/i.test(comandos));
 }
 
 console.log("── Caller do Estúdio permanece tenant-aware ───────────────");

@@ -1,0 +1,110 @@
+-- =====================================================================
+-- SEC-2c (PR #2c) — `anon` perde ESCRITA em public.lojas
+-- =====================================================================
+--
+-- 1. OBJETIVO
+-- ---------------------------------------------------------------------
+-- Remover de `anon` os dois privilegios de escrita que restam na tabela
+-- `public.lojas`:
+--
+--     INSERT, UPDATE
+--
+-- SELECT PERMANECE. Esta migration nao o toca.
+--
+--
+-- 2. POR QUE ISTO E SEGURO AGORA — E NAO ERA ANTES
+-- ---------------------------------------------------------------------
+-- Ate a PR #2b-4, o codigo de producao escrevia em `lojas` com a chave
+-- ANON, em quatro lugares. As PRs #2b-1 a #2b-4 migraram todos eles:
+--
+--   #2b-1  callback OAuth Shopee    -> registrarLojaShopeeOAuth
+--   #2b-2  desconectar loja         -> desconectarLojaDoDono
+--   #2b-3  ativar loja (leitura)    -> lerLojaParaAtivacao
+--   #2b-4  OAuth Mercado Livre      -> lerLojaMLDoDonoParaReconexao,
+--                                      listarLojasMLDoDonoPorSeller,
+--                                      registrarCredencialMLOAuth
+--
+-- Hoje TODA escrita em `lojas` vive em `lib/marketplace/credenciais.ts`,
+-- modulo marcado `server-only` que usa `getSupabaseServidor()` —
+-- service_role. Verificado por varredura global de `app/` e `lib/`:
+--
+--     INSERT fora da capability = 0
+--     UPDATE fora da capability = 0
+--     UPSERT fora da capability = 0
+--     DELETE fora da capability = 0
+--
+-- A guarda 91 de `scripts/testar-credenciais-marketplace.ts` percorre
+-- os dois diretorios a cada execucao e quebra se um arquivo novo voltar
+-- a escrever direto. A revogacao aqui deixa de depender de disciplina:
+-- passa a ser negada pelo banco.
+--
+--
+-- 3. POR QUE `SELECT` FICA
+-- ---------------------------------------------------------------------
+-- Nove consumidores runtime ainda leem `lojas` com a chave anon:
+--
+--   app/api/admin/backfill-resumos-diarios/route.ts
+--   app/api/estudio-anuncios/projetos/[id]/marketplaces/[marketplace]/lojas/route.ts
+--   app/api/lojas/route.ts
+--   app/api/ml/vendas/route.ts
+--   app/api/sync/iniciar/route.ts
+--   app/api/sync/route.ts
+--   lib/ml-auth.ts
+--   lib/sync-ml.ts
+--   lib/estudio-anuncios/compliance/ml-conta.ts  (recebe o cliente anon)
+--
+-- Nenhum deles le coluna de credencial, mas todos dependem do SELECT de
+-- tabela. Reduzi-lo exige migrar cada um para a capability primeiro —
+-- frente propria, fora do escopo desta PR.
+--
+--
+-- 4. ESTADO REAL VERIFICADO EM PRODUCAO ANTES DESTA MIGRATION
+-- ---------------------------------------------------------------------
+-- PRE-CHECK read-only (PostgreSQL 17.6), via has_table_privilege:
+--
+--   anon           SELECT=true  INSERT=true  UPDATE=true
+--                  DELETE=false TRUNCATE=false REFERENCES=false TRIGGER=false
+--   authenticated  SELECT=false INSERT=false UPDATE=false   (SEC-2a)
+--   service_role   SELECT=true  INSERT=true  UPDATE=true
+--
+-- ACLs POR COLUNA: `pg_attribute.attacl` esta VAZIO para todas as
+-- colunas de `public.lojas`. Isto importa: no PostgreSQL, privilegio de
+-- tabela e privilegio de coluna sao independentes, e um REVOKE de tabela
+-- NAO subtrai grant de coluna. Como nao existe nenhum, o REVOKE abaixo e
+-- suficiente por si so.
+--
+-- (`information_schema.column_privileges` lista as 14 colunas para
+-- `anon`, mas aquilo e a PROJECAO do grant de tabela, nao grant de
+-- coluna — foi conferido no catalogo em vez de aceito pela aparencia.)
+--
+--
+-- 5. O QUE ESTA MIGRATION DELIBERADAMENTE NAO FAZ
+-- ---------------------------------------------------------------------
+--   - NAO revoga SELECT (ver item 3);
+--   - NAO altera ALTER DEFAULT PRIVILEGES — o escopo aqui e UMA tabela,
+--     e mexer nos defaults afetaria tabelas FUTURAS do schema;
+--   - NAO toca `authenticated` — a SEC-2a ja a zerou;
+--   - NAO toca nenhuma outra tabela;
+--   - NAO altera `service_role`, que continua com os sete privilegios e
+--     e quem executa as escritas pela capability;
+--   - NAO cria indice, constraint, RLS, policy nem funcao.
+--
+--
+-- 6. IDEMPOTENCIA
+-- ---------------------------------------------------------------------
+-- `REVOKE` de privilegio ausente e no-op silencioso no PostgreSQL, nao
+-- erro. Reaplicar esta migration e seguro e nao exige checar existencia
+-- do grant antes.
+--
+--
+-- 7. ROLLBACK (MANUAL — NAO EXECUTADO AQUI)
+-- ---------------------------------------------------------------------
+-- Se for preciso desfazer:
+--
+--     GRANT INSERT, UPDATE ON TABLE public.lojas TO anon;
+--
+-- Isto e comentario, nao comando. Reverter recria exatamente a
+-- superficie de escrita que esta PR fecha.
+-- =====================================================================
+
+REVOKE INSERT, UPDATE ON TABLE public.lojas FROM anon;
