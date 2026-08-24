@@ -5,7 +5,7 @@
  */
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { syncShopeeForUser } from "@/lib/sync-shopee";
+import { syncShopeeForUserV2 } from "@/lib/sync-shopee";
 import { syncMLForUser } from "@/lib/sync-ml";
 
 const supabase = createClient(
@@ -84,9 +84,25 @@ export async function GET(request: Request) {
 
     // Shopee e ML em paralelo por usuário
     await Promise.all([
+      // ── TIMEOUT1b — o cron passa a operar em modo INCREMENTAL ────────
+      // Antes: `syncShopeeForUser(userId, ontem, hoje)`. Aquele wrapper é
+      // um adaptador puro — duas linhas, `await` da V2 e `return
+      // result.inserted`. Não resolve loja, não altera `noBuffer`, não
+      // normaliza data, não trata erro. Os cinco primeiros argumentos
+      // abaixo são os MESMOS que ele repassava (`noBuffer` chegava
+      // `false` pelo default; aqui é explícito), então a única mudança
+      // de comportamento é o 6º argumento.
+      //
+      // Por que chamar a V2 direto em vez de dar `opcoes` ao wrapper: o
+      // wrapper é COMPARTILHADO com o botão manual (`/api/sync/manual`),
+      // que precisa continuar em modo intervalo. Mexer nele ativaria os
+      // dois de uma vez.
+      //
+      // `undefined` em `lojaOverride` é deliberado e igual ao de antes:
+      // o cron não escolhe loja, quem resolve é `getShopeeLojaAtiva`.
       marketplaces.has("Shopee")
-        ? syncShopeeForUser(userId, ontem, hoje)
-            .then(n  => { results[userId].shopee = n; })
+        ? syncShopeeForUserV2(userId, ontem, hoje, false, undefined, { modo: "incremental" })
+            .then(r  => { results[userId].shopee = r.inserted; })
             .catch(e => { results[userId].shopee_err = String(e?.message ?? e); })
         : Promise.resolve(),
 

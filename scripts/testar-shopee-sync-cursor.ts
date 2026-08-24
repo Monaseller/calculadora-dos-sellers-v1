@@ -328,14 +328,42 @@ const T1505 = iso("2026-08-24T15:05:00Z");
     !/max\s*\(\s*synced_at/i.test(src) && !/synced_at[\s\S]{0,40}cursor/i.test(src)
   );
 
-  // Os tres chamadores reais. Nenhum pode ter ganhado `modo`.
+  // ── TIMEOUT1b — o cron ATIVA incremental; os demais NAO ────────────
+  // Este assert era o inverso na TIMEOUT1a ("cron NAO ativa"), porque la
+  // a fundacao era publicada inerte. Agora ele trava a ativacao: se
+  // alguem remover o modo do cron, a suite reprova.
+  const cronSrc = codigo("app/api/sync/route.ts");
+
+  ok("58. cron (app/api/sync/route.ts) ATIVA incremental", /modo:\s*["']incremental["']/.test(cronSrc));
+  ok(
+    "58b. cron chama a V2 com os 5 argumentos historicos + opcoes",
+    /syncShopeeForUserV2\(userId, ontem, hoje, false, undefined, \{ modo: "incremental" \}\)/.test(cronSrc)
+  );
+  // `noBuffer = false` -> time_range_field = update_time. Incremental com
+  // `create_time` seria semanticamente errado: a janela mede MUDANCA, nao
+  // criacao, e pedido antigo alterado hoje ficaria fora.
+  ok(
+    "58c. cron mantem noBuffer = false (update_time)",
+    /syncShopeeForUserV2\(userId, ontem, hoje, false,/.test(cronSrc) &&
+      !/syncShopeeForUserV2\(userId, ontem, hoje, true,/.test(cronSrc)
+  );
+  ok(
+    "58d. cron NAO passa lojaOverride (quem resolve e getShopeeLojaAtiva)",
+    /syncShopeeForUserV2\(userId, ontem, hoje, false, undefined,/.test(cronSrc)
+  );
+  ok("58e. cron usa r.inserted (a V2 devolve objeto, nao numero)", /results\[userId\]\.shopee = r\.inserted;/.test(cronSrc));
+  ok("58f. cron preserva o .catch em shopee_err", /results\[userId\]\.shopee_err = String\(e\?\.message \?\? e\);/.test(cronSrc));
+
+  // Os demais chamadores continuam em intervalo. `sync/manual` entra
+  // agora: a lista da TIMEOUT1a tinha tres arquivos e esquecia o botao
+  // manual, que por isso nao estava travado contra ativacao acidental.
   const chamadores = [
-    ["app/api/sync/route.ts", "cron"],
     ["app/api/shopee/vendas/route.ts", "GET"],
-    ["app/api/internal/sync/executar/route.ts", "worker/manual"],
+    ["app/api/internal/sync/executar/route.ts", "worker/fila"],
+    ["app/api/sync/manual/route.ts", "botao manual"],
   ] as const;
 
-  let n = 58;
+  let n = 59;
   for (const [arquivo, papel] of chamadores) {
     const c = codigo(arquivo);
     ok(
@@ -345,13 +373,21 @@ const T1505 = iso("2026-08-24T15:05:00Z");
     n++;
   }
 
+  // O botao manual segue no wrapper legado, que nao aceita `opcoes` —
+  // e essa e a razao de o cron chamar a V2 direto em vez de dar opcoes
+  // ao wrapper: ele e compartilhado pelos dois.
   ok(
-    "61. nenhum arquivo de producao passa modo incremental",
+    "62. botao manual continua no wrapper legado syncShopeeForUser",
+    /syncShopeeForUser\(userId, dateFrom, dateTo, noBuffer, loja\)/.test(codigo("app/api/sync/manual/route.ts"))
+  );
+
+  ok(
+    "63. nenhum modulo de lib/ ativa incremental por conta propria",
     !/modo:\s*["']incremental["']/.test(codigo(SYNC)) &&
       !/modo:\s*["']incremental["']/.test(codigo(CAPABILITY))
   );
   ok(
-    "62. o wrapper legado syncShopeeForUser tambem nao passa opcoes",
+    "64. o wrapper legado da lib nao passa opcoes (manual segue intervalo)",
     /syncShopeeForUserV2\(userId, dateFrom, dateTo, noBuffer, lojaOverride\);/.test(src)
   );
 }
@@ -361,18 +397,18 @@ const T1505 = iso("2026-08-24T15:05:00Z");
 // ══════════════════════════════════════════════════════════════════════
 {
   const src = fonte(JANELA);
-  ok("63. sync-shopee-janela nao importa nada (puro, testavel offline)", !/^\s*import\s/m.test(src));
-  ok("64. o modulo nao toca supabase", !/supabase/i.test(codigo(JANELA)));
+  ok("65. sync-shopee-janela nao importa nada (puro, testavel offline)", !/^\s*import\s/m.test(src));
+  ok("66. o modulo nao toca supabase", !/supabase/i.test(codigo(JANELA)));
 
   const capSrc = codigo(CAPABILITY);
   const corpoCursor = capSrc.slice(capSrc.indexOf("const COLUNA_CURSOR_SHOPEE"));
   ok(
-    "65. logs do cursor nao expoem token/credencial/segredo",
+    "67. logs do cursor nao expoem token/credencial/segredo",
     !/(access_token|refresh_token|partner_key|partnerKey|token)/i.test(
       (corpoCursor.match(/console\.(error|log|warn)\([\s\S]*?\)/g) ?? []).join(" ")
     )
   );
-  ok("66. o nome da coluna vive num lugar so", (capSrc.match(/"shopee_sincronizado_ate"/g) ?? []).length === 1);
+  ok("68. o nome da coluna vive num lugar so", (capSrc.match(/"shopee_sincronizado_ate"/g) ?? []).length === 1);
 }
 
 console.log(`\n${falhou === 0 ? "✓" : "✗"} cursor de sync Shopee — ${passou} passaram, ${falhou} falharam`);
