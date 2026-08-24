@@ -262,6 +262,11 @@ console.log("── 9 a 13. Superfície privilegiada ─────────
     // PR #2b-3: a ativação passou a ler pela capability, com projeção
     // mínima no lugar de `select("*")`.
     ["rota-ativar", codigo("app/api/lojas/ativar/route.ts")],
+    // PR #2b-4: o fluxo OAuth ML inteiro passou pela capability. Estas
+    // duas rotas eram os últimos acessos anon a `lojas` — e o callback,
+    // o único INSERT anon que existia no repositório.
+    ["rota-oauth-ml", codigo("app/api/auth/mercadolivre/route.ts")],
+    ["rota-callback-ml", codigo("app/api/auth/mercadolivre/callback/route.ts")],
   ] as const) {
     const temSelectDeCredencial = COLUNAS_SENSIVEIS.some((c) =>
       new RegExp(`\\.select\\([^)]*${c}`).test(src)
@@ -274,6 +279,20 @@ console.log("── 9 a 13. Superfície privilegiada ─────────
     // esta linha, o registro daria falsa sensação de cobertura.
     const temSelectEstrela = /\.select\(\s*["'`]\s*\*\s*["'`]\s*\)/.test(src);
     ok(`48b/${nome}: não usa select("*")`, !temSelectEstrela);
+    // PR #2b-4: `INSERT` tem guarda própria porque não é alcançado por
+    // nenhuma das checagens acima — o payload nomeia as colunas dentro
+    // de um objeto, então nem COLUNAS_SENSIVEIS nem o guard de `.update(`
+    // o veriam. Era assim que o callback ML criava loja com a anon key.
+    const temInsertDireto = /\.from\("lojas"\)[\s\S]{0,80}\.insert\(/.test(src);
+    ok(`48c/${nome}: não monta .insert() direto em lojas`, !temInsertDireto);
+    // Só para as ROTAS migradas: nenhuma delas pode montar cliente
+    // próprio. Os módulos de `lib/` ficam de fora porque `ml-auth` tem
+    // exceção deliberada e já coberta pelo assert 51 — ele mantém
+    // `createClient` para o caminho ANON sem credencial
+    // (`resolverLojaDoUsuario`, que lê apenas `id`).
+    if (nome.startsWith("rota-")) {
+      ok(`48d/${nome}: não instancia createClient`, !/createClient/.test(src));
+    }
   }
   ok("49. shopee-auth não instancia mais createClient",
     !/createClient/.test(codigo("lib/shopee-auth.ts")));

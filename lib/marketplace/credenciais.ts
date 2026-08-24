@@ -407,6 +407,200 @@ export async function desconectarLojaDoDono(
   return { desconectadas: Array.isArray(data) ? data.length : 0, erro: null };
 }
 
+// ── OAuth do Mercado Livre — PR #2b-4 ───────────────────────────────
+//
+// Tres operacoes estreitas cobrem o fluxo inteiro: localizar a loja de
+// uma RECONEXAO, listar as lojas do dono para um seller, e persistir a
+// credencial recem-autorizada. Nenhuma delas aceita filtro arbitrario e
+// nenhuma faz busca global por seller — o escopo por dono e da propria
+// query, sempre.
+//
+// NENHUMA delas participa do compare-and-swap. CAS pertence ao REFRESH
+// de token (`gravarCredencialML`), onde duas renovacoes concorrentes
+// poderiam sobrescrever uma a outra. Aqui o usuario acabou de autorizar:
+// o token novo deve prevalecer, e exigir CAS quebraria o fluxo.
+
+/**
+ * Loja alvo de uma RECONEXAO — leitura previa a gastar o `code`.
+ *
+ * Projeta `seller_id` porque quem chama precisa comparar o seller que
+ * voltou do Mercado Livre com o da loja pretendida: autorizar outra
+ * conta NAO transforma esta loja naquela conta.
+ *
+ * `marketplace = "ML"` entra no filtro para que um id de loja Shopee
+ * nunca seja alcancavel por este caminho.
+ *
+ * ── `somenteAtiva` existe porque as duas pontas divergem ────────────
+ * O INICIO do fluxo so aceita reconectar loja ATIVA; o CALLBACK aceita
+ * a loja em qualquer estado — afinal, entre um e outro o proprio fluxo
+ * pode te-la deixado inativa. Essa diferenca ja existia entre as duas
+ * consultas diretas, e unifica-la aqui mudaria comportamento em vez de
+ * migrar cliente. O padrao segue `lerCredencialMLPorLojaEDono`.
+ */
+export interface LojaMLParaReconexao {
+  id: string;
+  seller_id: string | null;
+}
+
+export async function lerLojaMLDoDonoParaReconexao(
+  lojaId: string,
+  userId: string,
+  opcoes?: { somenteAtiva?: boolean }
+): Promise<{ loja: LojaMLParaReconexao | null; erro: string | null }> {
+  if (!lojaId || !userId) return { loja: null, erro: null };
+
+  let consulta = getSupabaseServidor()
+    .from("lojas")
+    .select("id, seller_id")
+    .eq("id", lojaId)
+    .eq("user_id", String(userId))
+    .eq("marketplace", MARKETPLACE_ML);
+
+  if (opcoes?.somenteAtiva) consulta = consulta.eq("ativo", true);
+
+  const { data, error } = await consulta.maybeSingle();
+
+  if (error) {
+    console.error("[credenciais] falha ao localizar loja ML para reconexao");
+    return { loja: null, erro: "erro_consulta_loja" };
+  }
+
+  return { loja: (data as LojaMLParaReconexao | null) ?? null, erro: null };
+}
+
+/**
+ * Lojas do DONO para um seller — a busca que decide connect vs update.
+ *
+ * ── Por que devolve lista, e nao `maybeSingle()` ────────────────────
+ * Duplicidade dentro do mesmo usuario precisa continuar VISIVEL.
+ * `maybeSingle()` transformaria "duas linhas" em erro generico, e
+ * `single()` escolheria uma — que e exatamente o que nao pode
+ * acontecer: gravar credencial numa linha arbitraria esconderia a
+ * inconsistencia. Quem chama decide: 0 = criar, 1 = atualizar,
+ * >1 = recusar.
+ *
+ * ── Escopo por dono, nao por seller ─────────────────────────────────
+ * `user_id` esta no filtro, nao numa checagem posterior. O MESMO
+ * `seller_id` existe legitimamente para outros donos (medido no banco:
+ * 3 donos distintos para um mesmo seller) e para linhas orfas. Nenhuma
+ * delas e alcancavel daqui — e e por isso que reconectar uma conta ML
+ * ja usada por outro usuario nao cruza tenant.
+ */
+export async function listarLojasMLDoDonoPorSeller(
+  userId: string,
+  sellerId: string
+): Promise<{ ids: string[]; erro: string | null }> {
+  if (!userId || !sellerId) return { ids: [], erro: null };
+
+  const { data, error } = await getSupabaseServidor()
+    .from("lojas")
+    .select("id")
+    .eq("user_id", String(userId))
+    .eq("marketplace", MARKETPLACE_ML)
+    .eq("seller_id", sellerId);
+
+  if (error) {
+    console.error("[credenciais] falha ao listar lojas ML do dono por seller");
+    return { ids: [], erro: "erro_consulta_loja" };
+  }
+
+  const linhas = Array.isArray(data) ? data : [];
+  return { ids: linhas.map((l: any) => String(l.id)), erro: null };
+}
+
+/**
+ * Persiste a credencial recem-autorizada — UPDATE ou INSERT.
+ *
+ * ── Dois caminhos, nenhum `upsert` ──────────────────────────────────
+ * `lojaId` presente = a linha ja foi resolvida por quem chamou (reconexao
+ * ou seller ja conhecido) e o caminho e UPDATE, com `id + user_id` na
+ * propria escrita. `lojaId` ausente = nao ha linha do dono para este
+ * seller, e o caminho e INSERT. Um `upsert` precisaria de uma constraint
+ * que este schema nao tem, e escolheria linha sozinho.
+ *
+ * ── `refresh_token` ausente OMITE a coluna ──────────────────────────
+ * Regra que ja existia e nao pode regredir: quando o Mercado Livre nao
+ * devolve refresh token, a coluna NAO entra na escrita. Grava-la como
+ * `null` destruiria uma credencial de longa duracao ainda valida por
+ * causa de uma resposta que legitimamente pode vir sem ela.
+ *
+ * ── So colunas do ML ────────────────────────────────────────────────
+ * `partner_key`, `shop_id` e `partner_id` sao da Shopee e nunca entram
+ * aqui — nem no UPDATE nem no INSERT.
+ *
+ * `.select("id")` torna o efeito observavel: zero linhas NUNCA vira
+ * sucesso, e quem chama recebe `lojaId: null`.
+ */
+export interface DadosCredencialMLOAuth {
+  /** Presente = UPDATE de linha ja resolvida. Ausente = INSERT. */
+  lojaId?: string | null;
+  /** Usado somente no INSERT — o UPDATE nunca reescreve `seller_id`. */
+  sellerId: string;
+  nickname: string;
+  accessToken: string;
+  refreshToken: string | null;
+  expiraEm: string;
+}
+
+export async function registrarCredencialMLOAuth(
+  userId: string,
+  dados: DadosCredencialMLOAuth
+): Promise<{ lojaId: string | null; erro: string | null }> {
+  if (!userId || !dados?.accessToken) return { lojaId: null, erro: "entrada_invalida" };
+
+  const supabase = getSupabaseServidor();
+
+  if (dados.lojaId) {
+    const atualizacao: Record<string, unknown> = {
+      access_token: dados.accessToken,
+      token_expires_at: dados.expiraEm,
+      nickname: dados.nickname,
+      nome: dados.nickname,
+      ativo: true,
+    };
+    if (dados.refreshToken) atualizacao.refresh_token = dados.refreshToken;
+
+    const { data, error } = await supabase
+      .from("lojas")
+      .update(atualizacao)
+      .eq("id", dados.lojaId)
+      .eq("user_id", String(userId))
+      .select("id");
+
+    if (error) {
+      console.error("[credenciais] falha ao gravar credencial ML");
+      return { lojaId: null, erro: "erro_persistencia" };
+    }
+    const linhas = Array.isArray(data) ? data : [];
+    if (linhas.length === 0) return { lojaId: null, erro: "nenhuma_linha" };
+    return { lojaId: String(linhas[0].id), erro: null };
+  }
+
+  const novaLinha: Record<string, unknown> = {
+    marketplace: MARKETPLACE_ML,
+    seller_id: dados.sellerId,
+    nickname: dados.nickname,
+    nome: dados.nickname,
+    access_token: dados.accessToken,
+    token_expires_at: dados.expiraEm,
+    ativo: true,
+    // Dono SEMPRE da sessao ja validada por quem chamou — nunca do
+    // `state`, do seller nem de qualquer campo vindo do navegador.
+    user_id: String(userId),
+  };
+  if (dados.refreshToken) novaLinha.refresh_token = dados.refreshToken;
+
+  const { data, error } = await supabase.from("lojas").insert(novaLinha).select("id");
+
+  if (error) {
+    console.error("[credenciais] falha ao criar loja ML");
+    return { lojaId: null, erro: "erro_persistencia" };
+  }
+  const criadas = Array.isArray(data) ? data : [];
+  if (criadas.length === 0) return { lojaId: null, erro: "nenhuma_linha" };
+  return { lojaId: String(criadas[0].id), erro: null };
+}
+
 /**
  * Registro de loja Shopee vindo do callback OAuth — PR #2b-1.
  *

@@ -24,8 +24,8 @@
  * da própria rota.
  */
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
 import { autenticarRequisicao, agoraEmSegundos } from "@/lib/autenticacao";
+import { lerLojaMLDoDonoParaReconexao } from "@/lib/marketplace/credenciais";
 import {
   assinarEstado,
   gerarCodeVerifier,
@@ -33,11 +33,6 @@ import {
   nomeCookiePkce,
   TTL_PADRAO_SEGUNDOS,
 } from "@/lib/estado-oauth";
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -67,22 +62,23 @@ export async function GET(request: Request) {
   if (ehReconexao) {
     if (!UUID_REGEX.test(lojaId)) return erro(request, "loja_nao_pertence_usuario");
 
-    const { data, error } = await supabase
-      .from("lojas")
-      .select("id")
-      .eq("id", lojaId)
-      .eq("user_id", userId)
-      .eq("marketplace", "ML")
-      .eq("ativo", true)
-      .maybeSingle();
+    // A rota não monta query: a leitura privilegiada vive na capability
+    // server-only, com `id + user_id + marketplace` na própria consulta.
+    // `somenteAtiva` preserva a regra desta ponta — reconectar só vale
+    // para loja ativa.
+    const { loja, erro: erroLeitura } = await lerLojaMLDoDonoParaReconexao(
+      lojaId,
+      userId,
+      { somenteAtiva: true }
+    );
 
-    if (error) {
-      console.error("[GET /api/auth/mercadolivre] falha ao validar a loja:", error.message);
+    if (erroLeitura) {
+      // O texto do Postgres fica na capability; aqui só o código estável.
       return erro(request, "persistencia_falhou");
     }
     // Inexistente, de outro dono ou inativa produzem a MESMA recusa —
     // distinguir permitiria descobrir se uma loja alheia existe.
-    if (!data) return erro(request, "loja_nao_pertence_usuario");
+    if (!loja) return erro(request, "loja_nao_pertence_usuario");
   }
 
   const segredo = process.env.SESSION_SECRET;

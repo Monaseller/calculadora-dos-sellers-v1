@@ -27,14 +27,13 @@
  * como evitar sem saber o seller antes, o que é impossível.
  */
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
 import { autenticarRequisicao, agoraEmSegundos, lerCookie } from "@/lib/autenticacao";
 import { verificarEstado, verifierConfere, nomeCookiePkce } from "@/lib/estado-oauth";
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+import {
+  lerLojaMLDoDonoParaReconexao,
+  listarLojasMLDoDonoPorSeller,
+  registrarCredencialMLOAuth,
+} from "@/lib/marketplace/credenciais";
 
 const TIMEOUT_MS = 20_000;
 
@@ -147,20 +146,13 @@ export async function GET(request: Request) {
   // 8-9. RECONNECT revalida a propriedade da loja ANTES de gastar o code.
   let lojaAlvo: { id: string; seller_id: string | null } | null = null;
   if (state.intent === "reconnect") {
-    const { data, error } = await supabase
-      .from("lojas")
-      .select("id, seller_id")
-      .eq("id", state.loja)
-      .eq("user_id", userId)
-      .eq("marketplace", "ML")
-      .maybeSingle();
+    // Sem `somenteAtiva`: esta ponta aceita a loja em qualquer estado —
+    // entre o início e o retorno o próprio fluxo pode tê-la desativado.
+    const { loja, erro: erroLeitura } = await lerLojaMLDoDonoParaReconexao(state.loja, userId);
 
-    if (error) {
-      console.error("[callback ML] falha ao revalidar a loja:", error.message);
-      return erro(request, "persistencia_falhou", state.chal);
-    }
-    if (!data) return erro(request, "loja_nao_pertence_usuario", state.chal);
-    lojaAlvo = data as { id: string; seller_id: string | null };
+    if (erroLeitura) return erro(request, "persistencia_falhou", state.chal);
+    if (!loja) return erro(request, "loja_nao_pertence_usuario", state.chal);
+    lojaAlvo = loja;
   }
 
   // 10-11. Troca do code por token — SERVER-SIDE, nada disso sai daqui.
@@ -181,77 +173,60 @@ export async function GET(request: Request) {
       return erro(request, "conta_ml_diferente", state.chal);
     }
 
-    const gravou = await gravarCredencial(
-      { id: lojaAlvo!.id, userId },
-      credencial,
-      identidade.nickname,
-      expiraEm
-    );
-    if (gravou === "erro") return erro(request, "persistencia_falhou", state.chal);
-    if (gravou === "vazio") return erro(request, "persistencia_falhou", state.chal);
-    return sucesso(request, "reconnected", lojaAlvo!.id, state.chal);
+    const gravado = await persistir(userId, lojaAlvo!.id, credencial, identidade, expiraEm);
+    if (!gravado) return erro(request, "persistencia_falhou", state.chal);
+    return sucesso(request, "reconnected", gravado, state.chal);
   }
 
   // CONNECT. A busca é SEMPRE escopada pelo usuário: o mesmo seller pode
   // existir para outros donos (medido no banco: 3 donos distintos para o
   // mesmo seller) e para linhas órfãs. Nenhuma delas é alcançável daqui.
-  const { data: proprias, error: erroBusca } = await supabase
-    .from("lojas")
-    .select("id")
-    .eq("user_id", userId)
-    .eq("marketplace", "ML")
-    .eq("seller_id", identidade.sellerId);
+  const { ids, erro: erroBusca } = await listarLojasMLDoDonoPorSeller(userId, identidade.sellerId);
 
-  if (erroBusca) {
-    console.error("[callback ML] falha ao buscar loja do usuário:", erroBusca.message);
-    return erro(request, "persistencia_falhou", state.chal);
-  }
-
-  const linhas = proprias ?? [];
+  if (erroBusca) return erro(request, "persistencia_falhou", state.chal);
 
   // Duplicidade DENTRO do mesmo usuário: fail-closed. Escolher uma linha
   // arbitrariamente esconderia a inconsistência e gravaria credencial num
   // registro que talvez não seja o que a interface mostra.
-  if (linhas.length > 1) return erro(request, "duplicidade_loja", state.chal);
+  if (ids.length > 1) return erro(request, "duplicidade_loja", state.chal);
 
-  if (linhas.length === 1) {
-    const gravou = await gravarCredencial(
-      { id: linhas[0].id, userId },
-      credencial,
-      identidade.nickname,
-      expiraEm
-    );
-    if (gravou !== "ok") return erro(request, "persistencia_falhou", state.chal);
-    return sucesso(request, "connected", linhas[0].id, state.chal);
-  }
+  // Uma linha própria → atualiza aquela. Nenhuma → a capability cria,
+  // sempre com o dono da sessão. `refresh_token` ausente é OMITIDO nos
+  // dois caminhos, nunca gravado como null.
+  const gravado = await persistir(
+    userId,
+    ids.length === 1 ? ids[0] : null,
+    credencial,
+    identidade,
+    expiraEm
+  );
+  if (!gravado) return erro(request, "persistencia_falhou", state.chal);
 
-  // Nenhuma linha própria: cria uma, sempre com o dono da sessão.
-  const novaLinha: Record<string, unknown> = {
-    marketplace: "ML",
-    seller_id: identidade.sellerId,
+  return sucesso(request, "connected", gravado, state.chal);
+}
+
+/**
+ * Ponte fina para a capability. Devolve o id gravado, ou `null` em
+ * QUALQUER falha — erro de banco e zero linhas alteradas produzem o
+ * mesmo desfecho (`persistencia_falhou`), como antes. Nenhum sucesso
+ * visual sem gravação confirmada pelo banco.
+ */
+async function persistir(
+  userId: string,
+  lojaId: string | null,
+  credencial: CredencialML,
+  identidade: IdentidadeML,
+  expiraEm: string
+): Promise<string | null> {
+  const { lojaId: gravada } = await registrarCredencialMLOAuth(userId, {
+    lojaId,
+    sellerId: identidade.sellerId,
     nickname: identidade.nickname,
-    nome: identidade.nickname,
-    access_token: credencial.accessToken,
-    token_expires_at: expiraEm,
-    ativo: true,
-    user_id: userId,
-  };
-  // Ausência de refresh_token: a coluna é OMITIDA, nunca gravada como
-  // null explícito. Ver o comentário de `gravarCredencial`.
-  if (credencial.refreshToken) novaLinha.refresh_token = credencial.refreshToken;
-
-  const { data: criada, error: erroInsert } = await supabase
-    .from("lojas")
-    .insert(novaLinha)
-    .select("id");
-
-  if (erroInsert) {
-    console.error("[callback ML] falha ao criar a loja:", erroInsert.message);
-    return erro(request, "persistencia_falhou", state.chal);
-  }
-  if (!criada || criada.length === 0) return erro(request, "persistencia_falhou", state.chal);
-
-  return sucesso(request, "connected", criada[0].id, state.chal);
+    accessToken: credencial.accessToken,
+    refreshToken: credencial.refreshToken,
+    expiraEm,
+  });
+  return gravada;
 }
 
 /** O Mercado Livre também chama por POST em algumas configurações. */
@@ -371,47 +346,6 @@ async function obterIdentidadeML(accessToken: string): Promise<IdentidadeML | nu
   } finally {
     clearTimeout(timer);
   }
-}
-
-/**
- * Grava a credencial numa linha JÁ resolvida, sempre com `user_id` no
- * filtro da própria escrita — não numa checagem anterior que um refactor
- * possa remover. `.select("id")` torna o efeito observável: zero linhas
- * nunca vira sucesso.
- *
- * REFRESH TOKEN: quando o Mercado Livre não devolve um, a coluna NÃO
- * entra no update. Sobrescrever com `null` destruiria uma credencial de
- * longa duração ainda válida por causa de uma resposta que legitimamente
- * pode vir sem ela — é a mesma regra que `refreshMLToken` já aplica
- * (`data.refresh_token ?? refreshToken`) e que o relay aplicava.
- */
-async function gravarCredencial(
-  alvo: { id: string; userId: string },
-  credencial: CredencialML,
-  nickname: string,
-  expiraEm: string
-): Promise<"ok" | "vazio" | "erro"> {
-  const atualizacao: Record<string, unknown> = {
-    access_token: credencial.accessToken,
-    token_expires_at: expiraEm,
-    nickname,
-    nome: nickname,
-    ativo: true,
-  };
-  if (credencial.refreshToken) atualizacao.refresh_token = credencial.refreshToken;
-
-  const { data, error } = await supabase
-    .from("lojas")
-    .update(atualizacao)
-    .eq("id", alvo.id)
-    .eq("user_id", alvo.userId)
-    .select("id");
-
-  if (error) {
-    console.error("[callback ML] falha ao gravar a credencial:", error.message);
-    return "erro";
-  }
-  return data && data.length > 0 ? "ok" : "vazio";
 }
 
 /**

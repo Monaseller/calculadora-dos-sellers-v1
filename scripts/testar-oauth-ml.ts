@@ -17,6 +17,10 @@
  *
  * Uso: npx tsx scripts/testar-oauth-ml.ts
  */
+// PR #2b-4: as rotas ML passaram a importar a capability, marcada
+// `server-only` — pacote que LANÇA fora da condição `react-server`.
+// Precisa vir antes do duplo de `require` abaixo, que encadeia sobre ele.
+import "./_server-only-inerte";
 import Module from "node:module";
 
 let ok = 0, falhou = 0;
@@ -33,6 +37,12 @@ function assert(c: boolean, m: string) { if (!c) throw new Error(m); }
 
 process.env.NEXT_PUBLIC_SUPABASE_URL ??= "https://placeholder-de-teste.invalid";
 process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ??= "chave-de-teste-invalida";
+// PR #2b-4: as rotas ML agora leem/gravam pela capability, e
+// `getSupabaseServidor()` é fail-closed — sem esta variável ele LANÇA
+// antes de qualquer consulta. Valor inválido de propósito: o cliente
+// real nunca chega a ser construído, porque `createClient` está
+// interceptado pelo duplo abaixo.
+process.env.SUPABASE_SERVICE_ROLE_KEY ??= "chave-de-teste-invalida";
 process.env.ML_CLIENT_ID ??= "ficticio";
 process.env.ML_CLIENT_SECRET ??= "ficticio";
 process.env.ML_REDIRECT_URI ??= "https://www.exemplo.test/api/auth/mercadolivre/callback";
