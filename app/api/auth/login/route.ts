@@ -1,12 +1,56 @@
 /**
- * PERFIL-SENHA1a: a leitura do perfil saiu do cliente ANON e passou a
- * viver na capability server-only. `senha` continua PLAINTEXT e continua
- * comparada aqui — trocar isso é a PERFIL-SENHA1b, deliberadamente
- * separada. Esta rota mudou de CLIENTE, não de comportamento.
+ * POST /api/auth/login
+ *
+ * ── PERFIL-SENHA1a ──────────────────────────────────────────────────
+ * A leitura do perfil saiu do cliente ANON e vive na capability
+ * server-only.
+ *
+ * ── PERFIL-SENHA1b — o que esta rota passa a fazer ──────────────────
+ * A senha deixa de ser comparada por igualdade de string.
+ *
+ *   senha_hash != null  →  verifica SOMENTE o Argon2id.
+ *                          Hash corrompido REPROVA — nunca cai para o
+ *                          plaintext. Aceitar esse fallback permitiria a
+ *                          quem tivesse escrita no banco anular
+ *                          `senha_hash` e reabrir o caminho fraco.
+ *
+ *   senha_hash == null  →  conta legada. Compara o plaintext em tempo
+ *                          constante e, se conferir, gera o hash e migra
+ *                          na hora (CAS). Falhar a gravação NÃO impede o
+ *                          login: a senha estava certa, e negar acesso
+ *                          por problema de migração transformaria uma
+ *                          melhoria em indisponibilidade. A conta tenta
+ *                          de novo no próximo login.
+ *
+ * ── Enumeração e timing ─────────────────────────────────────────────
+ * Os três desfechos de falha — conta inexistente, senha errada e hash
+ * corrompido — devolvem **401 com a mesma mensagem**. O 404
+ * "Nenhuma conta configurada" saiu: ele dizia a qualquer visitante se um
+ * email estava cadastrado.
+ *
+ * E quando a conta não existe, roda um Argon2 DUMMY antes de responder.
+ * Sem isso, "email inexistente" retornaria em microssegundos e "senha
+ * errada" em ~50 ms — a mesma resposta, com o relógio entregando a
+ * diferença.
  */
 import { NextResponse } from "next/server";
 import { emitirTokenSessao, COOKIE_SESSAO, OPCOES_COOKIE_SESSAO } from "@/lib/autenticacao";
-import { lerCredencialDeLogin, gravarUserUuid } from "@/lib/perfil/credenciais";
+import {
+  lerCredencialDeLogin,
+  gravarUserUuid,
+  migrarSenhaLegada,
+} from "@/lib/perfil/credenciais";
+import {
+  gerarHash,
+  verificarHash,
+  verificarDummy,
+  plaintextConfere,
+} from "@/lib/perfil/senha";
+
+/** Resposta única de falha de credencial. Não distingue os casos. */
+function credencialInvalida() {
+  return NextResponse.json({ erro: "Email ou senha incorretos." }, { status: 401 });
+}
 
 export async function POST(request: Request) {
   const { email, senha } = await request.json();
@@ -20,11 +64,29 @@ export async function POST(request: Request) {
   const { credencial: perfil } = await lerCredencialDeLogin(emailNorm);
 
   if (!perfil || !perfil.email) {
-    return NextResponse.json({ erro: "Nenhuma conta configurada. Crie sua conta primeiro." }, { status: 404 });
+    // Trabalho equivalente ao caminho real, para o tempo não denunciar
+    // que a conta não existe.
+    await verificarDummy(senha);
+    return credencialInvalida();
   }
 
-  if (perfil.senha?.trim() !== senha.trim()) {
-    return NextResponse.json({ erro: "Email ou senha incorretos." }, { status: 401 });
+  if (perfil.senha_hash) {
+    // ── Conta já migrada ────────────────────────────────────────────
+    // Único caminho possível. Sem fallback, em nenhuma circunstância.
+    if (!(await verificarHash(senha, perfil.senha_hash))) return credencialInvalida();
+  } else {
+    // ── Conta legada ────────────────────────────────────────────────
+    if (!plaintextConfere(senha, perfil.senha)) return credencialInvalida();
+
+    // Senha correta: migra agora. `gerarHash` pode lançar se o binário
+    // falhar — e nesse caso o login segue, porque a credencial já foi
+    // validada e a migração é oportunista, não requisito de acesso.
+    try {
+      const hash = await gerarHash(senha);
+      await migrarSenhaLegada(perfil.id, hash);
+    } catch {
+      console.error("[login] falha ao migrar senha legada");
+    }
   }
 
   // Bloqueia apenas se explicitamente false (não null — contas antigas não tinham verificação)

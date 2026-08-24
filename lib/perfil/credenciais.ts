@@ -28,7 +28,7 @@ import "server-only";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 
 /** Colunas expostas a cada caso de uso. Listas EXPLICITAS, nunca `*`. */
-const COLUNAS_LOGIN = "id, email, senha, nome_completo, email_verificado, user_uuid";
+const COLUNAS_LOGIN = "id, email, senha, senha_hash, nome_completo, email_verificado, user_uuid";
 const COLUNAS_SESSAO = "user_uuid, nome_completo, email";
 const COLUNAS_PERFIL = "id, nome_completo, usuario, email, documento, email_verificado, user_uuid";
 const COLUNAS_TOKEN = "id, token_verificacao, token_expiracao, email_verificado";
@@ -41,7 +41,10 @@ const COLUNAS_REENVIO = "id, email, email_verificado";
 export interface CredencialDeLogin {
   id: number;
   email: string | null;
+  /** PLAINTEXT legado. `null` assim que a conta migra. */
   senha: string | null;
+  /** Argon2id. `null` = conta ainda nao migrada. */
+  senha_hash: string | null;
   nome_completo: string | null;
   email_verificado: boolean | null;
   user_uuid: string | null;
@@ -81,19 +84,32 @@ export interface DadosNovoPerfil {
   usuario: unknown;
   email: unknown;
   documento: unknown;
-  senha: unknown;
+  /**
+   * PERFIL-SENHA1b: o hash Argon2id, JA gerado por quem chamou. A
+   * capability nao recebe mais senha em claro na criacao — nem para
+   * hashear. Assim nao existe caminho, nem por engano, que grave
+   * plaintext numa conta nova.
+   */
+  senhaHash: string;
   tokenVerificacao: string;
   tokenExpiracao: string;
   userUuid: string;
 }
 
-/** Campos que a edicao de perfil aceita. Nada alem disto passa. */
+/**
+ * Campos que a edicao de perfil aceita. Nada alem disto passa.
+ *
+ * Note que NAO ha `senha`: a troca de senha entra como `senhaHash`, ja
+ * derivado. A ausencia e proposital — o tipo torna impossivel a rota
+ * mandar plaintext para ca.
+ */
 export interface CamposPerfilEditavel {
   nome_completo?: unknown;
   usuario?: unknown;
   email?: unknown;
   documento?: unknown;
-  senha?: unknown;
+  /** Argon2id ja gerado. Grava-lo tambem ANULA o plaintext legado. */
+  senhaHash?: string;
 }
 
 // ── Login ────────────────────────────────────────────────────────────
@@ -125,6 +141,46 @@ export async function lerCredencialDeLogin(
   // vira `null`, nao erro.
   if (error) return { credencial: null, erro: null };
   return { credencial: (data as unknown as CredencialDeLogin | null) ?? null, erro: null };
+}
+
+/**
+ * CAS da migracao progressiva — PERFIL-SENHA1b.
+ *
+ * Grava o Argon2id e ANULA o plaintext na MESMA escrita. As duas coisas
+ * juntas ou nenhuma: gravar o hash e deixar `senha` preenchida manteria
+ * a senha legivel no banco sem nenhum ganho.
+ *
+ * ── `senha_hash IS NULL` no filtro e o compare-and-swap ─────────────
+ * Dois logins simultaneos da mesma conta geram dois hashes validos. Sem
+ * o filtro, o segundo sobrescreveria o primeiro — inofensivo hoje, mas
+ * o CAS custa nada e fecha a porta para o caso que importa: uma escrita
+ * atrasada nao pode sobrepor um hash MAIS NOVO (ex.: alteracao de senha
+ * ocorrida no intervalo). Com o filtro, a segunda simplesmente nao casa
+ * linha, e quem chamou recebe `false`.
+ *
+ * Zero linhas NAO e erro: significa "outra requisicao ja migrou" ou "a
+ * conta deixou de ser legada". Quem chama distingue pelo booleano e —
+ * por decisao de contrato — deixa o login prosseguir de qualquer forma.
+ */
+export async function migrarSenhaLegada(
+  perfilId: number,
+  senhaHash: string
+): Promise<boolean> {
+  if (!perfilId || !senhaHash) return false;
+
+  const { data, error } = await getSupabaseServidor()
+    .from("perfil")
+    .update({ senha_hash: senhaHash, senha: null })
+    .eq("id", perfilId)
+    .is("senha_hash", null)
+    .select("id");
+
+  if (error) {
+    // Sem hash, sem id, sem texto do Postgres — so a etapa.
+    console.error("[perfil] falha ao migrar senha legada");
+    return false;
+  }
+  return Array.isArray(data) && data.length > 0;
 }
 
 /**
@@ -226,7 +282,11 @@ export async function criarPerfil(
     usuario: dados.usuario,
     email: dados.email,
     documento: dados.documento,
-    senha: dados.senha,
+    // PERFIL-SENHA1b: conta nova nasce SEM plaintext. `senha` entra
+    // explicitamente como null — nao omitida — para que uma coluna com
+    // default futuro nunca reintroduza valor.
+    senha_hash: dados.senhaHash,
+    senha: null,
     email_verificado: false,
     token_verificacao: dados.tokenVerificacao,
     token_expiracao: dados.tokenExpiracao,
@@ -262,7 +322,13 @@ export async function atualizarPerfilDoDono(
   if (campos.usuario !== undefined) permitidos.usuario = campos.usuario;
   if (campos.email !== undefined) permitidos.email = campos.email;
   if (campos.documento !== undefined) permitidos.documento = campos.documento;
-  if (campos.senha !== undefined) permitidos.senha = campos.senha;
+  // Trocar a senha grava o hash e ANULA o plaintext legado na mesma
+  // escrita — do contrário uma conta ainda não migrada continuaria com a
+  // senha ANTIGA legível ao lado do hash novo.
+  if (campos.senhaHash !== undefined) {
+    permitidos.senha_hash = campos.senhaHash;
+    permitidos.senha = null;
+  }
 
   const { error } = await getSupabaseServidor()
     .from("perfil")

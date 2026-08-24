@@ -1,0 +1,78 @@
+-- =====================================================================
+-- PERFIL-SENHA1b — coluna `senha_hash` em public.perfil
+-- =====================================================================
+--
+-- 1. OBJETIVO
+-- ---------------------------------------------------------------------
+-- Acrescentar a coluna que passa a guardar a senha em Argon2id:
+--
+--     ALTER TABLE public.perfil ADD COLUMN IF NOT EXISTS senha_hash text;
+--
+-- E so isso. Uma coluna, nullable, sem default, sem constraint, sem
+-- indice, sem trigger, sem funcao.
+--
+--
+-- 2. POR QUE `senha` CONTINUA EXISTINDO
+-- ---------------------------------------------------------------------
+-- A migracao e PROGRESSIVA, feita no login. Nao ha reset de senha neste
+-- produto — nenhum fluxo de "esqueci minha senha" existe —, entao forcar
+-- reset trancaria todos os usuarios para fora. E hashear em lote exigiria
+-- ler o plaintext dentro do SQL, que e o oposto do objetivo.
+--
+-- Entao: enquanto `senha_hash IS NULL`, a conta e legada; no primeiro
+-- login correto, o hash e gerado e gravado, e `senha` vira NULL na MESMA
+-- escrita. A coluna `senha` so podera ser removida quando
+-- `count(*) WHERE senha IS NOT NULL` chegar a zero — e isso e migration
+-- separada, num gate proprio.
+--
+--
+-- 3. POR QUE NAO HA `senha_algoritmo` NEM PREFIXO A INTERPRETAR
+-- ---------------------------------------------------------------------
+-- A discriminacao e ESTRUTURAL: `senha_hash IS NULL` decide o caminho,
+-- nao a aparencia do texto. Isso importa — uma senha legitima PODE
+-- comecar com `$2b$` ou `$argon2id$`, e usar heuristica de prefixo
+-- deixaria alguem escolher o ramo de comparacao ao cadastrar a senha.
+--
+-- Tambem nao e preciso coluna de algoritmo: o hash Argon2id e
+-- autocontido — carrega variante, versao e os tres parametros
+-- (`$argon2id$v=19$m=19456,t=2,p=1$...`). Trocar parametros no futuro
+-- nao exige coluna nova.
+--
+--
+-- 4. TIPO
+-- ---------------------------------------------------------------------
+-- `text`, sem limite. Um hash Argon2id ocupa ~97 caracteres; `senha` ja
+-- e `text` sem limite nesta tabela (verificado no PRE-CHECK), e manter o
+-- mesmo tipo evita truncamento silencioso.
+--
+--
+-- 5. PRIVILEGIOS — NADA A FAZER
+-- ---------------------------------------------------------------------
+-- A PERFIL-SENHA1a ja revogou SELECT, INSERT e UPDATE de `anon` na
+-- tabela inteira, e `pg_attribute.attacl` esta vazio (nenhuma ACL por
+-- coluna). Coluna nova NAO reabre acesso: ela herda o ACL da tabela, e
+-- `anon` nao tem nenhum. `senha_hash` ja nasce inacessivel a `anon`.
+--
+-- Por isso esta migration NAO mexe em GRANT/REVOKE.
+--
+--
+-- 6. IDEMPOTENCIA
+-- ---------------------------------------------------------------------
+-- `ADD COLUMN IF NOT EXISTS` e no-op se a coluna ja existir. Reaplicar e
+-- seguro.
+--
+--
+-- 7. ROLLBACK (MANUAL — NAO EXECUTADO AQUI)
+-- ---------------------------------------------------------------------
+-- Enquanto NENHUMA conta tiver migrado:
+--
+--     ALTER TABLE public.perfil DROP COLUMN senha_hash;
+--
+-- Depois da primeira migracao NAO HA ROLLBACK para plaintext: hash e
+-- irreversivel por definicao, e e esse o objetivo. O que continua
+-- reversivel e o CODIGO, e apenas enquanto restarem contas legadas.
+--
+-- Isto e comentario, nao comando.
+-- =====================================================================
+
+ALTER TABLE public.perfil ADD COLUMN IF NOT EXISTS senha_hash text;

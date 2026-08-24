@@ -10,6 +10,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.115.0",
     "@google/genai": "^2.15.0",
+    "@node-rs/argon2": "^2.1.0",
     "@supabase/supabase-js": "^2.108.2",
     "file-type": "^22.0.1",
     "image-size": "^2.0.2",

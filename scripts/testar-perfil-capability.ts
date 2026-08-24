@@ -255,22 +255,27 @@ async function principal() {
     assert(res.status === 401, `esperado 401, veio ${res.status}`);
   });
 
-  t("9. usuário inexistente -> 404 (1a NÃO corrige enumeração)", async () => {
-    // Trava deliberada: a correção é da PERFIL-SENHA1b. Se alguém mudar
-    // isso por engano dentro da 1a, o teste acusa.
+  t("9. usuário inexistente -> 401 (enumeração corrigida na 1b)", async () => {
+    // Na 1a este teste exigia 404, travando o comportamento de então.
+    // A PERFIL-SENHA1b corrigiu a enumeração: inexistente e senha errada
+    // passam a devolver o MESMO 401. A cobertura profunda desse contrato
+    // está em testar-autenticacao-senha.ts (testes 21–24).
     reiniciar();
     const res = await loginPOST(req("https://x.test/api/auth/login",
       { corpo: { email: "ninguem@exemplo.test", senha: "x" } }));
-    assert(res.status === 404, `🔴 comportamento alterado na 1a: ${res.status}`);
+    assert(res.status === 401, `🔴 esperado 401, veio ${res.status}`);
   });
 
-  t("10. login projeta apenas as 6 colunas necessárias", async () => {
+  t("10. login projeta apenas as 7 colunas necessárias", async () => {
+    // `senha_hash` entrou na PERFIL-SENHA1b — é o campo que decide entre
+    // o caminho de hash e o legado. `senha` permanece enquanto houver
+    // conta não migrada.
     reiniciar();
     await loginPOST(req("https://x.test/api/auth/login",
       { corpo: { email: "a@exemplo.test", senha: "<senha-a>" } }));
     const cols = leituras()[0].projecao.split(",").map(s => s.trim()).sort();
     assert(JSON.stringify(cols) === JSON.stringify(
-      ["email", "email_verificado", "id", "nome_completo", "senha", "user_uuid"]),
+      ["email", "email_verificado", "id", "nome_completo", "senha", "senha_hash", "user_uuid"]),
       `🔴 projeção mudou: ${cols.join(", ")}`);
   });
 
@@ -405,7 +410,7 @@ async function principal() {
     assert(JSON.stringify(await res.json()) === "{}", "não devolveu objeto vazio");
   });
 
-  t("25. criação grava exatamente os 9 campos esperados", async () => {
+  t("25. criação grava exatamente os 10 campos esperados", async () => {
     reiniciar();
     const res = await perfilPOST(req("https://x.test/api/perfil", {
       corpo: { _novaConta: true, nome_completo: "Novo", usuario: "novo",
@@ -415,10 +420,24 @@ async function principal() {
     const w = escritas().filter(c => c.tipo === "insert");
     assert(w.length === 1, `esperava 1 insert, houve ${w.length}`);
     const chaves = Object.keys(w[0].payload).sort();
+    // PERFIL-SENHA1b: `senha_hash` entrou e `senha` continua na lista —
+    // mas agora gravada como `null` explícito (ver teste 25b).
     assert(JSON.stringify(chaves) === JSON.stringify(
-      ["documento", "email", "email_verificado", "nome_completo", "senha",
+      ["documento", "email", "email_verificado", "nome_completo", "senha", "senha_hash",
        "token_expiracao", "token_verificacao", "user_uuid", "usuario"]),
       `🔴 payload mudou: ${chaves.join(", ")}`);
+  });
+
+  t("25b. a criação NUNCA grava plaintext — senha entra como null", async () => {
+    reiniciar();
+    await perfilPOST(req("https://x.test/api/perfil", {
+      corpo: { _novaConta: true, nome_completo: "Novo", usuario: "novo",
+               email: "novo2@exemplo.test", documento: "<doc>", senha: "<senha-nova>" },
+    }));
+    const p = escritas().find(c => c.tipo === "insert")!.payload;
+    assert(p.senha === null, `🔴 gravou plaintext: ${p.senha}`);
+    assert(typeof p.senha_hash === "string" && (p.senha_hash as string).startsWith("$argon2id$"),
+      "🔴 não gravou hash Argon2id");
   });
 
   t("26. criação força email_verificado=false, mesmo se o cliente mandar true", async () => {

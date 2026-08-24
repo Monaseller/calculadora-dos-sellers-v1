@@ -34,6 +34,7 @@ import {
   criarPerfil,
   atualizarPerfilDoDono,
 } from "@/lib/perfil/credenciais";
+import { gerarHash } from "@/lib/perfil/senha";
 
 export async function GET(request: Request) {
   const auth = await autenticarRequisicao(request);
@@ -72,6 +73,17 @@ export async function POST(request: Request) {
     const token    = crypto.randomUUID();
     const expiracao = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 
+    // PERFIL-SENHA1b: conta nova NUNCA guarda plaintext. Se o hash não
+    // puder ser gerado, a conta não é criada — criar com senha em claro
+    // reintroduziria exatamente o defeito que esta PR fecha.
+    let senhaHash: string;
+    try {
+      senhaHash = await gerarHash(String(body.senha ?? ""));
+    } catch {
+      console.error("[POST /api/perfil] falha ao gerar hash da senha");
+      return NextResponse.json({ erro: true, mensagem: "Não foi possível criar a conta." }, { status: 500 });
+    }
+
     // `email_verificado: false` é fixado DENTRO da capability — não vem
     // do corpo da requisição, e verificação por email segue obrigatória.
     const { criado } = await criarPerfil({
@@ -79,7 +91,7 @@ export async function POST(request: Request) {
       usuario:          body.usuario,
       email:            body.email,
       documento:        body.documento,
-      senha:            body.senha,
+      senhaHash,
       tokenVerificacao: token,
       tokenExpiracao:   expiracao,
       userUuid,
@@ -134,12 +146,25 @@ export async function POST(request: Request) {
   // A capability recopia campo a campo de uma lista fechada e aplica
   // `user_uuid` no filtro da própria escrita — com service_role, é o
   // que impede alcançar o perfil de outro usuário.
+  // PERFIL-SENHA1b: trocar a senha grava SOMENTE o hash — a capability
+  // anula o plaintext legado na mesma escrita. Senha vazia ou ausente
+  // não altera nada, como sempre foi ("deixe em branco para não alterar").
+  let senhaHash: string | undefined;
+  if (body.senha !== undefined && String(body.senha) !== "") {
+    try {
+      senhaHash = await gerarHash(String(body.senha));
+    } catch {
+      console.error("[POST /api/perfil] falha ao gerar hash da senha");
+      return NextResponse.json({ erro: true, mensagem: "Não foi possível salvar o perfil." }, { status: 500 });
+    }
+  }
+
   const { atualizado } = await atualizarPerfilDoDono(userId, {
     nome_completo: body.nome_completo,
     usuario:       body.usuario,
     email:         body.email,
     documento:     body.documento,
-    senha:         body.senha,
+    senhaHash,
   });
 
   if (!atualizado) {
