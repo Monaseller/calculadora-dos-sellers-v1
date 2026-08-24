@@ -7,6 +7,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { autenticarRequisicao } from "@/lib/autenticacao";
 import { syncMLForUser } from "@/lib/sync-ml";
+import { lerIdLojaMLAtivaMaisRecenteDoDono } from "@/lib/marketplace/credenciais";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -80,15 +81,10 @@ export async function GET(request: Request) {
   // token (diferente de getMLLojaAtiva). Exposto na resposta para o
   // frontend disparar POST /api/sync/iniciar com o loja_id correto (ver
   // docs/DECISIONS.md, redesenho do botão Sincronizar, 2026-07-11).
-  const { data: lojaRow } = await supabase
-    .from("lojas")
-    .select("id")
-    .eq("user_id", userId)
-    .eq("marketplace", "ML")
-    .eq("ativo", true)
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  // LOJAS-ANON-SELECT: era leitura com o cliente ANON. So o `id` sai do
+  // banco — a rota nunca usou token aqui.
+  const { lojaId: lojaIdAtiva } = await lerIdLojaMLAtivaMaisRecenteDoDono(userId);
+  const lojaRow = lojaIdAtiva ? { id: lojaIdAtiva } : null;
   const lojaId = lojaRow?.id ?? null;
 
   // Fase C (2026-07-06): date_field decide se o relatório é filtrado por

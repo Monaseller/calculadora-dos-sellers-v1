@@ -20,6 +20,7 @@
 import { createClient } from "@supabase/supabase-js";
 import { CATEGORIAS_ML } from "@/lib/comissoes-mercado-livre";
 import { getMLLojaAtiva } from "@/lib/ml-auth";
+import { listarLojasMLDoDonoPorSeller } from "@/lib/marketplace/credenciais";
 import { LojaIdIntegrityError } from "@/lib/sync-errors";
 // import { atualizarResumosDosDias } from "@/lib/resumos-diarios"; — desativado
 // temporariamente 2026-07-13 (ver bloco de chamada removido mais abaixo).
@@ -212,22 +213,21 @@ export async function syncMLForUserV2(
       sellerId = String(me.id);
       conta    = me.nickname || me.first_name || "ML";
 
-      const { data: lojasEncontradas, error: lojaErr } = await supabase
-        .from("lojas")
-        .select("id")
-        .eq("user_id", userId)
-        .eq("marketplace", "ML")
-        .eq("seller_id", sellerId);
+      // LOJAS-ANON-SELECT: era leitura com o cliente ANON. A capability
+      // ja existia (PR #2b-4) com os tres filtros identicos e devolve os
+      // ids SEM `maybeSingle()`, de proposito: duplicidade precisa
+      // continuar visivel para a checagem de "exatamente 1" abaixo.
+      const { ids: lojasEncontradas, erro: lojaErr } = await listarLojasMLDoDonoPorSeller(userId, sellerId);
 
       if (lojaErr) {
-        throw new LojaIdIntegrityError(`[sync-ml] erro ao resolver loja_id via seller_id=${sellerId}: ${lojaErr.message}`);
+        throw new LojaIdIntegrityError(`[sync-ml] erro ao resolver loja_id via seller_id=${sellerId}`);
       }
-      if (!lojasEncontradas || lojasEncontradas.length !== 1) {
+      if (lojasEncontradas.length !== 1) {
         throw new LojaIdIntegrityError(
-          `[sync-ml] loja_id nao resolvido (fluxo cookie legado): seller_id=${sellerId} encontrou ${lojasEncontradas?.length ?? 0} loja(s) em vez de exatamente 1 — sync interrompido, nenhum pedido gravado.`
+          `[sync-ml] loja_id nao resolvido (fluxo cookie legado): seller_id=${sellerId} encontrou ${lojasEncontradas.length} loja(s) em vez de exatamente 1 — sync interrompido, nenhum pedido gravado.`
         );
       }
-      lojaId = lojasEncontradas[0].id;
+      lojaId = lojasEncontradas[0];
     } catch (err) {
       // Erro de integridade de loja_id nunca cai para o fallback abaixo —
       // usar getMLLojaAtiva aqui poderia resolver para uma loja DIFERENTE

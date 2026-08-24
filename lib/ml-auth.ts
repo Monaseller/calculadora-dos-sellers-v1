@@ -1,4 +1,3 @@
-import { createClient } from "@supabase/supabase-js";
 import {
   lerCredencialMLPorLojaEDono,
   lerCredencialMLAtivaDoDono,
@@ -6,17 +5,16 @@ import {
 } from "@/lib/marketplace/credenciais";
 
 /**
- * Cliente ANON — menor privilégio, e é tudo de que `resolverLojaDoUsuario`
- * precisa: ela lê APENAS `id`, nunca uma coluna de credencial. Dar-lhe
- * service_role seria privilégio gratuito.
+ * LOJAS-ANON-SELECT: este módulo tinha um cliente ANON próprio, usado só
+ * por `resolverLojaDoUsuario`. O comentário antigo o justificava como
+ * "menor privilégio, lê apenas `id`" — e isso descrevia bem a INTENÇÃO,
+ * mas não o efeito: o privilégio não era da consulta, era da ROLE, e a
+ * role `anon` enxergava a tabela inteira, tokens incluídos.
  *
- * Toda leitura ou escrita de credencial deste módulo passa por
- * `lib/marketplace/credenciais.ts` — ver a invariante lá.
+ * Agora TODA leitura de `lojas` deste módulo passa por
+ * `lib/marketplace/credenciais.ts`, e o cliente anon foi removido — não
+ * desativado, removido, para que ninguém volte a usá-lo por engano.
  */
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
 
 function getCookie(request: Request, name: string): string | null {
   const header = request.headers.get("cookie") || "";
@@ -46,15 +44,12 @@ const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 async function resolverLojaDoUsuario(lojaIdBruto: string, userId: string): Promise<string | null> {
   if (!UUID_REGEX.test(lojaIdBruto)) return null;
 
-  const { data } = await supabase
-    .from("lojas")
-    .select("id")
-    .eq("id", lojaIdBruto)
-    .eq("user_id", userId)
-    .eq("marketplace", "ML")
-    .maybeSingle();
+  // LOJAS-ANON-SELECT: era leitura com o cliente ANON. A capability
+  // aplica exatamente os mesmos tres filtros (id + user_id + ML) e
+  // devolve `linha: null` em erro — o fail-closed de antes, preservado.
+  const { linha } = await lerCredencialMLPorLojaEDono(lojaIdBruto, userId);
 
-  return data?.id ?? null;
+  return linha?.id ? String(linha.id) : null;
 }
 
 /**

@@ -19,13 +19,11 @@
  * nome de tabela, coluna e detalhe de esquema. Fica no log do servidor.
  */
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
 import { autenticarRequisicao } from "@/lib/autenticacao";
+import { listarLojasAtivasDoDono } from "@/lib/marketplace/credenciais";
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+// LOJAS-ANON-SELECT: o cliente ANON de módulo foi REMOVIDO — esta rota
+// não tem mais nenhuma consulta própria.
 
 export async function GET(request: Request) {
   const auth = await autenticarRequisicao(request);
@@ -35,15 +33,14 @@ export async function GET(request: Request) {
   if (!userId) return NextResponse.json({ erro: "Não autenticado." }, { status: 401 });
 
   try {
-    const { data, error } = await supabase
-      .from("lojas")
-      .select("id, nome, marketplace, seller_id, nickname, ativo, created_at")
-      .eq("ativo", true)
-      .eq("user_id", userId)
-      .order("created_at");
+    // LOJAS-ANON-SELECT: era leitura com o cliente ANON. Mesma projecao,
+    // mesmos filtros, mesma ordenacao — so a origem passou a ser
+    // privilegiada e server-only.
+    const { linhas: data, erro: error } = await listarLojasAtivasDoDono(userId);
 
     if (error) {
-      console.error("[GET /api/lojas] falha ao consultar lojas:", error.message);
+      // `erro` e um CODIGO estavel da capability, nao o texto do Postgres.
+      console.error("[GET /api/lojas] falha ao consultar lojas:", error);
       return NextResponse.json({ erro: "Não foi possível carregar as lojas." }, { status: 503 });
     }
 

@@ -4,14 +4,12 @@
  * Também pode ser chamado manualmente com ?userId=xxx para um usuário específico.
  */
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
 import { syncShopeeForUserV2 } from "@/lib/sync-shopee";
+import { listarLojasAtivasParaCron } from "@/lib/marketplace/credenciais";
 import { syncMLForUser } from "@/lib/sync-ml";
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+// LOJAS-ANON-SELECT: o cliente ANON de módulo foi REMOVIDO — o cron não
+// tem mais nenhuma consulta própria.
 
 function brtDate(offsetDays = 0): string {
   const d = new Date(Date.now() - 3 * 60 * 60 * 1000);
@@ -57,12 +55,11 @@ export async function GET(request: Request) {
   // Com update_time no sync Shopee, 2 dias bastam: pedidos pagos ontem
   // ou hoje são capturados diretamente pelo update_time da confirmação de pagamento.
 
-  // Busca todos os usuários com loja ativa
-  const { data: lojas } = await supabase
-    .from("lojas")
-    .select("user_id, marketplace")
-    .eq("ativo", true)
-    .not("user_id", "is", null);
+  // Busca todos os usuários com loja ativa.
+  // LOJAS-ANON-SELECT: era leitura com o cliente ANON. A projeção segue
+  // idêntica — (user_id, marketplace) e nada mais — e o filtro
+  // `user_id IS NOT NULL` continua dentro da consulta.
+  const { linhas: lojas } = await listarLojasAtivasParaCron();
 
   if (!lojas?.length) {
     return NextResponse.json({ ok: true, mensagem: "Nenhum usuário ativo" });

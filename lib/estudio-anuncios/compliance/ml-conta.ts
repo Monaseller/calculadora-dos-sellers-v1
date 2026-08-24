@@ -22,6 +22,7 @@
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getMLLojaById } from "@/lib/ml-auth";
+import { lerLojaParaPublicacaoML } from "@/lib/marketplace/credenciais";
 
 const BASE_ML = "https://api.mercadolibre.com";
 const TIMEOUT_MS = 20_000;
@@ -79,14 +80,17 @@ export async function carregarContaML(
   supabase: SupabaseClient,
   params: { lojaId: string; userId: string; marketplace: string }
 ): Promise<ContaMLInterna | null> {
-  const { data, error } = await supabase
-    .from("lojas")
-    .select("id, nome, nickname, seller_id, marketplace, ativo, user_id")
-    .eq("id", params.lojaId)
-    .maybeSingle();
-  if (error) throw new Error(`Falha ao ler a loja: ${error.message}`);
+  // LOJAS-ANON-SELECT: era leitura com o cliente ANON injetado. O
+  // parametro `supabase` PERMANECE na assinatura — os 4 chamadores nao
+  // mudam nesta PR; a limpeza e frente propria.
+  //
+  // Erro de banco continua sendo ERRO, nunca `return null`: um `null`
+  // aqui significa "loja invalida para publicar", e transformar falha de
+  // infraestrutura nisso esconderia o problema atras de um 404.
+  const { linha, erro } = await lerLojaParaPublicacaoML(params.lojaId, params.userId);
+  if (erro) throw new Error("Falha ao ler a loja.");
 
-  const loja = data as any | null;
+  const loja = linha as any | null;
   // As três checagens que impedem usar token de outra pessoa.
   if (!loja) return null;
   if (!loja.user_id || String(loja.user_id) !== params.userId) return null;

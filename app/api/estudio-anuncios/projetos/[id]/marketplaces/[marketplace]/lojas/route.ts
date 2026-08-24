@@ -18,6 +18,7 @@ import { autenticarRequisicao } from "@/lib/autenticacao";
 import { buscarProjetoPorId } from "@/lib/estudio-anuncios/projetos";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { resolverMarketplacePorSlug } from "@/lib/estudio-anuncios/compliance/tipos";
+import { listarLojasConectadasDoDono } from "@/lib/marketplace/credenciais";
 import { resolverModeloDaConta } from "@/lib/estudio-anuncios/compliance/validacao-oficial";
 
 const supabase = createClient(
@@ -52,15 +53,13 @@ export async function GET(request: Request, { params }: { params: { id: string; 
 
     // Só contas DO USUÁRIO, DO marketplace pedido, ativas e com token.
     // `access_token` não entra no select — nem para checar.
-    const { data, error } = await supabase
-      .from("lojas")
-      .select("id, nome, nickname, seller_id, created_at")
-      .eq("user_id", auth.userId)
-      .eq("marketplace", auth.marketplace)
-      .eq("ativo", true)
-      .not("access_token", "is", null)
-      .order("created_at", { ascending: false });
-    if (error) throw new Error(error.message);
+    // LOJAS-ANON-SELECT: era leitura com o cliente ANON. `access_token`
+    // continua fora da projecao — entra so no filtro, dentro do banco.
+    const { linhas: data, erro: error } = await listarLojasConectadasDoDono(
+      auth.userId,
+      auth.marketplace
+    );
+    if (error) throw new Error("Falha ao listar as contas conectadas.");
 
     return NextResponse.json({
       ok: true,

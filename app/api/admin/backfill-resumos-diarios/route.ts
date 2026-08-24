@@ -50,6 +50,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { autenticarRequisicao } from "@/lib/autenticacao";
 import { atualizarResumoDia } from "@/lib/resumos-diarios";
+import { listarLojasDoDonoPorIds } from "@/lib/marketplace/credenciais";
 
 export const maxDuration = 60;
 
@@ -118,18 +119,16 @@ export async function GET(request: Request) {
   // Query 3: cross-check com `lojas` — só aqui o resultado é escopado ao
   // usuário da sessão (segurança multi-tenant), e é onde pegamos
   // marketplace/nickname pra gravar no resumo.
-  let lojasSel = supabase
-    .from("lojas")
-    .select("id, marketplace, nickname")
-    .eq("user_id", userId)
-    .in("id", lojaIdsUnicos);
-
-  if (marketplaceParam) lojasSel = lojasSel.eq("marketplace", marketplaceParam);
-  if (contaParam) lojasSel = lojasSel.eq("nickname", contaParam);
-
-  const { data: lojasDoUsuario, error: errLojas } = await lojasSel;
+  // LOJAS-ANON-SELECT: era leitura com o cliente ANON. Os dois filtros
+  // condicionais viraram opcoes da capability; o escopo por `user_id`
+  // continua dentro da consulta.
+  const { linhas: lojasDoUsuario, erro: errLojas } = await listarLojasDoDonoPorIds(
+    userId,
+    lojaIdsUnicos,
+    { marketplace: marketplaceParam, nickname: contaParam }
+  );
   if (errLojas) {
-    return NextResponse.json({ ok: false, erro: "Erro ao cruzar lojas do usuário: " + errLojas.message }, { status: 500 });
+    return NextResponse.json({ ok: false, erro: "Erro ao cruzar lojas do usuário." }, { status: 500 });
   }
 
   const resultado: any[] = [];

@@ -298,12 +298,24 @@ console.log("── 9 a 13. Superfície privilegiada ─────────
     !/createClient/.test(codigo("lib/shopee-auth.ts")));
   ok("50. ml-conexao não instancia mais createClient",
     !/createClient/.test(codigo("lib/ml-conexao.ts")));
-  ok("51. ml-auth mantém createClient APENAS para o caminho anon sem credencial",
-    /createClient/.test(mlAuth) &&
+  // LOJAS-ANON-SELECT inverteu o 51. Ele existia para registrar a ÚLTIMA
+  // exceção viva: `ml-auth` mantinha um cliente anon próprio porque
+  // `resolverLojaDoUsuario` "lia apenas `id`". A justificativa descrevia
+  // bem a intenção e mal o efeito — o privilégio nunca foi da consulta,
+  // era da ROLE, e `anon` enxergava a tabela inteira, tokens incluídos.
+  // A exceção acabou, e o assert agora trava o oposto.
+  ok("51. ml-auth não instancia mais cliente anon e usa a capability",
+    !/createClient/.test(mlAuth) &&
+    !/NEXT_PUBLIC_SUPABASE_ANON_KEY/.test(mlAuth) &&
+    /lerCredencialMLPorLojaEDono/.test(mlAuth));
+  // A INTENÇÃO do 52 não mudou: `resolverLojaDoUsuario` não pode passar a
+  // manusear credencial. O que mudou é onde a query mora, então o assert
+  // deixa de exigir `.from("lojas")` aqui e prova o mesmo pela borda que
+  // importa — o que a função DEVOLVE continua sendo só o id.
+  ok("52. resolverLojaDoUsuario resolve posse pela capability e devolve só o id",
     /resolverLojaDoUsuario/.test(mlAuth) &&
-    /Cliente ANON — menor privilégio/.test(mlAuth));
-  ok("52. resolverLojaDoUsuario segue lendo somente id",
-    /\.from\("lojas"\)\s*\n\s*\.select\("id"\)/.test(mlAuth));
+    /lerCredencialMLPorLojaEDono\(lojaIdBruto, userId\)/.test(mlAuth) &&
+    /return linha\?\.id \? String\(linha\.id\) : null;/.test(mlAuth));
 
   // 10 — barreira server-only, agora em tempo de BUILD.
   const credSemComentarios = codigo("lib/marketplace/credenciais.ts");
@@ -456,9 +468,27 @@ console.log("── PR #2c — escrita em `lojas` só existe na capability ─�
 
   // A guarda só vale se o varredor de fato enxerga a tabela. Sem isto,
   // um erro no filtro faria a asserção passar por não olhar nada.
-  const tocamLojas = alvos.filter((rel) => /\.from\("lojas"\)/.test(codigo(rel)));
-  ok("92. o varredor enxerga os leitores conhecidos de lojas",
-    tocamLojas.length >= 8);
+  //
+  // A âncora ANTIGA era "existem >= 8 leitores em `alvos`". Ela morreu por
+  // SUCESSO: LOJAS-ANON-SELECT moveu todo acesso a `lojas` para a
+  // capability — que é exatamente o que `alvos` exclui. Baixar o limiar
+  // para zero teria NEUTRALIZADO a guarda; ela foi reancorada, não
+  // afrouxada.
+  //
+  // A nova prova duas coisas de uma vez, e é mais forte que a anterior:
+  //   1. o MECANISMO funciona — o mesmo `codigo()` + regex do varredor
+  //      encontra o acesso canônico dentro da capability;
+  //   2. a CENTRALIZAÇÃO é real — esse acesso é o único do runtime.
+  // Reintroduzir acesso direto em `app/` ou `lib/` quebra o item 2 e o
+  // assert nomeia o arquivo culpado.
+  const todosRuntime = [...arquivosRuntime("app"), ...arquivosRuntime("lib")];
+  const tocamLojas = todosRuntime.filter((rel) => /\.from\("lojas"\)/.test(codigo(rel)));
+  const forasteiros = tocamLojas.filter((rel) => rel !== CAPABILITY_CANONICA);
+  ok(
+    `92. o varredor encontra o acesso a lojas e ele está centralizado na capability` +
+      (forasteiros.length ? ` — FORA DELA: ${forasteiros.join(" | ")}` : ""),
+    tocamLojas.includes(CAPABILITY_CANONICA) && forasteiros.length === 0
+  );
   ok("93. a capability canônica ficou fora da varredura",
     !alvos.includes(CAPABILITY_CANONICA));
 }

@@ -21,7 +21,21 @@
  * singleton de escopo de módulo — assim, ausência de variável de
  * ambiente falha de forma controlada e explícita no momento do uso,
  * em vez de falhar de forma confusa/silenciosa no import do módulo.
+ *
+ * ── `import "server-only"` — LOJAS-ANON-SELECT ──────────────────────
+ * Até esta frente, "server-only" aqui era CONVENÇÃO: um comentário
+ * afirmando que o App Router garante o isolamento. Convenção não é
+ * barreira. Este módulo instancia a `service_role` — a credencial mais
+ * privilegiada do projeto, e a única capaz de ler `access_token`,
+ * `refresh_token` e `partner_key` de todos os tenants.
+ *
+ * O import abaixo transforma a afirmação em erro de compilação: se um
+ * componente `"use client"` importar este arquivo, ainda que
+ * indiretamente, o build QUEBRA em vez de embarcar a chave no bundle do
+ * browser. É exatamente o modo de falha que esta frente existe para
+ * fechar, e ele não pode depender de ninguém lembrar da regra.
  */
+import "server-only";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 export function getSupabaseServidor(): SupabaseClient {

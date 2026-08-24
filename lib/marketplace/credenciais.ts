@@ -890,6 +890,278 @@ export async function avancarCursorSyncShopee(
   return { avancou: Array.isArray(data) && data.length > 0, erro: null };
 }
 
+// ─── Leituras nao-credenciais de `lojas` — LOJAS-ANON-SELECT ──────────
+//
+// ── Por que estas operacoes existem ────────────────────────────────────
+// Nove pontos de runtime liam `public.lojas` com o cliente ANON. Nenhum
+// deles precisava disso: todos rodam no servidor e todos ja tem guarda de
+// sessao, cron ou admin. O acesso anon era heranca do
+// `ALTER DEFAULT PRIVILEGES` do projeto Supabase, nunca uma decisao.
+//
+// Enquanto existir UM leitor anon, o `GRANT SELECT ... TO anon` nao pode
+// ser revogado — e sem revoga-lo, a chave anon (que o Next inlina no
+// bundle do browser) le `access_token`, `refresh_token` e `partner_key`
+// de TODOS os tenants, porque a tabela nao tem RLS nem ACL de coluna.
+//
+// Estas operacoes nao leem credencial. Sao deliberadamente separadas das
+// de cima: projecao minima, sem token, sem `partner_key`, sem
+// `refresh_token`. Quem precisa de credencial usa as funcoes de
+// credencial, que tem projecao propria e fechada.
+
+export interface ResultadoLista2<T> {
+  linhas: T[];
+  erro: string | null;
+}
+
+/** Loja ativa vista pelo cron: o minimo para agrupar trabalho por dono. */
+export interface LinhaLojaParaCron {
+  user_id: string;
+  marketplace: string;
+}
+
+/**
+ * TODAS as lojas ativas com dono, de TODOS os tenants.
+ *
+ * ── A unica leitura cross-tenant deste modulo, e e proposital ──────────
+ * O cron nao tem sessao: ele existe justamente para varrer todo mundo.
+ * Filtrar por `user_id` aqui tornaria a funcao inutil. O que a mantem
+ * segura e o que ela NAO devolve — nem id de loja, nem token, nem
+ * `seller_id`, nem `nickname`. Só o par (dono, marketplace), que e
+ * exatamente o que o agrupamento do cron consome.
+ *
+ * `user_id IS NOT NULL` reproduz o filtro que a rota ja aplicava: lojas
+ * orfas existem no banco e nao pertencem a ninguem que se possa
+ * sincronizar.
+ */
+export async function listarLojasAtivasParaCron(): Promise<ResultadoLista2<LinhaLojaParaCron>> {
+  const { data, error } = await getSupabaseServidor()
+    .from("lojas")
+    .select("user_id, marketplace")
+    .eq("ativo", true)
+    .not("user_id", "is", null);
+
+  if (error) {
+    console.error("[credenciais] falha ao listar lojas ativas para o cron");
+    return { linhas: [], erro: "erro_consulta_loja" };
+  }
+  return { linhas: (Array.isArray(data) ? data : []) as LinhaLojaParaCron[], erro: null };
+}
+
+export interface LinhaLojaParaJob {
+  id: string;
+  user_id: string | null;
+  marketplace: string;
+  ativo: boolean | null;
+}
+
+/**
+ * Loja para validar um pedido de sync vindo do cliente.
+ *
+ * ── O filtro de dono entrou na query, e o contrato HTTP nao mudou ──────
+ * A rota lia por `id` e comparava `user_id` em memoria, devolvendo 400
+ * com a MESMA mensagem para "nao existe" e "e de outro dono". Com o par
+ * na query, loja de terceiro devolve `linha: null`, cai no mesmo `!loja`
+ * e produz o mesmo 400 com o mesmo texto — indistinguivel de antes, do
+ * lado de fora.
+ *
+ * A checagem em memoria permanece na rota. E redundante agora, e e para
+ * ser: o isolamento passa a ter duas camadas em vez de depender só da
+ * disciplina de quem chama.
+ */
+export async function lerLojaParaValidacaoDeJob(
+  lojaId: string,
+  userId: string
+): Promise<ResultadoLeitura<LinhaLojaParaJob>> {
+  if (!lojaId || !userId) return { linha: null, erro: null };
+
+  const { data, error } = await aplicarFiltros(
+    getSupabaseServidor().from("lojas").select("id, user_id, marketplace, ativo"),
+    filtrosGravacaoPorLojaEDono(lojaId, userId)
+  ).maybeSingle();
+
+  if (error) {
+    console.error("[credenciais] falha ao ler loja para validacao de job");
+    return { linha: null, erro: "erro_consulta_loja" };
+  }
+  return { linha: (data as LinhaLojaParaJob | null) ?? null, erro: null };
+}
+
+export interface LinhaLojaDoDono {
+  id: string;
+  nome: string | null;
+  marketplace: string;
+  seller_id: string | null;
+  nickname: string | null;
+  ativo: boolean | null;
+  created_at: string | null;
+}
+
+/** As lojas ATIVAS do dono — o que a tela de lojas lista. Sem token. */
+export async function listarLojasAtivasDoDono(
+  userId: string
+): Promise<ResultadoLista2<LinhaLojaDoDono>> {
+  if (!userId) return { linhas: [], erro: null };
+
+  const { data, error } = await getSupabaseServidor()
+    .from("lojas")
+    .select("id, nome, marketplace, seller_id, nickname, ativo, created_at")
+    .eq("ativo", true)
+    .eq("user_id", String(userId))
+    .order("created_at");
+
+  if (error) {
+    console.error("[credenciais] falha ao listar lojas ativas do dono");
+    return { linhas: [], erro: "erro_consulta_loja" };
+  }
+  return { linhas: (Array.isArray(data) ? data : []) as LinhaLojaDoDono[], erro: null };
+}
+
+/**
+ * Só o `id` da loja ML ativa mais recente do dono.
+ *
+ * Existe separada de `lerCredencialMLAtivaDoDono` de proposito: aquela
+ * projeta `access_token`/`refresh_token` porque quem a chama precisa
+ * deles. Este chamador quer um id para devolver ao frontend, e trazer
+ * token para a memoria de uma rota que nunca o usa e superficie a toa.
+ */
+export async function lerIdLojaMLAtivaMaisRecenteDoDono(
+  userId: string
+): Promise<{ lojaId: string | null; erro: string | null }> {
+  if (!userId) return { lojaId: null, erro: null };
+
+  const { data, error } = await aplicarFiltros(
+    getSupabaseServidor().from("lojas").select("id"),
+    filtrosMLAtivaDoDono(userId)
+  )
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    console.error("[credenciais] falha ao ler loja ML ativa mais recente do dono");
+    return { lojaId: null, erro: "erro_consulta_loja" };
+  }
+  const linha = data as { id?: unknown } | null;
+  return { lojaId: linha?.id ? String(linha.id) : null, erro: null };
+}
+
+export interface LinhaLojaParaResumo {
+  id: string;
+  marketplace: string;
+  nickname: string | null;
+}
+
+/**
+ * Cruzamento das lojas do dono com uma lista de ids ja conhecidos.
+ *
+ * Os dois filtros opcionais reproduzem os `.eq()` condicionais que a rota
+ * de backfill aplicava. Sao campos de FILTRO, nunca colunas de escrita, e
+ * a lista de ids nao dispensa o `user_id`: id vindo de outro tenant
+ * simplesmente nao volta.
+ */
+export async function listarLojasDoDonoPorIds(
+  userId: string,
+  lojaIds: string[],
+  opcoes: { marketplace?: string | null; nickname?: string | null } = {}
+): Promise<ResultadoLista2<LinhaLojaParaResumo>> {
+  if (!userId || !Array.isArray(lojaIds) || lojaIds.length === 0) {
+    return { linhas: [], erro: null };
+  }
+
+  let consulta = getSupabaseServidor()
+    .from("lojas")
+    .select("id, marketplace, nickname")
+    .eq("user_id", String(userId))
+    .in("id", lojaIds);
+
+  if (opcoes.marketplace) consulta = consulta.eq("marketplace", opcoes.marketplace);
+  if (opcoes.nickname) consulta = consulta.eq("nickname", opcoes.nickname);
+
+  const { data, error } = await consulta;
+
+  if (error) {
+    console.error("[credenciais] falha ao cruzar lojas do dono por ids");
+    return { linhas: [], erro: "erro_consulta_loja" };
+  }
+  return { linhas: (Array.isArray(data) ? data : []) as LinhaLojaParaResumo[], erro: null };
+}
+
+export interface LinhaLojaConectada {
+  id: string;
+  nome: string | null;
+  nickname: string | null;
+  seller_id: string | null;
+  created_at: string | null;
+}
+
+/**
+ * Lojas do dono, de um marketplace, ativas e COM token.
+ *
+ * `access_token` entra no `.not(...)` mas NAO na projecao: a pergunta e
+ * "esta conectada?", e a resposta e um booleano que o filtro ja resolve.
+ * O valor do token nunca precisa sair do banco para isso — e o comentario
+ * original da rota ja dizia exatamente isso ("nem para checar").
+ */
+export async function listarLojasConectadasDoDono(
+  userId: string,
+  marketplace: string
+): Promise<ResultadoLista2<LinhaLojaConectada>> {
+  if (!userId || !marketplace) return { linhas: [], erro: null };
+
+  const { data, error } = await getSupabaseServidor()
+    .from("lojas")
+    .select("id, nome, nickname, seller_id, created_at")
+    .eq("user_id", String(userId))
+    .eq("marketplace", marketplace)
+    .eq("ativo", true)
+    .not("access_token", "is", null)
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    console.error("[credenciais] falha ao listar lojas conectadas do dono");
+    return { linhas: [], erro: "erro_consulta_loja" };
+  }
+  return { linhas: (Array.isArray(data) ? data : []) as LinhaLojaConectada[], erro: null };
+}
+
+export interface LinhaLojaPublicacaoML {
+  id: string;
+  nome: string | null;
+  nickname: string | null;
+  seller_id: string | null;
+  marketplace: string;
+  ativo: boolean | null;
+  user_id: string | null;
+}
+
+/**
+ * Loja para o fluxo de publicacao no Mercado Livre.
+ *
+ * `user_id` continua na PROJECAO mesmo com o par ja na query: quem chama
+ * mantem as tres checagens em memoria (`user_id`, `marketplace`,
+ * `ativo`), e retira-las seria trocar defesa em profundidade por
+ * economia de linha. O filtro na query e camada nova, nao substituta.
+ */
+export async function lerLojaParaPublicacaoML(
+  lojaId: string,
+  userId: string
+): Promise<ResultadoLeitura<LinhaLojaPublicacaoML>> {
+  if (!lojaId || !userId) return { linha: null, erro: null };
+
+  const { data, error } = await aplicarFiltros(
+    getSupabaseServidor()
+      .from("lojas")
+      .select("id, nome, nickname, seller_id, marketplace, ativo, user_id"),
+    filtrosGravacaoPorLojaEDono(lojaId, userId)
+  ).maybeSingle();
+
+  if (error) {
+    console.error("[credenciais] falha ao ler loja para publicacao ML");
+    return { linha: null, erro: "erro_consulta_loja" };
+  }
+  return { linha: (data as LinhaLojaPublicacaoML | null) ?? null, erro: null };
+}
+
 /**
  * Grava credencial Shopee renovada.
  *

@@ -24,6 +24,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { autenticarRequisicao } from "@/lib/autenticacao";
 import { ASYNC_SYNC_JOBS_ENABLED } from "@/lib/feature-flags";
+import { lerLojaParaValidacaoDeJob } from "@/lib/marketplace/credenciais";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -73,14 +74,15 @@ export async function POST(request: Request) {
   // Ownership: loja precisa existir E pertencer ao usuário da sessão.
   // Nunca confiar em loja_id do cliente sem checar isso — regra aprovada
   // 2026-07-11 ("validar que loja_id pertence ao usuário").
-  const { data: loja, error: lojaErr } = await supabase
-    .from("lojas")
-    .select("id, user_id, marketplace, ativo")
-    .eq("id", lojaId)
-    .maybeSingle();
+  // LOJAS-ANON-SELECT: era leitura com o cliente ANON, por `id` apenas.
+  // O par (id, user_id) passou para dentro da consulta; a checagem logo
+  // abaixo continua valendo e o contrato HTTP não muda — loja de outro
+  // dono devolve `null` e cai no mesmo 400, com a mesma mensagem.
+  const { linha: loja, erro: lojaErr } = await lerLojaParaValidacaoDeJob(lojaId, userId);
 
   if (lojaErr) {
-    return NextResponse.json({ ok: false, erro: "Erro ao validar loja: " + lojaErr.message }, { status: 500 });
+    // O texto do Postgres não sai daqui: a capability já devolve código.
+    return NextResponse.json({ ok: false, erro: "Erro ao validar loja." }, { status: 500 });
   }
   if (!loja || String(loja.user_id) !== String(userId)) {
     return NextResponse.json({ ok: false, erro: "Loja não encontrada ou não pertence ao usuário." }, { status: 400 });
