@@ -1,0 +1,104 @@
+-- =====================================================================
+-- SEC-2d — REVOGAR LEITURA DE `anon` EM public.lojas
+--
+-- Continua a SEC-2c (20260907), que fechou a ESCRITA. Esta fecha a
+-- LEITURA — e era ela que expunha credencial.
+-- =====================================================================
+--
+-- 1. O QUE ESTAVA EXPOSTO
+-- ---------------------------------------------------------------------
+-- `public.lojas` nao tem RLS, nao tem policy e nao tem ACL de coluna.
+-- O SELECT concedido a `anon` era, portanto, IRRESTRITO: toda linha,
+-- toda coluna, de todos os tenants. Medido em producao antes da
+-- correcao (contagens apenas, nenhum valor lido ou registrado):
+--
+--     linhas visiveis por `anon` .......... 15 de 15
+--     colunas retornadas .................. 15 de 15
+--     linhas com `access_token` ........... 15
+--     linhas com `refresh_token` ..........  6
+--     linhas com `partner_key` ............  3
+--
+-- `partner_key` e o segredo da aplicacao parceira Shopee;
+-- `access_token`/`refresh_token` dao controle das contas de marketplace.
+--
+-- 2. POR QUE ISSO ERA ALCANCAVEL DE FORA
+-- ---------------------------------------------------------------------
+-- A chave `anon` NAO e segredo: o Next.js inlina toda variavel
+-- `NEXT_PUBLIC_*` nos bundles de cliente. Confirmado no build: a chave
+-- aparece em 2 chunks de `.next/static/`, servidos ao browser.
+--
+-- A origem e `app/(app)/dashboard/page.tsx`, um componente "use client"
+-- que instancia um cliente Supabase para consultar `anuncios`. Ele nunca
+-- leu `lojas` — mas a chave que ele embarca servia para ler `lojas`,
+-- porque o privilegio nao e da consulta, e da ROLE.
+--
+-- 3. DE ONDE VEIO O PRIVILEGIO
+-- ---------------------------------------------------------------------
+-- De lugar nenhum, deliberadamente. Nenhuma migration jamais concedeu
+-- SELECT em `lojas` a `anon`. O privilegio vem do `ALTER DEFAULT
+-- PRIVILEGES` do projeto Supabase, que ainda concede acesso automatico a
+-- `anon` em TODA tabela nova de `public` — o mesmo mecanismo que causou
+-- o bug SEC1.
+--
+-- Consequencia pratica, e a razao de esta migration existir: num banco
+-- NOVO, `lojas` nasceria com `anon=arw` por default. A SEC-2c revoga o
+-- `a` e o `w`; sem este arquivo, o `r` PERMANECERIA. Este nao e um
+-- registro historico — e o que faz a reproducao do ambiente funcionar.
+--
+-- Corrigir o default privilege e frente PROPRIA, fora do escopo aqui:
+-- ele afeta todas as tabelas futuras, nao apenas esta.
+--
+-- 4. POR QUE O CODIGO VEIO ANTES DO REVOKE
+-- ---------------------------------------------------------------------
+-- Nove pontos de runtime liam `lojas` com o cliente `anon`. Nenhum
+-- precisava: todos rodam no servidor e todos ja tinham guarda de sessao,
+-- cron ou admin. Mas enquanto um deles existisse, este REVOKE derrubaria
+-- producao — cron diario, tela de lojas, vendas ML, Estudio.
+--
+-- Por isso a ordem foi: migrar os nove para capability server-only
+-- (`service_role`) -> publicar -> confirmar deployment READY e smokes
+-- -> so entao revogar, na mesma sessao.
+--
+-- A alternativa (revogar primeiro, corrigir depois) fecharia a exposicao
+-- algumas horas antes as custas de indisponibilidade do sync financeiro
+-- e das telas de loja para todos os clientes. Como a exposicao ja durava
+-- muito mais que isso, a troca nao se justificava. Decisao registrada e
+-- aprovada antes da execucao.
+--
+-- 5. O QUE ESTE REVOKE NAO FAZ
+-- ---------------------------------------------------------------------
+-- Nao desfaz leitura que ja tenha ocorrido. Ele fecha a exposicao
+-- FUTURA. A avaliacao de rotacao das credenciais que estiveram legiveis
+-- e etapa separada de resposta a incidente, com escopo e janela
+-- proprios — nao pertence a esta migration.
+--
+-- Tambem nao remove a chave `anon` do bundle: ela continua la e continua
+-- servindo para as tabelas onde ainda tem privilegio. O que muda e que
+-- `lojas` deixa de responder a ela.
+--
+-- 6. IDEMPOTENCIA
+-- ---------------------------------------------------------------------
+-- `REVOKE` de privilegio ausente e no-op silencioso no PostgreSQL, nao
+-- erro. Reaplicar esta migration e seguro e nao exige checar existencia
+-- do grant antes — mesmo argumento da SEC-2c.
+--
+-- Estado ja aplicado em producao (2026-08-24). Verificado depois:
+--     ACL de public.lojas: {postgres=arwdDxtm/postgres,
+--                           service_role=arwdDxtm/postgres}
+--     `anon` desapareceu da ACL — nao e privilegio reduzido, e entrada
+--     removida. Probe com a chave anon real devolveu:
+--         42501 permission denied for table lojas
+--     `service_role` intacto; as 7 capabilities de leitura seguiram
+--     respondendo sem erro.
+--
+-- 7. ROLLBACK (MANUAL — NAO EXECUTADO AQUI)
+-- ---------------------------------------------------------------------
+-- Se for preciso desfazer:
+--
+--     GRANT SELECT ON TABLE public.lojas TO anon;
+--
+-- Isto e comentario, nao comando. Reverter reabre exatamente a exposicao
+-- de credenciais que esta migration fecha, e exige autorizacao propria.
+-- =====================================================================
+
+REVOKE SELECT ON TABLE public.lojas FROM anon;

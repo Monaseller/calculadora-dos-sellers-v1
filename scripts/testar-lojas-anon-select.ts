@@ -264,5 +264,53 @@ const RUNTIME = arquivosRuntime();
   );
 }
 
+// ══════════════════════════════════════════════════════════════════════
+// 39-44 — MIGRATION SEC-2d: o REVOKE está registrado no repositório
+// ══════════════════════════════════════════════════════════════════════
+{
+  // O REVOKE foi aplicado em produção antes de existir arquivo. Sem esta
+  // migration, o repositório continuaria descrevendo a postura VULNERÁVEL
+  // — e um banco novo a reproduziria, porque o `ALTER DEFAULT PRIVILEGES`
+  // do projeto ainda concede `anon=arw` a toda tabela nova de `public`.
+  // A SEC-2c revoga o `a` e o `w`; sem este arquivo o `r` sobreviveria.
+  const MIGRACAO = "supabase/migrations/20260911_sec2d_revogar_leitura_anon_lojas.sql";
+
+  let sql = "";
+  let existe = true;
+  try {
+    sql = fonte(MIGRACAO);
+  } catch {
+    existe = false;
+  }
+  ok("39. a migration SEC-2d existe", existe);
+
+  const semComentarios = sql.replace(/--.*$/gm, "");
+  const statements = semComentarios
+    .split(";")
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  ok("40. a migration tem exatamente UM statement executavel", statements.length === 1);
+  ok(
+    "41. o statement e o REVOKE de SELECT em public.lojas para anon",
+    /^REVOKE\s+SELECT\s+ON\s+TABLE\s+public\.lojas\s+FROM\s+anon$/i.test(
+      (statements[0] ?? "").replace(/\s+/g, " ")
+    )
+  );
+  // O rollback reabre a exposição inteira. Ele existe documentado, mas
+  // NUNCA como comando — um GRANT executável aqui desfaria a correção
+  // silenciosamente em qualquer replay das migrations.
+  ok("42. nenhum GRANT executavel na migration", !/GRANT/i.test(semComentarios));
+  ok(
+    "43. o rollback aparece SOMENTE como comentario",
+    /^--\s*GRANT SELECT ON TABLE public\.lojas TO anon;/m.test(sql)
+  );
+  // Nem contagem nem prosa podem carregar valor de credencial.
+  ok(
+    "44. a migration nao contem token, chave nem segredo",
+    !/eyJ[A-Za-z0-9_-]{15,}/.test(sql) && !/-----BEGIN/.test(sql) && !/sbp_[a-f0-9]{20,}/.test(sql)
+  );
+}
+
 console.log(`\n${falhou === 0 ? "✓" : "✗"} LOJAS-ANON-SELECT — ${passou} passaram, ${falhou} falharam`);
 process.exit(falhou === 0 ? 0 : 1);
