@@ -41,6 +41,12 @@ import {
 } from "../lib/agentes/handlers/teste-fundacao";
 import { TIPOS_ERRO_TAREFA, type ContextoTarefa } from "../lib/agentes/tipos-execucao";
 import { INTERVALO_HEARTBEAT_MS } from "../lib/agentes/executar-tarefa";
+import {
+  decidirAcesso,
+  ROTAS_COM_SEGREDO,
+  ROTAS_PUBLICAS,
+  PAGINAS_PUBLICAS,
+} from "../lib/middleware-rotas";
 import { transicaoTarefaPermitida, STATUS_TAREFA } from "../lib/agentes/tipos";
 
 const RAIZ = join(__dirname, "..");
@@ -451,6 +457,50 @@ async function main() {
   ok("K27 tem teto", /TIMEOUT_HTTP_TETO_MS/.test(wrk));
   ok("K28 fallback seguro com aviso", /console\.warn/.test(wrk) && /TIMEOUT_HTTP_PADRAO_MS/.test(wrk));
   ok("K29 o padrao e 60000", /TIMEOUT_HTTP_PADRAO_MS\s*=\s*60000/.test(wrk));
+
+  // ═══ L. ROTA INTERNA ↔ POLITICA DO MIDDLEWARE ═════════════════════
+  //
+  // Existe por causa de um FAIL real. No primeiro smoke da FASE 1C a
+  // rota interna estava perfeita — segredo proprio, fail-closed, UUID
+  // validado — e mesmo assim o worker levou 401. O 401 nao era dela: o
+  // MIDDLEWARE bloqueava a requisicao antes, porque
+  // `/api/internal/agentes/executar` nunca foi registrada em
+  // `ROTAS_COM_SEGREDO`.
+  //
+  // Nenhuma suite pegou: a offline auditava a rota ISOLADA, e a de banco
+  // chama as RPCs sem passar por HTTP. Uma rota interna so funciona se
+  // DUAS coisas forem verdadeiras ao mesmo tempo, e ate aqui so uma
+  // delas era verificada.
+  //
+  // Os asserts abaixo amarram as duas pontas NOS DOIS SENTIDOS:
+  //   - tirar a rota da politica  -> L2/L3 quebram
+  //   - tirar o segredo do handler mantendo a rota liberada -> L7 quebra
+  //     (seria um endpoint aberto, que e pior que a fila parada)
+  const CAMINHO_ROTA = "/api/internal/agentes/executar";
+  console.log("L. Rota interna x politica do middleware");
+
+  ok("L0  a politica foi carregada (anti-vacuidade)", Object.keys(ROTAS_COM_SEGREDO).length > 0);
+  ok("L1  a rota esta em ROTAS_COM_SEGREDO", CAMINHO_ROTA in ROTAS_COM_SEGREDO);
+  ok("L2  declarada SOMENTE para POST",
+     JSON.stringify(ROTAS_COM_SEGREDO[CAMINHO_ROTA]) === JSON.stringify(["POST"]));
+  // O que o middleware DECIDE, nao o que a lista parece dizer.
+  ok("L3  POST sem cookie -> liberar", decidirAcesso(CAMINHO_ROTA, "POST", false) === "liberar");
+  ok("L4  GET sem cookie -> bloquear_api", decidirAcesso(CAMINHO_ROTA, "GET", false) === "bloquear_api");
+  ok("L5  demais metodos sem cookie -> bloquear_api",
+     ["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"].every(
+       (m) => decidirAcesso(CAMINHO_ROTA, m, false) === "bloquear_api"));
+  ok("L6  a rota NAO e publica",
+     !(CAMINHO_ROTA in ROTAS_PUBLICAS) && !PAGINAS_PUBLICAS.has(CAMINHO_ROTA));
+  // O outro sentido: liberada no middleware EXIGE autenticacao propria.
+  ok("L7  liberada no middleware => o handler autentica sozinho",
+     /AGENTES_WORKER_INTERNAL_SECRET/.test(rota) &&
+       /x-worker-secret/.test(rota) &&
+       /!segredoEsperado/.test(rota));
+  ok("L8  o caminho da politica e o caminho REAL do arquivo de rota",
+     require("fs").existsSync(join(RAIZ, "app" + CAMINHO_ROTA.replace("/api", "/api") + "/route.ts")));
+  ok("L9  o worker chama exatamente esse caminho", wrk.includes(CAMINHO_ROTA));
+  ok("L10 o segredo do middleware e o mesmo que o worker envia",
+     /x-worker-secret/.test(wrk) && /AGENTES_WORKER_INTERNAL_SECRET/.test(wrk));
 
   const total = passou + falhou;
   console.log(`\n${"=".repeat(58)}`);

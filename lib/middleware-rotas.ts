@@ -112,6 +112,7 @@ export const ROTAS_COM_SEGREDO: Readonly<Record<string, readonly string[]>> = {
   "/api/internal/estudio-anuncios/worker": ["GET"], // Vercel Cron * * * * *
   "/api/internal/estudio-anuncios/executar": ["POST"], // scripts/estudio-anuncios-worker.mjs
   "/api/internal/sync/executar": ["POST"], // scripts/sync-worker.mjs
+  "/api/internal/agentes/executar": ["POST"], // scripts/agentes-worker.mjs
 };
 
 /**

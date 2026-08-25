@@ -67,17 +67,64 @@ t("4. POST /api/internal/sync/executar passa sem cookie", () => {
   assert(sem("/api/internal/sync/executar", "POST") === "liberar", "worker de sync bloqueado");
 });
 
+t("4b. POST /api/internal/agentes/executar passa sem cookie", () => {
+  // Este assert existe por causa de um FAIL real: no primeiro smoke da
+  // AGENTES-FASE1C a rota interna foi criada mas NAO registrada aqui. O
+  // worker reivindicou a tarefa, chamou a rota e levou 401 do MIDDLEWARE
+  // — nao do handler. A tarefa ficou em `rodando` ate a orfa.
+  assert(sem("/api/internal/agentes/executar", "POST") === "liberar",
+    "worker de agentes bloqueado pelo middleware — a fila pararia sem sintoma");
+});
+
+t("4c. a rota de agentes NAO fica publica, e so por ter segredo proprio", () => {
+  // "liberar" aqui significa DEIXAR CHEGAR, nunca "qualquer um pode".
+  // O metodo e fechado: so POST.
+  assert(sem("/api/internal/agentes/executar", "GET") === "bloquear_api",
+    "GET na rota de agentes deveria cair no default deny");
+  for (const metodo of ["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
+    assert(sem("/api/internal/agentes/executar", metodo) === "bloquear_api",
+      `${metodo} na rota de agentes deveria cair no default deny`);
+
+  // Nao esta em nenhuma lista de coisa publica.
+  assert(!("/api/internal/agentes/executar" in ROTAS_PUBLICAS),
+    "rota de agentes listada como PUBLICA — ela tem segredo proprio, nao e publica");
+  assert(!PAGINAS_PUBLICAS.has("/api/internal/agentes/executar"),
+    "rota de agentes listada como pagina publica");
+
+  // A LIBERACAO SO SE JUSTIFICA porque o handler autentica sozinho. Se
+  // alguem remover o segredo do handler e esquecer de tirar a rota
+  // daqui, a rota vira um endpoint aberto — e este assert quebra.
+  // SEM COMENTARIOS. O cabecalho da rota EXPLICA o segredo em prosa —
+  // uma busca na fonte crua casaria com a explicacao e passaria mesmo que
+  // o codigo tivesse parado de validar. Foi o que aconteceu na primeira
+  // versao deste assert, flagrado pelo teste de mutacao.
+  const fonteRota = fs
+    .readFileSync(path.join(process.cwd(), "app/api/internal/agentes/executar/route.ts"), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|[^:])\/\/.*$/gm, "$1");
+  assert(/process\.env\.AGENTES_WORKER_INTERNAL_SECRET/.test(fonteRota),
+    "rota liberada no middleware mas NAO le AGENTES_WORKER_INTERNAL_SECRET do ambiente");
+  assert(/headers\.get\("x-worker-secret"\)/.test(fonteRota),
+    "rota liberada mas nao le o header do segredo");
+  assert(/!segredoEsperado/.test(fonteRota),
+    "rota liberada mas nao e fail-closed quando a variavel de ambiente falta");
+  assert(/segredoRecebido !== segredoEsperado/.test(fonteRota),
+    "rota liberada mas nao compara o segredo recebido com o esperado");
+});
+
 t("5. metodo errado numa rota com segredo NAO e liberado", () => {
   // O middleware não inventa método: worker é GET, executar é POST.
   assert(sem("/api/internal/estudio-anuncios/worker", "POST") === "bloquear_api",
     "POST no worker deveria cair no default deny");
   assert(sem("/api/internal/estudio-anuncios/executar", "GET") === "bloquear_api",
     "GET no executar deveria cair no default deny");
+  assert(sem("/api/internal/agentes/executar", "GET") === "bloquear_api",
+    "GET no executar de agentes deveria cair no default deny");
 });
 
-t("6. as 4 rotas com segredo estao declaradas, nem uma a mais", () => {
-  assert(Object.keys(ROTAS_COM_SEGREDO).length === 4,
-    `esperado 4 rotas com segredo, encontrado ${Object.keys(ROTAS_COM_SEGREDO).length}`);
+t("6. as 5 rotas com segredo estao declaradas, nem uma a mais", () => {
+  assert(Object.keys(ROTAS_COM_SEGREDO).length === 5,
+    `esperado 5 rotas com segredo, encontrado ${Object.keys(ROTAS_COM_SEGREDO).length}`);
 });
 
 // ────────────────────────────────────────────────────────────────────
@@ -304,7 +351,7 @@ t("29. asset marcado 'publico' precisa constar em ASSETS_PUBLICOS", () => {
 });
 
 // ────────────────────────────────────────────────────────────────────
-console.log("\n[8. cobertura: as 49 rotas do inventario F0.a]");
+console.log("\n[8. cobertura: as 50 rotas do inventario F0.a]");
 
 /** caminho, metodo, decisao esperada SEM sessao. */
 const INVENTARIO: [string, string, Decisao][] = [
@@ -316,11 +363,12 @@ const INVENTARIO: [string, string, Decisao][] = [
   ["/api/auth/mercadolivre/callback", "GET", "liberar"],
   ["/api/auth/shopee", "GET", "liberar"],
   ["/api/auth/shopee/callback", "GET", "liberar"],
-  // — com segredo proprio (4)
+  // — com segredo proprio (5; era 4 ate a AGENTES-FASE1C-FIX1)
   ["/api/sync", "GET", "liberar"],
   ["/api/internal/estudio-anuncios/worker", "GET", "liberar"],
   ["/api/internal/estudio-anuncios/executar", "POST", "liberar"],
   ["/api/internal/sync/executar", "POST", "liberar"],
+  ["/api/internal/agentes/executar", "POST", "liberar"],
   // — excecao temporaria F0.c (1; era 3 ate o cutover F0.c.5 e 2 ate a
   //   F0.c.16, quando /api/auth/status saiu do inventario por ter sido
   //   DELETADA — o caminho segue coberto pelo teste 20)
@@ -371,10 +419,11 @@ const INVENTARIO: [string, string, Decisao][] = [
   [`/api/estudio-anuncios/projetos/${UUID}/exportacao/${UUID}/arquivo`, "GET", "bloquear_api"],
 ];
 
-t("30. as 49 rotas do inventario caem na classe correta", () => {
+t("30. as 50 rotas do inventario caem na classe correta", () => {
   // 51 → 50 em F0.c.6d: `/api/auth/relay` deixou de existir.
   // 50 → 49 em F0.c.16: `/api/auth/status` deixou de existir.
-  assert(INVENTARIO.length === 49, `inventario tem ${INVENTARIO.length} rotas, esperado 49`);
+  // 49 → 50 na AGENTES-FASE1C-FIX1: `/api/internal/agentes/executar` entrou.
+  assert(INVENTARIO.length === 50, `inventario tem ${INVENTARIO.length} rotas, esperado 50`);
   for (const [caminho, metodo, esperado] of INVENTARIO) {
     const obtido = sem(caminho, metodo);
     assert(obtido === esperado, `${metodo} ${caminho}: esperado ${esperado}, obtido ${obtido}`);
