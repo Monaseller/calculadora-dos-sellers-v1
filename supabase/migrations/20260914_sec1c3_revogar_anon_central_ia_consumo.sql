@@ -1,0 +1,98 @@
+-- =====================================================================
+-- SEC-1c-3 — REVOGAR anon EM public.central_ia_consumo
+-- =====================================================================
+--
+-- 1. O QUE MUDOU NO CODIGO ANTES DESTE REVOKE
+-- ---------------------------------------------------------------------
+-- Esta migration so e segura porque um call site foi migrado antes, na
+-- mesma PR:
+--
+--   app/api/estudio-anuncios/projetos/[id]/route.ts:115
+--     montarResultadoProjeto(supabase, ...)
+--       ->  montarResultadoProjeto(getSupabaseServidor(), ...)
+--
+-- `montarResultadoProjeto` delega a `buscarCustoProjeto(supabase, ...)`
+-- (lib/estudio-anuncios/resultados.ts:367), e e ELA que le
+-- `central_ia_consumo` (resultados.ts:244). Aquele era o ultimo caminho
+-- runtime anon da tabela.
+--
+-- 2. INVENTARIO COMPLETO — 4 ocorrencias runtime, 2 funcoes
+-- ---------------------------------------------------------------------
+-- A prova NAO se apoia no nome da variavel: em `lib/estudio-anuncios/`
+-- praticamente todo modulo recebe `supabase: SupabaseClient` como
+-- PARAMETRO, e o cliente real depende de quem chama. Foi assim que
+-- `ml-conta.ts` enganou a auditoria da LOJAS-ANON-SELECT. Cada cadeia
+-- foi seguida ate o `createClient` de origem:
+--
+--   lib/ai-gateway/registro.ts:99,112,135  — fn `registrarConsumo`
+--     caller UNICO: lib/estudio-anuncios/executar-job.ts:233
+--       registrarConsumo(supabaseServico, ...)
+--     cadeia: app/api/internal/estudio-anuncios/executar/route.ts:27
+--       createClient(URL, SUPABASE_SERVICE_ROLE_KEY) -> supabaseServico
+--       -> processarJobDoPipeline(supabaseServico, jobId)  (linha 58)
+--     => SERVICE_ROLE (worker). Nenhuma rota chama `registrarConsumo`.
+--
+--   lib/estudio-anuncios/resultados.ts:244 — fn `buscarCustoProjeto`
+--     caller runtime UNICO: resultados.ts:367, dentro de
+--     `montarResultadoProjeto`, cujo caller runtime UNICO e
+--     app/api/estudio-anuncios/projetos/[id]/route.ts:115
+--     => SERVICE_ROLE apos a migracao acima.
+--
+--   Os 12 demais callers de `montarResultadoProjeto`/`buscarCustoProjeto`
+--   estao em scripts/testar-ui-resultado.ts — SUITE DE TESTE, com duplo
+--   em memoria (`sb`). Nao e runtime e nao alcanca o banco.
+--
+--   CAMINHOS RUNTIME ANON = 0.
+--
+-- 3. O QUE ESTA TABELA CONTEM — e por que o risco e baixo
+-- ---------------------------------------------------------------------
+-- Contabilidade de uso de IA: provedor, modelo, custo estimado e
+-- CONTAGEM de tokens (`tokens_entrada`, `tokens_saida`). O nome "token"
+-- aqui e unidade de faturamento de LLM, NAO credencial — um detector
+-- ingenuo confunde os dois. Nenhum segredo, nenhum dado de marketplace.
+--
+-- 66 linhas, RLS desligada, 0 policies, owner `postgres`.
+--
+-- 4. O QUE ESTA MIGRATION NAO FAZ
+-- ---------------------------------------------------------------------
+--   - nao toca `estudio_anuncios_projetos`. As duas ESCRITAS daquela
+--     rota (`editarProjeto`, `cancelarProjetoLogicamente`) sairam do
+--     cliente anon nesta mesma PR, mas a tabela mantem outros 5 caminhos
+--     anon (projetos/route.ts, geracao-prompts-imagem.ts). Revogar ali
+--     quebraria producao;
+--   - nao toca nenhuma das outras 20 tabelas que ainda tem `anon`;
+--   - nao toca `authenticated` (ja tem zero aqui) nem `service_role`
+--     (mantem os 7 privilegios);
+--   - nao toca DEFAULT PRIVILEGES — isso foi a SEC-1a;
+--   - nao toca RLS, policies, sequences nem functions;
+--   - nao usa CASCADE nem logica dinamica.
+--
+-- 5. IDEMPOTENCIA
+-- ---------------------------------------------------------------------
+-- `REVOKE` de privilegio ausente e no-op silencioso no PostgreSQL, nao
+-- erro. Reaplicar e seguro.
+--
+-- 6. BASELINE (medida imediatamente antes, read-only)
+-- ---------------------------------------------------------------------
+--   anon em central_ia_consumo ........ INSERT, SELECT, UPDATE  -> 0
+--   service_role ...................... 7 privilegios (integro)
+--   authenticated ..................... nenhum
+--   owner ............................. postgres
+--   RLS / policies .................... false / 0
+--   COUNT(*) real ..................... 66   (medido, nao presumido)
+--   anon total em public .............. 63  ->  esperado 60
+--   tabelas com anon .................. 21  ->  esperado 20
+--   md5 ACL das outras 20 ............. 9b49ed5d6b885896b93256cec622f90c
+--   md5 default privileges ............ 6528e89dd1922165b5d79e70dcaeebeb
+--
+-- Os dois md5 devem permanecer IDENTICOS apos a aplicacao. Divergencia
+-- significa efeito fora do escopo declarado.
+--
+-- 7. ROLLBACK (MANUAL — NAO EXECUTADO AQUI)
+-- ---------------------------------------------------------------------
+--     GRANT SELECT, INSERT, UPDATE ON TABLE public.central_ia_consumo TO anon;
+--
+-- Isto e comentario, nao comando.
+-- =====================================================================
+
+REVOKE SELECT, INSERT, UPDATE ON TABLE public.central_ia_consumo FROM anon;

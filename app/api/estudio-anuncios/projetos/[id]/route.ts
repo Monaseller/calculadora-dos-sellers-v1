@@ -106,7 +106,13 @@ export async function GET(
       buscarPipelinePorProjeto(supabase, params.id),
       listarJobsPorProjeto(supabase, params.id),
       listarFotosPorProjeto(supabase, getSupabaseServidor(), params.id),
-      montarResultadoProjeto(supabase, getSupabaseServidor(), params.id),
+      // SEC-1c-3: 1o argumento migrado de `supabase` (anon) para
+      // service_role. `montarResultadoProjeto` delega a
+      // `buscarCustoProjeto(supabase, ...)`, que le `central_ia_consumo`
+      // com ESTE cliente — e este era o ULTIMO caminho runtime anon
+      // daquela tabela. O 2o argumento ja era service_role (Storage) e
+      // nao muda. A posse do projeto foi validada na linha 95.
+      montarResultadoProjeto(getSupabaseServidor(), getSupabaseServidor(), params.id),
       buscarResultadosPipelinePorProjeto(supabase, params.id),
     ]);
 
@@ -299,7 +305,12 @@ export async function PATCH(
       return NextResponse.json({ ok: false, erro: validacao.erro }, { status: 400 });
     }
 
-    const atualizado = await editarProjeto(supabase, userId, params.id, validacao.dados);
+    // SEC-1c-3: ESCRITA sai do cliente anon. O isolamento NAO dependia
+    // da role e continua nao dependendo: `editarProjeto` aplica
+    // `.eq("id", id).eq("user_id", userId)` na propria instrucao de
+    // UPDATE, entao registro de outro dono nunca casa o WHERE. `userId`
+    // vem de `autenticarRequisicao`, nunca do body.
+    const atualizado = await editarProjeto(getSupabaseServidor(), userId, params.id, validacao.dados);
     if (!atualizado) {
       return NextResponse.json({ ok: false, erro: "Projeto não encontrado." }, { status: 404 });
     }
@@ -326,7 +337,10 @@ export async function DELETE(
   }
 
   try {
-    const resultado = await cancelarProjetoLogicamente(supabase, userId, params.id);
+    // SEC-1c-3: mesma razao do PATCH — a segunda ESCRITA desta rota
+    // deixa de usar o cliente anon. O par (id, user_id) permanece na
+    // instrucao de UPDATE.
+    const resultado = await cancelarProjetoLogicamente(getSupabaseServidor(), userId, params.id);
     if (!resultado.encontrado) {
       return NextResponse.json({ ok: false, erro: "Projeto não encontrado." }, { status: 404 });
     }
