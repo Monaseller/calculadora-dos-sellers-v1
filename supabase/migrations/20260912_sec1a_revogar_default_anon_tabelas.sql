@@ -1,0 +1,116 @@
+-- =====================================================================
+-- SEC-1a — FECHAR O DEFAULT PRIVILEGE RESIDUAL DE `anon` EM TABELAS
+--          FUTURAS CRIADAS POR `postgres` NO SCHEMA `public`
+-- =====================================================================
+--
+-- 1. OBJETIVO
+-- ---------------------------------------------------------------------
+-- Toda tabela nova criada por `postgres` em `public` nasce hoje com
+-- `anon = arw` (SELECT, INSERT, UPDATE). Esta migration fecha isso.
+--
+-- Nao e uma correcao pontual: e o GERADOR da classe de vulnerabilidade
+-- que ja custou tres correcoes anteriores.
+--
+--     SEC-2c        revogou INSERT/UPDATE de anon em `lojas`
+--     PERFIL-SENHA1a revogou todo acesso de anon em `perfil`
+--     SEC-2d        revogou SELECT de anon em `lojas`
+--
+-- Nenhuma das tres tabelas recebeu `GRANT` explicito em migration
+-- alguma. O privilegio veio SEMPRE daqui. Enquanto o default estiver
+-- aberto, cada tabela nova repete o problema — em silencio, e sem que
+-- ninguem precise escrever uma linha de SQL errada.
+--
+-- 2. ESCOPO — o que esta migration toca
+-- ---------------------------------------------------------------------
+-- EXATAMENTE UMA COISA: o default privilege de TABLES, para a role
+-- `anon`, no schema `public`, quando o criador for `postgres`.
+--
+-- NAO toca, deliberadamente:
+--   - nenhuma das 33 tabelas EXISTENTES (ver secao 3);
+--   - `authenticated` — ja nao tem privilegio default aqui; a SEC-2a
+--     (20260819) o removeu, e mexer de novo seria no-op ruidoso;
+--   - `service_role` — permanece com `arwdDxtm` integralmente. E a role
+--     que a aplicacao usa para TODO acesso privilegiado; revoga-la
+--     derrubaria o produto inteiro;
+--   - `supabase_admin` — default privileges pertencem ao role criador,
+--     e `postgres` nao e membro dele nem superusuario. Alem disso as 33
+--     tabelas atuais tem owner `postgres`, entao o default de
+--     `supabase_admin` e LATENTE. Frente propria (SEC-1d);
+--   - SEQUENCES — frente propria (SEC-1b). Sao 2, e uma delas
+--     (`dashboard_resumos_diarios_id_seq`) precisa de verificacao de
+--     dependencia antes;
+--   - FUNCTIONS — deliberadamente fora. O projeto ja revoga EXECUTE
+--     funcao a funcao (padrao presente em 12 migrations), o que e mais
+--     preciso que um default fechado. Fechar por default poderia quebrar
+--     CHECK constraints e funcoes internas do Supabase;
+--   - RLS, policies, grants de coluna — nada disso muda;
+--   - runtime, cron, cursor Shopee, rotas de sync — nada disso muda.
+--
+-- 3. POR QUE NAO E RETROATIVO — e por que isso e a caracteristica
+--    mais importante desta migration
+-- ---------------------------------------------------------------------
+-- `ALTER DEFAULT PRIVILEGES` NAO altera objeto existente. Ele so grava
+-- uma regra em `pg_default_acl`, consultada no momento em que um objeto
+-- NOVO e criado.
+--
+-- Consequencia pratica: 31 das 33 tabelas atuais tem hoje
+-- `anon = INSERT, SELECT, UPDATE`, e continuarao tendo depois desta
+-- migration. Isso NAO e falha — e o escopo declarado. Fechar os grants
+-- existentes exige migrar leitores para `service_role` antes, tabela por
+-- tabela, exatamente como a LOJAS-ANON-SELECT fez com os nove pontos de
+-- `lojas`. Isso e a SEC-1c, e ela tem risco ALTO porque parte das
+-- dependencias vem do BROWSER (`dashboard/page.tsx` le `anuncios` com o
+-- cliente anon).
+--
+-- Ou seja: esta migration impede o problema de CRESCER. Nao o encolhe.
+--
+-- 4. RISCO
+-- ---------------------------------------------------------------------
+-- BAIXO. Nao existe objeto cujo privilegio mude ao executar isto. O
+-- unico efeito observavel aparece na PROXIMA tabela criada.
+--
+-- O risco residual e o oposto do habitual: uma tabela futura que
+-- legitimamente precise de acesso anon (por exemplo, conteudo publico)
+-- passara a exigir `GRANT` explicito. Isso e desejavel — torna a decisao
+-- visivel em migration, em vez de herdada em silencio.
+--
+-- 5. IDEMPOTENCIA
+-- ---------------------------------------------------------------------
+-- `REVOKE` de privilegio ausente e no-op silencioso no PostgreSQL, nao
+-- erro. Reaplicar e seguro. Mesmo argumento das SEC-2c e SEC-2d.
+--
+-- 6. ROLLOUT E VERIFICACAO
+-- ---------------------------------------------------------------------
+-- Antes de executar, capturar a BASELINE dos grants das 33 tabelas:
+--
+--     SELECT md5(string_agg(linha, E'\n' ORDER BY linha))
+--     FROM (SELECT c.relname || '|' || COALESCE(c.relacl::text,'NULL') AS linha
+--             FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+--            WHERE n.nspname = 'public' AND c.relkind = 'r') t;
+--
+-- Depois de executar, provar DUAS coisas independentes:
+--
+--   (A) o DEFAULT mudou — `pg_default_acl` do par (postgres, public,
+--       TABLES) nao deve mais conter entrada `anon=`;
+--
+--   (B) nada existente mudou — o hash acima deve ser IDENTICO ao da
+--       baseline. Um hash diferente significa que alguma tabela foi
+--       alterada, e isso seria fora de escopo.
+--
+-- A prova (A) por criacao material de tabela NAO deve ser feita em
+-- producao. Se for necessaria, usar branch/ambiente isolado.
+--
+-- 7. ROLLBACK (MANUAL — NAO EXECUTADO AQUI)
+-- ---------------------------------------------------------------------
+-- Simetria exata do que e removido:
+--
+--     ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+--       GRANT SELECT, INSERT, UPDATE ON TABLES TO anon;
+--
+-- Isto e comentario, nao comando. Reverter faz toda tabela futura voltar
+-- a nascer legivel e gravavel por `anon`, que e exatamente a condicao
+-- que originou SEC-2c, PERFIL-SENHA1a e SEC-2d.
+-- =====================================================================
+
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+  REVOKE SELECT, INSERT, UPDATE ON TABLES FROM anon;
