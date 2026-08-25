@@ -316,9 +316,17 @@ ok(
 
   // ── A troca é call-site-level, não substituição global ────────────
   ok(
+    // O limiar era `>= 8` — um SNAPSHOT de quantos call sites anon esta
+    // rota tinha na SEC-1c-3, não o invariante. A SEC-1c-4 migrou mais
+    // dois legitimamente e o assert reprovou por SUCESSO da frente.
+    // O invariante real é "não houve substituição global do cliente":
+    // ele continua declarado E continua servindo alguém. Isso ainda
+    // reprova a limpeza oportunista proibida, e deixa de reprovar cada
+    // migração futura de call site. A regex também passa a tolerar
+    // espaço — a estrita perdia chamadas multilinha.
     "42. o cliente anon da rota PERMANECE para os demais call sites",
     /^const supabase = createClient\(/m.test(rota) &&
-      (rota.match(/\w+\(supabase[,)]/g) ?? []).length >= 8
+      (rota.match(/\w+\(\s*supabase\s*[,)]/g) ?? []).length > 0
   );
 
   // ── A migration ───────────────────────────────────────────────────
@@ -358,6 +366,154 @@ ok(
   ok(
     "51. o rollback aparece SOMENTE como comentario",
     /^--\s+GRANT SELECT, INSERT, UPDATE ON TABLE public\.central_ia_consumo TO anon;$/m.test(sql3)
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// SEC-1c-4 — cadeia exportacao/compliance: 7 call sites, 4 tabelas
+// ══════════════════════════════════════════════════════════════════════
+// A maior desta frente até aqui. O risco específico é sutil: várias
+// dessas funções recebem DOIS clientes — o 1º migra para service_role,
+// o 2º/3º/4º JÁ era service_role e não pode ser mexido. Perder um
+// desses argumentos não quebra o build; quebra o hash de compliance em
+// silêncio, e todo parecer passa a parecer desatualizado.
+{
+  const B = "app/api/estudio-anuncios/projetos/[id]";
+  const CALL_SITES: Array<[string, string, RegExp]> = [
+    ["1. exportacao → montarItensIncluidos", `${B}/exportacao/route.ts`,
+      /montarItensIncluidos\(getSupabaseServidor\(\), params\.id, projeto\.nome_produto\)/],
+    ["2. [id] → listarPacotesDoProjeto", `${B}/route.ts`,
+      /listarPacotesDoProjeto\(getSupabaseServidor\(\), params\.id\)/],
+    ["3. [id] → buscarComplianceDoProjeto (+4o srv preservado)", `${B}/route.ts`,
+      /buscarComplianceDoProjeto\(getSupabaseServidor\(\), params\.id, projeto\.nome_produto, getSupabaseServidor\(\)\)/],
+    ["4. arquivo → buscarPacoteDoProjeto", `${B}/exportacao/[pacoteId]/arquivo/route.ts`,
+      /buscarPacoteDoProjeto\(getSupabaseServidor\(\), params\.id, params\.pacoteId\)/],
+    ["5. publicar → buscarComplianceDoProjeto (+`servico` preservado)", `${B}/marketplaces/[marketplace]/publicar/route.ts`,
+      /buscarComplianceDoProjeto\(getSupabaseServidor\(\), params\.id, projeto\.nome_produto, servico\)/],
+    ["6. validacao-oficial → buscarComplianceDoProjeto (+4o srv)", `${B}/marketplaces/[marketplace]/validacao-oficial/route.ts`,
+      /buscarComplianceDoProjeto\(getSupabaseServidor\(\), params\.id, projeto\.nome_produto, getSupabaseServidor\(\)\)/],
+    ["7. compliance → montarEntradaCompliance (+3o srv preservado)", `${B}/compliance/[marketplace]/route.ts`,
+      /montarEntradaCompliance\(\s*getSupabaseServidor\(\),\s*\{[^}]*\},\s*getSupabaseServidor\(\)\s*\)/],
+  ];
+
+  let n = 52;
+  for (const [rotulo, arq, re] of CALL_SITES) {
+    ok(`${n}. ${rotulo}`, re.test(codigo(arq)));
+    n++;
+  }
+
+  // Nenhum dos 7 pode voltar a passar `supabase` como 1o argumento.
+  const FNS = ["montarItensIncluidos", "listarPacotesDoProjeto", "buscarComplianceDoProjeto",
+               "buscarPacoteDoProjeto", "montarEntradaCompliance"];
+  const ARQS = [`${B}/exportacao/route.ts`, `${B}/route.ts`,
+                `${B}/exportacao/[pacoteId]/arquivo/route.ts`,
+                `${B}/marketplaces/[marketplace]/publicar/route.ts`,
+                `${B}/marketplaces/[marketplace]/validacao-oficial/route.ts`,
+                `${B}/compliance/[marketplace]/route.ts`];
+  ok(
+    "59. nenhuma das 5 funcoes recebe `supabase` como 1o argumento",
+    ARQS.every((a) => {
+      const c = codigo(a);
+      return FNS.every((f) => !new RegExp(`${f}\\(\\s*supabase\\s*[,)]`).test(c));
+    })
+  );
+
+  // Limpeza oportunista é proibida: o cliente anon segue servindo os
+  // outros call sites de cada rota.
+  ok(
+    "60. o cliente anon PERMANECE nas rotas que ainda o usam",
+    ARQS.every((a) => {
+      const c = codigo(a);
+      const declara = /^const supabase = createClient\(/m.test(c);
+      const usa = (c.match(/\w+\(\s*supabase\s*[,)]/g) ?? []).length > 0;
+      return declara && usa;
+    })
+  );
+
+  // ── As libs NÃO mudaram: assinaturas e filtros idênticos ──────────
+  const comp = codigo("lib/estudio-anuncios/compliance/compliance.ts");
+  const expo = codigo("lib/estudio-anuncios/exportacao.ts");
+
+  ok(
+    "61. buscarComplianceDoProjeto continua filtrando projeto_id",
+    /from\("estudio_anuncios_compliance_marketplace"\)[\s\S]{0,200}\.eq\("projeto_id", projetoId\)/.test(comp)
+  );
+  ok(
+    "62. montarEntradaCompliance: projetos_marketplace por projeto_id + marketplace",
+    /from\("estudio_anuncios_projetos_marketplace"\)[\s\S]{0,700}\.eq\("projeto_id", projetoId\)[\s\S]{0,120}\.eq\("marketplace", marketplace\)/.test(comp)
+  );
+  ok(
+    "63. montarEntradaCompliance: conteudo_versoes por projeto_marketplace_id + aprovado",
+    /from\("estudio_anuncios_conteudo_versoes"\)[\s\S]{0,400}\.eq\("projeto_marketplace_id"[\s\S]{0,200}\.eq\("aprovado"/.test(comp)
+  );
+  ok(
+    "64. montarEntradaCompliance: imagens_geradas por projeto_id",
+    /from\("estudio_anuncios_imagens_geradas"\)[\s\S]{0,400}\.eq\("projeto_id", projetoId\)/.test(comp)
+  );
+  ok(
+    "65. montarEntradaCompliance: entradas_produto por projeto_id",
+    /from\("estudio_anuncios_entradas_produto"\)[\s\S]{0,400}\.eq\("projeto_id", projetoId\)/.test(comp)
+  );
+  // Assinaturas intactas — a PR troca ARGUMENTO, nunca contrato.
+  ok(
+    "66. assinaturas das libs inalteradas (1o param segue `supabase`)",
+    /export async function buscarComplianceDoProjeto\(\s*supabase: SupabaseClient/.test(comp) &&
+      /export async function montarEntradaCompliance\(\s*supabase: SupabaseClient/.test(comp) &&
+      /export async function montarItensIncluidos\(\s*supabase: SupabaseClient/.test(expo) &&
+      /export async function listarPacotesDoProjeto\(\s*supabase: SupabaseClient/.test(expo) &&
+      /export async function buscarPacoteDoProjeto\(\s*supabase: SupabaseClient/.test(expo)
+  );
+
+  // ── A migration ───────────────────────────────────────────────────
+  const MIG_1C4 = "supabase/migrations/20260915_sec1c4_revogar_anon_cadeia_exportacao_compliance.sql";
+  const QUATRO = [
+    "estudio_anuncios_compliance_marketplace",
+    "estudio_anuncios_entradas_produto",
+    "estudio_anuncios_imagens_geradas",
+    "estudio_anuncios_pacotes_exportacao",
+  ];
+  let sql4 = "";
+  let existe4 = true;
+  try {
+    sql4 = fonte(MIG_1C4);
+  } catch {
+    existe4 = false;
+  }
+  const exec4 = sql4.replace(/--.*$/gm, "");
+  const st4 = exec4.split(";").map((s) => s.trim()).filter(Boolean);
+  const FORMA4 = /^REVOKE SELECT, INSERT, UPDATE ON TABLE public\.([a-z_]+) FROM anon$/;
+  const cas4 = st4.map((s) => FORMA4.exec(s.replace(/\s+/g, " ")));
+
+  ok("67. a migration SEC-1c-4 existe", existe4);
+  ok("68. tem exatamente 4 statements executaveis", st4.length === 4);
+  ok("69. todos na forma canonica exata", cas4.length === 4 && cas4.every(Boolean));
+  ok(
+    "70. atinge EXATAMENTE as 4 tabelas autorizadas, sem repetir",
+    JSON.stringify(cas4.filter(Boolean).map((m) => m![1]).sort()) === JSON.stringify(QUATRO)
+  );
+  ok("71. somente a role anon", !/\b(authenticated|service_role|postgres|PUBLIC)\b/.test(exec4));
+  ok(
+    "72. somente SELECT/INSERT/UPDATE — nunca ALL nem DELETE/TRUNCATE",
+    !/\bREVOKE\s+ALL\b/i.test(exec4) && !/\b(DELETE|TRUNCATE|TRIGGER|REFERENCES|MAINTAIN)\b/i.test(exec4)
+  );
+  ok(
+    "73. sem GRANT, CASCADE, ALTER DEFAULT PRIVILEGES, ALTER TABLE, CREATE/DROP",
+    !/\bGRANT\b/i.test(exec4) && !/\bCASCADE\b/i.test(exec4) &&
+      !/ALTER\s+DEFAULT\s+PRIVILEGES/i.test(exec4) && !/\bALTER\s+TABLE\b/i.test(exec4) &&
+      !/\b(CREATE|DROP)\b/i.test(exec4)
+  );
+  ok(
+    "74. sem SQL dinamico",
+    !/\bDO\s*\$\$/i.test(exec4) && !/\bEXECUTE\b/i.test(exec4) &&
+      !/information_schema/i.test(exec4) && !/\bpg_catalog\b/i.test(exec4)
+  );
+  ok(
+    "75. nao contem token, chave nem segredo",
+    !/eyJ[A-Za-z0-9_-]{15,}/.test(sql4) && !/-----BEGIN/.test(sql4) && !/sbp_[a-f0-9]{20,}/.test(sql4)
+  );
+  ok(
+    "76. rollback SOMENTE como comentario, 4 linhas",
+    (sql4.match(/^--\s+GRANT SELECT, INSERT, UPDATE ON TABLE public\.[a-z_]+ TO anon;$/gm) ?? []).length === 4
   );
 }
 

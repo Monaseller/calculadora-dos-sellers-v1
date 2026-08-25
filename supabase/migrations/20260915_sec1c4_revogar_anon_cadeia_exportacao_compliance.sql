@@ -1,0 +1,122 @@
+-- =====================================================================
+-- SEC-1c-4 — REVOGAR anon EM 4 TABELAS DA CADEIA EXPORTACAO/COMPLIANCE
+-- =====================================================================
+--
+-- 1. O QUE MUDOU NO CODIGO ANTES DESTE REVOKE
+-- ---------------------------------------------------------------------
+-- Esta migration so e segura porque 7 call sites sairam do cliente anon
+-- na MESMA PR. Nenhuma funcao de `lib/` foi alterada — apenas o
+-- argumento passado a elas:
+--
+--   exportacao/route.ts:61            montarItensIncluidos(...)
+--   [id]/route.ts:134                 listarPacotesDoProjeto(...)
+--   [id]/route.ts:138                 buscarComplianceDoProjeto(...)
+--   arquivo/route.ts:62               buscarPacoteDoProjeto(...)
+--   publicar/route.ts:76              buscarComplianceDoProjeto(...)
+--   validacao-oficial/route.ts:71     buscarComplianceDoProjeto(...)
+--   compliance/[marketplace]:67       montarEntradaCompliance(...)
+--
+-- Os argumentos ADICIONAIS de service_role que ja existiam (o 4o de
+-- `buscarComplianceDoProjeto`, o 3o de `montarEntradaCompliance`) foram
+-- preservados. Eles nao sao redundantes: leem o CHECKSUM das imagens no
+-- Storage, e o hash de compliance so casa se os dois lados enxergarem os
+-- mesmos dados — defeito estrutural ja documentado em compliance.ts.
+--
+-- 2. AS 4 TABELAS, E POR QUE CADA UMA FECHA
+-- ---------------------------------------------------------------------
+-- A prova NAO se apoia no nome da variavel. Em `lib/estudio-anuncios/`
+-- praticamente todo modulo recebe `supabase: SupabaseClient` como
+-- PARAMETRO, e o cliente real depende de quem chama — foi assim que
+-- `ml-conta.ts` enganou a auditoria da LOJAS-ANON-SELECT. Cada acesso
+-- foi rastreado ate o `createClient` de origem.
+--
+--   estudio_anuncios_pacotes_exportacao  (2 linhas)
+--     2 acessos no repositorio inteiro, ambos em exportacao.ts:
+--     L348 `listarPacotesDoProjeto`, L368 `buscarPacoteDoProjeto`.
+--     Os dois migram. A ESCRITA ja era service_role: acontece pela RPC
+--     `estudio_anuncios_gerar_pacote_exportacao`, nao por INSERT direto.
+--
+--   estudio_anuncios_imagens_geradas  (21 linhas)
+--     10 acessos. Sete ja eram service_role (calculo-score, imagens-ml,
+--     exportacao-arquivo, geracao-imagem x4). `resultados.ts:195` foi
+--     fechado pela SEC-1c-3. Restavam DOIS anon — exportacao.ts:208 e
+--     compliance.ts:170 — e ambos migram aqui.
+--
+--   estudio_anuncios_compliance_marketplace  (31 linhas)
+--     1 acesso no repositorio: compliance.ts:444, dentro de
+--     `buscarComplianceDoProjeto`. Os 3 call sites migram.
+--
+--   estudio_anuncios_entradas_produto  (0 linhas)
+--     1 acesso: compliance.ts:206, dentro de `montarEntradaCompliance`.
+--     Os 2 caminhos ate ela migram (direto e via compliance).
+--
+-- Nenhuma das 4 e acessada por componente `.tsx` (browser), por cron,
+-- por worker ou por webhook.
+--
+-- 3. FILTROS PRESERVADOS — o isolamento nunca esteve na role
+-- ---------------------------------------------------------------------
+-- Nenhuma das 4 tem RLS (`relrowsecurity = false`) nem policy. O
+-- privilegio de `anon` era, portanto, irrestrito, e o isolamento sempre
+-- veio dos filtros da consulta + da validacao de posse feita ANTES, por
+-- `buscarProjetoPorId` (que aplica `.eq("user_id", userId)`).
+--
+-- Filtros que permanecem literalmente identicos:
+--   projetos_marketplace ....... projeto_id + marketplace
+--   conteudo_versoes ........... projeto_marketplace_id + aprovado
+--   imagens_geradas ............ projeto_id
+--   entradas_produto ........... projeto_id
+--   compliance_marketplace ..... projeto_id
+--   pacotes_exportacao ......... projeto_id
+--
+-- Todas as 4 rotas envolvidas autenticam por `autenticarRequisicao` e
+-- validam posse antes da chamada.
+--
+-- 4. O QUE ESTA MIGRATION NAO FAZ
+-- ---------------------------------------------------------------------
+--   - nao toca `estudio_anuncios_conteudo_versoes` nem
+--     `estudio_anuncios_projetos_marketplace`. As duas ESTAO na cadeia
+--     migrada, mas mantem outros caminhos anon (conteudo-editorial.ts,
+--     adaptacao-marketplace.ts, configuracao-marketplace.ts e 3 rotas
+--     diretas). Revogar ali quebraria producao;
+--   - nao toca `authenticated` (ja tem zero nas 4) nem `service_role`
+--     (mantem os 7 privilegios em cada uma);
+--   - nao toca DEFAULT PRIVILEGES — isso foi a SEC-1a;
+--   - nao toca RLS, policies, sequences nem functions;
+--   - nao usa CASCADE nem logica dinamica. As 4 tabelas estao escritas
+--     uma a uma, de proposito: um `DO $$ ... $$` que descobrisse alvos
+--     sozinho nao seria auditavel por leitura.
+--
+-- 5. IDEMPOTENCIA
+-- ---------------------------------------------------------------------
+-- `REVOKE` de privilegio ausente e no-op silencioso no PostgreSQL, nao
+-- erro. Reaplicar e seguro.
+--
+-- 6. BASELINE ESPERADA (medir READ-ONLY imediatamente antes)
+-- ---------------------------------------------------------------------
+--   cada uma das 4 ....... anon = INSERT, SELECT, UPDATE  (3 grants)
+--                          service_role = 7 privilegios
+--                          authenticated = nenhum
+--                          owner = postgres · RLS false · 0 policies
+--   COUNT(*) real ........ pacotes=2, imagens=21, compliance=31,
+--                          entradas=0   (confirmar, nao presumir)
+--   anon total ........... 60  ->  48
+--   tabelas com anon ..... 20  ->  16
+--   grants removidos ..... 12
+--
+-- Invariantes que devem permanecer IDENTICOS: ACL das demais tabelas,
+-- hash de RLS/owner/policies e hash dos default privileges.
+--
+-- 7. ROLLBACK (MANUAL — NAO EXECUTADO AQUI)
+-- ---------------------------------------------------------------------
+--     GRANT SELECT, INSERT, UPDATE ON TABLE public.estudio_anuncios_pacotes_exportacao TO anon;
+--     GRANT SELECT, INSERT, UPDATE ON TABLE public.estudio_anuncios_imagens_geradas TO anon;
+--     GRANT SELECT, INSERT, UPDATE ON TABLE public.estudio_anuncios_compliance_marketplace TO anon;
+--     GRANT SELECT, INSERT, UPDATE ON TABLE public.estudio_anuncios_entradas_produto TO anon;
+--
+-- Isto e comentario, nao comando.
+-- =====================================================================
+
+REVOKE SELECT, INSERT, UPDATE ON TABLE public.estudio_anuncios_pacotes_exportacao FROM anon;
+REVOKE SELECT, INSERT, UPDATE ON TABLE public.estudio_anuncios_imagens_geradas FROM anon;
+REVOKE SELECT, INSERT, UPDATE ON TABLE public.estudio_anuncios_compliance_marketplace FROM anon;
+REVOKE SELECT, INSERT, UPDATE ON TABLE public.estudio_anuncios_entradas_produto FROM anon;

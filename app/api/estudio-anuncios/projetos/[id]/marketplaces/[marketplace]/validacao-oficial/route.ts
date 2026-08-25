@@ -68,7 +68,9 @@ export async function POST(
       return NextResponse.json({ ok: false, erro: "Canal não encontrado neste projeto." }, { status: 404 });
     }
 
-    const compliance = (await buscarComplianceDoProjeto(supabase, params.id, projeto.nome_produto, getSupabaseServidor()))
+    // SEC-1c-4: 1o argumento migrado para service_role. O 4o ja era
+    // service_role e PERMANECE.
+    const compliance = (await buscarComplianceDoProjeto(getSupabaseServidor(), params.id, projeto.nome_produto, getSupabaseServidor()))
       .find(c => c.marketplace === marketplace) ?? null;
 
     const r = await executarValidacaoOficial(supabase, getSupabaseServidor(), {

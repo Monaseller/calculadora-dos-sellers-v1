@@ -73,7 +73,9 @@ export async function POST(
     }
 
     const servico = getSupabaseServidor();
-    const compliance = (await buscarComplianceDoProjeto(supabase, params.id, projeto.nome_produto, servico))
+    // SEC-1c-4: 1o argumento migrado para service_role. `servico` (4o)
+    // ja era service_role e PERMANECE inalterado.
+    const compliance = (await buscarComplianceDoProjeto(getSupabaseServidor(), params.id, projeto.nome_produto, servico))
       .find(c => c.marketplace === marketplace) ?? null;
 
     // Hash do payload de AGORA, montado do mesmo jeito que o GET do

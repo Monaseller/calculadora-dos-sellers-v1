@@ -58,7 +58,10 @@ export async function POST(
       return NextResponse.json({ ok: false, erro: "Projeto não encontrado." }, { status: 404 });
     }
 
-    const itens = await montarItensIncluidos(supabase, params.id, projeto.nome_produto);
+    // SEC-1c-4: `montarItensIncluidos` le projetos_marketplace,
+    // conteudo_versoes e imagens_geradas. Sai do cliente anon; os
+    // filtros por projeto_id permanecem intactos na lib.
+    const itens = await montarItensIncluidos(getSupabaseServidor(), params.id, projeto.nome_produto);
 
     if (!temAlgumCanalExportavel(itens)) {
       return NextResponse.json(

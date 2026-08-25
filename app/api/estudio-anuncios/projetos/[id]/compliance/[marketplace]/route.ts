@@ -64,8 +64,10 @@ export async function POST(
 
     // O service role entra SÓ para ler os bytes das imagens no Storage e
     // calcular o checksum — a checagem de dono já aconteceu acima.
+    // SEC-1c-4: 1o argumento migrado para service_role. O 3o argumento
+    // (service role para o checksum no Storage) PERMANECE — ver abaixo.
     const entrada = await montarEntradaCompliance(
-      supabase,
+      getSupabaseServidor(),
       { projetoId: params.id, nomeProduto: projeto.nome_produto, marketplace },
       getSupabaseServidor()
     );

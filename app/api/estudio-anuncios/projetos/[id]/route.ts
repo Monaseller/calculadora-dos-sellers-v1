@@ -131,11 +131,17 @@ export async function GET(
       // Histórico de pacotes (2026-08-21): 1 query, filtrada por
       // projeto_id, na mesma resposta — nenhuma rota de listagem
       // paralela, e o polling já existente mantém a UI atualizada.
-      listarPacotesDoProjeto(supabase, params.id),
+      // SEC-1c-4: 1o argumento migrado de `supabase` (anon) para
+      // service_role. Query, filtros e projecao inalterados — a posse do
+      // projeto ja foi validada por buscarProjetoPorId acima.
+      listarPacotesDoProjeto(getSupabaseServidor(), params.id),
       // Pré-publicação (2026-08-23): último parecer por canal, 1 query,
       // filtrada por projeto_id. `podePublicar` é derivado no servidor
       // pelo portão único — a UI nunca decide isso por conta própria.
-      buscarComplianceDoProjeto(supabase, params.id, projeto.nome_produto, getSupabaseServidor()),
+      // SEC-1c-4: 1o argumento migrado para service_role. O 4o ja era
+      // service_role (checksum das imagens no Storage) e PERMANECE — os
+      // dois lados do hash precisam enxergar os mesmos dados.
+      buscarComplianceDoProjeto(getSupabaseServidor(), params.id, projeto.nome_produto, getSupabaseServidor()),
       // Dados de publicação por canal (2026-08-24): 1 query, filtrada por
       // projeto_id. Nenhum token, nenhum segredo — só o que o usuário
       // configurou e o snapshot público da categoria.

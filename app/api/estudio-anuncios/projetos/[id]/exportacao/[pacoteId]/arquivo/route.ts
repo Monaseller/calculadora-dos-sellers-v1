@@ -59,7 +59,9 @@ async function autorizar(request: Request, params: Params["params"]): Promise<Au
   if (!projeto) {
     return { erro: NextResponse.json({ ok: false, erro: "Projeto não encontrado." }, { status: 404 }) };
   }
-  const pacote = await buscarPacoteDoProjeto(supabase, params.id, params.pacoteId);
+  // SEC-1c-4: sai do cliente anon. Ultimo leitor de pacotes_exportacao
+  // junto com listarPacotesDoProjeto; filtro por projeto_id preservado.
+  const pacote = await buscarPacoteDoProjeto(getSupabaseServidor(), params.id, params.pacoteId);
   if (!pacote) {
     return { erro: NextResponse.json({ ok: false, erro: "Pacote não encontrado." }, { status: 404 }) };
   }
