@@ -32,18 +32,12 @@
  *   semantica for at-least-once, isso nao e recomendacao.
  */
 import type { ContextoTarefa, RelatarProgresso } from "@/lib/agentes/tipos-execucao";
-
-/**
- * Erro de entrada. Classe propria para que o executor distinga
- * "entrada errada do chamador" de "handler quebrou" — e mapeie para
- * `entrada_invalida` em vez de `handler_falhou`.
- */
-export class ErroEntradaTarefa extends Error {
-  constructor(mensagem: string) {
-    super(mensagem);
-    this.name = "ErroEntradaTarefa";
-  }
-}
+// `ErroEntradaTarefa` MOROU aqui ate a AGENTES-FASE1D-b. Mudou para
+// `lib/agentes/erros.ts` porque `executar-tarefa.ts` — codigo de
+// producao — a importava DESTE handler de teste. Andaime nao deve ser
+// dependencia de codigo real. NAO reexportar daqui: reexport manteria a
+// dependencia viva com outro nome.
+import { ErroEntradaTarefa } from "@/lib/agentes/erros";
 
 export const TIPO_TESTE_FUNDACAO = "teste_fundacao";
 

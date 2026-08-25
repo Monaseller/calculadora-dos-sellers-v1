@@ -82,3 +82,38 @@ export interface ResultadoExecucao {
 
 /** Uma tarefa reivindicada, como o claim a devolve. */
 export type TarefaReivindicada = LinhaTarefa;
+
+/**
+ * Constroi um handler ja amarrado ao dono da tarefa — AGENTES-FASE1D-b.
+ *
+ * ── O problema que este contrato resolve ────────────────────────────
+ * Um handler que le dado real precisa de uma capability; e essa
+ * capability precisa estar presa ao `user_id` DA TAREFA, nunca a um
+ * valor escolhido por quem escreve o handler.
+ *
+ * A saida OBVIA seria dar ao handler um terceiro parametro com um
+ * objeto de dependencias. Foi recusada, e por dois motivos concretos:
+ * um handler que nao precisa de vendas receberia acesso a vendas do
+ * mesmo jeito, e um campo opcional transformaria "capability ausente"
+ * em estado normal. Objeto de dependencias vira sacola de servicos.
+ *
+ * ── Como funciona em vez disso ──────────────────────────────────────
+ * O registry guarda, por tipo de tarefa, uma funcao que recebe o
+ * `userId` e devolve o handler PRONTO. Cada handler declara, na sua
+ * propria fabrica, exatamente as dependencias que usa — nomeadas e
+ * obrigatorias. O que chega ao handler ja esta amarrado:
+ *
+ *     registry:  (userId) => criarHandlerX(criarLeituraY(userId))
+ *     executor:  resolverHandler(tipo)(tarefa.user_id)
+ *
+ * `HandlerTarefa` permanece com DOIS parametros. Nao existe canal de
+ * dependencia na assinatura do handler — a capability vive na closure,
+ * e por isso o handler nao tem como pedir outro dono nem construir
+ * outra closure.
+ *
+ * ── Ainda NAO consumido ─────────────────────────────────────────────
+ * Introduzido aqui como contrato. Quem passa a usa-lo sao o registry e
+ * o executor, na FASE 1D-d — o ultimo passo atomico, depois que o
+ * primeiro handler real existir e estiver testado fora do registry.
+ */
+export type ConstruirHandler = (userId: string) => HandlerTarefa;

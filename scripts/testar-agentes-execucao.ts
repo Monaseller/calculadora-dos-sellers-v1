@@ -37,8 +37,11 @@ import {
 import {
   handlerTesteFundacao,
   TIPO_TESTE_FUNDACAO,
-  ErroEntradaTarefa,
 } from "../lib/agentes/handlers/teste-fundacao";
+// AGENTES-FASE1D-b: a classe mudou de casa. Importar daqui e parte da
+// prova — se `teste-fundacao.ts` voltar a defini-la ou a reexporta-la,
+// os asserts da secao M quebram.
+import { ErroEntradaTarefa } from "../lib/agentes/erros";
 import { TIPOS_ERRO_TAREFA, type ContextoTarefa } from "../lib/agentes/tipos-execucao";
 import { INTERVALO_HEARTBEAT_MS } from "../lib/agentes/executar-tarefa";
 import {
@@ -501,6 +504,76 @@ async function main() {
   ok("L9  o worker chama exatamente esse caminho", wrk.includes(CAMINHO_ROTA));
   ok("L10 o segredo do middleware e o mesmo que o worker envia",
      /x-worker-secret/.test(wrk) && /AGENTES_WORKER_INTERNAL_SECRET/.test(wrk));
+
+  // ═══ M. AGENTES-FASE1D-b — casa neutra do erro e contrato novo ════
+  //
+  // A classe saiu de `handlers/teste-fundacao.ts` porque o EXECUTOR —
+  // codigo de producao — a importava de um handler de TESTE. Andaime
+  // nao pode ser dependencia de codigo real: o dia em que
+  // `teste_fundacao` for removido, o motor nao pode quebrar junto.
+  console.log("M. FASE 1D-b: erros.ts e ConstruirHandler");
+
+  const erros = codigo("lib/agentes/erros.ts");
+  const errosBruta = fonte("lib/agentes/erros.ts");
+  const han2 = codigo(HANDLER);
+  const exe2 = codigo(EXECUTOR);
+
+  ok("M0  erros.ts foi lido (anti-vacuidade)", erros.length > 100);
+  // UMA definicao de runtime, e ela esta em erros.ts.
+  ok("M1  erros.ts DEFINE ErroEntradaTarefa", /export class ErroEntradaTarefa extends Error/.test(erros));
+  ok("M2  teste-fundacao NAO define mais a classe", !/class ErroEntradaTarefa/.test(han2));
+  ok("M3  teste-fundacao NAO reexporta a classe",
+     !/export\s*\{[^}]*ErroEntradaTarefa/.test(han2) && !/export .*from .*erros/.test(han2));
+  ok("M4  definicao unica em toda a lib", (() => {
+       let n = 0;
+       for (const rel of ["lib/agentes/erros.ts", "lib/agentes/handlers/teste-fundacao.ts",
+                          "lib/agentes/executar-tarefa.ts", "lib/agentes/tipos-execucao.ts",
+                          "lib/agentes/handlers/registry.ts"]) {
+         n += conta(codigo(rel), /class ErroEntradaTarefa/g);
+       }
+       return n === 1;
+     })());
+  // Quem consome, consome da casa nova.
+  ok("M5  teste-fundacao importa de @/lib/agentes/erros",
+     /import \{ ErroEntradaTarefa \} from "@\/lib\/agentes\/erros"/.test(han2));
+  ok("M6  executor importa de @/lib/agentes/erros",
+     /import \{ ErroEntradaTarefa \} from "@\/lib\/agentes\/erros"/.test(exe2));
+  ok("M7  executor NAO importa mais de handlers/teste-fundacao",
+     !/from "@\/lib\/agentes\/handlers\/teste-fundacao"/.test(exe2));
+  // erros.ts precisa ser PURO: o executor e server-only, o handler nao.
+  ok("M8  erros.ts nao importa server-only", !/import\s+"server-only"/.test(errosBruta));
+  ok("M9  erros.ts nao toca SDK/banco/env/rede",
+     !/createClient|supabase|process\.env|fetch\(|\.from\(/i.test(erros));
+  ok("M10 erros.ts nao tem import algum", conta(erros, /^import\s/gm) === 0);
+  // Comportamento preservado: a classe ainda e o que o executor espera.
+  ok("M11 a classe continua sendo Error", new ErroEntradaTarefa("x") instanceof Error);
+  ok("M12 name continua ErroEntradaTarefa", new ErroEntradaTarefa("x").name === "ErroEntradaTarefa");
+  ok("M13 a mensagem e preservada", new ErroEntradaTarefa("abc").message === "abc");
+  ok("M14 o executor ainda mapeia para entrada_invalida",
+     /err instanceof ErroEntradaTarefa\) return "entrada_invalida"/.test(exe2));
+
+  // O contrato novo: tipo, sem canal de dependencia no handler.
+  ok("M15 ConstruirHandler existe em tipos-execucao",
+     /export type ConstruirHandler = \(userId: string\) => HandlerTarefa;/.test(tex));
+  ok("M16 HandlerTarefa continua com 2 parametros", (() => {
+       const bloco = tex.slice(tex.indexOf("export type HandlerTarefa"));
+       const ate = bloco.slice(0, bloco.indexOf(";") + 1);
+       return /contexto: ContextoTarefa/.test(ate) && /relatarProgresso: RelatarProgresso/.test(ate)
+         && !/dados/.test(ate) && conta(ate, /:/g) === 2;
+     })());
+  ok("M17 tipos-execucao NAO ganhou LeiturasDeAgente nem dados?",
+     !/LeiturasDeAgente/.test(tex) && !/dados\?/.test(tex));
+  ok("M18 tipos-execucao continua sem valor de runtime alem dos const de dominio",
+     !/class /.test(tex));
+
+  // 1D-b NAO consome o contrato novo: registry e executor intactos.
+  ok("M19 o registry AINDA guarda HandlerTarefa (currying so na 1D-d)",
+     /HANDLERS: Readonly<Record<string, HandlerTarefa>>/.test(reg));
+  ok("M20 o registry NAO usa ConstruirHandler ainda", !/ConstruirHandler/.test(reg));
+  ok("M21 o executor NAO usa ConstruirHandler ainda", !/ConstruirHandler/.test(exe2));
+  ok("M22 o executor ainda chama handler(contexto, relatarProgresso)",
+     /await handler\(contexto, relatarProgresso\)/.test(exe2));
+  ok("M23 nenhum handler novo foi registrado", TIPOS_REGISTRADOS.length === 1);
 
   const total = passou + falhou;
   console.log(`\n${"=".repeat(58)}`);

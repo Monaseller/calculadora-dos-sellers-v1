@@ -55,7 +55,9 @@ import {
   registrarProgresso,
 } from "@/lib/agentes/capability-worker";
 import { ErroTipoTarefaDesconhecido, resolverHandler } from "@/lib/agentes/handlers/registry";
-import { ErroEntradaTarefa } from "@/lib/agentes/handlers/teste-fundacao";
+// AGENTES-FASE1D-b: a classe saiu de `handlers/teste-fundacao.ts` para
+// uma casa neutra. O executor nao pode depender de um handler de teste.
+import { ErroEntradaTarefa } from "@/lib/agentes/erros";
 import type {
   ContextoTarefa,
   ResultadoExecucao,
