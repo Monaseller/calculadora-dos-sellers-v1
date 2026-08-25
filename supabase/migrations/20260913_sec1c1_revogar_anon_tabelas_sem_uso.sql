@@ -1,0 +1,137 @@
+-- =====================================================================
+-- SEC-1c-1 — REVOGAR anon EM 10 TABELAS SEM DEPENDENCIA COMPROVADA
+-- =====================================================================
+--
+-- 1. OBJETIVO
+-- ---------------------------------------------------------------------
+-- A SEC-1a fechou o DEFAULT privilege — tabela nova nao nasce mais com
+-- `anon = arw`. Mas ela nao e retroativa: 31 tabelas ja criadas mantem
+-- `anon = SELECT, INSERT, UPDATE`, somando 93 grants.
+--
+-- Esta migration remove 30 desses 93 (32,3%), nas 10 tabelas onde a
+-- ausencia de dependencia foi PROVADA — nao presumida.
+--
+-- 2. AS 10, E POR QUE CADA UMA E SEGURA
+-- ---------------------------------------------------------------------
+-- GRUPO 1 — zero acesso em runtime (8 tabelas, todas com 0 linhas).
+-- Varredura de `app/` e `lib/` nao encontrou UMA unica ocorrencia de
+-- `.from("<tabela>")`. O grant e residuo do default privilege antigo:
+-- nenhuma migration jamais o concedeu, e nenhum codigo jamais o usou.
+--
+--   central_ia_biblioteca_produtos
+--   central_ia_biblioteca_produtos_versoes
+--   central_ia_creditos
+--   central_ia_creditos_lancamentos
+--   estudio_anuncios_auditoria
+--   estudio_anuncios_pendencias
+--   estudio_anuncios_score
+--   estudio_anuncios_videos_gerados
+--
+-- GRUPO 2 — acesso existe, mas e comprovadamente `service_role`.
+-- Aqui a prova exigiu rastrear a cadeia de injecao ate o `createClient`
+-- de origem, porque NENHUM arquivo de `lib/estudio-anuncios/` cria
+-- cliente proprio — todos recebem `supabase: SupabaseClient` como
+-- parametro. "Estar em lib/" ou "nao ter ANON_KEY no arquivo" NAO e
+-- prova de nada; foi exatamente assim que `ml-conta.ts` enganou a
+-- auditoria da LOJAS-ANON-SELECT.
+--
+--   central_ia_prompts (66 linhas)
+--     3 queries, todas em `registrarPrompt(supabase, ...)`
+--     (lib/ai-gateway/registro.ts:33,47,71). Caller UNICO:
+--     lib/estudio-anuncios/executar-job.ts:223 -> registrarPrompt(
+--       supabaseServico, ...). Cadeia:
+--       app/api/internal/estudio-anuncios/executar/route.ts:27
+--         createClient(URL, SUPABASE_SERVICE_ROLE_KEY) -> supabaseServico
+--       -> processarJobDoPipeline(supabaseServico, jobId)  (linha 58)
+--       -> executar-job.ts recebe e repassa.
+--     Nenhuma rota de app/api/estudio-anuncios/ chama registrarPrompt.
+--
+--   estudio_anuncios_pictures_marketplace (3 linhas)
+--     2 queries, ambas executadas por `supabaseServico`
+--     (compliance/pictures-ml.ts:74,241). Os 3 call sites passam
+--     service_role: publicar/route.ts:84 (`servico`),
+--     [id]/route.ts:163 (`getSupabaseServidor()`) e
+--     validacao-oficial.ts:187 (`supabaseServico`).
+--     Alem disso esta tabela tem RLS = true com 0 policies, o que ja
+--     nega `anon` na pratica — o REVOKE aqui remove um grant que a RLS
+--     ja neutraliza. E higiene, nao fechamento de exposicao.
+--
+-- Nenhuma das 10 e acessada por componente `.tsx` (browser).
+--
+-- 3. O QUE ESTA MIGRATION NAO FAZ
+-- ---------------------------------------------------------------------
+--   - nao usa CASCADE — REVOKE em cascata poderia atingir grants
+--     dependentes que ninguem mapeou;
+--   - nao toca `authenticated` — ja tem zero privilegio nas 10
+--     (verificado), e um REVOKE seria no-op ruidoso;
+--   - nao toca `service_role` — mantem os 7 privilegios integros em
+--     todas as 10. E a role que a aplicacao usa de fato;
+--   - nao toca o owner (`postgres`);
+--   - nao toca DEFAULT PRIVILEGES — isso foi a SEC-1a, ja aplicada;
+--   - nao toca RLS nem policies — a RLS de
+--     `estudio_anuncios_pictures_marketplace` fica exatamente como esta;
+--   - nao toca sequences nem functions — frente propria (SEC-1b);
+--   - nao toca NENHUMA das outras 23 tabelas de `public`. As 15 de
+--     classe B tem cadeia anon comprovada e exigem migrar leitores
+--     antes; `pedidos`, `anuncios` e `vendas_dia` idem, com o agravante
+--     de `anuncios`/`vendas_dia` serem lidas do browser;
+--   - nao contem logica dinamica. As 10 tabelas estao escritas uma a
+--     uma, de proposito: um `DO $$ ... $$` que descobrisse tabelas
+--     sozinho poderia atingir alvo diferente em outro banco, e nao
+--     seria auditavel por leitura.
+--
+-- 4. RISCO
+-- ---------------------------------------------------------------------
+-- BAIXO. Oito tabelas nao tem leitor algum e estao vazias; duas tem
+-- leitor exclusivamente `service_role`, cujos privilegios permanecem.
+--
+-- O modo de falha residual seria um caminho anon que a auditoria nao
+-- viu — por exemplo uma chamada montada por string. Varredura por
+-- `.from("` cobre o padrao usado em todo o projeto; nao existe
+-- construcao dinamica de nome de tabela no repositorio.
+--
+-- 5. IDEMPOTENCIA
+-- ---------------------------------------------------------------------
+-- `REVOKE` de privilegio ausente e no-op silencioso no PostgreSQL, nao
+-- erro. Reaplicar e seguro. Mesmo argumento das SEC-2c, SEC-2d e SEC-1a.
+--
+-- 6. VERIFICACAO (baseline capturada antes da aplicacao)
+-- ---------------------------------------------------------------------
+--   grants de anon em public, total ......... 93  ->  esperado 63
+--   grants de anon nas 10 do lote ........... 30  ->  esperado  0
+--   md5 ACL das 23 fora do lote ............. 067e72866cfdeb89b4ded45bb10794a9
+--   md5 RLS/owner/policies das 33 ........... 90637209560ad5c0a1b81a3a81058995
+--   md5 default privileges .................. 6528e89dd1922165b5d79e70dcaeebeb
+--   linhas: central_ia_prompts=66, pictures_marketplace=3, demais=0
+--
+-- Os tres hashes acima devem permanecer IDENTICOS apos a aplicacao. Um
+-- hash diferente significa efeito fora do escopo declarado.
+--
+-- 7. ROLLBACK (MANUAL — NAO EXECUTADO AQUI)
+-- ---------------------------------------------------------------------
+-- Simetria exata, uma linha por tabela:
+--
+--     GRANT SELECT, INSERT, UPDATE ON TABLE public.central_ia_biblioteca_produtos TO anon;
+--     GRANT SELECT, INSERT, UPDATE ON TABLE public.central_ia_biblioteca_produtos_versoes TO anon;
+--     GRANT SELECT, INSERT, UPDATE ON TABLE public.central_ia_creditos TO anon;
+--     GRANT SELECT, INSERT, UPDATE ON TABLE public.central_ia_creditos_lancamentos TO anon;
+--     GRANT SELECT, INSERT, UPDATE ON TABLE public.central_ia_prompts TO anon;
+--     GRANT SELECT, INSERT, UPDATE ON TABLE public.estudio_anuncios_auditoria TO anon;
+--     GRANT SELECT, INSERT, UPDATE ON TABLE public.estudio_anuncios_pendencias TO anon;
+--     GRANT SELECT, INSERT, UPDATE ON TABLE public.estudio_anuncios_pictures_marketplace TO anon;
+--     GRANT SELECT, INSERT, UPDATE ON TABLE public.estudio_anuncios_score TO anon;
+--     GRANT SELECT, INSERT, UPDATE ON TABLE public.estudio_anuncios_videos_gerados TO anon;
+--
+-- Isto e comentario, nao comando.
+-- =====================================================================
+
+REVOKE SELECT, INSERT, UPDATE ON TABLE public.central_ia_biblioteca_produtos FROM anon;
+REVOKE SELECT, INSERT, UPDATE ON TABLE public.central_ia_biblioteca_produtos_versoes FROM anon;
+REVOKE SELECT, INSERT, UPDATE ON TABLE public.central_ia_creditos FROM anon;
+REVOKE SELECT, INSERT, UPDATE ON TABLE public.central_ia_creditos_lancamentos FROM anon;
+REVOKE SELECT, INSERT, UPDATE ON TABLE public.central_ia_prompts FROM anon;
+REVOKE SELECT, INSERT, UPDATE ON TABLE public.estudio_anuncios_auditoria FROM anon;
+REVOKE SELECT, INSERT, UPDATE ON TABLE public.estudio_anuncios_pendencias FROM anon;
+REVOKE SELECT, INSERT, UPDATE ON TABLE public.estudio_anuncios_pictures_marketplace FROM anon;
+REVOKE SELECT, INSERT, UPDATE ON TABLE public.estudio_anuncios_score FROM anon;
+REVOKE SELECT, INSERT, UPDATE ON TABLE public.estudio_anuncios_videos_gerados FROM anon;

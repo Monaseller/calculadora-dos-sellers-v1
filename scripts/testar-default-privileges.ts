@@ -146,5 +146,103 @@ ok(
   /baseline/i.test(sql) && /md5\(string_agg/i.test(sql)
 );
 
-console.log(`\n${falhou === 0 ? "✓" : "✗"} DEFAULT-PRIVILEGES-SEC1a — ${passou} passaram, ${falhou} falharam`);
+// ══════════════════════════════════════════════════════════════════════
+// SEC-1c-1 — REVOGAR anon EM 10 TABELAS SEM DEPENDENCIA
+// ══════════════════════════════════════════════════════════════════════
+// Diferente da SEC-1a, esta migration É retroativa: atinge tabelas que
+// existem. O contrato aqui é sobre O CONJUNTO — quais tabelas, qual
+// role, quais privilégios — e uma 11ª tabela, um `CASCADE` ou um
+// `authenticated` a mais teriam efeito imediato em produção.
+{
+  const MIG_1C1 = "supabase/migrations/20260913_sec1c1_revogar_anon_tabelas_sem_uso.sql";
+
+  // A lista é literal e ordenada: a suíte não deve descobrir as tabelas
+  // do mesmo jeito que a migration, senão as duas erram juntas.
+  const DEZ = [
+    "central_ia_biblioteca_produtos",
+    "central_ia_biblioteca_produtos_versoes",
+    "central_ia_creditos",
+    "central_ia_creditos_lancamentos",
+    "central_ia_prompts",
+    "estudio_anuncios_auditoria",
+    "estudio_anuncios_pendencias",
+    "estudio_anuncios_pictures_marketplace",
+    "estudio_anuncios_score",
+    "estudio_anuncios_videos_gerados",
+  ] as const;
+
+  let sql1c1 = "";
+  let existe1c1 = true;
+  try {
+    sql1c1 = fonte(MIG_1C1);
+  } catch {
+    existe1c1 = false;
+  }
+  const exec1c1 = sql1c1.replace(/--.*$/gm, "");
+  const st1c1 = exec1c1.split(";").map((s) => s.trim()).filter(Boolean);
+
+  ok("19. a migration SEC-1c-1 existe", existe1c1);
+  ok("20. tem exatamente 10 statements executaveis", st1c1.length === 10);
+
+  // Cada statement precisa casar a forma canônica INTEIRA. Um `.test()`
+  // frouxo aceitaria `REVOKE ALL` ou `FROM anon, authenticated`.
+  const FORMA = /^REVOKE SELECT, INSERT, UPDATE ON TABLE public\.([a-z_]+) FROM anon$/;
+  const casados = st1c1.map((s) => FORMA.exec(s.replace(/\s+/g, " ")));
+  ok("21. todos os 10 seguem a forma canonica exata", casados.every(Boolean));
+
+  const alvos = casados.filter(Boolean).map((m) => m![1]).sort();
+  ok(
+    "22. as tabelas atingidas sao EXATAMENTE as 10 autorizadas",
+    JSON.stringify(alvos) === JSON.stringify([...DEZ].sort())
+  );
+  ok("23. nenhuma 11a tabela", alvos.length === 10 && new Set(alvos).size === 10);
+
+  // Só `anon`. `authenticated` já tem zero nas 10, e `service_role` é a
+  // role que a aplicação usa — atingir qualquer uma delas derrubaria algo.
+  ok("24. somente a role anon aparece", !/\b(authenticated|service_role|postgres|PUBLIC)\b/.test(exec1c1));
+  ok(
+    "25. somente SELECT/INSERT/UPDATE — nunca ALL nem DELETE/TRUNCATE",
+    !/\bREVOKE\s+ALL\b/i.test(exec1c1) && !/\b(DELETE|TRUNCATE|TRIGGER|REFERENCES|MAINTAIN)\b/i.test(exec1c1)
+  );
+  ok("26. nenhum GRANT executavel", !/\bGRANT\b/i.test(exec1c1));
+  ok("27. nenhum CASCADE", !/\bCASCADE\b/i.test(exec1c1));
+  ok("28. nenhum ALTER DEFAULT PRIVILEGES", !/ALTER\s+DEFAULT\s+PRIVILEGES/i.test(exec1c1));
+  ok(
+    "29. nenhum ALTER TABLE / ENABLE|DISABLE RLS / POLICY",
+    !/\bALTER\s+TABLE\b/i.test(exec1c1) &&
+      !/ROW\s+LEVEL\s+SECURITY/i.test(exec1c1) &&
+      !/\bPOLICY\b/i.test(exec1c1)
+  );
+  ok("30. nenhum CREATE ou DROP", !/\b(CREATE|DROP)\b/i.test(exec1c1));
+  ok(
+    "31. nenhum comando sobre sequences ou functions",
+    !/\bSEQUENCES?\b/i.test(exec1c1) && !/\b(FUNCTIONS?|ROUTINES?)\b/i.test(exec1c1)
+  );
+  ok(
+    "32. nao contem token, chave nem segredo",
+    !/eyJ[A-Za-z0-9_-]{15,}/.test(sql1c1) &&
+      !/-----BEGIN/.test(sql1c1) &&
+      !/sbp_[a-f0-9]{20,}/.test(sql1c1)
+  );
+  // Nenhum mecanismo que rode sozinho ou escolha alvo em tempo de
+  // execução: a migration precisa ser auditável por leitura.
+  ok(
+    "33. sem execucao automatica ou logica dinamica",
+    !/\bDO\s*\$\$/i.test(exec1c1) &&
+      !/\bEXECUTE\b/i.test(exec1c1) &&
+      !/\bpg_catalog\b/i.test(exec1c1) &&
+      !/information_schema/i.test(exec1c1) &&
+      !/\bFOR\s+\w+\s+IN\b/i.test(exec1c1)
+  );
+  ok(
+    "34. o rollback aparece SOMENTE como comentario",
+    (sql1c1.match(/^--\s+GRANT SELECT, INSERT, UPDATE ON TABLE public\.[a-z_]+ TO anon;$/gm) ?? []).length === 10
+  );
+  ok(
+    "35. documenta a baseline verificavel (hashes e contagens)",
+    /067e72866cfdeb89b4ded45bb10794a9/.test(sql1c1) && /93/.test(sql1c1) && /30/.test(sql1c1)
+  );
+}
+
+console.log(`\n${falhou === 0 ? "✓" : "✗"} DEFAULT-PRIVILEGES-SEC1 — ${passou} passaram, ${falhou} falharam`);
 process.exit(falhou === 0 ? 0 : 1);
