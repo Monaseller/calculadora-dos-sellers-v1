@@ -195,7 +195,25 @@ export async function executarTarefa(tarefaId: string): Promise<RespostaExecucao
     // vivo durante `falharTarefa`/`concluirTarefa`, e uma batida
     // atrasada chegaria depois da transicao.
     try {
-      const handler = resolverHandler(tarefa.tipo);
+      // ── BINDING DE TENANT — AGENTES-FASE1D-d ──────────────────────
+      // Resolver depende do TIPO; construir depende do DONO. O registry
+      // devolve uma fabrica, e o dono entra AQUI.
+      //
+      // `tarefa.user_id` vem da LINHA que o claim reivindicou, validada
+      // pela FK composta da 1B. Nunca de `contexto.entrada`, nunca de um
+      // `user_id` enviado no corpo, nunca de query.
+      //
+      // A rota interna usa SOMENTE `tarefa_id` como dado de selecao da
+      // execucao. Campo extra que venha no JSON simplesmente nao
+      // participa de nada aqui — nao ha caminho pelo qual ele alcance o
+      // binding de tenant. Note a diferenca: ele e IGNORADO, nao
+      // rejeitado; a rota nao valida a forma do corpo alem de exigir um
+      // `tarefa_id` que passe no `UUID_REGEX`.
+      //
+      // Nao ha fallback: se o dono faltasse, a capability recusa com
+      // `user_id_ausente` em vez de ler dado de alguem.
+      const construirHandler = resolverHandler(tarefa.tipo);
+      const handler = construirHandler(tarefa.user_id);
       resultado = await handler(contexto, relatarProgresso);
     } finally {
       clearInterval(timerHeartbeat);

@@ -208,9 +208,21 @@ async function main() {
   // ═══ E. REGISTRY ══════════════════════════════════════════════════
   console.log("E. Registry");
   ok("E0  ha o que inspecionar (anti-vacuidade)", reg.length > 200);
-  ok("E1  resolve teste_fundacao", resolverHandler(TIPO_TESTE_FUNDACAO) === handlerTesteFundacao);
-  ok("E2  exatamente 1 tipo registrado", TIPOS_REGISTRADOS.length === 1);
-  ok("E3  o tipo e teste_fundacao", TIPOS_REGISTRADOS[0] === "teste_fundacao");
+  // AGENTES-FASE1D-d: `resolverHandler` devolve FABRICA, nao handler.
+  // Resolver depende do tipo; construir depende do dono.
+  ok("E1  resolve teste_fundacao como FABRICA", typeof resolverHandler(TIPO_TESTE_FUNDACAO) === "function");
+  ok("E1a a fabrica de teste_fundacao devolve o handler existente",
+     resolverHandler(TIPO_TESTE_FUNDACAO)("dono-qualquer") === handlerTesteFundacao);
+  ok("E1b a fabrica de teste_fundacao IGNORA o dono (aridade 0)",
+     resolverHandler(TIPO_TESTE_FUNDACAO).length === 0);
+  ok("E1c dois donos diferentes recebem o MESMO handler de teste_fundacao (nao ha capability)",
+     resolverHandler(TIPO_TESTE_FUNDACAO)("a") === resolverHandler(TIPO_TESTE_FUNDACAO)("b"));
+  ok("E1d resolve analise_vendas como FABRICA", typeof resolverHandler("analise_vendas") === "function");
+  ok("E1e a fabrica de analise_vendas RECEBE o dono (aridade 1)",
+     resolverHandler("analise_vendas").length === 1);
+  ok("E2  exatamente 2 tipos registrados", TIPOS_REGISTRADOS.length === 2);
+  ok("E3  os tipos sao teste_fundacao e analise_vendas",
+     [...TIPOS_REGISTRADOS].sort().join(",") === "analise_vendas,teste_fundacao");
   ok("E4  LANCA em tipo desconhecido (fechado)", (() => {
        try { resolverHandler("nao_existe"); return false; } catch (e) { return e instanceof ErroTipoTarefaDesconhecido; }
      })());
@@ -566,14 +578,68 @@ async function main() {
   ok("M18 tipos-execucao continua sem valor de runtime alem dos const de dominio",
      !/class /.test(tex));
 
-  // 1D-b NAO consome o contrato novo: registry e executor intactos.
-  ok("M19 o registry AINDA guarda HandlerTarefa (currying so na 1D-d)",
-     /HANDLERS: Readonly<Record<string, HandlerTarefa>>/.test(reg));
-  ok("M20 o registry NAO usa ConstruirHandler ainda", !/ConstruirHandler/.test(reg));
-  ok("M21 o executor NAO usa ConstruirHandler ainda", !/ConstruirHandler/.test(exe2));
+  // AGENTES-FASE1D-d: o contrato da 1D-b passou a ser CONSUMIDO. Os
+  // asserts M19..M23 afirmavam "ainda nao" — premissa que esta fase
+  // torna falsa de proposito. Reformulados para a arquitetura nova.
+  ok("M19 o registry guarda ConstruirHandler, nao handler pronto",
+     /HANDLERS: Readonly<Record<string, ConstruirHandler>>/.test(reg));
+  ok("M20 o registry NAO guarda mais HandlerTarefa pronto",
+     !/Record<string,\s*HandlerTarefa>/.test(reg));
+  ok("M21 o executor consome a fabrica", /resolverHandler\(tarefa\.tipo\)/.test(exe2) && /construirHandler\(tarefa\.user_id\)/.test(exe2));
   ok("M22 o executor ainda chama handler(contexto, relatarProgresso)",
      /await handler\(contexto, relatarProgresso\)/.test(exe2));
-  ok("M23 nenhum handler novo foi registrado", TIPOS_REGISTRADOS.length === 1);
+  ok("M23 exatamente 2 handlers registrados", TIPOS_REGISTRADOS.length === 2);
+
+  // ═══ N. WIRING DE TENANT — AGENTES-FASE1D-d ═══════════════════════
+  console.log("N. Wiring de tenant");
+
+  // ── N1..N5: o dono vem da TAREFA, e de mais lugar nenhum ─────────
+  const blocoExec = exe2.slice(exe2.indexOf("const construirHandler"), exe2.indexOf("await handler(contexto"));
+  ok("N0  o trecho de binding foi localizado (anti-vacuidade)", blocoExec.length > 40 && blocoExec.includes("construirHandler"));
+  ok("N1  o binding usa tarefa.user_id", /construirHandler\(tarefa\.user_id\)/.test(blocoExec));
+  ok("N2  o binding NAO usa contexto.entrada", !/contexto\.entrada/.test(blocoExec));
+  ok("N3  o binding NAO usa agenteId nem agente_id", !/agente_?[Ii]d/.test(blocoExec));
+  ok("N4  o executor inteiro nao tem fallback de dono", !/user_id\s*(\?\?|\|\|)/.test(exe2) && !/entrada\.userId/.test(exe2));
+  ok("N5  a rota interna nao le user_id do corpo",
+     !/user_id/.test(codigo("app/api/internal/agentes/executar/route.ts").replace(/tarefa_id/g, "")));
+
+  // ── N6..N9: entrada nao escolhe tenant, na PRATICA ───────────────
+  {
+    // Duas construcoes com donos diferentes tem de produzir handlers
+    // DIFERENTES. Se o registry guardasse um handler global, seriam o
+    // mesmo objeto — e o segundo tenant leria dados do primeiro.
+    const construir = resolverHandler("analise_vendas");
+    const hA = construir("dono-A");
+    const hB = construir("dono-B");
+    ok("N6  tenants diferentes produzem handlers DIFERENTES", hA !== hB);
+    ok("N7  cada handler continua com 2 parametros", hA.length === 2 && hB.length === 2);
+    // Mesmo dono, duas construcoes: tambem objetos distintos — nada e
+    // memoizado num escopo de modulo onde pudesse vazar entre tenants.
+    ok("N8  nem o mesmo dono reaproveita instancia global", construir("dono-A") !== hA);
+  }
+  ok("N9  ContextoTarefa nao ganhou userId proprio: segue vindo da linha",
+     /userId: tarefa\.user_id/.test(exe2));
+
+  // ── N10..N14: least-capability na composicao ─────────────────────
+  const blocoMapa = reg.slice(reg.indexOf("export const HANDLERS"), reg.indexOf("export const TIPOS_REGISTRADOS"));
+  ok("N10 o mapa do registry foi localizado (anti-vacuidade)", blocoMapa.includes("TIPO_ANALISE_VENDAS") && blocoMapa.includes("TIPO_TESTE_FUNDACAO"));
+  ok("N11 analise_vendas recebe SO a leitura de vendas",
+     /criarHandlerAnaliseVendas\(\s*criarLeiturasDeVendas\(userId\)\s*\)/.test(blocoMapa.replace(/\s+/g, " ")));
+  ok("N12 o registry nao passa SupabaseClient nem getSupabaseServidor",
+     !/SupabaseClient|getSupabaseServidor/.test(reg));
+  ok("N13 o registry nao monta objeto generico de dependencias",
+     !/dependencies|LeiturasDeAgente|servicos|container/i.test(reg));
+  ok("N14 teste_fundacao nao recebe capability alguma",
+     /\[TIPO_TESTE_FUNDACAO\]:\s*\(\)\s*=>\s*handlerTesteFundacao/.test(blocoMapa.replace(/\s+/g, " ")));
+
+  // ── N15..N17: o handler permanece puro ───────────────────────────
+  const srcAnalise = codigo("lib/agentes/handlers/analise-vendas.ts");
+  ok("N15 o handler segue sem userId", !/userId|user_id/.test(srcAnalise));
+  ok("N16 o handler segue sem SupabaseClient/env/fetch",
+     !/SupabaseClient|process\.env|\bfetch\s*\(/.test(srcAnalise));
+  ok("N17 o handler importa dados/vendas SO como tipo",
+     /import type \{[\s\S]*?\} from "@\/lib\/agentes\/dados\/vendas"/.test(srcAnalise) &&
+     !/(^|\n)import \{[^}]*\} from "@\/lib\/agentes\/dados\/vendas"/.test(srcAnalise));
 
   const total = passou + falhou;
   console.log(`\n${"=".repeat(58)}`);

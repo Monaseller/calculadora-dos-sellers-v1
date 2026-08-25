@@ -54,7 +54,21 @@ import {
   LIMITE_SKUS_MAXIMO,
 } from "../lib/agentes/handlers/analise-vendas";
 import { ErroEntradaTarefa } from "../lib/agentes/erros";
-import { TIPOS_REGISTRADOS, HANDLERS } from "../lib/agentes/handlers/registry";
+// AGENTES-FASE1D-d: o import EM RUNTIME de `handlers/registry` saiu daqui,
+// e a remocao e parte da prova.
+//
+// Com o wiring da 1D-d o registry passou a ser a composition root e
+// importa `dados/vendas.ts` como VALOR — que carrega `server-only`.
+// Medido: importar o registry aqui derruba esta suite INTEIRA no load
+// (`server-only/index.js:1` lanca, via `dados/vendas.ts:34`), antes do
+// primeiro assert.
+//
+// A saida NAO foi adicionar `_server-only-inerte`: o shim desligaria a
+// barreira que o G13 protege e que a mutacao M3b da 1D-c provou existir.
+// A saida foi trocar tres asserts de conveniencia — que liam o registry
+// em runtime so para contar tipos — por inspecao de FONTE. O que esta
+// suite existe para provar e a pureza do HANDLER, e essa prova depende
+// justamente de ela conseguir rodar sem carregar arvore server-only.
 import type { ContextoTarefa } from "../lib/agentes/tipos-execucao";
 import type { FiltroVendas, LinhaVenda, ResultadoVendas } from "../lib/agentes/dados/vendas";
 
@@ -355,15 +369,32 @@ function caminhosDeStatus(saida: string): string[] {
 const ESCOPO_AGENTES = ["lib/agentes", "app/api/internal/agentes", "supabase/migrations"];
 
 /**
+ * Arquivos que a AGENTES-FASE1D-d esta autorizada a alterar. Qualquer
+ * caminho fora deste conjunto que apareca modificado no escopo dos
+ * agentes reprova o G11 — inclusive um quinto arquivo "inofensivo".
+ *
+ * `ARQ_HANDLER` entra porque ate a 1D-c ele era o unico esperado; hoje
+ * ele esta commitado e limpo, entao nem aparece — mas mante-lo aqui faz
+ * o predicado valer nos dois momentos.
+ */
+const ARQUIVOS_1DD: readonly string[] = [
+  ARQ_HANDLER,
+  "lib/agentes/handlers/registry.ts",
+  "lib/agentes/executar-tarefa.ts",
+  "scripts/testar-agentes-execucao.ts",
+  "scripts/testar-agentes-analise-vendas.ts",
+];
+
+/**
  * PREDICADO de G11 — funcao de TEXTO, para que o controle negativo possa
  * alimentar uma saida sintetica sem tocar em arquivo nenhum.
  *
- * Verdadeiro quando nada alem do proprio handler aparece no escopo.
- * Igualdade EXATA de caminho, nao `endsWith`: um
- * `outra/pasta/analise-vendas.ts` passaria por sufixo.
+ * Verdadeiro quando tudo que aparece no escopo esta entre os arquivos
+ * autorizados. Igualdade EXATA de caminho, nao `endsWith`: um
+ * `outra/pasta/registry.ts` passaria por sufixo.
  */
-function soOHandlerNoEscopo(saidaPorcelain: string): boolean {
-  return caminhosDeStatus(saidaPorcelain).every((p) => p === ARQ_HANDLER);
+function soAutorizadosNoEscopo(saidaPorcelain: string): boolean {
+  return caminhosDeStatus(saidaPorcelain).every((p) => ARQUIVOS_1DD.includes(p));
 }
 
 /**
@@ -747,17 +778,51 @@ async function main() {
   // ═══ G. ISOLAMENTO ARQUITETURAL ═══════════════════════════════════
   console.log("G. Isolamento arquitetural");
 
-  ok("G1  registry NAO conhece analise_vendas (runtime)", !TIPOS_REGISTRADOS.includes("analise_vendas"));
-  ok("G2  registry so tem teste_fundacao", TIPOS_REGISTRADOS.length === 1 && TIPOS_REGISTRADOS[0] === "teste_fundacao");
-  ok("G3  HANDLERS nao tem a chave analise_vendas", !Object.prototype.hasOwnProperty.call(HANDLERS, "analise_vendas"));
+  // ── G1..G8: o WIRING, por inspecao de fonte ─────────────────────
+  //
+  // Estes oito eram TRANSITORIOS: afirmavam que a 1D-d ainda nao tinha
+  // acontecido ("registry nao conhece analise_vendas", "registry ainda
+  // tipa HandlerTarefa"). A 1D-d torna essas premissas falsas de
+  // proposito, entao eles foram reformulados para afirmar a arquitetura
+  // NOVA — na mesma mudanca que a introduz. Nenhum assert PERMANENTE
+  // desta suite foi tocado.
   const srcRegistry = codigo("lib/agentes/handlers/registry.ts");
-  ok("G4  fonte do registry carregada (anti-vacuidade)", /HANDLERS/.test(srcRegistry) && /teste_fundacao|TIPO_TESTE_FUNDACAO/.test(srcRegistry));
-  ok("G5  registry nao importa analise-vendas", !/analise-vendas|analise_vendas|criarHandlerAnaliseVendas/.test(srcRegistry));
-  ok("G6  registry ainda tipa HandlerTarefa (nao adotou ConstruirHandler)", /Record<string,\s*HandlerTarefa>/.test(srcRegistry) && !/ConstruirHandler/.test(srcRegistry));
+  const mapaRegistry = bloco(srcRegistry, /export const HANDLERS/);
+  const chavesRegistry = [...(mapaRegistry ?? "").matchAll(/\[\s*(TIPO_[A-Z_]+)\s*\]\s*:/g)].map((m) => m[1]).sort();
+
+  ok("G0  fonte do registry carregada (anti-vacuidade)", srcRegistry.length > 300 && /HANDLERS/.test(srcRegistry));
+  ok("G1  o mapa do registry foi delimitado (anti-vacuidade)", mapaRegistry !== null && mapaRegistry.length > 40);
+  ok("G2  registry registra EXATAMENTE 2 tipos", chavesRegistry.length === 2);
+  ok("G3  os tipos sao teste_fundacao e analise_vendas", chavesRegistry.join(",") === "TIPO_ANALISE_VENDAS,TIPO_TESTE_FUNDACAO");
+  ok("G4  registry importa o handler e a capability", /criarHandlerAnaliseVendas/.test(srcRegistry) && /criarLeiturasDeVendas/.test(srcRegistry));
+  ok("G5  analise_vendas e construido por FABRICA, com o dono no ato", /\[TIPO_ANALISE_VENDAS\]: \(userId: string\) => criarHandlerAnaliseVendas\(criarLeiturasDeVendas\(userId\)\)/.test(norm(mapaRegistry ?? "")));
+  ok("G6  registry adotou ConstruirHandler e largou HandlerTarefa pronto", /Record<string,\s*ConstruirHandler>/.test(srcRegistry) && !/Record<string,\s*HandlerTarefa>/.test(srcRegistry));
+  ok("G6a registry nao passa SupabaseClient nem objeto de dependencias", !/SupabaseClient|getSupabaseServidor|dependencies|LeiturasDeAgente/.test(srcRegistry));
+  ok("G6b teste_fundacao nao recebe capability (aridade 0 na fonte)", /\[TIPO_TESTE_FUNDACAO\]: \(\) => handlerTesteFundacao/.test(norm(mapaRegistry ?? "")));
 
   const srcExecutor = codigo("lib/agentes/executar-tarefa.ts");
-  ok("G7  executar-tarefa nao conhece analise_vendas", /resolverHandler/.test(srcExecutor) && !/analise/i.test(srcExecutor));
+  ok("G7  executar-tarefa faz o binding com tarefa.user_id", /construirHandler\(tarefa\.user_id\)/.test(srcExecutor));
+  ok("G7a o binding nao vem de entrada/body/query", !/entrada\.userId|body\.user_id|searchParams/.test(srcExecutor));
   ok("G8  executar-tarefa continua chamando handler(contexto, relatarProgresso)", /handler\(contexto,\s*relatarProgresso\)/.test(srcExecutor));
+  // ── G8a..G8c: ContextoTarefa NAO mudou nesta fase ────────────────
+  //
+  // Registro de uma imprecisao do enunciado, resolvida pelo codigo real:
+  // `ContextoTarefa` JA POSSUI `readonly userId: string` desde a FASE 1C
+  // — o executor o preenche a partir de `tarefa.user_id`. Logo "continua
+  // sem userId" nao e satisfazivel literalmente. O que a 1D-d respeita e
+  // a regra que importa: NAO ADICIONAR nada ao contexto, e garantir que
+  // o handler de dado real nao dependa desse campo.
+  //
+  // A protecao efetiva nao esta no contexto e sim na CLOSURE: mesmo que
+  // o handler lesse `contexto.userId`, nao teria cliente algum com que
+  // usa-lo. A capability ja chega amarrada a um dono so.
+  const srcTipos = codigo("lib/agentes/tipos-execucao.ts");
+  const blocoContexto = bloco(srcTipos, /export interface ContextoTarefa/);
+  const camposContexto = [...(blocoContexto ?? "").matchAll(/readonly\s+(\w+)\s*:/g)].map((m) => m[1]).sort();
+  ok("G8a ContextoTarefa foi delimitado (anti-vacuidade)", blocoContexto !== null && camposContexto.length > 0);
+  ok("G8b ContextoTarefa segue com os MESMOS 7 campos da 1C — nenhum novo",
+     camposContexto.join(",") === "agenteId,entrada,maxTentativas,tarefaId,tentativa,tipo,userId");
+  ok("G8c o handler de vendas NAO le contexto.userId", !/contexto\.userId/.test(src));
 
   // Oraculo git: preexistentes intocados. Controle negativo primeiro.
   let gitVivo = false;
@@ -768,16 +833,20 @@ async function main() {
   }
   ok("G9  CONTROLE NEGATIVO: o oraculo git enxerga arquivo modificado", gitVivo);
 
+  // AGENTES-FASE1D-d: SAIRAM desta lista exatamente os tres arquivos que
+  // esta fase esta autorizada a alterar — `registry.ts`,
+  // `executar-tarefa.ts` e `testar-agentes-execucao.ts`. Nao saiu mais
+  // nenhum: `dados/vendas.ts`, `tipos-execucao.ts`, `erros.ts`,
+  // `teste-fundacao.ts`, as capabilities, o worker, a rota interna e o
+  // middleware seguem congelados e continuam sendo verificados aqui.
   const CONGELADOS = [
-    "lib/agentes/handlers/registry.ts",
-    "lib/agentes/executar-tarefa.ts",
     "lib/agentes/dados/vendas.ts",
     "lib/agentes/tipos-execucao.ts",
     "lib/agentes/erros.ts",
     "lib/agentes/handlers/teste-fundacao.ts",
+    "lib/agentes/handlers/analise-vendas.ts",
     "lib/agentes/capability.ts",
     "lib/agentes/capability-worker.ts",
-    "scripts/testar-agentes-execucao.ts",
     "scripts/testar-agentes-fundacao.ts",
     "scripts/testar-agentes-vendas-capability.ts",
     "scripts/testar-middleware.ts",
@@ -795,23 +864,26 @@ async function main() {
     // untracked, staged ou ja commitado.
     const saida = git("status", "--porcelain", "--", ...ESCOPO_AGENTES);
     const caminhos = caminhosDeStatus(saida);
-    const foraDoEsperado = caminhos.filter((p) => p !== ARQ_HANDLER);
+    const foraDoEsperado = caminhos.filter((p) => !ARQUIVOS_1DD.includes(p));
 
-    ok("G11 no escopo dos agentes nao ha arquivo inesperado", foraDoEsperado.length === 0);
+    ok("G11 no escopo dos agentes so aparecem arquivos autorizados pela 1D-d", foraDoEsperado.length === 0);
 
-    // Os TRES estados que o handler atravessa, todos aceitos.
-    ok("G11a aceita o handler untracked", soOHandlerNoEscopo(`?? ${ARQ_HANDLER}\n`));
-    ok("G11b aceita o handler staged", soOHandlerNoEscopo(`A  ${ARQ_HANDLER}\n`));
-    ok("G11c aceita o handler ja commitado (escopo limpo, saida vazia)", soOHandlerNoEscopo(""));
+    // Os tres estados de versionamento, todos aceitos.
+    ok("G11a aceita untracked", soAutorizadosNoEscopo(`?? ${ARQ_HANDLER}\n`));
+    ok("G11b aceita staged", soAutorizadosNoEscopo(`A  ${ARQ_HANDLER}\n`));
+    ok("G11c aceita ja commitado (escopo limpo, saida vazia)", soAutorizadosNoEscopo(""));
+    ok("G11d aceita os 2 arquivos de producao desta fase, modificados",
+       soAutorizadosNoEscopo(" M lib/agentes/handlers/registry.ts\n M lib/agentes/executar-tarefa.ts\n"));
 
     // Controles negativos sinteticos: o predicado precisa saber dizer
     // NAO, e sem depender de mutacao em disco para isso.
-    ok("G11d CONTROLE NEGATIVO: registry.ts modificado no escopo reprova", !soOHandlerNoEscopo(" M lib/agentes/handlers/registry.ts\n"));
-    ok("G11e CONTROLE NEGATIVO: migration nova no escopo reprova", !soOHandlerNoEscopo("?? supabase/migrations/99999999_falsa.sql\n"));
-    ok("G11f CONTROLE NEGATIVO: handler + intruso reprova", !soOHandlerNoEscopo(`A  ${ARQ_HANDLER}\n M lib/agentes/erros.ts\n`));
-    ok("G11g CONTROLE NEGATIVO: sufixo parecido em outra pasta reprova", !soOHandlerNoEscopo("?? outra/pasta/analise-vendas.ts\n"));
-    ok("G11h parser: le o DESTINO de um rename", caminhosDeStatus("R  velho.ts -> lib/agentes/novo.ts\n")[0] === "lib/agentes/novo.ts");
-    ok("G11i parser: desempacota caminho entre aspas", caminhosDeStatus('?? "lib/agentes/com espaco.ts"\n')[0] === "lib/agentes/com espaco.ts");
+    ok("G11e CONTROLE NEGATIVO: um QUINTO arquivo do escopo reprova", !soAutorizadosNoEscopo(" M lib/agentes/erros.ts\n"));
+    ok("G11f CONTROLE NEGATIVO: capability alterada reprova", !soAutorizadosNoEscopo(" M lib/agentes/dados/vendas.ts\n"));
+    ok("G11g CONTROLE NEGATIVO: migration nova no escopo reprova", !soAutorizadosNoEscopo("?? supabase/migrations/99999999_falsa.sql\n"));
+    ok("G11h CONTROLE NEGATIVO: autorizados + intruso reprova", !soAutorizadosNoEscopo(" M lib/agentes/handlers/registry.ts\n M lib/agentes/tipos-execucao.ts\n"));
+    ok("G11i CONTROLE NEGATIVO: sufixo parecido em outra pasta reprova", !soAutorizadosNoEscopo("?? outra/pasta/registry.ts\n"));
+    ok("G11j parser: le o DESTINO de um rename", caminhosDeStatus("R  velho.ts -> lib/agentes/novo.ts\n")[0] === "lib/agentes/novo.ts");
+    ok("G11k parser: desempacota caminho entre aspas", caminhosDeStatus('?? "lib/agentes/com espaco.ts"\n')[0] === "lib/agentes/com espaco.ts");
 
     // ── G12 — conjunto de migrations, propriedade positiva ─────────
     const disco = migrationsDisco();
