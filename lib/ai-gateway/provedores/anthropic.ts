@@ -86,18 +86,44 @@ export async function chamarClaudeTexto(params: {
   schema: object;
   modelo: string;
   maxTokens?: number;
+  /**
+   * Timeout desta chamada, em milissegundos. AGENTES-FASE1E-d.
+   *
+   * AUSENTE = comportamento historico intacto: vale o timeout do
+   * cliente cacheado (TIMEOUT_MS_REVISAO, 120 s). Nenhum chamador
+   * existente do Estudio precisou mudar, e nenhum mudou.
+   *
+   * Existe porque o cliente e cacheado no modulo e seu timeout e fixado
+   * na construcao — calibrado para `revisao_claude`. O runtime dos
+   * AGENTES tem outro orcamento: o worker aborta o HTTP em 60 s
+   * (`AGENTES_WORKER_HTTP_TIMEOUT_MS`, padrao) e o Vercel Hobby corta a
+   * funcao serverless em 60 s. Um provedor com teto de 120 s
+   * terminaria DEPOIS de quem o espera, deixando a tarefa `executando`
+   * segurando o lease.
+   *
+   * Vai como opcao POR REQUISICAO ao SDK: nao recria o cliente, nao
+   * mexe na credencial, nao altera `maxRetries: 0` e nao afeta nenhuma
+   * outra chamada em voo.
+   */
+  timeoutMs?: number;
 }): Promise<ResultadoChamadaAnthropic> {
   const cliente = obterCliente();
   const inicio = Date.now();
 
   try {
-    const resposta = await cliente.messages.create({
-      model: params.modelo,
-      max_tokens: params.maxTokens ?? 16000,
-      system: params.promptSistema,
-      messages: [{ role: "user", content: params.promptUsuario }],
-      output_config: { format: { type: "json_schema", schema: params.schema } },
-    } as Anthropic.MessageCreateParamsNonStreaming);
+    const resposta = await cliente.messages.create(
+      {
+        model: params.modelo,
+        max_tokens: params.maxTokens ?? 16000,
+        system: params.promptSistema,
+        messages: [{ role: "user", content: params.promptUsuario }],
+        output_config: { format: { type: "json_schema", schema: params.schema } },
+      } as Anthropic.MessageCreateParamsNonStreaming,
+      // `undefined` e exatamente equivalente a omitir o argumento — e o
+      // que preserva a retrocompatibilidade sem um segundo caminho de
+      // codigo para manter.
+      params.timeoutMs === undefined ? undefined : { timeout: params.timeoutMs }
+    );
 
     const tempoMs = Date.now() - inicio;
 

@@ -78,6 +78,28 @@ import type { HandlerTarefa } from "@/lib/agentes/tipos-execucao";
  */
 export const NOME_FLAG_INTERPRETACAO_VENDAS = "AGENTES_IA_INTERPRETACAO_ENABLED";
 
+/**
+ * A SEGUNDA flag — AGENTES-FASE1E-d. Escolhe entre fake e provedor real.
+ *
+ * ── Por que duas flags, e nao uma de tres estados ───────────────────
+ * Porque elas desligam coisas DIFERENTES, e o rollback e em dois
+ * niveis:
+ *
+ *   INTERPRETACAO OFF ................ handler base, por identidade
+ *   INTERPRETACAO ON + REAL OFF ...... fake deterministico
+ *   INTERPRETACAO ON + REAL ON ....... Anthropic real
+ *
+ * Desligar so a de baixo mantem a funcionalidade viva e tira o gasto e a
+ * dependencia externa; desligar a de cima remove o caminho inteiro. Uma
+ * variavel unica de tres valores confundiria "a feature existe?" com
+ * "quem a atende?", e obrigaria a reler a tabela para saber o que um
+ * valor significa.
+ *
+ * Tambem segue a convencao ja vigente: toda etapa com IA REAL tem flag
+ * propria de ambiente, `false` por padrao.
+ */
+export const NOME_FLAG_PROVEDOR_REAL = "AGENTES_IA_PROVIDER_REAL_ENABLED";
+
 /** Chaves que a interpretacao acrescenta ao resultado. */
 export const CHAVE_INTERPRETACAO = "interpretacao";
 export const CHAVE_ORIGEM_INTERPRETACAO = "origemInterpretacao";
@@ -107,6 +129,15 @@ export function interpretacaoDeVendasHabilitada(): boolean {
 }
 
 /**
+ * UNICO leitor da flag de provedor real. Mesma politica da outra: so a
+ * string exata `"true"` liga; ausente, vazia, `"1"`, `"TRUE"` ou lixo
+ * mantem o fake.
+ */
+export function provedorRealHabilitado(): boolean {
+  return process.env[NOME_FLAG_PROVEDOR_REAL] === "true";
+}
+
+/**
  * Fabrica minima. Devolve a capability de interpretacao quando a flag
  * esta ligada, e `null` quando nao esta.
  *
@@ -114,15 +145,38 @@ export function interpretacaoDeVendasHabilitada(): boolean {
  * fazer sem interpretacao, e a decisao fica visivel no registry em vez
  * de escondida atras de uma funcao que finge trabalhar.
  *
- * Nesta fase o adaptador e sempre o FAKE — nao ha ramo, nao ha escolha
- * de modelo, nao ha leitura de chave. Quando existir provedor real, ele
- * entra AQUI, atras da flag propria dele, e nao em nenhum outro lugar.
+ * O provedor entra AQUI, atras da flag propria dele, e em nenhum outro
+ * lugar. Nem o handler, nem o registry, nem a entrada da tarefa tem voz
+ * nessa escolha.
+ *
+ * ── O import do provedor real e DINAMICO, e isso e a garantia ───────
+ * Com `AGENTES_IA_PROVIDER_REAL_ENABLED` desligada, o modulo do
+ * adaptador — e portanto o SDK da Anthropic inteiro — NUNCA e carregado
+ * no processo. Nao e "carregado e nao usado": nao entra em
+ * `require.cache`. A suite da 1E-c verifica exatamente isso, e continua
+ * verde depois desta fase.
+ *
+ * Um import estatico aqui traria o SDK para dentro do runtime de todo
+ * mundo que toca o registry, inclusive com a feature desligada. O custo
+ * do import dinamico e um `await` na primeira interpretacao real; o
+ * ganho e que "desligado" significa mesmo ausente.
  */
 export function criarInterpretadorDeVendas(): InterpretarAnaliseDeVendas | null {
   if (!interpretacaoDeVendasHabilitada()) return null;
 
-  const { adaptador } = criarAdaptadorFake();
-  return (analise) => interpretarAnaliseVendas(analise, adaptador);
+  if (!provedorRealHabilitado()) {
+    const { adaptador } = criarAdaptadorFake();
+    return (analise) => interpretarAnaliseVendas(analise, adaptador);
+  }
+
+  return async (analise) => {
+    const { criarAdaptadorAnthropic } = await import("@/lib/agentes/adaptador-anthropic");
+    // SEM try/catch: modelo ausente, auth, rate limit, timeout,
+    // transient, JSON quebrado e resposta fora do contrato sobem
+    // inteiros. Nao existe queda para o fake — com o provedor real
+    // ligado, falha do provedor e falha da tarefa.
+    return interpretarAnaliseVendas(analise, criarAdaptadorAnthropic());
+  };
 }
 
 /**

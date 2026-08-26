@@ -475,6 +475,23 @@ const ARQUIVOS_1EC: readonly string[] = [
 ];
 
 /**
+ * O que a AGENTES-FASE1E-d acrescentou: o adaptador do provedor real e a
+ * suite dele.
+ *
+ * Tambem fora de `lib/agentes/ia/`, pelo mesmo motivo do wiring: le env
+ * e fala com um SDK. O inventario de `ia/` continua com quatro arquivos.
+ *
+ * `lib/ai-gateway/provedores/anthropic.ts` NAO entra aqui: `ESCOPO_AGENTES`
+ * cobre `lib/agentes`, a rota interna e as migrations — o gateway esta
+ * fora do escopo deste guarda, e a alteracao dele (timeout opcional) foi
+ * autorizada e verificada a parte, na suite da 1E-d.
+ */
+const ARQUIVOS_1ED: readonly string[] = [
+  "lib/agentes/adaptador-anthropic.ts",
+  "scripts/testar-agentes-ia-provider.ts",
+];
+
+/**
  * Inventario acumulado de `lib/agentes/ia/`, por frente.
  *
  * O guarda de disco (G11l) compara contra ESTA uniao, nunca contra uma
@@ -489,6 +506,7 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_1EA,
   ...ARQUIVOS_1EB,
   ...ARQUIVOS_1EC,
+  ...ARQUIVOS_1ED,
 ];
 
 /**
@@ -559,6 +577,7 @@ const SUITES_AGENTES: readonly string[] = [
   "testar-agentes-fundacao.ts",
   "testar-agentes-ia-adaptador.ts",
   "testar-agentes-ia-interpretacao.ts",
+  "testar-agentes-ia-provider.ts",
   "testar-agentes-ia-wiring.ts",
   "testar-agentes-isolamento-1de.ts",
   "testar-agentes-isolamento-banco.ts",

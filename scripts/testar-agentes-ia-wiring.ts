@@ -183,8 +183,21 @@ async function main() {
        /process\.env\[NOME_FLAG_INTERPRETACAO_VENDAS\] === "true"/.test(CODIGO_WIRING));
     ok("A8 CONTROLE NEGATIVO: nenhuma verdade por 'string nao vazia'",
        !/Boolean\(process\.env|!!process\.env|process\.env\[[^\]]+\]\s*\?\s/.test(CODIGO_WIRING));
-    ok("A9 a flag e lida em UM unico lugar no runtime dos agentes",
-       (CODIGO_WIRING.match(/process\.env\[/g) ?? []).length === 1 && !/process\.env/.test(semComentarios(FONTE_REGISTRY)));
+    // AGENTES-FASE1E-d: a 1E-c tinha UMA flag, e este assert exigia
+    // exatamente uma leitura de env. Com a segunda flag, contar leituras
+    // deixou de descrever a propriedade. A forma nova e mais forte: cada
+    // flag tem exatamente UM leitor, e nenhuma leitura de env sobra sem
+    // dono. Contar so o total deixaria passar duas leituras da MESMA
+    // flag em lugares diferentes, que e o defeito que interessa impedir.
+    const leiturasEnv = [...CODIGO_WIRING.matchAll(/process\.env\[(\w+)\]/g)].map((m) => m[1]);
+    ok("A9 cada flag tem exatamente UM leitor no wiring",
+       leiturasEnv.filter((n) => n === "NOME_FLAG_INTERPRETACAO_VENDAS").length === 1 &&
+       leiturasEnv.filter((n) => n === "NOME_FLAG_PROVEDOR_REAL").length === 1);
+    ok("A9a nenhuma leitura de env sem dono no wiring",
+       leiturasEnv.length === 2 && (CODIGO_WIRING.match(/process\.env/g) ?? []).length === 2);
+    ok("A9b o registry continua sem ler env", !/process\.env/.test(semComentarios(FONTE_REGISTRY)));
+    ok("A9c CONTROLE NEGATIVO: o extrator acha o nome da flag lida",
+       [...'process.env[FLAG_X]'.matchAll(/process\.env\[(\w+)\]/g)].map((m) => m[1])[0] === "FLAG_X");
   }
 
   // ═══ B. FABRICA ═══════════════════════════════════════════════════
