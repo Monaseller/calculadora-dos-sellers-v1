@@ -512,6 +512,18 @@ const ARQUIVOS_1EE: readonly string[] = [
 ];
 
 /**
+ * CONEXOES/CAPABILITIES-1 — saneamento da autoridade de `lojas`.
+ *
+ * Nao sao arquivos de agentes, mas caem no `ESCOPO_AGENTES` porque ele
+ * cobre `supabase/migrations` inteiro. Declaradas nome a nome, como as
+ * demais: o guarda continua reprovando migration nao prevista.
+ */
+const ARQUIVOS_CONEXOES_1: readonly string[] = [
+  "supabase/migrations/20260826_lojas_remover_orfaos.sql",
+  "supabase/migrations/20260826_lojas_autoridade_dono.sql",
+];
+
+/**
  * MIGRATIONS que podem estar no DISCO sem estar no HEAD do git.
  *
  * O G12b comparava disco contra HEAD e exigia conjunto vazio — era o
@@ -532,6 +544,10 @@ const MIGRATIONS_NO_DISCO_NAO_COMMITADAS: readonly string[] = [
   // tudo a service_role por ALTER DEFAULT PRIVILEGES. Faltava o REVOKE.
   // Aplicada como versao 20260826193859.
   "20260826_agentes_ia_chamadas_append_only.sql",
+  // CONEXOES/CAPABILITIES-1 — saneamento da autoridade de lojas.
+  // Aplicadas como 20260826201145 e 20260826201326.
+  "20260826_lojas_remover_orfaos.sql",
+  "20260826_lojas_autoridade_dono.sql",
 ];
 
 /**
@@ -551,6 +567,7 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_1EC,
   ...ARQUIVOS_1ED,
   ...ARQUIVOS_1EE,
+  ...ARQUIVOS_CONEXOES_1,
 ];
 
 /**
