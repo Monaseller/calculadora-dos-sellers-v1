@@ -386,6 +386,19 @@ const ARQUIVOS_1DD: readonly string[] = [
 ];
 
 /**
+ * Os DOIS arquivos que a correcao de performance da 1D-a tocou. Ficam
+ * numa lista propria, e nao diluidos na anterior, para que a origem de
+ * cada liberacao continue legivel — cada uma tem sua fase e seu motivo.
+ */
+const ARQUIVOS_1DA_PERF: readonly string[] = [
+  "lib/agentes/dados/vendas.ts",
+  "scripts/testar-agentes-vendas-capability.ts",
+];
+
+/** Uniao EXPLICITA. Qualquer caminho fora dela reprova o G11. */
+const ARQUIVOS_ESPERADOS: readonly string[] = [...ARQUIVOS_1DD, ...ARQUIVOS_1DA_PERF];
+
+/**
  * PREDICADO de G11 — funcao de TEXTO, para que o controle negativo possa
  * alimentar uma saida sintetica sem tocar em arquivo nenhum.
  *
@@ -394,7 +407,7 @@ const ARQUIVOS_1DD: readonly string[] = [
  * `outra/pasta/registry.ts` passaria por sufixo.
  */
 function soAutorizadosNoEscopo(saidaPorcelain: string): boolean {
-  return caminhosDeStatus(saidaPorcelain).every((p) => ARQUIVOS_1DD.includes(p));
+  return caminhosDeStatus(saidaPorcelain).every((p) => ARQUIVOS_ESPERADOS.includes(p));
 }
 
 /**
@@ -839,8 +852,17 @@ async function main() {
   // nenhum: `dados/vendas.ts`, `tipos-execucao.ts`, `erros.ts`,
   // `teste-fundacao.ts`, as capabilities, o worker, a rota interna e o
   // middleware seguem congelados e continuam sendo verificados aqui.
+  // AGENTES-FASE1D-a (correcao de performance): sairam TAMBEM
+  // `dados/vendas.ts` e `testar-agentes-vendas-capability.ts`. A prova
+  // 1D-e revelou que a query de limite inicial da capability usava
+  // `.limit(1)` e caia num backward scan de `pedidos_pkey` — 432.472
+  // linhas descartadas, 43,5 s, contra um timeout de 8 s. A correcao
+  // trocou por `.limit(PAGE_SIZE)`, o que obrigou a alterar os dois.
+  //
+  // Sair do congelamento NAO e ficar sem protecao: os asserts G10a..G10k
+  // logo abaixo cobrem a fronteira que interessa a esta suite. O resto
+  // da lista continua exigido byte a byte.
   const CONGELADOS = [
-    "lib/agentes/dados/vendas.ts",
     "lib/agentes/tipos-execucao.ts",
     "lib/agentes/erros.ts",
     "lib/agentes/handlers/teste-fundacao.ts",
@@ -848,7 +870,6 @@ async function main() {
     "lib/agentes/capability.ts",
     "lib/agentes/capability-worker.ts",
     "scripts/testar-agentes-fundacao.ts",
-    "scripts/testar-agentes-vendas-capability.ts",
     "scripts/testar-middleware.ts",
     "lib/middleware-rotas.ts",
     "scripts/agentes-worker.mjs",
@@ -858,15 +879,61 @@ async function main() {
     ok(`G10 ${rel} identico ao HEAD`, gitVivo && gitLimpo(rel));
   }
 
+  // ── G10a..G10k: a fronteira dos DOIS arquivos liberados ───────────
+  //
+  // `dados/vendas.ts` deixou de ser congelado byte a byte, mas continua
+  // sendo a capability de onde este handler come. O que importa AQUI nao
+  // e o arquivo inteiro — a suite da 1D-a ja o cobre em 153 asserts — e
+  // sim o contrato de fronteira: a capability publica que o handler
+  // recebe, o filtro de tenant, e a query cuja regressao derrubou a 1D-e.
+  {
+    const srcVendas = codigo("lib/agentes/dados/vendas.ts");
+    ok("G10a fonte da capability carregada (anti-vacuidade)", srcVendas.length > 1000);
+    ok("G10b capability publica inalterada: criarLeiturasDeVendas -> LerVendasDoPeriodo",
+       /export function criarLeiturasDeVendas\(userId: string\): LerVendasDoPeriodo/.test(srcVendas));
+    ok("G10c filtro de tenant continua presente", /user_id: String\(userId\)/.test(srcVendas));
+    ok("G10d status 'paid' continua obrigatorio", /status: "paid"/.test(srcVendas));
+    ok("G10e cursor por id continua: gt(cursor) e lte(limiteInicial)",
+       /\.gt\("id", cursor\)/.test(srcVendas) && /\.lte\("id", limiteInicial\)/.test(srcVendas));
+    ok("G10f PAGE_SIZE continua 1000", /export const PAGE_SIZE = 1000;/.test(srcVendas));
+
+    // A query do limite, DELIMITADA — um grep global de `.limit(1)`
+    // acusaria a paginacao junto.
+    const blocoLimite = (() => {
+      const i = srcVendas.indexOf("const { data: topo");
+      const f = srcVendas.indexOf("if (erroTopo)");
+      return i >= 0 && f > i ? srcVendas.slice(i, f) : "";
+    })();
+    ok("G10g trecho do limite inicial delimitado (anti-vacuidade)", blocoLimite.length > 30);
+    ok("G10h limite inicial: ORDER BY id DESC + LIMIT PAGE_SIZE",
+       /\.order\("id", \{ ascending: false \}\)/.test(blocoLimite) && /\.limit\(PAGE_SIZE\)/.test(blocoLimite));
+    ok("G10i topo[0] continua sendo a origem do limite",
+       /topo\[0\]/.test(srcVendas) && /const limiteInicial = primeiraLinha\.id/.test(srcVendas));
+    ok("G10j REGRESSAO: .limit(1) nao pode voltar a este trecho", !/\.limit\(\s*1\s*\)/.test(blocoLimite));
+
+    // `testar-agentes-vendas-capability.ts` e suite, e tem de continuar
+    // sendo so isso: nenhum arquivo de producao pode passar a importa-la.
+    const PRODUCAO = [
+      "lib/agentes/dados/vendas.ts",
+      "lib/agentes/handlers/analise-vendas.ts",
+      "lib/agentes/handlers/registry.ts",
+      "lib/agentes/executar-tarefa.ts",
+      "lib/agentes/capability-worker.ts",
+      "app/api/internal/agentes/executar/route.ts",
+    ];
+    ok("G10k a suite da 1D-a nao e importada por nenhum arquivo de producao",
+       PRODUCAO.every((f) => !/testar-agentes-vendas-capability/.test(codigo(f))));
+  }
+
   {
     // ── G11 — nada inesperado no escopo dos agentes ────────────────
     // Propriedade arquitetural, nao estado do Git: vale com o handler
     // untracked, staged ou ja commitado.
     const saida = git("status", "--porcelain", "--", ...ESCOPO_AGENTES);
     const caminhos = caminhosDeStatus(saida);
-    const foraDoEsperado = caminhos.filter((p) => !ARQUIVOS_1DD.includes(p));
+    const foraDoEsperado = caminhos.filter((p) => !ARQUIVOS_ESPERADOS.includes(p));
 
-    ok("G11 no escopo dos agentes so aparecem arquivos autorizados pela 1D-d", foraDoEsperado.length === 0);
+    ok("G11 no escopo dos agentes so aparecem arquivos autorizados (1D-d + correcao 1D-a)", foraDoEsperado.length === 0);
 
     // Os tres estados de versionamento, todos aceitos.
     ok("G11a aceita untracked", soAutorizadosNoEscopo(`?? ${ARQ_HANDLER}\n`));
@@ -878,7 +945,12 @@ async function main() {
     // Controles negativos sinteticos: o predicado precisa saber dizer
     // NAO, e sem depender de mutacao em disco para isso.
     ok("G11e CONTROLE NEGATIVO: um QUINTO arquivo do escopo reprova", !soAutorizadosNoEscopo(" M lib/agentes/erros.ts\n"));
-    ok("G11f CONTROLE NEGATIVO: capability alterada reprova", !soAutorizadosNoEscopo(" M lib/agentes/dados/vendas.ts\n"));
+    // A capability SAIU do congelamento na correcao de performance da
+    // 1D-a, entao ela agora e aceita — e quem a protege sao G10a..G10j,
+    // nao mais a igualdade byte a byte.
+    ok("G11f aceita a capability, liberada pela correcao 1D-a", soAutorizadosNoEscopo(" M lib/agentes/dados/vendas.ts\n"));
+    ok("G11f2 CONTROLE NEGATIVO: outra capability do escopo continua reprovando",
+       !soAutorizadosNoEscopo(" M lib/agentes/capability-worker.ts\n"));
     ok("G11g CONTROLE NEGATIVO: migration nova no escopo reprova", !soAutorizadosNoEscopo("?? supabase/migrations/99999999_falsa.sql\n"));
     ok("G11h CONTROLE NEGATIVO: autorizados + intruso reprova", !soAutorizadosNoEscopo(" M lib/agentes/handlers/registry.ts\n M lib/agentes/tipos-execucao.ts\n"));
     ok("G11i CONTROLE NEGATIVO: sufixo parecido em outra pasta reprova", !soAutorizadosNoEscopo("?? outra/pasta/registry.ts\n"));

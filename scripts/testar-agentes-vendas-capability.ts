@@ -239,8 +239,34 @@ async function main() {
   ok("I3  cursor estrito com .gt(\"id\", cursor)", /\.gt\("id", cursor\)/.test(src));
   ok("I4  limite superior com .lte(\"id\", limiteInicial)", /\.lte\("id", limiteInicial\)/.test(src));
   ok("I5  ordena ASC por id nas paginas", /\.order\("id", \{ ascending: true \}\)/.test(src));
-  ok("I6  o limite inicial vem de order DESC + limit 1",
-     /\.order\("id", \{ ascending: false \}\)[\s\S]{0,40}\.limit\(1\)/.test(src));
+  // ── I6..I6d: a query de LIMITE INICIAL, delimitada ────────────────
+  //
+  // O assert antigo exigia `order DESC + limit 1`. Esse `limit(1)` era o
+  // gatilho de um plano patologico: com ele o Postgres varria
+  // `pedidos_pkey` de tras para frente (432.472 linhas descartadas,
+  // 43,5 s medidos) e estourava o `statement_timeout` de 8 s para
+  // qualquer dono que nao ordenasse por ultimo. A prova 1D-e encontrou.
+  //
+  // A varredura abaixo delimita PRIMEIRO o trecho entre o comentario da
+  // secao 1 e o `if (erroTopo)`, e so entao afirma sobre ele. Um grep
+  // global de `.limit(1)` acusaria a paginacao junto e seria fragil.
+  const blocoLimite = (() => {
+    const i = src.indexOf("const { data: topo");
+    const f = src.indexOf("if (erroTopo)");
+    return i >= 0 && f > i ? src.slice(i, f) : "";
+  })();
+  ok("I6  o trecho do limite inicial foi delimitado (anti-vacuidade)",
+     blocoLimite.length > 30 && /consultaBase\(\)/.test(blocoLimite));
+  ok("I6a o limite inicial ordena por id DESC (e assim topo[0] e o maior)",
+     /\.order\("id", \{ ascending: false \}\)/.test(blocoLimite));
+  ok("I6b o limite inicial usa .limit(PAGE_SIZE), nao .limit(1)",
+     /\.limit\(PAGE_SIZE\)/.test(blocoLimite));
+  ok("I6c REGRESSAO: .limit(1) NAO pode voltar a este trecho — arma o backward scan da PK",
+     !/\.limit\(\s*1\s*\)/.test(blocoLimite));
+  ok("I6d CONTROLE NEGATIVO: a varredura acusaria o limit(1) se ele voltasse",
+     /\.limit\(\s*1\s*\)/.test(blocoLimite.replace(".limit(PAGE_SIZE)", ".limit(1)")));
+  ok("I6e topo[0] segue sendo a origem do limite (semantica de max preservada)",
+     /topo\[0\]/.test(src) && /const limiteInicial = primeiraLinha\.id/.test(src));
   ok("I7  o limite usa a MESMA consultaBase (mesmo conjunto)",
      conta(src, /consultaBase\(\)/g) === 2 && /const consultaBase = \(\) =>/.test(src));
   ok("I8  consultaBase carrega filtros + intervalo de datas",
@@ -250,6 +276,38 @@ async function main() {
   ok("I11 pagina incompleta encerra", /lote\.length < PAGE_SIZE/.test(src));
   ok("I12 falha de pagina invalida a leitura inteira", /if \(erroPagina\) return \{ linhas: \[\], truncado: false, erro: erroPagina \}/.test(src));
   ok("I13 semId remove a PK antes de devolver", /const \{ id: _ignorado, \.\.\.publica \} = linha/.test(src));
+
+  // ── I14..I17: PROVA SEMANTICA de que trocar o LIMIT nao muda o valor
+  //
+  // A correcao de desempenho so vale se `topo[0]` continuar sendo o
+  // MESMO id. Aqui isso e exercitado, nao argumentado: um duplo aplica a
+  // ordenacao DESC exatamente como a query, e compara o primeiro
+  // elemento com N=1 e com N=PAGE_SIZE, contra o maior id calculado de
+  // forma independente.
+  //
+  // Os tamanhos incluem casos ACIMA de PAGE_SIZE — sem eles o teste
+  // seria vacuo, porque com poucas linhas os dois recortes coincidem
+  // trivialmente.
+  {
+    const topoDesc = (linhas: LinhaVendaInterna[], n: number) =>
+      [...linhas].sort((a, b) => (a.id < b.id ? 1 : a.id > b.id ? -1 : 0)).slice(0, n);
+
+    for (const tamanho of [1, 7, PAGE_SIZE - 1, PAGE_SIZE, PAGE_SIZE + 1, PAGE_SIZE + 1234]) {
+      const t = criarTabela(tamanho);
+      const comUm = topoDesc(t, 1)[0].id;
+      const comPagina = topoDesc(t, PAGE_SIZE)[0].id;
+      const maiorReal = t.reduce((m, l) => (l.id > m ? l.id : m), t[0].id);
+      ok(`I14 [${tamanho} linhas] topo[0] com PAGE_SIZE == topo[0] com 1`, comUm === comPagina);
+      ok(`I15 [${tamanho} linhas] e ambos SAO o maior id elegivel`, comPagina === maiorReal);
+    }
+    // Ordem inversa da entrada: o resultado nao pode depender de como as
+    // linhas chegaram, so da ordenacao.
+    const embaralhada = criarTabela(PAGE_SIZE + 50).reverse();
+    ok("I16 independe da ordem em que as linhas chegam",
+       topoDesc(embaralhada, PAGE_SIZE)[0].id === topoDesc(embaralhada, 1)[0].id);
+    ok("I17 CONTROLE NEGATIVO: o duplo NAO devolve o menor id",
+       topoDesc(criarTabela(PAGE_SIZE + 50), 1)[0].id !== "id-000000");
+  }
 
   // ═══ J. KEYSET — comportamento, com o paginarKeyset REAL ══════════
   console.log("J. Keyset (comportamento real)");

@@ -314,9 +314,44 @@ export function criarLeiturasDeVendas(userId: string): LerVendasDoPeriodo {
         .lte("data_pagamento", filtro.dataFim);
 
     // ── 1) LIMITE INICIAL ────────────────────────────────────────────
+    //
+    // `.limit(PAGE_SIZE)` em vez de `.limit(1)`, e o motivo NAO e querer
+    // 1000 linhas: e desarmar um atalho do planner.
+    //
+    // ── O que foi medido (2026-08-26, prova 1D-e) ────────────────────
+    // Com `.limit(1)`, o Postgres escolhe varrer `pedidos_pkey` de tras
+    // para frente e parar na primeira linha que casar. Como `pedidos.id`
+    // e `"<user_id>_SHOPEE_<order_sn>_..."`, ordenar por `id` ordena por
+    // DONO primeiro — entao, para qualquer dono que nao ordene por
+    // ultimo, essa varredura atravessa quase a tabela inteira:
+    //
+    //   dono menor: Rows Removed by Filter 432.472 -> 43.520 ms
+    //   dono maior: Rows Removed by Filter  47.369 ->  5.981 ms
+    //
+    // O `statement_timeout` do PostgREST e 8 s. O primeiro estourava; o
+    // segundo passava a 75% do orcamento. Nenhum dos dois estava certo.
+    //
+    // Com `PAGE_SIZE`, o atalho deixa de parecer barato e o planner usa
+    // `pedidos_user_marketplace_data_pagamento_idx` (Index Cond em
+    // user_id + intervalo de datas), ordenando um conjunto pequeno — a
+    // janela e limitada a JANELA_MAXIMA_DIAS, entao o sort e sempre
+    // curto:
+    //
+    //   dono menor:  3,3 ms      dono maior: ~480 ms
+    //
+    // ── A semantica NAO muda ─────────────────────────────────────────
+    // `ORDER BY id DESC` continua, e `topo[0]` continua sendo a PRIMEIRA
+    // linha da ordenacao decrescente — ou seja, exatamente o mesmo
+    // `max(id)` que `.limit(1)` devolvia. O que muda e so o plano.
+    //
+    // ── Ressalva honesta ─────────────────────────────────────────────
+    // Isto e preferencia de CUSTO do otimizador, nao garantia estrutural:
+    // nao existe indice cobrindo `user_id = X ORDER BY id`. Se as
+    // estatisticas mudarem, o atalho pode voltar. A garantia de verdade
+    // seria um indice `(user_id, id)` — decisao separada, nao tomada.
     const { data: topo, error: erroTopo } = await consultaBase()
       .order("id", { ascending: false })
-      .limit(1);
+      .limit(PAGE_SIZE);
 
     if (erroTopo) {
       console.error("[agentes/dados] falha ao capturar o limite inicial de vendas");
