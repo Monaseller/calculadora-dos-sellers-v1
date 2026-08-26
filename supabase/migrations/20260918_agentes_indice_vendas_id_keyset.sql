@@ -1,0 +1,98 @@
+-- ============================================================
+-- REGISTRO — indice idx_pedidos_vendas_id_keyset
+-- Gerado em: 2026-08-26
+--
+-- ESTE ARQUIVO E REGISTRO, NAO EVIDENCIA DE EXECUCAO PELO RUNNER.
+--
+-- O indice abaixo foi criado MANUALMENTE em producao em 2026-08-26, em
+-- execucao isolada, com o comando exatamente como esta no fim deste
+-- arquivo. Ele NAO foi aplicado por `apply_migration` nem por qualquer
+-- runner: nao existe linha correspondente em
+-- `supabase_migrations.schema_migrations`, e isso e proposital —
+-- inserir uma ali afirmaria que o runner o aplicou, e ele nao aplicou.
+--
+-- ATENCAO AO REAPLICAR
+--   NAO use `apply_migration`. NAO envie dentro de BEGIN/COMMIT. NAO
+--   envie junto de outro statement na mesma submissao.
+--   `CREATE INDEX CONCURRENTLY` nao roda em bloco de transacao e falha
+--   com 25001. O `apply_migration` do Supabase envolve o corpo em
+--   `begin; ... commit;` — confirmado no log da aplicacao da
+--   20260916_agentes_fundacao.sql.
+--   Mesmo caso ja registrado em `20260728_indices_data_loja.sql`, que
+--   documenta o 25001 "confirmado na pratica".
+--   Para recriar: rodar o comando SOZINHO no SQL Editor do Supabase.
+--   `IF NOT EXISTS` torna a reexecucao segura quanto a duplicacao, mas
+--   NAO protege contra o erro de bloco de transacao.
+--
+-- ── POR QUE ESTE INDICE EXISTE ──────────────────────────────────────
+--
+-- A prova de isolamento multi-tenant (AGENTES-FASE1D-e) expos dois
+-- defeitos encadeados na capability de leitura de vendas
+-- (`lib/agentes/dados/vendas.ts`):
+--
+--   1. A query de limite inicial usava `.limit(1)`. Com isso o Postgres
+--      escolhia varrer `pedidos_pkey` de tras para frente e parar na
+--      primeira linha que casasse. Como `pedidos.id` e
+--      "<user_id>_SHOPEE_<order_sn>_...", ordenar por `id` ordena por
+--      DONO primeiro — e para qualquer dono que nao ordene por ultimo a
+--      varredura atravessa quase a tabela inteira:
+--        dono menor: 432.472 linhas descartadas -> 43.520 ms
+--        dono maior:  47.369 linhas descartadas ->  5.981 ms
+--      contra um `statement_timeout` de 8 s no PostgREST.
+--      Corrigido em codigo no commit eefc487 (`.limit(PAGE_SIZE)`).
+--
+--   2. Mesmo com (1) corrigido, a PAGINACAO relia o conjunto elegivel
+--      inteiro a cada pagina e o reordenava: `ORDER BY id` nao tinha
+--      indice que o sustentasse sob `user_id = ?`. Custo
+--      O(n^2 / PAGE_SIZE) — cerca de 354 mil acessos a pagina para
+--      entregar 23.464 linhas. Este indice resolve (2).
+--
+-- ── POR QUE AS COLUNAS SAO TODAS CHAVE, E NENHUMA EM INCLUDE ────────
+--
+-- `user_id` e `status` sao igualdades: formam o prefixo de busca.
+-- `id` e a 3a chave: e ela que da a ordenacao de `ORDER BY id` e faz
+-- `id > cursor` / `id <= limiteInicial` virarem Index Cond (seek real),
+-- em vez de filtro pos-heap.
+-- `data_pagamento` e `marketplace` vem DEPOIS de `id` de proposito: como
+-- colunas-CHAVE, ainda que nao-boundary, sao avaliadas DENTRO do indice.
+-- Medido antes de decidir: uma coluna-chave apos um range aparece em
+-- `Index Cond`. Em `INCLUDE` elas NAO poderiam ser usadas em
+-- qualificacao de busca — cairiam em `Filter`, depois do heap fetch, e
+-- anulariam justamente o ganho que se busca aqui.
+--
+-- Descartados com medicao: indice PARCIAL `WHERE status='paid'` (paid e
+-- 90,9% da tabela — economiza 9% e adiciona churn nas transicoes de
+-- status) e COVERING com as 9 colunas da projecao (`anuncio` chega a 190
+-- caracteres; o indice iria a ~85 MB, e 95,7% dos UPDATE desta tabela
+-- nao sao HOT).
+--
+-- ── MEDIDO EM PRODUCAO (2026-08-26) ─────────────────────────────────
+--   limite inicial A/maio ..... 43.520 ms  ->  ~1.494 ms
+--   limite inicial B/C1 ....... 43.520 ms  ->    ~281 ms
+--   pagina tardia ............. 14.458 buffers -> ~162 buffers
+--   plano ..................... Index Scan usando este indice, SEM Sort,
+--                               com data_pagamento em Index Cond
+--   tamanho do indice ......... 72 MB
+--
+-- ── VALIDACAO ───────────────────────────────────────────────────────
+-- AGENTES-FASE1D-e, execucao real end-to-end: 91/91 asserts, exit 0,
+-- 47 s, `idx_scan` +39 durante a execucao. Isolamento bilateral A/B
+-- provado contra oraculos independentes, cruzamentos em zero, e entrada
+-- com `userId`/`user_id` do tenant oposto plantados nao movendo o dono.
+--
+-- ── ROLLBACK (comentario; NAO executar deste arquivo) ───────────────
+-- Se este indice precisar ser removido, rodar SOZINHO no SQL Editor,
+-- nunca dentro de transacao:
+--
+--     DROP INDEX CONCURRENTLY idx_pedidos_vendas_id_keyset;
+--
+-- ── O QUE ESTA MIGRATION NAO FAZ ────────────────────────────────────
+--   - Nao altera nenhum dado de `pedidos`.
+--   - Nao substitui nem remove nenhum indice existente.
+--   - Nao cria tabela, coluna, RPC ou permissao.
+-- ============================================================
+
+-- Ja executado manualmente em producao em 2026-08-26.
+-- Rodar SOZINHO, fora de BEGIN/COMMIT, se precisar recriar.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_pedidos_vendas_id_keyset
+  ON public.pedidos (user_id, status, id, data_pagamento, marketplace);
