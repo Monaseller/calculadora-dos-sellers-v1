@@ -439,11 +439,40 @@ const ARQUIVOS_1EA: readonly string[] = [
   "scripts/testar-agentes-ia-adaptador.ts",
 ];
 
+/**
+ * O que a AGENTES-FASE1E-b acrescentou: a composicao pura
+ * "analise deterministica -> IA" e a suite dela.
+ *
+ * OBSERVADO nesta fase, e vale registrar porque confirma o que o
+ * docblock de `ARQUIVOS_1EA` previu: agora que `lib/agentes/ia/` esta
+ * RASTREADO, o `git status --porcelain` deixou de colapsar a pasta e
+ * passou a listar o arquivo novo expandido —
+ * `?? lib/agentes/ia/interpretar-analise-vendas.ts`. O colapso era mesmo
+ * transitorio, e por isso as duas formas continuam declaradas.
+ */
+const ARQUIVOS_IA_1EB: readonly string[] = [
+  "interpretar-analise-vendas.ts",
+];
+
+const ARQUIVOS_1EB: readonly string[] = [
+  ...ARQUIVOS_IA_1EB.map((nome) => `lib/agentes/ia/${nome}`),
+  "scripts/testar-agentes-ia-interpretacao.ts",
+];
+
+/**
+ * Inventario acumulado de `lib/agentes/ia/`, por frente.
+ *
+ * O guarda de disco (G11l) compara contra ESTA uniao, nunca contra uma
+ * frente isolada — senao cada fase nova reprovaria a anterior.
+ */
+const ARQUIVOS_IA_ESPERADOS: readonly string[] = [...ARQUIVOS_IA_1EA, ...ARQUIVOS_IA_1EB];
+
 /** Uniao EXPLICITA. Qualquer caminho fora dela reprova o G11. */
 const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_1DD,
   ...ARQUIVOS_1DA_PERF,
   ...ARQUIVOS_1EA,
+  ...ARQUIVOS_1EB,
 ];
 
 /**
@@ -478,7 +507,7 @@ function mesmoConjuntoDeNomes(encontrados: readonly string[], esperados: readonl
 
 /** PREDICADO de G11l — o guarda que o Git nao consegue ser (ver `ARQUIVOS_1EA`). */
 function soAutorizadosDentroDeIa(nomes: readonly string[]): boolean {
-  return mesmoConjuntoDeNomes(nomes, ARQUIVOS_IA_1EA);
+  return mesmoConjuntoDeNomes(nomes, ARQUIVOS_IA_ESPERADOS);
 }
 
 /**
@@ -513,6 +542,7 @@ const SUITES_AGENTES: readonly string[] = [
   "testar-agentes-execucao.ts",
   "testar-agentes-fundacao.ts",
   "testar-agentes-ia-adaptador.ts",
+  "testar-agentes-ia-interpretacao.ts",
   "testar-agentes-isolamento-1de.ts",
   "testar-agentes-isolamento-banco.ts",
   "testar-agentes-vendas-capability.ts",
@@ -1077,16 +1107,16 @@ async function main() {
     // de `ARQUIVOS_1EA`. Estes asserts sao a outra metade do par.
     const conteudoIa = readdirSync(join(RAIZ, "lib", "agentes", "ia")).sort();
 
-    ok("G11l lib/agentes/ia contem exatamente os arquivos da 1E-a", soAutorizadosDentroDeIa(conteudoIa));
-    ok("G11m ANCORA: o diretorio foi mesmo lido e nao veio vazio", conteudoIa.length === ARQUIVOS_IA_1EA.length && conteudoIa.length > 0);
-    ok("G11n CONTROLE NEGATIVO: um QUARTO arquivo em ia/ reprova", !soAutorizadosDentroDeIa([...ARQUIVOS_IA_1EA, "_intruso.ts"]));
-    ok("G11o CONTROLE NEGATIVO: arquivo FALTANDO em ia/ reprova", !soAutorizadosDentroDeIa(ARQUIVOS_IA_1EA.slice(1)));
+    ok("G11l lib/agentes/ia contem exatamente os arquivos declarados (1E-a + 1E-b)", soAutorizadosDentroDeIa(conteudoIa));
+    ok("G11m ANCORA: o diretorio foi mesmo lido e nao veio vazio", conteudoIa.length === ARQUIVOS_IA_ESPERADOS.length && conteudoIa.length > 0);
+    ok("G11n CONTROLE NEGATIVO: um arquivo A MAIS em ia/ reprova", !soAutorizadosDentroDeIa([...ARQUIVOS_IA_ESPERADOS, "_intruso.ts"]));
+    ok("G11o CONTROLE NEGATIVO: arquivo FALTANDO em ia/ reprova", !soAutorizadosDentroDeIa(ARQUIVOS_IA_ESPERADOS.slice(1)));
     ok("G11p CONTROLE NEGATIVO: mesma quantidade, nome trocado, reprova",
-       !soAutorizadosDentroDeIa([...ARQUIVOS_IA_1EA.slice(1), "outro.ts"]));
+       !soAutorizadosDentroDeIa([...ARQUIVOS_IA_ESPERADOS.slice(1), "outro.ts"]));
     ok("G11q a forma COLAPSADA do diretorio e aceita pelo oraculo git (par de G11l)",
        soAutorizadosNoEscopo("?? lib/agentes/ia/\n"));
     ok("G11r a forma EXPANDIDA dos mesmos arquivos tambem e aceita (pos-commit)",
-       soAutorizadosNoEscopo(ARQUIVOS_IA_1EA.map((n) => `A  lib/agentes/ia/${n}`).join("\n") + "\n"));
+       soAutorizadosNoEscopo(ARQUIVOS_IA_ESPERADOS.map((n) => `A  lib/agentes/ia/${n}`).join("\n") + "\n"));
     ok("G11s CONTROLE NEGATIVO: arquivo expandido NAO declarado em ia/ reprova",
        !soAutorizadosNoEscopo("?? lib/agentes/ia/_intruso.ts\n"));
 

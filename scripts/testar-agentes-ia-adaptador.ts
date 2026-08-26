@@ -5,8 +5,8 @@
  *
  * ── Ausencia proposital no topo, de novo ────────────────────────────
  * Como a suite da 1D-c, esta NAO importa `_server-only-inerte` nem
- * `_env-inerte`. A omissao e barreira: se algum dia um dos tres modulos
- * de `lib/agentes/ia/` passar a arrastar `server-only` (por importar
+ * `_env-inerte`. A omissao e barreira: se algum dia um dos modulos de
+ * `lib/agentes/ia/` passar a arrastar `server-only` (por importar
  * `dados/vendas.ts`, um cliente Supabase ou um SDK), esta suite para de
  * CARREGAR — falha no load, antes do primeiro assert, e nao ha como nao
  * notar. O limite dessa barreira foi medido na 1D-c: import de valor
@@ -142,16 +142,33 @@ function semComentarios(fonte: string): string {
   return saida;
 }
 
-const MODULOS_IA = ["tipos.ts", "contrato-analise.ts", "fake.ts"] as const;
+/**
+ * INVENTARIO EXPLICITO de `lib/agentes/ia/`, nome a nome, sem curinga.
+ *
+ * Alimenta DUAS coisas, e a segunda e a que importa: alem de A7 (o
+ * inventario bater com o disco), esta lista monta `codigoIA` — o texto
+ * varrido por A1 atras dos termos proibidos. Um modulo que nao esteja
+ * aqui nao e apenas "nao contado": ele nao e VARRIDO.
+ *
+ * Por isso `interpretar-analise-vendas.ts` (AGENTES-FASE1E-b) entrou na
+ * lista em vez de A7 ser afrouxado. Um arquivo novo em `lib/agentes/ia/`
+ * exige uma linha nova aqui, de proposito.
+ */
+const MODULOS_IA = [
+  "tipos.ts",
+  "contrato-analise.ts",
+  "fake.ts",
+  "interpretar-analise-vendas.ts",
+] as const;
 
-/** Fonte crua e fonte sem comentario, dos tres modulos, lidas uma vez. */
+/** Fonte crua e fonte sem comentario, de cada modulo declarado. */
 const fontes = new Map<string, { crua: string; codigo: string }>();
 for (const arquivo of MODULOS_IA) {
   const crua = readFileSync(join(DIR_IA, arquivo), "utf8");
   fontes.set(arquivo, { crua, codigo: semComentarios(crua) });
 }
 
-/** Concatena o CODIGO (sem comentario) dos tres modulos. */
+/** Concatena o CODIGO (sem comentario) de TODOS os modulos declarados. */
 const codigoIA = MODULOS_IA.map((a) => fontes.get(a)!.codigo).join("\n");
 
 async function main() {
@@ -161,7 +178,7 @@ async function main() {
   console.log("A. Varredura de fonte (codigo, sem comentario)");
 
   // Ancoras: sem elas, todo assert de ausencia abaixo seria vacuo.
-  ok("A0a os tres modulos existem e foram lidos", MODULOS_IA.every((a) => (fontes.get(a)?.crua.length ?? 0) > 0));
+  ok(`A0a os ${MODULOS_IA.length} modulos declarados existem e foram lidos`, MODULOS_IA.every((a) => (fontes.get(a)?.crua.length ?? 0) > 0));
   ok(
     "A0b o removedor de comentario apaga comentario de verdade",
     !semComentarios("const a = 1; // marcador_de_comentario\n").includes("marcador_de_comentario")
@@ -239,7 +256,7 @@ async function main() {
     /type\s+AdaptadorIA\s*=\s*<T>\(\s*pedido\s*:\s*PedidoIA<T>\s*\)\s*=>/.test(fontes.get("tipos.ts")!.codigo)
   );
   ok(
-    "A7 lib/agentes/ia contem apenas os tres modulos previstos",
+    "A7 lib/agentes/ia contem exatamente os modulos declarados (nada fora do inventario)",
     JSON.stringify(readdirSync(DIR_IA).sort()) === JSON.stringify([...MODULOS_IA].sort())
   );
 
@@ -566,7 +583,7 @@ async function main() {
   {
     // Prova do GRAFO REALMENTE CARREGADO, nao da fonte: o que o `tsx`
     // resolveu e executou ate aqui esta em `require.cache`. Se algum dos
-    // tres modulos passar a arrastar `server-only`, Supabase ou um SDK
+    // modulos declarados passar a arrastar `server-only`, Supabase ou SDK
     // de provedor, o caminho aparece aqui — mesmo que a fonte importe
     // por um intermediario que a varredura do grupo A nao le.
     const carregados = Object.keys(require.cache).map((p) => p.replace(/\\/g, "/"));
