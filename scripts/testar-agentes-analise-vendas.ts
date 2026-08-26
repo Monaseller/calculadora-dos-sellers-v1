@@ -395,8 +395,56 @@ const ARQUIVOS_1DA_PERF: readonly string[] = [
   "scripts/testar-agentes-vendas-capability.ts",
 ];
 
+/**
+ * Os arquivos que a AGENTES-FASE1E-a acrescentou — fundacao neutra de
+ * IA. Lista propria, pela mesma razao das duas anteriores: cada
+ * liberacao mantem legivel de qual frente ela veio.
+ *
+ * Aqui os NOMES DE DENTRO de `lib/agentes/ia/` ficam separados dos
+ * caminhos completos, porque eles servem a DOIS guardas diferentes — o
+ * do Git e o de diretorio. Ver `ARQUIVOS_1EA` e G11l logo abaixo.
+ */
+const ARQUIVOS_IA_1EA: readonly string[] = [
+  "contrato-analise.ts",
+  "fake.ts",
+  "tipos.ts",
+];
+
+/**
+ * ── UM BURACO REAL NO ORACULO GIT, E COMO ELE E TAPADO ──────────────
+ *
+ * `git status --porcelain` COLAPSA diretorio inteiramente untracked numa
+ * unica linha. Medido nesta arvore, com um intruso plantado dentro:
+ *
+ *     ?? lib/agentes/ia/          <- e so isso, com 3 ou com 4 arquivos
+ *
+ * Ou seja: enquanto `lib/agentes/ia/` estiver untracked, NENHUM arquivo
+ * novo colocado la dentro aparece para o G11. Aceitar a forma colapsada
+ * sem mais nada abriria exatamente o furo que o G11 existe para fechar —
+ * uma pasta franca dentro do escopo dos agentes.
+ *
+ * Por isso a entrada colapsada e aceita AQUI e o conteudo do diretorio e
+ * verificado SEPARADAMENTE, por enumeracao real de disco, em G11l. Os
+ * dois andam juntos: quem remover um tem de remover o outro, ou o guarda
+ * fica cego sem que nenhum teste reclame.
+ *
+ * As formas expandidas tambem entram porque o colapso e transitorio: no
+ * instante do `git add`/commit os mesmos arquivos passam a aparecer um a
+ * um. A propriedade medida e "que arquivo aparece", nunca "em que estado
+ * de versionamento ele esta".
+ */
+const ARQUIVOS_1EA: readonly string[] = [
+  "lib/agentes/ia/",
+  ...ARQUIVOS_IA_1EA.map((nome) => `lib/agentes/ia/${nome}`),
+  "scripts/testar-agentes-ia-adaptador.ts",
+];
+
 /** Uniao EXPLICITA. Qualquer caminho fora dela reprova o G11. */
-const ARQUIVOS_ESPERADOS: readonly string[] = [...ARQUIVOS_1DD, ...ARQUIVOS_1DA_PERF];
+const ARQUIVOS_ESPERADOS: readonly string[] = [
+  ...ARQUIVOS_1DD,
+  ...ARQUIVOS_1DA_PERF,
+  ...ARQUIVOS_1EA,
+];
 
 /**
  * PREDICADO de G11 — funcao de TEXTO, para que o controle negativo possa
@@ -408,6 +456,71 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [...ARQUIVOS_1DD, ...ARQUIVOS_1DA_
  */
 function soAutorizadosNoEscopo(saidaPorcelain: string): boolean {
   return caminhosDeStatus(saidaPorcelain).every((p) => ARQUIVOS_ESPERADOS.includes(p));
+}
+
+/**
+ * Igualdade EXATA de conjunto entre dois inventarios de nomes.
+ *
+ * Nao e "todo esperado esta presente": um arquivo a mais reprova, e um
+ * arquivo que sumiu tambem — os guardas que usam isto valem nas duas
+ * direcoes.
+ *
+ * Funcao de LISTA, nao de disco, pelo mesmo motivo de
+ * `soAutorizadosNoEscopo`: os controles negativos alimentam inventario
+ * sintetico sem precisar criar arquivo nenhum. A leitura real acontece
+ * uma vez, em cada assert.
+ */
+function mesmoConjuntoDeNomes(encontrados: readonly string[], esperados: readonly string[]): boolean {
+  const a = [...encontrados].sort();
+  const b = [...esperados].sort();
+  return a.length === b.length && a.every((nome, i) => nome === b[i]);
+}
+
+/** PREDICADO de G11l — o guarda que o Git nao consegue ser (ver `ARQUIVOS_1EA`). */
+function soAutorizadosDentroDeIa(nomes: readonly string[]): boolean {
+  return mesmoConjuntoDeNomes(nomes, ARQUIVOS_IA_1EA);
+}
+
+/**
+ * INVENTARIO EXPLICITO das suites de agentes em `scripts/`.
+ *
+ * ── O SEGUNDO buraco do oraculo Git, achado na 1E-a ─────────────────
+ * `ESCOPO_AGENTES` cobre `lib/agentes`, a rota interna e as migrations —
+ * nunca cobriu `scripts/`. Consequencia MEDIDA: uma suite de agentes
+ * inesperada em `scripts/` nao reprovava o G11 (controle negativo M3 da
+ * 1E-a escapou com exit 0 antes desta lista existir).
+ *
+ * Nao da para fechar isso pelo `git status`: seis destas oito ja estao
+ * commitadas e limpas, entao simplesmente nao aparecem no porcelain.
+ * Por isso o guarda e enumeracao de DISCO, igual ao de `lib/agentes/ia/`
+ * — e por isso ele continua valendo depois do commit, quando o oraculo
+ * Git fica mudo.
+ *
+ * `testar-agentes-isolamento-1de.ts` esta aqui e permanece UNTRACKED de
+ * proposito: e a ferramenta operacional da prova de isolamento
+ * multi-tenant, que a 1D-e decidiu explicitamente nao versionar nesta
+ * frente. Declara-la aqui nao a versiona nem a legitima como suite
+ * permanente — apenas registra que a presenca dela em disco e conhecida,
+ * em vez de reprovar o guarda todo dia. Converte-la em ferramenta de
+ * verdade continua sendo frente propria.
+ *
+ * Sem curinga e sem prefixo permissivo: nome a nome. Uma suite nova
+ * exige uma linha nova aqui, de proposito.
+ */
+const SUITES_AGENTES: readonly string[] = [
+  "testar-agentes-analise-vendas.ts",
+  "testar-agentes-execucao-banco.ts",
+  "testar-agentes-execucao.ts",
+  "testar-agentes-fundacao.ts",
+  "testar-agentes-ia-adaptador.ts",
+  "testar-agentes-isolamento-1de.ts",
+  "testar-agentes-isolamento-banco.ts",
+  "testar-agentes-vendas-capability.ts",
+];
+
+/** PREDICADO de G11t. */
+function soAutorizadasEmScripts(nomes: readonly string[]): boolean {
+  return mesmoConjuntoDeNomes(nomes, SUITES_AGENTES);
 }
 
 /**
@@ -956,6 +1069,43 @@ async function main() {
     ok("G11i CONTROLE NEGATIVO: sufixo parecido em outra pasta reprova", !soAutorizadosNoEscopo("?? outra/pasta/registry.ts\n"));
     ok("G11j parser: le o DESTINO de um rename", caminhosDeStatus("R  velho.ts -> lib/agentes/novo.ts\n")[0] === "lib/agentes/novo.ts");
     ok("G11k parser: desempacota caminho entre aspas", caminhosDeStatus('?? "lib/agentes/com espaco.ts"\n')[0] === "lib/agentes/com espaco.ts");
+
+    // ── G11l..G11q — o guarda que o Git NAO consegue ser ───────────
+    // Enquanto `lib/agentes/ia/` estiver untracked, o porcelain colapsa
+    // a pasta inteira em uma linha e um intruso la dentro fica
+    // INVISIVEL para o G11 acima. Medido, nao suposto. Ver o docblock
+    // de `ARQUIVOS_1EA`. Estes asserts sao a outra metade do par.
+    const conteudoIa = readdirSync(join(RAIZ, "lib", "agentes", "ia")).sort();
+
+    ok("G11l lib/agentes/ia contem exatamente os arquivos da 1E-a", soAutorizadosDentroDeIa(conteudoIa));
+    ok("G11m ANCORA: o diretorio foi mesmo lido e nao veio vazio", conteudoIa.length === ARQUIVOS_IA_1EA.length && conteudoIa.length > 0);
+    ok("G11n CONTROLE NEGATIVO: um QUARTO arquivo em ia/ reprova", !soAutorizadosDentroDeIa([...ARQUIVOS_IA_1EA, "_intruso.ts"]));
+    ok("G11o CONTROLE NEGATIVO: arquivo FALTANDO em ia/ reprova", !soAutorizadosDentroDeIa(ARQUIVOS_IA_1EA.slice(1)));
+    ok("G11p CONTROLE NEGATIVO: mesma quantidade, nome trocado, reprova",
+       !soAutorizadosDentroDeIa([...ARQUIVOS_IA_1EA.slice(1), "outro.ts"]));
+    ok("G11q a forma COLAPSADA do diretorio e aceita pelo oraculo git (par de G11l)",
+       soAutorizadosNoEscopo("?? lib/agentes/ia/\n"));
+    ok("G11r a forma EXPANDIDA dos mesmos arquivos tambem e aceita (pos-commit)",
+       soAutorizadosNoEscopo(ARQUIVOS_IA_1EA.map((n) => `A  lib/agentes/ia/${n}`).join("\n") + "\n"));
+    ok("G11s CONTROLE NEGATIVO: arquivo expandido NAO declarado em ia/ reprova",
+       !soAutorizadosNoEscopo("?? lib/agentes/ia/_intruso.ts\n"));
+
+    // ── G11t..G11w — `scripts/` nunca esteve em ESCOPO_AGENTES ─────
+    // Medido na 1E-a: uma suite de agentes inesperada em `scripts/`
+    // passava batido. Enumeracao de disco, porque a maioria destas ja
+    // esta commitada e limpa — invisivel para o porcelain.
+    const suitesEmDisco = readdirSync(join(RAIZ, "scripts"))
+      .filter((nome) => nome.startsWith("testar-agentes-"))
+      .sort();
+
+    ok("G11t scripts/ contem exatamente as suites de agentes declaradas", soAutorizadasEmScripts(suitesEmDisco));
+    ok("G11u ANCORA: o diretorio scripts/ foi lido e achou suites", suitesEmDisco.length === SUITES_AGENTES.length && suitesEmDisco.length > 0);
+    ok("G11v CONTROLE NEGATIVO: suite de agentes nao declarada reprova",
+       !soAutorizadasEmScripts([...SUITES_AGENTES, "testar-agentes-intruso.ts"]));
+    ok("G11w CONTROLE NEGATIVO: suite de agentes que sumiu reprova", !soAutorizadasEmScripts(SUITES_AGENTES.slice(1)));
+    ok("G11x a ferramenta operacional 1D-e continua declarada e untracked",
+       SUITES_AGENTES.includes("testar-agentes-isolamento-1de.ts") &&
+       git("status", "--porcelain", "--", "scripts/testar-agentes-isolamento-1de.ts").startsWith("??"));
 
     // ── G12 — conjunto de migrations, propriedade positiva ─────────
     const disco = migrationsDisco();
