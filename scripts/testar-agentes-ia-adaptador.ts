@@ -610,7 +610,13 @@ async function main() {
     const INTOCAVEIS = [
       "lib/agentes/dados/vendas.ts",
       "lib/agentes/handlers/analise-vendas.ts",
-      "lib/agentes/handlers/registry.ts",
+      // AGENTES-FASE1E-c: `handlers/registry.ts` SAIU desta lista — e so
+      // ele. O wiring da interpretacao de IA e feito na composition root,
+      // que e justamente o registry, entao a fase que o introduz e a que
+      // o libera. Sair daqui nao e ficar sem protecao: a suite 1E-c cobre
+      // essa fronteira em detalhe (grupo H), e a 1D-c a cobre em
+      // G5..G5d — inclusive o controle negativo que reprova se alguem
+      // passar `userId` ao interpretador.
       "lib/agentes/executar-tarefa.ts",
       "lib/agentes/capability-worker.ts",
       "lib/agentes/capability.ts",

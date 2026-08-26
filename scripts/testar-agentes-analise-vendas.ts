@@ -460,6 +460,21 @@ const ARQUIVOS_1EB: readonly string[] = [
 ];
 
 /**
+ * O que a AGENTES-FASE1E-c acrescentou: o wiring da interpretacao no
+ * runtime (flag + decorator) e a suite dele.
+ *
+ * `lib/agentes/ativacao-ia.ts` fica FORA de `lib/agentes/ia/` de
+ * proposito: aquele diretorio e zona pura, varrida pela suite da 1E-a,
+ * e este modulo LE `process.env`. Por isso ele entra aqui como caminho
+ * proprio e NAO em `ARQUIVOS_IA_ESPERADOS` — o inventario de `ia/`
+ * continua com quatro arquivos, e o guarda de la segue valendo intacto.
+ */
+const ARQUIVOS_1EC: readonly string[] = [
+  "lib/agentes/ativacao-ia.ts",
+  "scripts/testar-agentes-ia-wiring.ts",
+];
+
+/**
  * Inventario acumulado de `lib/agentes/ia/`, por frente.
  *
  * O guarda de disco (G11l) compara contra ESTA uniao, nunca contra uma
@@ -473,6 +488,7 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_1DA_PERF,
   ...ARQUIVOS_1EA,
   ...ARQUIVOS_1EB,
+  ...ARQUIVOS_1EC,
 ];
 
 /**
@@ -543,6 +559,7 @@ const SUITES_AGENTES: readonly string[] = [
   "testar-agentes-fundacao.ts",
   "testar-agentes-ia-adaptador.ts",
   "testar-agentes-ia-interpretacao.ts",
+  "testar-agentes-ia-wiring.ts",
   "testar-agentes-isolamento-1de.ts",
   "testar-agentes-isolamento-banco.ts",
   "testar-agentes-vendas-capability.ts",
@@ -951,7 +968,23 @@ async function main() {
   ok("G2  registry registra EXATAMENTE 2 tipos", chavesRegistry.length === 2);
   ok("G3  os tipos sao teste_fundacao e analise_vendas", chavesRegistry.join(",") === "TIPO_ANALISE_VENDAS,TIPO_TESTE_FUNDACAO");
   ok("G4  registry importa o handler e a capability", /criarHandlerAnaliseVendas/.test(srcRegistry) && /criarLeiturasDeVendas/.test(srcRegistry));
-  ok("G5  analise_vendas e construido por FABRICA, com o dono no ato", /\[TIPO_ANALISE_VENDAS\]: \(userId: string\) => criarHandlerAnaliseVendas\(criarLeiturasDeVendas\(userId\)\)/.test(norm(mapaRegistry ?? "")));
+  // AGENTES-FASE1E-c: a expressao mudou de forma — o handler passou a ser
+  // ENVOLVIDO por `comInterpretacaoDeVendas`. O que este assert existe
+  // para provar NAO mudou e continua sendo exigido, item por item:
+  // fabrica de aridade 1, `userId` entrando no ato da construcao, e o
+  // dono indo SO para a capability. O G5c e a parte que mais importa —
+  // se alguem um dia passar `userId` para o interpretador, ele reprova.
+  ok("G5  analise_vendas e construido por FABRICA, com o dono no ato",
+     /\[TIPO_ANALISE_VENDAS\]: \(userId: string\) =>/.test(norm(mapaRegistry ?? "")));
+  ok("G5a a capability continua recebendo o dono",
+     /criarHandlerAnaliseVendas\(criarLeiturasDeVendas\(userId\)\)/.test(norm(mapaRegistry ?? "")));
+  ok("G5b o handler e envolvido pela interpretacao de IA (1E-c)",
+     /comInterpretacaoDeVendas\(\s*criarHandlerAnaliseVendas\(criarLeiturasDeVendas\(userId\)\),\s*criarInterpretadorDeVendas\(\)\s*\)/.test(norm(mapaRegistry ?? "")));
+  ok("G5c o dono NAO chega ao interpretador de IA",
+     /criarInterpretadorDeVendas\(\)/.test(norm(mapaRegistry ?? "")) &&
+     !/criarInterpretadorDeVendas\([^)]/.test(norm(mapaRegistry ?? "")));
+  ok("G5d CONTROLE NEGATIVO: G5c reprova se o dono for repassado",
+     /criarInterpretadorDeVendas\([^)]/.test("comInterpretacaoDeVendas(h, criarInterpretadorDeVendas(userId))"));
   ok("G6  registry adotou ConstruirHandler e largou HandlerTarefa pronto", /Record<string,\s*ConstruirHandler>/.test(srcRegistry) && !/Record<string,\s*HandlerTarefa>/.test(srcRegistry));
   ok("G6a registry nao passa SupabaseClient nem objeto de dependencias", !/SupabaseClient|getSupabaseServidor|dependencies|LeiturasDeAgente/.test(srcRegistry));
   ok("G6b teste_fundacao nao recebe capability (aridade 0 na fonte)", /\[TIPO_TESTE_FUNDACAO\]: \(\) => handlerTesteFundacao/.test(norm(mapaRegistry ?? "")));

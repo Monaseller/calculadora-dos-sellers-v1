@@ -43,6 +43,9 @@ import { handlerTesteFundacao, TIPO_TESTE_FUNDACAO } from "@/lib/agentes/handler
 // `import type`, e recebe a capability ja construida.
 import { criarLeiturasDeVendas } from "@/lib/agentes/dados/vendas";
 import { criarHandlerAnaliseVendas, TIPO_ANALISE_VENDAS } from "@/lib/agentes/handlers/analise-vendas";
+// AGENTES-FASE1E-c: wiring da interpretacao de IA. Le a flag e devolve o
+// FAKE quando ligada — nenhum provedor real, nenhuma rede, nenhuma chave.
+import { comInterpretacaoDeVendas, criarInterpretadorDeVendas } from "@/lib/agentes/ativacao-ia";
 
 /**
  * Erro de tipo nao registrado. Classe propria para que o executor o
@@ -83,8 +86,25 @@ export const HANDLERS: Readonly<Record<string, ConstruirHandler>> = Object.freez
   // closure, e e ela — sozinha — que chega ao handler. Nao existe objeto
   // de dependencias, nao existe `SupabaseClient`, e o handler nao recebe
   // `userId`: nao ha assinatura pela qual ele peca dado de outro tenant.
+  // AGENTES-FASE1E-c: a interpretacao de IA entra AQUI, como decorator,
+  // e nao dentro do handler. `analise_vendas` continua sendo o mesmo
+  // tipo e o mesmo handler — nao ha tipo novo de tarefa, nao ha
+  // migration, e tarefa ja enfileirada continua valendo.
+  //
+  // Com a flag DESLIGADA, `criarInterpretadorDeVendas()` devolve `null`
+  // e `comInterpretacaoDeVendas` devolve o proprio handler base: mesmo
+  // objeto de funcao, zero codigo novo no caminho. Rollback e desligar
+  // a env, sem deploy.
+  //
+  // O handler deterministico segue sem saber que IA existe — ele nao a
+  // escolhe, nao a recebe e nao a menciona. O `userId` tambem nao chega
+  // ao interpretador: a fabrica nao o aceita, e a analise que ele le ja
+  // e o agregado de UM dono, produzido pela capability vinculada.
   [TIPO_ANALISE_VENDAS]: (userId: string) =>
-    criarHandlerAnaliseVendas(criarLeiturasDeVendas(userId)),
+    comInterpretacaoDeVendas(
+      criarHandlerAnaliseVendas(criarLeiturasDeVendas(userId)),
+      criarInterpretadorDeVendas()
+    ),
 });
 
 /** Tipos registrados, para diagnostico e para a suite. */
