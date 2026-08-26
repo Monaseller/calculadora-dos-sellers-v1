@@ -492,6 +492,49 @@ const ARQUIVOS_1ED: readonly string[] = [
 ];
 
 /**
+ * O que a AGENTES-FASE1E-e acrescentou: a observabilidade de chamadas de
+ * IA e a suite dela.
+ *
+ * Tambem fora de `lib/agentes/ia/`, pelo mesmo motivo das duas fases
+ * anteriores: o modulo compoe acesso a banco (por import dinamico) e
+ * calcula custo — e wiring, nao contrato. O inventario de `ia/` continua
+ * com quatro arquivos, e o guarda de la segue intacto.
+ */
+const ARQUIVOS_1EE: readonly string[] = [
+  "lib/agentes/observabilidade-ia.ts",
+  "scripts/testar-agentes-ia-observabilidade.ts",
+  // `ESCOPO_AGENTES` cobre `supabase/migrations`, entao a migration da
+  // fase precisa constar aqui alem de em MIGRATIONS_NO_DISCO_NAO_COMMITADAS
+  // — os dois guardas olham a mesma pasta por angulos diferentes: um ve
+  // o ESCOPO sujo, o outro ve o conjunto de migrations.
+  "supabase/migrations/20260919_agentes_ia_chamadas.sql",
+  "supabase/migrations/20260826_agentes_ia_chamadas_append_only.sql",
+];
+
+/**
+ * MIGRATIONS que podem estar no DISCO sem estar no HEAD do git.
+ *
+ * O G12b comparava disco contra HEAD e exigia conjunto vazio — era o
+ * assert de fase "a 1D-c nao introduziu migration nova". Ele esta CERTO
+ * em reprovar: migration nova nao declarada e exatamente o que ele deve
+ * pegar. Entao ele nao e afrouxado — passa a comparar contra uma lista
+ * EXPLICITA, nome a nome, como as demais allowlists desta suite.
+ *
+ * `20260919_agentes_ia_chamadas.sql` (AGENTES-FASE1E-e) esta no disco e
+ * ainda nao commitada: e o artefato do gate pre-migration. Ela tambem
+ * NAO foi aplicada ao banco — a aplicacao depende de autorizacao
+ * explicita, e o proprio cabecalho do arquivo diz isso.
+ */
+const MIGRATIONS_NO_DISCO_NAO_COMMITADAS: readonly string[] = [
+  "20260919_agentes_ia_chamadas.sql",
+  // Corretiva de grants: o `grant select, insert` da criacao NAO tornou
+  // a tabela append-only, porque GRANT e aditivo e o projeto concede
+  // tudo a service_role por ALTER DEFAULT PRIVILEGES. Faltava o REVOKE.
+  // Aplicada como versao 20260826193859.
+  "20260826_agentes_ia_chamadas_append_only.sql",
+];
+
+/**
  * Inventario acumulado de `lib/agentes/ia/`, por frente.
  *
  * O guarda de disco (G11l) compara contra ESTA uniao, nunca contra uma
@@ -507,6 +550,7 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_1EB,
   ...ARQUIVOS_1EC,
   ...ARQUIVOS_1ED,
+  ...ARQUIVOS_1EE,
 ];
 
 /**
@@ -577,6 +621,7 @@ const SUITES_AGENTES: readonly string[] = [
   "testar-agentes-fundacao.ts",
   "testar-agentes-ia-adaptador.ts",
   "testar-agentes-ia-interpretacao.ts",
+  "testar-agentes-ia-observabilidade.ts",
   "testar-agentes-ia-provider.ts",
   "testar-agentes-ia-wiring.ts",
   "testar-agentes-isolamento-1de.ts",
@@ -1199,7 +1244,13 @@ async function main() {
     // qualquer coisa — que e exatamente o defeito do G12 antigo.
     ok("G12 ANCORA: o HEAD conhece dezenas de migrations", head.length > 40);
     ok("G12a ANCORA: o disco tambem tem migrations", disco.length > 40);
-    ok("G12b a 1D-c nao introduziu migration nova", novasNoDisco.length === 0);
+    ok(`G12b nenhuma migration nao declarada no disco (${novasNoDisco.join(", ") || "nenhuma"})`,
+       novasNoDisco.every((m) => MIGRATIONS_NO_DISCO_NAO_COMMITADAS.includes(m)));
+    ok("G12b1 CONTROLE NEGATIVO: uma migration nao declarada reprovaria",
+       !["99999999_intrusa.sql"].every((m) => MIGRATIONS_NO_DISCO_NAO_COMMITADAS.includes(m)));
+    ok("G12b2 a migration da 1E-e declara que NAO foi aplicada",
+       readFileSync(join(RAIZ, "supabase", "migrations", "20260919_agentes_ia_chamadas.sql"), "utf8")
+         .includes("NAO APLICADA AINDA"));
     ok("G12c nenhuma migration desapareceu do disco", sumidasDoDisco.length === 0);
     ok("G12d as duas migrations desta frente seguem no HEAD", head.includes("20260916_agentes_fundacao.sql") && head.includes("20260917_agentes_execucao.sql"));
     // Controles sobre listas SINTETICAS, nao sobre `disco`/`head` reais:

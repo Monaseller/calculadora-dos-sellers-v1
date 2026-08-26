@@ -207,7 +207,17 @@ async function main() {
     ok("B2 flag ON => fabrica devolve funcao", typeof (await comFlag("true", () => criarInterpretadorDeVendas())) === "function");
     ok("B3 a fabrica nao aceita parametro (nao ha como passar dono)", criarInterpretadorDeVendas.length === 0);
     ok("B4 a fabrica usa o FAKE, nao um provedor", /criarAdaptadorFake\(\)/.test(CODIGO_WIRING));
-    ok("B5 nao ha escolha de modelo nem leitura de chave", !/modelo|apiKey|API_KEY|decidirProvedor|chamarIA/i.test(CODIGO_WIRING));
+    // AGENTES-FASE1E-e: o wiring passou a RESOLVER o modelo — pelo leitor
+    // unico `obterModeloInterpretacao()` — para declarar provedor/modelo na
+    // linha de contabilidade quando a chamada FALHA e a resposta nao chega.
+    // O assert antigo casava a palavra "modelo" e reprovava isso. A forma
+    // nova e mais precisa E mais estrita: continua proibindo ler chave e
+    // rotear provedor, e passa a EXIGIR que a resolucao seja delegada.
+    ok("B5 nao le chave nem roteia provedor", !/apiKey|API_KEY|decidirProvedor|chamarIA/i.test(CODIGO_WIRING));
+    ok("B5a nenhum nome de modelo escrito a mao no wiring",
+       !/["'`](claude|gemini|gpt)[a-z0-9.-]*["'`]/i.test(CODIGO_WIRING));
+    ok("B5b o modelo vem do LEITOR UNICO, e a env nao e lida aqui",
+       /obterModeloInterpretacao\(\)/.test(CODIGO_WIRING) && !/AGENTES_ANTHROPIC_MODEL/.test(CODIGO_WIRING));
   }
 
   // ═══ C. FLAG OFF — garantia de rollback ══════════════════════════
@@ -335,9 +345,22 @@ async function main() {
     ok("G1 ANCORA: o contexto REALMENTE carrega os identificadores", ctx.userId.length > 0 && "user_id" in ctx.entrada);
     ok("G2 nenhum identificador de dono chega ao PedidoIA", PROIBIDOS.every((k) => !texto.includes(k)));
     ok("G3 o `userId` do contexto nao aparece no texto enviado", !pedido.dados.includes(ctx.userId));
-    ok("G4 o `contexto` NAO e repassado ao interpretador", !/interpretar\(contexto|contexto\)/.test(CODIGO_WIRING.split("const interpretado")[1] ?? ""));
+    // AGENTES-FASE1E-e: o interpretador passou a receber a IDENTIDADE —
+    // cinco campos DERIVADOS do contexto — para a observabilidade. O
+    // contexto CRU continua fora, e agora isso e exigido item a item,
+    // inclusive que a identidade nao carregue `entrada`, que e onde um
+    // spoofing viveria.
+    ok("G4 o `contexto` CRU nao e repassado ao interpretador",
+       !/interpretar\(\s*analise[^)]*,\s*contexto\s*\)/.test(CODIGO_WIRING));
+    ok("G4a o que viaja e a identidade DERIVADA", /identidadeDoContexto\(contexto\)/.test(CODIGO_WIRING));
+    ok("G4b a identidade nao e montada a partir de `entrada`",
+       !/entrada/.test((CODIGO_WIRING.match(/identidadeDoContexto[\s\S]{0,160}/) ?? [""])[0]));
     ok("G5 a fabrica nao tem por onde receber dono (aridade 0)", criarInterpretadorDeVendas.length === 0);
-    ok("G6 o tipo do interpretador aceita SO a analise", /InterpretarAnaliseDeVendas = \(\s*analise: AnaliseVendasDeterministica\s*\) =>/.test(CODIGO_WIRING));
+    ok("G6 o tipo do interpretador aceita analise + identidade, e nada alem",
+       /InterpretarAnaliseDeVendas = \(\s*analise: AnaliseVendasDeterministica,[\s\S]{0,900}identidade: IdentidadeChamadaIA\s*\) =>/.test(CODIGO_WIRING));
+    ok("G6a a identidade tem os 5 campos do claim, e nenhum a mais",
+       /readonly userId: string;[\s\S]{0,400}readonly tentativa: number;/.test(
+         readFileSync(join(RAIZ, "lib", "agentes", "observabilidade-ia.ts"), "utf8")));
     ok("G7 CONTROLE NEGATIVO: o detector acha identificador quando presente",
        PROIBIDOS.some((k) => JSON.stringify({ user_id: 1 }).includes(k)));
   }
@@ -376,14 +399,24 @@ async function main() {
     ok(`I2 nenhum SDK de provedor de IA carregado (${achados.length})`, achados.length === 0);
     ok("I3 CONTROLE NEGATIVO: o padrao acha um caminho de SDK",
        SDK_IA.test("/x/node_modules/@google/genai/index.js") && SDK_IA.test("/x/node_modules/@anthropic-ai/sdk"));
-    ok("I4 o ai-gateway de producao nao foi carregado (so `erros`, puro)",
-       !carregados.some((p) => /\/lib\/ai-gateway\/(cliente|roteamento|custos|registro|provedores)/.test(p)));
+    // AGENTES-FASE1E-e: `custos` SAIU desta lista. Ele e puro (zero imports,
+    // zero env, zero banco) e seu reuso como base do calculo de custo foi
+    // autorizado. O que continua proibido e o gateway de EXECUCAO.
+    ok("I4 o ai-gateway de EXECUCAO nao foi carregado",
+       !carregados.some((p) => /\/lib\/ai-gateway\/(cliente|roteamento|registro|provedores)/.test(p)));
+    ok("I4a `registro.ts` do Estudio segue fora do grafo (nada de central_ia_consumo)",
+       !carregados.some((p) => /\/lib\/ai-gateway\/registro/.test(p)));
 
     for (const [rot, re] of [
       ["fetch", /\bfetch\s*\(/], ["SDK", /@anthropic-ai|@google\/genai|openai/i],
       ["API key", /api[_-]?key|apiKey/i], ["billing/custo", /custo|billing|estimarCusto|registrarConsumo/i],
       ["tools", /\btools\s*:|\btool_choice\b|\binput_schema\b/], ["rede", /https?:\/\/|axios|XMLHttpRequest/],
-      ["banco", /\.\s*rpc\s*\(|\.\s*select\s*\(|supabase/i], ["migration/SQL", /\bfrom\s+public\.|CREATE\s+TABLE/i],
+      // "banco" passou a significar ACESSO a banco, e nao a palavra
+      // "Supabase" dentro de um nome de simbolo: o wiring compoe
+      // `criarRegistradorSupabase()`, que e uma FABRICA. Quem fala com o
+      // banco e ela, por import dinamico — este arquivo nao.
+      ["acesso a banco", /\.\s*rpc\s*\(|\.\s*select\s*\(|\.\s*insert\s*\(|\.\s*from\s*\(|createClient/i],
+      ["migration/SQL", /\bfrom\s+public\.|CREATE\s+TABLE/i],
       ["loop de agente", /while\s*\(|for\s*\(;;/],
     ] as const) {
       ok(`I5 wiring sem ${rot}`, !re.test(CODIGO_WIRING));

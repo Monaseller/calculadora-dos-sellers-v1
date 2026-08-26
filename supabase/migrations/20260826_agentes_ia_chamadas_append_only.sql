@@ -1,0 +1,70 @@
+-- ============================================================
+-- AGENTES-FASE1E-e — CORRETIVA: append-only em agentes_ia_chamadas
+-- Aplicada em: 2026-08-26
+--
+-- ── O QUE ACONTECEU ─────────────────────────────────────────────────
+--
+-- A criacao da tabela (aplicada como versao 20260826193452, a partir de
+-- `20260919_agentes_ia_chamadas.sql`) trazia:
+--
+--     grant select, insert on public.agentes_ia_chamadas to service_role;
+--
+-- com a INTENCAO de tornar a contabilidade append-only. A inspecao
+-- pos-migration mostrou que a intencao NAO se cumpriu: `service_role`
+-- ficou com o conjunto completo — SELECT, INSERT, UPDATE, DELETE,
+-- TRUNCATE, REFERENCES, TRIGGER.
+--
+-- ── POR QUE O GRANT NAO BASTOU ─────────────────────────────────────
+--
+-- `GRANT` e ADITIVO: ele concede, nunca restringe. E este projeto Supabase
+-- tem `ALTER DEFAULT PRIVILEGES` concedendo TUDO em toda tabela nova:
+--
+--     supabase_admin -> anon=arwdDxtm | authenticated=arwdDxtm |
+--                       service_role=arwdDxtm | postgres=arwdDxtm
+--     postgres       -> service_role=arwdDxtm | postgres=arwdDxtm
+--
+-- (`arwdDxtm` = todos os privilegios de tabela.)
+--
+-- Ou seja: quando o `GRANT select, insert` rodou, `service_role` ja tinha
+-- tudo havia um instante. O grant nao acrescentou nada e, principalmente,
+-- nao tirou nada.
+--
+-- Os tres `REVOKE` da migration original miravam `public`, `anon` e
+-- `authenticated` — e FUNCIONARAM: nenhum desses tres alcanca a tabela,
+-- confirmado por `has_table_privilege`. O que faltou foi aplicar a mesma
+-- licao a `service_role`.
+--
+-- E a mesma armadilha do bug SEC1, ja documentada no CLAUDE.md para
+-- funcoes e para anon/authenticated. A licao vale igual aqui: neste
+-- projeto, privilegio de tabela nova precisa ser REVOGADO, nunca apenas
+-- "nao concedido".
+--
+-- ── POR QUE ISSO IMPORTA ────────────────────────────────────────────
+--
+-- Contabilidade que pode ser reescrita depois do fato perde valor
+-- probatorio. Um numero de custo corrigido a posteriori nao e mais
+-- registro do que aconteceu — e opiniao sobre o que aconteceu. Append-only
+-- e o que permite usar esta tabela como evidencia.
+--
+-- Nota de proporcao, para nao exagerar o problema: isto e integridade de
+-- DADO, nao exposicao. Nenhum papel de cliente jamais alcancou a tabela,
+-- e `service_role` e o papel confiavel do backend, que ja podia apagar
+-- `agente_tarefas` de qualquer forma.
+--
+-- ── O QUE ESTA CORRETIVA NAO FAZ ───────────────────────────────────
+--
+-- Nao mexe em SELECT nem em INSERT — a aplicacao precisa dos dois.
+--
+-- Nao revoga REFERENCES nem TRIGGER, embora `service_role` tambem os
+-- tenha. Motivo: nenhum dos dois altera linha por si. `REFERENCES` deixa
+-- criar FK apontando para ca; `TRIGGER` deixa criar gatilho — que seria
+-- uma rota INDIRETA para reescrever dado, mas exige um ato deliberado de
+-- schema, nao um UPDATE acidental, e revoga-lo atrapalharia evolucao
+-- legitima do schema. Ha 0 triggers nesta tabela hoje. Fica REGISTRADO
+-- como observacao, nao como pendencia silenciosa.
+--
+-- Nao altera tabela, colunas, constraints, FKs nem indices.
+-- Nao toca em nenhuma outra tabela.
+-- ============================================================
+
+revoke update, delete, truncate on public.agentes_ia_chamadas from service_role;

@@ -59,6 +59,8 @@ import type {
   AnaliseVendasDeterministica,
   AnaliseVendasInterpretada,
 } from "@/lib/agentes/ia/interpretar-analise-vendas";
+import { identidadeDoContexto } from "@/lib/agentes/observabilidade-ia";
+import type { IdentidadeChamadaIA } from "@/lib/agentes/observabilidade-ia";
 import type { HandlerTarefa } from "@/lib/agentes/tipos-execucao";
 
 /**
@@ -111,7 +113,21 @@ export const CHAVE_ORIGEM_INTERPRETACAO = "origemInterpretacao";
  * funcao pronta ou nao recebe nada.
  */
 export type InterpretarAnaliseDeVendas = (
-  analise: AnaliseVendasDeterministica
+  analise: AnaliseVendasDeterministica,
+  /**
+   * Quem esta pagando por esta chamada — AGENTES-FASE1E-e.
+   *
+   * Montada de `ContextoTarefa` pelo decorator, que a tem em maos. Vai
+   * para a OBSERVABILIDADE, jamais para o `PedidoIA`: o adaptador
+   * continua sem `userId`, `agenteId` ou `tarefaId`, e o modelo continua
+   * recebendo apenas instrucao, dados e schema.
+   *
+   * Preferida a injecao na construcao porque `tarefaId` e `tentativa` so
+   * existem no momento da EXECUCAO — o registry constroi o handler antes
+   * disso e nao poderia saber nenhum dos dois. Assim o registry nao
+   * muda: continua chamando `criarInterpretadorDeVendas()` sem argumento.
+   */
+  identidade: IdentidadeChamadaIA
 ) => Promise<AnaliseVendasInterpretada>;
 
 /**
@@ -165,17 +181,38 @@ export function criarInterpretadorDeVendas(): InterpretarAnaliseDeVendas | null 
   if (!interpretacaoDeVendasHabilitada()) return null;
 
   if (!provedorRealHabilitado()) {
+    // O FAKE nao e observado, e isso e decisao, nao esquecimento: ele e
+    // infraestrutura de teste, seu custo e zero por construcao, e
+    // gravar linhas de contabilidade a partir dele encheria a tabela de
+    // ruido — alem de por escrita em banco num caminho documentado como
+    // deterministico e sem efeito externo. Sem custo, sem contabilidade.
     const { adaptador } = criarAdaptadorFake();
     return (analise) => interpretarAnaliseVendas(analise, adaptador);
   }
 
-  return async (analise) => {
-    const { criarAdaptadorAnthropic } = await import("@/lib/agentes/adaptador-anthropic");
+  return async (analise, identidade) => {
+    const { criarAdaptadorAnthropic, obterModeloInterpretacao } =
+      await import("@/lib/agentes/adaptador-anthropic");
+    const { criarAdaptadorObservavel, criarRegistradorSupabase } =
+      await import("@/lib/agentes/observabilidade-ia");
+
+    // O modelo e resolvido AQUI tambem para que o caminho de erro tenha
+    // o que declarar — e a mesma funcao leitora unica da env, entao nao
+    // ha segunda fonte de verdade. Se a env faltar, isto lanca antes de
+    // abrir conexao, exatamente como ja lancava.
+    const observavel = criarAdaptadorObservavel(
+      criarAdaptadorAnthropic(),
+      identidade,
+      criarRegistradorSupabase(),
+      { provedor: "anthropic", modelo: obterModeloInterpretacao() }
+    );
+
     // SEM try/catch: modelo ausente, auth, rate limit, timeout,
     // transient, JSON quebrado e resposta fora do contrato sobem
     // inteiros. Nao existe queda para o fake — com o provedor real
-    // ligado, falha do provedor e falha da tarefa.
-    return interpretarAnaliseVendas(analise, criarAdaptadorAnthropic());
+    // ligado, falha do provedor e falha da tarefa. A observabilidade
+    // NAO participa dessa decisao: ela nunca derruba nem salva a tarefa.
+    return interpretarAnaliseVendas(analise, observavel);
   };
 }
 
@@ -222,7 +259,10 @@ export function comInterpretacaoDeVendas(
     // da 1E-b — e nao e um voto de confianca: se a forma nao bater,
     // `prepararPedidoInterpretacao` recusa e lanca, sem prompt
     // degradado.
-    const interpretado = await interpretar(analise as unknown as AnaliseVendasDeterministica);
+    const interpretado = await interpretar(
+      analise as unknown as AnaliseVendasDeterministica,
+      identidadeDoContexto(contexto)
+    );
 
     return {
       ...analise,
