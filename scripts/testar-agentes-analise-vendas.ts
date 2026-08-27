@@ -535,6 +535,11 @@ const ARQUIVOS_CONEXOES_1: readonly string[] = [
  */
 const ARQUIVOS_SKILL_1DD1: readonly string[] = [
   "supabase/migrations/20260920_agente_permissoes.sql",
+  // SKILL-1D.d.1c — corretiva de privilegios. O `grant` da migration
+  // acima nao bastou: GRANT e aditivo e o projeto ja concede tudo a
+  // service_role por ALTER DEFAULT PRIVILEGES. Mesma classe do corretivo
+  // de `agentes_ia_chamadas`.
+  "supabase/migrations/20260921_agente_permissoes_privilegios.sql",
 ];
 
 /**
@@ -562,10 +567,17 @@ const MIGRATIONS_NO_DISCO_NAO_COMMITADAS: readonly string[] = [
   // Aplicadas como 20260826201145 e 20260826201326.
   "20260826_lojas_remover_orfaos.sql",
   "20260826_lojas_autoridade_dono.sql",
-  // SKILL-1D.d.1 — `agente_permissoes`. NAO APLICADA: o arquivo e o
-  // artefato do gate pre-migration, e o proprio cabecalho dele diz isso.
-  // Aplicar ao banco exige autorizacao separada.
+  // SKILL-1D.d.1 — `agente_permissoes`. APLICADA na 1D.d.1b, como versao
+  // 20260827200259, sob autorizacao separada. O cabecalho do arquivo
+  // ainda diz "NAO APLICADA AINDA" e assim permanece: migration
+  // publicada nao se edita retroativamente. A verdade sobre o que esta
+  // aplicado e do banco, nunca do comentario.
   "20260920_agente_permissoes.sql",
+  // SKILL-1D.d.1c — corretiva de privilegios. APLICADA como versao
+  // 20260827204039, depois da rotacao da senha do Postgres. Deixou
+  // `service_role` com `arwd` e nada alem — sem TRUNCATE, REFERENCES,
+  // TRIGGER nem MAINTAIN, medido no catalogo.
+  "20260921_agente_permissoes_privilegios.sql",
 ];
 
 /**

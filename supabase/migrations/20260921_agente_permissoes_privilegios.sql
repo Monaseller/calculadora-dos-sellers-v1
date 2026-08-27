@@ -1,0 +1,147 @@
+-- ============================================================
+-- SKILL-1D.d.1c — CORRETIVA: privilegios de agente_permissoes
+--
+-- APLICADA em 2026-08-27, como versao 20260827204039 /
+-- agente_permissoes_privilegios.
+--
+-- A aplicacao ficou bloqueada por um tempo: o gate anterior expos a senha
+-- do Postgres num mascaramento defeituoso, e a rotacao dela virou
+-- pre-requisito. A senha FOI rotacionada antes desta migration rodar —
+-- nenhuma operacao de banco usou a credencial comprometida depois do
+-- incidente.
+--
+-- ── O QUE ACONTECEU ─────────────────────────────────────────────────
+--
+-- `20260920_agente_permissoes.sql` (aplicada como versao 20260827200259)
+-- terminava com:
+--
+--     revoke all ... from public;
+--     revoke all ... from anon;
+--     revoke all ... from authenticated;
+--     grant select, insert, update, delete ... to service_role;
+--
+-- com a INTENCAO de dar CRUD e nada alem. A inspecao pos-migration
+-- mostrou que a intencao nao se cumpriu para `service_role`:
+--
+--     agente_permissoes  ->  service_role=arwdDxtm/postgres
+--
+-- Os tres REVOKE FUNCIONARAM: `public`, `anon` e `authenticated` nao
+-- alcancam a tabela. O que faltou foi aplicar a mesma licao ao quarto
+-- papel.
+--
+-- ── POR QUE O GRANT NAO BASTOU ─────────────────────────────────────
+--
+-- `GRANT` e ADITIVO: concede, nunca restringe. Este projeto tem
+-- `ALTER DEFAULT PRIVILEGES` concedendo TUDO a `service_role` em toda
+-- tabela nova, entao quando o `grant select, insert, update, delete`
+-- rodou, `service_role` ja tinha os oito havia um instante. O grant nao
+-- acrescentou nada e, principalmente, nao tirou nada.
+--
+-- Mesma armadilha do bug SEC1 e da corretiva
+-- `20260826_agentes_ia_chamadas_append_only.sql`. A licao vale igual:
+-- neste projeto, privilegio de tabela nova precisa ser REVOGADO, nunca
+-- apenas "nao concedido".
+--
+-- Registro de honestidade sobre a fase anterior: a migration original
+-- foi escrita seguindo a convencao da mais recente e mesmo assim errou.
+-- O defeito so apareceu porque o gate exigiu conferir o CATALOGO em vez
+-- de confiar no SQL declarado. Sem essa exigencia, a tabela teria
+-- nascido com privilegio a mais e ninguem saberia.
+--
+-- ── SAO OITO PRIVILEGIOS, NAO SETE ─────────────────────────────────
+--
+-- `arwdDxtm` decodifica como:
+--
+--     a INSERT   r SELECT   w UPDATE   d DELETE
+--     D TRUNCATE x REFERENCES t TRIGGER  m MAINTAIN
+--
+-- `MAINTAIN` (PG17+) NAO aparece em `information_schema.role_table_grants`
+-- — a primeira leitura do gate mostrou sete, e havia oito. So o `relacl`
+-- bruto o revelou.
+--
+-- Por isso esta corretiva NAO copia o REVOKE nominal da corretiva
+-- anterior (`revoke update, delete, truncate`): aquele conjunto foi
+-- montado para uma tabela append-only e, aqui, deixaria `REFERENCES`,
+-- `TRIGGER` e `MAINTAIN` para tras. `REVOKE ALL` seguido de `GRANT` fecha
+-- os oito e deixa o estado final explicito na propria migration, sem
+-- depender de o autor lembrar de enumerar todos.
+--
+-- ── DIFERENCA DELIBERADA EM RELACAO A CORRETIVA ANTERIOR ───────────
+--
+-- `agentes_ia_chamadas` manteve REFERENCES/TRIGGER de proposito, com
+-- justificativa escrita: sao rota INDIRETA, exigem ato de schema e
+-- revoga-los atrapalharia evolucao legitima.
+--
+-- Aqui a decisao e outra, e o pedido do gate e explicito: `service_role`
+-- fica com SELECT, INSERT, UPDATE, DELETE e SOMENTE esses quatro. A
+-- tabela e configuracao de AUTORIDADE — quem pode acionar qual Funcao.
+-- Um TRIGGER sobre ela poderia reescrever nivel de permissao sem passar
+-- pelo write path, que e exatamente a garantia que ela existe para dar.
+--
+-- ── O QUE ESTA CORRETIVA NAO FAZ ───────────────────────────────────
+--
+-- Nao altera a migration anterior — ela esta publicada e aplicada, e
+-- editar migration ja executada e proibido.
+--
+-- Nao toca colunas, PK, FK, CHECK, indices, RLS nem dados.
+-- Nao toca nenhuma outra tabela.
+-- Nao toca `postgres` (owner) nem os default privileges do schema: o
+-- default e problema geral do projeto, com gate proprio, e resolve-lo de
+-- passagem aqui atingiria tabelas futuras sem revisao.
+-- ============================================================
+
+-- REVOKE ALL antes do GRANT: o unico jeito de o estado final nao depender
+-- do que a tabela ja tinha. Inclui `service_role`, que foi justamente o
+-- papel que a migration original deixou passar.
+revoke all on table public.agente_permissoes from public;
+revoke all on table public.agente_permissoes from anon;
+revoke all on table public.agente_permissoes from authenticated;
+revoke all on table public.agente_permissoes from service_role;
+
+-- CRUD completo, e nada alem. Permissao MUDA — o dono altera o nivel —,
+-- entao UPDATE e DELETE sao necessarios, diferente de `agentes_ia_chamadas`.
+grant select, insert, update, delete on table public.agente_permissoes to service_role;
+
+-- ── ESTADO FINAL, MEDIDO NO CATALOGO APOS A APLICACAO ──────────────
+--
+-- Nao e expectativa: e leitura de `pg_class.relacl` depois desta
+-- migration rodar.
+--
+--   postgres=arwdDxtm/postgres | service_role=arwd/postgres
+--
+--   public         -> nenhuma entrada de ACL
+--   anon           -> nenhuma entrada de ACL
+--   authenticated  -> nenhuma entrada de ACL
+--   service_role   -> arwd  (exatamente SELECT, INSERT, UPDATE, DELETE)
+--
+-- `has_table_privilege` para `service_role` devolveu false nos quatro
+-- excedentes: TRUNCATE, REFERENCES, TRIGGER e MAINTAIN.
+--
+-- Ausencia foi provada por CATALOGO, nunca executando TRUNCATE para
+-- descobrir se ele existe. A consulta:
+--
+--   select relacl from pg_class where relname = 'agente_permissoes';
+--
+-- A suite `scripts/testar-ia-skill-1d-d1-banco.ts` cobra exatamente este
+-- estado nos asserts I4-I12, e passou 50/50.
+
+-- ── ROLLBACK ───────────────────────────────────────────────────────
+--
+--   grant truncate, references, trigger, maintain
+--     on table public.agente_permissoes to service_role;
+--
+-- Restaura exatamente os quatro removidos, sem `GRANT ALL` — que
+-- reconcederia o CRUD de forma redundante e apagaria a intencao de
+-- simetria. Nao ha rollback para `public`/`anon`/`authenticated`: eles ja
+-- nao tinham nada antes desta migration.
+
+-- ── ORDEM EM QUE ISTO ACONTECEU ────────────────────────────────────
+--
+--   1. senha do Postgres rotacionada no dashboard do Supabase;
+--   2. esta migration aplicada (20260827204039);
+--   3. privilegios provados pelo catalogo;
+--   4. suite de banco reexecutada, 50/50.
+--
+-- A ordem importa e nao e burocracia: aplicar antes da rotacao teria
+-- usado a credencial comprometida para mexer justamente na tabela que
+-- define autoridade.
