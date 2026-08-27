@@ -405,8 +405,42 @@ ok("O6  CONTROLE: a sonda de seed acha quando existe",
 
 secao("P. A fase nao tocou banco nem criou caminho de escrita");
 
-ok("P1  a suite de banco da 1D.f.1b ainda NAO existe",
-  !existe("scripts/testar-ia-skill-1d-f1-banco.ts"));
+{
+  // ── SENTINELA TEMPORAL, ATUALIZADA ────────────────────────────────
+  //
+  // Este assert nasceu afirmando que a suite de banco da 1D.f.1b NAO
+  // existia — era a fronteira desta fase, que criou a migration e nao a
+  // prova em runtime. A 1D.f.1b-A criou a suite, entao a AFIRMACAO mudou;
+  // o que ela guarda, nao. A fronteira que continua valendo e: quem
+  // aplica a migration NAO e o teste.
+  //
+  // ── por que recortar antes de varrer ──────────────────────────────
+  //
+  // A suite alvo tem um bloco proprio de auto-verificacao com CONTROLES
+  // POSITIVOS — literalmente `create table x ()` e a regex
+  // `/create\s+table|apply_migration/`. Uma sonda textual ingenua
+  // reprovaria por causa deles, acusando o alvo de fazer justamente o que
+  // os controles existem para provar que ele NAO faz. Por isso comentario
+  // e bloco de auto-verificacao saem antes, e o que se procura e
+  // MECANISMO EXECUTAVEL de DDL, nao a sequencia de caracteres.
+  const CAMINHO_BANCO = "scripts/testar-ia-skill-1d-f1-banco.ts";
+  const existeBanco = existe(CAMINHO_BANCO);
+
+  const bruto = existeBanco ? ler(CAMINHO_BANCO) : "";
+  const semCom = bruto.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
+  const iAuto = semCom.indexOf("function autoVerificar()");
+  const fimAuto = semCom.indexOf("\n}\n", iAuto);
+  const EXEC = iAuto < 0 ? semCom : semCom.slice(0, iAuto) + semCom.slice(fimAuto);
+
+  const recorteValido = iAuto > 0 && fimAuto > iAuto && EXEC.length < semCom.length - 500;
+  const semDDL = !/\b(create|drop|alter)\s+table\b/i.test(EXEC);
+  const semAplicador = !/apply_migration|db\s+push|migration\s+up/i.test(EXEC);
+  const verificaHistorico = /supabase_migrations\.schema_migrations/.test(EXEC);
+
+  ok("P1  a suite de banco existe, NAO aplica migration e verifica a ja aplicada",
+    existeBanco && recorteValido && semDDL && semAplicador && verificaHistorico,
+    `existe=${existeBanco} recorte=${recorteValido} semDDL=${semDDL} semAplicador=${semAplicador} historico=${verificaHistorico}`);
+}
 ok("P2  nenhum modulo de leitura foi criado (1D.f.2)",
   !existe("lib/agentes/skills"));
 ok("P3  lib/ia/skills continua com 3 modulos",
