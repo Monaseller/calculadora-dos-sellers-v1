@@ -5,14 +5,18 @@
  *
  * ── O que este componente NAO deve virar ────────────────────────────
  *
- * A pagina definitiva do agente tera oito abas (Visao geral, Chat,
- * Tarefas, Conexoes, Funcoes, Permissoes, Memoria, Custos). Este drawer
- * NAO e o lugar delas. Ele existe para responder "o que este agente esta
- * fazendo agora?" em um clique, e deve continuar cabendo nessa frase.
+ * A pagina definitiva do agente existe agora, em `/ia/agentes/[id]`, com
+ * as oito abas. Este drawer NAO e o lugar delas. Ele responde "o que
+ * este agente esta fazendo agora?" em um clique, e deve continuar
+ * cabendo nessa frase.
  *
  * Por isso ele mostra identidade, estado, tarefa e progresso — e para.
- * Cada aba que for empurrada para ca torna mais caro extrair a pagina
- * real depois, ate que ninguem extraia.
+ * O historico completo de tarefas MOROU aqui por uma fase e saiu: era a
+ * aba Tarefas nascendo dentro do drawer. Cada pedaco empurrado para ca
+ * torna mais caro manter a pagina real como o lugar da configuracao.
+ *
+ * Consulta rapida aqui; configuracao e operacao completas la. O caminho
+ * entre os dois e o botao "Abrir agente".
  *
  * ── Acessibilidade nao e enfeite aqui ───────────────────────────────
  *
@@ -22,8 +26,10 @@
  * lendo o escritorio atras do painel.
  */
 import { useEffect, useRef } from "react";
+import Link from "next/link";
 import { CROMO, ESPACO, FONTE, RAIO } from "@/lib/ia/design";
 import { VOCABULARIO_ESTADO, type AparenciaAgente } from "@/lib/ia/estados";
+import { tarefaAtual, tituloDaTarefa } from "@/lib/ia/tarefas";
 import { MOCK_AVISO } from "@/lib/ia/mocks";
 import type { AgenteUI, TarefaUI } from "@/lib/ia/contratos";
 import BadgeEstado, { corDaAparencia } from "@/components/ia/BadgeEstado";
@@ -64,7 +70,7 @@ export default function PainelAgente({
     };
   }, [onFechar]);
 
-  const atual = tarefas.find((t) => t.concluido_em === null) ?? null;
+  const atual = tarefaAtual(tarefas);
   const cor = corDaAparencia(aparencia);
 
   return (
@@ -140,7 +146,7 @@ export default function PainelAgente({
         <Campo rotulo="TAREFA ATUAL">
           {atual ? (
             <>
-              <p style={{ margin: 0 }}>{atual.titulo}</p>
+              <p style={{ margin: 0 }}>{tituloDaTarefa(atual)}</p>
               <div
                 role="progressbar"
                 aria-valuenow={atual.progresso}
@@ -166,32 +172,37 @@ export default function PainelAgente({
           )}
         </Campo>
 
-        <Campo rotulo="HISTÓRICO">
-          {tarefas.length === 0 ? (
-            <p style={{ margin: 0, color: CROMO.textoFraco }}>Nenhuma tarefa registrada.</p>
-          ) : (
-            <ul style={{ margin: 0, paddingLeft: 18, color: CROMO.textoFraco }}>
-              {tarefas.map((t) => (
-                <li key={t.id} style={{ marginBottom: 4 }}>
-                  {t.titulo} — {t.status}
-                </li>
-              ))}
-            </ul>
-          )}
-        </Campo>
+        {/* O caminho para a configuracao completa. E um <Link> de
+            verdade: navega, abre em nova aba, aparece no historico. */}
+        <Link
+          href={`/ia/agentes/${agente.id}`}
+          style={{
+            display: "block",
+            marginTop: ESPACO.xl,
+            padding: "11px 0",
+            textAlign: "center",
+            textDecoration: "none",
+            border: `1px solid ${CROMO.acentoBorda}`,
+            borderRadius: RAIO.controle,
+            background: CROMO.acentoFundo,
+            color: CROMO.acento,
+            fontWeight: 700,
+            letterSpacing: 0.4,
+          }}
+        >
+          Abrir agente
+        </Link>
 
         <p
           style={{
-            marginTop: ESPACO.xl,
-            padding: ESPACO.md,
-            border: `1px solid ${CROMO.borda}`,
-            borderRadius: RAIO.controle,
+            marginTop: ESPACO.lg,
             fontSize: 12,
+            lineHeight: 1.6,
             color: CROMO.textoFraco,
           }}
         >
-          {MOCK_AVISO}. A página completa do agente — visão geral, chat, tarefas, conexões,
-          funções, permissões, memória e custos — chega em fase posterior.
+          {MOCK_AVISO}. Este painel é consulta rápida — o histórico de tarefas, as conexões, as
+          funções, as permissões, a memória e os custos vivem na página do agente.
         </p>
       </aside>
     </>

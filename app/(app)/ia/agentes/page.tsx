@@ -17,6 +17,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { CROMO, ESPACO, FONTE, RAIO } from "@/lib/ia/design";
 import { JANELA_CONCLUIDO_MS, aparenciaDoAgente, rotuloDe } from "@/lib/ia/estados";
+import { tarefaAtual, tituloDaTarefa } from "@/lib/ia/tarefas";
 import { MOCK_AGENTES, MOCK_TAREFAS } from "@/lib/ia/mocks";
 import type { TarefaUI } from "@/lib/ia/contratos";
 import BadgeEstado, { corDaAparencia } from "@/components/ia/BadgeEstado";
@@ -52,7 +53,7 @@ export default function PaginaAgentes() {
       return {
         agente,
         aparencia: aparenciaDoAgente(agente, doAgente, agoraMs),
-        tarefa: doAgente.find((t) => t.concluido_em === null) ?? null,
+        tarefa: tarefaAtual(doAgente),
       };
     });
   }, [tarefas, agoraMs]);
@@ -75,7 +76,7 @@ export default function PaginaAgentes() {
               onClick={() => setSelecionado(agente.id)}
               className="cds-ia-card"
               aria-label={`${agente.nome}, ${rotuloDe(aparencia)}${
-                tarefa ? `, ${tarefa.titulo}` : ""
+                tarefa ? `, ${tituloDaTarefa(tarefa)}` : ""
               }. Abrir detalhes.`}
             >
               <div style={{ display: "flex", alignItems: "center", gap: ESPACO.md, width: "100%" }}>
@@ -109,7 +110,7 @@ export default function PaginaAgentes() {
 
               <div style={{ width: "100%", textAlign: "left" }}>
                 <p style={{ margin: `${ESPACO.md}px 0 0`, fontSize: 13, color: CROMO.textoFraco }}>
-                  {tarefa ? tarefa.titulo : "Nenhuma tarefa em andamento."}
+                  {tarefa ? tituloDaTarefa(tarefa) : "Nenhuma tarefa em andamento."}
                 </p>
 
                 {tarefa && tarefa.progresso > 0 && (

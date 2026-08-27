@@ -57,6 +57,10 @@ export interface AgenteUI {
   id: string;
   nome: string;
   tipo: TipoAgenteUI;
+  /** Espelha `agentes.instrucoes`: texto livre, nullable. E CONFIGURACAO
+   *  do agente, nunca autoridade — o que ele PODE fazer vive em
+   *  permissao/autonomia, nao aqui. Ver `lib/ia/conceitos.ts`. */
+  instrucoes: string | null;
   ativo: boolean;
   criado_em: string;
 }
@@ -64,18 +68,34 @@ export interface AgenteUI {
 /**
  * Espelha `agente_tarefas` — o subconjunto que a tela desenha.
  *
- * `titulo` e o unico campo que NAO existe no banco: e a frase legivel da
- * tarefa. Hoje vem do mock; quando houver leitura real, sera derivada de
- * `tipo` + `entrada` por uma funcao de apresentacao, nunca uma coluna
- * nova. Fica marcado aqui para que ninguem crie a coluna por engano.
+ * ── Nao existe `titulo`, e isso e deliberado ────────────────────────
+ *
+ * Uma versao anterior deste contrato tinha `titulo: string`, preenchido
+ * pelo mock. Era uma coluna inventada: o banco nao tem esse campo e nao
+ * deve ganha-lo. A frase legivel e APRESENTACAO, derivada de `tipo` +
+ * `entrada` por `tituloDaTarefa()` em `lib/ia/tarefas.ts`.
+ *
+ * A diferenca importa porque um campo aqui viraria, mais cedo ou mais
+ * tarde, um pedido de `ALTER TABLE`.
+ *
+ * `entrada` e `jsonb` no banco e chega como objeto arbitrario. Ele NUNCA
+ * e renderizado inteiro: a apresentacao le chaves conhecidas, uma a uma.
+ * Despejar `entrada` na tela e como despejar payload de API — funciona
+ * ate o dia em que alguem coloca algo sensivel la dentro.
  */
 export interface TarefaUI {
   id: string;
   agente_id: string;
   tipo: string;
-  titulo: string;
+  entrada: Record<string, unknown>;
   status: StatusTarefaUI;
   progresso: number;
+  tentativas: number;
+  max_tentativas: number;
+  erro_tipo: string | null;
+  erro_mensagem: string | null;
   criado_em: string;
+  iniciado_em: string | null;
   concluido_em: string | null;
+  heartbeat_em: string | null;
 }

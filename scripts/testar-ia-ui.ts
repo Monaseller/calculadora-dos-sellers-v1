@@ -97,8 +97,31 @@ const ARQUIVOS_UI_1B: readonly string[] = [
   "app/(app)/ia/custos/page.tsx",
 ];
 
-/** Fontes que a UI-1B pode ler. `.tsx` de componente + `.ts` de lib. */
-const COMPONENTES = ARQUIVOS_UI_1B.filter((a) => a.endsWith(".tsx"));
+/**
+ * O que a UI-1C.a acrescentou: a pagina individual do agente, as duas
+ * abas com conteudo, os contratos dos quatro conceitos e a apresentacao
+ * de tarefas.
+ *
+ * Declarado nome a nome, como as demais fases: o guarda continua
+ * reprovando arquivo que aparecer no disco sem passar por aqui.
+ */
+const ARQUIVOS_UI_1CA: readonly string[] = [
+  "lib/ia/abas.ts",
+  "lib/ia/conceitos.ts",
+  "lib/ia/tarefas.ts",
+  "components/ia/EstadoVazio.tsx",
+  "components/ia/agente/AbasAgente.tsx",
+  "components/ia/agente/ListaTarefas.tsx",
+  "components/ia/agente/PaginaAgente.tsx",
+  "components/ia/agente/VisaoGeral.tsx",
+  "app/(app)/ia/agentes/[id]/page.tsx",
+];
+
+/** A area inteira. As varreduras de seguranca valem para TUDO. */
+const ARQUIVOS_UI: readonly string[] = [...ARQUIVOS_UI_1B, ...ARQUIVOS_UI_1CA];
+
+/** Fontes de componente. `.tsx` de componente + de rota. */
+const COMPONENTES = ARQUIVOS_UI.filter((a) => a.endsWith(".tsx"));
 
 // ═══════════════════════════════════════════════════════════════════════
 console.log("\n══ CDS IA — UI-1B: fundacao visual ══");
@@ -111,13 +134,13 @@ secao("A. Inventario e rotas");
     ...arquivosDe("components/ia"),
     ...arquivosDe("app/(app)/ia"),
   ].sort();
-  const declarado = [...ARQUIVOS_UI_1B].sort();
+  const declarado = [...ARQUIVOS_UI].sort();
 
   ok("A1  disco == inventario declarado (sem arquivo surpresa)",
     JSON.stringify(noDisco) === JSON.stringify(declarado),
     `disco=${noDisco.length} declarado=${declarado.length}`);
 
-  ok("A2  17 arquivos, nem um a mais", noDisco.length === 17, String(noDisco.length));
+  ok("A2  26 arquivos, nem um a mais", noDisco.length === 26, String(noDisco.length));
 }
 
 const ROTAS = [
@@ -139,7 +162,7 @@ ok("A5  /ia renderiza o Escritorio",
   /Escritorio/.test(ler("app/(app)/ia/page.tsx")));
 
 ok("A6  nenhuma rota nova fora de app/(app)/ia",
-  arquivosDe("app/(app)/ia").every((a) => ARQUIVOS_UI_1B.includes(a)));
+  arquivosDe("app/(app)/ia").every((a) => ARQUIVOS_UI.includes(a)));
 
 secao("B. Navegacao");
 
@@ -282,7 +305,7 @@ secao("D. Vocabulario do backend nao vaza para a UI");
     [/\bocupado\b/, /\bidle\b/].every((p) => p.test(codigo(ler("lib/ia/estados.ts")))));
 
   ok("D3  estados.ts e o unico a importar lib/agentes",
-    ARQUIVOS_UI_1B.filter((a) => /from "@\/lib\/agentes/.test(ler(a))).join() === "lib/ia/estados.ts");
+    ARQUIVOS_UI.filter((a) => /from "@\/lib\/agentes/.test(ler(a))).join() === "lib/ia/estados.ts");
 }
 
 secao("E. Zero backend: banco, rede, provider, segredo");
@@ -293,7 +316,14 @@ secao("E. Zero backend: banco, rede, provider, segredo");
     ["fetch/rede", /\bfetch\s*\(|XMLHttpRequest|axios|WebSocket/],
     ["env", /process\.env/],
     ["provider de IA", /anthropic|@google\/genai|openai|ai-gateway/i],
-    ["marketplace", /mercadolivre|mercadolibre|shopee|marketplace\//i],
+    // A primeira versao era `/mercadolivre|mercadolibre|shopee/i`, que
+    // buscava a PALAVRA. Ela reprovou `lib/ia/mocks.ts` no momento em que
+    // a UI passou a nomear a conexao "Mercado Livre" — e nomear a conexao
+    // e exatamente o que a tela precisa fazer. O alvo certo e a
+    // INTEGRACAO: cliente, endpoint, SDK, modulo de marketplace.
+    // Enfraquecer a sonda seria remove-la; estreita-la e mira-la melhor.
+    ["integracao de marketplace",
+      /lib\/marketplace|lib\/(mercado-livre|shopee|ml-auth|shopee-auth|sync-ml|sync-shopee)|mercadolibre\.com|mercadolivre\.com|shopee\.com|partner_id|app_secret/i],
     ["n8n", /n8n/i],
     ["capability/dados de agente", /lib\/agentes\/(dados|capability|executar)/],
     // A primeira versao desta sonda era `select\s+from`, que NAO pega
@@ -307,14 +337,15 @@ secao("E. Zero backend: banco, rede, provider, segredo");
   // Controle negativo: um texto que TEM de acusar todas as 10.
   const iscas = [
     'createClient(supabase)', 'fetch("/x")', 'process.env.X', 'anthropic()',
-    'shopee-api', 'n8n webhook', 'lib/agentes/dados/vendas', 'select * from pedidos',
+    'import x from "@/lib/marketplace/credenciais"', 'n8n webhook',
+    'lib/agentes/dados/vendas', 'select * from pedidos',
     'access_token = "x"', 'user_id',
   ].join("\n");
   ok("E0  controle negativo: as 10 sondas acusam a isca",
     sondas.every(([, p]) => p.test(iscas)), String(sondas.filter(([, p]) => !p.test(iscas)).length));
 
   for (const [nome, padrao] of sondas) {
-    const sujos = ARQUIVOS_UI_1B.filter((a) => padrao.test(codigo(ler(a))));
+    const sujos = ARQUIVOS_UI.filter((a) => padrao.test(codigo(ler(a))));
     ok(`E  zero ${nome} em toda a UI-1B`, sujos.length === 0, sujos.join(", "));
   }
 }
@@ -322,7 +353,7 @@ secao("E. Zero backend: banco, rede, provider, segredo");
 secao("F. Mocks centralizados e ficticios");
 
 {
-  const fora = ARQUIVOS_UI_1B
+  const fora = ARQUIVOS_UI
     .filter((a) => a !== "lib/ia/mocks.ts")
     .filter((a) => /const\s+[A-Z_]*(AGENTES|TAREFAS|METAS)\s*(:|=)/.test(codigo(ler(a))));
   ok("F1  nenhum dado fake declarado fora de mocks.ts", fora.length === 0, fora.join(", "));
@@ -409,7 +440,7 @@ secao("G. Layout escalavel: sem coordenada por agente");
   ok("G5  ha duas zonas: estacao e copa",
     /estaNaEstacao/.test(office) && /copa/i.test(office));
   ok("G6  o prototipo nao e importado por nenhum arquivo de producao",
-    ARQUIVOS_UI_1B.every((a) => !/app\/dev/.test(ler(a))) &&
+    ARQUIVOS_UI.every((a) => !/app\/dev/.test(ler(a))) &&
     !/app\/dev/.test(ler("components/Sidebar.tsx")));
 }
 

@@ -14,6 +14,7 @@
  */
 import { CORES_TIPO, FONTE, PALCO, RAIO, degrau } from "@/lib/ia/design";
 import { VOCABULARIO_ESTADO, type AparenciaAgente } from "@/lib/ia/estados";
+import { tituloDaTarefa } from "@/lib/ia/tarefas";
 import type { AgenteUI, TarefaUI } from "@/lib/ia/contratos";
 import BadgeEstado, { corDaAparencia } from "@/components/ia/BadgeEstado";
 
@@ -104,7 +105,7 @@ export default function Estacao({
       // mostra visualmente em tres pedacos separados (nome, estado,
       // tarefa) e que um leitor de tela leria fora de ordem.
       aria-label={`${agente.nome}, ${VOCABULARIO_ESTADO[aparencia.estado].rotulo}${
-        tarefa ? `, ${tarefa.titulo}` : ""
+        tarefa ? `, ${tituloDaTarefa(tarefa)}` : ""
       }. Abrir detalhes.`}
       style={{
         display: "flex",

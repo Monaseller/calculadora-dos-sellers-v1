@@ -28,6 +28,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { BREAKPOINT, CROMO, ESPACO, FONTE, PALCO, RAIO, degrau } from "@/lib/ia/design";
 import { JANELA_CONCLUIDO_MS, aparenciaDoAgente, estaNaEstacao, rotuloDe } from "@/lib/ia/estados";
+import { tarefaAtual } from "@/lib/ia/tarefas";
 import { MOCK_AGENTES, MOCK_TAREFAS } from "@/lib/ia/mocks";
 import type { AgenteUI, TarefaUI } from "@/lib/ia/contratos";
 import Estacao, { Personagem } from "@/components/ia/office/Estacao";
@@ -70,10 +71,11 @@ export default function Escritorio() {
     return MOCK_AGENTES.map((agente) => {
       const doAgente = tarefas.filter((t) => t.agente_id === agente.id);
       const aparencia = aparenciaDoAgente(agente, doAgente, agoraMs);
-      // A tarefa que a estacao mostra e a que NAO terminou. Uma tarefa
-      // concluida ha 2s ainda pinta o flash, mas nao deve reaparecer
-      // como "tarefa atual" na mesa.
-      const atual = doAgente.find((t) => t.concluido_em === null) ?? null;
+      // A tarefa que a estacao mostra e a que esta EM ANDAMENTO. Uma
+      // tarefa concluida ha 2s ainda pinta o flash, mas nao deve
+      // reaparecer como "tarefa atual" na mesa; uma que falhou tambem
+      // nao — falha e desfecho, nao trabalho. Ver `tarefaAtual`.
+      const atual = tarefaAtual(doAgente);
       return { agente, aparencia, tarefa: atual };
     });
   }, [tarefas, agoraMs]);
