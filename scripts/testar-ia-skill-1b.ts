@@ -111,7 +111,15 @@ const motivos = (r: { recusas: readonly { motivo: string }[] }) => r.recusas.map
 
 secao("A. Inventario da fase — 3 arquivos, nem um a mais");
 
-const ESPERADOS_SKILLS = ["contrato.ts", "formato.ts"];
+/**
+ * A pasta inteira, nao so o que a 1B criou.
+ *
+ * `diagnostico.ts` e da SKILL-1C e esta declarado aqui de proposito: o
+ * assert continua sendo lista EXATA, entao um arquivo surpresa segue
+ * reprovando. Trocar por "contem contrato.ts e formato.ts" tornaria o
+ * guarda cego para tudo o mais — que e justamente o que ele vigia.
+ */
+const ESPERADOS_SKILLS = ["contrato.ts", "diagnostico.ts", "formato.ts"];
 const NA_PASTA = existe("lib/ia/skills")
   ? readdirSync(join(RAIZ, "lib/ia/skills")).sort()
   : [];

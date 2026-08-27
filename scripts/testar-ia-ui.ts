@@ -167,6 +167,11 @@ const ARQUIVOS_SKILL_1B: readonly string[] = [
   "lib/ia/skills/formato.ts",
 ];
 
+/** O que a SKILL-1C acrescentou: o motor puro de diagnostico. */
+const ARQUIVOS_SKILL_1C: readonly string[] = [
+  "lib/ia/skills/diagnostico.ts",
+];
+
 /** A area inteira. As varreduras de seguranca valem para TUDO. */
 const ARQUIVOS_UI: readonly string[] = [
   ...ARQUIVOS_UI_1B,
@@ -175,6 +180,7 @@ const ARQUIVOS_UI: readonly string[] = [
   ...ARQUIVOS_UI_1DA,
   ...ARQUIVOS_UI_1DB,
   ...ARQUIVOS_SKILL_1B,
+  ...ARQUIVOS_SKILL_1C,
 ];
 
 /**
@@ -204,11 +210,12 @@ secao("A. Inventario e rotas");
     JSON.stringify(noDisco) === JSON.stringify(declarado),
     `disco=${noDisco.length} declarado=${declarado.length}`);
 
-  // 45 na UI-1D.b; 47 desde a SKILL-1B, que somou contrato.ts e
-  // formato.ts. O numero continua literal de proposito: se ele fosse
-  // `ARQUIVOS_UI.length`, o assert compararia a lista consigo mesma e
-  // um arquivo novo declarado sem revisao passaria batido.
-  ok("A2  47 arquivos, nem um a mais", noDisco.length === 47, String(noDisco.length));
+  // 45 na UI-1D.b; 47 na SKILL-1B (contrato.ts + formato.ts); 48 desde a
+  // SKILL-1C (diagnostico.ts). O numero continua literal de proposito:
+  // se ele fosse `ARQUIVOS_UI.length`, o assert compararia a lista
+  // consigo mesma e um arquivo novo declarado sem revisao passaria
+  // batido.
+  ok("A2  48 arquivos, nem um a mais", noDisco.length === 48, String(noDisco.length));
 }
 
 const ROTAS = [
