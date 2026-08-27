@@ -15,7 +15,7 @@
  * Rodar:  npx tsx scripts/testar-ia-ui-1cb.ts
  * Sem rede, sem banco, sem IA.
  */
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import { ABAS } from "../lib/ia/abas";
@@ -76,6 +76,16 @@ function arquivosDe(dirRel: string): string[] {
   caminhar(dirRel);
   return saida.sort();
 }
+
+/** A pasta de mocks, nome a nome — sem wildcard. */
+const MOCKS_PASTA: readonly string[] = [
+  "lib/ia/mocks/agentes.ts",
+  "lib/ia/mocks/aprovacoes.ts",
+  "lib/ia/mocks/capabilities.ts",
+  "lib/ia/mocks/conexoes.ts",
+  "lib/ia/mocks/index.ts",
+  "lib/ia/mocks/tarefas.ts",
+];
 
 const NOVOS_1CB = [
   "components/ia/agente/AbaConexoes.tsx",
@@ -138,7 +148,7 @@ secao("B. Eixo unico de nivel (Decisao 1)");
   ok("B9  permitida(aprovacao) === true", permitida({ nivel: "aprovacao" }) === true);
   ok("B10 permitida(automatico) === true", permitida({ nivel: "automatico" }) === true);
   ok("B11 nenhum mock declara `concedida`",
-    !/\bconcedida\b/.test(codigo(ler("lib/ia/mocks.ts"))));
+    !/\bconcedida\b/.test(codigo(MOCKS_PASTA.map(ler).join("\n"))));
   ok("B12 toda permissao do mock tem nivel valido",
     MOCK_PERMISSOES.every((p) => (NIVEIS_AUTONOMIA as readonly string[]).includes(p.nivel)));
   ok("B13 nivel ausente cai no padrao SEGURO (bloqueado)",
@@ -383,9 +393,9 @@ secao("I. Zero backend na area inteira");
 secao("J. Mocks e procedencia");
 
 {
-  const mocks = ler("lib/ia/mocks.ts");
+  const mocks = MOCKS_PASTA.map(ler).join("\n");
   const exportados = [...mocks.matchAll(/export (?:const|function) (\w+)/g)].map((m) => m[1]);
-  ok("J1  todo export de mocks usa prefixo MOCK_",
+  ok("J1  todo export da pasta de mocks usa prefixo MOCK_",
     exportados.every((e) => e.startsWith("MOCK_")), exportados.join(","));
   ok("J2  ids de conexao nao imitam UUID",
     MOCK_CONEXOES.every((c) => !/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(c.id)));
@@ -398,11 +408,20 @@ secao("J. Mocks e procedencia");
     [AB_CX, AB_FN, AB_PM].every((f) => /MOCK_AVISO/.test(f)));
   ok("J8  os cards exibem a procedencia de cada item",
     /ROTULO_PROCEDENCIA/.test(CARD_CX) && /ROTULO_PROCEDENCIA/.test(CARD_FN));
-  ok("J9  nenhum fake declarado fora de mocks.ts",
-    ARQUIVOS_AREA.filter((a) => a !== "lib/ia/mocks.ts")
+  ok("J9  nenhum fake declarado fora de lib/ia/mocks/",
+    ARQUIVOS_AREA.filter((a) => !a.startsWith("lib/ia/mocks/"))
       .every((a) => !/const\s+[A-Z_]*(AGENTES|TAREFAS|CONEXOES|FUNCOES|PERMISSOES)\s*(:|=)/.test(codigo(ler(a)))));
-  ok("J10 mocks.ts ainda cabe em um arquivo (< 400 linhas)",
-    mocks.split("\n").length < 400, String(mocks.split("\n").length));
+
+  // O antigo `mocks.ts < 400 linhas` disparou na UI-1D.a e a divisao
+  // aconteceu. O guarda nao foi apagado — passou a cobrar a estrutura.
+  ok("J10 o arquivo unico `lib/ia/mocks.ts` NAO existe mais",
+    !existsSync(join(RAIZ, "lib/ia/mocks.ts")));
+  ok("J10b a pasta tem exatamente os 6 arquivos previstos",
+    JSON.stringify(arquivosDe("lib/ia/mocks")) === JSON.stringify([...MOCKS_PASTA].sort()),
+    arquivosDe("lib/ia/mocks").join(", "));
+  ok("J10c cada arquivo de mock cabe em si (< 400 linhas)",
+    MOCKS_PASTA.every((m) => ler(m).split("\n").length < 400),
+    MOCKS_PASTA.map((m) => `${m}:${ler(m).split("\n").length}`).join(" "));
 }
 
 secao("K. Acessibilidade e responsividade");

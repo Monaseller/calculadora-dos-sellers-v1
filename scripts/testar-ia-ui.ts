@@ -29,7 +29,7 @@ import {
   iconeDe,
   rotuloDe,
 } from "../lib/ia/estados";
-import { MOCK_AGENTES, MOCK_CONTAGENS, MOCK_TAREFAS, MOCK_AVISO } from "../lib/ia/mocks";
+import { MOCK_AGENTES, MOCK_APROVACOES, MOCK_CONTAGENS, MOCK_TAREFAS, MOCK_AVISO } from "../lib/ia/mocks";
 import { TIPOS_AGENTE_UI } from "../lib/ia/contratos";
 
 let passou = 0;
@@ -81,7 +81,13 @@ const ARQUIVOS_UI_1B: readonly string[] = [
   "lib/ia/contratos.ts",
   "lib/ia/estados.ts",
   "lib/ia/design.ts",
-  "lib/ia/mocks.ts",
+  // `lib/ia/mocks.ts` virou a pasta `lib/ia/mocks/` na UI-1D.a.
+  "lib/ia/mocks/index.ts",
+  "lib/ia/mocks/agentes.ts",
+  "lib/ia/mocks/tarefas.ts",
+  "lib/ia/mocks/conexoes.ts",
+  "lib/ia/mocks/capabilities.ts",
+  "lib/ia/mocks/aprovacoes.ts",
   "components/ia/BadgeEstado.tsx",
   "components/ia/EmBreve.tsx",
   "components/ia/SubNavIA.tsx",
@@ -130,12 +136,30 @@ const ARQUIVOS_UI_1CB: readonly string[] = [
   "components/ia/capabilities/SeletorAutonomia.tsx",
 ];
 
+/**
+ * O que a UI-1D.a acrescentou: a fila de aprovacoes e seu contrato.
+ */
+const ARQUIVOS_UI_1DA: readonly string[] = [
+  "lib/ia/aprovacoes.ts",
+  "components/ia/aprovacoes/CardAprovacao.tsx",
+  "components/ia/aprovacoes/DetalheAprovacao.tsx",
+  "components/ia/aprovacoes/FilaAprovacoes.tsx",
+];
+
 /** A area inteira. As varreduras de seguranca valem para TUDO. */
 const ARQUIVOS_UI: readonly string[] = [
   ...ARQUIVOS_UI_1B,
   ...ARQUIVOS_UI_1CA,
   ...ARQUIVOS_UI_1CB,
+  ...ARQUIVOS_UI_1DA,
 ];
+
+/**
+ * A pasta de mocks. `ehMock` responde "isto e fonte de dado simulado?" —
+ * usado para excluir a pasta das varreduras que proibem fake FORA dela.
+ */
+const PASTA_MOCKS: readonly string[] = ARQUIVOS_UI.filter((a) => a.startsWith("lib/ia/mocks/"));
+const ehMock = (a: string) => a.startsWith("lib/ia/mocks/");
 
 /** Fontes de componente. `.tsx` de componente + de rota. */
 const COMPONENTES = ARQUIVOS_UI.filter((a) => a.endsWith(".tsx"));
@@ -157,7 +181,7 @@ secao("A. Inventario e rotas");
     JSON.stringify(noDisco) === JSON.stringify(declarado),
     `disco=${noDisco.length} declarado=${declarado.length}`);
 
-  ok("A2  32 arquivos, nem um a mais", noDisco.length === 32, String(noDisco.length));
+  ok("A2  41 arquivos, nem um a mais", noDisco.length === 41, String(noDisco.length));
 }
 
 const ROTAS = [
@@ -307,7 +331,7 @@ secao("D. Vocabulario do backend nao vaza para a UI");
   // `lib/ia/estados.ts` traduz.
   const proibidos = [/\bocupado\b/, /\bidle\b/, /\bdesativado\b/];
   let vazamentos = 0;
-  for (const arq of [...COMPONENTES, "lib/ia/mocks.ts", "lib/ia/design.ts", "lib/ia/contratos.ts"]) {
+  for (const arq of [...COMPONENTES, ...PASTA_MOCKS, "lib/ia/design.ts", "lib/ia/contratos.ts"]) {
     const fonte = codigo(ler(arq));
     for (const p of proibidos) {
       if (p.test(fonte)) {
@@ -371,13 +395,13 @@ secao("F. Mocks centralizados e ficticios");
 
 {
   const fora = ARQUIVOS_UI
-    .filter((a) => a !== "lib/ia/mocks.ts")
+    .filter((a) => !ehMock(a))
     .filter((a) => /const\s+[A-Z_]*(AGENTES|TAREFAS|METAS)\s*(:|=)/.test(codigo(ler(a))));
-  ok("F1  nenhum dado fake declarado fora de mocks.ts", fora.length === 0, fora.join(", "));
+  ok("F1  nenhum dado fake declarado fora de lib/ia/mocks/", fora.length === 0, fora.join(", "));
 
-  const mocks = ler("lib/ia/mocks.ts");
+  const mocks = PASTA_MOCKS.map(ler).join("\n");
   const exportados = [...mocks.matchAll(/export (?:const|function) (\w+)/g)].map((m) => m[1]);
-  ok("F2  todo export de mocks.ts usa prefixo MOCK_",
+  ok("F2  todo export da pasta de mocks usa prefixo MOCK_",
     exportados.length > 0 && exportados.every((e) => e.startsWith("MOCK_")), exportados.join(","));
 
   ok("F3  o aviso de simulacao existe e aparece no shell",
@@ -436,9 +460,16 @@ secao("F. Mocks centralizados e ficticios");
       return /MOCK_TAREFAS\(ancoraMs\)/.test(fonte) && !/MOCK_TAREFAS\(agoraMs\)/.test(fonte);
     }));
 
-  ok("F10 contagens da subnav derivam das tarefas, nao sao digitadas",
+  // Atualizado na UI-1D.a: o badge de aprovacoes passou a derivar da
+  // FILA, nao das tarefas — e a fila que representa o que espera decisao
+  // humana. Contar nos dois lugares criaria dois numeros que precisariam
+  // concordar para sempre. `trabalhando` continua vindo das tarefas.
+  ok("F10 contagens da subnav sao derivadas, nunca digitadas",
     MOCK_CONTAGENS.trabalhando === tarefas.filter((t) => t.status === "rodando" || t.status === "pendente").length &&
-    MOCK_CONTAGENS.aguardandoAprovacao === tarefas.filter((t) => t.status === "aguardando_aprovacao").length);
+    MOCK_CONTAGENS.aguardandoAprovacao === MOCK_APROVACOES.length);
+  ok("F10b o badge de aprovacoes tem UMA fonte (a fila)",
+    MOCK_CONTAGENS.aguardandoAprovacao === MOCK_APROVACOES.length &&
+    MOCK_APROVACOES.length > 0);
 }
 
 secao("G. Layout escalavel: sem coordenada por agente");

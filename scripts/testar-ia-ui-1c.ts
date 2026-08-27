@@ -14,7 +14,7 @@
  * Sem rede, sem banco, sem IA.
  */
 import { createHash } from "node:crypto";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import { ABAS, ABA_PADRAO, PENDENCIA_ABA, abaSegura } from "../lib/ia/abas";
@@ -76,6 +76,18 @@ function arquivosDe(dirRel: string): string[] {
   caminhar(dirRel);
   return saida.sort();
 }
+
+const existe = (rel: string) => existsSync(join(RAIZ, rel));
+
+/** A pasta de mocks, nome a nome — sem wildcard. */
+const MOCKS_PASTA: readonly string[] = [
+  "lib/ia/mocks/agentes.ts",
+  "lib/ia/mocks/aprovacoes.ts",
+  "lib/ia/mocks/capabilities.ts",
+  "lib/ia/mocks/conexoes.ts",
+  "lib/ia/mocks/index.ts",
+  "lib/ia/mocks/tarefas.ts",
+];
 
 const ROTA_AGENTE = "app/(app)/ia/agentes/[id]/page.tsx";
 const DRAWER = "components/ia/office/PainelAgente.tsx";
@@ -415,16 +427,39 @@ secao("K. Mocks centralizados");
 
 {
   const fora = ARQUIVOS_AREA
-    .filter((a) => a !== "lib/ia/mocks.ts")
+    .filter((a) => !a.startsWith("lib/ia/mocks/"))
     .filter((a) => /const\s+[A-Z_]*(AGENTES|TAREFAS|CONEXOES|FUNCOES|PERMISSOES)\s*(:|=)/.test(codigo(ler(a))));
-  ok("K1  nenhum fake fora de mocks.ts", fora.length === 0, fora.join(", "));
+  ok("K1  nenhum fake fora de lib/ia/mocks/", fora.length === 0, fora.join(", "));
 
-  const mocks = ler("lib/ia/mocks.ts");
+  const mocks = MOCKS_PASTA.map(ler).join("\n");
   const exportados = [...mocks.matchAll(/export (?:const|function) (\w+)/g)].map((m) => m[1]);
-  ok("K2  todo export de mocks usa prefixo MOCK_",
+  ok("K2  todo export da pasta de mocks usa prefixo MOCK_",
     exportados.length > 0 && exportados.every((e) => e.startsWith("MOCK_")), exportados.join(","));
-  ok("K3  mocks.ts ainda cabe em um arquivo (< 400 linhas)",
-    mocks.split("\n").length < 400, String(mocks.split("\n").length));
+
+  // ── O tripwire que virou guarda estrutural ──────────────────────
+  //
+  // O antigo `mocks.ts < 400 linhas` cumpriu o papel de alarme: tocou na
+  // UI-1D.a e a divisao aconteceu. Ele NAO foi apagado — virou mais
+  // forte, cobrando a ausencia do arquivo antigo, o inventario exato da
+  // pasta e o limite POR ARQUIVO. Apagar o assert teria sido silenciar
+  // justamente o mecanismo que funcionou.
+  ok("K3  o arquivo unico `lib/ia/mocks.ts` NAO existe mais",
+    !existe("lib/ia/mocks.ts"));
+  ok("K3b controle negativo: `existe` reconhece um arquivo que existe",
+    existe("lib/ia/mocks/index.ts"));
+  ok("K3c a pasta tem exatamente os 6 arquivos previstos",
+    JSON.stringify(arquivosDe("lib/ia/mocks")) === JSON.stringify([...MOCKS_PASTA].sort()),
+    arquivosDe("lib/ia/mocks").join(", "));
+  ok("K3d cada arquivo de mock cabe em si (< 400 linhas)",
+    MOCKS_PASTA.every((m) => ler(m).split("\n").length < 400),
+    MOCKS_PASTA.filter((m) => ler(m).split("\n").length >= 400).join(", "));
+  ok("K3e o index reexporta a API publica",
+    ["MOCK_AGENTES", "MOCK_TAREFAS", "MOCK_CONEXOES", "MOCK_FUNCOES", "MOCK_APROVACOES",
+     "MOCK_AVISO", "MOCK_CONTAGENS"].every((n) => new RegExp(`\\b${n}\\b`).test(ler("lib/ia/mocks/index.ts"))));
+  ok("K3f consumidores importam da fronteira publica, nunca de dentro",
+    ARQUIVOS_AREA.filter((a) => !a.startsWith("lib/ia/mocks/"))
+      .every((a) => !/@\/lib\/ia\/mocks\//.test(ler(a))),
+    ARQUIVOS_AREA.filter((a) => !a.startsWith("lib/ia/mocks/") && /@\/lib\/ia\/mocks\//.test(ler(a))).join(", "));
 
   const tarefas = MOCK_TAREFAS(AGORA);
   ok("K4  os 6 status de tarefa aparecem no mock",

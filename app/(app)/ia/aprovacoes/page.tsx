@@ -1,21 +1,25 @@
 /**
- * `/ia/aprovacoes` — placeholder deliberado.
+ * `/ia/aprovacoes` — a fila de decisao humana.
  *
- * O status `aguardando_aprovacao` ja existe em `agente_tarefas`, mas NAO
- * existe tabela de aprovacoes: nao ha onde registrar quem aprovou, o que
- * foi aprovado, com qual justificativa e ate quando a autorizacao vale.
+ * ── Um lugar so para decidir ────────────────────────────────────────
  *
- * Renderizar cards com botoes inertes daria a impressao de que o fluxo
- * existe e so nao foi ligado. Ele nao existe.
+ * Toda acao que um agente nao pode executar sozinho termina aqui.
+ * Permissoes, Funcoes, Tarefas e o Escritorio APONTAM para esta rota e
+ * nao decidem nada — dois caminhos para a mesma decisao seriam duas
+ * fontes de verdade sobre quem autorizou o que.
+ *
+ * ── O que esta tela ainda nao faz ───────────────────────────────────
+ *
+ * Aprovar e Recusar aparecem desabilitados. Nao existe tabela de
+ * aprovacoes, nao existe registro de quem decidiu, e a transicao que
+ * retomaria a tarefa ainda nao foi implementada. Botao que muda a tela
+ * sem gravar nada e pior que botao nenhum.
+ *
+ * A pagina e fina: a fila inteira vive em `FilaAprovacoes`, que e Client
+ * Component porque calcula "solicitada ha X" a partir do relogio.
  */
-import EmBreve from "@/components/ia/EmBreve";
+import FilaAprovacoes from "@/components/ia/aprovacoes/FilaAprovacoes";
 
 export default function PaginaAprovacoes() {
-  return (
-    <EmBreve
-      titulo="Aprovações"
-      descricao="Toda ação que altera algo fora do CDS passará por aqui antes de acontecer: qual agente pediu, em qual conta, o que faz, por quê, qual o impacto e até quando o pedido vale. Aprovar e recusar serão decisões suas, registradas."
-      pendencia="modelo de aprovação no banco — não existe tabela de aprovações, apenas o status `aguardando_aprovacao` nas tarefas. Sem registro de quem decidiu e quando, aprovar seria um clique sem prova."
-    />
-  );
+  return <FilaAprovacoes />;
 }
