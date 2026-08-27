@@ -1,24 +1,26 @@
 /**
- * `/ia/atividade` — placeholder deliberado.
+ * `/ia/atividade` — o feed do que aconteceu na operação.
  *
- * Parte da timeline JA seria derivavel hoje: `agente_tarefas` tem
- * `criado_em`, `iniciado_em`, `concluido_em`, `status` e `erro_tipo`, e
- * `agentes_ia_chamadas` tem cada chamada de IA com modelo, tokens e
- * latencia. Isso cobre os eventos de EXECUCAO.
+ * ── O que esta area NAO e ───────────────────────────────────────────
  *
- * O que nao existe e o registro de DECISAO: aprovacao concedida ou
- * recusada, permissao alterada, conexao ligada ou desligada. Uma timeline
- * que mostra so metade dos eventos, sem dizer qual metade falta, engana
- * mais do que informa — por isso a tela inteira espera.
+ * Nao e a aba Tarefas de todos os agentes juntos, nao e log tecnico e
+ * nao e console. A aba Tarefas responde "quais tarefas este agente tem";
+ * esta tela responde "o que aconteceu". Por isso aqui nao ha progresso,
+ * tentativa, duracao nem espera na fila — sao atributos de estado.
+ *
+ * ── Honestidade sobre a fonte ───────────────────────────────────────
+ *
+ * `agente_tarefas` e tabela de estado e sobrescreve historia: o claim
+ * reescreve `iniciado_em` a cada tentativa, concluir limpa o erro
+ * anterior e o retry devolve `concluido_em` para NULL. O feed deriva
+ * apenas o que sobrevive a isso — e prefere omitir um evento a inventar
+ * um. Ver `lib/ia/atividade.ts`.
+ *
+ * A pagina e fina: o feed inteiro vive em `Timeline`, Client Component
+ * porque calcula "ha X" e filtra localmente.
  */
-import EmBreve from "@/components/ia/EmBreve";
+import Timeline from "@/components/ia/atividade/Timeline";
 
 export default function PaginaAtividade() {
-  return (
-    <EmBreve
-      titulo="Atividade"
-      descricao="A linha do tempo de tudo que os agentes fizeram: tarefas criadas, iniciadas e concluídas, falhas, chamadas de IA, aprovações concedidas e permissões alteradas."
-      pendencia="registro de eventos de decisão. Os eventos de execução já poderiam vir de `agente_tarefas` e `agentes_ia_chamadas`, mas aprovação, permissão e conexão não deixam rastro em lugar nenhum hoje."
-    />
-  );
+  return <Timeline />;
 }

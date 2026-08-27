@@ -115,9 +115,14 @@ secao("A. Inventario e pagina");
   ok("A5  controle negativo: a sonda acharia EmBreve",
     /EmBreve/.test('import EmBreve from "@/components/ia/EmBreve";'));
   ok("A6  a pagina monta a fila", /FilaAprovacoes/.test(PAGINA));
-  ok("A7  as outras 3 areas continuam EmBreve",
-    ["atividade", "custos", "conexoes"].every(
+  // `atividade` saiu desta lista na UI-1D.b, quando deixou de ser
+  // placeholder. Atualizacao consciente: o assert continua exigindo a
+  // lista EXATA das areas que ainda nao existem, agora com duas.
+  ok("A7  as outras 2 areas continuam EmBreve",
+    ["custos", "conexoes"].every(
       (a) => /EmBreve/.test(ler(`app/(app)/ia/${a}/page.tsx`))));
+  ok("A7b atividade NAO e mais placeholder",
+    !/EmBreve/.test(ler("app/(app)/ia/atividade/page.tsx")));
 }
 
 secao("B. Contrato: acao, motivo, risco e conexao SEPARADOS");

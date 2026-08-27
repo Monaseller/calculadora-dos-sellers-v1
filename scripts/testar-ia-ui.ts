@@ -88,6 +88,7 @@ const ARQUIVOS_UI_1B: readonly string[] = [
   "lib/ia/mocks/conexoes.ts",
   "lib/ia/mocks/capabilities.ts",
   "lib/ia/mocks/aprovacoes.ts",
+  "lib/ia/mocks/atividade.ts",
   "components/ia/BadgeEstado.tsx",
   "components/ia/EmBreve.tsx",
   "components/ia/SubNavIA.tsx",
@@ -139,6 +140,12 @@ const ARQUIVOS_UI_1CB: readonly string[] = [
 /**
  * O que a UI-1D.a acrescentou: a fila de aprovacoes e seu contrato.
  */
+const ARQUIVOS_UI_1DB: readonly string[] = [
+  "lib/ia/atividade.ts",
+  "components/ia/atividade/Timeline.tsx",
+  "components/ia/atividade/ItemAtividade.tsx",
+];
+
 const ARQUIVOS_UI_1DA: readonly string[] = [
   "lib/ia/aprovacoes.ts",
   "components/ia/aprovacoes/CardAprovacao.tsx",
@@ -152,6 +159,7 @@ const ARQUIVOS_UI: readonly string[] = [
   ...ARQUIVOS_UI_1CA,
   ...ARQUIVOS_UI_1CB,
   ...ARQUIVOS_UI_1DA,
+  ...ARQUIVOS_UI_1DB,
 ];
 
 /**
@@ -181,7 +189,7 @@ secao("A. Inventario e rotas");
     JSON.stringify(noDisco) === JSON.stringify(declarado),
     `disco=${noDisco.length} declarado=${declarado.length}`);
 
-  ok("A2  41 arquivos, nem um a mais", noDisco.length === 41, String(noDisco.length));
+  ok("A2  45 arquivos, nem um a mais", noDisco.length === 45, String(noDisco.length));
 }
 
 const ROTAS = [

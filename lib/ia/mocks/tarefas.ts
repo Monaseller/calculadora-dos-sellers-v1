@@ -78,12 +78,25 @@ export function MOCK_TAREFAS(ancoraMs: number): readonly TarefaUI[] {
       heartbeat_em: null,
     },
     {
+      // Falha TERMINAL, e o mock agora reflete o que o banco produz.
+      //
+      // `falhar_tarefa` decide o desfecho assim:
+      //
+      //   tentativas < max_tentativas -> 'pendente'  (retry, concluido_em NULL)
+      //   caso contrario              -> 'erro'      (concluido_em = now())
+      //
+      // Ou seja: `status = 'erro'` implica DUAS coisas ao mesmo tempo —
+      // tentativas esgotadas E `concluido_em` preenchido. Este mock tinha
+      // `concluido_em: null`, um estado que a RPC nao consegue gerar, e o
+      // efeito colateral era invisivel ate a Atividade existir: a
+      // derivacao (corretamente) exige o timestamp, entao a falha nunca
+      // virava evento e o filtro "Erros" ficava sempre vazio.
       id: "tf-5", agente_id: "ag-gerente", tipo: "distribuir_fila",
       entrada: {},
       status: "erro", progresso: 45, tentativas: 3, max_tentativas: 3,
       erro_tipo: "quota",
       erro_mensagem: "Limite de uso do provedor atingido para este período.",
-      criado_em: iso(-4 * min), iniciado_em: iso(-3 * min), concluido_em: null,
+      criado_em: iso(-4 * min), iniciado_em: iso(-3 * min), concluido_em: iso(-2 * min),
       heartbeat_em: null,
     },
     {
@@ -108,9 +121,24 @@ export function MOCK_TAREFAS(ancoraMs: number): readonly TarefaUI[] {
       heartbeat_em: null,
     },
     {
+      // Falha TRANSITORIA, aguardando nova tentativa.
+      //
+      // Este mock dizia `status: "erro"` com `tentativas 2 < max 3` — um
+      // estado que a RPC nao produz: com tentativas sobrando,
+      // `falhar_tarefa` devolve a tarefa para `pendente`, e nao para
+      // `erro`.
+      //
+      // O detalhe que importa: `erro_tipo` e `erro_mensagem` FICAM
+      // preenchidos mesmo assim. O SQL grava os dois "nos DOIS caminhos,
+      // inclusive no retry", justamente para a causa nao se perder. Ou
+      // seja, erro preenchido NAO implica `status = 'erro'` — pode ser
+      // uma tarefa de volta na fila carregando a falha anterior.
+      //
+      // E o unico mock que cobre esse estado, e ele existe para impedir
+      // que alguem derive "falhou" da mera presenca de `erro_tipo`.
       id: "tf-8", agente_id: "ag-atendimento", tipo: "responder_perguntas",
       entrada: { quantidade: 7 },
-      status: "erro", progresso: 20, tentativas: 2, max_tentativas: 3,
+      status: "pendente", progresso: 20, tentativas: 2, max_tentativas: 3,
       erro_tipo: "rede",
       erro_mensagem: "Tempo esgotado ao contatar o provedor.",
       criado_em: iso(-6 * h), iniciado_em: iso(-6 * h + 12 * s), concluido_em: null,

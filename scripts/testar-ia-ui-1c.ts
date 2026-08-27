@@ -83,6 +83,7 @@ const existe = (rel: string) => existsSync(join(RAIZ, rel));
 const MOCKS_PASTA: readonly string[] = [
   "lib/ia/mocks/agentes.ts",
   "lib/ia/mocks/aprovacoes.ts",
+  "lib/ia/mocks/atividade.ts",
   "lib/ia/mocks/capabilities.ts",
   "lib/ia/mocks/conexoes.ts",
   "lib/ia/mocks/index.ts",

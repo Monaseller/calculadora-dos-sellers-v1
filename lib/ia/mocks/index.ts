@@ -37,6 +37,9 @@ export {
   MOCK_NIVEL_DA_FUNCAO,
 } from "@/lib/ia/mocks/capabilities";
 export { MOCK_APROVACOES } from "@/lib/ia/mocks/aprovacoes";
+// So os eventos que nenhuma fonte sustenta — o resto do feed e derivado
+// por `lib/ia/atividade.ts` a partir de tarefas e aprovacoes.
+export { MOCK_ATIVIDADES } from "@/lib/ia/mocks/atividade";
 
 import { MOCK_CONTAGEM_TRABALHANDO } from "@/lib/ia/mocks/tarefas";
 import { MOCK_APROVACOES } from "@/lib/ia/mocks/aprovacoes";
