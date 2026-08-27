@@ -534,6 +534,23 @@ const ARQUIVOS_CONEXOES_1: readonly string[] = [
  * fase e `scripts/testar-ia-skill-1d-d2.ts`, fora do escopo porque
  * `scripts/` nunca esteve em `ESCOPO_AGENTES`.
  */
+/**
+ * SKILL-1D.f.1 — persistencia de Skills (`skills` + `agente_skills`).
+ *
+ * Cai no `ESCOPO_AGENTES` porque ele cobre `supabase/migrations` inteiro,
+ * pelo mesmo motivo de `ARQUIVOS_CONEXOES_1` e `ARQUIVOS_SKILL_1DD1`.
+ * Declarada nome a nome — o guarda continua reprovando migration nao
+ * prevista.
+ *
+ * A suite propria da fase e `scripts/testar-ia-skill-1d-f1.ts`, e ela NAO
+ * entra em `SUITES_AGENTES`: aquele inventario filtra por
+ * `startsWith("testar-agentes-")`, e este arquivo nao casa. Verificado, e
+ * nao suposto — o mesmo ja valia para `testar-ia-skill-1d-d1-banco.ts`.
+ */
+const ARQUIVOS_SKILL_1DF1: readonly string[] = [
+  "supabase/migrations/20260922_skills.sql",
+];
+
 const ARQUIVOS_PERMISSOES_1DD2: readonly string[] = [
   "estado.ts",
   "fatos.ts",
@@ -609,6 +626,10 @@ const MIGRATIONS_NO_DISCO_NAO_COMMITADAS: readonly string[] = [
   // `service_role` com `arwd` e nada alem — sem TRUNCATE, REFERENCES,
   // TRIGGER nem MAINTAIN, medido no catalogo.
   "20260921_agente_permissoes_privilegios.sql",
+  // SKILL-1D.f.1 — `skills` + `agente_skills`. NAO APLICADA: o arquivo e
+  // o artefato do gate pre-migration, e o proprio cabecalho dele diz
+  // isso. Aplicar ao banco exige autorizacao separada (1D.f.1b).
+  "20260922_skills.sql",
 ];
 
 /**
@@ -631,6 +652,7 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_CONEXOES_1,
   ...ARQUIVOS_SKILL_1DD1,
   ...ARQUIVOS_SKILL_1DD2,
+  ...ARQUIVOS_SKILL_1DF1,
 ];
 
 /**
