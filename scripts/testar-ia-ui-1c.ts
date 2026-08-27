@@ -18,7 +18,7 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import { ABAS, ABA_PADRAO, PENDENCIA_ABA, abaSegura } from "../lib/ia/abas";
-import { AUTONOMIAS, PROCEDENCIAS, RISCOS, DESCRICAO_TIPO } from "../lib/ia/conceitos";
+import { NIVEIS_AUTONOMIA, PROCEDENCIAS, RISCOS, DESCRICAO_TIPO } from "../lib/ia/conceitos";
 import { TIPOS_AGENTE_UI, STATUS_TAREFA_UI } from "../lib/ia/contratos";
 import {
   LIMITE_MENSAGEM_ERRO,
@@ -124,8 +124,11 @@ secao("B. As 8 abas");
     JSON.stringify(ABAS.map((a) => a.id)) ===
     JSON.stringify(["visao-geral", "chat", "tarefas", "conexoes", "funcoes", "permissoes", "memoria", "custos"]));
   ok("B3  ids unicos", new Set(ABAS.map((a) => a.id)).size === 8);
-  ok("B4  somente Visao Geral e Tarefas estao implementadas",
-    ABAS.filter((a) => a.implementada).map((a) => a.id).join(",") === "visao-geral,tarefas");
+  // Atualizado na UI-1C.b: conexoes, funcoes e permissoes passaram a
+  // ter conteudo. O assert continua exato — ele lista QUAIS, nao quantas.
+  ok("B4  as cinco abas implementadas sao exatamente estas",
+    ABAS.filter((a) => a.implementada).map((a) => a.id).join(",") ===
+    "visao-geral,tarefas,conexoes,funcoes,permissoes");
   ok("B5  as 6 nao implementadas declaram pendencia",
     ABAS.filter((a) => !a.implementada).every(
       (a) => (PENDENCIA_ABA as Record<string, string>)[a.id]?.length > 20));
@@ -354,11 +357,11 @@ secao("I. Conceitos separados");
   ok("I3  PermissaoUI existe e e separada de FuncaoUI",
     /interface PermissaoUI/.test(conceitos));
   ok("I4  autonomia tem exatamente 3 niveis",
-    AUTONOMIAS.length === 3 &&
-    JSON.stringify([...AUTONOMIAS]) === JSON.stringify(["bloqueado", "aprovacao", "automatico"]));
+    NIVEIS_AUTONOMIA.length === 3 &&
+    JSON.stringify([...NIVEIS_AUTONOMIA]) === JSON.stringify(["bloqueado", "aprovacao", "automatico"]));
   ok("I5  os 4 conceitos sao tipos distintos (nenhum fundido)",
     ["ConexaoUI", "FuncaoUI", "PermissaoUI"].every((n) => new RegExp(`interface ${n}`).test(conceitos)) &&
-    /type Autonomia/.test(conceitos));
+    /type NivelAutonomia/.test(conceitos));
   ok("I6  procedencia tem os 4 niveis de honestidade", PROCEDENCIAS.length === 4);
   ok("I7  risco tem 3 niveis", RISCOS.length === 3);
   ok("I8  descricao por tipo cobre os 6 tipos do CHECK",

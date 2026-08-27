@@ -17,7 +17,13 @@
  */
 import { CROMO, ESPACO, FONTE, RAIO } from "@/lib/ia/design";
 import { rotuloDe, type AparenciaAgente } from "@/lib/ia/estados";
-import { DESCRICAO_TIPO, ROTULO_PROCEDENCIA, VOCABULARIO_AUTONOMIA, type Procedencia } from "@/lib/ia/conceitos";
+import {
+  DESCRICAO_TIPO,
+  ROTULO_PROCEDENCIA,
+  VOCABULARIO_NIVEL,
+  permitida,
+  type Procedencia,
+} from "@/lib/ia/conceitos";
 import { MOCK_CONEXOES, MOCK_FUNCOES, MOCK_PERMISSOES } from "@/lib/ia/mocks";
 import { formatarInstante, tarefaAtual, tituloDaTarefa, ultimaAtividade } from "@/lib/ia/tarefas";
 import type { AgenteUI, TarefaUI } from "@/lib/ia/contratos";
@@ -34,7 +40,9 @@ export default function VisaoGeral({
 }) {
   const atual = tarefaAtual(tarefas);
   const ultima = ultimaAtividade(tarefas);
-  const concedidas = MOCK_PERMISSOES.filter((p) => p.concedida);
+  // "Permitida" e DERIVADA do nivel, nunca um campo proprio — ver o
+  // bloco sobre o eixo unico em `lib/ia/conceitos.ts`.
+  const concedidas = MOCK_PERMISSOES.filter(permitida);
 
   return (
     <div className="cds-ia-vg">
@@ -120,7 +128,7 @@ export default function VisaoGeral({
               <li key={p.funcaoId}>
                 <strong>{funcao.rotulo}</strong>
                 {" — "}
-                {VOCABULARIO_AUTONOMIA[p.autonomia].rotulo}
+                {VOCABULARIO_NIVEL[p.nivel].rotulo}
                 {funcao.procedencia === "em_breve" && (
                   <span className="cds-ia-vg-inline"> (função ainda não existe)</span>
                 )}

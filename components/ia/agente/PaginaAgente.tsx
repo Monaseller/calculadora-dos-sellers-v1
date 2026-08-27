@@ -32,6 +32,9 @@ import EmBreve from "@/components/ia/EmBreve";
 import AbasAgente from "@/components/ia/agente/AbasAgente";
 import VisaoGeral from "@/components/ia/agente/VisaoGeral";
 import ListaTarefas from "@/components/ia/agente/ListaTarefas";
+import AbaConexoes from "@/components/ia/agente/AbaConexoes";
+import AbaFuncoes from "@/components/ia/agente/AbaFuncoes";
+import AbaPermissoes from "@/components/ia/agente/AbaPermissoes";
 
 export default function PaginaAgente({ agente, aba }: { agente: AgenteUI; aba: AbaId }) {
   const [ancoraMs, setAncoraMs] = useState<number | null>(null);
@@ -109,7 +112,13 @@ export default function PaginaAgente({ agente, aba }: { agente: AgenteUI; aba: A
           <p className="cds-ia-carregando">Carregando…</p>
         )}
 
-        {aba !== "visao-geral" && aba !== "tarefas" && (
+        {/* As tres abas de configuracao nao dependem do relogio: elas
+            desenham configuracao, nao estado em andamento. */}
+        {aba === "conexoes" && <AbaConexoes />}
+        {aba === "funcoes" && <AbaFuncoes />}
+        {aba === "permissoes" && <AbaPermissoes />}
+
+        {abaPendente(aba) && (
           <EmBreve
             titulo={rotuloDaAba(aba)}
             descricao={DESCRICAO_ABA[aba]}
@@ -125,13 +134,23 @@ function rotuloDaAba(aba: AbaId): string {
   return ABAS.find((a) => a.id === aba)?.rotulo ?? "Agente";
 }
 
+/** Chave de `PENDENCIA_ABA`, derivada da propria lista de abas. */
+type AbaPendente = Extract<(typeof ABAS)[number], { implementada: false }>["id"];
+
+/**
+ * Predicado com type guard: quem entra aqui e, para o `tsc`, uma aba
+ * pendente — e so entao pode indexar `PENDENCIA_ABA`. Promover uma aba a
+ * implementada quebra a compilacao se ela continuar na lista de
+ * pendencias, em vez de renderizar "Em breve" para algo ja pronto.
+ */
+function abaPendente(aba: AbaId): aba is AbaPendente {
+  return ABAS.find((a) => a.id === aba)?.implementada === false;
+}
+
 /** O que cada superficie VAI ser. Fica ao lado da pendencia, para a tela
  *  dizer as duas coisas: o destino e o que falta para chegar la. */
-const DESCRICAO_ABA: Record<Exclude<AbaId, "visao-geral" | "tarefas">, string> = {
+const DESCRICAO_ABA: Record<AbaPendente, string> = {
   chat: "Conversar diretamente com este agente: pedir análises, dar orientações e entender o que ele encontrou.",
-  conexoes: "Quais contas e fontes este agente pode usar. A credencial nunca chega ao agente — ele sabe que a conexão existe e o que ela permite.",
-  funcoes: "O que este agente é capaz de fazer, e qual conexão cada função exige.",
-  permissoes: "Para cada função: bloqueado, com aprovação ou automático.",
   memoria: "Instruções fixas, preferências e o que o agente aprendeu ao longo do tempo.",
   custos: "Consumo de IA deste agente por período, modelo e provedor.",
 };

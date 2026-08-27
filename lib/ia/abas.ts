@@ -25,9 +25,9 @@ export const ABAS = [
   { id: "visao-geral", rotulo: "Visão geral", implementada: true },
   { id: "chat", rotulo: "Chat", implementada: false },
   { id: "tarefas", rotulo: "Tarefas", implementada: true },
-  { id: "conexoes", rotulo: "Conexões", implementada: false },
-  { id: "funcoes", rotulo: "Funções", implementada: false },
-  { id: "permissoes", rotulo: "Permissões", implementada: false },
+  { id: "conexoes", rotulo: "Conexões", implementada: true },
+  { id: "funcoes", rotulo: "Funções", implementada: true },
+  { id: "permissoes", rotulo: "Permissões", implementada: true },
   { id: "memoria", rotulo: "Memória", implementada: false },
   { id: "custos", rotulo: "Custos", implementada: false },
 ] as const;
@@ -48,12 +48,17 @@ export function abaSegura(bruto: unknown): AbaId {
   return encontrada ? encontrada.id : ABA_PADRAO;
 }
 
-/** O que cada aba ainda nao implementada esta esperando. */
-export const PENDENCIA_ABA: Record<Exclude<AbaId, "visao-geral" | "tarefas">, string> = {
+/**
+ * As abas que ainda nao existem, e o que cada uma espera.
+ *
+ * O tipo e derivado de `ABAS`: uma aba que passa a `implementada: true`
+ * PRECISA sair daqui, e uma que continue pendente precisa continuar. O
+ * `tsc` cobra os dois lados, entao a lista nao envelhece em silencio.
+ */
+type AbaPendente = Extract<(typeof ABAS)[number], { implementada: false }>["id"];
+
+export const PENDENCIA_ABA: Record<AbaPendente, string> = {
   chat: "nenhuma conversa é enviada ou armazenada hoje — não existe endpoint, provedor nem histórico. Uma resposta fabricada aqui seria indistinguível de uma resposta real, e por isso não existe.",
-  conexoes: "falta o vínculo entre agente e conexão. As contas existem em `lojas`, mas nada registra qual agente usa qual conta.",
-  funcoes: "falta o catálogo de funções. Hoje só existem dois tipos de tarefa registrados no runtime, e nenhum deles é uma capability concedível.",
-  permissoes: "falta o modelo de permissão e autonomia. Sem onde gravar a decisão, um seletor aqui seria um botão que não decide nada.",
   memoria: "as instruções fixas já existem e aparecem na Visão geral. Preferências, memória aprendida e exemplos ainda não têm onde morar.",
   custos: "falta a camada de leitura. As chamadas de IA já são registradas com modelo, tokens, tempo e custo, mas ainda não há rota autenticada que as leia por dono.",
 };

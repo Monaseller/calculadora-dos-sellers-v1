@@ -242,45 +242,101 @@ export const MOCK_CONTAGENS = {
 // `procedencia`, e a tela e obrigada a exibi-la: e o que impede um
 // resumo simulado de parecer configuracao real.
 
+/**
+ * Tres conexoes de proposito, cobrindo os casos que a tela precisa
+ * distinguir: uma conectada e atribuida, uma com autorizacao vencida, e
+ * uma perfeitamente conectada que simplesmente NAO foi dada a este
+ * agente — o caso que prova que "existe no CDS" e "atribuida ao agente"
+ * sao coisas diferentes.
+ *
+ * Contas com nome inequivocamente ficticio. Nenhum `seller_id`,
+ * `shop_id` ou `partner_id`: o contrato nem tem esses campos.
+ */
 export const MOCK_CONEXOES: readonly ConexaoUI[] = [
-  { id: "cx-ml", tipo: "mercado_livre", rotulo: "Mercado Livre", conta: "Conta principal", ativa: true, procedencia: "simulado" },
-  { id: "cx-shopee", tipo: "shopee", rotulo: "Shopee", conta: "Loja principal", ativa: true, procedencia: "simulado" },
+  {
+    id: "cx-ml", tipo: "mercado_livre", rotulo: "Mercado Livre",
+    conta: "Loja Exemplo", estado: "conectada", atribuida: true,
+    ultimaSincronizacao: "2026-08-27T09:14:00.000Z", procedencia: "simulado",
+  },
+  {
+    id: "cx-shopee", tipo: "shopee", rotulo: "Shopee",
+    conta: "Loja Exemplo", estado: "expirada", atribuida: true,
+    ultimaSincronizacao: "2026-08-24T18:02:00.000Z", procedencia: "simulado",
+  },
+  {
+    id: "cx-ml-2", tipo: "mercado_livre", rotulo: "Mercado Livre",
+    conta: "Segunda conta", estado: "conectada", atribuida: false,
+    ultimaSincronizacao: null, procedencia: "simulado",
+  },
 ];
 
+/**
+ * O catalogo. A `procedencia` de cada funcao e o que separa o que o
+ * sistema SABE fazer do que ele ainda nao sabe — e ela nao e opiniao:
+ *
+ *   vendas.consultar  -> handler `analise_vendas` existe no runtime,
+ *                        com janela limitada e dono fechado por closure.
+ *   anuncio.consultar -> ha infraestrutura reutilizavel (leitura de
+ *                        anuncio ML e rotas de importacao), mas nao ha
+ *                        capability montada. Fica `em_breve`: meio
+ *                        caminho nao e caminho.
+ *   o resto           -> nao existe. ADS foi verificado e nao ha
+ *                        integracao alguma.
+ */
 export const MOCK_FUNCOES: readonly FuncaoUI[] = [
   {
     id: "vendas.consultar", rotulo: "Consultar vendas",
-    descricao: "Lê vendas de um período limitado, já filtradas pelo dono.",
+    descricao: "Consulta pedidos e métricas de vendas das conexões autorizadas deste agente.",
     conexaoNecessaria: null, acesso: "leitura", risco: "baixo",
-    // A unica com lastro real: existe handler `analise_vendas` no
-    // runtime, com janela limitada e dono fechado por closure.
     procedencia: "disponivel",
   },
   {
-    id: "anuncio.consultar", rotulo: "Consultar anúncios",
-    descricao: "Lê os anúncios publicados na conta conectada.",
+    id: "anuncio.consultar", rotulo: "Consultar anúncio",
+    descricao: "Lê título, preço e ficha dos anúncios publicados na conta conectada.",
     conexaoNecessaria: "cx-ml", acesso: "leitura", risco: "baixo",
     procedencia: "em_breve",
   },
   {
-    id: "ads.metricas.ler", rotulo: "Ler métricas de campanha",
-    descricao: "Lê investimento, ACOS e conversão das campanhas.",
-    conexaoNecessaria: "cx-ml", acesso: "leitura", risco: "baixo",
+    id: "mensagens.responder", rotulo: "Responder mensagens",
+    descricao: "Envia respostas às perguntas dos compradores na conta conectada.",
+    conexaoNecessaria: "cx-ml", acesso: "escrita", risco: "medio",
     procedencia: "em_breve",
   },
   {
     id: "ads.campanha.pausar", rotulo: "Pausar campanha",
-    descricao: "Interrompe a veiculação de uma campanha ativa.",
+    descricao: "Interrompe a veiculação de uma campanha de anúncios ativa.",
     conexaoNecessaria: "cx-ml", acesso: "escrita", risco: "alto",
     procedencia: "em_breve",
   },
 ];
 
+/**
+ * Um nivel por funcao, cobrindo os tres: automatico, exige aprovacao e
+ * bloqueado. NAO existe campo `concedida` — "permitida" e derivada de
+ * `nivel !== "bloqueado"` por `permitida()`.
+ *
+ * `mensagens.responder` aparece com "exige aprovacao" mesmo sendo uma
+ * funcao `em_breve`: e assim que a tela mostra os dois eixos ao mesmo
+ * tempo sem mentir — o sistema ainda nao sabe fazer, E o nivel que
+ * estaria configurado seria esse.
+ */
 export const MOCK_PERMISSOES: readonly PermissaoUI[] = [
-  { funcaoId: "vendas.consultar", concedida: true, autonomia: "automatico", procedencia: "simulado" },
-  { funcaoId: "ads.metricas.ler", concedida: true, autonomia: "automatico", procedencia: "em_breve" },
-  { funcaoId: "ads.campanha.pausar", concedida: true, autonomia: "aprovacao", procedencia: "em_breve" },
+  { funcaoId: "vendas.consultar", nivel: "automatico", procedencia: "simulado" },
+  { funcaoId: "anuncio.consultar", nivel: "bloqueado", procedencia: "simulado" },
+  { funcaoId: "mensagens.responder", nivel: "aprovacao", procedencia: "em_breve" },
+  { funcaoId: "ads.campanha.pausar", nivel: "bloqueado", procedencia: "em_breve" },
 ];
+
+/** O nivel configurado para uma funcao. Ausente = bloqueado: o padrao
+ *  seguro e "nao pode", nunca "pode". */
+export function MOCK_NIVEL_DA_FUNCAO(funcaoId: string): PermissaoUI["nivel"] {
+  return MOCK_PERMISSOES.find((p) => p.funcaoId === funcaoId)?.nivel ?? "bloqueado";
+}
+
+/** Funcoes que dependem de uma conexao — o "Usada por" do card. */
+export function MOCK_FUNCOES_DA_CONEXAO(conexaoId: string): readonly FuncaoUI[] {
+  return MOCK_FUNCOES.filter((f) => f.conexaoNecessaria === conexaoId);
+}
 
 /**
  * Resolucao do agente por id, no proprio conjunto de mocks.

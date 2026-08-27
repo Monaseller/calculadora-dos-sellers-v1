@@ -46,22 +46,80 @@ export const ROTULO_PROCEDENCIA: Record<Procedencia, string> = {
 // ── 1. CONEXAO ────────────────────────────────────────────────────────
 
 /**
+ * Estado operacional de uma conexao.
+ *
+ * Os tres primeiros sao DERIVAVEIS de colunas que `lojas` ja tem:
+ * `ativo`, `access_token IS NOT NULL` e `token_expires_at`. `erro` nao
+ * e coluna nenhuma — seria inferido do ultimo `sync_jobs` da loja, e
+ * por isso e o unico que nunca deve ser apresentado como estado
+ * persistido. Ver `PROCEDENCIA_ESTADO_CONEXAO`.
+ */
+export const ESTADOS_CONEXAO = ["conectada", "expirada", "desconectada", "erro"] as const;
+export type EstadoConexao = (typeof ESTADOS_CONEXAO)[number];
+
+export const VOCABULARIO_CONEXAO: Record<
+  EstadoConexao,
+  { rotulo: string; icone: string; explicacao: string }
+> = {
+  conectada: {
+    rotulo: "Conectada",
+    icone: "●",
+    explicacao: "A conta está ativa e autorizada.",
+  },
+  expirada: {
+    rotulo: "Expirada",
+    icone: "◐",
+    explicacao: "A autorização venceu. É preciso reconectar a conta.",
+  },
+  desconectada: {
+    rotulo: "Desconectada",
+    icone: "○",
+    explicacao: "A conta foi desligada e não é usada por nenhum agente.",
+  },
+  erro: {
+    rotulo: "Erro",
+    icone: "✕",
+    explicacao: "A última sincronização falhou. Este estado é inferido, não registrado.",
+  },
+};
+
+/**
+ * De onde cada estado viria, se a leitura real existisse.
+ *
+ * Documenta uma assimetria importante: tres estados sao derivaveis de
+ * colunas, um e inferencia sobre outra tabela. A tela usa isto para nao
+ * dar o mesmo peso aos quatro.
+ */
+export const PROCEDENCIA_ESTADO_CONEXAO: Record<EstadoConexao, Procedencia> = {
+  conectada: "disponivel",
+  expirada: "disponivel",
+  desconectada: "disponivel",
+  erro: "simulado",
+};
+
+/**
  * Uma conta/fonte disponivel para uso pelos agentes.
  *
  * NAO tem, e nao pode ganhar, campo de credencial. A tela mostra que a
  * conexao EXISTE e o que ela oferece; o material de autenticacao fica no
- * backend e nunca chega ao frontend nem ao agente.
+ * backend e nunca chega ao frontend nem ao agente. Este contrato tambem
+ * nao tem `seller_id`, `shop_id` nem `partner_id`: o mesmo seller
+ * externo pode pertencer a donos diferentes, entao ele nao identifica
+ * ninguem — so serviria para vazar.
  *
- * `conta` e rotulo legivel ("MONAMOR"), nunca `seller_id`/`shop_id`
- * completos — o mesmo seller externo pode pertencer a donos diferentes,
- * entao ele nao identifica ninguem e so serviria para vazar.
+ * `atribuida` e o vinculo agente↔conexao, que NAO existe no banco. Fica
+ * separado do `estado` de proposito: uma conta pode estar perfeitamente
+ * conectada e simplesmente nao ter sido dada a este agente.
  */
 export interface ConexaoUI {
   id: string;
   tipo: "mercado_livre" | "shopee" | "erp" | "outra";
   rotulo: string;
   conta: string;
-  ativa: boolean;
+  estado: EstadoConexao;
+  atribuida: boolean;
+  /** ISO. `null` quando nunca sincronizou. */
+  ultimaSincronizacao: string | null;
   procedencia: Procedencia;
 }
 
@@ -70,12 +128,20 @@ export interface ConexaoUI {
 export const RISCOS = ["baixo", "medio", "alto"] as const;
 export type Risco = (typeof RISCOS)[number];
 
+export const ROTULO_RISCO: Record<Risco, string> = {
+  baixo: "Risco baixo",
+  medio: "Risco médio",
+  alto: "Risco alto",
+};
+
 /**
  * Algo que o agente pode fazer usando recursos controlados pelo backend.
  *
  * `acesso` separa leitura de escrita porque a diferenca e de natureza,
  * nao de grau: ler vendas errado mostra numero errado; pausar campanha
- * errado gasta dinheiro do cliente.
+ * errado gasta dinheiro do cliente. O termo tecnico e `escrita`; o
+ * rotulo que o usuario le e "Ação", porque "escrita" descreve o efeito
+ * no sistema e "ação" descreve o que ele percebe.
  */
 export interface FuncaoUI {
   id: string;
@@ -88,38 +154,73 @@ export interface FuncaoUI {
   procedencia: Procedencia;
 }
 
-// ── 3. PERMISSAO + 4. AUTONOMIA ───────────────────────────────────────
+export const ROTULO_ACESSO: Record<FuncaoUI["acesso"], { rotulo: string; icone: string }> = {
+  leitura: { rotulo: "Leitura", icone: "◎" },
+  escrita: { rotulo: "Ação", icone: "▲" },
+};
 
-export const AUTONOMIAS = ["bloqueado", "aprovacao", "automatico"] as const;
-export type Autonomia = (typeof AUTONOMIAS)[number];
+/** `true` quando o sistema sabe executar a funcao hoje. NAO diz nada
+ *  sobre este agente poder usa-la — isso e permissao. */
+export function funcaoDisponivel(funcao: Pick<FuncaoUI, "procedencia">): boolean {
+  return funcao.procedencia === "disponivel";
+}
 
-export const VOCABULARIO_AUTONOMIA: Record<Autonomia, { rotulo: string; explicacao: string }> = {
+// ── 3. PERMISSAO + 4. AUTONOMIA, num eixo unico ───────────────────────
+
+/**
+ * ── Por que UM eixo, e nao `concedida` + `autonomia` ────────────────
+ *
+ * A primeira versao deste contrato tinha `concedida: boolean` E um campo
+ * de autonomia que incluia `"bloqueado"`. Duas formas de dizer a mesma
+ * coisa: `{ concedida: false, autonomia: "automatico" }` era
+ * representavel e nao significava nada.
+ *
+ * Dois campos que precisam concordar para sempre acabam discordando —
+ * normalmente numa migracao, e normalmente em producao. Agora ha um
+ * unico eixo com tres estados mutuamente exclusivos, e "permitida" e
+ * DERIVADA por `permitida()`, nunca armazenada em paralelo.
+ */
+export const NIVEIS_AUTONOMIA = ["bloqueado", "aprovacao", "automatico"] as const;
+export type NivelAutonomia = (typeof NIVEIS_AUTONOMIA)[number];
+
+export const VOCABULARIO_NIVEL: Record<
+  NivelAutonomia,
+  { rotulo: string; explicacao: string; efeito: string }
+> = {
   bloqueado: {
     rotulo: "Bloqueado",
     explicacao: "O agente não pode usar esta função, nem pedir autorização.",
+    efeito: "A ferramenta não é entregue ao agente — ele não tem como tentar.",
   },
   aprovacao: {
-    rotulo: "Com aprovação",
+    rotulo: "Exige aprovação",
     explicacao: "O agente pode solicitar, mas a execução espera sua autorização.",
+    efeito: "A tarefa para em “aguardando aprovação” e a decisão acontece em Aprovações.",
   },
   automatico: {
     rotulo: "Automático",
     explicacao: "O agente executa sem perguntar.",
+    efeito:
+      "Continua sujeito à conexão autorizada, às validações do backend e à idempotência da ação.",
   },
 };
 
 /**
- * O vinculo entre um agente e uma funcao, mais o grau dele.
+ * O vinculo entre um agente e uma funcao, com o grau dele.
  *
- * Permissao e autonomia andam juntas na tela e sao campos separados no
- * tipo: "pode usar" e uma decisao, "pode usar sozinho" e outra. Um
- * booleano unico nao representaria os tres niveis.
+ * NAO existe campo `concedida`: ver o bloco acima. Se um dia alguem
+ * quiser acrescentar, `permitida()` ja responde a pergunta sem
+ * armazenar nada.
  */
 export interface PermissaoUI {
   funcaoId: string;
-  concedida: boolean;
-  autonomia: Autonomia;
+  nivel: NivelAutonomia;
   procedencia: Procedencia;
+}
+
+/** "Permitida" e derivada, nunca persistida em paralelo ao nivel. */
+export function permitida(permissao: Pick<PermissaoUI, "nivel">): boolean {
+  return permissao.nivel !== "bloqueado";
 }
 
 // ── Descricao do agente por tipo ──────────────────────────────────────
@@ -139,3 +240,14 @@ export const DESCRICAO_TIPO: Record<TipoAgenteUI, string> = {
   financeiro: "Margem, taxas e repasses",
   gerente: "Coordena os demais agentes",
 };
+
+/**
+ * Divida registrada, sem reproduzir valor nenhum.
+ *
+ * As credenciais das lojas atuais estao em TEXTO PURO no banco. Isso
+ * bloqueia "Adicionar conexao", OAuth novo, reconexao pela UI nova e
+ * cadastro de integracao. A tela cita esta constante em vez de repetir a
+ * frase, para que exista um lugar so a apagar quando a divida cair.
+ */
+export const DIVIDA_CREDENCIAIS =
+  "As credenciais das contas conectadas ainda são guardadas sem criptografia. Enquanto isso não mudar, esta tela não cadastra, não reconecta e não desconecta nada.";

@@ -117,8 +117,25 @@ const ARQUIVOS_UI_1CA: readonly string[] = [
   "app/(app)/ia/agentes/[id]/page.tsx",
 ];
 
+/**
+ * O que a UI-1C.b acrescentou: as tres abas de configuracao do agente e
+ * os cards que elas usam.
+ */
+const ARQUIVOS_UI_1CB: readonly string[] = [
+  "components/ia/agente/AbaConexoes.tsx",
+  "components/ia/agente/AbaFuncoes.tsx",
+  "components/ia/agente/AbaPermissoes.tsx",
+  "components/ia/conexoes/CardConexao.tsx",
+  "components/ia/capabilities/CardFuncao.tsx",
+  "components/ia/capabilities/SeletorAutonomia.tsx",
+];
+
 /** A area inteira. As varreduras de seguranca valem para TUDO. */
-const ARQUIVOS_UI: readonly string[] = [...ARQUIVOS_UI_1B, ...ARQUIVOS_UI_1CA];
+const ARQUIVOS_UI: readonly string[] = [
+  ...ARQUIVOS_UI_1B,
+  ...ARQUIVOS_UI_1CA,
+  ...ARQUIVOS_UI_1CB,
+];
 
 /** Fontes de componente. `.tsx` de componente + de rota. */
 const COMPONENTES = ARQUIVOS_UI.filter((a) => a.endsWith(".tsx"));
@@ -140,7 +157,7 @@ secao("A. Inventario e rotas");
     JSON.stringify(noDisco) === JSON.stringify(declarado),
     `disco=${noDisco.length} declarado=${declarado.length}`);
 
-  ok("A2  26 arquivos, nem um a mais", noDisco.length === 26, String(noDisco.length));
+  ok("A2  32 arquivos, nem um a mais", noDisco.length === 32, String(noDisco.length));
 }
 
 const ROTAS = [
