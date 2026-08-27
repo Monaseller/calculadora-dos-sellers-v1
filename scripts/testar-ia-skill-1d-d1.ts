@@ -306,8 +306,20 @@ secao("M. Os guardas que a migration obrigou a atualizar");
 
 secao("N. Zero leitura, write path, UI, Funcao, Conexao, LLM");
 
-ok("N1  resolverFatoPermissao nao existe", !existe("lib/agentes/permissoes/fatos.ts"));
-ok("N2  pasta de permissoes nao foi criada", !existe("lib/agentes/permissoes"));
+// N1/N2 nasceram afirmando que `lib/agentes/permissoes/` NAO existia —
+// era a fronteira da 1D.d.1, que criou schema e nao leitura. A 1D.d.2
+// criou a leitura, entao a afirmacao mudou; o GUARDA, nao. O que a
+// 1D.d.1 precisa continuar provando e que ELA nao trouxe write path, e
+// e exatamente isso que os dois cobram agora — sobre os modulos reais,
+// nao sobre a ausencia deles. Apagar os asserts perderia a cobertura;
+// invertidos, ela fica mais forte, porque passa a inspecionar codigo em
+// vez de um `existsSync` negativo.
+ok("N1  a leitura da 1D.d.2 existe e continua SEM escrita",
+  existe("lib/agentes/permissoes/fatos.ts") &&
+    !/\.insert\(|\.update\(|\.delete\(|\.upsert\(|\.rpc\(/.test(ler("lib/agentes/permissoes/fatos.ts")));
+ok("N2  a pasta de permissoes tem exatamente os 2 modulos previstos",
+  JSON.stringify(readdirSync(join(RAIZ, "lib/agentes/permissoes")).sort()) ===
+    JSON.stringify(["estado.ts", "fatos.ts"]));
 ok("N3  definirPermissaoDoAgente nao existe em lugar nenhum",
   !/definirPermissaoDoAgente/.test(ler("lib/agentes/funcoes/registry.ts")));
 ok("N4  registry de Funcoes intocado — 1 Funcao real",

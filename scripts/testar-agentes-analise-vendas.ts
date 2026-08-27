@@ -524,6 +524,37 @@ const ARQUIVOS_CONEXOES_1: readonly string[] = [
 ];
 
 /**
+ * SKILL-1D.d.2 — a LEITURA das permissoes, em `lib/agentes/`.
+ *
+ * Diferente dos grupos vizinhos, estes dois caem no escopo pelo caminho
+ * mais direto: `lib/agentes` E o escopo. Declarados nome a nome, como
+ * todo o resto — o guarda continua reprovando modulo novo nao previsto.
+ *
+ * `estado.ts` e puro e `fatos.ts` e `server-only`; a suite propria da
+ * fase e `scripts/testar-ia-skill-1d-d2.ts`, fora do escopo porque
+ * `scripts/` nunca esteve em `ESCOPO_AGENTES`.
+ */
+const ARQUIVOS_PERMISSOES_1DD2: readonly string[] = [
+  "estado.ts",
+  "fatos.ts",
+];
+
+/**
+ * A pasta e NOVA e inteiramente untracked, entao o porcelain a colapsa em
+ * `?? lib/agentes/permissoes/` — o mesmo buraco ja medido e documentado
+ * em `ARQUIVOS_1EA`. Aceitar so a forma colapsada abriria uma pasta
+ * franca dentro do escopo dos agentes.
+ *
+ * Por isso as duas formas entram aqui E o conteudo e enumerado do disco
+ * em G11x. Os dois andam juntos: quem remover um tem de remover o outro,
+ * ou o guarda fica cego sem que nenhum teste reclame.
+ */
+const ARQUIVOS_SKILL_1DD2: readonly string[] = [
+  "lib/agentes/permissoes/",
+  ...ARQUIVOS_PERMISSOES_1DD2.map((nome) => `lib/agentes/permissoes/${nome}`),
+];
+
+/**
  * SKILL-1D.d.1 — permissoes reais por agente e funcao.
  *
  * Tambem nao e arquivo de agentes, mas cai no `ESCOPO_AGENTES` pelo mesmo
@@ -599,6 +630,7 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_1EE,
   ...ARQUIVOS_CONEXOES_1,
   ...ARQUIVOS_SKILL_1DD1,
+  ...ARQUIVOS_SKILL_1DD2,
 ];
 
 /**
@@ -634,6 +666,11 @@ function mesmoConjuntoDeNomes(encontrados: readonly string[], esperados: readonl
 /** PREDICADO de G11l — o guarda que o Git nao consegue ser (ver `ARQUIVOS_1EA`). */
 function soAutorizadosDentroDeIa(nomes: readonly string[]): boolean {
   return mesmoConjuntoDeNomes(nomes, ARQUIVOS_IA_ESPERADOS);
+}
+
+/** PREDICADO de G11x — o mesmo par, para `lib/agentes/permissoes/` (1D.d.2). */
+function soAutorizadosDentroDePermissoes(nomes: readonly string[]): boolean {
+  return mesmoConjuntoDeNomes(nomes, ARQUIVOS_PERMISSOES_1DD2);
 }
 
 /**
@@ -1264,6 +1301,23 @@ async function main() {
        soAutorizadosNoEscopo(ARQUIVOS_IA_ESPERADOS.map((n) => `A  lib/agentes/ia/${n}`).join("\n") + "\n"));
     ok("G11s CONTROLE NEGATIVO: arquivo expandido NAO declarado em ia/ reprova",
        !soAutorizadosNoEscopo("?? lib/agentes/ia/_intruso.ts\n"));
+
+    // ── G11x..G11z2 — o MESMO par, para lib/agentes/permissoes/ ────
+    // Pasta nova da SKILL-1D.d.2, hoje inteiramente untracked: o
+    // porcelain a colapsa exatamente como colapsava `ia/`. Sem estes
+    // asserts, declarar a forma colapsada abriria a pasta.
+    const conteudoPermissoes = readdirSync(join(RAIZ, "lib", "agentes", "permissoes")).sort();
+
+    ok("G11x lib/agentes/permissoes contem exatamente os 2 modulos declarados",
+       soAutorizadosDentroDePermissoes(conteudoPermissoes));
+    ok("G11y ANCORA: o diretorio foi mesmo lido e nao veio vazio",
+       conteudoPermissoes.length === ARQUIVOS_PERMISSOES_1DD2.length && conteudoPermissoes.length > 0);
+    ok("G11z CONTROLE NEGATIVO: um arquivo A MAIS em permissoes/ reprova",
+       !soAutorizadosDentroDePermissoes([...ARQUIVOS_PERMISSOES_1DD2, "_intruso.ts"]));
+    ok("G11z1 CONTROLE NEGATIVO: arquivo FALTANDO em permissoes/ reprova",
+       !soAutorizadosDentroDePermissoes(ARQUIVOS_PERMISSOES_1DD2.slice(1)));
+    ok("G11z2 CONTROLE NEGATIVO: arquivo expandido NAO declarado em permissoes/ reprova",
+       !soAutorizadosNoEscopo("?? lib/agentes/permissoes/_intruso.ts\n"));
 
     // ── G11t..G11w — `scripts/` nunca esteve em ESCOPO_AGENTES ─────
     // Medido na 1E-a: uma suite de agentes inesperada em `scripts/`
