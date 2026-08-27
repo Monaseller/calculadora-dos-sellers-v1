@@ -63,6 +63,31 @@ const MENU = [
     ),
   },
   {
+    // AJUSTE (2026-08-27 — CDS IA / UI-1B): item novo, inserido logo
+    // depois de "Central de IA" por afinidade de assunto, SEM mover
+    // nenhum item existente — mesmo procedimento adotado quando a
+    // Central de IA entrou.
+    //
+    // "Central de IA" NAO foi renomeada nesta fase, por decisao
+    // explicita. As duas convivem: aquela e o Estudio de Anuncios, esta
+    // e a central de agentes. Distinguir os nomes fica para fase propria.
+    //
+    // `/ia` nao colide com `/central-ia` no calculo de item ativo:
+    // `"/central-ia".startsWith("/ia/")` e falso e as strings diferem.
+    href: "/ia",
+    label: "CDS IA",
+    icon: (
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="4" y="8" width="16" height="12" rx="2"/>
+        <path d="M12 8V4"/>
+        <circle cx="12" cy="3" r="1"/>
+        <path d="M9 13h.01"/>
+        <path d="M15 13h.01"/>
+        <path d="M9.5 17h5"/>
+      </svg>
+    ),
+  },
+  {
     href: "/historico",
     label: "Histórico de Cálculos",
     icon: (
