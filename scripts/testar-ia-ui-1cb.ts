@@ -365,7 +365,13 @@ secao("I. Zero backend na area inteira");
     ["SQL", /\bselect\b[^;\n]{0,80}\bfrom\b|\binsert\s+into\b|\bdelete\s+from\b/i],
     ["migration", /supabase\/migrations|apply_migration|create table|alter table/i],
     ["rota de API", /app\/api\/|route\.ts|NextResponse|export async function (GET|POST|PUT|PATCH|DELETE)/],
-    ["segredo", /access_token|refresh_token|partner_key|api[_-]?key|authorization|bearer\s/i],
+    // A sonda exige VALOR, nunca a palavra. Uma Ficha de Integracao
+    // precisa poder DOCUMENTAR autenticacao ("a API usa access_token",
+    // "envie Authorization: Bearer <token>") sem ser tratada como
+    // vazamento — isso e requisito de produto, nao tolerancia. O que
+    // reprova e a credencial em si. Semantica equivalente a de
+    // `lib/ia/skills/formato.ts`, que precisou da mesma distincao.
+    ["segredo", /\b(?:access_token|refresh_token|partner_key|client_secret|api[_-]?key|token|secret|senha)\b\s*[:=]\s*["']?[A-Za-z0-9_\-./+]{12,}|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.|\bsk-[A-Za-z0-9_-]{16,}|-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----|\bBearer\s+[A-Za-z0-9_\-.]{16,}/i],
     ["identificador externo", /\bseller_id\b|\bshop_id\b|\bpartner_id\b/],
     ["identificador de dono", /\buser_id\b|\bloja_id\b/],
     ["viewport em JS", /window\.innerWidth|addEventListener\("resize"|matchMedia/],
@@ -376,7 +382,7 @@ secao("I. Zero backend na area inteira");
     'import x from "@/lib/marketplace/credenciais"', 'n8n webhook',
     'lib/agentes/dados/vendas', 'select * from pedidos',
     'supabase/migrations/x.sql', 'export async function GET()',
-    'access_token = "v"', 'seller_id', 'user_id', 'window.innerWidth',
+    'access_token = "aB3xK9zQ7mP2wL5tR8"', 'seller_id', 'user_id', 'window.innerWidth',
   ].join("\n");
 
   let mortas = 0;
@@ -384,6 +390,22 @@ secao("I. Zero backend na area inteira");
     if (!p.test(isca)) { mortas++; console.log(`        SONDA MORTA: ${nome}`); }
   }
   ok("I0  controle negativo: as 14 sondas acusam a isca", mortas === 0, `${mortas} mortas`);
+  // A sonda de segredo mudou de semantica nesta fase: passou a exigir
+  // VALOR. Os controles abaixo provam os dois lados — que ela continua
+  // viva para credencial real, e que nao reprova documentacao.
+  {
+    const sondaSegredo = sondas.find(([n]) => n === "segredo")![1];
+    const DOC =
+      "A API usa access_token e refresh_token. Envie Authorization: Bearer <token>. " +
+      "A API key vem de Conexoes, nunca da Skill.";
+    ok("Is1 segredo: prosa documental NAO dispara", !sondaSegredo.test(DOC));
+    ok("Is2 segredo: valor atribuido dispara", sondaSegredo.test('access_token = "aB3xK9zQ7mP2wL5tR8"'));
+    ok("Is3 segredo: JWT sintetico dispara", sondaSegredo.test("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.aZ"));
+    ok("Is4 segredo: Bearer com valor dispara", sondaSegredo.test("Bearer " + "A".repeat(24)));
+    ok("Is5 segredo: chave sk- dispara", sondaSegredo.test("sk-" + "A".repeat(20)));
+    ok("Is6 segredo: bloco PRIVATE KEY dispara", sondaSegredo.test("-----BEGIN RSA PRIVATE KEY-----"));
+  }
+
 
   for (const [nome, padrao] of sondas) {
     const sujos = ARQUIVOS_AREA.filter((a) => padrao.test(codigo(ler(a))));

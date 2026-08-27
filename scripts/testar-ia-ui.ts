@@ -153,6 +153,20 @@ const ARQUIVOS_UI_1DA: readonly string[] = [
   "components/ia/aprovacoes/FilaAprovacoes.tsx",
 ];
 
+/**
+ * O que a SKILL-1B acrescentou: o contrato do CDS Skill Format v1.
+ *
+ * Nao e UI — sao contrato e parser puros, consumidos pela biblioteca de
+ * Skills quando ela existir. Entram aqui porque vivem em `lib/ia/` e o
+ * guarda de inventario varre a arvore inteira: arquivo novo nesta area
+ * PRECISA falhar o teste ate ser declarado, e essa e a razao de o guarda
+ * existir. Declarar e o passo; afrouxar a varredura nunca foi opcao.
+ */
+const ARQUIVOS_SKILL_1B: readonly string[] = [
+  "lib/ia/skills/contrato.ts",
+  "lib/ia/skills/formato.ts",
+];
+
 /** A area inteira. As varreduras de seguranca valem para TUDO. */
 const ARQUIVOS_UI: readonly string[] = [
   ...ARQUIVOS_UI_1B,
@@ -160,6 +174,7 @@ const ARQUIVOS_UI: readonly string[] = [
   ...ARQUIVOS_UI_1CB,
   ...ARQUIVOS_UI_1DA,
   ...ARQUIVOS_UI_1DB,
+  ...ARQUIVOS_SKILL_1B,
 ];
 
 /**
@@ -189,7 +204,11 @@ secao("A. Inventario e rotas");
     JSON.stringify(noDisco) === JSON.stringify(declarado),
     `disco=${noDisco.length} declarado=${declarado.length}`);
 
-  ok("A2  45 arquivos, nem um a mais", noDisco.length === 45, String(noDisco.length));
+  // 45 na UI-1D.b; 47 desde a SKILL-1B, que somou contrato.ts e
+  // formato.ts. O numero continua literal de proposito: se ele fosse
+  // `ARQUIVOS_UI.length`, o assert compararia a lista consigo mesma e
+  // um arquivo novo declarado sem revisao passaria batido.
+  ok("A2  47 arquivos, nem um a mais", noDisco.length === 47, String(noDisco.length));
 }
 
 const ROTAS = [
@@ -379,7 +398,12 @@ secao("E. Zero backend: banco, rede, provider, segredo");
     // `select * from pedidos` — a forma real. Passava verde sem ser capaz
     // de detectar SQL nenhum. O controle negativo abaixo a reprovou.
     ["SQL", /\bselect\b[^;\n]{0,80}\bfrom\b|\binsert\s+into\b|\bdelete\s+from\b|\bupdate\b[^;\n]{0,40}\bset\b/i],
-    ["segredo", /access_token|refresh_token|partner_key|api[_-]?key|authorization|bearer\s/i],
+    // A sonda exige VALOR, nunca a palavra. Uma Ficha de Integracao
+    // precisa poder DOCUMENTAR autenticacao ("a API usa access_token",
+    // "envie Authorization: Bearer <token>") sem ser tratada como
+    // vazamento — isso e requisito de produto. O que reprova e a
+    // credencial em si. Mesma semantica de `lib/ia/skills/formato.ts`.
+    ["segredo", /\b(?:access_token|refresh_token|partner_key|client_secret|api[_-]?key|token|secret|senha)\b\s*[:=]\s*["']?[A-Za-z0-9_\-./+]{12,}|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.|\bsk-[A-Za-z0-9_-]{16,}|-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----|\bBearer\s+[A-Za-z0-9_\-.]{16,}/i],
     ["identificador de dono", /user_id|loja_id|seller_id|shop_id/],
   ];
 
@@ -388,10 +412,26 @@ secao("E. Zero backend: banco, rede, provider, segredo");
     'createClient(supabase)', 'fetch("/x")', 'process.env.X', 'anthropic()',
     'import x from "@/lib/marketplace/credenciais"', 'n8n webhook',
     'lib/agentes/dados/vendas', 'select * from pedidos',
-    'access_token = "x"', 'user_id',
+    'access_token = "aB3xK9zQ7mP2wL5tR8"', 'user_id',
   ].join("\n");
   ok("E0  controle negativo: as 10 sondas acusam a isca",
     sondas.every(([, p]) => p.test(iscas)), String(sondas.filter(([, p]) => !p.test(iscas)).length));
+
+  // A sonda de segredo mudou de semantica nesta fase: passou a exigir
+  // VALOR. Os controles abaixo provam os dois lados — viva para
+  // credencial real, silenciosa para documentacao.
+  {
+    const sondaSegredo = sondas.find(([n]) => n === "segredo")![1];
+    const DOC =
+      "A API usa access_token e refresh_token. Envie Authorization: Bearer <token>. " +
+      "A API key vem de Conexoes, nunca da Skill.";
+    ok("E0a segredo: prosa documental NAO dispara", !sondaSegredo.test(DOC));
+    ok("E0b segredo: valor atribuido dispara", sondaSegredo.test('access_token = "aB3xK9zQ7mP2wL5tR8"'));
+    ok("E0c segredo: JWT sintetico dispara", sondaSegredo.test("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.aZ"));
+    ok("E0d segredo: Bearer com valor dispara", sondaSegredo.test("Bearer " + "A".repeat(24)));
+    ok("E0e segredo: chave sk- dispara", sondaSegredo.test("sk-" + "A".repeat(20)));
+    ok("E0f segredo: bloco PRIVATE KEY dispara", sondaSegredo.test("-----BEGIN RSA PRIVATE KEY-----"));
+  }
 
   for (const [nome, padrao] of sondas) {
     const sujos = ARQUIVOS_UI.filter((a) => padrao.test(codigo(ler(a))));
