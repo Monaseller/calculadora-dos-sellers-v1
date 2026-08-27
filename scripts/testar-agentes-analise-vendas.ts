@@ -524,6 +524,20 @@ const ARQUIVOS_CONEXOES_1: readonly string[] = [
 ];
 
 /**
+ * SKILL-1D.d.1 — permissoes reais por agente e funcao.
+ *
+ * Tambem nao e arquivo de agentes, mas cai no `ESCOPO_AGENTES` pelo mesmo
+ * motivo de `ARQUIVOS_CONEXOES_1`: o escopo cobre `supabase/migrations`
+ * inteiro. Declarada nome a nome — o guarda continua reprovando migration
+ * nao prevista, e a suite propria da fase e
+ * `scripts/testar-ia-skill-1d-d1.ts`, que fica fora do escopo porque
+ * `scripts/` nunca esteve em `ESCOPO_AGENTES`.
+ */
+const ARQUIVOS_SKILL_1DD1: readonly string[] = [
+  "supabase/migrations/20260920_agente_permissoes.sql",
+];
+
+/**
  * MIGRATIONS que podem estar no DISCO sem estar no HEAD do git.
  *
  * O G12b comparava disco contra HEAD e exigia conjunto vazio — era o
@@ -548,6 +562,10 @@ const MIGRATIONS_NO_DISCO_NAO_COMMITADAS: readonly string[] = [
   // Aplicadas como 20260826201145 e 20260826201326.
   "20260826_lojas_remover_orfaos.sql",
   "20260826_lojas_autoridade_dono.sql",
+  // SKILL-1D.d.1 — `agente_permissoes`. NAO APLICADA: o arquivo e o
+  // artefato do gate pre-migration, e o proprio cabecalho dele diz isso.
+  // Aplicar ao banco exige autorizacao separada.
+  "20260920_agente_permissoes.sql",
 ];
 
 /**
@@ -568,6 +586,7 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_1ED,
   ...ARQUIVOS_1EE,
   ...ARQUIVOS_CONEXOES_1,
+  ...ARQUIVOS_SKILL_1DD1,
 ];
 
 /**
