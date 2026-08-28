@@ -22,6 +22,8 @@ import {
   ROTULO_ORIGEM,
   ehOrigemSkill,
   temVerificacaoPropria,
+  PLATAFORMAS_CONEXAO,
+  ehPlataformaConexao,
 } from "../lib/ia/skills/contrato";
 import {
   LIMITE_BYTES,
@@ -442,6 +444,65 @@ ok("J2  controle: o tripwire reprovaria um arquivo de 600", !(600 < 600));
 ok("J3  controle: a contagem le o arquivo real, nao um numero fixo", LINHAS_FORMATO > 100);
 ok(`J4  contrato.ts permanece o menor dos dois (${LINHAS_CONTRATO})`, LINHAS_CONTRATO < LINHAS_FORMATO);
 ok("J5  nao surgiu validacao.ts nem quarto modulo", !existe("lib/ia/skills/validacao.ts"));
+
+// ─── K. Autoridade de plataforma de conexao ───────────────────────────
+//
+// `plataforma` deixou de usar o mesmo slug do `recurso` na SKILL-1D.ml:
+// o slug rejeita underscore, e `mercado_livre` — a grafia que
+// `MARKETPLACE_POR_PLATAFORMA` e `ConexaoUI.tipo` sempre usaram — nao
+// passava. Nenhuma Skill conseguia declarar requisito de Mercado Livre.
+//
+// A troca ESTREITA a aceitacao: antes qualquer slug entrava (`amazon`,
+// `whatsapp`, ate `mercado-livre`, grafia errada do mesmo marketplace).
+// Agora so o conjunto canonico. As provas abaixo passam pelo parser REAL,
+// com manifesto e Ficha completos — nao pelo guard isolado.
+
+secao("K. Plataforma de conexao — autoridade canonica");
+
+const comConexao = (plataforma: unknown, recurso: unknown = "chat") =>
+  arquivoSkill({ ...SKILL_BASE, requer: { conexoes: [{ plataforma, recurso, obrigatoria: true }] } });
+
+const fichaCom = (plataforma: unknown, recurso: unknown = "chat") =>
+  arquivoFicha({ ...FICHA_BASE, plataforma, recurso });
+
+ok("K1  requisito: mercado_livre e ACEITO (o bug que esta frente corrige)",
+  importarSkill(comConexao("mercado_livre")).aceito !== null,
+  motivos(importarSkill(comConexao("mercado_livre"))).join(","));
+ok("K2  requisito: shopee continua aceito",
+  importarSkill(comConexao("shopee")).aceito !== null);
+ok("K3  Ficha: mercado_livre e ACEITA",
+  importarFicha(fichaCom("mercado_livre")).aceito !== null,
+  motivos(importarFicha(fichaCom("mercado_livre"))).join(","));
+ok("K4  Ficha: shopee continua aceita",
+  importarFicha(fichaCom("shopee")).aceito !== null);
+
+// `mercado-livre` e o caso mais perigoso: passava no slug, parece Mercado
+// Livre e nunca casaria com o mapa de marketplace.
+for (const p of ["mercado-livre", "Mercado_Livre", "mercado__livre", "mercado_livre_",
+                 "amazon", "whatsapp", "erp", "zz", ""]) {
+  const rot = p === "" ? '""' : p;
+  ok(`K5  requisito recusa ${rot}`, importarSkill(comConexao(p)).aceito === null);
+  ok(`K6  Ficha recusa ${rot}`, importarFicha(fichaCom(p)).aceito === null);
+}
+
+ok("K7  requisito: plataforma canonica NAO salva recurso com underscore",
+  importarSkill(comConexao("mercado_livre", "recurso_com_underscore")).aceito === null);
+ok("K8  Ficha: idem",
+  importarFicha(fichaCom("mercado_livre", "recurso_com_underscore")).aceito === null);
+ok("K9  recurso com hifen continua valido",
+  importarSkill(comConexao("mercado_livre", "meu-recurso")).aceito !== null);
+
+ok("K10 a autoridade tem EXATAMENTE as duas plataformas canonicas",
+  JSON.stringify([...PLATAFORMAS_CONEXAO].sort()) ===
+    JSON.stringify(["mercado_livre", "shopee"]),
+  [...PLATAFORMAS_CONEXAO].join(", "));
+ok("K11 o guard deriva da constante, e nao de uma segunda lista",
+  PLATAFORMAS_CONEXAO.every((v) => ehPlataformaConexao(v)) &&
+    !ehPlataformaConexao("mercado-livre"));
+ok("K12 formato.ts NAO tem segunda lista de plataformas",
+  !/\["']mercado_livre\["']\s*,\s*\["']shopee\["']/.test(FONTE_FORMATO));
+ok("K13 RE_SLUG continua sem underscore — recurso e id nao mudaram",
+  /const RE_SLUG = \/\^\[a-z0-9\]\+\(\?:-\[a-z0-9\]\+\)\*\$\//.test(FONTE_FORMATO));
 
 // ─── Placar ───────────────────────────────────────────────────────────
 

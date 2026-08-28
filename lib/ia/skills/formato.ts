@@ -35,6 +35,7 @@
 import {
   FORMATO_SUPORTADO,
   ehOrigemSkill,
+  ehPlataformaConexao,
   type Ficha,
   type ManifestoFicha,
   type ManifestoSkill,
@@ -270,7 +271,12 @@ function verificacao(v: unknown): Verificacao | null {
 function requisitoConexao(v: unknown): RequisitoConexao | null {
   const o = objetoSimples(v);
   if (o === null) return null;
-  const plataforma = slug(o.plataforma);
+  // `plataforma` NAO usa `slug`: o slug rejeita underscore, e
+  // `mercado_livre` e grafia canonica do dominio. A autoridade e
+  // `ehPlataformaConexao` — mais estrita que o slug, nao mais frouxa:
+  // `amazon` e `mercado-livre` passariam no slug e sao recusados aqui.
+  // `recurso` continua no slug: ele e chave OPACA, sem vocabulario.
+  const plataforma = ehPlataformaConexao(o.plataforma) ? o.plataforma : null;
   const recurso = slug(o.recurso);
   if (plataforma === null || recurso === null || typeof o.obrigatoria !== "boolean") return null;
   return { plataforma, recurso, obrigatoria: o.obrigatoria };
@@ -449,7 +455,12 @@ function manifestoFicha(
   classificarChaves(bruto, CHAVES_FICHA, "", recusas, descartados);
 
   const id = slug(bruto.id);
-  const plataforma = slug(bruto.plataforma);
+  // Mesma autoridade do requisito: `avaliarConfiguracoes` cruza os dois
+  // pares `(plataforma, recurso)` por igualdade literal, entao uma Ficha
+  // com grafia que o requisito nao aceita nunca casaria com nada.
+  // `id` e `recurso` seguem no slug — `id` e identificador tecnico
+  // (`shopee-chat`), nao o nome da plataforma.
+  const plataforma = ehPlataformaConexao(bruto.plataforma) ? bruto.plataforma : null;
   const recurso = slug(bruto.recurso);
   const versao = typeof bruto.versao === "string" && RE_SEMVER.test(bruto.versao) ? bruto.versao : null;
   const verif = verificacao(bruto.verificacao);

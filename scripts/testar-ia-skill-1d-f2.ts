@@ -456,6 +456,43 @@ ok("J5  nenhum modulo novo importa React ou UI",
         JSON.stringify([...CONSUMIDORES_AUTORIZADOS].sort()));
 }
 
+// ─── L. Autoridade de plataforma na LEITURA persistida ────────────────
+//
+// `requisitosValidos` validava `plataforma` so com `texto()` — qualquer
+// string nao-vazia. Era deliberado: a leitura confere FORMA, nao
+// vocabulario. Mas o parser de importacao passou a recusar grafia nao
+// canonica, e sem alinhar as duas uma Skill gravada antes entregaria ao
+// agregador um requisito que NENHUMA selecao pode satisfazer —
+// `plataformaConhecida` barra `amazon` tanto na escrita quanto na leitura
+// da selecao. O dono veria "escolha uma loja" sem loja escolhivel.
+//
+// O pre-flight read-only da SKILL-1D.ml-A4 mediu o banco antes desta
+// mudanca: ZERO requisito de conexao persistido. Nada existente e
+// invalidado por este estreitamento.
+
+secao("L. Plataforma de conexao — leitura persistida");
+
+const comPlataforma = (plataforma: unknown) =>
+  manifesto({ requer: { conexoes: [{ plataforma, recurso: "chat", obrigatoria: true }] } });
+
+ok("L1  persistido shopee -> valido", manifestoValido(comPlataforma("shopee")));
+ok("L2  persistido mercado_livre -> valido", manifestoValido(comPlataforma("mercado_livre")));
+
+for (const p of ["mercado-livre", "amazon", "whatsapp", "erp", "zz"]) {
+  ok(`L3  persistido ${p} -> invalido`, !manifestoValido(comPlataforma(p)));
+}
+
+ok("L4  plataforma vazia continua invalida", !manifestoValido(comPlataforma("")));
+ok("L5  plataforma nao-string continua invalida", !manifestoValido(comPlataforma(7)));
+ok("L6  recurso continua livre de vocabulario — so precisa ser texto",
+  manifestoValido(manifesto({
+    requer: { conexoes: [{ plataforma: "shopee", recurso: "qualquer_coisa", obrigatoria: true }] },
+  })));
+ok("L7  skills/estado.ts NAO tem segunda lista de plataformas",
+  !/\["']mercado_livre\["']\s*,\s*\["']shopee\["']/.test(CODIGO_ESTADO));
+ok("L8  a leitura usa a MESMA autoridade do parser",
+  /ehPlataformaConexao/.test(CODIGO_ESTADO));
+
 // ─── Placar ───────────────────────────────────────────────────────────
 
 console.log(`\n${"═".repeat(66)}`);

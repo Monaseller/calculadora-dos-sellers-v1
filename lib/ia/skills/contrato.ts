@@ -87,6 +87,41 @@ export function ehOrigemSkill(valor: unknown): valor is OrigemSkill {
   return typeof valor === "string" && (ORIGENS_SKILL as readonly string[]).includes(valor);
 }
 
+// ─── Plataforma de conexao ────────────────────────────────────────────
+
+/**
+ * As plataformas para as quais a CDS tem conexao de marketplace.
+ *
+ * ── Por que a autoridade nasce AQUI ─────────────────────────────────
+ *
+ * Ela e usada por tres camadas que nao podem divergir: o parser valida
+ * o que entra, a leitura valida o que ja esta persistido, e
+ * `MARKETPLACE_POR_PLATAFORMA` traduz para o valor que `lojas` guarda.
+ * Este arquivo e puro, ja e dono de `RequisitoConexao` e `ManifestoFicha`
+ * — os dois tipos cujo campo `plataforma` isto governa — e ja e a unica
+ * dependencia do parser. Colocar a lista em qualquer um dos outros
+ * significaria o parser importar `lib/agentes`, invertendo a camada.
+ *
+ * ── A grafia e canonica, e nao ha alias ─────────────────────────────
+ *
+ * `mercado_livre` com underscore, porque e essa a grafia que
+ * `ConexaoUI.tipo` e o mapa de marketplace ja usam. `mercado-livre`
+ * NAO e aceita: duas grafias para a mesma conta produziriam requisitos
+ * que nunca se cruzam com a selecao do dono.
+ *
+ * Antes desta autoridade existir, `plataforma` era validada pelo mesmo
+ * slug do `recurso` — que rejeita underscore. O resultado era uma
+ * contradicao viva: `mercado_livre` estava no mapa de marketplace e
+ * nenhuma Skill conseguia declara-lo.
+ */
+export const PLATAFORMAS_CONEXAO = ["mercado_livre", "shopee"] as const;
+export type PlataformaConexao = (typeof PLATAFORMAS_CONEXAO)[number];
+
+/** Deriva da constante acima — nunca de uma segunda lista. */
+export function ehPlataformaConexao(valor: unknown): valor is PlataformaConexao {
+  return typeof valor === "string" && (PLATAFORMAS_CONEXAO as readonly string[]).includes(valor);
+}
+
 // ─── Verificacao ──────────────────────────────────────────────────────
 
 /**

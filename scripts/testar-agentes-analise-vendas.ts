@@ -810,6 +810,31 @@ const ARQUIVOS_SKILL_1DE: readonly string[] = [
   "lib/agentes/conexoes/agregador.ts",
 ];
 
+/**
+ * SKILL-1D.ml — a autoridade canonica de plataforma de conexao.
+ *
+ * `mercado_livre` estava em `MARKETPLACE_POR_PLATAFORMA` desde a 1D.c, mas
+ * o parser validava `plataforma` com o mesmo slug do `recurso` — que
+ * rejeita underscore. Nenhuma Skill conseguia declarar Mercado Livre. A
+ * frente move a autoridade para `lib/ia/skills/contrato.ts` e faz as tres
+ * camadas lerem a MESMA lista.
+ *
+ * So estes dois paths entram: `ESCOPO_AGENTES` cobre `lib/agentes`, a rota
+ * interna e `supabase/migrations`. `lib/ia/skills/contrato.ts`,
+ * `lib/ia/skills/formato.ts` e as suites de `scripts/` mudaram na mesma
+ * frente e ficam de fora porque a guarda nao os mede.
+ *
+ * Zero migration: a grafia canonica nao mudou e `agente_conexoes.plataforma`
+ * nunca teve CHECK de vocabulario.
+ */
+const ARQUIVOS_SKILL_1DML: readonly string[] = [
+  // Fechamento compile-time do mapa contra a autoridade (`satisfies`).
+  "lib/agentes/conexoes/estado.ts",
+  // `requisitosValidos` passou a validar a plataforma persistida pela
+  // mesma autoridade do parser.
+  "lib/agentes/skills/estado.ts",
+];
+
 /** Uniao EXPLICITA. Qualquer caminho fora dela reprova o G11. */
 const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_1DD,
@@ -826,6 +851,7 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_SKILL_1DF2,
   ...ARQUIVOS_SKILL_1DG,
   ...ARQUIVOS_SKILL_1DE,
+  ...ARQUIVOS_SKILL_1DML,
 ];
 
 /**

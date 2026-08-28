@@ -21,6 +21,7 @@
  * sobre data.
  */
 import type { EstadoConexao } from "@/lib/ia/conceitos";
+import type { PlataformaConexao } from "@/lib/ia/skills/contrato";
 import type { CoberturaRecurso, FatoConexao } from "@/lib/ia/skills/diagnostico";
 
 /**
@@ -44,7 +45,12 @@ export const MARGEM_EXPIRACAO_MS = 300_000;
 export const MARKETPLACE_POR_PLATAFORMA: Readonly<Record<string, string>> = Object.freeze({
   mercado_livre: "ML",
   shopee: "Shopee",
-});
+  // `satisfies` fecha o CONJUNTO de chaves contra a autoridade canonica:
+  // faltar uma plataforma ou inventar uma extra vira erro de `tsc`. O tipo
+  // declarado continua indexavel por `string` de proposito — quem consulta
+  // este mapa recebe `plataforma` crua, ainda nao validada, e e justamente
+  // essa consulta que decide se ela e conhecida.
+} satisfies Record<PlataformaConexao, string>);
 
 /** A plataforma correspondente ao valor do banco, ou `null`. */
 export function plataformaDeMarketplace(marketplace: unknown): string | null {

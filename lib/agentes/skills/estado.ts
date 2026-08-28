@@ -42,6 +42,7 @@ import {
   type RequisitosSkill,
   type Skill,
   type Verificacao,
+  ehPlataformaConexao,
 } from "@/lib/ia/skills/contrato";
 
 // ─── Linhas cruas ─────────────────────────────────────────────────────
@@ -133,7 +134,13 @@ function requisitosValidos(v: unknown): v is RequisitosSkill {
     if (!Array.isArray(v.conexoes) || v.conexoes.length === 0) return false;
     for (const c of v.conexoes) {
       if (!objeto(c)) return false;
-      if (!texto(c.plataforma) || !texto(c.recurso)) return false;
+      // `plataforma` pela AUTORIDADE, nao por `texto()`. O parser de
+      // importacao ja recusa grafia nao canonica; sem isto, uma Skill
+      // gravada antes desta frente entregaria ao agregador um requisito
+      // que nenhuma selecao pode satisfazer — `plataformaConhecida`
+      // barra a escrita e a leitura da selecao — e o dono veria uma
+      // pendencia que nenhuma acao resolve.
+      if (!ehPlataformaConexao(c.plataforma) || !texto(c.recurso)) return false;
       if (typeof c.obrigatoria !== "boolean") return false;
     }
   }
