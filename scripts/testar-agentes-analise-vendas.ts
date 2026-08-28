@@ -782,6 +782,34 @@ const MIGRATIONS_DA_SKILL_1DG: readonly string[] = [
  */
 const ARQUIVOS_IA_ESPERADOS: readonly string[] = [...ARQUIVOS_IA_1EA, ...ARQUIVOS_IA_1EB];
 
+/**
+ * SKILL-1D.e — o agregador requisito -> selecao -> conexao.
+ *
+ * Primeiro passo (1D.e-B1): a camada de conexao ganhou resolucao EM LOTE.
+ * `fatos.ts` deixou de ser so `resolverFatoConexao` e passou a expor
+ * tambem `resolverFatosConexao`, que resolve N requisitos ja selecionados
+ * com UMA leitura de `lojas`. A mudanca e aditiva — a API individual
+ * continua identica — mas mexe em arquivo dentro de `ESCOPO_AGENTES`, e
+ * por isso precisa de declaracao nominal aqui.
+ *
+ * A suite da fase (`scripts/testar-ia-skill-1d-e.ts`) NAO entra:
+ * `ESCOPO_AGENTES` cobre `lib/agentes`, a rota interna e
+ * `supabase/migrations` — `scripts/` nunca esteve nele.
+ *
+ * `lib/agentes/conexoes/agregador.ts` tambem NAO entra: ele ainda nao
+ * existe, e declarar arquivo futuro abriria uma vaga franca no G11 antes
+ * de qualquer gate autorizar o modulo.
+ */
+const ARQUIVOS_SKILL_1DE: readonly string[] = [
+  // Batching da camada autoritativa de conexoes (1D.e-B1). Zero migration
+  // nesta frente — nada foi acrescentado a lista de migrations.
+  "lib/agentes/conexoes/fatos.ts",
+  // O agregador (1D.e-B2): compoe Skills -> selecoes -> conexoes com UMA
+  // leitura de lojas. Nao abre banco e nao cita tabela — por isso o I1 de
+  // `g1` continua com os mesmos dois arquivos.
+  "lib/agentes/conexoes/agregador.ts",
+];
+
 /** Uniao EXPLICITA. Qualquer caminho fora dela reprova o G11. */
 const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_1DD,
@@ -797,6 +825,7 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_SKILL_1DF1,
   ...ARQUIVOS_SKILL_1DF2,
   ...ARQUIVOS_SKILL_1DG,
+  ...ARQUIVOS_SKILL_1DE,
 ];
 
 /**

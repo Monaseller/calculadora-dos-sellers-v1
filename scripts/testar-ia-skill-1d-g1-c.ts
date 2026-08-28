@@ -395,7 +395,18 @@ async function principal(): Promise<void> {
   };
   varrer("lib");
   varrer("app");
-  ok("N1  zero consumidor de producao", alvos.length === 0, alvos.join(", "));
+  // A 1D.e-B2 trouxe o primeiro consumidor superior desta leitura. A
+  // guarda deixa de exigir ZERO e passa a exigir EXATAMENTE ESTE: a
+  // allowlist e nominal, comparada por igualdade de caminho, entao um
+  // segundo consumidor — mesmo dentro de `lib/agentes/conexoes/` —
+  // continua reprovando. Trocar por prefixo abriria a pasta inteira.
+  const CONSUMIDORES_AUTORIZADOS: readonly string[] = ["lib/agentes/conexoes/agregador.ts"];
+  const naoAutorizados = alvos.filter((a) => !CONSUMIDORES_AUTORIZADOS.includes(a));
+  ok("N1  so o agregador consome resolverSelecoesDoAgente",
+    naoAutorizados.length === 0 &&
+      JSON.stringify(alvos.slice().sort()) ===
+        JSON.stringify([...CONSUMIDORES_AUTORIZADOS].sort()),
+    alvos.join(", "));
   ok("N2  ANCORA: a varredura leu arquivos de verdade",
     existsSync(join(RAIZ, "lib/agentes/conexoes/fatos.ts")));
   ok("N3  diagnostico.ts nao foi tocado — sem falta_selecao ainda",

@@ -79,10 +79,11 @@ ok("A2  fatos.ts existe", existe("lib/agentes/conexoes/fatos.ts"));
 // `selecao-fatos` (a leitura da selecao de loja) e a 1D.g.2-B somou
 // `selecao-escrita`. O conjunto continua FECHADO e conferido pelo nome:
 // contar arquivos aceitaria qualquer modulo novo; comparar a lista
-// ordenada so aceita exatamente estes cinco.
-ok("A3  a pasta tem exatamente os 5 modulos previstos",
+// ordenada so aceita exatamente estes seis. A 1D.e-B2 somou
+// `agregador.ts`, que compoe as tres leituras sem abrir banco.
+ok("A3  a pasta tem exatamente os 6 modulos previstos",
   JSON.stringify(readdirSync(join(RAIZ, "lib/agentes/conexoes")).sort()) ===
-    JSON.stringify(["estado.ts", "fatos.ts", "selecao-escrita.ts", "selecao-estado.ts", "selecao-fatos.ts"]),
+    JSON.stringify(["agregador.ts", "estado.ts", "fatos.ts", "selecao-escrita.ts", "selecao-estado.ts", "selecao-fatos.ts"]),
   readdirSync(join(RAIZ, "lib/agentes/conexoes")).sort().join(", "));
 ok("A4  estado.ts NAO e server-only (por isso esta suite o executa)",
   !/server-only/.test(CODIGO_ESTADO));
@@ -107,8 +108,13 @@ ok("B5  nao-string -> null",
   plataformaDeMarketplace(null) === null && plataformaDeMarketplace(7) === null);
 ok("B6  fatos.ts confere a plataforma contra o dado real",
   /linhaBruta\.marketplace !== marketplaceEsperado/.test(CODIGO_FATOS));
-ok("B7  plataforma divergente devolve AUSENTE, nao um fato",
-  /marketplace !== marketplaceEsperado\) return AUSENTE/.test(CODIGO_FATOS));
+// A comparacao migrou para o helper puro `fatoDaLinha` na 1D.e-B1, que
+// devolve `null` — e e o chamador que traduz `null` em AUSENTE. Esta
+// guarda cobre SO o helper: fazer o regex atravessar helper + chamador
+// criaria sonda fragil sobre duas funcoes. Que o resultado publico seja
+// ausencia e provado comportamentalmente em `testar-ia-skill-1d-e.ts`.
+ok("B7  plataforma divergente nao produz fato no helper",
+  /marketplace !== marketplaceEsperado\) return null/.test(CODIGO_FATOS));
 ok("B8  plataforma desconhecida nem toca o banco",
   CODIGO_FATOS.indexOf("marketplaceEsperado === null") < CODIGO_FATOS.indexOf(".from(\"lojas\")"));
 

@@ -416,13 +416,14 @@ ok("J2  lib/ia/skills continua com 3 modulos",
   readdirSync(join(RAIZ, "lib/ia/skills")).length === 3);
 ok("J3  lib/agentes/permissoes intocada — 2 modulos",
   readdirSync(join(RAIZ, "lib/agentes/permissoes")).length === 2);
-// O par `selecao-*` e da 1D.g.1-C e `selecao-escrita` e da 1D.g.2-B. Esta
+// O par `selecao-*` e da 1D.g.1-C, `selecao-escrita` da 1D.g.2-B e
+// `agregador` da 1D.e-B2. Esta
 // fase continua provando o que lhe cabe — que a leitura de Skills nao
 // criou modulo em conexoes — e pelo conjunto nominal, que nao afrouxa
 // quando o total muda.
-ok("J4  lib/agentes/conexoes com o conjunto exato de 5 modulos — nenhum e da 1D.f.2",
+ok("J4  lib/agentes/conexoes com o conjunto exato de 6 modulos — nenhum e da 1D.f.2",
   JSON.stringify(readdirSync(join(RAIZ, "lib/agentes/conexoes")).sort()) ===
-    JSON.stringify(["estado.ts", "fatos.ts", "selecao-escrita.ts", "selecao-estado.ts", "selecao-fatos.ts"]),
+    JSON.stringify(["agregador.ts", "estado.ts", "fatos.ts", "selecao-escrita.ts", "selecao-estado.ts", "selecao-fatos.ts"]),
   readdirSync(join(RAIZ, "lib/agentes/conexoes")).sort().join(", "));
 ok("J5  nenhum modulo novo importa React ou UI",
   !/from "react"|components\//.test(CODIGO_ESTADO + CODIGO_FATOS));
@@ -443,8 +444,16 @@ ok("J5  nenhum modulo novo importa React ou UI",
     };
     return varrer(raiz);
   });
-  ok(`J6  zero consumidor de producao nesta fase (${chamadores.join(", ") || "nenhum"})`,
-    chamadores.length === 0);
+  // A 1D.e-B2 tornou o agregador o primeiro consumidor superior desta
+  // leitura. A exigencia deixa de ser ZERO e passa a ser EXATAMENTE
+  // ESTE — allowlist nominal, por igualdade de caminho. Um segundo
+  // consumidor volta a reprovar; prefixo ou pasta inteira nao.
+  const CONSUMIDORES_AUTORIZADOS: readonly string[] = ["lib/agentes/conexoes/agregador.ts"];
+  const naoAutorizados = chamadores.filter((c) => !CONSUMIDORES_AUTORIZADOS.includes(c));
+  ok(`J6  so o agregador consome resolverSkillsDoAgente (${chamadores.join(", ") || "nenhum"})`,
+    naoAutorizados.length === 0 &&
+      JSON.stringify(chamadores.slice().sort()) ===
+        JSON.stringify([...CONSUMIDORES_AUTORIZADOS].sort()));
 }
 
 // ─── Placar ───────────────────────────────────────────────────────────

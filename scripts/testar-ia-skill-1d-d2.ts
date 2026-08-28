@@ -423,13 +423,13 @@ ok("P1  diagnostico.ts continua sem mencionar agente_permissoes",
   !/agente_permissoes/.test(ler("lib/ia/skills/diagnostico.ts")));
 ok("P2  lib/ia/skills continua com 3 modulos",
   readdirSync(join(RAIZ, "lib/ia/skills")).length === 3);
-// O par `selecao-*` e da 1D.g.1-C e `selecao-escrita` e da 1D.g.2-B, nao
-// desta fase. Conferir o conjunto nominal — e nao o total — mantem a
+// O par `selecao-*` e da 1D.g.1-C, `selecao-escrita` da 1D.g.2-B e
+// `agregador` da 1D.e-B2 — nenhum desta fase. Conferir o conjunto nominal — e nao o total — mantem a
 // guarda dizendo o que ela sempre quis dizer: nenhum modulo DESTA fase
 // foi parar em conexoes.
-ok("P3  lib/agentes/conexoes com o conjunto exato de 5 modulos — nenhum e da 1D.d",
+ok("P3  lib/agentes/conexoes com o conjunto exato de 6 modulos — nenhum e da 1D.d",
   JSON.stringify(readdirSync(join(RAIZ, "lib/agentes/conexoes")).sort()) ===
-    JSON.stringify(["estado.ts", "fatos.ts", "selecao-escrita.ts", "selecao-estado.ts", "selecao-fatos.ts"]),
+    JSON.stringify(["agregador.ts", "estado.ts", "fatos.ts", "selecao-escrita.ts", "selecao-estado.ts", "selecao-fatos.ts"]),
   readdirSync(join(RAIZ, "lib/agentes/conexoes")).sort().join(", "));
 ok("P4  lib/agentes/funcoes intocada — so o registry",
   JSON.stringify(readdirSync(join(RAIZ, "lib/agentes/funcoes")).sort()) ===

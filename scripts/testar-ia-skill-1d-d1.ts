@@ -326,14 +326,14 @@ ok("N4  registry de Funcoes intocado — 1 Funcao real",
   (ler("lib/agentes/funcoes/registry.ts").match(/": Object\.freeze/g) ?? []).length === 1);
 ok("N5  diagnostico.ts nao menciona agente_permissoes",
   !/agente_permissoes/.test(ler("lib/ia/skills/diagnostico.ts")));
-// A pasta de conexoes ganhou o par `selecao-*` na 1D.g.1-C e
-// `selecao-escrita` na 1D.g.2-B. O que esta fase precisa provar nao e
+// A pasta de conexoes ganhou o par `selecao-*` na 1D.g.1-C,
+// `selecao-escrita` na 1D.g.2-B e `agregador` na 1D.e-B2. O que esta fase precisa provar nao e
 // "nada mudou desde a 1D.c" — isso ja e falso — e sim que a 1D.d nao
 // deixou modulo proprio la. Por isso o conjunto nominal exato, e nao a
 // contagem.
-ok("N6  conexoes com o conjunto exato de 5 modulos — nenhum e da 1D.d",
+ok("N6  conexoes com o conjunto exato de 6 modulos — nenhum e da 1D.d",
   JSON.stringify(readdirSync(join(RAIZ, "lib/agentes/conexoes")).sort()) ===
-    JSON.stringify(["estado.ts", "fatos.ts", "selecao-escrita.ts", "selecao-estado.ts", "selecao-fatos.ts"]),
+    JSON.stringify(["agregador.ts", "estado.ts", "fatos.ts", "selecao-escrita.ts", "selecao-estado.ts", "selecao-fatos.ts"]),
   readdirSync(join(RAIZ, "lib/agentes/conexoes")).sort().join(", "));
 ok("N7  lib/ia/skills continua com 3 modulos",
   readdirSync(join(RAIZ, "lib/ia/skills")).length === 3);

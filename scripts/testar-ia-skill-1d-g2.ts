@@ -176,9 +176,12 @@ secao("A. Um modulo de producao, server-only, sem autoridade extra");
 
 ok("A1  selecao-escrita.ts existe", existsSync(join(RAIZ, "lib/agentes/conexoes/selecao-escrita.ts")));
 ok("A2  E server-only", /import "server-only"/.test(CODIGO_ESCRITA));
-ok("A3  a pasta tem exatamente os 5 modulos previstos",
+// A 1D.e-B2 somou `agregador.ts`, que compoe as tres leituras sem abrir
+// banco. O conjunto continua conferido pelo NOME: contar aceitaria
+// qualquer setimo modulo; a lista ordenada so aceita exatamente estes.
+ok("A3  a pasta tem exatamente os 6 modulos previstos",
   JSON.stringify(readdirSync(join(RAIZ, "lib/agentes/conexoes")).sort()) ===
-    JSON.stringify(["estado.ts", "fatos.ts", "selecao-escrita.ts", "selecao-estado.ts", "selecao-fatos.ts"]),
+    JSON.stringify(["agregador.ts", "estado.ts", "fatos.ts", "selecao-escrita.ts", "selecao-estado.ts", "selecao-fatos.ts"]),
   readdirSync(join(RAIZ, "lib/agentes/conexoes")).sort().join(", "));
 ok("A4  nenhum segundo modulo de producao desta fase",
   !existsSync(join(RAIZ, "lib/agentes/conexoes/selecao-escrita-helpers.ts")) &&
