@@ -423,8 +423,13 @@ ok("P1  diagnostico.ts continua sem mencionar agente_permissoes",
   !/agente_permissoes/.test(ler("lib/ia/skills/diagnostico.ts")));
 ok("P2  lib/ia/skills continua com 3 modulos",
   readdirSync(join(RAIZ, "lib/ia/skills")).length === 3);
-ok("P3  lib/agentes/conexoes intocada — 2 modulos",
-  readdirSync(join(RAIZ, "lib/agentes/conexoes")).length === 2);
+// O par `selecao-*` e da 1D.g.1-C, nao desta fase. Conferir o conjunto
+// nominal — e nao o total — mantem a guarda dizendo o que ela sempre quis
+// dizer: nenhum modulo DESTA fase foi parar em conexoes.
+ok("P3  lib/agentes/conexoes com o conjunto exato de 4 modulos — nenhum e da 1D.d",
+  JSON.stringify(readdirSync(join(RAIZ, "lib/agentes/conexoes")).sort()) ===
+    JSON.stringify(["estado.ts", "fatos.ts", "selecao-estado.ts", "selecao-fatos.ts"]),
+  readdirSync(join(RAIZ, "lib/agentes/conexoes")).sort().join(", "));
 ok("P4  lib/agentes/funcoes intocada — so o registry",
   JSON.stringify(readdirSync(join(RAIZ, "lib/agentes/funcoes")).sort()) ===
     JSON.stringify(["registry.ts"]));

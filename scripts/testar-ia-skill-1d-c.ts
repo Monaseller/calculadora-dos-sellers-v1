@@ -75,9 +75,14 @@ secao("A. Dois modulos, e so a regra e importavel");
 
 ok("A1  estado.ts existe", existe("lib/agentes/conexoes/estado.ts"));
 ok("A2  fatos.ts existe", existe("lib/agentes/conexoes/fatos.ts"));
-ok("A3  a pasta tem exatamente 2 modulos",
+// A pasta cresceu na 1D.g.1-C, que somou o par `selecao-*` (a leitura da
+// selecao explicita de loja). O conjunto continua FECHADO e conferido pelo
+// nome: contar arquivos aceitaria qualquer quarto modulo; comparar a lista
+// ordenada so aceita exatamente estes quatro.
+ok("A3  a pasta tem exatamente os 4 modulos previstos",
   JSON.stringify(readdirSync(join(RAIZ, "lib/agentes/conexoes")).sort()) ===
-    JSON.stringify(["estado.ts", "fatos.ts"]));
+    JSON.stringify(["estado.ts", "fatos.ts", "selecao-estado.ts", "selecao-fatos.ts"]),
+  readdirSync(join(RAIZ, "lib/agentes/conexoes")).sort().join(", "));
 ok("A4  estado.ts NAO e server-only (por isso esta suite o executa)",
   !/server-only/.test(CODIGO_ESTADO));
 ok("A5  fatos.ts E server-only", /import "server-only"/.test(CODIGO_FATOS));

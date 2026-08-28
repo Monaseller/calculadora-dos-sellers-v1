@@ -568,6 +568,34 @@ const ARQUIVOS_SKILL_1DF1: readonly string[] = [
 ];
 
 /**
+ * SKILL-1D.g — selecao EXPLICITA de loja.
+ *
+ * Grupo proprio da frente. Na g.1-A a migration foi declarada dentro de
+ * `ARQUIVOS_SKILL_1DF1` por ser a lista que terminava ali — nome errado
+ * para conteudo certo. Corrigido aqui: mesma declaracao explicita, na
+ * lista que a nomeia.
+ *
+ * A migration cai no escopo porque `ESCOPO_AGENTES` cobre
+ * `supabase/migrations` inteiro; os dois modulos caem pelo caminho mais
+ * direto, porque `lib/agentes` E o escopo.
+ *
+ * `selecao-estado.ts` e puro e `selecao-fatos.ts` e `server-only`. A
+ * suite propria da fase e `scripts/testar-ia-skill-1d-g1-c.ts`, fora do
+ * escopo porque `scripts/` nunca esteve em `ESCOPO_AGENTES` — aquele
+ * inventario filtra por `startsWith("testar-agentes-")`, e este nome nao
+ * casa. Verificado, nao suposto.
+ */
+const ARQUIVOS_SKILL_1DG: readonly string[] = [
+  // Aplicada como versao 20260828161453. O pertencimento dela a frente
+  // esta em `MIGRATIONS_DA_SKILL_1DG` — afirmacao DURAVEL, que nao muda
+  // de valor quando a frente for publicada.
+  "supabase/migrations/20260925_agente_conexoes.sql",
+  // A LEITURA da selecao. Nao escolhe loja: le escolhas ja persistidas.
+  "lib/agentes/conexoes/selecao-estado.ts",
+  "lib/agentes/conexoes/selecao-fatos.ts",
+];
+
+/**
  * SKILL-1D.f.2 — a LEITURA das Skills associadas ao agente, mais
  * `escrita.ts`, o write path acrescentado pela SKILL-1D.f.3-A.
  *
@@ -716,6 +744,28 @@ const MIGRATIONS_DA_SKILL_1DF4: readonly string[] = [
 ];
 
 /**
+ * MIGRATIONS da SKILL-1D.g — selecao EXPLICITA de loja.
+ *
+ * Mesma NATUREZA de `MIGRATIONS_DA_SKILL_1DF4`, e pelo mesmo motivo:
+ * afirma PERTENCIMENTO, nao situacao do git. `agente_conexoes` e da
+ * frente 1D.g, e continua sendo depois do commit e do push — enquanto
+ * "esta no disco e ainda nao no HEAD" viraria falso no dia da
+ * publicacao.
+ *
+ * Lista separada por frente, e nao uma unica lista global, para que cada
+ * publicacao mexa so na sua. Nome a nome, sem glob.
+ */
+const MIGRATIONS_DA_SKILL_1DG: readonly string[] = [
+  // `agente_conexoes` — a selecao (agente, plataforma, recurso) -> loja.
+  // Fecha o blocker da 1D.e: `resolverFatoConexao` EXIGE `lojaId` e se
+  // recusa a escolher, e ate agora ninguem persistia essa escolha.
+  // Aplicada UMA vez no gate g.1-B, como versao 20260828161453. Continua
+  // listada aqui por PERTENCIMENTO a frente, nao por estado de aplicacao
+  // — que e justamente o que esta lista nao mede.
+  "20260925_agente_conexoes.sql",
+];
+
+/**
  * Inventario acumulado de `lib/agentes/ia/`, por frente.
  *
  * O guarda de disco (G11l) compara contra ESTA uniao, nunca contra uma
@@ -737,6 +787,7 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_SKILL_1DD2,
   ...ARQUIVOS_SKILL_1DF1,
   ...ARQUIVOS_SKILL_1DF2,
+  ...ARQUIVOS_SKILL_1DG,
 ];
 
 /**
@@ -1478,7 +1529,9 @@ async function main() {
     // a de pertencimento a f.4. Nenhuma das duas e wildcard, e uma
     // migration fora das duas continua reprovando.
     const declarada = (m: string) =>
-      MIGRATIONS_NO_DISCO_NAO_COMMITADAS.includes(m) || MIGRATIONS_DA_SKILL_1DF4.includes(m);
+      MIGRATIONS_NO_DISCO_NAO_COMMITADAS.includes(m) ||
+      MIGRATIONS_DA_SKILL_1DF4.includes(m) ||
+      MIGRATIONS_DA_SKILL_1DG.includes(m);
 
     ok(`G12b nenhuma migration nao declarada no disco (${novasNoDisco.join(", ") || "nenhuma"})`,
        novasNoDisco.every(declarada));

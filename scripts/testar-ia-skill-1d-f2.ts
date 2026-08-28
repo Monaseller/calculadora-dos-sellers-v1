@@ -416,8 +416,13 @@ ok("J2  lib/ia/skills continua com 3 modulos",
   readdirSync(join(RAIZ, "lib/ia/skills")).length === 3);
 ok("J3  lib/agentes/permissoes intocada — 2 modulos",
   readdirSync(join(RAIZ, "lib/agentes/permissoes")).length === 2);
-ok("J4  lib/agentes/conexoes intocada — 2 modulos",
-  readdirSync(join(RAIZ, "lib/agentes/conexoes")).length === 2);
+// O par `selecao-*` e da 1D.g.1-C. Esta fase continua provando o que lhe
+// cabe — que a leitura de Skills nao criou modulo em conexoes — e agora
+// pelo conjunto nominal, que nao afrouxa quando o total muda.
+ok("J4  lib/agentes/conexoes com o conjunto exato de 4 modulos — nenhum e da 1D.f.2",
+  JSON.stringify(readdirSync(join(RAIZ, "lib/agentes/conexoes")).sort()) ===
+    JSON.stringify(["estado.ts", "fatos.ts", "selecao-estado.ts", "selecao-fatos.ts"]),
+  readdirSync(join(RAIZ, "lib/agentes/conexoes")).sort().join(", "));
 ok("J5  nenhum modulo novo importa React ou UI",
   !/from "react"|components\//.test(CODIGO_ESTADO + CODIGO_FATOS));
 {
