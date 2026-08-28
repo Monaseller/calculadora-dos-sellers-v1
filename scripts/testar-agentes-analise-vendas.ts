@@ -557,6 +557,32 @@ const ARQUIVOS_SKILL_1DF1: readonly string[] = [
   "supabase/migrations/20260923_skills_formato_fail_closed.sql",
 ];
 
+/**
+ * SKILL-1D.f.2 — a LEITURA das Skills associadas ao agente.
+ *
+ * Pasta NOVA em `lib/agentes/`, inteiramente untracked: o porcelain a
+ * colapsa em `?? lib/agentes/skills/`, o mesmo buraco ja medido em
+ * `ARQUIVOS_1EA` e repetido em `ARQUIVOS_SKILL_1DD2`. Aceitar so a forma
+ * colapsada abriria uma pasta franca dentro do escopo dos agentes.
+ *
+ * Por isso as duas formas entram aqui E o conteudo e enumerado do disco
+ * em G11z4. Os dois andam juntos: quem remover um tem de remover o
+ * outro, ou o guarda fica cego sem que nenhum teste reclame.
+ *
+ * A suite propria da fase e `scripts/testar-ia-skill-1d-f2.ts`, e ela
+ * NAO entra em `SUITES_AGENTES`: aquele inventario filtra por
+ * `startsWith("testar-agentes-")`, e este nome nao casa.
+ */
+const ARQUIVOS_SKILLS_1DF2: readonly string[] = [
+  "estado.ts",
+  "fatos.ts",
+];
+
+const ARQUIVOS_SKILL_1DF2: readonly string[] = [
+  "lib/agentes/skills/",
+  ...ARQUIVOS_SKILLS_1DF2.map((nome) => `lib/agentes/skills/${nome}`),
+];
+
 const ARQUIVOS_PERMISSOES_1DD2: readonly string[] = [
   "estado.ts",
   "fatos.ts",
@@ -663,6 +689,7 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_SKILL_1DD1,
   ...ARQUIVOS_SKILL_1DD2,
   ...ARQUIVOS_SKILL_1DF1,
+  ...ARQUIVOS_SKILL_1DF2,
 ];
 
 /**
@@ -703,6 +730,11 @@ function soAutorizadosDentroDeIa(nomes: readonly string[]): boolean {
 /** PREDICADO de G11x — o mesmo par, para `lib/agentes/permissoes/` (1D.d.2). */
 function soAutorizadosDentroDePermissoes(nomes: readonly string[]): boolean {
   return mesmoConjuntoDeNomes(nomes, ARQUIVOS_PERMISSOES_1DD2);
+}
+
+/** PREDICADO de G11z4 — o mesmo par, para `lib/agentes/skills/` (1D.f.2). */
+function soAutorizadosDentroDeSkills(nomes: readonly string[]): boolean {
+  return mesmoConjuntoDeNomes(nomes, ARQUIVOS_SKILLS_1DF2);
 }
 
 /**
@@ -1350,6 +1382,23 @@ async function main() {
        !soAutorizadosDentroDePermissoes(ARQUIVOS_PERMISSOES_1DD2.slice(1)));
     ok("G11z2 CONTROLE NEGATIVO: arquivo expandido NAO declarado em permissoes/ reprova",
        !soAutorizadosNoEscopo("?? lib/agentes/permissoes/_intruso.ts\n"));
+
+    // ── G11z4..G11z8 — o MESMO par, para lib/agentes/skills/ ───────
+    // Pasta nova da SKILL-1D.f.2, hoje inteiramente untracked: o
+    // porcelain a colapsa exatamente como colapsou `ia/` e `permissoes/`.
+    // Sem estes asserts, declarar a forma colapsada abriria a pasta.
+    const conteudoSkills = readdirSync(join(RAIZ, "lib", "agentes", "skills")).sort();
+
+    ok("G11z4 lib/agentes/skills contem exatamente os 2 modulos declarados",
+       soAutorizadosDentroDeSkills(conteudoSkills));
+    ok("G11z5 ANCORA: o diretorio foi mesmo lido e nao veio vazio",
+       conteudoSkills.length === ARQUIVOS_SKILLS_1DF2.length && conteudoSkills.length > 0);
+    ok("G11z6 CONTROLE NEGATIVO: um arquivo A MAIS em skills/ reprova",
+       !soAutorizadosDentroDeSkills([...ARQUIVOS_SKILLS_1DF2, "_intruso.ts"]));
+    ok("G11z7 CONTROLE NEGATIVO: arquivo FALTANDO em skills/ reprova",
+       !soAutorizadosDentroDeSkills(ARQUIVOS_SKILLS_1DF2.slice(1)));
+    ok("G11z8 CONTROLE NEGATIVO: arquivo expandido NAO declarado em skills/ reprova",
+       !soAutorizadosNoEscopo("?? lib/agentes/skills/_intruso.ts\n"));
 
     // ── G11t..G11w — `scripts/` nunca esteve em ESCOPO_AGENTES ─────
     // Medido na 1E-a: uma suite de agentes inesperada em `scripts/`

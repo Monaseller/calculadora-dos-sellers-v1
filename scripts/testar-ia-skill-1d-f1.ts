@@ -441,8 +441,31 @@ secao("P. A fase nao tocou banco nem criou caminho de escrita");
     existeBanco && recorteValido && semDDL && semAplicador && verificaHistorico,
     `existe=${existeBanco} recorte=${recorteValido} semDDL=${semDDL} semAplicador=${semAplicador} historico=${verificaHistorico}`);
 }
-ok("P2  nenhum modulo de leitura foi criado (1D.f.2)",
-  !existe("lib/agentes/skills"));
+{
+  // SENTINELA TEMPORAL, ATUALIZADA — mesma historia de P1 acima.
+  //
+  // Nasceu afirmando que `lib/agentes/skills/` NAO existia: era a
+  // fronteira da 1D.f.1, que criou o SCHEMA e nao a leitura. A 1D.f.2
+  // criou a leitura, entao a afirmacao mudou; o que ela guarda, nao.
+  //
+  // A fronteira que continua valendo e: a fase do SCHEMA nao trouxe
+  // caminho de escrita nem consumidor. Por isso o assert passa a exigir
+  // que o modulo de leitura exista E continue sendo so leitura — o que e
+  // mais forte que um `existsSync` negativo, porque inspeciona codigo.
+  const CAMINHO_LEITURA = "lib/agentes/skills/fatos.ts";
+  const existeLeitura = existe(CAMINHO_LEITURA);
+  const codigo = existeLeitura
+    ? ler(CAMINHO_LEITURA).replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "")
+    : "";
+
+  const semEscrita = !/\.(insert|update|delete|upsert|rpc)\(/.test(codigo);
+  const serverOnly = /import "server-only"/.test(codigo);
+  const semDDL = !/\b(create|drop|alter)\s+table\b/i.test(codigo);
+
+  ok("P2  o modulo de leitura da 1D.f.2 existe e continua SO leitura",
+    existeLeitura && codigo.length > 500 && semEscrita && serverOnly && semDDL,
+    `existe=${existeLeitura} semEscrita=${semEscrita} serverOnly=${serverOnly} semDDL=${semDDL}`);
+}
 ok("P3  lib/ia/skills continua com 3 modulos",
   readdirSync(join(RAIZ, "lib/ia/skills")).length === 3);
 ok("P4  lib/agentes/permissoes intocada — 2 modulos",
