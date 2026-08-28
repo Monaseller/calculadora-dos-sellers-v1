@@ -540,10 +540,35 @@ async function principal(): Promise<void> {
   ok("N1  o unico .update( e o do hash, nenhum no cliente Supabase",
     (CODIGO.match(/\.update\(/g) ?? []).length === 1 &&
       /createHash\("sha256"\)\.update\(/.test(CODIGO));
-  ok("N2  a palavra vigente nao aparece no CODIGO", !/vigente/.test(CODIGO));
-  ok("N3  nenhuma funcao de promocao exportada",
-    !/promover|despromover|setVigente|trocarVigente/i.test(CODIGO));
-  ok("N4  nenhum .rpc(", !/\.rpc\(/.test(CODIGO));
+  // ── N2..N4 — invertidos pela SKILL-1D.f.4-C ──────────────────────
+  //
+  // Estes tres afirmavam o estado PRE-f.4: "vigente nao aparece",
+  // "nenhuma funcao de promocao", "nenhum .rpc(". A f.4 criou a RPC
+  // atomica `promover_skill_vigente` e a chamou daqui, entao as tres
+  // afirmacoes viraram falsas POR DESENHO — mesma inversao ja feita em
+  // P1/P2 e em A3.
+  //
+  // Nao foram removidos: o que era uma NEGATIVA ("promocao nao existe")
+  // vira uma restricao mais forte ("a promocao existe e so pode
+  // acontecer por UM caminho"). A negativa protegia enquanto a feature
+  // nao existia; a restricao protege agora que ela existe.
+  ok("N2  a promocao de vigente e explicita e nomeada",
+    /promoverSkillVigente/.test(CODIGO) && /promover_skill_vigente/.test(CODIGO));
+  ok("N3  promoverSkillVigente e exportada",
+    /export async function promoverSkillVigente/.test(CODIGO));
+  // O modulo chama a RPC pela constante `RPC_PROMOVER`, nao por literal
+  // inline — mesmo estilo de `TABELA_SKILLS`. A sonda segue as duas
+  // pontas: a chamada usa a constante, e a constante vale o nome certo.
+  ok("N4  a promocao passa EXCLUSIVAMENTE pela RPC — uma, e so uma",
+    (CODIGO.match(/\.rpc\(/g) ?? []).length === 1 &&
+      /\.rpc\(RPC_PROMOVER,/.test(CODIGO) &&
+      /const RPC_PROMOVER = "promover_skill_vigente"/.test(CODIGO));
+  ok("N4a nenhuma promocao por .update( direto",
+    (CODIGO.match(/\.update\(/g) ?? []).length === 1 &&
+      /createHash\("sha256"\)\.update\(/.test(CODIGO));
+  ok("N4b CONTROLE: as sondas acusariam uma segunda RPC ou um update de vigente",
+    ('.rpc(a) .rpc(b)'.match(/\.rpc\(/g) ?? []).length === 2 &&
+      /\.update\(\{\s*vigente/.test('.update({ vigente: true })'));
   ok("N5  um unico .delete(, e ele e da associacao",
     (CODIGO.match(/\.delete\(/g) ?? []).length === 1 &&
       /TABELA_ASSOCIACOES\)\s*\.delete\(/.test(CODIGO));

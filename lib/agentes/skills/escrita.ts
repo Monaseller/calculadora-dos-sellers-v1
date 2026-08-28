@@ -13,13 +13,16 @@
  *
  * ── O que este modulo NAO faz ───────────────────────────────────────
  *
- * Nao promove `vigente`, nao o despromove, nao o envia no INSERT. A
- * coluna nasce `false` por DEFAULT e continua sendo autoridade do banco.
- * Promover exige despromover a versao anterior no MESMO instante, e o
- * client Supabase nao abre transacao multi-statement: duas `.update()`
- * separadas deixariam o slug sem nenhuma vigente se a segunda falhasse.
- * Isso pertence a SKILL-1D.f.4, com RPC dedicada — nao a um workaround
- * aqui.
+ * Nao escreve `vigente` — nem no INSERT, nem por `.update()`. A coluna
+ * nasce `false` por DEFAULT, e importar nunca promove.
+ *
+ * Promover EXISTE (SKILL-1D.f.4-C), mas nao acontece aqui: exige
+ * despromover a versao anterior no MESMO instante, e o client Supabase
+ * nao abre transacao multi-statement — duas `.update()` separadas
+ * deixariam o slug sem nenhuma vigente se a segunda falhasse. Por isso
+ * `promoverSkillVigente()` nao decide nada: ela apenas chama a RPC
+ * `promover_skill_vigente`, onde as duas UPDATEs vivem na mesma
+ * transacao.
  *
  * Nao apaga Skill (a ACL permite, o escopo nao), nao resolve versao por
  * slug, nao escolhe "a ultima", nao mescla manifestos. E nao tem
@@ -102,6 +105,30 @@ export interface ResultadoAssociar {
 export interface ResultadoDesassociar {
   estado: "desassociada" | "nao_associada" | "entrada_invalida" | "falha_escrita";
 }
+
+/**
+ * Autoridade da promocao: dono e versao. Nao ha `slug` nem `versao`
+ * textual — o slug e DERIVADO da linha alvo dentro da RPC. Aceita-lo de
+ * fora permitiria promover no dominio de um slug com um id que nao
+ * pertence a ele.
+ */
+export interface EntradaPromocao {
+  userId: string;
+  skillId: string;
+}
+
+export interface ResultadoPromover {
+  estado: "promovida" | "ja_vigente" | "nao_disponivel" | "entrada_invalida" | "falha_escrita";
+}
+
+/** Nome da RPC atomica. O TypeScript nao reimplementa nada do que ela faz. */
+const RPC_PROMOVER = "promover_skill_vigente";
+
+/**
+ * O vocabulario que a RPC pode devolver. Qualquer outra coisa e
+ * `falha_escrita` — nunca "provavelmente promoveu".
+ */
+const ESTADOS_DA_RPC: readonly string[] = Object.freeze(["promovida", "ja_vigente", "nao_disponivel"]);
 
 const IMPORTACAO_ENTRADA_INVALIDA: ResultadoImportarSkill = Object.freeze({ estado: "entrada_invalida" as const });
 const IMPORTACAO_CONFLITO: ResultadoImportarSkill = Object.freeze({ estado: "conflito_versao" as const });
@@ -371,4 +398,61 @@ export async function desassociarSkillDoAgente(entrada: EntradaAssociacao): Prom
 
   const removidas = ((r.data ?? []) as unknown[]).length;
   return { estado: removidas > 0 ? "desassociada" : "nao_associada" };
+}
+
+/**
+ * Promove UMA versao a `vigente` dentro da biblioteca do dono.
+ *
+ * ── Esta funcao nao promove nada; ela pede ───────────────────────────
+ *
+ * Toda a decisao vive na RPC: resolver o alvo fechado por dono, derivar
+ * o slug, despromover e promover na MESMA transacao. Aqui nao ha
+ * consulta previa, resolucao de slug, leitura de `vigente` nem qualquer
+ * `.update()` — reimplementar um pedaco disso em TypeScript recriaria
+ * exatamente a janela que a RPC existe para fechar.
+ *
+ * Por isso o modulo faz UMA chamada por invocacao valida. Sem retry e
+ * sem laco: a operacao ou aconteceu inteira, ou nao aconteceu.
+ *
+ * ── Retorno desconhecido e FALHA ─────────────────────────────────────
+ *
+ * `data` fora de `ESTADOS_DA_RPC` — null, texto diferente, objeto, ou
+ * ate `'promovida '` com espaco — vira `falha_escrita`. Nao se normaliza
+ * nem se aproxima: um contrato fechado que aceita "quase" nao e fechado,
+ * e o modo de falha seria dizer que promoveu sem ter promovido.
+ *
+ * ── `02000` NAO e `nao_disponivel` ───────────────────────────────────
+ *
+ * `nao_disponivel` e retorno NORMAL da RPC: o alvo nao existe naquele
+ * tenant, e nada foi escrito. `02000` e o `raise` que a RPC usa quando o
+ * alvo existia na resolucao e sumiu antes da promocao — ele DESFAZ a
+ * despromocao ja aplicada. Traduzir um no outro esconderia uma corrida
+ * real atras de uma resposta de rotina. Todo erro, esse inclusive, e
+ * `falha_escrita`.
+ */
+export async function promoverSkillVigente(entrada: EntradaPromocao): Promise<ResultadoPromover> {
+  const { userId, skillId } = entrada;
+
+  // Sem dono ou sem alvo nao ha o que promover. Zero RPC.
+  if (!userId || !skillId) return { estado: "entrada_invalida" };
+
+  const r = await getSupabaseServidor().rpc(RPC_PROMOVER, {
+    p_user_id: userId,
+    p_skill_id: skillId,
+  });
+
+  if (r.error) {
+    console.error(`[skills] falha ao promover Skill (sqlstate ${codigoDe(r.error) ?? "desconhecido"})`);
+    return { estado: "falha_escrita" };
+  }
+
+  const devolvido: unknown = r.data;
+  if (typeof devolvido !== "string" || !ESTADOS_DA_RPC.includes(devolvido)) {
+    // Nao se registra o valor recebido: ele vem do banco e nao pertence
+    // ao log desta camada.
+    console.error("[skills] retorno fora do contrato da RPC de promocao");
+    return { estado: "falha_escrita" };
+  }
+
+  return { estado: devolvido as ResultadoPromover["estado"] };
 }

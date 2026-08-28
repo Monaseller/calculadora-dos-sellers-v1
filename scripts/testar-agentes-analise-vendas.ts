@@ -555,6 +555,16 @@ const ARQUIVOS_SKILL_1DF1: readonly string[] = [
   // da 1D.f.1b-C, nao pela suite estrutural — que passava, porque verifica
   // o texto declarado.
   "supabase/migrations/20260923_skills_formato_fail_closed.sql",
+  // SKILL-1D.f.4-A — RPC `promover_skill_vigente`. Promover exige
+  // despromover a versao anterior no MESMO instante, e o cliente Supabase
+  // nao abre transacao multi-statement: as duas UPDATEs so podem viver
+  // juntas dentro de uma funcao. Cai aqui pelo mesmo motivo das duas
+  // acima — `ESCOPO_AGENTES` cobre `supabase/migrations` inteiro.
+  // Declarada nome a nome; o guarda continua reprovando migration nao
+  // prevista. Aplicada como versao 20260828131734. O pertencimento dela a
+  // f.4 e declarado em `MIGRATIONS_DA_SKILL_1DF4` — afirmacao DURAVEL,
+  // que nao muda de valor quando a frente for publicada.
+  "supabase/migrations/20260924_skills_promover_vigente.sql",
 ];
 
 /**
@@ -639,6 +649,11 @@ const ARQUIVOS_SKILL_1DD1: readonly string[] = [
  * explicita, e o proprio cabecalho do arquivo diz isso.
  */
 const MIGRATIONS_NO_DISCO_NAO_COMMITADAS: readonly string[] = [
+  // A migration da SKILL-1D.f.4 NAO entra aqui. Esta lista descreve um
+  // estado TRANSITORIO do git ("esta no disco e ainda nao no HEAD"), e
+  // esse estado deixa de valer no instante em que a f.4 e publicada.
+  // Ela vive em `MIGRATIONS_DA_SKILL_1DF4`, que afirma PERTENCIMENTO —
+  // verdadeiro antes e depois do commit.
   "20260919_agentes_ia_chamadas.sql",
   // Corretiva de grants: o `grant select, insert` da criacao NAO tornou
   // a tabela append-only, porque GRANT e aditivo e o projeto concede
@@ -668,6 +683,36 @@ const MIGRATIONS_NO_DISCO_NAO_COMMITADAS: readonly string[] = [
   // NAO APLICADA: aplicar exige autorizacao separada. Enquanto isso, o
   // defeito segue vivo no banco — manifesto sem `formato` e aceito.
   "20260923_skills_formato_fail_closed.sql",
+];
+
+/**
+ * MIGRATIONS da SKILL-1D.f.4 — declaracao DURAVEL.
+ *
+ * A diferenca para `MIGRATIONS_NO_DISCO_NAO_COMMITADAS` nao e de forma,
+ * e de NATUREZA. Aquela lista descreve uma situacao do git que muda
+ * sozinha: "esta no disco e ainda nao no HEAD". No dia em que a frente e
+ * publicada, a afirmacao vira falsa e o guarda passa a declarar um
+ * estado que nao existe mais.
+ *
+ * Esta lista afirma PERTENCIMENTO: esta migration e da f.4, e conhecida
+ * pelo guarda e e esperada aqui. Isso continua verdadeiro antes do
+ * commit, depois do commit e depois do push — a frase nao depende de
+ * onde o arquivo esta no git.
+ *
+ * O efeito pratico no G12b: antes da publicacao a migration aparece em
+ * `novasNoDisco` e e aceita por ESTA lista; depois, ela esta no HEAD e
+ * nem chega a aparecer. Nos dois estados o assert passa pelo motivo
+ * certo, e qualquer OUTRA migration nao declarada continua reprovando.
+ *
+ * Nome a nome, como todas as allowlists desta suite. Sem `20260924*`,
+ * sem `skills_*`, sem glob.
+ */
+const MIGRATIONS_DA_SKILL_1DF4: readonly string[] = [
+  // RPC `promover_skill_vigente(text, uuid)`. Aplicada como versao
+  // 20260828131734 e provada em runtime na 1D.f.4-L: session mode com
+  // tres backends distintos, `pg_blocking_pids(pid2)` contendo pid1 e
+  // `wait_event_type = Lock`.
+  "20260924_skills_promover_vigente.sql",
 ];
 
 /**
@@ -1429,13 +1474,34 @@ async function main() {
     // qualquer coisa — que e exatamente o defeito do G12 antigo.
     ok("G12 ANCORA: o HEAD conhece dezenas de migrations", head.length > 40);
     ok("G12a ANCORA: o disco tambem tem migrations", disco.length > 40);
+    // Aceita por DUAS listas explicitas: a transitoria (disco sem HEAD) e
+    // a de pertencimento a f.4. Nenhuma das duas e wildcard, e uma
+    // migration fora das duas continua reprovando.
+    const declarada = (m: string) =>
+      MIGRATIONS_NO_DISCO_NAO_COMMITADAS.includes(m) || MIGRATIONS_DA_SKILL_1DF4.includes(m);
+
     ok(`G12b nenhuma migration nao declarada no disco (${novasNoDisco.join(", ") || "nenhuma"})`,
-       novasNoDisco.every((m) => MIGRATIONS_NO_DISCO_NAO_COMMITADAS.includes(m)));
+       novasNoDisco.every(declarada));
     ok("G12b1 CONTROLE NEGATIVO: uma migration nao declarada reprovaria",
-       !["99999999_intrusa.sql"].every((m) => MIGRATIONS_NO_DISCO_NAO_COMMITADAS.includes(m)));
+       !["99999999_intrusa.sql"].every(declarada));
     ok("G12b2 a migration da 1E-e declara que NAO foi aplicada",
        readFileSync(join(RAIZ, "supabase", "migrations", "20260919_agentes_ia_chamadas.sql"), "utf8")
          .includes("NAO APLICADA AINDA"));
+    // ── G12h..G12j — a migration da f.4, de forma DURAVEL ──────────
+    //
+    // Nenhum destes tres depende de a migration estar ou nao no HEAD.
+    // Antes da publicacao passam; depois da publicacao passam pelos
+    // mesmos motivos. E o que substitui a entrada temporaria removida de
+    // `MIGRATIONS_NO_DISCO_NAO_COMMITADAS`.
+    ok("G12h a migration da f.4 esta declarada nome a nome",
+       MIGRATIONS_DA_SKILL_1DF4.length === 1 &&
+       MIGRATIONS_DA_SKILL_1DF4[0] === "20260924_skills_promover_vigente.sql");
+    ok("G12i e ela existe no disco, onde o guarda a espera",
+       disco.includes("20260924_skills_promover_vigente.sql"));
+    ok("G12j CONTROLE NEGATIVO: a lista da f.4 nao aceita migration alheia",
+       !MIGRATIONS_DA_SKILL_1DF4.includes("99999999_intrusa.sql") &&
+       !MIGRATIONS_DA_SKILL_1DF4.some((m) => m.includes("*")));
+
     ok("G12c nenhuma migration desapareceu do disco", sumidasDoDisco.length === 0);
     ok("G12d as duas migrations desta frente seguem no HEAD", head.includes("20260916_agentes_fundacao.sql") && head.includes("20260917_agentes_execucao.sql"));
     // Controles sobre listas SINTETICAS, nao sobre `disco`/`head` reais:
