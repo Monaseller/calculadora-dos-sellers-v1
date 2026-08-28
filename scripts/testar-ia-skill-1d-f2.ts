@@ -84,9 +84,19 @@ secao("A. Dois modulos, e so a regra e importavel");
 
 ok("A1  estado.ts existe", existe("lib/agentes/skills/estado.ts"));
 ok("A2  fatos.ts existe", existe("lib/agentes/skills/fatos.ts"));
-ok("A3  a pasta tem exatamente 2 modulos",
+// A SKILL-1D.f.3-A acrescentou `escrita.ts`, entao "exatamente 2" virou
+// falso POR DESENHO — a mesma inversao ja feita em P1/P2 quando esta fase
+// criou a pasta. A sentinela nao e removida: passa a exigir os TRES
+// modulos E que o caminho de LEITURA continue sem depender do de escrita,
+// que e a fronteira que esta suite existe para defender.
+ok("A3  a pasta tem exatamente 3 modulos",
   JSON.stringify(readdirSync(join(RAIZ, "lib/agentes/skills")).sort()) ===
-    JSON.stringify(["estado.ts", "fatos.ts"]));
+    JSON.stringify(["escrita.ts", "estado.ts", "fatos.ts"]));
+ok("A3b escrita.ts existe e E server-only",
+  existe("lib/agentes/skills/escrita.ts") &&
+    /import "server-only"/.test(ler("lib/agentes/skills/escrita.ts")));
+ok("A3c a LEITURA nao importa a escrita",
+  !/skills\/escrita/.test(CODIGO_FATOS) && !/skills\/escrita/.test(CODIGO_ESTADO));
 ok("A4  estado.ts NAO e server-only (por isso esta suite o executa)",
   !/server-only/.test(CODIGO_ESTADO));
 ok("A5  fatos.ts E server-only", /import "server-only"/.test(CODIGO_FATOS));

@@ -558,7 +558,8 @@ const ARQUIVOS_SKILL_1DF1: readonly string[] = [
 ];
 
 /**
- * SKILL-1D.f.2 — a LEITURA das Skills associadas ao agente.
+ * SKILL-1D.f.2 — a LEITURA das Skills associadas ao agente, mais
+ * `escrita.ts`, o write path acrescentado pela SKILL-1D.f.3-A.
  *
  * Pasta NOVA em `lib/agentes/`, inteiramente untracked: o porcelain a
  * colapsa em `?? lib/agentes/skills/`, o mesmo buraco ja medido em
@@ -574,6 +575,7 @@ const ARQUIVOS_SKILL_1DF1: readonly string[] = [
  * `startsWith("testar-agentes-")`, e este nome nao casa.
  */
 const ARQUIVOS_SKILLS_1DF2: readonly string[] = [
+  "escrita.ts",
   "estado.ts",
   "fatos.ts",
 ];
@@ -1389,7 +1391,7 @@ async function main() {
     // Sem estes asserts, declarar a forma colapsada abriria a pasta.
     const conteudoSkills = readdirSync(join(RAIZ, "lib", "agentes", "skills")).sort();
 
-    ok("G11z4 lib/agentes/skills contem exatamente os 2 modulos declarados",
+    ok("G11z4 lib/agentes/skills contem exatamente os 3 modulos declarados",
        soAutorizadosDentroDeSkills(conteudoSkills));
     ok("G11z5 ANCORA: o diretorio foi mesmo lido e nao veio vazio",
        conteudoSkills.length === ARQUIVOS_SKILLS_1DF2.length && conteudoSkills.length > 0);
