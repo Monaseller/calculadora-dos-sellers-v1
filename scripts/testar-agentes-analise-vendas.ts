@@ -593,6 +593,15 @@ const ARQUIVOS_SKILL_1DG: readonly string[] = [
   // A LEITURA da selecao. Nao escolhe loja: le escolhas ja persistidas.
   "lib/agentes/conexoes/selecao-estado.ts",
   "lib/agentes/conexoes/selecao-fatos.ts",
+  // A ESCRITA da selecao (SKILL-1D.g.2-B). Frente com ZERO migration: a
+  // tabela e a ACL ja vieram na g.1, entao nada foi acrescentado a
+  // `MIGRATIONS_DA_SKILL_1DG`.
+  //
+  // A suite da fase (`scripts/testar-ia-skill-1d-g2.ts`) NAO entra aqui:
+  // `ESCOPO_AGENTES` cobre `lib/agentes`, a rota interna e
+  // `supabase/migrations` — `scripts/` nunca esteve nele, e declarar um
+  // caminho que a guarda nao mede daria falsa impressao de cobertura.
+  "lib/agentes/conexoes/selecao-escrita.ts",
 ];
 
 /**

@@ -262,17 +262,23 @@ secao("I. Nada de producao nesta subfase");
  * e que a UNICA porta de leitura da tabela seja a que esta frente
  * autorizou, e que nenhum consumidor externo tenha aparecido.
  *
- * Um arquivo so: `selecao-fatos.ts`, onde vive o `.from(...)`.
+ * Dois arquivos: `selecao-fatos.ts`, onde vive a leitura, e
+ * `selecao-escrita.ts` (SKILL-1D.g.2-B), onde vivem o upsert e o delete.
+ * Os dois abrem a tabela; nenhum terceiro pode.
+ *
  * `selecao-estado.ts` NAO entra — ele e puro, nao toca banco, e cita o
  * nome da tabela apenas em docblock. Colocar um arquivo na allowlist
  * "porque e da mesma pasta" ampliaria a autorizacao alem do que ela
  * precisa cobrir.
  *
  * A comparacao e de CONJUNTO, nao de subconjunto: se a referencia sumir
- * de `selecao-fatos.ts`, a guarda cai tambem — o arquivo autorizado
- * deixaria de ser a porta que a allowlist afirma que ele e.
+ * de um dos dois, a guarda cai tambem — o arquivo autorizado deixaria de
+ * ser a porta que a allowlist afirma que ele e.
  */
-const REFERENCIA_AUTORIZADA: readonly string[] = ["lib/agentes/conexoes/selecao-fatos.ts"];
+const REFERENCIA_AUTORIZADA: readonly string[] = [
+  "lib/agentes/conexoes/selecao-escrita.ts",
+  "lib/agentes/conexoes/selecao-fatos.ts",
+];
 
 /**
  * Comentario nao e consumidor.

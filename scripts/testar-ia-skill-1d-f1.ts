@@ -470,12 +470,13 @@ ok("P3  lib/ia/skills continua com 3 modulos",
   readdirSync(join(RAIZ, "lib/ia/skills")).length === 3);
 ok("P4  lib/agentes/permissoes intocada — 2 modulos",
   readdirSync(join(RAIZ, "lib/agentes/permissoes")).length === 2);
-// O par `selecao-*` entrou na 1D.g.1-C. A guarda desta fase e sobre a
-// 1D.f: comparar a lista ordenada prova que nenhum modulo de Skills foi
-// parar em conexoes, sem depender de um total que ja mudou uma vez.
-ok("P5  lib/agentes/conexoes com o conjunto exato de 4 modulos — nenhum e da 1D.f",
+// O par `selecao-*` entrou na 1D.g.1-C e `selecao-escrita` na 1D.g.2-B. A
+// guarda desta fase e sobre a 1D.f: comparar a lista ordenada prova que
+// nenhum modulo de Skills foi parar em conexoes, sem depender de um total
+// que ja mudou duas vezes.
+ok("P5  lib/agentes/conexoes com o conjunto exato de 5 modulos — nenhum e da 1D.f",
   JSON.stringify(readdirSync(join(RAIZ, "lib/agentes/conexoes")).sort()) ===
-    JSON.stringify(["estado.ts", "fatos.ts", "selecao-estado.ts", "selecao-fatos.ts"]),
+    JSON.stringify(["estado.ts", "fatos.ts", "selecao-escrita.ts", "selecao-estado.ts", "selecao-fatos.ts"]),
   readdirSync(join(RAIZ, "lib/agentes/conexoes")).sort().join(", "));
 ok("P6  a migration declara o rollback na ordem correta",
   /drop table if exists public\.agente_skills;[\s\S]*drop table if exists public\.skills;/.test(SQL));
