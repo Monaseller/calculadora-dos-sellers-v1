@@ -1,0 +1,133 @@
+-- ============================================================
+-- SKILL-1D.f.1b-D — CORRETIVA: `skills_formato_suportado` falhava ABERTO
+--
+-- NAO APLICADA AINDA. Aplicar ao banco exige autorizacao explicita,
+-- separada da criacao deste arquivo.
+--
+-- ── O QUE ACONTECEU ─────────────────────────────────────────────────
+--
+-- `20260922_skills.sql` (aplicada como versao 20260827231223) criou:
+--
+--   constraint skills_formato_suportado
+--     check (jsonb_typeof(manifesto->'formato') = 'number'
+--            and manifesto->>'formato' = '1')
+--
+-- com a INTENCAO de exigir que todo manifesto declare `formato: 1`. A
+-- prova em runtime (SKILL-1D.f.1b-C, assert `C-G manifesto SEM
+-- 'formato'`) mostrou que a intencao NAO se cumpriu: um manifesto SEM a
+-- chave `formato` e ACEITO.
+--
+-- ── POR QUE ACEITA ──────────────────────────────────────────────────
+--
+-- CHECK do PostgreSQL reprova SOMENTE `false`. `NULL` e aceito.
+--
+-- Com a chave ausente, medido no banco real:
+--
+--   manifesto->'formato'                        -> SQL NULL
+--   jsonb_typeof(NULL)                          -> NULL
+--   NULL = 'number'                             -> NULL
+--   manifesto->>'formato'                       -> NULL
+--   NULL = '1'                                  -> NULL
+--   NULL and NULL                               -> NULL
+--   CHECK(NULL)                                 -> ACEITO
+--
+-- ── A IRONIA, REGISTRADA ────────────────────────────────────────────
+--
+-- Esta e EXATAMENTE a armadilha que a migration original documentou e
+-- fechou nos quatro CHECKs de equivalencia, que testam
+-- `manifesto->>'x' is not null` ANTES de comparar. O quinto CHECK ficou
+-- sem o guarda — o comentario sobre a armadilha estava escrito na linha
+-- de cima e nao foi aplicado ao vizinho.
+--
+-- E a suite estrutural passava 156/156 sobre este mesmo CHECK, porque ela
+-- verifica o TEXTO DECLARADO. Texto correto, semantica errada. So a
+-- execucao real revelou.
+--
+-- ── A CORRECAO ──────────────────────────────────────────────────────
+--
+-- Acrescenta o guarda de PRESENCA. Com ele a expressao nunca avalia NULL:
+--
+--   chave ausente   -> `is not null` FALSE   -> AND curto-circuita FALSE
+--   chave presente  -> `jsonb_typeof` recebe argumento nao-nulo e devolve
+--                      texto nao-nulo; a comparacao e true/false, nunca
+--                      NULL
+--   formato: null   -> `manifesto->'formato'` e o jsonb `null`, NAO SQL
+--                      NULL; `is not null` passa, `jsonb_typeof` devolve
+--                      'null' != 'number' -> FALSE
+--
+-- Ausencia vira FALSE, que e o que o CHECK precisa para reprovar.
+--
+-- ── ALTERNATIVA CONSIDERADA E DESCARTADA ────────────────────────────
+--
+--   check (manifesto @> '{"formato": 1}'::jsonb)
+--
+-- Tambem e fail-closed por construcao — `@>` devolve boolean e nunca NULL
+-- com operandos nao-nulos — e mais curta. Descartada por consistencia: os
+-- quatro CHECKs de equivalencia usam a forma `is not null and ...`, e um
+-- sexto idioma no mesmo bloco custaria mais em leitura do que ganha em
+-- concisao. A forma escolhida tambem separa as tres afirmacoes
+-- (existe / e number / vale 1), que e o que o teste estrutural cobra.
+--
+-- ── O QUE ESTA CORRETIVA NAO FAZ ────────────────────────────────────
+--
+-- Nao altera a migration anterior — ela esta publicada e aplicada, e
+-- editar migration ja executada e proibido.
+--
+-- Nao toca colunas, FKs, indices, RLS, policies, defaults, ACL, os outros
+-- CHECKs, nem `agente_skills`. O defeito e de UMA constraint, e o reparo
+-- tem o tamanho do defeito.
+--
+-- Nao reexecuta GRANT/REVOKE: os privilegios foram provados corretos em
+-- runtime (table-level `ard` + UPDATE apenas na coluna `vigente`), e
+-- mexer neles aqui seria risco sem causa.
+--
+-- ── AUDITORIA DOS DEMAIS CHECKS ─────────────────────────────────────
+--
+-- Os nove CHECKs de `skills` foram reauditados por leitura, procurando a
+-- mesma classe de defeito. Nenhum outro fail-open:
+--
+--   manifesto_objeto / slug_formato / origem_valida /
+--   conteudo_hash_formato   operam sobre colunas NOT NULL, que nunca
+--                           produzem NULL
+--   as 4 equivalencias      ja tem `is not null and`
+--   formato_suportado       o unico defeituoso — corrigido aqui
+--
+-- `agente_skills` nao tem CHECK.
+-- ============================================================
+
+alter table public.skills
+  drop constraint skills_formato_suportado;
+
+alter table public.skills
+  add constraint skills_formato_suportado
+  check (manifesto->'formato' is not null
+         and jsonb_typeof(manifesto->'formato') = 'number'
+         and manifesto->>'formato' = '1');
+
+-- ── ESTADO FINAL ESPERADO ──────────────────────────────────────────
+--
+--   manifesto sem a chave `formato`   -> RECUSADO (23514)   <- era aceito
+--   {"formato": 1}                    -> aceito
+--   {"formato": 0}                    -> RECUSADO
+--   {"formato": 2}                    -> RECUSADO
+--   {"formato": "1"}                  -> RECUSADO (string, nao number)
+--   {"formato": null}                 -> RECUSADO (jsonb null != number)
+--
+-- Conferir pelo CATALOGO, nunca por este arquivo:
+--
+--   select pg_get_constraintdef(oid) from pg_constraint
+--    where conname = 'skills_formato_suportado';
+--
+-- E pela suite `scripts/testar-ia-skill-1d-f1-banco.ts --confirmo`, cujo
+-- assert `C-G manifesto SEM 'formato'` deve passar a devolver 23514.
+
+-- ── ROLLBACK ───────────────────────────────────────────────────────
+--
+--   alter table public.skills drop constraint skills_formato_suportado;
+--   alter table public.skills
+--     add constraint skills_formato_suportado
+--     check (jsonb_typeof(manifesto->'formato') = 'number'
+--            and manifesto->>'formato' = '1');
+--
+-- Restaura a forma ANTERIOR, com o defeito. Documentado por simetria, e
+-- nao porque reverter faca sentido: voltar aqui e reabrir o fail-open.

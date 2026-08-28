@@ -549,6 +549,12 @@ const ARQUIVOS_CONEXOES_1: readonly string[] = [
  */
 const ARQUIVOS_SKILL_1DF1: readonly string[] = [
   "supabase/migrations/20260922_skills.sql",
+  // SKILL-1D.f.1b-D — corretiva de UM CHECK. `skills_formato_suportado`
+  // aceitava manifesto sem a chave `formato`: CHECK do Postgres reprova
+  // so `false`, e a expressao avaliava NULL. Achado pela prova em runtime
+  // da 1D.f.1b-C, nao pela suite estrutural — que passava, porque verifica
+  // o texto declarado.
+  "supabase/migrations/20260923_skills_formato_fail_closed.sql",
 ];
 
 const ARQUIVOS_PERMISSOES_1DD2: readonly string[] = [
@@ -630,6 +636,10 @@ const MIGRATIONS_NO_DISCO_NAO_COMMITADAS: readonly string[] = [
   // o artefato do gate pre-migration, e o proprio cabecalho dele diz
   // isso. Aplicar ao banco exige autorizacao separada (1D.f.1b).
   "20260922_skills.sql",
+  // SKILL-1D.f.1b-D — corretiva do fail-open de `skills_formato_suportado`.
+  // NAO APLICADA: aplicar exige autorizacao separada. Enquanto isso, o
+  // defeito segue vivo no banco — manifesto sem `formato` e aceito.
+  "20260923_skills_formato_fail_closed.sql",
 ];
 
 /**

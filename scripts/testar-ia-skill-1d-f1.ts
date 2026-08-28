@@ -452,6 +452,95 @@ ok("P5  lib/agentes/conexoes intocada — 2 modulos",
 ok("P6  a migration declara o rollback na ordem correta",
   /drop table if exists public\.agente_skills;[\s\S]*drop table if exists public\.skills;/.test(SQL));
 
+// ─── Q. Corretiva do fail-open de `formato` (1D.f.1b-D) ──────────────
+//
+// A prova em runtime (1D.f.1b-C) mostrou que
+// `skills_formato_suportado` ACEITAVA manifesto sem a chave `formato`:
+// CHECK do Postgres reprova so `false`, e a expressao avaliava NULL.
+//
+// A secao E acima continua provando o que a `20260922` DECLARA — ela
+// nao foi editada, e continua com a forma defeituosa. O que esta secao
+// prova e que a corretiva existe e fecha o buraco.
+
+secao("Q. skills_formato_suportado agora falha FECHADO");
+
+{
+  const CAMINHO_Q = "supabase/migrations/20260923_skills_formato_fail_closed.sql";
+  ok("Q1  a migration corretiva existe", existe(CAMINHO_Q));
+
+  const SQL_Q = existe(CAMINHO_Q) ? ler(CAMINHO_Q) : "";
+  const DDL_Q = SQL_Q.replace(/^\s*--.*$/gm, "");
+
+  ok("Q2  declara NAO APLICADA AINDA (convencao do projeto)",
+    /NAO APLICADA AINDA/.test(SQL_Q));
+  ok("Q3  a original NAO foi editada — segue com a forma defeituosa",
+    /check \(jsonb_typeof\(manifesto->'formato'\) = 'number'\s*\n?\s*and manifesto->>'formato' = '1'\)/
+      .test(ler(CAMINHO)));
+
+  ok("Q4  faz DROP da constraint defeituosa",
+    /alter table public\.skills\s+drop constraint skills_formato_suportado;/.test(DDL_Q));
+  ok("Q5  e RECRIA com o mesmo nome",
+    /alter table public\.skills\s+add constraint skills_formato_suportado/.test(DDL_Q));
+
+  // Expressao NOVA, extraida do arquivo e normalizada. Trabalhar sobre o
+  // texto extraido — nao sobre o arquivo inteiro — impede que a sonda
+  // case com comentario, com o bloco de ROLLBACK (que cita a forma
+  // ANTIGA de proposito) ou consigo mesma.
+  const m = DDL_Q.match(/add constraint skills_formato_suportado\s*check \(([\s\S]*?)\);/);
+  const NOVA = (m?.[1] ?? "").replace(/\s+/g, " ").trim();
+  ok(`Q6  ANCORA: a expressao nova foi extraida (${NOVA.length} chars)`, NOVA.length > 60);
+
+  /**
+   * O predicado. Uma expressao so e fail-closed aqui se afirmar as TRES
+   * coisas — e a primeira e a que faltava.
+   */
+  const conjuntos = (e: string) => ({
+    presenca: /manifesto->'formato'\s+is not null/i.test(e),
+    tipo: /jsonb_typeof\(manifesto->'formato'\)\s*=\s*'number'/i.test(e),
+    valor: /manifesto->>'formato'\s*=\s*'1'/i.test(e),
+  });
+  const nova = conjuntos(NOVA);
+
+  ok("Q7  conjunto 1 — GUARDA DE PRESENCA (era o que faltava)", nova.presenca);
+  ok("Q8  conjunto 2 — o tipo tem de ser `number`", nova.tipo);
+  ok("Q9  conjunto 3 — o valor tem de ser 1", nova.valor);
+  ok("Q10 os tres estao ligados por AND", (NOVA.match(/\band\b/gi) ?? []).length >= 2);
+
+  // CONTROLE NEGATIVO: a forma ANTIGA, literal, tem de reprovar no
+  // predicado. Sem isto, Q7 passaria por qualquer expressao que
+  // mencionasse `is not null` em qualquer lugar.
+  const ANTIGA = "jsonb_typeof(manifesto->'formato') = 'number' and manifesto->>'formato' = '1'";
+  const antiga = conjuntos(ANTIGA);
+  ok("Q11 CONTROLE NEGATIVO: a forma ANTIGA reprova no guarda de presenca",
+    antiga.presenca === false);
+  ok("Q12 CONTROLE: a forma antiga ainda satisfazia tipo e valor",
+    antiga.tipo && antiga.valor);
+  ok("Q13 e por isso o defeito passava — texto certo, semantica NULL",
+    !antiga.presenca && antiga.tipo && antiga.valor);
+
+  // Os cinco casos do contrato, cada um amarrado ao conjunto que o
+  // reprova. A semantica em si e provada em runtime (`C-G` da suite de
+  // banco); aqui se prova que existe a CLAUSULA capaz de reprovar cada um.
+  ok("Q14 chave AUSENTE -> reprovada pelo conjunto de presenca", nova.presenca);
+  ok("Q15 `formato: 1` (number) -> aceito pelos tres conjuntos",
+    nova.presenca && nova.tipo && nova.valor);
+  ok("Q16 `formato: 0` -> reprovado pelo conjunto de valor", nova.valor);
+  ok("Q17 `formato: 2` -> reprovado pelo conjunto de valor", nova.valor);
+  ok("Q18 `formato: \"1\"` (string) -> reprovado pelo conjunto de tipo", nova.tipo);
+
+  // A corretiva tem o tamanho do defeito: uma constraint, nada mais.
+  ok("Q19 nao mexe em coluna, FK, indice, RLS nem policy",
+    !/\b(add|drop)\s+column\b/i.test(DDL_Q) && !/foreign key/i.test(DDL_Q) &&
+    !/create\s+(unique\s+)?index/i.test(DDL_Q) && !/row level security|create policy/i.test(DDL_Q));
+  ok("Q20 nao reexecuta GRANT/REVOKE", !/\b(grant|revoke)\b/i.test(DDL_Q));
+  ok("Q21 nao toca agente_skills", !/agente_skills/i.test(DDL_Q));
+  ok("Q22 nao toca outros CHECKs de skills",
+    !/skills_(manifesto_objeto|slug_formato|origem_valida|conteudo_hash_formato|\w+_igual_ao_manifesto)/
+      .test(DDL_Q));
+  ok("Q23 CONTROLE: as sondas de escopo acusam quando o padrao existe",
+    /\badd\s+column\b/i.test("alter table t add column x int") && /\bgrant\b/i.test("grant select on t to r"));
+}
+
 // ─── Placar ───────────────────────────────────────────────────────────
 
 console.log(`\n${"═".repeat(66)}`);
