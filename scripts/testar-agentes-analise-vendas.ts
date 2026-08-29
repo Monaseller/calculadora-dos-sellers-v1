@@ -835,6 +835,39 @@ const ARQUIVOS_SKILL_1DML: readonly string[] = [
   "lib/agentes/skills/estado.ts",
 ];
 
+/**
+ * SKILL-1D.consumer-B2 — o primeiro compositor de diagnostico.
+ *
+ * `lib/agentes/diagnostico/compositor.ts` compoe as quatro camadas ja
+ * publicadas (Skills, conexoes, permissoes, registry) e chama o motor
+ * `diagnosticarSkill` uma vez por Skill. Nao abre banco, nao escreve e
+ * nao tem consumidor de producao acima dele — mas vive dentro de
+ * `lib/agentes`, e por isso precisa de declaracao nominal aqui.
+ *
+ * UM path so. A suite da fase (`scripts/testar-ia-skill-1d-consumer.ts`)
+ * fica de fora pelo motivo de sempre: `ESCOPO_AGENTES` cobre
+ * `lib/agentes`, a rota interna e `supabase/migrations` — `scripts/`
+ * nunca esteve nele. Zero migration nesta frente.
+ */
+const MODULOS_DIAGNOSTICO_1D_CONSUMER: readonly string[] = [
+  "compositor.ts",
+];
+
+const ARQUIVOS_SKILL_1D_CONSUMER: readonly string[] = [
+  // A forma COLAPSADA. `lib/agentes/diagnostico/` nasceu inteiramente
+  // untracked, e o porcelain a resume nesta unica linha — exatamente
+  // como fez com `ia/`, `permissoes/` e `skills/`. Aceitar so ela
+  // abriria uma pasta franca dentro do escopo dos agentes, e por isso
+  // ela NAO anda sozinha: o G11z9 enumera o diretorio no disco contra
+  // `MODULOS_DIAGNOSTICO_1D_CONSUMER`. Quem remover um tem de remover o
+  // outro, ou a guarda fica cega sem nenhum teste reclamar.
+  "lib/agentes/diagnostico/",
+  // E a forma EXPANDIDA, que passa a aparecer no instante do `git add`.
+  // O colapso e transitorio; a propriedade medida e "que arquivo
+  // aparece", nunca "em que estado de versionamento ele esta".
+  ...MODULOS_DIAGNOSTICO_1D_CONSUMER.map((nome) => `lib/agentes/diagnostico/${nome}`),
+];
+
 /** Uniao EXPLICITA. Qualquer caminho fora dela reprova o G11. */
 const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_1DD,
@@ -852,6 +885,7 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_SKILL_1DG,
   ...ARQUIVOS_SKILL_1DE,
   ...ARQUIVOS_SKILL_1DML,
+  ...ARQUIVOS_SKILL_1D_CONSUMER,
 ];
 
 /**
@@ -1561,6 +1595,22 @@ async function main() {
        !soAutorizadosDentroDeSkills(ARQUIVOS_SKILLS_1DF2.slice(1)));
     ok("G11z8 CONTROLE NEGATIVO: arquivo expandido NAO declarado em skills/ reprova",
        !soAutorizadosNoEscopo("?? lib/agentes/skills/_intruso.ts\n"));
+
+    // ── G11z9 — o MESMO par, para lib/agentes/diagnostico/ ────────
+    // Pasta nova da SKILL-1D.consumer-B2, hoje inteiramente untracked:
+    // o porcelain a colapsa como colapsou as tres anteriores. Este e o
+    // lado de DISCO do par — `ARQUIVOS_SKILL_1D_CONSUMER` aceita a linha
+    // colapsada, e este assert diz o que pode existir la dentro.
+    //
+    // `mesmoConjuntoDeNomes` vale nos dois sentidos: um modulo A MAIS
+    // reprova, e `compositor.ts` SUMIR tambem. Diretorio ausente nao
+    // vira lista vazia aceita — `readdirSync` lanca, o `catch` de
+    // `main()` marca exitCode 1 e a suite falha alto, exatamente como
+    // ja acontece com `ia/`, `permissoes/` e `skills/`.
+    const conteudoDiagnostico = readdirSync(join(RAIZ, "lib", "agentes", "diagnostico")).sort();
+
+    ok("G11z9 lib/agentes/diagnostico contem exatamente o modulo declarado",
+       mesmoConjuntoDeNomes(conteudoDiagnostico, MODULOS_DIAGNOSTICO_1D_CONSUMER));
 
     // ── G11t..G11w — `scripts/` nunca esteve em ESCOPO_AGENTES ─────
     // Medido na 1E-a: uma suite de agentes inesperada em `scripts/`

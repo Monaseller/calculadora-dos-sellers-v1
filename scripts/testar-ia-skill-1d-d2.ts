@@ -439,8 +439,11 @@ ok("P5  nenhum modulo novo importa React ou UI",
 ok("P6  MOCK_PERMISSOES nao foi tocado nem importado",
   !/MOCK_PERMISSOES/.test(CODIGO_ESTADO + CODIGO_FATOS));
 {
-  // A fonte real ainda nao tem consumidor: `resolverFatosPermissoes` nao
-  // e chamada por producao nenhuma. Registrado como fato, nao escondido.
+  // `resolverFatosPermissoes` ganhou seu primeiro consumidor de producao
+  // na SKILL-1D.consumer-B2. A exigencia deixa de ser ZERO e passa a ser
+  // EXATAMENTE ESTE: allowlist nominal, por igualdade de caminho. O que
+  // a sonda protege continua sendo o mesmo — nao ha consumidor NAO
+  // autorizado —, e um segundo reprova. Prefixo ou pasta inteira, nao.
   const chamadores = ["lib", "app"].flatMap((raiz) => {
     const varrer = (dir: string): string[] => {
       const saida: string[] = [];
@@ -455,8 +458,12 @@ ok("P6  MOCK_PERMISSOES nao foi tocado nem importado",
     };
     return varrer(raiz);
   });
-  ok(`P7  zero consumidor de producao nesta fase (${chamadores.join(", ") || "nenhum"})`,
-    chamadores.length === 0);
+  const CONSUMIDORES_AUTORIZADOS: readonly string[] = ["lib/agentes/diagnostico/compositor.ts"];
+  const naoAutorizados = chamadores.filter((c) => !CONSUMIDORES_AUTORIZADOS.includes(c));
+  ok(`P7  so o compositor consome resolverFatosPermissoes (${chamadores.join(", ") || "nenhum"})`,
+    naoAutorizados.length === 0 &&
+      JSON.stringify(chamadores.slice().sort()) ===
+        JSON.stringify([...CONSUMIDORES_AUTORIZADOS].sort()));
 }
 
 // ─── Placar ───────────────────────────────────────────────────────────

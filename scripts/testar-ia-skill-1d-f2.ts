@@ -448,9 +448,18 @@ ok("J5  nenhum modulo novo importa React ou UI",
   // leitura. A exigencia deixa de ser ZERO e passa a ser EXATAMENTE
   // ESTE — allowlist nominal, por igualdade de caminho. Um segundo
   // consumidor volta a reprovar; prefixo ou pasta inteira nao.
-  const CONSUMIDORES_AUTORIZADOS: readonly string[] = ["lib/agentes/conexoes/agregador.ts"];
+  //
+  // A SKILL-1D.consumer-B2 acrescentou o SEGUNDO: o compositor le as
+  // Skills para saber o que diagnosticar, e o agregador as le de novo
+  // por dentro para saber quais conexoes exigir. As duas leituras foram
+  // auditadas e o custo constante, aceito. A lista continua NOMINAL —
+  // caminho por caminho, sem prefixo nem pasta.
+  const CONSUMIDORES_AUTORIZADOS: readonly string[] = [
+    "lib/agentes/conexoes/agregador.ts",
+    "lib/agentes/diagnostico/compositor.ts",
+  ];
   const naoAutorizados = chamadores.filter((c) => !CONSUMIDORES_AUTORIZADOS.includes(c));
-  ok(`J6  so o agregador consome resolverSkillsDoAgente (${chamadores.join(", ") || "nenhum"})`,
+  ok(`J6  so agregador e compositor consomem resolverSkillsDoAgente (${chamadores.join(", ") || "nenhum"})`,
     naoAutorizados.length === 0 &&
       JSON.stringify(chamadores.slice().sort()) ===
         JSON.stringify([...CONSUMIDORES_AUTORIZADOS].sort()));

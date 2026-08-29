@@ -745,20 +745,36 @@ async function principal(): Promise<void> {
       CODIGO_AGREGADOR));
   ok("M11 zero escolha implicita de loja",
     !/\.limit\(|\.order\(|maybeSingle|vigente/.test(CODIGO_AGREGADOR));
-  ok("M12 zero consumidor de producao do agregador",
-    ["lib", "app"].every((raiz) => {
-      const varrer = (dir: string): boolean => {
-        for (const e of readdirSync(join(RAIZ, dir), { withFileTypes: true })) {
-          const rel = `${dir}/${e.name}`;
-          if (e.isDirectory()) { if (!/node_modules|\.next/.test(e.name) && !varrer(rel)) return false; }
-          else if (/\.tsx?$/.test(e.name) && rel !== "lib/agentes/conexoes/agregador.ts") {
-            if (/resolverConexoesDoAgente/.test(semComentarios(ler(rel)))) return false;
-          }
+  // A SKILL-1D.consumer-B2 deu ao agregador o seu PRIMEIRO consumidor de
+  // producao. Ate aqui o M12 exigia ZERO — correto enquanto ninguem o
+  // chamava. A exigencia nao e afrouxada, e trocada: deixa de ser "zero"
+  // e passa a ser "EXATAMENTE ESTE", por igualdade de conjunto e por
+  // caminho nominal, no mesmo molde do J6 da f2 e do P7 da d2.
+  //
+  // A definicao em `agregador.ts` continua excluida da varredura: quem
+  // exporta a funcao nao a consome. E a igualdade e nos DOIS sentidos —
+  // um segundo consumidor reprova, e o desaparecimento do autorizado
+  // tambem, para que a guarda nunca vire "o compositor existe".
+  const CONSUMIDORES_AUTORIZADOS: readonly string[] = ["lib/agentes/diagnostico/compositor.ts"];
+  const consumidores = ["lib", "app"].flatMap((raiz) => {
+    const varrer = (dir: string): string[] => {
+      const saida: string[] = [];
+      for (const e of readdirSync(join(RAIZ, dir), { withFileTypes: true })) {
+        const rel = `${dir}/${e.name}`;
+        if (e.isDirectory()) { if (!/node_modules|\.next/.test(e.name)) saida.push(...varrer(rel)); }
+        else if (/\.tsx?$/.test(e.name) && rel !== "lib/agentes/conexoes/agregador.ts") {
+          if (/resolverConexoesDoAgente/.test(semComentarios(ler(rel)))) saida.push(rel);
         }
-        return true;
-      };
-      return varrer(raiz);
-    }));
+      }
+      return saida;
+    };
+    return varrer(raiz);
+  });
+  const naoAutorizados = consumidores.filter((c) => !CONSUMIDORES_AUTORIZADOS.includes(c));
+  ok(`M12 so o compositor consome o agregador (${consumidores.join(", ") || "nenhum"})`,
+    naoAutorizados.length === 0 &&
+      JSON.stringify(consumidores.slice().sort()) ===
+        JSON.stringify([...CONSUMIDORES_AUTORIZADOS].sort()));
 
   console.log(`\n══ ${passou} PASS / ${falhou} FAIL ══\n`);
   process.exitCode = falhou === 0 ? 0 : 1;
