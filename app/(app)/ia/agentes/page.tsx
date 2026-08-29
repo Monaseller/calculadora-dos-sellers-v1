@@ -13,55 +13,91 @@
  *
  * Por isso ela usa exatamente o mesmo vocabulario de estado e o mesmo
  * drawer — nao existe uma "versao mobile" com regras proprias.
+ *
+ * ── Dados REAIS desde a SKILL-1D.ui-consumer-C ──────────────────────
+ *
+ * Esta tela deixou de ler a lista simulada: os agentes vem do dono da
+ * sessao, pelo unico modulo de rede da area. E com eles veio uma perda
+ * deliberada — as TAREFAS continuam sem fonte real, e associar as
+ * simuladas a um agente de verdade seria misturar duas verdades na
+ * mesma linha. Ate existir leitura real de tarefas, cada agente e
+ * avaliado com a lista VAZIA: `derivarStatusAgente` ja trata esse caso,
+ * e o cartao mostra apenas o que se sabe — ativo ou desligado.
+ *
+ * Falha e sessao expirada tem estados PROPRIOS. Nenhuma das duas vira
+ * "voce nao tem agentes", e em nenhuma hipotese a tela cai de volta
+ * para os dados simulados.
  */
 import { useEffect, useMemo, useState } from "react";
 import { CROMO, ESPACO, FONTE, RAIO } from "@/lib/ia/design";
 import { JANELA_CONCLUIDO_MS, aparenciaDoAgente, rotuloDe } from "@/lib/ia/estados";
-import { tarefaAtual, tituloDaTarefa } from "@/lib/ia/tarefas";
-import { MOCK_AGENTES, MOCK_TAREFAS } from "@/lib/ia/mocks";
-import type { TarefaUI } from "@/lib/ia/contratos";
+import { listarAgentes, type RespostaAgentes } from "@/lib/ia/agentes-http";
+import type { AgenteUI, TarefaUI } from "@/lib/ia/contratos";
 import BadgeEstado, { corDaAparencia } from "@/components/ia/BadgeEstado";
 import PainelAgente from "@/components/ia/office/PainelAgente";
+
+/** Enquanto nao ha leitura real de tarefas, ninguem tem tarefa. */
+const NENHUMA_TAREFA: readonly TarefaUI[] = [];
 
 export default function PaginaAgentes() {
   // `ancoraMs` fixa os dados; `agoraMs` anda e faz o flash expirar. Ver
   // o cabecalho de `Escritorio.tsx`: juntar os dois tornava permanente um
   // estado que existe justamente para ser temporario.
-  const [ancoraMs, setAncoraMs] = useState<number | null>(null);
   const [agoraMs, setAgoraMs] = useState<number | null>(null);
   const [selecionado, setSelecionado] = useState<string | null>(null);
+  const [resposta, setResposta] = useState<RespostaAgentes | null>(null);
 
   // Tambem evita divergencia de hidratacao: ler o relogio no servidor e
   // no cliente produziria HTML diferente nos dois lados.
   useEffect(() => {
     const inicio = Date.now();
-    setAncoraMs(inicio);
     setAgoraMs(inicio);
     const t = window.setTimeout(() => setAgoraMs(Date.now()), JANELA_CONCLUIDO_MS + 250);
     return () => window.clearTimeout(t);
   }, []);
 
-  const tarefas = useMemo<readonly TarefaUI[]>(
-    () => (ancoraMs === null ? [] : MOCK_TAREFAS(ancoraMs)),
-    [ancoraMs]
-  );
+  // UMA leitura no ciclo normal da tela: sem polling e sem timer. O
+  // `AbortController` cancela se a tela sair antes da resposta chegar.
+  useEffect(() => {
+    const controlador = new AbortController();
+    void listarAgentes(controlador.signal).then((r) => {
+      if (!controlador.signal.aborted) setResposta(r);
+    });
+    return () => controlador.abort();
+  }, []);
+
+  const agentes: readonly AgenteUI[] =
+    resposta !== null && resposta.estado === "ok" ? resposta.agentes : [];
 
   const linhas = useMemo(() => {
     if (agoraMs === null) return [];
-    return MOCK_AGENTES.map((agente) => {
-      const doAgente = tarefas.filter((t) => t.agente_id === agente.id);
-      return {
-        agente,
-        aparencia: aparenciaDoAgente(agente, doAgente, agoraMs),
-        tarefa: tarefaAtual(doAgente),
-      };
-    });
-  }, [tarefas, agoraMs]);
+    return agentes.map((agente) => ({
+      agente,
+      aparencia: aparenciaDoAgente(agente, NENHUMA_TAREFA, agoraMs),
+    }));
+  }, [agentes, agoraMs]);
 
   const aberto = linhas.find((l) => l.agente.id === selecionado) ?? null;
 
-  if (agoraMs === null) {
+  if (agoraMs === null || resposta === null) {
     return <p style={{ color: CROMO.textoFraco, font: `13px/1.6 ${FONTE.interface}` }}>Carregando…</p>;
+  }
+
+  const aviso = (texto: string) => (
+    <p style={{ color: CROMO.textoFraco, font: `13px/1.6 ${FONTE.interface}` }}>{texto}</p>
+  );
+
+  // Os tres desfechos que NAO sao lista, cada um com voz propria: quem
+  // perdeu a sessao precisa entrar de novo, quem encontrou falha precisa
+  // saber que foi falha, e so quem realmente nao tem agentes ve o vazio.
+  if (resposta.estado === "nao_autenticado") {
+    return aviso("Sua sessão expirou. Entre novamente para ver seus agentes.");
+  }
+  if (resposta.estado === "falha") {
+    return aviso("Não foi possível carregar seus agentes.");
+  }
+  if (linhas.length === 0) {
+    return aviso("Você ainda não tem agentes.");
   }
 
   return (
@@ -69,15 +105,13 @@ export default function PaginaAgentes() {
       <style>{css}</style>
 
       <ul className="cds-ia-lista">
-        {linhas.map(({ agente, aparencia, tarefa }) => (
+        {linhas.map(({ agente, aparencia }) => (
           <li key={agente.id}>
             <button
               type="button"
               onClick={() => setSelecionado(agente.id)}
               className="cds-ia-card"
-              aria-label={`${agente.nome}, ${rotuloDe(aparencia)}${
-                tarefa ? `, ${tituloDaTarefa(tarefa)}` : ""
-              }. Abrir detalhes.`}
+              aria-label={`${agente.nome}, ${rotuloDe(aparencia)}. Abrir detalhes.`}
             >
               <div style={{ display: "flex", alignItems: "center", gap: ESPACO.md, width: "100%" }}>
                 <div
@@ -108,36 +142,9 @@ export default function PaginaAgentes() {
                 <BadgeEstado aparencia={aparencia} />
               </div>
 
-              <div style={{ width: "100%", textAlign: "left" }}>
-                <p style={{ margin: `${ESPACO.md}px 0 0`, fontSize: 13, color: CROMO.textoFraco }}>
-                  {tarefa ? tituloDaTarefa(tarefa) : "Nenhuma tarefa em andamento."}
-                </p>
-
-                {tarefa && tarefa.progresso > 0 && (
-                  <div
-                    role="progressbar"
-                    aria-valuenow={tarefa.progresso}
-                    aria-valuemin={0}
-                    aria-valuemax={100}
-                    aria-label={`Progresso de ${agente.nome}`}
-                    style={{
-                      marginTop: ESPACO.sm,
-                      height: 8,
-                      background: "rgba(255,255,255,0.06)",
-                      borderRadius: 999,
-                      overflow: "hidden",
-                    }}
-                  >
-                    <div
-                      style={{
-                        width: `${tarefa.progresso}%`,
-                        height: "100%",
-                        background: corDaAparencia(aparencia),
-                      }}
-                    />
-                  </div>
-                )}
-              </div>
+              {/* A linha de tarefa saiu com os mocks: nao ha leitura real
+                  de tarefas, e texto inventado no lugar seria pior que o
+                  espaco vazio. Ela volta quando a fonte existir. */}
             </button>
           </li>
         ))}
@@ -147,7 +154,7 @@ export default function PaginaAgentes() {
         <PainelAgente
           agente={aberto.agente}
           aparencia={aberto.aparencia}
-          tarefas={tarefas.filter((t) => t.agente_id === aberto.agente.id)}
+          tarefas={NENHUMA_TAREFA}
           onFechar={() => setSelecionado(null)}
         />
       )}

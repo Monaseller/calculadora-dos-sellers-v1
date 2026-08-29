@@ -146,6 +146,16 @@ const ARQUIVOS_UI_1DB: readonly string[] = [
   "components/ia/atividade/ItemAtividade.tsx",
 ];
 
+/**
+ * O que a SKILL-1D.ui-consumer-C acrescentou: o UNICO ponto de rede da
+ * area. Um arquivo so, e de proposito — a sonda `fetch/rede` do bloco E
+ * o nomeia como o unico autorizado, e um segundo arquivo com rede
+ * reprovaria as cinco suites desta area.
+ */
+const ARQUIVOS_UI_CONSUMER: readonly string[] = [
+  "lib/ia/agentes-http.ts",
+];
+
 const ARQUIVOS_UI_1DA: readonly string[] = [
   "lib/ia/aprovacoes.ts",
   "components/ia/aprovacoes/CardAprovacao.tsx",
@@ -181,6 +191,7 @@ const ARQUIVOS_UI: readonly string[] = [
   ...ARQUIVOS_UI_1DB,
   ...ARQUIVOS_SKILL_1B,
   ...ARQUIVOS_SKILL_1C,
+  ...ARQUIVOS_UI_CONSUMER,
 ];
 
 /**
@@ -211,11 +222,12 @@ secao("A. Inventario e rotas");
     `disco=${noDisco.length} declarado=${declarado.length}`);
 
   // 45 na UI-1D.b; 47 na SKILL-1B (contrato.ts + formato.ts); 48 desde a
-  // SKILL-1C (diagnostico.ts). O numero continua literal de proposito:
-  // se ele fosse `ARQUIVOS_UI.length`, o assert compararia a lista
-  // consigo mesma e um arquivo novo declarado sem revisao passaria
-  // batido.
-  ok("A2  48 arquivos, nem um a mais", noDisco.length === 48, String(noDisco.length));
+  // SKILL-1C (diagnostico.ts); 49 na SKILL-1D.ui-consumer-C
+  // (`agentes-http.ts`, o unico ponto de rede da area). O numero
+  // continua literal de proposito: se ele fosse `ARQUIVOS_UI.length`, o
+  // assert compararia a lista consigo mesma e um arquivo novo declarado
+  // sem revisao passaria batido.
+  ok("A2  49 arquivos, nem um a mais", noDisco.length === 49, String(noDisco.length));
 }
 
 const ROTAS = [
@@ -386,9 +398,16 @@ secao("D. Vocabulario do backend nao vaza para a UI");
 secao("E. Zero backend: banco, rede, provider, segredo");
 
 {
-  const sondas: Array<[string, RegExp]> = [
+  const sondas: Array<[string, RegExp, string[]?]> = [
     ["supabase", /supabase|createClient|service_role/i],
-    ["fetch/rede", /\bfetch\s*\(|XMLHttpRequest|axios|WebSocket/],
+    // A SKILL-1D.ui-consumer-C deu a area o seu PRIMEIRO ponto de rede
+    // legitimo: a tela de agentes passou a ler a API de agentes e a de
+    // diagnostico. A proibicao nao afrouxa, muda de forma — deixa de ser
+    // "zero na area" e passa a ser "EXATAMENTE este arquivo", por
+    // igualdade nominal de caminho. Um segundo arquivo com rede reprova,
+    // e o desaparecimento do autorizado tambem. `XMLHttpRequest`, `axios`
+    // e `WebSocket` seguem proibidos em TODA a area, inclusive nele.
+    ["fetch/rede", /\bfetch\s*\(|XMLHttpRequest|axios|WebSocket/, ["lib/ia/agentes-http.ts"]],
     ["env", /process\.env/],
     ["provider de IA", /anthropic|@google\/genai|openai|ai-gateway/i],
     // A primeira versao era `/mercadolivre|mercadolibre|shopee/i`, que
@@ -440,9 +459,18 @@ secao("E. Zero backend: banco, rede, provider, segredo");
     ok("E0f segredo: bloco PRIVATE KEY dispara", sondaSegredo.test("-----BEGIN RSA PRIVATE KEY-----"));
   }
 
-  for (const [nome, padrao] of sondas) {
-    const sujos = ARQUIVOS_UI.filter((a) => padrao.test(codigo(ler(a))));
-    ok(`E  zero ${nome} em toda a UI-1B`, sujos.length === 0, sujos.join(", "));
+  for (const [nome, padrao, autorizados] of sondas) {
+    const marcados = ARQUIVOS_UI.filter((a) => padrao.test(codigo(ler(a))));
+    const permitidos = autorizados ?? [];
+    const sujos = marcados.filter((a) => !permitidos.includes(a));
+    // Igualdade nos DOIS sentidos: arquivo nao autorizado que casa
+    // com o padrao reprova, e autorizado que deixou de casar tambem
+    // — allowlist com item obsoleto e como uma protecao morre sem
+    // ninguem perceber.
+    const sumidos = permitidos.filter((a) => !marcados.includes(a));
+    ok(`E  ${permitidos.length === 0 ? "zero" : "so o autorizado tem"} ${nome} em toda a UI-1B`,
+      sujos.length === 0 && sumidos.length === 0,
+      [...sujos, ...sumidos.map((a) => `${a} (sumiu)`)].join(", "));
   }
 }
 
@@ -509,11 +537,24 @@ secao("F. Mocks centralizados e ficticios");
   ok("F13 controle: reancorar o mock RESSUSCITA o flash (era esse o defeito)",
     aparenciaDoAgente({ ativo: true }, reancorado, depois).estado === "concluido");
 
-  ok("F14 as telas ancoram o mock na montagem, nao no relogio corrente",
-    ["components/ia/office/Escritorio.tsx", "app/(app)/ia/agentes/page.tsx"].every((arq) => {
+  // A SKILL-1D.ui-consumer-C tirou `app/(app)/ia/agentes/page.tsx` desta
+  // lista: aquela tela passou a ler agentes REAIS, e associar tarefas
+  // simuladas a um agente de verdade seria misturar duas verdades na
+  // mesma linha. Ela nao ancora mais mock nenhum porque nao usa mais
+  // mock nenhum — e o assert seguinte cobra exatamente isso, para que a
+  // saida daqui nao vire uma vaga silenciosa.
+  //
+  // O escritorio CONTINUA simulado e continua cobrado aqui.
+  ok("F14 as telas que ainda usam mock ancoram na montagem, nao no relogio corrente",
+    ["components/ia/office/Escritorio.tsx"].every((arq) => {
       const fonte = codigo(ler(arq));
       return /MOCK_TAREFAS\(ancoraMs\)/.test(fonte) && !/MOCK_TAREFAS\(agoraMs\)/.test(fonte);
     }));
+
+  ok("F14b a lista de agentes NAO voltou a usar dado simulado",
+    ["app/(app)/ia/agentes/page.tsx", "components/ia/agente/PaginaAgente.tsx"].every(
+      (arq) => !/MOCK_/.test(codigo(ler(arq)))
+    ));
 
   // Atualizado na UI-1D.a: o badge de aprovacoes passou a derivar da
   // FILA, nao das tarefas — e a fila que representa o que espera decisao

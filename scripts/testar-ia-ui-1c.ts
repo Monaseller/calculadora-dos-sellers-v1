@@ -91,6 +91,9 @@ const MOCKS_PASTA: readonly string[] = [
 ];
 
 const ROTA_AGENTE = "app/(app)/ia/agentes/[id]/page.tsx";
+/** O container cliente do detalhe — para onde a resolucao do agente
+ *  desceu na SKILL-1D.ui-consumer-C, junto com a identidade real. */
+const CONTAINER_AGENTE = "components/ia/agente/PaginaAgente.tsx";
 const DRAWER = "components/ia/office/PainelAgente.tsx";
 
 /** Tudo que a area de IA tem hoje — as varreduras valem para o conjunto. */
@@ -121,7 +124,16 @@ secao("A. Rota dinamica");
   ok("A1  a rota /ia/agentes/[id] existe", arquivosDe("app/(app)/ia").includes(ROTA_AGENTE));
   const fonte = ler(ROTA_AGENTE);
   ok("A2  exporta default", /export default function/.test(fonte));
-  ok("A3  resolve o agente SO no mock", /MOCK_AGENTE_POR_ID/.test(codigo(fonte)));
+  // A SKILL-1D.ui-consumer-C inverteu este assert. A rota resolvia o
+  // agente na lista simulada; hoje a identidade e REAL e vem da lista
+  // autenticada do dono, que so o container cliente consegue ler. A
+  // pagina ficou com uma responsabilidade so: validar a aba e entregar
+  // o `id`. O que se cobra agora e o contrario do que se cobrava —
+  // que ela NAO resolva mock nenhum.
+  ok("A3  a rota NAO resolve mais o agente no mock",
+    !/MOCK_AGENTE_POR_ID|MOCK_AGENTES/.test(codigo(fonte)));
+  ok("A3b a rota entrega o id da rota ao container",
+    /agenteId=\{params\.id\}/.test(codigo(fonte)));
   ok("A4  nao ha rota-filha por aba (uma rota so)",
     arquivosDe("app/(app)/ia").filter((a) => a.includes("[id]")).length === 1);
   ok("A5  a aba passa por abaSegura antes de escolher qualquer coisa",
@@ -345,8 +357,16 @@ secao("H. Agente inexistente e ids ficticios");
   ok("H1  id conhecido resolve", MOCK_AGENTE_POR_ID("ag-atendimento")?.nome === "Atendimento");
   ok("H2  id desconhecido devolve undefined, sem lancar",
     MOCK_AGENTE_POR_ID("nao-existe") === undefined);
-  ok("H3  a rota trata o inexistente com EstadoVazio",
-    /EstadoVazio/.test(codigo(ler(ROTA_AGENTE))) && /não encontrado/i.test(ler(ROTA_AGENTE)));
+  // A tela de "nao encontrado" continua existindo e continua sendo uma
+  // TELA, nunca um 404 seco — o que mudou na SKILL-1D.ui-consumer-C foi
+  // quem a decide: saiu da rota e foi para o container, porque a
+  // conclusao agora depende da lista autenticada do dono.
+  ok("H3  o container trata o inexistente com EstadoVazio",
+    /EstadoVazio/.test(codigo(ler(CONTAINER_AGENTE))) &&
+      /não encontrado/i.test(ler(CONTAINER_AGENTE)));
+  ok("H3b e a conclusao vem da LISTA, nunca do diagnostico vazio",
+    /agentes\.find\(\(a\) => a\.id === agenteId\)/.test(codigo(ler(CONTAINER_AGENTE))) &&
+      !/diagnosticos\.length === 0[^\n]*nao encontrado/i.test(codigo(ler(CONTAINER_AGENTE))));
   ok("H4  oferece caminho de volta para /ia/agentes",
     /\/ia\/agentes/.test(ler(ROTA_AGENTE)));
   ok("H5  nao usa notFound() seco", !/notFound\(\)/.test(codigo(ler(ROTA_AGENTE))));
@@ -384,9 +404,16 @@ secao("I. Conceitos separados");
 secao("J. Zero backend na area inteira");
 
 {
-  const sondas: Array<[string, RegExp]> = [
+  const sondas: Array<[string, RegExp, string[]?]> = [
     ["supabase", /supabase|createClient|service_role/i],
-    ["fetch/rede", /\bfetch\s*\(|XMLHttpRequest|axios|WebSocket/],
+    // A SKILL-1D.ui-consumer-C deu a area o seu PRIMEIRO ponto de rede
+    // legitimo: a tela de agentes passou a ler a API de agentes e a de
+    // diagnostico. A proibicao nao afrouxa, muda de forma — deixa de ser
+    // "zero na area" e passa a ser "EXATAMENTE este arquivo", por
+    // igualdade nominal de caminho. Um segundo arquivo com rede reprova,
+    // e o desaparecimento do autorizado tambem. `XMLHttpRequest`, `axios`
+    // e `WebSocket` seguem proibidos em TODA a area, inclusive nele.
+    ["fetch/rede", /\bfetch\s*\(|XMLHttpRequest|axios|WebSocket/, ["lib/ia/agentes-http.ts"]],
     ["env", /process\.env/],
     ["provider de IA", /anthropic|@google\/genai|openai|ai-gateway/i],
     ["integracao de marketplace",
@@ -440,9 +467,18 @@ secao("J. Zero backend na area inteira");
   }
 
 
-  for (const [nome, padrao] of sondas) {
-    const sujos = ARQUIVOS_AREA.filter((a) => padrao.test(codigo(ler(a))));
-    ok(`J  zero ${nome}`, sujos.length === 0, sujos.join(", "));
+  for (const [nome, padrao, autorizados] of sondas) {
+    const marcados = ARQUIVOS_AREA.filter((a) => padrao.test(codigo(ler(a))));
+    const permitidos = autorizados ?? [];
+    const sujos = marcados.filter((a) => !permitidos.includes(a));
+    // Igualdade nos DOIS sentidos: arquivo nao autorizado que casa
+    // com o padrao reprova, e autorizado que deixou de casar tambem
+    // — allowlist com item obsoleto e como uma protecao morre sem
+    // ninguem perceber.
+    const sumidos = permitidos.filter((a) => !marcados.includes(a));
+    ok(`J  ${permitidos.length === 0 ? "zero" : "so o autorizado tem"} ${nome}`,
+      sujos.length === 0 && sumidos.length === 0,
+      [...sujos, ...sumidos.map((a) => `${a} (sumiu)`)].join(", "));
   }
 }
 

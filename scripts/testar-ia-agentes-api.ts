@@ -488,8 +488,14 @@ async function principal(): Promise<void> {
       .every((r) => r.headers.get("cache-control") === "no-store"));
   ok("I7  zero RPC em todo o pipeline", rpcs === 0);
 
-  // Fronteira: esta frente NAO toca a UI.
+  // Fronteira com a UI. Nasceu na agent-source-C provando que AQUELA
+  // frente nao havia criado consumidor nenhum — a area de IA era, na
+  // epoca, desenhada sem rede. A SKILL-1D.ui-consumer-C deu a ela UM
+  // transporte nominal, e a premissa literal "zero rede" deixou de ser
+  // verdadeira. A guarda nao sai: passa a proteger a EXCLUSIVIDADE
+  // desse boundary, por igualdade de conjunto e caminho nominal.
   const areaIa = ["lib/ia", "components/ia", "app/(app)/ia"];
+  const TRANSPORTE_AUTORIZADO = ["lib/ia/agentes-http.ts"];
   const comFetch: string[] = [];
   const varrer = (dir: string): void => {
     for (const e of readdirSync(join(RAIZ, dir), { withFileTypes: true })) {
@@ -501,8 +507,12 @@ async function principal(): Promise<void> {
     }
   };
   for (const d of areaIa) varrer(d);
-  ok("I8  a area de IA continua sem fetch e sem citar /api/agentes",
-    comFetch.length === 0, comFetch.join(", "));
+  // Igualdade nos DOIS sentidos: um segundo arquivo com rede reprova, e
+  // o transporte sumir ou mudar de lugar tambem — guarda que so olha um
+  // lado passa verde no dia em que o boundary deixa de existir.
+  ok("I8  so o transporte nominal da UI tem rede e cita a rota de agentes",
+    JSON.stringify(comFetch.slice().sort()) === JSON.stringify(TRANSPORTE_AUTORIZADO),
+    comFetch.join(", ") || "nenhum");
   ok("I9  nenhuma UI foi criada para esta rota",
     !existsSync(join(RAIZ, "app/(app)/ia/agentes/NovoAgente.tsx")) &&
       readdirSync(join(RAIZ, "app/api/agentes")).sort().join(", ") === "[agenteId], route.ts");

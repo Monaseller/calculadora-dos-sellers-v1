@@ -14,23 +14,24 @@
  * (`?aba=a&aba=b` chega como array), desconhecida ou de outro tipo.
  * Nada aqui indexa um mapa de componentes com string vinda do usuario.
  *
- * ── Server Component fino ───────────────────────────────────────────
+ * ── Server Component fino, e cada vez mais fino ─────────────────────
  *
- * Resolve o agente e valida a aba; o resto e cliente, porque depende do
- * relogio. Resolver aqui mantem "agente inexistente" fora do JavaScript
- * do navegador.
+ * Ate a SKILL-1D.ui-consumer-C esta pagina resolvia o agente na lista
+ * simulada em memoria. Agora a identidade e REAL, e quem a resolve e o
+ * container cliente: a pagina valida a aba e entrega o `id` da rota,
+ * nada mais.
  *
- * ── Resolucao por MOCK, e so por mock ───────────────────────────────
+ * A resolucao desceu de proposito. O agente vem da lista do dono da
+ * sessao, e essa leitura e autenticada por cookie — coisa que um
+ * Server Component so faria chamando a propria API por HTTP, padrao que
+ * este repositorio nao usa em lugar nenhum.
  *
- * `MOCK_AGENTE_POR_ID` procura na lista em memoria. Sem fetch, sem
- * consulta, sem rota de API. Os ids sao os ficticios (`ag-atendimento`),
- * e continuam assim de proposito: um UUID falso seria indistinguivel de
- * um real numa captura de tela.
+ * "Agente nao encontrado" continua existindo, e continua sendo uma
+ * tela e nao uma excecao — so que agora a conclusao vem da lista
+ * autenticada do proprio usuario, dentro do container.
  */
 import { abaSegura } from "@/lib/ia/abas";
-import { MOCK_AGENTE_POR_ID } from "@/lib/ia/mocks";
 import PaginaAgente from "@/components/ia/agente/PaginaAgente";
-import EstadoVazio from "@/components/ia/EstadoVazio";
 
 export default function PaginaDoAgente({
   params,
@@ -39,21 +40,5 @@ export default function PaginaDoAgente({
   params: { id: string };
   searchParams?: { [chave: string]: string | string[] | undefined };
 }) {
-  const agente = MOCK_AGENTE_POR_ID(params.id);
-
-  // Id desconhecido nao derruba a pagina e nao vira 404 seco: a area
-  // continua navegavel e o usuario recebe o caminho de volta. E o mesmo
-  // criterio de "recusa fechada, nunca no-op silencioso" que as RPCs
-  // seguem — so que aqui a recusa e uma tela, nao uma excecao.
-  if (!agente) {
-    return (
-      <EstadoVazio
-        titulo="Agente não encontrado"
-        descricao="Nenhum agente corresponde a este endereço. Ele pode ter sido removido, ou o link pode estar incorreto."
-        acao={{ href: "/ia/agentes", rotulo: "Ver todos os agentes" }}
-      />
-    );
-  }
-
-  return <PaginaAgente agente={agente} aba={abaSegura(searchParams?.aba)} />;
+  return <PaginaAgente agenteId={params.id} aba={abaSegura(searchParams?.aba)} />;
 }

@@ -353,9 +353,16 @@ secao("H. Quatro conceitos, ainda separados");
 secao("I. Zero backend na area inteira");
 
 {
-  const sondas: Array<[string, RegExp]> = [
+  const sondas: Array<[string, RegExp, string[]?]> = [
     ["supabase", /supabase|createClient|service_role/i],
-    ["fetch/rede", /\bfetch\s*\(|XMLHttpRequest|axios|WebSocket/],
+    // A SKILL-1D.ui-consumer-C deu a area o seu PRIMEIRO ponto de rede
+    // legitimo: a tela de agentes passou a ler a API de agentes e a de
+    // diagnostico. A proibicao nao afrouxa, muda de forma — deixa de ser
+    // "zero na area" e passa a ser "EXATAMENTE este arquivo", por
+    // igualdade nominal de caminho. Um segundo arquivo com rede reprova,
+    // e o desaparecimento do autorizado tambem. `XMLHttpRequest`, `axios`
+    // e `WebSocket` seguem proibidos em TODA a area, inclusive nele.
+    ["fetch/rede", /\bfetch\s*\(|XMLHttpRequest|axios|WebSocket/, ["lib/ia/agentes-http.ts"]],
     ["env", /process\.env/],
     ["provider de IA", /anthropic|@google\/genai|openai|ai-gateway/i],
     ["integracao de marketplace",
@@ -407,9 +414,18 @@ secao("I. Zero backend na area inteira");
   }
 
 
-  for (const [nome, padrao] of sondas) {
-    const sujos = ARQUIVOS_AREA.filter((a) => padrao.test(codigo(ler(a))));
-    ok(`I  zero ${nome}`, sujos.length === 0, sujos.join(", "));
+  for (const [nome, padrao, autorizados] of sondas) {
+    const marcados = ARQUIVOS_AREA.filter((a) => padrao.test(codigo(ler(a))));
+    const permitidos = autorizados ?? [];
+    const sujos = marcados.filter((a) => !permitidos.includes(a));
+    // Igualdade nos DOIS sentidos: arquivo nao autorizado que casa
+    // com o padrao reprova, e autorizado que deixou de casar tambem
+    // — allowlist com item obsoleto e como uma protecao morre sem
+    // ninguem perceber.
+    const sumidos = permitidos.filter((a) => !marcados.includes(a));
+    ok(`I  ${permitidos.length === 0 ? "zero" : "so o autorizado tem"} ${nome}`,
+      sujos.length === 0 && sumidos.length === 0,
+      [...sujos, ...sumidos.map((a) => `${a} (sumiu)`)].join(", "));
   }
 }
 
