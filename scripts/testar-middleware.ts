@@ -351,7 +351,7 @@ t("29. asset marcado 'publico' precisa constar em ASSETS_PUBLICOS", () => {
 });
 
 // ────────────────────────────────────────────────────────────────────
-console.log("\n[8. cobertura: as 51 rotas do inventario F0.a]");
+console.log("\n[8. cobertura: as 53 rotas do inventario F0.a]");
 
 /** caminho, metodo, decisao esperada SEM sessao. */
 const INVENTARIO: [string, string, Decisao][] = [
@@ -401,10 +401,16 @@ const INVENTARIO: [string, string, Decisao][] = [
   ["/api/sync/iniciar", "POST", "bloquear_api"],
   ["/api/sync/manual", "POST", "bloquear_api"],
   ["/api/sync/status", "GET", "bloquear_api"],
-  // — protegidas: agentes (1; entrou na SKILL-1D.endpoint-B)
-  // Primeira rota de agentes com SESSAO — as outras quatro de
+  // — protegidas: agentes (3; 1 na SKILL-1D.endpoint-B, 2 na agent-source-C)
+  // Primeira area de agentes com SESSAO — as outras quatro de
   // `internal/` se autenticam por segredo proprio e ficam la em cima.
+  // O mesmo caminho aparece DUAS vezes de proposito: o inventario e por
+  // (caminho, metodo), e `/api/agentes` expoe os dois verbos. Aqui a
+  // decisao nao depende do metodo — default deny —, e listar os dois
+  // prova isso em vez de supor.
   [`/api/agentes/${UUID}/diagnostico`, "GET", "bloquear_api"],
+  ["/api/agentes", "GET", "bloquear_api"],
+  ["/api/agentes", "POST", "bloquear_api"],
   // — protegidas: Estudio (15)
   ["/api/estudio-anuncios/projetos", "GET", "bloquear_api"],
   [`/api/estudio-anuncios/projetos/${UUID}`, "GET", "bloquear_api"],
@@ -423,7 +429,7 @@ const INVENTARIO: [string, string, Decisao][] = [
   [`/api/estudio-anuncios/projetos/${UUID}/exportacao/${UUID}/arquivo`, "GET", "bloquear_api"],
 ];
 
-t("30. as 51 rotas do inventario caem na classe correta", () => {
+t("30. as 53 rotas do inventario caem na classe correta", () => {
   // 51 → 50 em F0.c.6d: `/api/auth/relay` deixou de existir.
   // 50 → 49 em F0.c.16: `/api/auth/status` deixou de existir.
   // 49 → 50 na AGENTES-FASE1C-FIX1: `/api/internal/agentes/executar` entrou.
@@ -431,7 +437,10 @@ t("30. as 51 rotas do inventario caem na classe correta", () => {
   // entrou. E a primeira rota de agentes protegida por SESSAO, e nao por
   // segredo de worker — o inventario prova que ela cai em `bloquear_api`
   // sem cookie e em `liberar` com cookie, como qualquer API privada.
-  assert(INVENTARIO.length === 51, `inventario tem ${INVENTARIO.length} rotas, esperado 51`);
+  // 51 → 53 na SKILL-1D.agent-source-C: `GET` e `POST /api/agentes`, a
+  // fonte real dos agentes do dono. Duas entradas para um caminho so,
+  // porque o inventario e por (caminho, metodo).
+  assert(INVENTARIO.length === 53, `inventario tem ${INVENTARIO.length} rotas, esperado 53`);
   for (const [caminho, metodo, esperado] of INVENTARIO) {
     const obtido = sem(caminho, metodo);
     assert(obtido === esperado, `${metodo} ${caminho}: esperado ${esperado}, obtido ${obtido}`);
