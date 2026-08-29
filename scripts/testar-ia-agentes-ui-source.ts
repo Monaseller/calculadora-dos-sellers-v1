@@ -116,16 +116,65 @@ secao("B. O que a UI NAO manda");
   ok("B2  nenhum arquivo envia relogio do cliente",
     paraOServidor.every((a) => !/\bagoraMs\s*:/.test(codigo(ler(a)))) &&
       !/agoraMs/.test(CODIGO_TRANSPORTE));
-  ok("B3  zero cabecalho de autorizacao ou cookie manual",
-    !/Authorization|[Bb]earer|document\.cookie|headers\s*:/.test(CODIGO_TRANSPORTE));
+  // B3 juntava duas coisas que a criacao separou: "nenhuma credencial
+  // manual" (permanente) e "nenhum header" (de fase — enquanto so havia
+  // GET, header nenhum era necessario). Um corpo JSON exige
+  // `Content-Type`, e so ele. A parte de credencial NAO afrouxa; a de
+  // header passa a ser allowlist do proprio cabecalho.
+  ok("B3  zero credencial manual em qualquer arquivo da frente",
+    paraOServidor.every(
+      (a) => !/Authorization|[Bb]earer|document\.cookie/.test(codigo(ler(a)))
+    ));
+  ok("B3b headers so no transporte nominal",
+    AREA.filter((a) => /headers\s*:/.test(codigo(ler(a)))).join(",") === TRANSPORTE,
+    AREA.filter((a) => /headers\s*:/.test(codigo(ler(a)))).join(", ") || "nenhum");
+  ok("B3c e o UNICO cabecalho enviado e o do corpo JSON",
+    (CODIGO_TRANSPORTE.match(/headers\s*:/g) ?? []).length === 1 &&
+      /headers: \{ "Content-Type": "application\/json" \}/.test(CODIGO_TRANSPORTE) &&
+      !/"X-|Cookie|Api-Key|Idempotency-Key/i.test(CODIGO_TRANSPORTE));
   ok("B4  `credentials` omitido — o cookie same-origin ja viaja sozinho",
     !/credentials/.test(CODIGO_TRANSPORTE));
-  ok("B5  zero corpo: as duas leituras sao GET puro",
-    !/method\s*:|body\s*:/.test(CODIGO_TRANSPORTE));
+  // As duas LEITURAS continuam GET puro — o que mudou foi a existencia
+  // de UMA escrita. `method` e `body` deixam de ser proibidos no arquivo
+  // e passam a ser exclusivos de `criarAgenteViaApi`: o corpo de cada
+  // funcao e recortado e medido separadamente, para que um `body` que
+  // aparecesse em `listarAgentes` reprovasse.
+  const corpoDaFuncao = (nome: string): string => {
+    const i = CODIGO_TRANSPORTE.indexOf(`export async function ${nome}(`);
+    if (i < 0) return "";
+    const resto = CODIGO_TRANSPORTE.slice(i + 1);
+    const j = resto.indexOf("\nexport ");
+    return j < 0 ? resto : resto.slice(0, j);
+  };
+  ok("B5  as duas leituras continuam GET puro, sem method e sem corpo",
+    ["listarAgentes", "obterDiagnostico"].every((f) => {
+      const corpo = corpoDaFuncao(f);
+      return corpo.length > 50 && !/method\s*:|body\s*:/.test(corpo);
+    }));
+  ok("B5b method e body existem SO na capacidade de criacao",
+    /method: "POST"/.test(corpoDaFuncao("criarAgenteViaApi")) &&
+      /body: JSON\.stringify/.test(corpoDaFuncao("criarAgenteViaApi")) &&
+      (CODIGO_TRANSPORTE.match(/method\s*:/g) ?? []).length === 1 &&
+      (CODIGO_TRANSPORTE.match(/body\s*:/g) ?? []).length === 1);
+  ok("B5c e nenhum outro arquivo da area escreve",
+    AREA.filter((a) => /method\s*:\s*"(POST|PUT|PATCH|DELETE)"/.test(codigo(ler(a)))).join(",") ===
+      TRANSPORTE);
   ok("B6  o agenteId vai escapado no caminho",
     /encodeURIComponent\(agenteId\)/.test(CODIGO_TRANSPORTE));
-  ok("B7  zero POST nesta frente — criar agente e outra frente",
-    !AREA.some((a) => /"POST"|method:\s*"POST"/.test(codigo(ler(a)))));
+  // A SKILL-1D.agent-create-ui-B trouxe a criacao visual, e com ela o
+  // primeiro POST legitimo da area. A exigencia nao afrouxa: deixa de
+  // ser "zero POST" e passa a ser "EXATAMENTE este arquivo", por
+  // igualdade de conjunto e caminho nominal — um componente que ganhe
+  // POST proprio reprova, e o transporte perder o POST tambem.
+  const COM_POST_AUTORIZADO = ["lib/ia/agentes-http.ts"];
+  const comPost = AREA.filter((a) => /"POST"|method:\s*"POST"/.test(codigo(ler(a))));
+  ok("B7  POST existe SO no transporte nominal",
+    JSON.stringify(comPost.slice().sort()) === JSON.stringify(COM_POST_AUTORIZADO),
+    comPost.join(", ") || "nenhum");
+  ok("B7b e a unica capacidade de escrita publicada e a criacao",
+    (CODIGO_TRANSPORTE.match(/method:\s*"POST"/g) ?? []).length === 1 &&
+      /export async function criarAgenteViaApi\(/.test(CODIGO_TRANSPORTE) &&
+      !/"PUT"|"PATCH"|"DELETE"/.test(CODIGO_TRANSPORTE));
 }
 
 secao("C. As telas migradas nao voltam ao simulado");

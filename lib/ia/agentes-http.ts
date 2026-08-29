@@ -64,6 +64,28 @@ export type RespostaAgentes =
   | { estado: "falha" };
 
 /**
+ * Criação de UM agente.
+ *
+ * `dados_invalidos` existe separado de `falha` porque as duas pedem
+ * coisas diferentes do usuário: uma ele corrige e reenvia, a outra ele
+ * só pode tentar de novo. A `mensagem` é sempre uma das frases fixas
+ * que o servidor publica — nunca texto desconhecido repassado adiante.
+ */
+export type RespostaCriacao =
+  | { estado: "ok"; agente: AgenteUI }
+  | { estado: "dados_invalidos"; mensagem: string }
+  | { estado: "nao_autenticado" }
+  | { estado: "falha" };
+
+/** Os campos que a tela preenche. Três, e nenhum a mais: dono, id,
+ *  `ativo` e datas são autoridade do servidor. */
+export interface NovoAgente {
+  nome: string;
+  tipo: TipoAgenteUI;
+  instrucoes: string | null;
+}
+
+/**
  * Diagnóstico de UM agente.
  *
  * `semSelecao` chega separado e assim permanece: requisito que existe e
@@ -157,6 +179,74 @@ export async function listarAgentes(signal?: AbortSignal): Promise<RespostaAgent
     agentes.push(agente);
   }
   return { estado: "ok", agentes };
+}
+
+/**
+ * As frases de erro que o servidor publica para corpo inválido.
+ *
+ * A allowlist existe para que a tela nunca mostre texto que não tenha
+ * sido escrito aqui: mensagem desconhecida vira a genérica, e uma
+ * mudança no servidor não vaza redação nova para o usuário.
+ */
+const MENSAGENS_DE_DADOS: readonly string[] = [
+  "nome inválido.",
+  "tipo inválido.",
+];
+const MENSAGEM_GENERICA = "Não foi possível criar o agente com esses dados.";
+
+/**
+ * Cria UM agente para o dono da sessão.
+ *
+ * ── O que NÃO viaja ─────────────────────────────────────────────────
+ *
+ * O corpo é montado campo a campo, com três chaves. Nunca
+ * `JSON.stringify(formulario)`: um objeto de formulário pode ganhar
+ * chave nova sem ninguém notar, e `id`, dono, `ativo` e datas são do
+ * servidor. Aqui a proteção não depende do tipo — depende de o objeto
+ * ser escrito à mão.
+ *
+ * ── Por que não há AbortSignal ──────────────────────────────────────
+ *
+ * Abortar uma escrita no navegador não desfaz o que o servidor gravou.
+ * Aceitar um sinal aqui daria à tela a ilusão de cancelamento
+ * transacional que o HTTP não tem.
+ */
+export async function criarAgenteViaApi(dados: NovoAgente): Promise<RespostaCriacao> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(ROTA_BASE, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        nome: dados.nome,
+        tipo: dados.tipo,
+        instrucoes: dados.instrucoes,
+      }),
+    });
+  } catch {
+    return { estado: "falha" };
+  }
+
+  if (resposta.status === 401) return { estado: "nao_autenticado" };
+
+  const corpo = await corpoDe(resposta);
+
+  if (resposta.status === 400) {
+    const bruta = ehObjeto(corpo) && typeof corpo.erro === "string" ? corpo.erro : "";
+    return {
+      estado: "dados_invalidos",
+      mensagem: MENSAGENS_DE_DADOS.includes(bruta) ? bruta : MENSAGEM_GENERICA,
+    };
+  }
+
+  if (!resposta.ok || !ehObjeto(corpo) || corpo.ok !== true) return { estado: "falha" };
+
+  const agente = agenteDaResposta(corpo.agente);
+  // Resposta com formato inesperado e FALHA, nunca um agente meio
+  // montado entrando na lista como se fosse real.
+  if (agente === null) return { estado: "falha" };
+
+  return { estado: "ok", agente };
 }
 
 /**

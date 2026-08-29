@@ -154,6 +154,10 @@ const ARQUIVOS_UI_1DB: readonly string[] = [
  */
 const ARQUIVOS_UI_CONSUMER: readonly string[] = [
   "lib/ia/agentes-http.ts",
+  // SKILL-1D.agent-create-ui-B: o dialogo de criacao. Nao faz rede por
+  // conta propria — chama o transporte acima, que segue sendo o unico
+  // arquivo da area autorizado a isso.
+  "components/ia/agente/CriarAgente.tsx",
 ];
 
 const ARQUIVOS_UI_1DA: readonly string[] = [
@@ -223,11 +227,12 @@ secao("A. Inventario e rotas");
 
   // 45 na UI-1D.b; 47 na SKILL-1B (contrato.ts + formato.ts); 48 desde a
   // SKILL-1C (diagnostico.ts); 49 na SKILL-1D.ui-consumer-C
-  // (`agentes-http.ts`, o unico ponto de rede da area). O numero
-  // continua literal de proposito: se ele fosse `ARQUIVOS_UI.length`, o
-  // assert compararia a lista consigo mesma e um arquivo novo declarado
-  // sem revisao passaria batido.
-  ok("A2  49 arquivos, nem um a mais", noDisco.length === 49, String(noDisco.length));
+  // (`agentes-http.ts`, o unico ponto de rede da area); 50 na
+  // SKILL-1D.agent-create-ui-B (`CriarAgente.tsx`). O numero continua
+  // literal de proposito: se ele fosse `ARQUIVOS_UI.length`, o assert
+  // compararia a lista consigo mesma e um arquivo novo declarado sem
+  // revisao passaria batido.
+  ok("A2  50 arquivos, nem um a mais", noDisco.length === 50, String(noDisco.length));
 }
 
 const ROTAS = [

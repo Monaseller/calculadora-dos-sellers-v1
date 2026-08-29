@@ -35,6 +35,7 @@ import { listarAgentes, type RespostaAgentes } from "@/lib/ia/agentes-http";
 import type { AgenteUI, TarefaUI } from "@/lib/ia/contratos";
 import BadgeEstado, { corDaAparencia } from "@/components/ia/BadgeEstado";
 import PainelAgente from "@/components/ia/office/PainelAgente";
+import CriarAgente from "@/components/ia/agente/CriarAgente";
 
 /** Enquanto nao ha leitura real de tarefas, ninguem tem tarefa. */
 const NENHUMA_TAREFA: readonly TarefaUI[] = [];
@@ -46,6 +47,7 @@ export default function PaginaAgentes() {
   const [agoraMs, setAgoraMs] = useState<number | null>(null);
   const [selecionado, setSelecionado] = useState<string | null>(null);
   const [resposta, setResposta] = useState<RespostaAgentes | null>(null);
+  const [criando, setCriando] = useState(false);
 
   // Tambem evita divergencia de hidratacao: ler o relogio no servidor e
   // no cliente produziria HTML diferente nos dois lados.
@@ -87,6 +89,23 @@ export default function PaginaAgentes() {
     <p style={{ color: CROMO.textoFraco, font: `13px/1.6 ${FONTE.interface}` }}>{texto}</p>
   );
 
+  // O agente vem do POST ja no formato publico da lista — inserir o
+  // objeto retornado evita uma segunda leitura para saber o que o
+  // servidor acabou de dizer. Vai para o FIM porque a listagem preserva
+  // a ordem do servidor, que e por `criado_em`.
+  const aoCriar = (novo: AgenteUI) => {
+    setResposta((atual) =>
+      atual !== null && atual.estado === "ok"
+        ? { estado: "ok", agentes: [...atual.agentes, novo] }
+        : atual
+    );
+    setCriando(false);
+  };
+
+  const dialogo = criando ? (
+    <CriarAgente onFechar={() => setCriando(false)} onCriado={aoCriar} />
+  ) : null;
+
   // Os tres desfechos que NAO sao lista, cada um com voz propria: quem
   // perdeu a sessao precisa entrar de novo, quem encontrou falha precisa
   // saber que foi falha, e so quem realmente nao tem agentes ve o vazio.
@@ -96,13 +115,31 @@ export default function PaginaAgentes() {
   if (resposta.estado === "falha") {
     return aviso("Não foi possível carregar seus agentes.");
   }
+
+  // Lista vazia deixou de ser beco sem saida: ela e o lugar onde o
+  // primeiro agente nasce.
   if (linhas.length === 0) {
-    return aviso("Você ainda não tem agentes.");
+    return (
+      <>
+        <style>{css}</style>
+        {aviso("Você ainda não tem agentes.")}
+        <button type="button" className="cds-ia-criar-cta" onClick={() => setCriando(true)}>
+          Criar primeiro agente
+        </button>
+        {dialogo}
+      </>
+    );
   }
 
   return (
     <>
       <style>{css}</style>
+
+      <p className="cds-ia-barra">
+        <button type="button" className="cds-ia-criar-cta" onClick={() => setCriando(true)}>
+          Criar agente
+        </button>
+      </p>
 
       <ul className="cds-ia-lista">
         {linhas.map(({ agente, aparencia }) => (
@@ -158,11 +195,25 @@ export default function PaginaAgentes() {
           onFechar={() => setSelecionado(null)}
         />
       )}
+
+      {dialogo}
     </>
   );
 }
 
 const css = `
+  .cds-ia-barra { margin: 0 0 12px; display: flex; justify-content: flex-end; }
+  .cds-ia-criar-cta {
+    padding: 9px 14px;
+    background: ${CROMO.acento};
+    border: 1px solid ${CROMO.acento};
+    border-radius: ${RAIO.controle}px;
+    color: #000;
+    font: 700 13px/1 ${FONTE.interface};
+    cursor: pointer;
+  }
+  .cds-ia-criar-cta:focus-visible { outline: 2px solid ${CROMO.acento}; outline-offset: 2px; }
+
   .cds-ia-lista {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));

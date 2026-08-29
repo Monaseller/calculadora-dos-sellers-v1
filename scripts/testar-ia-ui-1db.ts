@@ -536,7 +536,16 @@ secao("M. Zero backend e zero segredo");
     ["identificador externo", /\bseller_id\b|\bshop_id\b|\bpartner_id\b/],
     ["identificador de dono", /\buser_id\b|\bloja_id\b/],
     ["viewport em JS", /window\.innerWidth|addEventListener\("resize"|matchMedia/],
-    ["payload/prompt/stack", /\bpayload\b|\bprompt\b|stack trace|\.stack\b|JSON\.stringify/i],
+    // `JSON.stringify` SAIU desta sonda na SKILL-1D.agent-create-ui-B, e
+    // a separacao e semantica, nao conveniencia: `payload`, `prompt` e
+    // `stack` sao coisas que a UI nao deve CONHECER, enquanto serializar
+    // e a unica forma de montar um corpo JSON. Mante-los juntos tornaria
+    // a sonda incompativel com qualquer escrita — e ela continua
+    // integralmente viva para os tres termos originais.
+    ["payload/prompt/stack", /\bpayload\b|\bprompt\b|stack trace|\.stack\b/i],
+    // A serializacao ganha guarda propria, com o mesmo rigor: ela existe
+    // no boundary de rede e em lugar nenhum mais.
+    ["serializacao", /JSON\.stringify/, ["lib/ia/agentes-http.ts"]],
   ];
 
   const isca = [
@@ -551,7 +560,19 @@ secao("M. Zero backend e zero segredo");
   for (const [nome, p] of sondas) {
     if (!p.test(isca)) { mortas++; console.log(`        SONDA MORTA: ${nome}`); }
   }
-  ok("M0  controle negativo: as 15 sondas acusam a isca", mortas === 0, `${mortas} mortas`);
+  ok("M0  controle negativo: as 16 sondas acusam a isca", mortas === 0, `${mortas} mortas`);
+  // A separacao de `JSON.stringify` precisa ser provada nos dois lados,
+  // senao "separar" viraria "afrouxar": a sonda de payload nao pode mais
+  // acusar serializacao, e a de serializacao nao pode acusar payload.
+  {
+    const sondaPayload = sondas.find(([n]) => n === "payload/prompt/stack")![1];
+    const sondaSerial = sondas.find(([n]) => n === "serializacao")![1];
+    ok("Mj1 payload continua sendo acusado", sondaPayload.test("const payload = {}"));
+    ok("Mj2 prompt continua sendo acusado", sondaPayload.test("const prompt = 'x'"));
+    ok("Mj3 stack continua sendo acusado", sondaPayload.test("erro.stack"));
+    ok("Mj4 serializar sozinho NAO e mais payload", !sondaPayload.test("JSON.stringify({ a: 1 })"));
+    ok("Mj5 e a sonda de serializacao acusa", sondaSerial.test("JSON.stringify({ a: 1 })"));
+  }
   // A sonda de segredo mudou de semantica nesta fase: passou a exigir
   // VALOR. Os controles abaixo provam os dois lados — que ela continua
   // viva para credencial real, e que nao reprova documentacao.
