@@ -351,7 +351,7 @@ t("29. asset marcado 'publico' precisa constar em ASSETS_PUBLICOS", () => {
 });
 
 // ────────────────────────────────────────────────────────────────────
-console.log("\n[8. cobertura: as 50 rotas do inventario F0.a]");
+console.log("\n[8. cobertura: as 51 rotas do inventario F0.a]");
 
 /** caminho, metodo, decisao esperada SEM sessao. */
 const INVENTARIO: [string, string, Decisao][] = [
@@ -401,6 +401,10 @@ const INVENTARIO: [string, string, Decisao][] = [
   ["/api/sync/iniciar", "POST", "bloquear_api"],
   ["/api/sync/manual", "POST", "bloquear_api"],
   ["/api/sync/status", "GET", "bloquear_api"],
+  // — protegidas: agentes (1; entrou na SKILL-1D.endpoint-B)
+  // Primeira rota de agentes com SESSAO — as outras quatro de
+  // `internal/` se autenticam por segredo proprio e ficam la em cima.
+  [`/api/agentes/${UUID}/diagnostico`, "GET", "bloquear_api"],
   // — protegidas: Estudio (15)
   ["/api/estudio-anuncios/projetos", "GET", "bloquear_api"],
   [`/api/estudio-anuncios/projetos/${UUID}`, "GET", "bloquear_api"],
@@ -419,11 +423,15 @@ const INVENTARIO: [string, string, Decisao][] = [
   [`/api/estudio-anuncios/projetos/${UUID}/exportacao/${UUID}/arquivo`, "GET", "bloquear_api"],
 ];
 
-t("30. as 50 rotas do inventario caem na classe correta", () => {
+t("30. as 51 rotas do inventario caem na classe correta", () => {
   // 51 → 50 em F0.c.6d: `/api/auth/relay` deixou de existir.
   // 50 → 49 em F0.c.16: `/api/auth/status` deixou de existir.
   // 49 → 50 na AGENTES-FASE1C-FIX1: `/api/internal/agentes/executar` entrou.
-  assert(INVENTARIO.length === 50, `inventario tem ${INVENTARIO.length} rotas, esperado 50`);
+  // 50 → 51 na SKILL-1D.endpoint-B: `/api/agentes/[agenteId]/diagnostico`
+  // entrou. E a primeira rota de agentes protegida por SESSAO, e nao por
+  // segredo de worker — o inventario prova que ela cai em `bloquear_api`
+  // sem cookie e em `liberar` com cookie, como qualquer API privada.
+  assert(INVENTARIO.length === 51, `inventario tem ${INVENTARIO.length} rotas, esperado 51`);
   for (const [caminho, metodo, esperado] of INVENTARIO) {
     const obtido = sem(caminho, metodo);
     assert(obtido === esperado, `${metodo} ${caminho}: esperado ${esperado}, obtido ${obtido}`);

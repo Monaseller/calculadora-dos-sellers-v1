@@ -1444,9 +1444,20 @@ async function main() {
   // linhas descartadas, 43,5 s, contra um timeout de 8 s. A correcao
   // trocou por `.limit(PAGE_SIZE)`, o que obrigou a alterar os dois.
   //
+  // SKILL-1D.endpoint-B: saiu TAMBEM `scripts/testar-middleware.ts`. A
+  // frente criou a primeira rota de agentes protegida por SESSAO —
+  // `/api/agentes/[agenteId]/diagnostico` — e o inventario de rotas
+  // daquela suite passou de 50 para 51 para cobri-la. Congelar byte a
+  // byte um inventario que precisa crescer a cada rota nova transforma
+  // a guarda em impedimento de cobertura: o assert reprovaria
+  // exatamente quem esta acrescentando protecao.
+  //
   // Sair do congelamento NAO e ficar sem protecao: os asserts G10a..G10k
-  // logo abaixo cobrem a fronteira que interessa a esta suite. O resto
-  // da lista continua exigido byte a byte.
+  // logo abaixo cobrem a fronteira que interessa a esta suite, e o
+  // middleware segue coberto pela propria `scripts/testar-middleware.ts`
+  // — que prova a rota nova em `bloquear_api` sem cookie e `liberar`
+  // com cookie. `lib/middleware-rotas.ts`, onde vive a POLITICA, segue
+  // congelado aqui. O resto da lista continua exigido byte a byte.
   const CONGELADOS = [
     "lib/agentes/tipos-execucao.ts",
     "lib/agentes/erros.ts",
@@ -1455,7 +1466,6 @@ async function main() {
     "lib/agentes/capability.ts",
     "lib/agentes/capability-worker.ts",
     "scripts/testar-agentes-fundacao.ts",
-    "scripts/testar-middleware.ts",
     "lib/middleware-rotas.ts",
     "scripts/agentes-worker.mjs",
     "app/api/internal/agentes/executar/route.ts",

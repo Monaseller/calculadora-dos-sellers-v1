@@ -555,14 +555,42 @@ async function principal(): Promise<void> {
 
   secao("J. Zero consumidor acima do compositor");
 
+  // A SKILL-1D.endpoint-B deu ao compositor o seu PRIMEIRO consumidor de
+  // producao. O J1 exigia ZERO — correto enquanto ninguem o chamava. A
+  // exigencia nao afrouxa: passa de "zero" para "EXATAMENTE ESTE", por
+  // igualdade de conjunto e caminho nominal, como J6/P7/M12 ja fazem.
+  //
+  // Vale nos dois sentidos: um segundo consumidor reprova, a rota sumir
+  // reprova, e uma copia sob `app/api/internal/` — que autentica por
+  // segredo de worker, nao por sessao — reprova por nao estar na lista.
+  const ROTA_AUTORIZADA = "app/api/agentes/[agenteId]/diagnostico/route.ts";
   const acima = consumidoresDe("diagnosticarAgente", "lib/agentes/diagnostico/compositor.ts");
-  ok("J1  nada em lib/ ou app/ chama diagnosticarAgente", acima.length === 0, acima.join(", "));
+  ok("J1  so a rota autorizada consome diagnosticarAgente",
+    JSON.stringify(acima) === JSON.stringify([ROTA_AUTORIZADA]), acima.join(", "));
   ok("J2  a pasta do compositor tem exatamente 1 modulo",
     JSON.stringify(readdirSync(join(RAIZ, "lib/agentes/diagnostico")).sort()) ===
       JSON.stringify(["compositor.ts"]),
     readdirSync(join(RAIZ, "lib/agentes/diagnostico")).sort().join(", "));
-  ok("J3  nenhuma rota nova foi criada para o diagnostico",
-    !readdirSync(join(RAIZ, "app/api")).includes("diagnostico"));
+  // O J3 media `app/api/` de topo, e passaria VERDE por acidente agora
+  // que o topo novo e `agentes` — assert verde com intencao falsa e pior
+  // que assert vermelho. Ele deixa de medir "existe pasta diagnostico" e
+  // passa a medir a LOCALIZACAO autorizada.
+  //
+  // Divisao de trabalho com o J1: o J1 protege quem CHAMA o simbolo; o
+  // J3 protege ONDE a fronteira HTTP pode existir. Um arquivo que apenas
+  // repassa a chamada por outro nome escaparia do J1 e cairia aqui.
+  const exposicoes: string[] = [];
+  const varrerRotas = (dir: string): void => {
+    for (const e of readdirSync(join(RAIZ, dir), { withFileTypes: true })) {
+      const rel = `${dir}/${e.name}`;
+      if (e.isDirectory()) { if (!/node_modules|\.next/.test(e.name)) varrerRotas(rel); }
+      else if (e.name === "route.ts" && /diagnostico/.test(rel)) exposicoes.push(rel);
+    }
+  };
+  varrerRotas("app");
+  ok("J3  a unica exposicao HTTP do diagnostico e a rota autorizada",
+    JSON.stringify(exposicoes.sort()) === JSON.stringify([ROTA_AUTORIZADA]),
+    exposicoes.join(", ") || "nenhuma");
 
   console.log(`\n══ ${passou} PASS / ${falhou} FAIL ══\n`);
   process.exitCode = falhou === 0 ? 0 : 1;
