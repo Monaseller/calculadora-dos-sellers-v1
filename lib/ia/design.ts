@@ -86,6 +86,10 @@ export const COR_FORA_DE_OPERACAO = "#4a5262";
  * As chaves espelham o CHECK de `agentes.tipo`.
  */
 export const CORES_TIPO = {
+  // Neutro de proposito: as seis cores abaixo sao identidade de funcao,
+  // e dar ao perfil generico uma delas sugeriria uma funcao que ele nao
+  // tem. Cinza-azulado, parente do texto fraco, sem competir.
+  personalizado: "#8b93a5",
   mensagens: "#4a9de8",
   ads: "#b06ae8",
   fotos: "#e8a54a",

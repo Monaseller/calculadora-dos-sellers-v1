@@ -109,6 +109,17 @@ function corpoDaFuncao(texto: string, nome: string): string {
 }
 
 const MIGRATION = "supabase/migrations/20260916_agentes_fundacao.sql";
+/**
+ * A migration FORWARD que acrescentou o setimo perfil.
+ *
+ * A autoridade do vocabulario de `tipo` deixou de ser um arquivo so na
+ * SKILL-1D.agent-custom-type-B: a fundacional registra o que o schema
+ * FOI (seis tipos, no dia em que nasceu) e esta registra o que ele E.
+ * A suite le as duas — reescrever a fundacional para caber uma decisao
+ * de hoje apagaria a historia que ela existe para guardar.
+ */
+const MIGRATION_TIPO_PERSONALIZADO =
+  "supabase/migrations/20260926_agentes_tipo_personalizado.sql";
 const CAPABILITY = "lib/agentes/capability.ts";
 const TIPOS = "lib/agentes/tipos.ts";
 
@@ -229,12 +240,42 @@ function main() {
   // ═══ C. tipos.ts <-> migration ═════════════════════════════════════
   console.log("C. Coerencia tipos.ts <-> migration");
 
-  const checkTipo = mig.match(/tipo\s+IN\s*\(([^)]*)\)/i)?.[1] ?? "";
-  const tiposNoBanco = (checkTipo.match(/'([^']+)'/g) ?? []).map((s) => s.replace(/'/g, ""));
-  ok("C0  o CHECK de tipo foi encontrado (anti-vacuidade)", tiposNoBanco.length > 0);
-  ok("C1  TIPOS_AGENTE == CHECK do banco",
+  const tiposDoCheck = (texto: string): string[] => {
+    const bloco = texto.match(/tipo\s+IN\s*\(([^)]*)\)/i)?.[1] ?? "";
+    return (bloco.match(/'([^']+)'/g) ?? []).map((s) => s.replace(/'/g, ""));
+  };
+
+  // HISTORIA: o que a fundacional criou. Continua sendo seis, e continua
+  // sendo cobrado — nao se reescreve o passado para um teste passar.
+  const tiposFundacionais = tiposDoCheck(mig);
+  ok("C0  o CHECK de tipo foi encontrado (anti-vacuidade)", tiposFundacionais.length > 0);
+  ok(`C0b a fundacional segue registrando os SEIS tipos originais (${tiposFundacionais.join(",")})`,
+     tiposFundacionais.length === 6 && !tiposFundacionais.includes("personalizado"));
+
+  // EVOLUCAO: a forward troca a constraint inteira, entao o vocabulario
+  // VIGENTE e o dela. Se um dia surgir outra forward, este e o ponto que
+  // precisa aprender a ler a mais recente.
+  const migForward = sql(MIGRATION_TIPO_PERSONALIZADO);
+  const tiposNoBanco = tiposDoCheck(migForward);
+  ok("C0c a forward de `personalizado` existe e recria a constraint",
+     /ALTER TABLE public\.agentes/i.test(migForward) &&
+     /DROP CONSTRAINT IF EXISTS agentes_tipo_valido/i.test(migForward) &&
+     /ADD CONSTRAINT agentes_tipo_valido/i.test(migForward));
+  ok("C0d e ela nao mexe em dado nem em mais nada do schema",
+     !/(update|insert|delete|truncate|upsert)/i.test(migForward) &&
+     (migForward.match(/ALTER TABLE/gi) ?? []).length === 2 &&
+     !/ADD COLUMN|DROP COLUMN|ALTER COLUMN|CREATE INDEX|CREATE TRIGGER|REFERENCES/i.test(migForward));
+
+  // VIGENTE: a autoridade que o codigo precisa espelhar.
+  ok("C1  TIPOS_AGENTE == CHECK vigente do banco",
      JSON.stringify([...TIPOS_AGENTE].sort()) === JSON.stringify([...tiposNoBanco].sort()));
-  ok("C2  sao 6 tipos", TIPOS_AGENTE.length === 6 && tiposNoBanco.length === 6);
+  ok("C2  sao 7 tipos vigentes",
+     TIPOS_AGENTE.length === 7 && tiposNoBanco.length === 7);
+  ok("C2b `personalizado` esta nos dois lados",
+     (TIPOS_AGENTE as readonly string[]).includes("personalizado") &&
+     tiposNoBanco.includes("personalizado"));
+  ok("C2c e e o PRIMEIRO — a ordem da autoridade e a que a tela oferece",
+     TIPOS_AGENTE[0] === "personalizado");
 
   const checkStatus = mig.match(/status\s+IN\s*\(([\s\S]*?)\)/i)?.[1] ?? "";
   const statusNoBanco = (checkStatus.match(/'([^']+)'/g) ?? []).map((s) => s.replace(/'/g, ""));
@@ -252,6 +293,8 @@ function main() {
   ok("C9  thinking/using_tool nao existem no dominio",
      !/thinking|using_tool/i.test(tip));
   ok("C10 ehTipoAgente recusa desconhecido", ehTipoAgente("mensagens") && !ehTipoAgente("zzz"));
+  ok("C10b ehTipoAgente aceita o setimo perfil, pelo mesmo caminho",
+     ehTipoAgente("personalizado") && !ehTipoAgente("Personalizado") && !ehTipoAgente("custom"));
   ok("C11 ehStatusTarefa recusa desconhecido", ehStatusTarefa("pendente") && !ehStatusTarefa("zzz"));
 
   // ═══ D. Capability — inspecao de fonte ═════════════════════════════
@@ -483,6 +526,103 @@ function main() {
      !/provedor|modelo|tools_permitidas|politica_aprovacao/i.test(cap));
   ok("J6  migration nao declara provedor/modelo/tools/politica",
      !/provedor|modelo|tools_permitidas|politica_aprovacao/i.test(mig));
+
+  // ═══ K. Perfil NAO e poder ═════════════════════════════════════════
+  //
+  // A invariavel que a SKILL-1D.agent-custom-type-B formalizou, e que
+  // vale desde a fundacao: `agentes.tipo` e ROTULO. Ele nomeia um ponto
+  // de partida e nao concede Skill, Funcao, conexao, permissao nem
+  // comportamento privilegiado.
+  //
+  // Isto e invariavel de DOMINIO, nao regra de formulario — por isso
+  // mora aqui. No dia em que alguem escrever
+  // `if (agente.tipo === "financeiro") liberar(...)`, o sistema ganha
+  // uma segunda autoridade de permissao: invisivel, sem tabela e sem
+  // auditoria.
+  //
+  // As sondas miram a FORMA de conceder poder, nao as palavras. A
+  // primeira versao delas varria os valores canonicos soltos e acusava
+  // `"fotos"` e `"anuncios"` do Estudio, `typeof dados?.tipo ===
+  // "string"` da capability e o `tipo` de pendencia do diagnostico —
+  // tres dominios que so compartilham vocabulario. Sonda que acusa o
+  // inocente e trocada, nunca tolerada.
+  console.log("K. Perfil nao e poder");
+
+  const arquivosDeProducao = (): string[] => {
+    const saida: string[] = [];
+    const caminhar = (rel: string) => {
+      for (const nome of readdirSync(join(RAIZ, rel), { withFileTypes: true })) {
+        const filho = `${rel}/${nome.name}`;
+        if (nome.isDirectory()) {
+          if (!/node_modules|\.next/.test(nome.name)) caminhar(filho);
+        } else if (/\.tsx?$/.test(nome.name)) saida.push(filho);
+      }
+    };
+    for (const raiz of ["lib", "app", "components"]) caminhar(raiz);
+    return saida.sort();
+  };
+
+  const PRODUCAO = arquivosDeProducao();
+  ok("K0  ANCORA: a varredura leu producao de verdade",
+     PRODUCAO.length > 100 && PRODUCAO.includes(TIPOS));
+
+  // 1. Ramificar por um valor canonico DE AGENTE. `\.tipo === "<valor>"`
+  //    e a forma exata; `typeof x.tipo === "string"` nao casa.
+  const RAMIFICA =
+    /\.tipo\s*===\s*"(personalizado|mensagens|ads|fotos|anuncios|financeiro|gerente)"|switch\s*\(\s*agente\.tipo/;
+  const ramificam = PRODUCAO.filter((a) => RAMIFICA.test(codigo(a)));
+  ok(`K1  ninguem ramifica por perfil de agente (${ramificam.join(", ") || "nenhum"})`,
+     ramificam.length === 0);
+
+  // 2. Mapa exaustivo por perfil. Metadata visual e legitima e vive em
+  //    autoridades nominais; qualquer outro `Record<Tipo...>` e o mapa
+  //    perigoso nascendo.
+  const AUTORIDADES_DE_TIPO = [
+    "lib/agentes/tipos.ts",   // canonica do servidor
+    "lib/ia/contratos.ts",    // canonica da tela
+    "lib/ia/conceitos.ts",    // DESCRICAO_TIPO — apresentacao
+    "lib/ia/design.ts",       // CORES_TIPO — apresentacao
+  ];
+  const mapas = PRODUCAO.filter((a) => /Record<Tipo(Agente|AgenteUI)\b/.test(codigo(a)));
+  ok(`K2  mapas exaustivos por perfil so nas autoridades declaradas (${mapas.join(", ")})`,
+     mapas.every((a) => AUTORIDADES_DE_TIPO.includes(a)));
+
+  // 3. O nome que esse mapa teria. Pega a intencao antes do conteudo.
+  const NOME_PERIGOSO =
+    /(tools?|skills?|permissoes|conexoes|capabilidades|capabilities)PorTipo|porTipoDeAgente|TIPO_(PARA|CONCEDE)_/i;
+  const batizados = PRODUCAO.filter((a) => NOME_PERIGOSO.test(codigo(a)));
+  ok(`K3  ninguem batiza um mapa perfil -> capacidade (${batizados.join(", ") || "nenhum"})`,
+     batizados.length === 0);
+
+  // 4. E o perfil nao entra nas leituras que decidem o que o agente pode.
+  // O que caracteriza "ler o perfil": tocar o campo do agente ou a
+  // autoridade do vocabulario. Nenhum decisor precisa de nenhum dos dois.
+  const LE_PERFIL = /\bagente\.tipo\b|TipoAgente\b|TIPOS_AGENTE\b/;
+  const DECISORES = [
+    "lib/agentes/diagnostico/compositor.ts",
+    "lib/agentes/skills/fatos.ts",
+    "lib/agentes/conexoes/agregador.ts",
+    "lib/agentes/permissoes/fatos.ts",
+    "lib/ia/skills/diagnostico.ts",
+  ].filter((a) => PRODUCAO.includes(a));
+  ok("K4  ANCORA: os cinco decisores existem", DECISORES.length === 5);
+  const decisoresSujos = DECISORES.filter((a) => LE_PERFIL.test(codigo(a)));
+  ok(`K5  nenhum decisor le o perfil do agente (${decisoresSujos.join(", ") || "nenhum"})`,
+     decisoresSujos.length === 0);
+
+  // Validar e LISTAR seguem legitimos — a guarda separa as duas coisas.
+  ok("K6  validacao e listagem continuam permitidas",
+     /TIPOS_AGENTE as readonly string\[\]\)\.includes/.test(codigo(TIPOS)) &&
+     ehTipoAgente("personalizado") && !ehTipoAgente("zzz"));
+
+  ok("K7  CONTROLE: as sondas acusam o padrao que proibem",
+     RAMIFICA.test('if (agente.tipo === "financeiro") liberar()') &&
+     /Record<Tipo(Agente|AgenteUI)\b/.test("const m: Record<TipoAgente, Tool[]> = {}") &&
+     NOME_PERIGOSO.test("const toolsPorTipo = {}"));
+  ok("K8  CONTROLE: e NAO acusam o inocente",
+     !RAMIFICA.test('typeof dados?.tipo === "string"') &&
+     !RAMIFICA.test('if (prompt.tipo === "capa_principal")') &&
+     !NOME_PERIGOSO.test("const DESCRICAO_TIPO = {}"));
 
   // ═══ Placar ════════════════════════════════════════════════════════
   const total = passou + falhou;

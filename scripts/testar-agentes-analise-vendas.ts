@@ -775,6 +775,22 @@ const MIGRATIONS_DA_SKILL_1DG: readonly string[] = [
 ];
 
 /**
+ * MIGRATION da SKILL-1D.agent-custom-type — o setimo perfil.
+ *
+ * Mesma NATUREZA das duas listas acima: afirma PERTENCIMENTO, nao
+ * situacao do git. Ela amplia SOMENTE o CHECK `agentes_tipo_valido`,
+ * de seis para sete valores, e nao toca em coluna, indice, dado nem
+ * qualquer outra constraint.
+ *
+ * A fundacional NAO foi editada: ela continua registrando os seis tipos
+ * originais, e a autoridade vigente passou a ser as duas somadas — e
+ * `scripts/testar-agentes-fundacao.ts` le as duas, em C0b e C1.
+ */
+const MIGRATIONS_DA_SKILL_1D_PERFIL: readonly string[] = [
+  "20260926_agentes_tipo_personalizado.sql",
+];
+
+/**
  * Inventario acumulado de `lib/agentes/ia/`, por frente.
  *
  * O guarda de disco (G11l) compara contra ESTA uniao, nunca contra uma
@@ -853,6 +869,24 @@ const MODULOS_DIAGNOSTICO_1D_CONSUMER: readonly string[] = [
   "compositor.ts",
 ];
 
+/**
+ * SKILL-1D.agent-custom-type-B — o setimo perfil, `personalizado`.
+ *
+ * Dois caminhos caem no `ESCOPO_AGENTES`: a autoridade canonica do
+ * servidor e a migration forward que amplia o CHECK. O restante da
+ * frente (contratos e metadata da tela, o dialogo, as suites) vive fora
+ * do escopo desta guarda e por isso nao e declarado aqui — declarar
+ * caminho que ela nao mede daria falsa impressao de cobertura.
+ */
+const ARQUIVOS_SKILL_1D_PERFIL: readonly string[] = [
+  // `TIPOS_AGENTE` passou de seis para sete valores. Nada alem disso:
+  // nenhum branch, nenhuma capacidade, nenhuma coluna.
+  "lib/agentes/tipos.ts",
+  // A forward que troca `agentes_tipo_valido`. A fundacional continua
+  // intocada, registrando os seis originais.
+  "supabase/migrations/20260926_agentes_tipo_personalizado.sql",
+];
+
 const ARQUIVOS_SKILL_1D_CONSUMER: readonly string[] = [
   // A forma COLAPSADA. `lib/agentes/diagnostico/` nasceu inteiramente
   // untracked, e o porcelain a resume nesta unica linha — exatamente
@@ -886,6 +920,7 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_SKILL_1DE,
   ...ARQUIVOS_SKILL_1DML,
   ...ARQUIVOS_SKILL_1D_CONSUMER,
+  ...ARQUIVOS_SKILL_1D_PERFIL,
 ];
 
 /**
@@ -1452,12 +1487,24 @@ async function main() {
   // a guarda em impedimento de cobertura: o assert reprovaria
   // exatamente quem esta acrescentando protecao.
   //
+  // SKILL-1D.agent-custom-type: sai TAMBEM
+  // `scripts/testar-agentes-fundacao.ts`. O C1 daquela suite compara
+  // `TIPOS_AGENTE` com o CHECK lido da migration FUNDACIONAL — leitura
+  // correta enquanto o vocabulario de tipo so existiu ali. O perfil
+  // `personalizado` chega por migration FORWARD, e a autoridade do tipo
+  // passa a ser fundacional + forward: congelar byte a byte a suite que
+  // precisa aprender a ler as duas transformaria a guarda em impedimento
+  // de evolucao do schema.
+  //
   // Sair do congelamento NAO e ficar sem protecao: os asserts G10a..G10k
-  // logo abaixo cobrem a fronteira que interessa a esta suite, e o
+  // logo abaixo cobrem a fronteira que interessa a esta suite, o
   // middleware segue coberto pela propria `scripts/testar-middleware.ts`
   // — que prova a rota nova em `bloquear_api` sem cookie e `liberar`
   // com cookie. `lib/middleware-rotas.ts`, onde vive a POLITICA, segue
-  // congelado aqui. O resto da lista continua exigido byte a byte.
+  // congelado aqui. A fundacao, por sua vez, segue com os proprios 142
+  // asserts e continua declarada em `SUITES_AGENTES` — sair daqui muda o
+  // congelamento, nunca a execucao. O resto da lista continua exigido
+  // byte a byte.
   const CONGELADOS = [
     "lib/agentes/tipos-execucao.ts",
     "lib/agentes/erros.ts",
@@ -1465,7 +1512,6 @@ async function main() {
     "lib/agentes/handlers/analise-vendas.ts",
     "lib/agentes/capability.ts",
     "lib/agentes/capability-worker.ts",
-    "scripts/testar-agentes-fundacao.ts",
     "lib/middleware-rotas.ts",
     "scripts/agentes-worker.mjs",
     "app/api/internal/agentes/executar/route.ts",
@@ -1655,7 +1701,8 @@ async function main() {
     const declarada = (m: string) =>
       MIGRATIONS_NO_DISCO_NAO_COMMITADAS.includes(m) ||
       MIGRATIONS_DA_SKILL_1DF4.includes(m) ||
-      MIGRATIONS_DA_SKILL_1DG.includes(m);
+      MIGRATIONS_DA_SKILL_1DG.includes(m) ||
+      MIGRATIONS_DA_SKILL_1D_PERFIL.includes(m);
 
     ok(`G12b nenhuma migration nao declarada no disco (${novasNoDisco.join(", ") || "nenhuma"})`,
        novasNoDisco.every(declarada));
@@ -1678,6 +1725,15 @@ async function main() {
     ok("G12j CONTROLE NEGATIVO: a lista da f.4 nao aceita migration alheia",
        !MIGRATIONS_DA_SKILL_1DF4.includes("99999999_intrusa.sql") &&
        !MIGRATIONS_DA_SKILL_1DF4.some((m) => m.includes("*")));
+    // ── G12k..G12m — a migration do setimo perfil, mesma forma duravel
+    ok("G12k a migration do perfil esta declarada nome a nome",
+       MIGRATIONS_DA_SKILL_1D_PERFIL.length === 1 &&
+       MIGRATIONS_DA_SKILL_1D_PERFIL[0] === "20260926_agentes_tipo_personalizado.sql");
+    ok("G12l e ela existe no disco, onde o guarda a espera",
+       disco.includes("20260926_agentes_tipo_personalizado.sql"));
+    ok("G12m CONTROLE NEGATIVO: a lista do perfil nao aceita migration alheia",
+       !MIGRATIONS_DA_SKILL_1D_PERFIL.includes("99999999_intrusa.sql") &&
+       !MIGRATIONS_DA_SKILL_1D_PERFIL.some((m) => m.includes("*")));
 
     ok("G12c nenhuma migration desapareceu do disco", sumidasDoDisco.length === 0);
     ok("G12d as duas migrations desta frente seguem no HEAD", head.includes("20260916_agentes_fundacao.sql") && head.includes("20260917_agentes_execucao.sql"));

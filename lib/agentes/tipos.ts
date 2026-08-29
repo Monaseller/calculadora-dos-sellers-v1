@@ -20,13 +20,26 @@
 
 // ─── Dominio fechado ──────────────────────────────────────────────────
 //
-// As listas abaixo sao a MESMA verdade que os CHECK da migration
-// `20260916_agentes_fundacao.sql`. Divergir delas nao produz bug de
-// tipo — produz erro 23514 em runtime, no INSERT. A suite compara as
-// duas fontes literalmente, para que a divergencia apareca no teste e
-// nao em producao.
+// As listas abaixo sao a MESMA verdade que os CHECK do banco. Divergir
+// delas nao produz bug de tipo — produz erro 23514 em runtime, no
+// INSERT. A suite compara as duas fontes literalmente, para que a
+// divergencia apareca no teste e nao em producao.
+//
+// Para `tipo`, a autoridade VIGENTE e a migration fundacional
+// `20260916_agentes_fundacao.sql` MAIS a forward
+// `20260926_agentes_tipo_personalizado.sql`, que acrescentou o setimo
+// valor. A fundacional segue registrando que nasceram seis.
 
+// `personalizado` vem PRIMEIRO de proposito: os outros seis nomeiam uma
+// funcao conhecida e sao atalhos; quem cria um agente raramente ja sabe
+// em qual caixa ele cai, e a primeira opcao deve ser a que nao obriga a
+// escolher. A ordem daqui e a que a tela oferece — nao ha reordenacao
+// em lugar nenhum.
+//
+// Nenhum destes valores concede capacidade. `tipo` e rotulo: o que o
+// agente PODE fazer vem de Skills, Funcoes, conexoes e permissoes.
 export const TIPOS_AGENTE = [
+  "personalizado",
   "mensagens",
   "ads",
   "fotos",

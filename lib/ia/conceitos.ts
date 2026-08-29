@@ -233,6 +233,11 @@ export function permitida(permissao: Pick<PermissaoUI, "nivel">): boolean {
  * que ja e determinado por `tipo` seria duplicar a verdade.
  */
 export const DESCRICAO_TIPO: Record<TipoAgenteUI, string> = {
+  // O setimo perfil nao descreve uma funcao — descreve a ausencia de
+  // uma escolha previa. Por isso a frase fala do dono, e nao do que o
+  // agente faz: quem define o proposito e ele, pelas instrucoes e pelas
+  // capacidades que vier a conceder.
+  personalizado: "Propósito definido por você",
   mensagens: "Atendimento ao comprador",
   ads: "Campanhas e mídia paga",
   fotos: "Tratamento de imagem",

@@ -23,8 +23,22 @@
  * `tentativas`, `heartbeat_em` nem credencial de especie alguma.
  */
 
-/** Espelha o CHECK de `agentes.tipo`. Seis valores, nao um a mais. */
+/**
+ * Espelha o CHECK vigente de `agentes.tipo`. Sete valores, nao um a
+ * mais — `personalizado` entrou pela migration forward
+ * `20260926_agentes_tipo_personalizado.sql`.
+ *
+ * A ORDEM importa: e a ordem em que a tela oferece os perfis, e o
+ * primeiro item e o estado inicial do seletor. `personalizado` vem
+ * primeiro porque os outros seis sao atalhos para funcoes conhecidas, e
+ * comecar exigindo que o dono escolha uma delas seria pedir uma decisao
+ * que ele ainda nao tem como tomar.
+ *
+ * Perfil e ROTULO, nunca poder: nenhum destes valores concede Skill,
+ * Funcao, conexao ou permissao.
+ */
 export const TIPOS_AGENTE_UI = [
+  "personalizado",
   "mensagens",
   "ads",
   "fotos",

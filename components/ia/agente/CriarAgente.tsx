@@ -42,6 +42,7 @@ import type { AgenteUI, TipoAgenteUI } from "@/lib/ia/contratos";
 import { criarAgenteViaApi } from "@/lib/ia/agentes-http";
 
 const TITULO_ID = "cds-ia-criar-agente-titulo";
+const AJUDA_ID = "cds-ia-criar-agente-ajuda";
 
 export default function CriarAgente({
   onFechar,
@@ -145,13 +146,18 @@ export default function CriarAgente({
             />
           </label>
 
+          {/* "Perfil inicial", nao "Tipo": o campo escolhe um ponto de
+              partida, e chama-lo de tipo sugeria uma classificacao que
+              decide o que o agente e capaz de fazer. Ela nao decide. O
+              nome do campo no corpo, na API e no banco continua `tipo`. */}
           <label className="cds-ia-criar-campo">
-            <span className="cds-ia-criar-rotulo">Tipo</span>
+            <span className="cds-ia-criar-rotulo">Perfil inicial</span>
             <select
               value={tipo}
               onChange={(e) => setTipo(e.target.value as TipoAgenteUI)}
               disabled={enviando}
               className="cds-ia-criar-controle"
+              aria-describedby={AJUDA_ID}
             >
               {TIPOS_AGENTE_UI.map((t) => (
                 <option key={t} value={t}>
@@ -159,6 +165,9 @@ export default function CriarAgente({
                 </option>
               ))}
             </select>
+            <span id={AJUDA_ID} className="cds-ia-criar-ajuda">
+              O perfil inicial não limita as capacidades do agente.
+            </span>
           </label>
 
           <label className="cds-ia-criar-campo">
@@ -231,6 +240,7 @@ const css = `
   .cds-ia-criar-form { display: grid; gap: ${ESPACO.md}px; }
   .cds-ia-criar-campo { display: grid; gap: ${ESPACO.sm}px; }
   .cds-ia-criar-rotulo { font: 12px/1.4 ${FONTE.interface}; color: ${CROMO.textoFraco}; }
+  .cds-ia-criar-ajuda { font: 11px/1.5 ${FONTE.interface}; color: ${CROMO.textoFraco}; }
   .cds-ia-criar-controle {
     width: 100%;
     padding: 10px 12px;

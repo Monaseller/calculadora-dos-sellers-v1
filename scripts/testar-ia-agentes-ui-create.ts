@@ -19,6 +19,10 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
+import { TIPOS_AGENTE_UI } from "../lib/ia/contratos";
+import { DESCRICAO_TIPO } from "../lib/ia/conceitos";
+import { CORES_TIPO } from "../lib/ia/design";
+
 let passou = 0;
 let falhou = 0;
 
@@ -107,9 +111,40 @@ secao("B. O dialogo pede tres coisas, e nenhuma a mais");
 
   ok("B7  o select vem da autoridade, sem lista literal duplicada",
     /TIPOS_AGENTE_UI\.map/.test(CODIGO_DIALOGO) &&
-      !/"mensagens"|"ads"|"fotos"|"anuncios"|"financeiro"|"gerente"/.test(CODIGO_DIALOGO));
+      !/"personalizado"|"mensagens"|"ads"|"fotos"|"anuncios"|"financeiro"|"gerente"/
+        .test(CODIGO_DIALOGO));
   ok("B8  o rotulo vem de DESCRICAO_TIPO, e o VALOR e o tipo canonico",
     /value=\{t\}/.test(CODIGO_DIALOGO) && /DESCRICAO_TIPO\[t\]/.test(CODIGO_DIALOGO));
+
+  // ── O setimo perfil (SKILL-1D.agent-custom-type-B) ────────────────
+  //
+  // `personalizado` existe para que criar um agente nao obrigue a
+  // escolher, no primeiro segundo, uma funcao que o dono ainda nao sabe
+  // qual e. Ele e o PRIMEIRO da autoridade, e e por isso — e so por
+  // isso — que aparece selecionado: nao ha `setTipo("personalizado")`
+  // em lugar nenhum.
+  ok("B7a a autoridade tem exatamente sete perfis",
+    TIPOS_AGENTE_UI.length === 7, String(TIPOS_AGENTE_UI.length));
+  ok("B7b `personalizado` e o primeiro — logo, o estado inicial",
+    TIPOS_AGENTE_UI[0] === "personalizado" &&
+      /useState<TipoAgenteUI>\(TIPOS_AGENTE_UI\[0\]\)/.test(CODIGO_DIALOGO));
+  ok("B7c e o default NAO vem de logica paralela",
+    !/setTipo\("personalizado"\)|=== "personalizado"/.test(CODIGO_DIALOGO));
+  ok("B7d ele tem descricao propria, e as outras seis nao mudaram",
+    DESCRICAO_TIPO.personalizado === "Propósito definido por você" &&
+      DESCRICAO_TIPO.mensagens === "Atendimento ao comprador");
+  ok("B7e e cor propria, neutra, sem tocar as seis de identidade",
+    CORES_TIPO.personalizado === "#8b93a5" && CORES_TIPO.mensagens === "#4a9de8");
+  ok("B7f toda a autoridade tem descricao e cor",
+    TIPOS_AGENTE_UI.every((t) => DESCRICAO_TIPO[t]?.length > 0 && CORES_TIPO[t]?.length > 0));
+  ok("B7g o campo se chama `Perfil inicial` na tela, e `tipo` no contrato",
+    /<span className="cds-ia-criar-rotulo">Perfil inicial<\/span>/.test(CODIGO_DIALOGO) &&
+      !/>Tipo</.test(CODIGO_DIALOGO) && /tipo,/.test(CODIGO_DIALOGO));
+  ok("B7h a ajuda diz que o perfil nao limita capacidade",
+    /O perfil inicial não limita as capacidades do agente\./.test(CODIGO_DIALOGO) &&
+      /aria-describedby=\{AJUDA_ID\}/.test(CODIGO_DIALOGO));
+  ok("B7i zero <option> escrito a mao fora do map",
+    (CODIGO_DIALOGO.match(/<option/g) ?? []).length === 1);
 
   ok("B9  zero campo prematuro",
     !/value=\{(modelo|temperatura|tools?|funcao|skill|fonte|conexao|permissao|memoria|avatar|cor|icone|agenda|budget)\}/i
@@ -216,6 +251,33 @@ async function principal(): Promise<void> {
       corpoEnviado().instrucoes === null);
   ok("D9  o agente devolvido e o do servidor, com uuid dele",
     r.estado === "ok" && r.agente.id === UUID && r.agente.ativo === true);
+
+  // O setimo perfil atravessa o transporte pelo MESMO caminho: nao ha
+  // ramo, nao ha tratamento proprio, e o parser da lista o aceita como
+  // aceita qualquer outro.
+  responde(201, { ok: true, agente: agenteCriado({ tipo: "personalizado", nome: "Meu agente" }) });
+  const rPers = await criarAgenteViaApi({
+    nome: "Meu agente", tipo: "personalizado", instrucoes: "Cuidar do que eu pedir.",
+  });
+  ok("D10 POST com `personalizado` -> ok, sem ramo especial",
+    rPers.estado === "ok" && rPers.agente.tipo === "personalizado");
+  ok("D11 e o corpo continua com as mesmas tres chaves",
+    JSON.stringify(Object.keys(corpoEnviado()).sort()) ===
+      JSON.stringify(["instrucoes", "nome", "tipo"]) &&
+      corpoEnviado().tipo === "personalizado");
+  ok("D12 zero branch por perfil no transporte",
+    !/=== "personalizado"|personalizado\s*\?/.test(CODIGO_TRANSPORTE));
+
+  const { listarAgentes } = await import("../lib/ia/agentes-http");
+  responde(200, { ok: true, agentes: [agenteCriado({ tipo: "personalizado" })] });
+  const lPers = await listarAgentes();
+  ok("D13 a listagem parseia `personalizado` sem shape novo",
+    lPers.estado === "ok" && lPers.agentes.length === 1 &&
+      lPers.agentes[0].tipo === "personalizado");
+
+  responde(200, { ok: true, agentes: [agenteCriado({ tipo: "custom" })] });
+  ok("D14 e continua recusando um perfil fora da autoridade",
+    (await listarAgentes()).estado === "falha");
 
   secao("E. Mass assignment: o que o cliente pede nao vira coluna");
 
