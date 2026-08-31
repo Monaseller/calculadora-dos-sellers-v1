@@ -18,6 +18,17 @@
  * Consulta rapida aqui; configuracao e operacao completas la. O caminho
  * entre os dois e o botao "Abrir agente".
  *
+ * ── O rodape nao diz mais "Dados simulados" ─────────────────────────
+ *
+ * Ele dizia, e a frase virou falsa: a identidade e o estado exibidos
+ * aqui vem do agente REAL do dono, pela mesma leitura autenticada da
+ * lista. O que sobrou de simulado neste drawer nao e dado nenhum — e a
+ * ausencia de tarefas, que chega como lista vazia e ja se anuncia
+ * sozinha ("Nenhuma tarefa em andamento").
+ *
+ * A frase de orientacao ficou: ela nao afirma nada sobre procedencia,
+ * so diz onde mora o resto.
+ *
  * ── Acessibilidade nao e enfeite aqui ───────────────────────────────
  *
  * Um painel que abre e prende o usuario e pior que nao ter painel. Este
@@ -30,7 +41,6 @@ import Link from "next/link";
 import { CROMO, ESPACO, FONTE, RAIO } from "@/lib/ia/design";
 import { VOCABULARIO_ESTADO, type AparenciaAgente } from "@/lib/ia/estados";
 import { tarefaAtual, tituloDaTarefa } from "@/lib/ia/tarefas";
-import { MOCK_AVISO } from "@/lib/ia/mocks";
 import type { AgenteUI, TarefaUI } from "@/lib/ia/contratos";
 import BadgeEstado, { corDaAparencia } from "@/components/ia/BadgeEstado";
 
@@ -201,8 +211,8 @@ export default function PainelAgente({
             color: CROMO.textoFraco,
           }}
         >
-          {MOCK_AVISO}. Este painel é consulta rápida — o histórico de tarefas, as conexões, as
-          funções, as permissões, a memória e os custos vivem na página do agente.
+          Este painel é consulta rápida — o histórico de tarefas, as conexões, as funções, as
+          permissões, a memória e os custos vivem na página do agente.
         </p>
       </aside>
     </>

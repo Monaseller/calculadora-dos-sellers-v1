@@ -15,6 +15,18 @@
  *
  * Quando a leitura entrar, chamadas sem preco vao numa linha separada,
  * contadas e nunca somadas.
+ *
+ * ── Por que esta tela NAO ganhou aviso de simulacao ─────────────────
+ *
+ * A tarja global saiu do shell de `/ia` e desceu para cada tela que
+ * ainda simula. Esta nao e uma delas: ela nao exibe numero nenhum, nem
+ * verdadeiro nem inventado — e um `EmBreve`, e placeholder nao e
+ * simulacao. Sao coisas diferentes e o produto precisa que continuem
+ * diferentes: "isto ainda nao existe" e uma promessa honesta, "estes
+ * dados sao simulados" e um alerta sobre o que esta na tela. Colar
+ * "Dados simulados" aqui inventaria uma simulacao que nao ha.
+ *
+ * Mesma decisao de `/ia/conexoes`, tambem `EmBreve` e tambem sem tarja.
  */
 import EmBreve from "@/components/ia/EmBreve";
 

@@ -16,38 +16,48 @@
  * por consistencia, com uma correcao necessaria: `/ia` e prefixo de
  * TODAS as outras rotas da area, entao com a regra crua ele ficaria
  * eternamente ativo. Escritorio casa por igualdade exata.
+ *
+ * ── Os badges numericos sairam ──────────────────────────────────────
+ *
+ * Eles vinham de `MOCK_CONTAGENS`: "agentes trabalhando" derivado das
+ * tarefas simuladas, "aprovacoes pendentes" derivado da fila simulada.
+ * Numero e a forma mais convincente de afirmacao que uma interface tem
+ * — ninguem olha um badge e pensa "isto pode ser ilustrativo" —, e por
+ * isso ele e o ultimo lugar onde simulacao pode ficar depois que a area
+ * passou a ter dado real.
+ *
+ * O mecanismo do badge FICA, sem nenhum item alimentando-o hoje: quando
+ * existir leitura real de tarefas e de aprovacoes, a mudanca e passar o
+ * numero, nao redesenhar a subnav.
+ *
+ * O que NAO foi feito, de proposito: trocar "trabalhando" pelo total de
+ * agentes do dono. Sao perguntas diferentes — quantos existem nao e
+ * quantos estao trabalhando —, e um numero certo respondendo a pergunta
+ * errada engana melhor que um numero inventado. Zero tambem nao serve:
+ * "0 trabalhando" afirma que consultamos e nao ha; a verdade e que
+ * ninguem consultou.
  */
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { CROMO, ESPACO, FONTE, RAIO } from "@/lib/ia/design";
-import { MOCK_CONTAGENS } from "@/lib/ia/mocks";
 
 interface ItemNav {
   href: string;
   rotulo: string;
   /** `true` = so casa por igualdade. Ver cabecalho. */
   exato?: boolean;
+  /** Nenhuma area preenche isto hoje: nao ha leitura real de tarefas
+   *  nem de aprovacoes. Ver o cabecalho. */
   contador?: number;
   /** Texto lido por leitor de tela no lugar do numero solto. */
   descricaoContador?: string;
 }
 
 export const AREAS_CDS_IA: readonly ItemNav[] = [
-  {
-    href: "/ia",
-    rotulo: "Escritório",
-    exato: true,
-    contador: MOCK_CONTAGENS.trabalhando,
-    descricaoContador: "agentes trabalhando",
-  },
+  { href: "/ia", rotulo: "Escritório", exato: true },
   { href: "/ia/agentes", rotulo: "Agentes" },
   { href: "/ia/conexoes", rotulo: "Conexões" },
-  {
-    href: "/ia/aprovacoes",
-    rotulo: "Aprovações",
-    contador: MOCK_CONTAGENS.aguardandoAprovacao,
-    descricaoContador: "aprovações pendentes",
-  },
+  { href: "/ia/aprovacoes", rotulo: "Aprovações" },
   { href: "/ia/atividade", rotulo: "Atividade" },
   { href: "/ia/custos", rotulo: "Custos" },
 ];

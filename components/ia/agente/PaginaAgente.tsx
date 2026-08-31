@@ -56,9 +56,6 @@ import EmBreve from "@/components/ia/EmBreve";
 import AbasAgente from "@/components/ia/agente/AbasAgente";
 import VisaoGeral from "@/components/ia/agente/VisaoGeral";
 import ListaTarefas from "@/components/ia/agente/ListaTarefas";
-import AbaConexoes from "@/components/ia/agente/AbaConexoes";
-import AbaFuncoes from "@/components/ia/agente/AbaFuncoes";
-import AbaPermissoes from "@/components/ia/agente/AbaPermissoes";
 
 /** Sem leitura real de tarefas, ninguem tem tarefa. */
 const NENHUMA_TAREFA: readonly TarefaUI[] = [];
@@ -200,12 +197,11 @@ export default function PaginaAgente({ agenteId, aba }: { agenteId: string; aba:
           <p className="cds-ia-carregando">Carregando…</p>
         )}
 
-        {/* As tres abas de configuracao nao dependem do relogio: elas
-            desenham configuracao, nao estado em andamento. */}
-        {aba === "conexoes" && <AbaConexoes />}
-        {aba === "funcoes" && <AbaFuncoes />}
-        {aba === "permissoes" && <AbaPermissoes />}
-
+        {/* Conexoes, Funcoes e Permissoes NAO tem caminho proprio aqui.
+            Elas voltaram a `implementada: false` na
+            SKILL-1D.ui-real-state-Bg2 e caem no bloco abaixo, junto com
+            Chat, Memoria e Custos — uma unica superficie de "Em breve"
+            para as seis, montada num lugar so. */}
         {abaPendente(aba) && (
           <EmBreve
             titulo={rotuloDaAba(aba)}
@@ -300,6 +296,9 @@ function abaPendente(aba: AbaId): aba is AbaPendente {
  *  dizer as duas coisas: o destino e o que falta para chegar la. */
 const DESCRICAO_ABA: Record<AbaPendente, string> = {
   chat: "Conversar diretamente com este agente: pedir análises, dar orientações e entender o que ele encontrou.",
+  conexoes: "As contas e os serviços que este agente poderá usar — e o que cada um permite que ele faça.",
+  funcoes: "As funções que este agente poderá executar, cada uma com o acesso que exige.",
+  permissoes: "Os limites de cada ação deste agente: o que ele pode fazer sozinho e o que precisa de autorização.",
   memoria: "Instruções fixas, preferências e o que o agente aprendeu ao longo do tempo.",
   custos: "Consumo de IA deste agente por período, modelo e provedor.",
 };

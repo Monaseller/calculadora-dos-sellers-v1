@@ -18,6 +18,18 @@
  *
  * A pagina e fina: o feed inteiro vive em `Timeline`, Client Component
  * porque calcula "ha X" e filtra localmente.
+ *
+ * ── Onde esta o aviso de simulacao desta tela ───────────────────────
+ *
+ * A tarja global saiu do shell de `/ia` (ver o layout da area): com
+ * `/ia/agentes` lendo dado real, um aviso de area inteira passou a
+ * mentir sobre as telas verdadeiras.
+ *
+ * Esta tela CONTINUA simulada e continua avisando — so que o aviso ja
+ * morava no corpo, dentro de `Timeline`, e nao aqui. Repeti-lo nesta
+ * pagina daria dois avisos para uma simulacao so, que e como se ensina
+ * o leitor a parar de ler avisos. Vale a mesma regra de
+ * `/ia/aprovacoes`, cujo aviso mora em `FilaAprovacoes`.
  */
 import Timeline from "@/components/ia/atividade/Timeline";
 

@@ -18,7 +18,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
-import { ABAS } from "../lib/ia/abas";
+import { ABAS, PENDENCIA_ABA } from "../lib/ia/abas";
 import {
   DIVIDA_CREDENCIAIS,
   ESTADOS_CONEXAO,
@@ -88,13 +88,28 @@ const MOCKS_PASTA: readonly string[] = [
   "lib/ia/mocks/tarefas.ts",
 ];
 
+/**
+ * O que sobrou da UI-1C.b: os tres cards apresentacionais.
+ *
+ * As tres abas que os montavam foram apagadas na
+ * SKILL-1D.ui-real-state-Bg2 — ver `ABAS_APAGADAS_BG2` logo abaixo.
+ */
 const NOVOS_1CB = [
-  "components/ia/agente/AbaConexoes.tsx",
-  "components/ia/agente/AbaFuncoes.tsx",
-  "components/ia/agente/AbaPermissoes.tsx",
   "components/ia/conexoes/CardConexao.tsx",
   "components/ia/capabilities/CardFuncao.tsx",
   "components/ia/capabilities/SeletorAutonomia.tsx",
+];
+
+/**
+ * As cascas de aba que a Bg2 removeu. Ficam declaradas NOMINALMENTE, e
+ * a suite cobra que continuem inexistentes: um arquivo com esse nome
+ * reaparecendo significa que alguem recriou a aba sem passar pela
+ * decisao de `implementada`.
+ */
+const ABAS_APAGADAS_BG2 = [
+  "components/ia/agente/AbaConexoes.tsx",
+  "components/ia/agente/AbaFuncoes.tsx",
+  "components/ia/agente/AbaPermissoes.tsx",
 ];
 
 const ARQUIVOS_AREA: readonly string[] = [
@@ -107,9 +122,17 @@ const CONCEITOS = ler("lib/ia/conceitos.ts");
 const SELETOR = ler("components/ia/capabilities/SeletorAutonomia.tsx");
 const CARD_CX = ler("components/ia/conexoes/CardConexao.tsx");
 const CARD_FN = ler("components/ia/capabilities/CardFuncao.tsx");
-const AB_CX = ler("components/ia/agente/AbaConexoes.tsx");
-const AB_FN = ler("components/ia/agente/AbaFuncoes.tsx");
-const AB_PM = ler("components/ia/agente/AbaPermissoes.tsx");
+// As frases que esta area NAO pode usar como estado dinamico: sem fonte
+// que as sustente, sao hardcode hoje verdadeiro e mentira convincente no
+// dia em que a fonte chegar com conteudo.
+const FRASE_DE_VAZIO =
+  /Nenhuma conex[aã]o atribu[ií]da|Nenhuma fun[cç][aã]o habilitada|Nenhuma permiss[aã]o configurada/i;
+
+/** As tres abas que a Bg2 devolveu para `implementada: false`. */
+const PENDENTES_BG2 = ["conexoes", "funcoes", "permissoes"] as const;
+
+const PAGINA_AGENTE = ler("components/ia/agente/PaginaAgente.tsx");
+const ABAS_TS = ler("lib/ia/abas.ts");
 
 // ═══════════════════════════════════════════════════════════════════════
 console.log("\n══ CDS IA — UI-1C.b: conexoes, funcoes e permissoes ══");
@@ -117,9 +140,12 @@ console.log("\n══ CDS IA — UI-1C.b: conexoes, funcoes e permissoes ══"
 secao("A. Inventario da fase");
 
 {
-  ok("A1  os 6 componentes novos existem",
+  ok("A1  os 3 cards da fase continuam existindo",
     NOVOS_1CB.every((a) => ARQUIVOS_AREA.includes(a)),
     NOVOS_1CB.filter((a) => !ARQUIVOS_AREA.includes(a)).join(", "));
+  ok("A1b as 3 cascas de aba NAO existem mais",
+    ABAS_APAGADAS_BG2.every((a) => !ARQUIVOS_AREA.includes(a)),
+    ABAS_APAGADAS_BG2.filter((a) => ARQUIVOS_AREA.includes(a)).join(", "));
   ok("A2  todos exportam default",
     NOVOS_1CB.every((a) => /export default function/.test(ler(a))));
   ok("A3  nenhum arquivo novo fora das pastas previstas",
@@ -185,19 +211,87 @@ secao("D. As 8 abas: 5 implementadas, 3 pendentes");
   ok("D2  ordem preservada",
     JSON.stringify(ABAS.map((a) => a.id)) ===
     JSON.stringify(["visao-geral", "chat", "tarefas", "conexoes", "funcoes", "permissoes", "memoria", "custos"]));
-  ok("D3  conexoes, funcoes e permissoes agora implementadas",
-    (["conexoes", "funcoes", "permissoes"] as const).every(
-      (id) => ABAS.find((a) => a.id === id)?.implementada === true));
-  ok("D4  chat, memoria e custos continuam pendentes",
-    (["chat", "memoria", "custos"] as const).every(
-      (id) => ABAS.find((a) => a.id === id)?.implementada === false));
+  // ── D3–D6 reconciliados na SKILL-1D.ui-real-state-Bg2 ───────────
+  //
+  // A UI-1C.b promoveu as tres a implementadas porque elas ganharam
+  // componente proprio com conteudo. O conteudo era simulado, e a
+  // ui-real-state-B o removeu — sobrou uma aba anunciada como pronta
+  // que abria um "Em breve", sem o ponto na barra e com o placeholder
+  // montado tres vezes.
+  //
+  // `implementada` voltou a significar uma coisa so: a funcionalidade
+  // existe. Os asserts inverteram junto, e continuam nominais.
+  ok("D3  conexoes, funcoes e permissoes voltaram a pendentes",
+    PENDENTES_BG2.every((id) => ABAS.find((a) => a.id === id)?.implementada === false));
+  ok("D4  as seis pendentes sao exatamente estas",
+    ABAS.filter((a) => !a.implementada).map((a) => a.id).join(",") ===
+    "chat,conexoes,funcoes,permissoes,memoria,custos");
 
-  const pag = codigo(ler("components/ia/agente/PaginaAgente.tsx"));
-  ok("D5  a pagina monta as tres abas novas",
-    /AbaConexoes/.test(pag) && /AbaFuncoes/.test(pag) && /AbaPermissoes/.test(pag));
-  ok("D6  escolha por comparacao explicita, nao indexacao",
-    /aba === "conexoes"/.test(pag) && /aba === "funcoes"/.test(pag) && /aba === "permissoes"/.test(pag));
-  ok("D7  EmBreve continua para as pendentes", /EmBreve/.test(pag));
+  const pag = codigo(PAGINA_AGENTE);
+  ok("D5  a pagina NAO monta componente proprio para as tres",
+    !/AbaConexoes|AbaFuncoes|AbaPermissoes/.test(pag));
+  ok("D6  nem por comparacao explicita com o id da aba",
+    PENDENTES_BG2.every((id) => !new RegExp(`aba === "${id}"`).test(pag)));
+  ok("D6b CONTROLE: a sonda acha o caminho proprio de quem TEM um",
+    /aba === "tarefas"/.test(pag) && /aba === "visao-geral"/.test(pag));
+  ok("D7  EmBreve continua para as pendentes, e so uma vez",
+    /EmBreve/.test(pag) && (pag.match(/<EmBreve/g) ?? []).length === 1);
+  ok("D8  as tres declaram pendencia e descricao para o dono",
+    PENDENTES_BG2.every((id) =>
+      new RegExp(`\\b${id}:`).test(ABAS_TS) && new RegExp(`\\b${id}:`).test(PAGINA_AGENTE)));
+  // ── O texto e lido pelo DONO ────────────────────────────────────
+  //
+  // Nome de tabela, de rota ou de modulo nao dizem nada a ele e ainda
+  // expoem forma interna do sistema. A sonda vale para TODAS as
+  // pendencias e para TODAS as descricoes, nao so para as tres que a
+  // Bg2 escreveu: a regra e do texto que aparece na tela, nao de quem o
+  // escreveu por ultimo.
+  const INTERNALS =
+    /agente_conexoes|agente_permissoes|agente_skills|supabase|\brota\b|endpoint|\bAPI\b|autenticad[ao]|backend|user_id|agregador|\bRPC\b|\btabela\b/i;
+
+  const sujas: string[] = ABAS.filter((a) => !a.implementada)
+    .map((a) => a.id as string)
+    .filter((id) => INTERNALS.test((PENDENCIA_ABA as Record<string, string>)[id] ?? ""));
+
+  // ── A divida de copy fechou ──────────────────────────────────────
+  //
+  // Por dois gates esta guarda carregou uma allowlist nominal: `custos`
+  // dizia "nao ha rota autenticada que as leia por dono" e `chat` dizia
+  // "nao existe endpoint, provedor nem historico" — vocabulario de
+  // infraestrutura em texto que o DONO le, os dois escritos na UI-1C.a.
+  //
+  // A allowlist cumpriu o papel dela: manteve as duas visiveis ate
+  // serem corrigidas, em vez de deixa-las envelhecer caladas. `custos`
+  // saiu na SKILL-1D.ui-real-state-C, `chat` na Cg — e a lista some
+  // junto, porque excecao que sobrevive ao motivo vira permissao.
+  //
+  // A regra agora e simples e sem escapatoria: NENHUMA pendencia fala
+  // de infraestrutura. `D9b` cobra a ausencia da propria allowlist,
+  // para que reintroduzi-la seja uma decisao visivel e nao um remendo.
+  ok("D9  nenhuma pendencia fala de infraestrutura ao dono",
+    sujas.length === 0, sujas.join(", "));
+  // Os nomes sao montados em pedacos de proposito: a sonda le o PROPRIO
+  // arquivo, e um literal inteiro aqui casaria consigo mesmo — a guarda
+  // reprovaria por existir, que e o oposto de guardar alguma coisa.
+  const NOMES_DE_EXCECAO = new RegExp(
+    [["VAZAMENTOS", "CONHECIDOS"].join("_"),
+     ["COPY", "TOLERADA"].join("_"),
+     ["PENDENCIA", "LEGADA"].join("_")].join("|"));
+  ok("D9b nao existe allowlist de excecao para copy user-facing",
+    !NOMES_DE_EXCECAO.test(codigo(ler("scripts/testar-ia-ui-1cb.ts"))));
+  ok("D9b2 CONTROLE: a sonda acharia a allowlist de volta",
+    NOMES_DE_EXCECAO.test(`const ${["VAZAMENTOS", "CONHECIDOS"].join("_")} = ["chat"];`));
+  ok("D9c toda pendencia e um texto de produto, com corpo",
+    ABAS.filter((a) => !a.implementada).every(
+      (a) => ((PENDENCIA_ABA as Record<string, string>)[a.id] ?? "").length > 40));
+  ok("D9d a descricao que o dono le tambem nao expoe internals",
+    !INTERNALS.test(
+      PAGINA_AGENTE.slice(PAGINA_AGENTE.indexOf("const DESCRICAO_ABA"))));
+  ok("D9e CONTROLE: a sonda acha o vocabulario que as duas copies tinham",
+    INTERNALS.test("falta a rota autenticada que leia agente_conexoes") &&
+    INTERNALS.test("nao existe endpoint, provedor nem historico") &&
+    !INTERNALS.test("falta conectar esta aba aos custos reais de uso de IA deste agente") &&
+    !INTERNALS.test("falta conectar esta aba as conversas reais do agente"));
 }
 
 secao("E. Conexoes");
@@ -234,20 +328,43 @@ secao("E. Conexoes");
     /Não atribuída/.test(CARD_CX) && /Atribuída a este agente/.test(CARD_CX));
   ok("E11 o card usa icone + texto no estado",
     /vocab\.icone/.test(CARD_CX) && /vocab\.rotulo/.test(CARD_CX));
-  ok("E12 'Usada por' vem das funcoes que dependem da conexao",
-    /MOCK_FUNCOES_DA_CONEXAO/.test(AB_CX));
+  // ── E12 reconciliado na SKILL-1D.ui-real-state-B ────────────────
+  //
+  // "Usada por" era derivado, nunca digitado — e continuava sendo uma
+  // lista de contas que nao existem, exibida na aba de um agente REAL.
+  // A derivacao correta de um dado ficticio permanece ficcao.
+  //
+  // `MOCK_FUNCOES_DA_CONEXAO` continua existindo e continua testado
+  // logo abaixo (E13/E14): o que saiu foi o CONSUMO na aba do agente.
+  // E12: a aba que consumia `MOCK_FUNCOES_DA_CONEXAO` nao existe mais.
+  // A invariavel migrou para onde ela ainda pode ser violada — a
+  // experiencia real do agente.
+  ok("E12 nenhuma superficie de agente consome mock de conexao",
+    !/MOCK_CONEXOES|MOCK_FUNCOES_DA_CONEXAO/.test(
+      codigo(PAGINA_AGENTE) + codigo(ler("components/ia/agente/VisaoGeral.tsx"))));
   ok("E13 MOCK_FUNCOES_DA_CONEXAO filtra por conexaoNecessaria",
     MOCK_FUNCOES_DA_CONEXAO("cx-ml").every((f) => f.conexaoNecessaria === "cx-ml"));
   ok("E14 conexao sem funcao dependente nao quebra",
     MOCK_FUNCOES_DA_CONEXAO("cx-inexistente").length === 0);
 
-  ok("E15 ha Link real para /ia/conexoes", /<Link/.test(AB_CX) && /"\/ia\/conexoes"/.test(AB_CX));
-  ok("E16 NAO ha acao de conectar/reconectar/desconectar",
-    !/(Reconectar|Desconectar|Adicionar conexão|OAuth|autorizar)/i.test(codigo(AB_CX)));
+  // E15 reconciliado: o Link para `/ia/conexoes` morava na aba e saiu
+  // com ela. Nao foi reposto de proposito — `EmBreve` nao aceita acao
+  // (C8/C10 da suite 1c existem para que nao aceite), e a tela global
+  // de conexoes tambem e um `EmBreve`: o link levaria de um "em breve" a
+  // outro. A pendencia diz em TEXTO onde a configuracao vai morar.
+  ok("E15 a pendencia de conexoes diz onde a configuracao vai morar",
+    /conta CDS/.test(ABAS_TS));
+  ok("E16 NAO ha acao de conectar/reconectar/desconectar na area do agente",
+    !/(Reconectar|Desconectar|Adicionar conexão|OAuth|autorizar)/i.test(codigo(PAGINA_AGENTE)));
   ok("E17 controle negativo: a sonda acharia um botao de reconectar",
     /(Reconectar|Desconectar)/i.test("<button>Reconectar</button>"));
-  ok("E18 a divida de credenciais e citada da constante unica",
-    /DIVIDA_CREDENCIAIS/.test(AB_CX) && DIVIDA_CREDENCIAIS.length > 40);
+  // E18 reconciliado: a divida de credenciais e da tela GLOBAL de
+  // conexoes, que mexe em credencial — nao desta aba, que so atribuiria
+  // uma conexao ja existente. Ela era citada aqui porque a aba
+  // descrevia contas; sem contas descritas, a citacao virou assunto
+  // alheio. A constante continua sendo a fonte unica do texto.
+  ok("E18 a divida de credenciais continua declarada em constante unica",
+    DIVIDA_CREDENCIAIS.length > 40 && /DIVIDA_CREDENCIAIS/.test(CONCEITOS));
 }
 
 secao("F. Funcoes: Disponivel x Permitida, Leitura x Acao");
@@ -263,8 +380,20 @@ secao("F. Funcoes: Disponivel x Permitida, Leitura x Acao");
     funcaoDisponivel({ procedencia: "disponivel" }) === true &&
     (["simulado", "nao_configurado", "em_breve"] as const).every(
       (p) => funcaoDisponivel({ procedencia: p }) === false));
-  ok("F5  a aba explica a diferenca antes dos cards",
-    /Disponível/.test(AB_FN) && /Permitida/.test(AB_FN) && /Bloqueada/.test(AB_FN));
+  // ── F5 reconciliado na SKILL-1D.ui-real-state-B ─────────────────
+  //
+  // A legenda ensinava "Disponivel" x "Permitida" antes dos cards, e
+  // era o melhor pedaco daquela tela. Ela existia PARA os cards; sem
+  // funcao alguma listada, ensinar a diferenca entre dois selos que
+  // ninguem vera e ruido. O conceito continua vivo e cobrado em
+  // `conceitos.ts` (F3/F4) e no proprio card (F8).
+  // F5: sem aba propria, a invariavel e que NENHUMA superficie do
+  // agente lista funcao — nem simulada, nem o catalogo executavel real,
+  // que responderia "o que o sistema sabe fazer" no lugar de "o que
+  // ESTE agente pode fazer".
+  ok("F5  nenhuma superficie de agente lista funcao",
+    !/MOCK_FUNCOES/.test(codigo(PAGINA_AGENTE) + codigo(ler("components/ia/agente/VisaoGeral.tsx"))) &&
+    !/CATALOGO|capabilities\/registry/.test(codigo(PAGINA_AGENTE)));
 
   ok("F6  acesso tem rotulo Leitura e Ação",
     ROTULO_ACESSO.leitura.rotulo === "Leitura" && ROTULO_ACESSO.escrita.rotulo === "Ação");
@@ -293,8 +422,12 @@ secao("F. Funcoes: Disponivel x Permitida, Leitura x Acao");
     MOCK_FUNCOES.some((f) => funcaoDisponivel(f) && permitida({ nivel: MOCK_NIVEL_DA_FUNCAO(f.id) })) &&
     MOCK_FUNCOES.some((f) => !permitida({ nivel: MOCK_NIVEL_DA_FUNCAO(f.id) })) &&
     MOCK_FUNCOES.some((f) => f.procedencia === "em_breve"));
-  ok("F17 funcoes disponiveis aparecem antes das pendentes",
-    /sort\(/.test(AB_FN) && /funcaoDisponivel/.test(AB_FN));
+  // F17 reconciliado: nao ha o que ordenar enquanto nao ha lista. A
+  // ordem "o que existe antes do que nao existe" volta com a fonte.
+  // F17: nao ha o que ordenar enquanto nao ha lista. A ordem "o que
+  // existe antes do que nao existe" volta com a fonte, e com a aba.
+  ok("F17 nao ha catalogo ordenado na pagina do agente",
+    !/sort\(/.test(codigo(PAGINA_AGENTE)));
 }
 
 secao("G. Permissoes: representacao ESTATICA (Decisao 3)");
@@ -320,19 +453,35 @@ secao("G. Permissoes: representacao ESTATICA (Decisao 3)");
   ok("G6b controle negativo: a sonda acha o cursor de clique",
     /cursor:\s*pointer/.test(".x { cursor: pointer; }"));
   ok("G7  mostra os tres niveis, nao so o vigente", /NIVEIS_AUTONOMIA\.map/.test(SELETOR));
-  ok("G8  a aba avisa que nada e gravado",
-    /não é gravada|nao e gravada|Nenhuma decisão/i.test(AB_PM));
-  ok("G9  a aba NAO tem botao Salvar", !/Salvar|Aplicar|Confirmar/.test(codigo(AB_PM)));
-  ok("G10 nenhum controle acionavel nas tres abas novas",
-    [AB_CX, AB_FN, AB_PM].every((f) => !/<input|<select|<textarea|onChange/.test(codigo(f))));
-  ok("G11 nenhuma das tres abas tem onClick",
-    [AB_CX, AB_FN, AB_PM].every((f) => !/onClick/.test(codigo(f))));
+  // ── G8 reconciliado na SKILL-1D.ui-real-state-B ─────────────────
+  //
+  // "Nenhuma decisao desta tela e gravada" era o primeiro elemento da
+  // pagina, e era honesto. Deixou de ser suficiente: com um agente REAL
+  // ao lado, quatro linhas dizendo `automatico`/`bloqueado` viravam a
+  // resposta aparente para "o que este agente pode fazer" — a pergunta
+  // mais importante que esta area inteira responde. Nao ha mais decisao
+  // a gravar porque nao ha mais decisao exibida.
+  ok("G8  a pagina nao exibe nivel nem autonomia sem onde grava-los",
+    !/MOCK_PERMISSOES|MOCK_NIVEL_DA_FUNCAO|SeletorAutonomia/.test(codigo(PAGINA_AGENTE)));
+  ok("G9  nao ha botao Salvar na pagina do agente",
+    !/>\s*(Salvar|Aplicar|Confirmar)\s*</.test(codigo(PAGINA_AGENTE)));
+  ok("G10 nenhum controle acionavel nas superficies pendentes",
+    !/<input|<select|<textarea|onChange/.test(codigo(ler("components/ia/EmBreve.tsx"))));
+  ok("G11 nem onClick", !/onClick/.test(codigo(ler("components/ia/EmBreve.tsx"))));
 
-  ok("G12 'Exige aprovação' aponta para /ia/aprovacoes", /\/ia\/aprovacoes/.test(AB_PM));
-  ok("G13 NAO ha Aprovar/Recusar dentro da aba",
-    !/>\s*(Aprovar|Recusar)\s*</.test(AB_PM));
-  ok("G14 a aba explica que bloqueada != indisponivel",
-    /não é o mesmo que indisponível|nao e o mesmo que indisponivel/i.test(AB_PM));
+  // G12 reconciliado: "Exige aprovacao" era um NIVEL exibido por
+  // funcao. Sem niveis, apontar para a fila daqui prometeria um fluxo
+  // de aprovacao por funcao que nao existe. A fila continua sendo a
+  // porta unica, e continua cobrada na suite dela.
+  ok("G12 a pagina do agente nao promete fluxo de aprovacao por funcao",
+    !/\/ia\/aprovacoes/.test(codigo(PAGINA_AGENTE)) && !/Exige aprova/.test(codigo(PAGINA_AGENTE)));
+  ok("G13 NAO ha Aprovar/Recusar na pagina do agente",
+    !/>\s*(Aprovar|Recusar)\s*</.test(PAGINA_AGENTE));
+  // G14: a distincao bloqueada x indisponivel era ensinada na aba. Sem
+  // aba, ela e ensinada na descricao que o dono le no "Em breve" — o
+  // conceito nao pode sumir junto com o componente.
+  ok("G14 a descricao pendente ainda separa 'pode' de 'existe'",
+    /sozinho e o que precisa de autoriza/i.test(PAGINA_AGENTE));
 }
 
 secao("H. Quatro conceitos, ainda separados");
@@ -429,6 +578,60 @@ secao("I. Zero backend na area inteira");
   }
 }
 
+secao("I2. Orfaos autorizados");
+
+{
+  // ── Por que esta secao existe ────────────────────────────────────
+  //
+  // A SKILL-1D.ui-real-state-B tirou os mocks das tres abas, e com isso
+  // `CardConexao`, `CardFuncao` e `SeletorAutonomia` perderam o unico
+  // consumidor de producao. A Bg2 apagou as abas e nao apagou os cards:
+  // eles sao apresentacionais, estao testados nas secoes E, F e G desta
+  // suite, e voltam quando conexoes e permissoes tiverem fonte real.
+  //
+  // Componente sem consumidor e uma das coisas que apodrecem em
+  // silencio. Entao ele deixa de ser silencio: a lista e NOMINAL e a
+  // igualdade vale nos dois sentidos — um quarto orfao reprova, e um
+  // destes tres voltando a ser importado tambem reprova, para que a
+  // volta seja notada e a lista, reconciliada.
+  //
+  // "Ser reutilizavel" nao e o mesmo que "estar ligado": nenhum destes
+  // tres significa que Conexoes, Funcoes ou Permissoes existam.
+  const ORFAOS_AUTORIZADOS: readonly string[] = [
+    "components/ia/conexoes/CardConexao.tsx",
+    "components/ia/capabilities/CardFuncao.tsx",
+    "components/ia/capabilities/SeletorAutonomia.tsx",
+  ];
+
+  // Um componente e "importado" quando alguem cita o especificador dele.
+  // Comparar pelo CAMINHO, e nao pelo nome exportado: nome solto casa
+  // com comentario, com string e com outro simbolo homonimo.
+  const importadoPor = (alvo: string) => {
+    const espec = `"@/${alvo.replace(/\.tsx$/, "")}"`;
+    return ARQUIVOS_AREA.filter((a) => a !== alvo && ler(a).includes(espec));
+  };
+
+  const componentes = ARQUIVOS_AREA.filter(
+    (a) => a.startsWith("components/ia/") && a.endsWith(".tsx"));
+  const semConsumidor = componentes.filter((a) => importadoPor(a).length === 0);
+
+  const inesperados = semConsumidor.filter((a) => !ORFAOS_AUTORIZADOS.includes(a));
+  const religados = ORFAOS_AUTORIZADOS.filter((a) => !semConsumidor.includes(a));
+
+  ok("I2.1 nenhum componente sem consumidor alem dos autorizados",
+    inesperados.length === 0, inesperados.join(", "));
+  ok("I2.2 e todo autorizado continua realmente sem consumidor",
+    religados.length === 0, religados.map((a) => `${a} (religado)`).join(", "));
+  ok("I2.3 ANCORA: a varredura enxergou componentes de verdade",
+    componentes.length > 15, String(componentes.length));
+  ok("I2.4 CONTROLE: a sonda enxerga quem TEM consumidor",
+    importadoPor("components/ia/EmBreve.tsx").length > 0 &&
+    importadoPor("components/ia/BadgeEstado.tsx").length > 0);
+  ok("I2.5 os tres orfaos seguem cobertos por assert nesta suite",
+    ORFAOS_AUTORIZADOS.every((a) => ARQUIVOS_AREA.includes(a)) &&
+    [CARD_CX, CARD_FN, SELETOR].every((f) => f.length > 500));
+}
+
 secao("J. Mocks e procedencia");
 
 {
@@ -443,8 +646,33 @@ secao("J. Mocks e procedencia");
   ok("J4  toda conexao declara procedencia", MOCK_CONEXOES.every((c) => !!c.procedencia));
   ok("J5  toda funcao declara procedencia", MOCK_FUNCOES.every((f) => !!f.procedencia));
   ok("J6  toda permissao declara procedencia", MOCK_PERMISSOES.every((p) => !!p.procedencia));
-  ok("J7  as tres abas exibem o aviso de simulacao",
-    [AB_CX, AB_FN, AB_PM].every((f) => /MOCK_AVISO/.test(f)));
+  // ── J7 reconciliado na SKILL-1D.ui-real-state-B ─────────────────
+  //
+  // Exigia a tarja nas tres abas. A exigencia INVERTEU: elas nao tem
+  // mais o que simular, entao exibir "Dados simulados" anunciaria uma
+  // simulacao inexistente — e o aviso so vale enquanto significa
+  // alguma coisa. A allowlist nominal das superficies que AINDA avisam,
+  // com igualdade nos dois sentidos, vive em `testar-ia-ui.ts` (F3).
+  // ── J7 na sua terceira forma ────────────────────────────────────
+  //
+  // UI-1C.b: "as tres abas exibem o aviso de simulacao".
+  // ui-real-state-B: "as tres abas nao consomem mock".
+  // Bg2: as tres abas nao existem — a invariavel mudou de arquivo, nao
+  // de conteudo. O que ela sempre protegeu foi a EXPERIENCIA do agente.
+  const SUPERFICIES_DO_AGENTE = [
+    "components/ia/agente/PaginaAgente.tsx",
+    "components/ia/agente/VisaoGeral.tsx",
+    "components/ia/office/PainelAgente.tsx",
+    "components/ia/EmBreve.tsx",
+  ];
+  ok("J7  nenhuma superficie do agente consome mock ou avisa simulacao",
+    SUPERFICIES_DO_AGENTE.every((a) => !/MOCK_/.test(codigo(ler(a)))));
+  ok("J7b e nenhuma delas afirma um vazio que ninguem consultou",
+    SUPERFICIES_DO_AGENTE.every((a) => !FRASE_DE_VAZIO.test(codigo(ler(a)))) &&
+    !FRASE_DE_VAZIO.test(codigo(ABAS_TS)));
+  ok("J7c CONTROLE: a sonda acha o consumo de mock e a frase de vazio",
+    /MOCK_/.test('import { MOCK_AVISO } from "@/lib/ia/mocks";') &&
+    FRASE_DE_VAZIO.test("<p>Nenhuma permissão configurada</p>"));
   ok("J8  os cards exibem a procedencia de cada item",
     /ROTULO_PROCEDENCIA/.test(CARD_CX) && /ROTULO_PROCEDENCIA/.test(CARD_FN));
   ok("J9  nenhum fake declarado fora de lib/ia/mocks/",
@@ -467,22 +695,44 @@ secao("K. Acessibilidade e responsividade");
 
 {
   const novos = NOVOS_1CB.map((a) => ler(a));
+  const pendente = ler("components/ia/EmBreve.tsx");
   ok("K1  nenhuma falsa affordance nos 6 componentes",
     novos.every((f) => !/<button|<input|<select|onChange/.test(codigo(f))));
-  ok("K2  Links tem foco visivel",
-    /:focus-visible/.test(AB_CX) && /:focus-visible/.test(AB_PM));
-  ok("K3  headings hierarquicos (h3 nas abas, h4 nos itens)",
-    /<h3/.test(AB_CX) && /<h3/.test(AB_FN) && /<h3/.test(AB_PM) && /<h4/.test(AB_PM));
+  // K2 na sua terceira forma: a exigencia e de quem TEM link, e nenhuma
+  // das superficies pendentes tem — `EmBreve` nao aceita acao, de
+  // proposito. A regra continua valendo para os tres cards, que voltam
+  // a ter link quando voltarem a ser montados.
+  const temFocoSeTemLink = (f: string) => !/<Link/.test(f) || /:focus-visible/.test(f);
+  ok("K2  todo componente com Link tem foco visivel",
+    [...novos, pendente].every(temFocoSeTemLink));
+  ok("K2b CONTROLE: componente com Link e sem foco visivel reprovaria",
+    !temFocoSeTemLink("<Link href=\"/x\">ir</Link>"));
+  // K3 reconciliado: o `<h3` de cada aba continua obrigatorio. O `<h4`
+  // titulava CADA FUNCAO da lista de permissoes; sem lista, exigir um
+  // subnivel seria pedir heading sem conteudo debaixo dele.
+  // K3: o heading das tres superficies pendentes agora vem do proprio
+  // `EmBreve`, num lugar so — que e metade do motivo de as cascas terem
+  // saido.
+  ok("K3  a superficie pendente tem heading proprio", /<h2/.test(pendente));
   ok("K4  cards tem aria-label descritivo", /aria-label=/.test(CARD_CX));
-  ok("K5  a lista de niveis e associada ao nome da funcao",
-    /aria-labelledby/.test(SELETOR) && /idRotulo/.test(AB_PM));
+  // K5 reconciliado: a associacao acontecia entre o seletor e o nome da
+  // funcao na aba. O seletor guarda a regra e continua cobrado por ela;
+  // a aba nao passa mais rotulo nenhum porque nao lista funcao.
+  ok("K5  o seletor de niveis segue associado a um rotulo",
+    /aria-labelledby/.test(SELETOR));
+  ok("K5b nenhuma superficie de agente usa mais o seletor",
+    !/SeletorAutonomia|idRotulo/.test(codigo(PAGINA_AGENTE)));
   ok("K6  estado nunca so por cor: icone + texto em conexao e funcao",
     /aria-hidden="true"/.test(CARD_CX) && /aria-hidden="true"/.test(CARD_FN));
-  ok("K7  grids responsivos por CSS",
-    novos.every((f) => !/innerWidth|resize|matchMedia/.test(f)) &&
-    /repeat\(auto-fit/.test(AB_CX) && /repeat\(auto-fit/.test(AB_FN) && /repeat\(auto-fit/.test(SELETOR));
-  ok("K8  permissoes empilham em vez de virar tabela horizontal",
-    !/<table/.test(AB_PM));
+  // K7 reconciliado: as duas abas nao tem mais grade porque nao tem
+  // mais cards. A proibicao de medir viewport em JavaScript, que e a
+  // parte que vale para a area inteira, continua valendo para os seis.
+  ok("K7  nenhuma medicao de viewport em JavaScript nos seis componentes",
+    novos.every((f) => !/innerWidth|resize|matchMedia/.test(f)));
+  ok("K7b onde ainda ha grade, ela e responsiva por CSS",
+    /repeat\(auto-fit/.test(SELETOR));
+  ok("K8  nada na area do agente vira tabela horizontal",
+    !/<table/.test(PAGINA_AGENTE) && !/<table/.test(pendente));
   ok("K9  texto longo nao estoura o container",
     /overflow-wrap:\s*anywhere/.test(CARD_FN));
 }

@@ -125,13 +125,19 @@ const ARQUIVOS_UI_1CA: readonly string[] = [
 ];
 
 /**
- * O que a UI-1C.b acrescentou: as tres abas de configuracao do agente e
- * os cards que elas usam.
+ * O que a UI-1C.b acrescentou: os cards de conexao, funcao e autonomia.
+ *
+ * As TRES abas que os montavam (`AbaConexoes`, `AbaFuncoes`,
+ * `AbaPermissoes`) sairam na SKILL-1D.ui-real-state-Bg2: sem conteudo
+ * simulado para exibir, elas viraram cascas em volta de um "Em breve"
+ * que a infraestrutura de abas ja sabe montar sozinha.
+ *
+ * Os cards FICARAM, e nao por descuido — sao apresentacionais, estao
+ * testados e voltam quando houver fonte real. Que hoje eles nao tenham
+ * consumidor e fato conhecido e cobrado nominalmente por `testar-ia-ui-1cb.ts`
+ * (secao de orfaos autorizados), para que orfao nao vire habito.
  */
 const ARQUIVOS_UI_1CB: readonly string[] = [
-  "components/ia/agente/AbaConexoes.tsx",
-  "components/ia/agente/AbaFuncoes.tsx",
-  "components/ia/agente/AbaPermissoes.tsx",
   "components/ia/conexoes/CardConexao.tsx",
   "components/ia/capabilities/CardFuncao.tsx",
   "components/ia/capabilities/SeletorAutonomia.tsx",
@@ -228,11 +234,14 @@ secao("A. Inventario e rotas");
   // 45 na UI-1D.b; 47 na SKILL-1B (contrato.ts + formato.ts); 48 desde a
   // SKILL-1C (diagnostico.ts); 49 na SKILL-1D.ui-consumer-C
   // (`agentes-http.ts`, o unico ponto de rede da area); 50 na
-  // SKILL-1D.agent-create-ui-B (`CriarAgente.tsx`). O numero continua
-  // literal de proposito: se ele fosse `ARQUIVOS_UI.length`, o assert
-  // compararia a lista consigo mesma e um arquivo novo declarado sem
-  // revisao passaria batido.
-  ok("A2  50 arquivos, nem um a mais", noDisco.length === 50, String(noDisco.length));
+  // SKILL-1D.agent-create-ui-B (`CriarAgente.tsx`); 47 na
+  // SKILL-1D.ui-real-state-Bg2, que apagou as tres cascas de aba. O
+  // numero continua literal de proposito: se ele fosse
+  // `ARQUIVOS_UI.length`, o assert compararia a lista consigo mesma e um
+  // arquivo novo declarado sem revisao passaria batido. E o unico assert
+  // desta suite que DESCE quando codigo e removido — por isso ele e a
+  // prova de que a remocao foi deliberada, nao acidente.
+  ok("A2  47 arquivos, nem um a mais", noDisco.length === 47, String(noDisco.length));
 }
 
 const ROTAS = [
@@ -492,8 +501,81 @@ secao("F. Mocks centralizados e ficticios");
   ok("F2  todo export da pasta de mocks usa prefixo MOCK_",
     exportados.length > 0 && exportados.every((e) => e.startsWith("MOCK_")), exportados.join(","));
 
-  ok("F3  o aviso de simulacao existe e aparece no shell",
-    MOCK_AVISO.length > 0 && ler("app/(app)/ia/layout.tsx").includes("MOCK_AVISO"));
+  // ── F3 reconciliado na SKILL-1D.ui-real-state-B ──────────────────
+  //
+  // Antes: "o aviso aparece no SHELL". Era o desenho certo enquanto a
+  // area inteira era simulacao — nenhuma tela nova podia esquecer de
+  // exibi-lo. Deixou de ser: `/ia/agentes` e `/ia/agentes/[id]` leem
+  // agentes reais, e um aviso de area inteira passou a AFIRMAR FALSO
+  // sobre elas. Aviso que mente para menos ensina a ignorar avisos.
+  //
+  // O guarda nao foi apagado: virou uma allowlist NOMINAL das
+  // superficies que ainda simulam, com igualdade nos DOIS sentidos —
+  // tela nova exibindo o aviso reprova, e tela autorizada que parar de
+  // exibi-lo tambem, porque allowlist com item obsoleto e protecao que
+  // morre sem ninguem perceber.
+  const SUPERFICIES_QUE_AVISAM: readonly string[] = [
+    "app/(app)/ia/page.tsx",                        // Escritorio: MOCK_AGENTES/MOCK_TAREFAS
+    "components/ia/aprovacoes/FilaAprovacoes.tsx",  // fila: MOCK_APROVACOES
+    "components/ia/atividade/Timeline.tsx",         // feed: MOCK_ATIVIDADES
+  ];
+  const exibem = ARQUIVOS_UI.filter((a) => !ehMock(a) && /MOCK_AVISO/.test(codigo(ler(a))));
+  const aMais = exibem.filter((a) => !SUPERFICIES_QUE_AVISAM.includes(a));
+  const sumiram = SUPERFICIES_QUE_AVISAM.filter((a) => !exibem.includes(a));
+  ok("F3  o aviso de simulacao existe e aparece SO onde ainda ha simulacao",
+    MOCK_AVISO.length > 0 && aMais.length === 0 && sumiram.length === 0,
+    [...aMais, ...sumiram.map((a) => `${a} (sumiu)`)].join(", "));
+
+  ok("F3b o shell da area NAO afirma mais que tudo e simulado",
+    !/MOCK_AVISO/.test(codigo(ler("app/(app)/ia/layout.tsx"))));
+
+  // A lista e nominal e cobre a experiencia REAL do agente inteira:
+  // rota da lista, rota do detalhe, container, visao geral e drawer.
+  const SUPERFICIES_DE_AGENTE = [
+    "app/(app)/ia/agentes/page.tsx",
+    "app/(app)/ia/agentes/[id]/page.tsx",
+    "components/ia/agente/PaginaAgente.tsx",
+    "components/ia/agente/VisaoGeral.tsx",
+    "components/ia/office/PainelAgente.tsx",
+  ];
+  ok("F3c as telas de agente, que leem dado real, nao exibem o aviso",
+    SUPERFICIES_DE_AGENTE.every((a) => !/MOCK_AVISO/.test(codigo(ler(a)))));
+
+  // A prova da SKILL-1D.ui-real-state-B que NAO pode morrer junto com os
+  // arquivos apagados: nenhum mock proibido voltou a experiencia real.
+  const MOCKS_PROIBIDOS =
+    /MOCK_(AVISO|CONEXOES|FUNCOES|PERMISSOES|NIVEL_DA_FUNCAO|FUNCOES_DA_CONEXAO|CONTAGENS)/;
+  const reincidentes = [...SUPERFICIES_DE_AGENTE, "components/ia/SubNavIA.tsx"]
+    .filter((a) => MOCKS_PROIBIDOS.test(codigo(ler(a))));
+  ok("F3g nenhum mock proibido voltou a experiencia real de agente",
+    reincidentes.length === 0, reincidentes.join(", "));
+  ok("F3h CONTROLE: a sonda acha cada um dos mocks proibidos",
+    ["MOCK_AVISO", "MOCK_CONEXOES", "MOCK_FUNCOES", "MOCK_PERMISSOES",
+     "MOCK_NIVEL_DA_FUNCAO", "MOCK_FUNCOES_DA_CONEXAO", "MOCK_CONTAGENS"]
+      .every((n) => MOCKS_PROIBIDOS.test(`import { ${n} } from "@/lib/ia/mocks";`)));
+
+  // ── A subnav perdeu os badges numericos ──────────────────────────
+  //
+  // Eles vinham de `MOCK_CONTAGENS`. Numero e a afirmacao mais
+  // convincente que uma interface faz, e por isso o ultimo lugar onde
+  // simulacao pode ficar. `MOCK_CONTAGENS` continua existindo e sendo
+  // testado logo abaixo (F10/F10b): o que saiu foi o CONSUMO.
+  const subnavIa = codigo(ler("components/ia/SubNavIA.tsx"));
+  ok("F3d a subnav nao consome mais contagem simulada",
+    !/MOCK_/.test(subnavIa));
+  // Nenhum item da subnav declara `contador` hoje. A decisao de produto
+  // foi OCULTAR, nunca substituir: trocar "agentes trabalhando" pelo
+  // total de agentes do dono seria um numero certo respondendo a
+  // pergunta errada, e "0 trabalhando" afirmaria uma consulta que
+  // ninguem faz.
+  const SONDA_BADGE = /contador:\s*\S/;
+  ok("F3e nem trocou o badge por outra metrica sem autoridade",
+    !SONDA_BADGE.test(subnavIa));
+  ok("F3e2 CONTROLE: a sonda acusaria um contador substituto",
+    SONDA_BADGE.test("{ href: \"/ia\", rotulo: \"X\", contador: agentes.length }") &&
+    SONDA_BADGE.test("contador: MOCK_CONTAGENS.trabalhando,"));
+  ok("F3f o mecanismo do badge continua no lugar, sem fonte que o alimente",
+    /item\.contador/.test(subnavIa) && /descricaoContador/.test(subnavIa));
 
   ok("F4  ids de mock nao imitam UUID",
     MOCK_AGENTES.every((a) => !/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(a.id)));

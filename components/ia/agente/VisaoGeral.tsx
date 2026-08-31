@@ -6,28 +6,42 @@
  * ── A regra que governa esta tela ───────────────────────────────────
  *
  * Ela mistura, na mesma pagina, dado que existe de verdade (identidade,
- * operacao, instrucoes) com resumos de coisas que ainda nao tem onde ser
- * gravadas (conexoes, funcoes, autonomia, custo). Isso e util e e
- * perigoso pelo mesmo motivo: fica tudo com a mesma cara.
+ * instrucoes, estado) com superficies cuja fonte ainda nao esta ligada
+ * a esta tela. Isso e util e e perigoso pelo mesmo motivo: fica tudo
+ * com a mesma cara.
  *
- * Por isso TODO bloco carrega uma etiqueta de procedencia. Uma
- * configuracao simulada nunca aparece com o mesmo peso visual de uma
- * configuracao persistida — se aparecesse, a tela viraria uma promessa
- * de algo que o backend nao cumpre.
+ * Por isso TODO bloco carrega uma etiqueta de procedencia, e a etiqueta
+ * muda a moldura, nao so o texto.
+ *
+ * ── O que mudou na SKILL-1D.ui-real-state-B ─────────────────────────
+ *
+ * Tres blocos deixaram de exibir conteudo ilustrativo:
+ *
+ *   Conexoes  listava `Loja Exemplo`, `Segunda conta` — contas que nao
+ *             existem, ao lado do nome e das instrucoes REAIS do
+ *             agente do dono. Enquanto tudo na tela era simulado isso
+ *             se sustentava; com identidade real ao lado, a lista
+ *             passou a parecer configuracao deste agente.
+ *   Funcoes   mesma coisa, com `Consultar vendas` e companhia.
+ *   Operacao  nao listava ficcao: derivava de uma lista de tarefas
+ *             VAZIA e fixa no codigo, e anunciava o resultado como
+ *             "Dado real". "Tarefas registradas: 0" nao e uma leitura
+ *             que deu zero — e a ausencia de leitura. As duas coisas
+ *             sao indistinguiveis na tela e opostas no significado.
+ *
+ * Os tres viraram `em_breve`, que e a unica coisa verdadeira que esta
+ * tela sabe dizer sobre eles hoje: a fonte nao esta ligada aqui.
+ *
+ * O que NAO foi feito, e e a regra desta frente: nenhum deles virou
+ * "Nenhuma conexao atribuida" ou "Nenhuma funcao habilitada". Isso
+ * seria um hardcode hoje verdadeiro — e no dia em que a fonte chegasse
+ * com conteudo, a frase continuaria la, errada e convincente.
  */
 import { CROMO, ESPACO, FONTE, RAIO } from "@/lib/ia/design";
-import { rotuloDe, type AparenciaAgente } from "@/lib/ia/estados";
-import {
-  DESCRICAO_TIPO,
-  ROTULO_PROCEDENCIA,
-  VOCABULARIO_NIVEL,
-  permitida,
-  type Procedencia,
-} from "@/lib/ia/conceitos";
-import { MOCK_CONEXOES, MOCK_FUNCOES, MOCK_PERMISSOES } from "@/lib/ia/mocks";
-import { formatarInstante, tarefaAtual, tituloDaTarefa, ultimaAtividade } from "@/lib/ia/tarefas";
+import { type AparenciaAgente } from "@/lib/ia/estados";
+import { DESCRICAO_TIPO, ROTULO_PROCEDENCIA, type Procedencia } from "@/lib/ia/conceitos";
 import type { AgenteUI, TarefaUI } from "@/lib/ia/contratos";
-import BadgeEstado, { corDaAparencia } from "@/components/ia/BadgeEstado";
+import BadgeEstado from "@/components/ia/BadgeEstado";
 
 export default function VisaoGeral({
   agente,
@@ -36,14 +50,15 @@ export default function VisaoGeral({
 }: {
   agente: AgenteUI;
   aparencia: AparenciaAgente;
+  /**
+   * Recebido e deliberadamente NAO lido. O container continua passando
+   * a lista (vazia, fixa) porque nao existe leitura real de tarefas; ler
+   * daqui produziria "0 tarefas" com cara de consulta. A prop fica no
+   * contrato para o dia em que houver fonte — remover e recolocar
+   * depois obrigaria a mexer no container por motivo nenhum.
+   */
   tarefas: readonly TarefaUI[];
 }) {
-  const atual = tarefaAtual(tarefas);
-  const ultima = ultimaAtividade(tarefas);
-  // "Permitida" e DERIVADA do nivel, nunca um campo proprio — ver o
-  // bloco sobre o eixo unico em `lib/ia/conceitos.ts`.
-  const concedidas = MOCK_PERMISSOES.filter(permitida);
-
   return (
     <div className="cds-ia-vg">
       <style>{css}</style>
@@ -64,37 +79,6 @@ export default function VisaoGeral({
         />
       </Bloco>
 
-      <Bloco titulo="Operação" procedencia="disponivel">
-        {atual ? (
-          <>
-            <Linha rotulo="Tarefa atual" valor={tituloDaTarefa(atual)} />
-            <div className="cds-ia-vg-linha">
-              <span className="cds-ia-vg-rotulo">Progresso</span>
-              <span style={{ flex: 1 }}>
-                <span
-                  role="progressbar"
-                  aria-valuenow={atual.progresso}
-                  aria-valuemin={0}
-                  aria-valuemax={100}
-                  aria-label={`Progresso da tarefa atual: ${atual.progresso} por cento`}
-                  className="cds-ia-vg-trilho"
-                >
-                  <span
-                    className="cds-ia-vg-barra"
-                    style={{ width: `${atual.progresso}%`, background: corDaAparencia(aparencia) }}
-                  />
-                </span>
-                <span className="cds-ia-vg-pct">{atual.progresso}%</span>
-              </span>
-            </div>
-          </>
-        ) : (
-          <Linha rotulo="Tarefa atual" valor="Nenhuma tarefa em andamento" />
-        )}
-        <Linha rotulo="Última atividade" valor={formatarInstante(ultima)} />
-        <Linha rotulo="Tarefas registradas" valor={String(tarefas.length)} />
-      </Bloco>
-
       <Bloco titulo="Configuração" procedencia="disponivel">
         {agente.instrucoes ? (
           <p className="cds-ia-vg-instrucoes">{agente.instrucoes}</p>
@@ -106,38 +90,27 @@ export default function VisaoGeral({
         )}
       </Bloco>
 
-      <Bloco titulo="Conexões" procedencia="simulado">
-        <ul className="cds-ia-vg-lista">
-          {MOCK_CONEXOES.map((c) => (
-            <li key={c.id}>
-              <strong>{c.rotulo}</strong> — {c.conta}
-            </li>
-          ))}
-        </ul>
-        <p className="cds-ia-vg-nota">
-          Nada registra hoje qual agente usa qual conta. Esta lista é ilustrativa.
+      <Bloco titulo="Trabalho" procedencia="em_breve">
+        <p className="cds-ia-vg-vazio">
+          Tarefa em andamento, progresso e última atividade aparecerão aqui quando esta tela
+          passar a ler as tarefas do agente. Nenhum número é exibido por enquanto — dizer
+          &ldquo;0 tarefas&rdquo; afirmaria uma consulta que ainda não acontece.
+        </p>
+      </Bloco>
+
+      <Bloco titulo="Conexões" procedencia="em_breve">
+        <p className="cds-ia-vg-vazio">
+          Quais contas conectadas este agente usa ainda não é lido nesta tela. Quando for, cada
+          conexão aparecerá com a conta e o estado dela — e o agente continuará sabendo apenas
+          que a conexão existe, nunca a credencial.
         </p>
       </Bloco>
 
       <Bloco titulo="Funções e autonomia" procedencia="em_breve">
-        <ul className="cds-ia-vg-lista">
-          {concedidas.map((p) => {
-            const funcao = MOCK_FUNCOES.find((f) => f.id === p.funcaoId);
-            if (!funcao) return null;
-            return (
-              <li key={p.funcaoId}>
-                <strong>{funcao.rotulo}</strong>
-                {" — "}
-                {VOCABULARIO_NIVEL[p.nivel].rotulo}
-                {funcao.procedencia === "em_breve" && (
-                  <span className="cds-ia-vg-inline"> (função ainda não existe)</span>
-                )}
-              </li>
-            );
-          })}
-        </ul>
-        <p className="cds-ia-vg-nota">
-          Não há onde gravar permissão ou autonomia. Nenhuma decisão desta lista está persistida.
+        <p className="cds-ia-vg-vazio">
+          O que este agente pode fazer, e com quanta autonomia, ainda não é lido nesta tela.
+          Nenhuma função é listada aqui até que exista fonte — uma lista de exemplo seria
+          indistinguível de uma configuração deste agente.
         </p>
       </Bloco>
 
@@ -218,13 +191,6 @@ const css = `
   .cds-ia-vg-linha { display: flex; gap: 12px; align-items: baseline; padding: 5px 0; }
   .cds-ia-vg-rotulo { flex: 0 0 118px; color: ${CROMO.textoFraco}; font-size: 12px; }
   .cds-ia-vg-valor { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-  .cds-ia-vg-trilho { display: block; height: 8px; border-radius: 999px; background: rgba(255,255,255,.06); overflow: hidden; }
-  .cds-ia-vg-barra { display: block; height: 100%; }
-  .cds-ia-vg-pct { display: block; margin-top: 4px; font-size: 11px; color: ${CROMO.textoFraco}; }
   .cds-ia-vg-instrucoes { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
-  .cds-ia-vg-vazio, .cds-ia-vg-nota { margin: 10px 0 0; font-size: 12px; color: ${CROMO.textoFraco}; }
-  .cds-ia-vg-vazio { margin-top: 0; }
-  .cds-ia-vg-lista { margin: 0; padding-left: 18px; }
-  .cds-ia-vg-lista li { margin-bottom: 4px; }
-  .cds-ia-vg-inline { color: ${CROMO.textoFraco}; font-size: 12px; }
+  .cds-ia-vg-vazio { margin: 0; font-size: 12px; color: ${CROMO.textoFraco}; }
 `;

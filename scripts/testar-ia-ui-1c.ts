@@ -149,14 +149,60 @@ secao("B. As 8 abas");
     JSON.stringify(ABAS.map((a) => a.id)) ===
     JSON.stringify(["visao-geral", "chat", "tarefas", "conexoes", "funcoes", "permissoes", "memoria", "custos"]));
   ok("B3  ids unicos", new Set(ABAS.map((a) => a.id)).size === 8);
-  // Atualizado na UI-1C.b: conexoes, funcoes e permissoes passaram a
-  // ter conteudo. O assert continua exato — ele lista QUAIS, nao quantas.
-  ok("B4  as cinco abas implementadas sao exatamente estas",
+  // Atualizado na UI-1C.b, quando conexoes/funcoes/permissoes ganharam
+  // conteudo — e de novo na SKILL-1D.ui-real-state-Bg2, quando o
+  // conteudo delas se revelou simulado e foi removido. O assert continua
+  // exato: ele lista QUAIS, nao quantas, e por isso acusa os dois
+  // movimentos.
+  ok("B4  as duas abas implementadas sao exatamente estas",
     ABAS.filter((a) => a.implementada).map((a) => a.id).join(",") ===
-    "visao-geral,tarefas,conexoes,funcoes,permissoes");
+    "visao-geral,tarefas");
+  // O rotulo dizia "6" desde a UI-1C.b, quando eram 3 — numero escrito
+  // no nome do assert envelhece calado. Agora sao seis de verdade, e o
+  // assert passou a cobrar a CONTAGEM tambem, para nao envelhecer de novo.
+  const pendentes = ABAS.filter((a) => !a.implementada);
   ok("B5  as 6 nao implementadas declaram pendencia",
-    ABAS.filter((a) => !a.implementada).every(
-      (a) => (PENDENCIA_ABA as Record<string, string>)[a.id]?.length > 20));
+    pendentes.length === 6 &&
+    pendentes.every((a) => (PENDENCIA_ABA as Record<string, string>)[a.id]?.length > 20),
+    pendentes.map((a) => a.id).join(","));
+
+  // ── A invariavel que faltava: `implementada` x o que a pagina monta ─
+  //
+  // Nada, ate aqui, impedia uma aba marcada como pronta cujo componente
+  // so renderizasse "Em breve" — foi exatamente o estado em que
+  // conexoes, funcoes e permissoes ficaram entre a ui-real-state-B e a
+  // Bg2. A barra dizia "pronta", a tela dizia "em breve", e nenhum teste
+  // reprovava.
+  //
+  // Agora reprova, nos DOIS sentidos.
+  const paginaAgente = codigo(ler("components/ia/agente/PaginaAgente.tsx"));
+  const montaPropria = (id: string) => new RegExp(`aba === "${id}"`).test(paginaAgente);
+
+  const prontasSemCaminho = ABAS.filter((a) => a.implementada && !montaPropria(a.id));
+  ok("B5b toda aba implementada tem caminho proprio na pagina",
+    prontasSemCaminho.length === 0, prontasSemCaminho.map((a) => a.id).join(","));
+
+  const pendentesComCaminho = ABAS.filter((a) => !a.implementada && montaPropria(a.id));
+  ok("B5c nenhuma aba pendente monta componente proprio",
+    pendentesComCaminho.length === 0, pendentesComCaminho.map((a) => a.id).join(","));
+
+  const pendentesSemPendencia = ABAS.filter(
+    (a) => !a.implementada && !(PENDENCIA_ABA as Record<string, string>)[a.id]);
+  ok("B5d toda aba pendente declara pendencia",
+    pendentesSemPendencia.length === 0, pendentesSemPendencia.map((a) => a.id).join(","));
+
+  const prontasComPendencia = ABAS.filter(
+    (a) => a.implementada && !!(PENDENCIA_ABA as Record<string, string>)[a.id]);
+  ok("B5e nenhuma aba implementada carrega pendencia orfa",
+    prontasComPendencia.length === 0, prontasComPendencia.map((a) => a.id).join(","));
+
+  // O `EmBreve` das pendentes e montado UMA vez, num lugar so.
+  ok("B5f o EmBreve das pendentes e centralizado, e unico",
+    /abaPendente\(aba\)/.test(paginaAgente) &&
+    (paginaAgente.match(/<EmBreve/g) ?? []).length === 1);
+
+  ok("B5g CONTROLE: a sonda de caminho proprio acha e deixa de achar",
+    /aba === "tarefas"/.test(paginaAgente) && !/aba === "memoria"/.test(paginaAgente));
 
   // Default e allowlist.
   ok("B6  ausente -> visao-geral", abaSegura(undefined) === ABA_PADRAO && ABA_PADRAO === "visao-geral");
@@ -192,7 +238,31 @@ secao("C. Visao Geral e Tarefas implementadas; as outras nao fingem");
 
   const vg = ler("components/ia/agente/VisaoGeral.tsx");
   ok("C4  Visao Geral separa procedencia do dado", /ROTULO_PROCEDENCIA|procedencia/.test(vg));
-  ok("C5  Visao Geral marca conexoes como simuladas", /"simulado"/.test(vg));
+  // ── C5 reconciliado na SKILL-1D.ui-real-state-B ─────────────────
+  //
+  // Antes: o bloco de conexoes precisava estar MARCADO como simulado.
+  // A marcacao era correta e ainda assim insuficiente: com identidade
+  // real do agente na mesma tela, `Loja Exemplo` e `Segunda conta`
+  // deixaram de ser ilustracao e viraram configuracao aparente DESTE
+  // agente. A etiqueta salvava a honestidade da tela, nao a leitura de
+  // quem bate o olho.
+  //
+  // A invariavel agora e mais forte: o bloco nao consome mock nenhum, e
+  // nada nesta tela se declara `simulado` — o que nao tem fonte e
+  // `em_breve`, que e a unica coisa verdadeira a dizer sobre ele.
+  ok("C5  Visao Geral nao exibe conexao nem funcao simulada",
+    !/MOCK_/.test(codigo(vg)) && !/procedencia="simulado"/.test(vg));
+  ok("C5b CONTROLE: a sonda acharia o consumo antigo",
+    /MOCK_/.test('import { MOCK_CONEXOES } from "@/lib/ia/mocks";') &&
+    /procedencia="simulado"/.test('<Bloco titulo="Conexões" procedencia="simulado">'));
+  // Sobre `codigo(vg)` e nao `vg`: o cabecalho do componente EXPLICA
+  // por que as frases proibidas nao foram usadas, e cita as duas. Sonda
+  // que le comentario acusaria justamente a documentacao da regra.
+  const FRASE_DE_VAZIO = /Nenhuma conex[aã]o atribu[ií]da|Nenhuma fun[cç][aã]o habilitada|Nenhuma permiss[aã]o configurada/i;
+  ok("C5c o que nao tem fonte declara ausencia, nao vazio consultado",
+    /em_breve/.test(vg) && !FRASE_DE_VAZIO.test(codigo(vg)));
+  ok("C5d CONTROLE: a sonda acha o hardcode de vazio",
+    FRASE_DE_VAZIO.test("<p>Nenhuma conexão atribuída</p>"));
   ok("C6  Visao Geral marca funcoes/custo como em breve", /"em_breve"/.test(vg));
   ok("C7  Visao Geral nao inventa numero de custo",
     !/US\$|R\$|\$\s?\d/.test(vg));
@@ -532,8 +602,17 @@ secao("K. Mocks centralizados");
     tarefas.every((x) => MOCK_AGENTE_POR_ID(x.agente_id) !== undefined));
   ok("K8  toda entrada e objeto (nunca string crua)",
     tarefas.every((x) => typeof x.entrada === "object" && x.entrada !== null));
-  ok("K9  o aviso de simulacao continua no shell",
-    /MOCK_AVISO/.test(ler("app/(app)/ia/layout.tsx")));
+  // ── K9 reconciliado na SKILL-1D.ui-real-state-B ─────────────────
+  //
+  // O aviso morava no shell e valia para a area toda. Saiu de la quando
+  // `/ia/agentes` passou a ler dado real: um aviso global virou falso
+  // sobre as telas verdadeiras. Ele desceu para cada tela que ainda
+  // simula — a allowlist nominal completa, com igualdade nos dois
+  // sentidos, vive em `testar-ia-ui.ts` (F3).
+  ok("K9  o aviso de simulacao saiu do shell",
+    !/MOCK_AVISO/.test(codigo(ler("app/(app)/ia/layout.tsx"))));
+  ok("K9b e desceu para a tela que ainda simula",
+    /MOCK_AVISO/.test(codigo(ler("app/(app)/ia/page.tsx"))));
 }
 
 secao("L. Acessibilidade e responsividade");
@@ -557,9 +636,15 @@ secao("L. Acessibilidade e responsividade");
 
   ok("L7  hierarquia de headings: h2 na pagina, h3 nos blocos",
     /<h2/.test(pagina) && /<h3/.test(vg) && /<h3/.test(lista));
-  ok("L8  progresso acessivel na Visao Geral e nas tarefas",
-    /role="progressbar"/.test(vg) && /aria-valuenow/.test(vg) &&
-    /role="progressbar"/.test(lista) && /aria-valuenow/.test(lista));
+  // L8 reconciliado: a barra de progresso saiu da Visao Geral junto com
+  // o bloco que a alimentava — ele derivava de uma lista de tarefas
+  // vazia e fixa no codigo, e anunciava o resultado como dado real.
+  // Onde ha progresso de verdade a exigencia continua identica.
+  ok("L8  progresso acessivel onde ha progresso: tarefas e drawer",
+    /role="progressbar"/.test(lista) && /aria-valuenow/.test(lista) &&
+    /role="progressbar"/.test(ler(DRAWER)) && /aria-valuenow/.test(ler(DRAWER)));
+  ok("L8b a Visao Geral nao desenha progresso sem fonte de tarefas",
+    !/role="progressbar"/.test(vg));
   ok("L9  status de tarefa tem icone E texto",
     /vocab\.icone/.test(lista) && /vocab\.rotulo/.test(lista));
   ok("L10 erro nao e comunicado so por cor", /Falhou/.test(lista));
