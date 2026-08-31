@@ -431,9 +431,26 @@ ok("P3  lib/agentes/conexoes com o conjunto exato de 6 modulos — nenhum e da 1
   JSON.stringify(readdirSync(join(RAIZ, "lib/agentes/conexoes")).sort()) ===
     JSON.stringify(["agregador.ts", "estado.ts", "fatos.ts", "selecao-escrita.ts", "selecao-estado.ts", "selecao-fatos.ts"]),
   readdirSync(join(RAIZ, "lib/agentes/conexoes")).sort().join(", "));
-ok("P4  lib/agentes/funcoes intocada — so o registry",
-  JSON.stringify(readdirSync(join(RAIZ, "lib/agentes/funcoes")).sort()) ===
-    JSON.stringify(["registry.ts"]));
+// P4 nasceu quando `registry.ts` era o unico modulo da pasta, e a
+// TOOL-REGISTRY-B1 publicou mais dois: `guard.ts` (decisao pura de
+// autorizacao) e `sanitizar.ts` (projecao por allowlist). O tripwire
+// gemeo — H12, em `testar-ia-skill-1d-b.ts` — foi reconciliado naquele
+// gate; este aqui nao, e ficou VERMELHO no HEAD publicado. A
+// TOOL-CALL-A3 o alinha ao conjunto canonico.
+//
+// A intencao original nao mudou e nao foi afrouxada: a comparacao segue
+// sendo de IGUALDADE, nunca `includes`/`some`/subconjunto. Um quarto
+// modulo aparecendo nesta pasta sem passar por gate proprio continua
+// reprovando — que e a unica coisa que P4 sempre quis dizer.
+const FUNCOES_AUTORIZADAS = ["guard.ts", "registry.ts", "sanitizar.ts"];
+const funcoesNoDisco = readdirSync(join(RAIZ, "lib/agentes/funcoes")).sort();
+ok("P4  lib/agentes/funcoes com o conjunto exato de 3 modulos autorizados",
+  JSON.stringify(funcoesNoDisco) === JSON.stringify(FUNCOES_AUTORIZADAS),
+  funcoesNoDisco.join(", "));
+ok("P4b controle: a comparacao e exata — um quarto modulo reprovaria",
+  JSON.stringify([...FUNCOES_AUTORIZADAS, "executar.ts"].sort()) !==
+    JSON.stringify(FUNCOES_AUTORIZADAS) &&
+  JSON.stringify(["guard.ts", "registry.ts"]) !== JSON.stringify(FUNCOES_AUTORIZADAS));
 ok("P5  nenhum modulo novo importa React ou UI",
   !/from "react"|components\//.test(CODIGO_ESTADO + CODIGO_FATOS));
 ok("P6  MOCK_PERMISSOES nao foi tocado nem importado",
