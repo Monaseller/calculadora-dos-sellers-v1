@@ -87,16 +87,76 @@ export type ExecutorFuncao = (
 ) => Promise<unknown>;
 
 /**
+ * Um requisito de conexao externa.
+ *
+ * A forma e `(plataforma, recurso)` porque e exatamente como
+ * `agente_conexoes` chaveia a atribuicao — PK `(agente_id, plataforma,
+ * recurso)` — e como `FatoConexao` ja chega ao diagnostico. Uma terceira
+ * forma aqui obrigaria uma traducao, e traducao entre autoridade e
+ * requisito e onde erro de escopo se esconde.
+ *
+ * Nao ha `loja_id`: QUAL loja atende o requisito e decisao de quem
+ * resolve a conexao do agente, nunca do catalogo. E nao ha credencial,
+ * token nem `seller_id` — a fronteira onde o segredo morre e
+ * `conexoes/fatos.ts`, e nada dela atravessa para ca.
+ */
+export interface RequisitoConexaoFuncao {
+  plataforma: string;
+  recurso: string;
+}
+
+/**
  * O que se sabe sobre uma Funcao AQUI.
  *
- * Somente o executor. `rotulo`, `descricao`, `acesso`, `risco`,
- * `procedencia`, nivel e icone NAO entram: os quatro primeiros ja vivem
- * em `FuncaoUI` (apresentacao) e nivel vive em permissao — duplicar aqui
- * criaria uma segunda verdade e permitiria que o catalogo contradissesse
- * a UI sobre o que e leitura e o que e acao.
+ * ── O que entrou, e por que ─────────────────────────────────────────
+ *
+ * `executor` continua sendo a autoridade de EXISTENCIA. Os tres campos
+ * novos sao OPERACIONAIS: o runtime ramifica por eles, e nenhum deles
+ * tem outra fonte server-side hoje.
+ *
+ *   acesso            natureza da operacao, nao grau. Ler venda errado
+ *                     mostra numero errado; pausar campanha errado gasta
+ *                     dinheiro do cliente.
+ *   idempotente       repetir tem o mesmo efeito que executar uma vez.
+ *                     Sob semantica at-least-once isso decide se repetir
+ *                     e seguro — e nenhuma outra camada sabe responder.
+ *   conexaoNecessaria `null` quando a Funcao nao depende de conexao
+ *                     externa. NAO inventar requisito: uma Funcao que le
+ *                     tabela propria da CDS nao precisa de marketplace.
+ *
+ * ── O que continua fora, e por que ──────────────────────────────────
+ *
+ * `rotulo`, `descricao`, `icone`, `risco` e `procedencia` NAO entram.
+ * Seguem em `FuncaoUI`, que e apresentacao. Nenhuma decisao de
+ * autorizacao pode depender deles — o guard nao os recebe e nao os
+ * consulta. `nivel` tambem nao entra: vive em `agente_permissoes`, e e
+ * por-agente, nao por-Funcao.
+ *
+ * `workflowId`, `settingsHash` e binding de executor externo tambem nao:
+ * sao estado observado de um sistema que muda FORA deste repositorio, e
+ * declara-los aqui criaria um espelho que envelhece sozinho.
+ *
+ * ── Validacao de argumentos: deliberadamente ausente ────────────────
+ *
+ * Nao ha `validarEntrada`/`validarSaida` neste contrato. Nao por
+ * esquecimento: `vendas.consultar` ja valida dentro do executor, via
+ * `validarFiltroVendas`, que e pura e devolve codigos ESTAVEIS. Declarar
+ * um validador aqui duplicaria essa regra, e duas validacoes que
+ * precisam concordar para sempre acabam discordando. Quando existir uma
+ * Funcao cuja validacao NAO tenha dono, o campo se justifica — hoje nao
+ * tem.
+ *
+ * ── Divida aceita ───────────────────────────────────────────────────
+ *
+ * `acesso` passa a existir aqui e em `FuncaoUI`. Este mapa e a
+ * AUTORIDADE; o de la e rotulo exibido. Enquanto a UI nao derivar o
+ * valor do servidor, os dois podem divergir sem que nada acuse.
  */
 export interface DefinicaoFuncao {
   executor: ExecutorFuncao;
+  acesso: "leitura" | "escrita";
+  idempotente: boolean;
+  conexaoNecessaria: RequisitoConexaoFuncao | null;
 }
 
 // ─── A primeira Funcao real ───────────────────────────────────────────
@@ -161,7 +221,23 @@ async function executarVendasConsultar(
  * compara as duas formas e reprova se divergirem.
  */
 export const FUNCOES: Readonly<Record<string, DefinicaoFuncao>> = Object.freeze({
-  "vendas.consultar": Object.freeze({ executor: executarVendasConsultar }),
+  // `acesso: "leitura"` — o executor nao escreve nada: zero
+  // `insert`/`update`/`delete`, como a suite da capability ja verifica.
+  //
+  // `idempotente: true` — leitura pura, ja registrado na secao acima.
+  //
+  // `conexaoNecessaria: null` — e a resposta HONESTA, nao uma omissao.
+  // `criarLeiturasDeVendas` le `pedidos`, tabela da propria CDS, com a
+  // service_role. Nao chama Mercado Livre nem Shopee, nao usa token de
+  // marketplace e nao tem `fetch`. Declarar um requisito de conexao aqui
+  // criaria uma pendencia inexistente e faria o guard negar uma Funcao
+  // que funciona.
+  "vendas.consultar": Object.freeze({
+    executor: executarVendasConsultar,
+    acesso: "leitura",
+    idempotente: true,
+    conexaoNecessaria: null,
+  }),
 });
 
 /** Erro de Funcao inexistente. Classe propria para que quem chama a

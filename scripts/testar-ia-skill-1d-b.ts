@@ -94,7 +94,14 @@ ok("A1  o modulo existe", existe(CAMINHO));
 ok("A2  fica no dominio de agentes, nao em lib/ia/skills", CAMINHO.startsWith("lib/agentes/"));
 ok("A3  nao ha executor dentro de lib/ia/skills", !existe("lib/ia/skills/registry.ts") && !existe("lib/ia/skills/funcoes.ts"));
 ok("A4  o mapa e congelado", /export const FUNCOES[^=]*=\s*Object\.freeze\(/.test(CODIGO));
-ok("A5  cada definicao tambem e congelada", (CODIGO.match(/Object\.freeze\(\{ executor/g) ?? []).length === IDS.length);
+// O `s*` entre `({` e `executor` e deliberado: a propriedade testada e que
+// cada definicao esta embrulhada em `Object.freeze`, nao que ela caiba numa
+// linha. Antes o regex reprovava uma entrada multi-linha corretamente
+// congelada — falso negativo que pressionaria a formatar codigo de producao
+// para agradar um teste.
+ok("A5  cada definicao tambem e congelada", (CODIGO.match(/Object\.freeze\(\{\s*executor/g) ?? []).length === IDS.length);
+ok("A5b controle: a sonda ainda reprova definicao NAO congelada",
+  !/Object\.freeze\(\{\s*executor/.test('"x.y": { executor: f }'));
 ok("A6  e server-only", /import "server-only"/.test(CODIGO));
 ok("A7  a extracao de ids leu algo (ancora)", IDS.length > 0, String(IDS.length));
 
@@ -249,8 +256,15 @@ ok("H10 controle: essas sondas acusam quando o termo existe",
   /\bnivel\b/.test("nivel") && /cobertura/.test("cobertura") &&
   /diagnosticarSkill/.test("diagnosticarSkill(") && /FatoFuncao/.test("FatoFuncao"));
 ok("H11 nenhum arquivo novo em lib/ia/skills", readdirSync(join(RAIZ, "lib/ia/skills")).length === 3);
-ok("H12 a pasta de funcoes tem exatamente 1 modulo",
-  JSON.stringify(readdirSync(join(RAIZ, "lib/agentes/funcoes")).sort()) === JSON.stringify(["registry.ts"]));
+// Continua sendo lista EXATA, nunca "contem pelo menos": um quarto modulo
+// aparecendo sem passar por gate proprio deve reprovar. A lista cresceu de um
+// para tres porque TOOL-REGISTRY-B1 autorizou explicitamente `guard.ts`
+// (decisao pura de autorizacao) e `sanitizar.ts` (projecao por allowlist).
+ok("H12 a pasta de funcoes tem exatamente os 3 modulos autorizados",
+  JSON.stringify(readdirSync(join(RAIZ, "lib/agentes/funcoes")).sort()) ===
+    JSON.stringify(["guard.ts", "registry.ts", "sanitizar.ts"]));
+ok("H12b controle: a comparacao e exata, nao 'contem'",
+  JSON.stringify(["guard.ts", "registry.ts"]) !== JSON.stringify(["guard.ts", "registry.ts", "sanitizar.ts"]));
 
 // ─── I. Seguranca ─────────────────────────────────────────────────────
 
