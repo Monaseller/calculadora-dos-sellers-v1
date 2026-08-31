@@ -791,6 +791,19 @@ const MIGRATIONS_DA_SKILL_1D_PERFIL: readonly string[] = [
 ];
 
 /**
+ * A migration da TOOL-CALL-B: `agente_funcao_chamadas`, append-only em
+ * duas fases, mais a UNIQUE `(id, user_id)` que `agente_tarefas` nao
+ * tinha e sem a qual a FK de tarefa nao seria tenant-safe.
+ *
+ * Mesma NATUREZA das listas acima: afirma PERTENCIMENTO pelo nome
+ * exato, nunca por prefixo ou range. Uma migration nova continua
+ * reprovando ate ser declarada aqui.
+ */
+const MIGRATIONS_DA_SKILL_1D_TOOL_CALL: readonly string[] = [
+  "20260927_agente_funcao_chamadas.sql",
+];
+
+/**
  * Inventario acumulado de `lib/agentes/ia/`, por frente.
  *
  * O guarda de disco (G11l) compara contra ESTA uniao, nunca contra uma
@@ -887,6 +900,35 @@ const ARQUIVOS_SKILL_1D_PERFIL: readonly string[] = [
   "supabase/migrations/20260926_agentes_tipo_personalizado.sql",
 ];
 
+/**
+ * O que a TOOL-CALL-B acrescentou dentro do `ESCOPO_AGENTES`.
+ *
+ * Dois modulos numa pasta NOVA (`lib/agentes/chamadas/`) e a migration
+ * da tabela de auditoria. A suite nova nao entra aqui: `scripts/` nunca
+ * esteve no escopo, e ela e declarada em `SUITES_AGENTES`.
+ *
+ * ── A forma colapsada, de novo ──────────────────────────────────────
+ *
+ * Mesmo caso de `ARQUIVOS_1EA`: enquanto `lib/agentes/chamadas/`
+ * estiver inteiramente untracked, o porcelain devolve UMA linha
+ * (`?? lib/agentes/chamadas/`) e nenhum arquivo de dentro aparece. Por
+ * isso a entrada colapsada e aceita aqui e o CONTEUDO do diretorio e
+ * conferido a parte, por enumeracao de disco, em G11z10. Os dois andam
+ * juntos: quem remover um tem de remover o outro.
+ *
+ * As formas expandidas tambem entram porque o colapso e transitorio —
+ * no `git add` os mesmos arquivos passam a aparecer um a um.
+ */
+const MODULOS_CHAMADAS_1D_TOOL_CALL: readonly string[] = ["contrato.ts", "registro.ts"];
+
+const ARQUIVOS_SKILL_1D_TOOL_CALL: readonly string[] = [
+  "lib/agentes/chamadas/",
+  ...MODULOS_CHAMADAS_1D_TOOL_CALL.map((nome) => `lib/agentes/chamadas/${nome}`),
+  // A tabela append-only de auditoria de Tool Call. Cai no escopo
+  // porque `ESCOPO_AGENTES` cobre `supabase/migrations` inteiro.
+  "supabase/migrations/20260927_agente_funcao_chamadas.sql",
+];
+
 const ARQUIVOS_SKILL_1D_CONSUMER: readonly string[] = [
   // A forma COLAPSADA. `lib/agentes/diagnostico/` nasceu inteiramente
   // untracked, e o porcelain a resume nesta unica linha — exatamente
@@ -921,6 +963,7 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_SKILL_1DML,
   ...ARQUIVOS_SKILL_1D_CONSUMER,
   ...ARQUIVOS_SKILL_1D_PERFIL,
+  ...ARQUIVOS_SKILL_1D_TOOL_CALL,
 ];
 
 /**
@@ -996,8 +1039,24 @@ function soAutorizadosDentroDeSkills(nomes: readonly string[]): boolean {
  */
 const SUITES_AGENTES: readonly string[] = [
   "testar-agentes-analise-vendas.ts",
+  // TOOL-CALL-B: contrato e persistencia append-only de Tool Call.
+  "testar-agentes-chamadas.ts",
   "testar-agentes-execucao-banco.ts",
   "testar-agentes-execucao.ts",
+  // ── Divida herdada da TOOL-REGISTRY-B1, medida na TOOL-CALL-BR2 ──
+  //
+  // Aquele gate publicou `guard.ts` e `sanitizar.ts` com as duas suites
+  // que os provam, e nao declarou nenhuma das duas aqui. O efeito ficou
+  // escondido pelo mesmo motivo que o P4 ficou: ninguem rodou ESTA
+  // suite naquele gate. Medido agora contra o proprio HEAD — 14 suites
+  // em disco, 12 declaradas —, entao G11t e G11u ja estavam vermelhos
+  // antes da TOOL-CALL-B existir.
+  //
+  // Declara-las aqui e a unica forma de a lista voltar a ser verdadeira:
+  // deixar duas de fora manteria o guarda reprovando por um motivo que
+  // ninguem mais leria.
+  "testar-agentes-funcoes-guard.ts",
+  "testar-agentes-funcoes-sanitizar.ts",
   "testar-agentes-fundacao.ts",
   "testar-agentes-ia-adaptador.ts",
   "testar-agentes-ia-interpretacao.ts",
@@ -1668,6 +1727,19 @@ async function main() {
     ok("G11z9 lib/agentes/diagnostico contem exatamente o modulo declarado",
        mesmoConjuntoDeNomes(conteudoDiagnostico, MODULOS_DIAGNOSTICO_1D_CONSUMER));
 
+    // A outra metade da entrada colapsada `lib/agentes/chamadas/`: sem
+    // esta enumeracao, um terceiro modulo plantado la dentro passaria
+    // batido pelo G11 enquanto a pasta estivesse untracked.
+    const conteudoChamadas = readdirSync(join(RAIZ, "lib", "agentes", "chamadas")).sort();
+
+    ok(`G11z10 lib/agentes/chamadas contem exatamente os modulos declarados (${conteudoChamadas.join(", ")})`,
+       mesmoConjuntoDeNomes(conteudoChamadas, MODULOS_CHAMADAS_1D_TOOL_CALL));
+    ok("G11z10a CONTROLE NEGATIVO: um terceiro modulo em chamadas/ reprova",
+       !mesmoConjuntoDeNomes([...MODULOS_CHAMADAS_1D_TOOL_CALL, "executar.ts"],
+                             MODULOS_CHAMADAS_1D_TOOL_CALL));
+    ok("G11z10b CONTROLE NEGATIVO: um modulo que suma de chamadas/ reprova",
+       !mesmoConjuntoDeNomes(["contrato.ts"], MODULOS_CHAMADAS_1D_TOOL_CALL));
+
     // ── G11t..G11w — `scripts/` nunca esteve em ESCOPO_AGENTES ─────
     // Medido na 1E-a: uma suite de agentes inesperada em `scripts/`
     // passava batido. Enumeracao de disco, porque a maioria destas ja
@@ -1702,7 +1774,8 @@ async function main() {
       MIGRATIONS_NO_DISCO_NAO_COMMITADAS.includes(m) ||
       MIGRATIONS_DA_SKILL_1DF4.includes(m) ||
       MIGRATIONS_DA_SKILL_1DG.includes(m) ||
-      MIGRATIONS_DA_SKILL_1D_PERFIL.includes(m);
+      MIGRATIONS_DA_SKILL_1D_PERFIL.includes(m) ||
+      MIGRATIONS_DA_SKILL_1D_TOOL_CALL.includes(m);
 
     ok(`G12b nenhuma migration nao declarada no disco (${novasNoDisco.join(", ") || "nenhuma"})`,
        novasNoDisco.every(declarada));
