@@ -80,8 +80,54 @@ export type ResultadoCriacao =
 
 export type ResultadoDecisao = { codigo: CodigoAprovacao };
 
+/**
+ * O nivel que a Tool Call registrou no INSTANTE da abertura.
+ *
+ * Os mesmos tres de `agente_permissoes_nivel_valido`. NULL nao entra:
+ * na retomada a RPC so abre depois de provar que existe nivel, entao
+ * uma abertura sem ele e sinal de bug, nao de dono desconfigurado.
+ */
+const NIVEIS_DE_CHAMADA = ["automatico", "aprovacao", "bloqueado"] as const;
+type NivelDeChamada = (typeof NIVEIS_DE_CHAMADA)[number];
+
+/**
+ * O que o executor precisa para retomar — e nada alem disso.
+ *
+ * Todo campo aqui nasce SERVER-SIDE: da aprovacao travada, do catalogo
+ * ou da propria abertura que a RPC acabou de gravar. Quem chama a
+ * retomada informa `userId` e `aprovacaoId`, e o resto e consequencia.
+ *
+ * Nao ha credencial, nao ha token e nao ha nada da conexao alem do alvo
+ * ja congelado: resolver credencial e trabalho de quem executa a
+ * Funcao, no instante em que executa.
+ */
+export interface ContextoRetomada {
+  agenteId: string;
+  tarefaId: string | null;
+  funcaoId: string;
+  definicao: DefinicaoFuncao;
+  acesso: "leitura" | "escrita";
+  plataforma: string | null;
+  recurso: string | null;
+  lojaId: string | null;
+  /** Lido da linha de abertura, nunca recalculado. Ver `lerNivelDaAbertura`. */
+  nivelNoMomento: NivelDeChamada;
+  /** O snapshot congelado na criacao. Nunca vem de quem retoma. */
+  argumentos: unknown;
+}
+
+/**
+ * `abertura_ilegivel` NAO e estado de aprovacao — e por isso que ele
+ * fica FORA de `CodigoAprovacao`.
+ *
+ * Ele descreve o unico ponto em que a retomada pode falhar DEPOIS do
+ * consumo: a RPC gravou a abertura e nao conseguimos le-la de volta.
+ * A aprovacao ja foi gasta e a chamada ja esta aberta, entao o
+ * `requestId` vem junto — sem ele quem investiga nao acha a linha orfa.
+ */
 export type ResultadoConsumo =
-  | { codigo: "consumida"; requestId: string }
+  | { codigo: "consumida"; requestId: string; contexto: ContextoRetomada }
+  | { codigo: "abertura_ilegivel"; requestId: string }
   | { codigo: Exclude<CodigoAprovacao, "consumida"> };
 
 // ─── Entradas publicas ────────────────────────────────────────────────
@@ -109,6 +155,11 @@ export interface EntradaConsumirAprovacao {
 // ─── Auxiliares ───────────────────────────────────────────────────────
 
 const TABELA = "agente_funcao_aprovacoes";
+
+/** Lida SOMENTE por select, e so na retomada. Quem grava nesta tabela
+ *  continua sendo `chamadas/registro.ts` no TypeScript e a RPC de
+ *  consumo no banco — este modulo nao insere, nao atualiza, nao apaga. */
+const TABELA_CHAMADAS = "agente_funcao_chamadas";
 
 const RPC_CRIAR = "aprovacao_criar";
 const RPC_DECIDIR = "aprovacao_decidir";
@@ -138,9 +189,13 @@ function conexaoServe(fato: { estado: string; cobertura: string }): boolean {
 
 /** Erro do driver vira codigo seguro. O SQLSTATE pode ir para o log do
  *  servidor — a mensagem, nunca. Mesmo padrao de `chamadas/registro.ts`. */
-function falha(origem: string, erro: unknown): { codigo: "falha_persistencia" } {
+function logarFalha(origem: string, erro: unknown): void {
   const sqlstate = (erro as { code?: string } | null)?.code;
   console.error(`[aprovacoes] ${origem} falhou (sqlstate ${sqlstate ?? "desconhecido"})`);
+}
+
+function falha(origem: string, erro: unknown): { codigo: "falha_persistencia" } {
+  logarFalha(origem, erro);
   return { codigo: "falha_persistencia" };
 }
 
@@ -197,6 +252,52 @@ async function resolverAlvo(
   if (!selecao || !selecao.lojaId) return { codigo: "conexao_indisponivel" };
 
   return { plataforma: requisito.plataforma, recurso: requisito.recurso, lojaId: selecao.lojaId };
+}
+
+/**
+ * O nivel do instante, lido da ABERTURA — nunca recalculado.
+ *
+ * ── Por que nao reler `agente_permissoes` ───────────────────────────
+ *
+ * A RPC de consumo resolve o nivel DENTRO da transacao e o grava na
+ * abertura. Reler a permissao aqui seria uma segunda leitura, em outro
+ * instante, que pode discordar da primeira — e o desfecho passaria a
+ * afirmar sobre a chamada um nivel diferente do que a abertura dela
+ * afirma. As duas linhas do mesmo `request_id` contam UMA historia.
+ *
+ * A abertura e a autoridade porque e o registro do instante. Ela nao
+ * decide nada — nao autoriza, nao libera, nao muda caminho —, so e
+ * espelhada no desfecho que a acompanha.
+ *
+ * Sem fallback: nivel ausente, valor fora do vocabulario, erro de
+ * leitura ou linha nao encontrada devolvem `null`, e quem chama para.
+ * Preencher um nivel plausivel aqui seria inventar o unico dado que
+ * esta funcao existe para nao inventar.
+ */
+async function lerNivelDaAbertura(
+  cliente: ReturnType<typeof getSupabaseServidor>,
+  userId: string,
+  requestId: string
+): Promise<NivelDeChamada | null> {
+  // `maybeSingle` tambem recusa resultado ambiguo: mais de uma linha
+  // volta como erro em vez de virar "a primeira serve".
+  const r = await cliente
+    .from(TABELA_CHAMADAS)
+    .select("nivel_no_momento")
+    .eq("user_id", userId)
+    .eq("request_id", requestId)
+    .eq("fase", "abertura")
+    .maybeSingle();
+
+  if (r.error) {
+    logarFalha("leitura_abertura", r.error);
+    return null;
+  }
+
+  const bruto = (r.data as { nivel_no_momento?: unknown } | null)?.nivel_no_momento;
+  return (NIVEIS_DE_CHAMADA as readonly unknown[]).includes(bruto)
+    ? (bruto as NivelDeChamada)
+    : null;
 }
 
 // ─── Criar ────────────────────────────────────────────────────────────
@@ -341,7 +442,7 @@ export async function consumirAprovacaoEAbrir(
 
   const leitura = await cliente
     .from(TABELA)
-    .select("id, funcao_id, revisao_funcao, acesso, conexao_plataforma, conexao_recurso, conexao_loja_id, argumentos, agente_id")
+    .select("id, funcao_id, revisao_funcao, acesso, conexao_plataforma, conexao_recurso, conexao_loja_id, argumentos, agente_id, tarefa_id")
     .eq("id", aprovacaoId)
     .eq("user_id", userId)
     .maybeSingle();
@@ -357,11 +458,24 @@ export async function consumirAprovacaoEAbrir(
     conexao_loja_id?: unknown;
     argumentos?: unknown;
     agente_id?: unknown;
+    tarefa_id?: unknown;
   } | null;
 
   // Inexistente e de outro dono chegam iguais, porque o filtro ja
   // escopou por `user_id`.
   if (!ap) return { codigo: "aprovacao_inexistente" };
+
+  // Forma das colunas de identidade. Elas sao NOT NULL / uuid no banco,
+  // entao um valor fora da forma e bug nosso — nao situacao de negocio —
+  // e vira falha em vez de virar `null` por interpretacao.
+  const agenteId = ap.agente_id;
+  if (typeof agenteId !== "string" || agenteId.length === 0) return { codigo: "falha_persistencia" };
+
+  const tarefaId = ap.tarefa_id ?? null;
+  if (tarefaId !== null && typeof tarefaId !== "string") return { codigo: "falha_persistencia" };
+
+  const lojaId = ap.conexao_loja_id ?? null;
+  if (lojaId !== null && typeof lojaId !== "string") return { codigo: "falha_persistencia" };
 
   const funcaoId = ap.funcao_id;
   if (typeof funcaoId !== "string" || !funcaoExiste(funcaoId)) {
@@ -398,12 +512,9 @@ export async function consumirAprovacaoEAbrir(
   // loja congelada. A RPC reconfirma o vinculo atomicamente; aqui o que
   // se prova e a usabilidade, que o banco nao sabe julgar.
   if (requisito !== null) {
-    const agenteId = ap.agente_id;
-    if (typeof agenteId !== "string") return { codigo: "falha_persistencia" };
-
     const alvo = await resolverAlvo(userId, agenteId, requisito);
     if ("codigo" in alvo) return { codigo: alvo.codigo };
-    if (alvo.lojaId !== ap.conexao_loja_id) return { codigo: "conexao_indisponivel" };
+    if (alvo.lojaId !== lojaId) return { codigo: "conexao_indisponivel" };
   }
 
   const requestId = randomUUID();
@@ -419,6 +530,33 @@ export async function consumirAprovacaoEAbrir(
 
   const codigo = comoCodigo(r.data);
   if (codigo === null) return { codigo: "falha_persistencia" };
-  if (codigo === "consumida") return { codigo, requestId };
-  return { codigo: codigo as Exclude<CodigoAprovacao, "consumida"> };
+  if (codigo !== "consumida") return { codigo: codigo as Exclude<CodigoAprovacao, "consumida"> };
+
+  // ── Daqui para baixo a aprovacao JA foi gasta ─────────────────────
+  //
+  // O `requestId` deixa de ser um id que propusemos e passa a ser o da
+  // chamada aberta pela RPC. Ele so aparece no retorno a partir deste
+  // ponto, e por isso: antes do consumo nao existe chamada nenhuma para
+  // ele nomear.
+  const nivelNoMomento = await lerNivelDaAbertura(cliente, userId, requestId);
+  if (nivelNoMomento === null) return { codigo: "abertura_ilegivel", requestId };
+
+  return {
+    codigo,
+    requestId,
+    contexto: {
+      agenteId,
+      tarefaId,
+      funcaoId,
+      definicao,
+      acesso: definicao.acesso,
+      // Do CATALOGO, nao da linha: os dois ja foram provados iguais
+      // acima, e a definicao e a autoridade do requisito.
+      plataforma: platEsperada,
+      recurso: recEsperado,
+      lojaId,
+      nivelNoMomento,
+      argumentos: ap.argumentos,
+    },
+  };
 }

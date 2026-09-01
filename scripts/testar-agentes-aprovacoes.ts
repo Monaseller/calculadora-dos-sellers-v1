@@ -748,8 +748,21 @@ secao("N. A persistencia respeita a fronteira de confianca");
       PERS.slice(PERS.indexOf("export interface EntradaCriarAprovacao"), PERS.indexOf("export interface EntradaDecidirAprovacao"))));
   ok("N9  request_id nasce aqui, por randomUUID",
     /const requestId = randomUUID\(\)/.test(PERS) && !/entrada\.requestId/.test(PERS));
-  ok("N10 o requestId so e devolvido quando consumiu",
-    /codigo === "consumida"\) return \{ codigo, requestId \}/.test(PERS));
+  // ── N10: a mesma invariante, com o retorno maior do B1C-I2 ────────
+  //
+  // Antes o consumo devolvia `{ codigo, requestId }` e a sonda mirava
+  // esse literal. Agora ele devolve tambem o CONTEXTO da retomada, e o
+  // literal mudou — mas a invariante nao: nada de dentro sai enquanto a
+  // RPC nao disser `consumida`. A sonda passa a provar isso pela GUARDA
+  // que fica antes, que e onde a invariante realmente mora.
+  ok("N10 nada sai do consumo enquanto a RPC nao disser consumida",
+    /if \(codigo !== "consumida"\) return \{ codigo: codigo as Exclude<CodigoAprovacao, "consumida"> \};/
+      .test(PERS));
+  ok("N10a o requestId e o contexto so aparecem DEPOIS dessa guarda",
+    PERS.indexOf('if (codigo !== "consumida")') < PERS.indexOf("contexto: {") &&
+      PERS.indexOf('if (codigo !== "consumida")') > PERS.indexOf("const requestId = randomUUID()"));
+  ok("N10b e o contexto acompanha SOMENTE o retorno de consumida",
+    (PERS.match(/contexto: \{/g) ?? []).length === 1);
 
   ok("N11 o consumo revalida revisao, acesso e requisito",
     /ap\.revisao_funcao !== definicao\.revisao/.test(PERS) &&
@@ -757,8 +770,12 @@ secao("N. A persistencia respeita a fronteira de confianca");
       /ap\.conexao_plataforma !== platEsperada/.test(PERS));
   ok("N12 e roda validarEntrada de novo sobre o argumento congelado",
     /definicao\.validarEntrada\(ap\.argumentos\)/.test(PERS));
+  // A comparacao passou a usar o local ja estreitado, mas o valor e o
+  // mesmo — e a sonda cobra as DUAS metades para que ele nao possa
+  // virar outra coisa no caminho.
   ok("N13 e confere a loja congelada contra a atual",
-    /alvo\.lojaId !== ap\.conexao_loja_id/.test(PERS));
+    /const lojaId = ap\.conexao_loja_id \?\? null;/.test(PERS) &&
+      /alvo\.lojaId !== lojaId/.test(PERS));
 
   ok("N14 nenhum erro cru do driver e propagado",
     !/error\.message|\.details|\.hint|\.stack/.test(PERS));
@@ -783,27 +800,119 @@ secao("O. Nada no runtime consome a fundacao ainda");
   };
   const outros = [...varrer("lib", []), ...varrer("app", [])];
 
+  // ── O1/O2: a inercia acabou, e de proposito ─────────────────────
+  //
+  // Ate o APPROVAL-B1C-I1 a fundacao tinha ZERO consumidor, e estes
+  // dois asserts existiam para provar isso. O I2 os fez disparar — era
+  // o objetivo do gate. A reconciliacao nao afrouxa nada: o detector e
+  // o mesmo, a varredura e a mesma, e a exigencia deixa de ser
+  // "conjunto vazio" para ser "conjunto EXATAMENTE igual ao declarado".
+  // Um segundo consumidor continua reprovando, e o desaparecimento do
+  // autorizado tambem.
+  const EXECUTOR_FUNCOES = "lib/agentes/execucao-funcoes/executar.ts";
+  const CONSUMIDORES_AUTORIZADOS = [EXECUTOR_FUNCOES];
+
   const consumidores = outros.filter((f) =>
     /criarAprovacao|decidirAprovacao|consumirAprovacaoEAbrir/.test(semComentariosTs(ler(f))));
-  ok(`O1  zero consumidor de producao (${consumidores.join(", ") || "nenhum"})`,
-    consumidores.length === 0);
+  ok(`O1  os consumidores de producao sao exatamente os declarados (${consumidores.join(", ") || "nenhum"})`,
+    conjuntosIguais(consumidores, CONSUMIDORES_AUTORIZADOS));
+  ok("O1a CONTROLE: um segundo consumidor reprovaria",
+    !conjuntosIguais([EXECUTOR_FUNCOES, "app/api/x/route.ts"], CONSUMIDORES_AUTORIZADOS));
+  ok("O1b CONTROLE: o autorizado sumir tambem reprovaria",
+    !conjuntosIguais([], CONSUMIDORES_AUTORIZADOS));
+  ok("O1c CONTROLE: um caminho parecido nao passa por semelhanca",
+    !conjuntosIguais(["lib/agentes/execucao-funcoes/executar.test.ts"], CONSUMIDORES_AUTORIZADOS));
 
   // A sonda mira a REFERENCIA ao modulo novo. Nao pode ser /aprovac/i:
   // os dois arquivos ja falam de `aprovacao_necessaria` e
   // `aguardando_aprovacao` desde o TOOL-CALL-B, e a sonda acusaria
-  // vocabulario legitimo que este gate nao criou.
+  // vocabulario legitimo que aquele gate nao criou.
   const REFERENCIA_NOVA = /aprovacoes\/|agente_funcao_aprovacoes|criarAprovacao|consumirAprovacaoEAbrir/;
-  ok("O2  o executor nao referencia a fundacao de aprovacoes",
-    !REFERENCIA_NOVA.test(semComentariosTs(ler("lib/agentes/execucao-funcoes/executar.ts"))));
-  ok("O3  registro.ts tambem nao",
+  ok("O2  o executor referencia a fundacao — e e o unico que pode",
+    REFERENCIA_NOVA.test(semComentariosTs(ler(EXECUTOR_FUNCOES))));
+  ok("O2a e a decisao humana continua FORA do executor: ele nao decide, so retoma",
+    !/decidirAprovacao/.test(semComentariosTs(ler(EXECUTOR_FUNCOES))));
+  ok("O3  registro.ts continua sem referencia nenhuma",
     !REFERENCIA_NOVA.test(semComentariosTs(ler("lib/agentes/chamadas/registro.ts"))));
   ok("O3b CONTROLE: a sonda acha a referencia quando ela existe",
     REFERENCIA_NOVA.test('import { criarAprovacao } from "@/lib/agentes/aprovacoes/persistencia";'));
+  ok("O3c CONTROLE: e nao acha onde ela nao existe",
+    !REFERENCIA_NOVA.test('const x = "aguardando_aprovacao";'));
   ok("O4  a persistencia nao chama o executor",
     !/definicao\.executor|executarFuncao/.test(PERS));
   ok("O5  escrita continua fail-closed no executor",
     /escrita_nao_suportada/.test(ler("lib/agentes/execucao-funcoes/executar.ts")));
   ok("O6  ANCORA: a varredura leu arquivos de verdade", outros.length > 50);
+}
+
+// ─── P. O contexto de retomada ────────────────────────────────────────
+//
+// O que o APPROVAL-B1C-I2 acrescentou a persistencia: depois de
+// consumir, ela entrega ao executor o contexto SERVER-SIDE da retomada.
+// Cada assert aqui existe para que nenhum campo desse contexto possa
+// passar a vir de quem chama.
+
+secao("P. O consumo entrega contexto, e nao autoridade");
+{
+  const CONSUMO = PERS.slice(PERS.indexOf("export async function consumirAprovacaoEAbrir"));
+
+  ok("P1  o SELECT da aprovacao inclui tarefa_id",
+    /\.select\("id, funcao_id, revisao_funcao, acesso, conexao_plataforma, conexao_recurso, conexao_loja_id, argumentos, agente_id, tarefa_id"\)/
+      .test(PERS));
+  ok("P2  e continua sendo UM select so, nao um paralelo",
+    (PERS.match(/\.from\(TABELA\)/g) ?? []).length === 1);
+
+  ok("P3  os argumentos do contexto vem da linha congelada",
+    /argumentos: ap\.argumentos/.test(CONSUMO));
+  ok("P4  a definicao vai resolvida no contexto, nao o id sozinho",
+    /definicao,/.test(CONSUMO) && /const definicao: DefinicaoFuncao = FUNCOES\[funcaoId\]/.test(PERS));
+  ok("P5  a definicao e resolvida ANTES da RPC de consumo",
+    PERS.indexOf("const definicao: DefinicaoFuncao = FUNCOES[funcaoId]") <
+      PERS.indexOf("cliente.rpc(RPC_CONSUMIR"));
+  ok("P6  o alvo de conexao do contexto vem do CATALOGO ja conferido",
+    /plataforma: platEsperada/.test(CONSUMO) && /recurso: recEsperado/.test(CONSUMO));
+
+  // ── O nivel: lido, nunca reconstruido ────────────────────────────
+  ok("P7  existe uma leitura dedicada da abertura",
+    /async function lerNivelDaAbertura\(/.test(PERS));
+  ok("P8  ela le a tabela de chamadas, por select",
+    /\.from\(TABELA_CHAMADAS\)\s*\n?\s*\.select\("nivel_no_momento"\)/.test(PERS));
+  ok("P9  e filtra por dono, request_id e fase de abertura",
+    /\.eq\("user_id", userId\)/.test(PERS) && /\.eq\("request_id", requestId\)/.test(PERS) &&
+      /\.eq\("fase", "abertura"\)/.test(PERS));
+  ok("P10 resultado ambiguo nao vira 'a primeira serve'", /\.maybeSingle\(\)/.test(PERS));
+  ok("P11 o nivel do contexto vem dessa leitura, e de nenhum lugar mais",
+    /const nivelNoMomento = await lerNivelDaAbertura\(/.test(CONSUMO) &&
+      /nivelNoMomento,/.test(CONSUMO));
+  ok("P12 a permissao NAO e relida para reconstruir o nivel",
+    !/agente_permissoes/.test(semComentariosTs(PERS)));
+  ok("P13 nivel fora do vocabulario nao vira fallback",
+    /NIVEIS_DE_CHAMADA as readonly unknown\[\]\)\.includes\(bruto\)/.test(PERS) &&
+      /: null;/.test(PERS));
+  ok("P14 e a leitura que falha para o consumo, em vez de seguir",
+    /if \(nivelNoMomento === null\) return \{ codigo: "abertura_ilegivel", requestId \};/.test(CONSUMO));
+
+  // ── `abertura_ilegivel` nao e estado de aprovacao ────────────────
+  ok("P15 abertura_ilegivel fica FORA de CodigoAprovacao",
+    !/\|\s*"abertura_ilegivel"/.test(
+      PERS.slice(PERS.indexOf("export type CodigoAprovacao"), PERS.indexOf("export type ResultadoCriacao"))));
+  ok("P16 e aparece so no resultado do consumo, com o requestId junto",
+    /\{ codigo: "abertura_ilegivel"; requestId: string \}/.test(PERS));
+
+  // ── A escrita continua fora deste modulo ─────────────────────────
+  ok("P17 a leitura nova nao escreve nada",
+    !/TABELA_CHAMADAS[\s\S]{0,120}\.(insert|update|upsert|delete)\(/.test(PERS));
+  ok("P18 e nao existe literal de abertura aqui — quem grava e registro.ts e a RPC",
+    !/fase: "abertura"/.test(PERS));
+  ok("P19 CONTROLE: a sonda de P18 acharia o literal",
+    /fase: "abertura"/.test('inserir({ fase: "abertura" })'));
+
+  // ── A fronteira de erro nao afrouxou ─────────────────────────────
+  ok("P20 a leitura da abertura loga so o SQLSTATE",
+    /logarFalha\("leitura_abertura", r\.error\)/.test(PERS) &&
+      /function logarFalha/.test(PERS));
+  ok("P21 nenhum dado da aprovacao sai em caso de erro",
+    !/return \{ codigo: "falha_persistencia", (ap|argumentos|contexto)/.test(PERS));
 }
 
 console.log(`\n══ ${passou} PASS / ${falhou} FAIL ══\n`);

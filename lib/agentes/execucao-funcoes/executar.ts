@@ -66,6 +66,11 @@ import {
   type EntradaDesfechoDeExecucao,
   type EntradaDesfechoSemExecucao,
 } from "@/lib/agentes/chamadas/registro";
+import {
+  consumirAprovacaoEAbrir,
+  criarAprovacao,
+  type CodigoAprovacao,
+} from "@/lib/agentes/aprovacoes/persistencia";
 import { autorizarFuncao, type CodigoNegacao } from "@/lib/agentes/funcoes/guard";
 import { FUNCOES, funcaoExiste, type DefinicaoFuncao } from "@/lib/agentes/funcoes/registry";
 import { resolverFatosPermissoes } from "@/lib/agentes/permissoes/fatos";
@@ -119,8 +124,22 @@ export interface EntradaExecucaoFuncao {
 }
 
 /**
- * O resultado publico. Seis variantes, e cada uma espelha um estado
+ * O resultado publico. Sete variantes, e cada uma espelha um estado
  * persistido — ou a ausencia deliberada dele.
+ *
+ * ── Por que `aprovacao_indisponivel` e variante propria ─────────────
+ *
+ * Ela cobre a retomada que NAO aconteceu: aprovacao vencida, rejeitada,
+ * cancelada, ja consumida, desatualizada, ou autoridade que mudou
+ * durante a espera. Nenhuma dessas e negacao do guard — o guard nem
+ * roda na retomada — e nenhuma e falha da Funcao, que nunca foi
+ * chamada. Enfia-las em `negado` ou `erro` obrigaria a inventar um
+ * codigo que o vocabulario daquelas variantes nao tem, e a devolver
+ * `auditoria` sobre uma linha que ninguem tentou gravar.
+ *
+ * Ela tambem e a unica que NAO grava nada: na retomada recusada nao ha
+ * chamada aberta para explicar, e a propria aprovacao ja e o registro
+ * do que aconteceu.
  *
  * `erro` e falha da TOOL; `falha_auditoria` e falha da nossa
  * infraestrutura de registro. Colapsar as duas faria o chamador tratar
@@ -143,7 +162,16 @@ export interface EntradaExecucaoFuncao {
 export type ResultadoExecucaoFuncao =
   | { tipo: "sucesso"; requestId: string; envelope: EnvelopeSucesso; auditoria: "completa" | "incompleta" }
   | { tipo: "negado"; requestId: string; codigo: CodigoNegacaoTerminal }
-  | { tipo: "aguardando_aprovacao"; requestId: string; codigo: "aprovacao_necessaria" }
+  | {
+      tipo: "aguardando_aprovacao";
+      requestId: string;
+      codigo: "aprovacao_necessaria";
+      /** Onde a espera vive. Sem ele quem chamou nao tem o que aprovar. */
+      aprovacaoId: string;
+      /** `reutilizada` quando a mesma acao ja tinha pedido ativo. */
+      estadoAprovacao: "criada" | "reutilizada";
+    }
+  | { tipo: "aprovacao_indisponivel"; requestId: string; codigo: CodigoAprovacao }
   | { tipo: "erro"; requestId: string; envelope: EnvelopeErro; auditoria: "completa" | "incompleta" }
   | { tipo: "falha_auditoria"; requestId: string; etapa: "abertura" | "desfecho"; reexecutavel: false }
   | { tipo: "indisponivel"; requestId: string };
@@ -326,6 +354,73 @@ async function erroDeExecucao(
     envelope: seguro.envelope,
     auditoria: registro.estado === "registrada" ? "completa" : "incompleta",
   };
+}
+
+/**
+ * Roda o validador da Funcao e classifica o que aconteceu.
+ *
+ * Dois caminhos precisam desta mesma leitura — o automatico, antes da
+ * abertura, e o de aprovacao, antes de congelar o argumento. A logica e
+ * curta, mas a regra que ela carrega nao e obvia: um THROW do validador
+ * e bug NOSSO, nao prova de que o argumento estava errado, e por isso
+ * vira `erro_interno` em vez de `entrada_invalida`. Escrita duas vezes,
+ * essa distincao sobreviveria enquanto os dois lados fossem lembrados
+ * juntos.
+ *
+ * A funcao nao decide o que fazer com o resultado, e nao grava nada:
+ * cada ramo continua respondendo do seu jeito, na sua posicao.
+ */
+type LeituraDeArgumentos =
+  | { tipo: "valida" }
+  | { tipo: "invalida"; codigo: string }
+  | { tipo: "erro_interno" };
+
+function validarArgumentos(definicao: DefinicaoFuncao, argumentos: unknown): LeituraDeArgumentos {
+  let validacao;
+  try {
+    validacao = definicao.validarEntrada(argumentos);
+  } catch {
+    return { tipo: "erro_interno" };
+  }
+  return validacao.valida ? { tipo: "valida" } : { tipo: "invalida", codigo: validacao.codigo };
+}
+
+/**
+ * O que fazer quando pedir a aprovacao NAO deu certo.
+ *
+ * Os codigos vem de `criarAprovacao` e a maioria descreve uma CORRIDA:
+ * entre o guard dizer "precisa de aprovacao" e a RPC revalidar, o dono
+ * pode ter mudado a permissao, apagado o agente ou trocado a conexao.
+ * Nenhuma delas pode virar execucao, e nenhuma pode virar silencio.
+ *
+ * As tres primeiras reusam categorias que ja existem e ja significam a
+ * mesma coisa neste modulo. Todo o resto — inclusive o que "nao deveria
+ * acontecer" — cai em `erro_interno`, fail-closed: uma corrida de
+ * autoridade que nao sabemos nomear nao vira permissao.
+ */
+async function recusaDeCriacao(
+  snapshot: SnapshotChamada,
+  codigo: Exclude<CodigoAprovacao, "criada" | "reutilizada">
+): Promise<ResultadoExecucaoFuncao> {
+  if (codigo === "agente_indisponivel" || codigo === "tarefa_indisponivel") {
+    // Mesma resposta do inicio de `executarFuncao`, e pelo mesmo
+    // motivo: sem posse nao ha tenant para sustentar a linha.
+    return { tipo: "indisponivel", requestId: snapshot.requestId };
+  }
+
+  if (codigo === "permissao_ausente") {
+    await registrarDesfechoSemExecucao({ ...snapshot, status: "negado", codigo });
+    return { tipo: "negado", requestId: snapshot.requestId, codigo };
+  }
+
+  if (codigo === "conexao_indisponivel") {
+    // O vocabulario da Tool Call chama isto de `conexao_ausente`; a
+    // traducao acontece aqui, uma vez, e nao vira codigo novo no banco.
+    await registrarDesfechoSemExecucao({ ...snapshot, status: "negado", codigo: "conexao_ausente" });
+    return { tipo: "negado", requestId: snapshot.requestId, codigo: "conexao_ausente" };
+  }
+
+  return erroSemExecucao(snapshot, "erro_interno", "erro_interno", MSG_INTERNO, false);
 }
 
 // ─── O pos-abertura ───────────────────────────────────────────────────
@@ -559,12 +654,41 @@ export async function executarFuncao(
 
   if (!decisao.permitido) {
     if (decisao.estado === "aguardando_aprovacao") {
-      await registrarDesfechoSemExecucao({
-        ...snapshot,
-        status: "aguardando_aprovacao",
-        codigo: "aprovacao_necessaria",
-      });
-      return { tipo: "aguardando_aprovacao", requestId, codigo: "aprovacao_necessaria" };
+      // ── Validar ANTES de pedir aprovacao ──────────────────────────
+      //
+      // Localizado neste ramo de proposito: no caminho automatico a
+      // validacao continua onde sempre esteve, logo antes da abertura.
+      // Aqui ela precisa vir antes porque congelar um argumento
+      // invalido produziria uma aprovacao que o dono poderia aprovar e
+      // que NUNCA poderia ser consumida — o consumo revalida.
+      const antesDeCongelar = validarArgumentos(definicao, argumentos);
+      if (antesDeCongelar.tipo === "erro_interno") {
+        return erroSemExecucao(snapshot, "erro_interno", "erro_interno", MSG_INTERNO, false);
+      }
+      if (antesDeCongelar.tipo === "invalida") {
+        return erroSemExecucao(snapshot, "entrada_invalida", antesDeCongelar.codigo, MSG_ENTRADA, false);
+      }
+
+      const pedido = await criarAprovacao({ userId, agenteId, tarefaId, funcaoId, argumentos });
+
+      if (pedido.codigo === "criada" || pedido.codigo === "reutilizada") {
+        // ── E aqui a Tool Call NAO nasce ──────────────────────────
+        //
+        // Ate o TOOL-EXEC-B este ramo gravava um desfecho isolado
+        // dizendo "esperando". Agora a espera tem lugar proprio, com
+        // dono, prazo, argumentos congelados e decisao registrada — a
+        // aprovacao E o registro. Manter as duas seria contar a mesma
+        // espera em dois lugares, e o segundo envelheceria sozinho.
+        return {
+          tipo: "aguardando_aprovacao",
+          requestId,
+          codigo: "aprovacao_necessaria",
+          aprovacaoId: pedido.aprovacaoId,
+          estadoAprovacao: pedido.codigo,
+        };
+      }
+
+      return recusaDeCriacao(snapshot, pedido.codigo);
     }
 
     const codigo = decisao.codigo as CodigoNegacaoTerminal;
@@ -587,16 +711,17 @@ export async function executarFuncao(
   }
 
   // ── 7. Argumentos ─────────────────────────────────────────────────
-  let validacao;
-  try {
-    validacao = definicao.validarEntrada(argumentos);
-  } catch {
-    // O contrato diz que o validador nao lanca. Se lancar, e bug nosso —
-    // nao prova de que o argumento estava errado.
+  //
+  // Mesma posicao de sempre, imediatamente antes da abertura. O ramo de
+  // aprovacao valida mais cedo, no lugar dele, e os dois usam a MESMA
+  // leitura — ver `validarArgumentos`.
+  const validacao = validarArgumentos(definicao, argumentos);
+
+  if (validacao.tipo === "erro_interno") {
     return erroSemExecucao(snapshot, "erro_interno", "erro_interno", MSG_INTERNO, false);
   }
 
-  if (!validacao.valida) {
+  if (validacao.tipo === "invalida") {
     // `envelopeCode` preserva o codigo de DOMINIO (`janela_excedida`); a
     // categoria de infraestrutura fica so na Tool Call.
     return erroSemExecucao(snapshot, "entrada_invalida", validacao.codigo, MSG_ENTRADA, false);
@@ -620,4 +745,105 @@ export async function executarFuncao(
   // depende de como ela foi aberta. Uma implementacao so — a mesma que
   // fecha uma abertura vinda da RPC de aprovacao.
   return executarComAberturaFeita(snapshot, definicao, argumentos);
+}
+
+// ─── A retomada ───────────────────────────────────────────────────────
+
+/**
+ * A entrada mais curta deste modulo, e a lista curta E a defesa.
+ *
+ * Quem retoma nao diz QUAL Funcao, nao diz com QUE argumentos, nao diz
+ * por qual agente nem contra qual loja. Tudo isso foi decidido quando a
+ * aprovacao nasceu e congelado nela; repetir qualquer um desses campos
+ * aqui abriria a porta para aprovar uma acao e executar outra.
+ *
+ * `userId` DEVE vir de camada server-side ja autenticada — mesmo
+ * precedente de `EntradaExecucaoFuncao`.
+ */
+export interface EntradaRetomadaAprovacao {
+  userId: string;
+  aprovacaoId: string;
+}
+
+/**
+ * Executa o que um humano ja aprovou.
+ *
+ * ── Quem abre a Tool Call aqui NAO e este modulo ────────────────────
+ *
+ * `consumirAprovacaoEAbrir` consome a aprovacao E grava a abertura na
+ * MESMA transacao — as duas coisas precisam acontecer juntas, e
+ * TypeScript nao roda em transacao. Por isso esta funcao nunca chama
+ * `registrarAbertura` e nunca gera `request_id` para a chamada: os dois
+ * ja aconteceram no banco quando ela recebe o controle.
+ *
+ * ── A unica porta para o executor ───────────────────────────────────
+ *
+ * Somente `codigo === "consumida"` chega a `executarComAberturaFeita`.
+ * Todo o resto retorna antes — inclusive `ja_consumida`, que significa
+ * que OUTRO chamador venceu a corrida e ja esta executando. Reaproveitar
+ * o contexto lido antes da RPC nesse caso executaria a Funcao duas vezes
+ * contra uma unica abertura.
+ *
+ * ── A janela que continua aberta ────────────────────────────────────
+ *
+ * Se o processo cair entre o COMMIT do consumo e o fim da execucao, a
+ * aprovacao fica `consumida`, a chamada fica `executando` e a Funcao
+ * nunca rodou. Nao ha recuperacao aqui: nao ha retry, nao ha timeout e
+ * nao ha caminho de volta de `consumida`. A abertura orfa e encontravel
+ * pelo indice parcial `WHERE status='executando'`, e essa divida so e
+ * aceitavel enquanto esta funcao nao tem chamador de producao — ligar
+ * uma rota, uma Task ou um worker a ela exige resolver isso antes.
+ */
+export async function retomarAprovacao(
+  entrada: EntradaRetomadaAprovacao
+): Promise<ResultadoExecucaoFuncao> {
+  const { userId, aprovacaoId } = entrada;
+
+  // Uma recusa nao tem chamada aberta para nomear, e mesmo assim
+  // precisa de um id — pelo mesmo motivo que `executarFuncao` gera o
+  // dele antes de tudo: ele identifica A TENTATIVA. O id da CHAMADA,
+  // quando existe, vem da RPC e nunca daqui.
+  const correlacao = randomUUID();
+
+  if (!userId || !aprovacaoId) return { tipo: "indisponivel", requestId: correlacao };
+
+  const consumo = await consumirAprovacaoEAbrir({ userId, aprovacaoId });
+
+  if (consumo.codigo === "abertura_ilegivel") {
+    // A aprovacao foi gasta e a chamada esta aberta, mas nao sabemos o
+    // que a abertura registrou. Executar produziria um desfecho que
+    // discorda da propria abertura; nao executar deixa uma linha orfa,
+    // que e o dano menor e o unico honesto. `reexecutavel: false`
+    // porque a aprovacao nao volta.
+    return {
+      tipo: "falha_auditoria",
+      requestId: consumo.requestId,
+      etapa: "abertura",
+      reexecutavel: false,
+    };
+  }
+
+  if (consumo.codigo !== "consumida") {
+    return { tipo: "aprovacao_indisponivel", requestId: correlacao, codigo: consumo.codigo };
+  }
+
+  // O snapshot do desfecho e o MESMO que a RPC gravou na abertura: os
+  // valores vem da aprovacao travada e o nivel vem da propria linha de
+  // abertura. Nada aqui e recalculado, e nada vem de quem chamou —
+  // exceto `userId`, que ja foi usado para escopar tudo acima.
+  const { contexto } = consumo;
+  const snapshot: SnapshotChamada = {
+    userId,
+    agenteId: contexto.agenteId,
+    requestId: consumo.requestId,
+    tarefaId: contexto.tarefaId,
+    funcaoId: contexto.funcaoId,
+    acesso: contexto.acesso,
+    nivelNoMomento: contexto.nivelNoMomento,
+    plataforma: contexto.plataforma,
+    recurso: contexto.recurso,
+    lojaId: contexto.lojaId,
+  };
+
+  return executarComAberturaFeita(snapshot, contexto.definicao, contexto.argumentos);
 }
