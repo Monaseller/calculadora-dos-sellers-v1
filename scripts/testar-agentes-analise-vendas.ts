@@ -804,6 +804,18 @@ const MIGRATIONS_DA_SKILL_1D_TOOL_CALL: readonly string[] = [
 ];
 
 /**
+ * A migration da APPROVAL-B1B: `agente_funcao_aprovacoes`, a decisao
+ * humana sobre UMA tentativa concreta, consumivel uma vez so.
+ *
+ * Criada no disco e NAO aplicada neste gate — o G12b mede pertencimento
+ * ao inventario, nunca estado do banco. Mesma natureza das listas
+ * acima: nome exato, nunca prefixo ou range.
+ */
+const MIGRATIONS_DA_APPROVAL_B1B: readonly string[] = [
+  "20260928_agente_funcao_aprovacoes.sql",
+];
+
+/**
  * Inventario acumulado de `lib/agentes/ia/`, por frente.
  *
  * O guarda de disco (G11l) compara contra ESTA uniao, nunca contra uma
@@ -945,6 +957,29 @@ const ARQUIVOS_TOOL_EXEC: readonly string[] = [
   "lib/agentes/funcoes/registry.ts",
 ];
 
+/**
+ * O que a APPROVAL-B1B acrescentou dentro do `ESCOPO_AGENTES`.
+ *
+ * A fundacao persistente de aprovacao: uma pasta NOVA com dois modulos
+ * — `identidade.ts`, puro, e `persistencia.ts`, server-only — mais a
+ * migration da tabela. A suite nao entra aqui: `scripts/` nunca esteve
+ * no escopo, e ela e declarada em `SUITES_AGENTES`.
+ *
+ * Mesma forma colapsada dos blocos acima: enquanto a pasta estiver
+ * inteiramente untracked o porcelain devolve UMA linha e nenhum arquivo
+ * de dentro aparece. Por isso a entrada colapsada e aceita aqui e o
+ * CONTEUDO e conferido a parte, por disco, em G11z12.
+ */
+const MODULOS_APROVACOES: readonly string[] = ["identidade.ts", "persistencia.ts"];
+
+const ARQUIVOS_APROVACOES: readonly string[] = [
+  "lib/agentes/aprovacoes/",
+  ...MODULOS_APROVACOES.map((nome) => `lib/agentes/aprovacoes/${nome}`),
+  // A tabela de aprovacoes. Cai no escopo porque `ESCOPO_AGENTES` cobre
+  // `supabase/migrations` inteiro. Criada no disco, NAO aplicada.
+  "supabase/migrations/20260928_agente_funcao_aprovacoes.sql",
+];
+
 const ARQUIVOS_SKILL_1D_TOOL_CALL: readonly string[] = [
   "lib/agentes/chamadas/",
   ...MODULOS_CHAMADAS_1D_TOOL_CALL.map((nome) => `lib/agentes/chamadas/${nome}`),
@@ -989,6 +1024,7 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_SKILL_1D_PERFIL,
   ...ARQUIVOS_SKILL_1D_TOOL_CALL,
   ...ARQUIVOS_TOOL_EXEC,
+  ...ARQUIVOS_APROVACOES,
 ];
 
 /**
@@ -1068,6 +1104,8 @@ const SUITES_AGENTES: readonly string[] = [
   "testar-agentes-chamadas.ts",
   // TOOL-EXEC-B: o executor que liga catalogo, guard e auditoria.
   "testar-agentes-execucao-funcoes.ts",
+  // APPROVAL-B1B: a fundacao persistente de aprovacao de Funcao.
+  "testar-agentes-aprovacoes.ts",
   "testar-agentes-execucao-banco.ts",
   "testar-agentes-execucao.ts",
   // ── Divida herdada da TOOL-REGISTRY-B1, medida na TOOL-CALL-BR2 ──
@@ -1779,6 +1817,19 @@ async function main() {
     ok("G11z11b CONTROLE NEGATIVO: a pasta vazia reprova",
        !mesmoConjuntoDeNomes([], MODULOS_EXECUCAO_FUNCOES));
 
+    // A outra metade da entrada colapsada `lib/agentes/aprovacoes/`.
+    // Sao dois modulos com fronteiras diferentes — um puro, outro
+    // server-only — e um terceiro arquivo aparecendo ali sem gate
+    // significa que a fronteira comecou a se diluir.
+    const conteudoAprovacoes = readdirSync(join(RAIZ, "lib", "agentes", "aprovacoes")).sort();
+
+    ok(`G11z12 lib/agentes/aprovacoes contem exatamente os modulos declarados (${conteudoAprovacoes.join(", ")})`,
+       mesmoConjuntoDeNomes(conteudoAprovacoes, MODULOS_APROVACOES));
+    ok("G11z12a CONTROLE NEGATIVO: um terceiro modulo em aprovacoes/ reprova",
+       !mesmoConjuntoDeNomes([...MODULOS_APROVACOES, "rotas.ts"], MODULOS_APROVACOES));
+    ok("G11z12b CONTROLE NEGATIVO: a pasta vazia reprova",
+       !mesmoConjuntoDeNomes([], MODULOS_APROVACOES));
+
     // ── G11t..G11w — `scripts/` nunca esteve em ESCOPO_AGENTES ─────
     // Medido na 1E-a: uma suite de agentes inesperada em `scripts/`
     // passava batido. Enumeracao de disco, porque a maioria destas ja
@@ -1814,7 +1865,8 @@ async function main() {
       MIGRATIONS_DA_SKILL_1DF4.includes(m) ||
       MIGRATIONS_DA_SKILL_1DG.includes(m) ||
       MIGRATIONS_DA_SKILL_1D_PERFIL.includes(m) ||
-      MIGRATIONS_DA_SKILL_1D_TOOL_CALL.includes(m);
+      MIGRATIONS_DA_SKILL_1D_TOOL_CALL.includes(m) ||
+      MIGRATIONS_DA_APPROVAL_B1B.includes(m);
 
     ok(`G12b nenhuma migration nao declarada no disco (${novasNoDisco.join(", ") || "nenhuma"})`,
        novasNoDisco.every(declarada));

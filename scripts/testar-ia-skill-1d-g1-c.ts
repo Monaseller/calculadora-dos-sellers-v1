@@ -400,13 +400,39 @@ async function principal(): Promise<void> {
   // allowlist e nominal, comparada por igualdade de caminho, entao um
   // segundo consumidor — mesmo dentro de `lib/agentes/conexoes/` —
   // continua reprovando. Trocar por prefixo abriria a pasta inteira.
-  const CONSUMIDORES_AUTORIZADOS: readonly string[] = ["lib/agentes/conexoes/agregador.ts"];
-  const naoAutorizados = alvos.filter((a) => !CONSUMIDORES_AUTORIZADOS.includes(a));
-  ok("N1  so o agregador consome resolverSelecoesDoAgente",
-    naoAutorizados.length === 0 &&
-      JSON.stringify(alvos.slice().sort()) ===
-        JSON.stringify([...CONSUMIDORES_AUTORIZADOS].sort()),
-    alvos.join(", "));
+  //
+  // APPROVAL-B1B: o SEGUNDO consumidor legitimo. `FatoConexao` nao
+  // carrega `lojaId` — o registry documenta que QUAL loja atende e
+  // decisao de quem resolve a conexao, nao do catalogo. A persistencia
+  // de aprovacoes precisa congelar a loja concreta que o dono escolheu,
+  // e reconferi-la no consumo; sem isso, a mesma conexao podendo apontar
+  // para outra loja deixaria aprovar para a loja A e executar contra a
+  // loja B.
+  //
+  // A divisao de autoridade fica: o AGREGADOR diz se a conexao esta
+  // utilizavel, e esta leitura diz QUAL loja e o alvo. A persistencia
+  // nao recompoe uma pela outra — se recompusesse, estaria
+  // reconstruindo o agregador, que e o que esta guarda existe para
+  // impedir.
+  const AGREGADOR = "lib/agentes/conexoes/agregador.ts";
+  const PERSISTENCIA_APROVACOES = "lib/agentes/aprovacoes/persistencia.ts";
+  const CONSUMIDORES_AUTORIZADOS: readonly string[] = [AGREGADOR, PERSISTENCIA_APROVACOES];
+
+  const mesmoConjunto = (a: readonly string[], b: readonly string[]): boolean =>
+    JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
+
+  ok(`N1  resolverSelecoesDoAgente tem exatamente os consumidores declarados (${alvos.join(", ") || "nenhum"})`,
+    mesmoConjunto(alvos, CONSUMIDORES_AUTORIZADOS));
+  ok("N1a CONTROLE: o conjunto exato dos dois autorizados passa",
+    mesmoConjunto([AGREGADOR, PERSISTENCIA_APROVACOES], CONSUMIDORES_AUTORIZADOS));
+  ok("N1b CONTROLE: o agregador sumir reprova",
+    !mesmoConjunto([PERSISTENCIA_APROVACOES], CONSUMIDORES_AUTORIZADOS));
+  ok("N1c CONTROLE: a persistencia sumir reprova",
+    !mesmoConjunto([AGREGADOR], CONSUMIDORES_AUTORIZADOS));
+  ok("N1d CONTROLE: um terceiro consumidor reprova",
+    !mesmoConjunto([...CONSUMIDORES_AUTORIZADOS, "app/api/x/route.ts"], CONSUMIDORES_AUTORIZADOS));
+  ok("N1e CONTROLE: um caminho parecido nao passa por semelhanca",
+    !mesmoConjunto([AGREGADOR, "lib/agentes/aprovacoes/identidade.ts"], CONSUMIDORES_AUTORIZADOS));
   ok("N2  ANCORA: a varredura leu arquivos de verdade",
     existsSync(join(RAIZ, "lib/agentes/conexoes/fatos.ts")));
   ok("N3  diagnostico.ts nao foi tocado — sem falta_selecao ainda",

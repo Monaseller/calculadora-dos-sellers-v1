@@ -765,10 +765,17 @@ async function principal(): Promise<void> {
   // A exigencia nao afrouxa: continua igualdade de conjunto, por caminho
   // NOMINAL, nos dois sentidos. Antes { compositor }, agora
   // { compositor, executar }. Prefixo, pasta ou contagem, nao.
+  // APPROVAL-B1B: o TERCEIRO consumidor legitimo. A persistencia de
+  // aprovacoes pergunta ao agregador se a conexao exigida esta
+  // UTILIZAVEL — na criacao, para congelar o alvo, e no consumo, antes
+  // de deixar a RPC gastar a aprovacao. A loja concreta vem da selecao;
+  // a usabilidade vem daqui, e nao e recomposta a mao.
   const EXECUTOR_FUNCOES = "lib/agentes/execucao-funcoes/executar.ts";
+  const PERSISTENCIA_APROVACOES = "lib/agentes/aprovacoes/persistencia.ts";
   const CONSUMIDORES_AUTORIZADOS: readonly string[] = [
     "lib/agentes/diagnostico/compositor.ts",
     EXECUTOR_FUNCOES,
+    PERSISTENCIA_APROVACOES,
   ];
   const COMPOSITOR = CONSUMIDORES_AUTORIZADOS[0];
 
@@ -791,14 +798,20 @@ async function principal(): Promise<void> {
   });
   ok(`M12 o agregador tem exatamente os consumidores declarados (${consumidores.join(", ") || "nenhum"})`,
     mesmoConjunto(consumidores, CONSUMIDORES_AUTORIZADOS));
-  ok("M12a CONTROLE: o conjunto exato dos dois autorizados passa",
-    mesmoConjunto([COMPOSITOR, EXECUTOR_FUNCOES], CONSUMIDORES_AUTORIZADOS));
+  ok("M12a CONTROLE: o conjunto exato dos tres autorizados passa",
+    mesmoConjunto([COMPOSITOR, EXECUTOR_FUNCOES, PERSISTENCIA_APROVACOES],
+      CONSUMIDORES_AUTORIZADOS));
   ok("M12b CONTROLE: o compositor sumir reprova",
-    !mesmoConjunto([EXECUTOR_FUNCOES], CONSUMIDORES_AUTORIZADOS));
+    !mesmoConjunto([EXECUTOR_FUNCOES, PERSISTENCIA_APROVACOES], CONSUMIDORES_AUTORIZADOS));
   ok("M12c CONTROLE: o executor sumir reprova",
-    !mesmoConjunto([COMPOSITOR], CONSUMIDORES_AUTORIZADOS));
-  ok("M12d CONTROLE: um terceiro consumidor reprova",
+    !mesmoConjunto([COMPOSITOR, PERSISTENCIA_APROVACOES], CONSUMIDORES_AUTORIZADOS));
+  ok("M12d CONTROLE: a persistencia sumir reprova",
+    !mesmoConjunto([COMPOSITOR, EXECUTOR_FUNCOES], CONSUMIDORES_AUTORIZADOS));
+  ok("M12e CONTROLE: um quarto consumidor reprova",
     !mesmoConjunto([...CONSUMIDORES_AUTORIZADOS, "app/api/x/route.ts"], CONSUMIDORES_AUTORIZADOS));
+  ok("M12f CONTROLE: um caminho parecido nao passa por semelhanca",
+    !mesmoConjunto([COMPOSITOR, EXECUTOR_FUNCOES, "lib/agentes/aprovacoes/identidade.ts"],
+      CONSUMIDORES_AUTORIZADOS));
 
   console.log(`\n══ ${passou} PASS / ${falhou} FAIL ══\n`);
   process.exitCode = falhou === 0 ? 0 : 1;

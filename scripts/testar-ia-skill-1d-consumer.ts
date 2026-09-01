@@ -531,8 +531,18 @@ async function principal(): Promise<void> {
   // conjunto == { compositor, executar }. Continua sendo igualdade de
   // conjunto nos DOIS sentidos — o desaparecimento de qualquer um dos
   // dois tambem reprova.
+  // APPROVAL-B1B: o TERCEIRO consumidor legitimo. A persistencia de
+  // aprovacoes precisa saber se a conexao exigida esta UTILIZAVEL —
+  // antes de congelar o alvo na criacao, e de novo antes de consumir.
+  // Compor selecao e estado por conta propria no lugar do agregador
+  // seria reconstruir o agregador, que e o que esta guarda impede.
   const EXECUTOR_FUNCOES = "lib/agentes/execucao-funcoes/executar.ts";
-  const CONSUMIDORES_CONEXOES: readonly string[] = [CONSUMIDOR_AUTORIZADO, EXECUTOR_FUNCOES];
+  const PERSISTENCIA_APROVACOES = "lib/agentes/aprovacoes/persistencia.ts";
+  const CONSUMIDORES_CONEXOES: readonly string[] = [
+    CONSUMIDOR_AUTORIZADO,
+    EXECUTOR_FUNCOES,
+    PERSISTENCIA_APROVACOES,
+  ];
 
   const mesmoConjunto = (a: readonly string[], b: readonly string[]): boolean =>
     JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
@@ -557,14 +567,21 @@ async function principal(): Promise<void> {
   const consCon = consumidoresDe("resolverConexoesDoAgente", "lib/agentes/conexoes/agregador.ts");
   ok(`I1  o agregador de conexoes tem exatamente os consumidores declarados (${consCon.join(", ") || "nenhum"})`,
     mesmoConjunto(consCon, CONSUMIDORES_CONEXOES));
-  ok("I1a CONTROLE: o conjunto exato dos dois autorizados passa",
-    mesmoConjunto([CONSUMIDOR_AUTORIZADO, EXECUTOR_FUNCOES], CONSUMIDORES_CONEXOES));
+  ok("I1a CONTROLE: o conjunto exato dos tres autorizados passa",
+    mesmoConjunto([CONSUMIDOR_AUTORIZADO, EXECUTOR_FUNCOES, PERSISTENCIA_APROVACOES],
+      CONSUMIDORES_CONEXOES));
   ok("I1b CONTROLE: o compositor sumir reprova",
-    !mesmoConjunto([EXECUTOR_FUNCOES], CONSUMIDORES_CONEXOES));
+    !mesmoConjunto([EXECUTOR_FUNCOES, PERSISTENCIA_APROVACOES], CONSUMIDORES_CONEXOES));
   ok("I1c CONTROLE: o executor sumir reprova",
-    !mesmoConjunto([CONSUMIDOR_AUTORIZADO], CONSUMIDORES_CONEXOES));
-  ok("I1d CONTROLE: um terceiro consumidor reprova",
+    !mesmoConjunto([CONSUMIDOR_AUTORIZADO, PERSISTENCIA_APROVACOES], CONSUMIDORES_CONEXOES));
+  ok("I1d CONTROLE: a persistencia sumir reprova",
+    !mesmoConjunto([CONSUMIDOR_AUTORIZADO, EXECUTOR_FUNCOES], CONSUMIDORES_CONEXOES));
+  ok("I1e CONTROLE: um quarto consumidor reprova",
     !mesmoConjunto([...CONSUMIDORES_CONEXOES, "app/api/x/route.ts"], CONSUMIDORES_CONEXOES));
+  ok("I1f CONTROLE: um caminho parecido nao passa por semelhanca",
+    !mesmoConjunto(
+      [CONSUMIDOR_AUTORIZADO, EXECUTOR_FUNCOES, "lib/agentes/aprovacoes/identidade.ts"],
+      CONSUMIDORES_CONEXOES));
 
   const consDiag = consumidoresDe("diagnosticarSkill", "lib/ia/skills/diagnostico.ts");
   ok("I2  so o compositor consome diagnosticarSkill",
