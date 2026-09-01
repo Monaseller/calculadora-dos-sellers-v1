@@ -1068,9 +1068,21 @@ function construtorDb(tabela: string): Record<string, unknown> {
 
 const clienteDb = { from: (t: string) => construtorDb(t) };
 
+/**
+ * Resposta forcada do observador — usada por UM teste.
+ *
+ * `null` significa "delegue ao real", que e o estado em toda a suite
+ * menos naquele caso. Ela existe porque provar que a rota nao devolve
+ * 200 para uma coleta desconhecida exige uma coleta desconhecida — e
+ * acrescenta-la a `ColetaObservacao` de producao so para testar seria
+ * inventar um estado que o sistema nao tem.
+ */
+let respostaObservadorForcada: unknown = null;
+
 const requireOriginalDb = (Module as unknown as { prototype: { require: (id: string) => unknown } })
   .prototype.require;
 let interceptouDb = false;
+let interceptouObservador = false;
 (Module as unknown as { prototype: { require: unknown } }).prototype.require = function (
   this: unknown,
   id: string
@@ -1078,6 +1090,23 @@ let interceptouDb = false;
   if (typeof id === "string" && id.includes("supabase-servidor")) {
     interceptouDb = true;
     return { getSupabaseServidor: () => clienteDb };
+  }
+  // Envelope DELEGANTE: por padrao chama o observador real, entao todas
+  // as secoes anteriores continuam exercitando a implementacao de
+  // verdade. So o teste da variante desconhecida troca a resposta.
+  if (typeof id === "string" && id.includes("aprovacoes/observabilidade-stale")) {
+    interceptouObservador = true;
+    const real = requireOriginalDb.apply(this, arguments as unknown as [string]) as Record<
+      string,
+      unknown
+    >;
+    return {
+      ...real,
+      observarAberturasStaleDoUsuario: (entrada: unknown) =>
+        respostaObservadorForcada !== null
+          ? Promise.resolve(respostaObservadorForcada)
+          : (real.observarAberturasStaleDoUsuario as (e: unknown) => Promise<unknown>)(entrada),
+    };
   }
   return requireOriginalDb.apply(this, arguments as unknown as [string]);
 };
@@ -1751,11 +1780,296 @@ async function principalStale(): Promise<void> {
     ok("R18 nao para por pagina vazia — o criterio e o cursor",
       !/itens\.length === 0/.test(OBS_CODIGO) && /nextCursor === null/.test(OBS_CODIGO));
 
+    // ── R19: o observador ganhou UMA superficie, e ela e nomeada ────
+    //
+    // Ate o D2-I1 o observador era capability sem chamador, e o assert
+    // exigia conjunto vazio. O D2-I2 criou a rota operacional — era o
+    // objetivo do gate, e sem ela ninguem pergunta. A exigencia nao
+    // afrouxou: mesma varredura, mesmo detector, agora com igualdade de
+    // conjunto contra a lista declarada.
+    const ROTA_STALE = "app/api/admin/agentes/aprovacoes-stale/route.ts";
+    const CONSUMIDORES_DO_OBSERVADOR = [ROTA_STALE];
+
     const consumidoresObs = [...varrerFontes("lib"), ...varrerFontes("app")].filter(
       (f) => f !== OBS && /observarAberturasStaleDoUsuario/.test(semComentariosTs(ler(f)))
     );
-    ok(`R19 zero consumidor de producao (${consumidoresObs.join(", ") || "nenhum"})`,
-      consumidoresObs.length === 0);
+    ok(`R19 os consumidores do observador sao exatamente os declarados (${consumidoresObs.join(", ") || "nenhum"})`,
+      conjuntosIguais(consumidoresObs, CONSUMIDORES_DO_OBSERVADOR));
+    ok("R19a CONTROLE: um segundo consumidor de producao reprovaria",
+      !conjuntosIguais([ROTA_STALE, "app/api/x/route.ts"], CONSUMIDORES_DO_OBSERVADOR));
+    ok("R19b CONTROLE: a rota sumir reprovaria",
+      !conjuntosIguais([], CONSUMIDORES_DO_OBSERVADOR));
+    ok("R19c CONTROLE: um caminho parecido nao passa por semelhanca",
+      !conjuntosIguais(["app/api/admin/agentes/aprovacoes-stale/rota.ts"],
+        CONSUMIDORES_DO_OBSERVADOR));
+
+    // A retomada continua sem superficie: o D2-I2 abre observabilidade,
+    // NAO abre execucao. Este assert e o que separa os dois.
+    const consumidoresResume = [...varrerFontes("lib"), ...varrerFontes("app")].filter(
+      (f) => f !== "lib/agentes/execucao-funcoes/executar.ts" &&
+        /retomarAprovacao/.test(semComentariosTs(ler(f)))
+    );
+    ok(`R20 retomarAprovacao continua SEM consumidor de producao (${consumidoresResume.join(", ") || "nenhum"})`,
+      consumidoresResume.length === 0);
+  }
+
+  // ─── S. A superficie operacional ───────────────────────────────────
+  //
+  // A rota roda DE VERDADE: autenticacao real (token assinado de
+  // verdade, cookie de verdade), observador real, detector real, contra
+  // o duplo de banco. Nao ha auth fake, nao ha observador injetado — a
+  // producao nao ganhou nenhuma porta para teste.
+
+  const { POST } = await import("../app/api/admin/agentes/aprovacoes-stale/route");
+  const { assinarSessao } = await import("../lib/sessao-assinada");
+
+  const SEGREDO_TESTE = "segredo-de-teste-com-pelo-menos-32-bytes!!";
+  process.env.SESSION_SECRET = SEGREDO_TESTE;
+  const UID = "77777777-7777-4777-8777-777777777777";
+
+  const tokenValido = await assinarSessao(UID, {
+    segredo: SEGREDO_TESTE,
+    agoraSegundos: Math.floor(Date.now() / 1000),
+  });
+
+  const pedir = (corpo?: unknown, cookie: string | null = `cds_session=${tokenValido}`) =>
+    POST(
+      new Request("https://cds.local/api/admin/agentes/aprovacoes-stale", {
+        method: "POST",
+        headers: cookie === null ? {} : { cookie },
+        body:
+          corpo === undefined
+            ? undefined
+            : typeof corpo === "string"
+              ? corpo
+              : JSON.stringify(corpo),
+      })
+    );
+
+  /** O `user_id` que o detector recebeu na primeira leitura. */
+  const donoConsultado = () => chamadasDb[0]?.filtros.user_id;
+
+  secao("S. A rota operacional: autenticada, tenant-scoped e read-only");
+  {
+    // ── S1. Sem sessao ──────────────────────────────────────────────
+    roteiroDb(...paginaDb([]));
+    const semAuth = await pedir({}, null);
+    ok("S1  sem cookie de sessao -> 401", semAuth.status === 401);
+    ok("S2  e o observador NAO e chamado", chamadasDb.length === 0);
+
+    roteiroDb(...paginaDb([]));
+    const tokenRuim = await pedir({}, "cds_session=nao-e-um-token");
+    ok("S3  token adulterado -> 401", tokenRuim.status === 401);
+    ok("S4  e tambem sem tocar o banco", chamadasDb.length === 0);
+
+    // ── S5. Caminho feliz ───────────────────────────────────────────
+    roteiroDb(...paginaDb([abertura(1)], [aprovacaoDe(1)], []));
+    const ok200 = await pedir({});
+    const corpo200 = (await ok200.json()) as { ok: boolean; resumo: Record<string, unknown> };
+
+    ok("S5  sessao valida com coleta ok -> 200", ok200.status === 200 && corpo200.ok === true);
+    ok("S6  o tenant consultado e o uid da SESSAO", donoConsultado() === UID);
+    ok("S7  o resumo do segmento viaja inteiro",
+      ["total", "idadeMaximaMs", "maisAntigaEm", "porFuncao", "paginas", "esgotado",
+       "nextCursor", "coleta", "inicioEm", "fimEm"].every((c) => c in corpo200.resumo));
+    ok("S8  e traz a stale observada", corpo200.resumo.total === 1);
+    ok("S9  UMA passada do observador por request",
+      chamadasDb.filter((c) => c.tabela === "agente_funcao_chamadas" &&
+        c.filtros.fase === "abertura").length === 1);
+
+    // ── S10. Corpo ──────────────────────────────────────────────────
+    roteiroDb(...paginaDb([]));
+    const semCorpo = await pedir();
+    ok("S10 corpo ausente vale como sem cursor",
+      semCorpo.status === 200 && chamadasDb[0]?.or === null);
+
+    roteiroDb(...paginaDb([]));
+    const cursorNulo = await pedir({ cursor: null });
+    ok("S11 cursor null tambem", cursorNulo.status === 200 && chamadasDb[0]?.or === null);
+
+    const cursorBom = { criadoEm: "2026-09-01T10:01:40.000+00:00", requestId: "req-0100" };
+    roteiroDb(...paginaDb([]));
+    const comCursor = await pedir({ cursor: cursorBom });
+    ok("S12 cursor valido e encaminhado ao detector",
+      comCursor.status === 200 && chamadasDb[0]?.or === expressaoDeContinuacao(cursorBom));
+
+    roteiroDb(...paginaDb([]));
+    const jsonRuim = await pedir("{ nao e json");
+    ok("S13 JSON invalido -> 400", jsonRuim.status === 400 && chamadasDb.length === 0);
+
+    roteiroDb(...paginaDb([]));
+    const arrayCorpo = await pedir([1, 2, 3]);
+    ok("S14 corpo array -> 400", arrayCorpo.status === 400 && chamadasDb.length === 0);
+
+    roteiroDb(...paginaDb([]));
+    const cursorAbsurdo = await pedir({ cursor: { criadoEm: 42, requestId: [] } });
+    ok("S15 cursor com tipos absurdos -> 400",
+      cursorAbsurdo.status === 400 && chamadasDb.length === 0);
+
+    // ── S16. A FRONTEIRA DE TENANT ──────────────────────────────────
+    //
+    // O corpo nao pode escolher dono. Recusar, e nao ignorar: ignorar em
+    // silencio ensinaria que o campo existe e nao faz nada.
+    const OUTRO = "88888888-8888-4888-8888-888888888888";
+    for (const [rotulo, corpo] of [
+      ["userId", { userId: OUTRO }],
+      ["user_id", { user_id: OUTRO }],
+      ["cursor + userId", { cursor: null, userId: OUTRO }],
+    ] as const) {
+      roteiroDb(...paginaDb([]));
+      const r = await pedir(corpo);
+      ok(`S16 corpo com ${rotulo} -> 400`, r.status === 400);
+      ok(`S16a e o observador nem e chamado (${rotulo})`, chamadasDb.length === 0);
+    }
+
+    // ── S17. Os codigos de falha ────────────────────────────────────
+    roteiroDb(falhaDb);
+    const falhaLeitura = await pedir({});
+    const corpoFalha = (await falhaLeitura.json()) as Record<string, unknown>;
+    ok("S17 falha_leitura -> 503, e nao 200 com zero stale",
+      falhaLeitura.status === 503 && corpoFalha.ok === false &&
+      corpoFalha.erro === "falha_leitura");
+    ok("S18 e nenhum erro cru do driver viaja no corpo",
+      !/sqlstate|08006|message|stack|select/i.test(JSON.stringify(corpoFalha)));
+
+    // Cursor parado: o detector devolve o mesmo ponto e o observador
+    // classifica como contrato_invalido.
+    const parado = { criadoEm: "2026-09-01T10:01:40.000+00:00", requestId: "req-0100" };
+    roteiroDb(...paginaDb(linhas(1, PAGINA_STALE + 1), []));
+    const contrato = await pedir({ cursor: parado });
+    ok("S19 contrato_invalido -> 500", contrato.status === 500);
+
+    // ── S20. Segmento incompleto ────────────────────────────────────
+    const roteiroTeto: RespostaDb[] = [];
+    for (let p = 0; p < MAX_PAGINAS_OBSERVACAO; p++) {
+      const de = p * (PAGINA_STALE + 1) + 1;
+      roteiroTeto.push(...paginaDb(linhas(de, de + PAGINA_STALE), []));
+    }
+    roteiroDb(...roteiroTeto);
+    const incompleto = await pedir({});
+    const corpoIncompleto = (await incompleto.json()) as { resumo: Record<string, unknown> };
+
+    ok("S20 segmento que atinge o teto volta 200 com esgotado=false",
+      incompleto.status === 200 && corpoIncompleto.resumo.esgotado === false);
+    ok("S21 e devolve o cursor para o proximo segmento",
+      corpoIncompleto.resumo.nextCursor !== null);
+    ok("S22 a rota NAO itera sozinha ate esgotar",
+      chamadasDb.filter((c) => c.tabela === "agente_funcao_chamadas" &&
+        c.filtros.fase === "abertura").length === MAX_PAGINAS_OBSERVACAO);
+  }
+
+  secao("S2. A rota nao ganha poder nenhum — provado pela fonte");
+  {
+    const ROTA = "app/api/admin/agentes/aprovacoes-stale/route.ts";
+    const ROTA_CODIGO = semComentariosTs(ler(ROTA));
+
+    ok("S23 a rota usa a autenticacao existente, e nao uma paralela",
+      /autenticarRequisicao\(request\)/.test(ROTA_CODIGO) &&
+      /from "@\/lib\/autenticacao"/.test(ROTA_CODIGO));
+    ok("S24 o userId sai de auth.uid, e de lugar nenhum mais",
+      /const userId = auth\.uid;/.test(ROTA_CODIGO) &&
+      !/body[^\n]*user_?[Ii]d|corpo[^\n]*\.user_?[Ii]d/.test(ROTA_CODIGO));
+    ok("S25 consome o observador, nao o detector",
+      /observarAberturasStaleDoUsuario/.test(ROTA_CODIGO) &&
+      !/listarAberturasStale|aprovacoes\/stale/.test(ROTA_CODIGO));
+    ok("S26 zero Supabase e zero tabela",
+      !/supabase/i.test(ROTA_CODIGO) &&
+      !/agente_funcao_aprovacoes|agente_funcao_chamadas/.test(ROTA_CODIGO));
+    ok("S27 zero escrita",
+      !/\.insert\(|\.update\(|\.upsert\(|\.delete\(|\.rpc\(/.test(ROTA_CODIGO));
+    ok("S28 zero executor e zero retomada",
+      !/executarFuncao|retomarAprovacao|executarComAberturaFeita|execucao-funcoes/
+        .test(ROTA_CODIGO));
+    ok("S29 zero closer",
+      !/registrarAbertura|registrarDesfecho|chamadas\/registro/.test(ROTA_CODIGO));
+    ok("S30 zero processo de fundo",
+      !/setInterval|setTimeout|cron|scheduler|queue|worker/i.test(ROTA_CODIGO));
+    ok("S31 zero varredura de tenants",
+      !/perfil|auth\.users|todos os usuarios/i.test(ROTA_CODIGO));
+    ok("S32 nao chama o observador mais de uma vez",
+      (ROTA_CODIGO.match(/observarAberturasStaleDoUsuario\(/g) ?? []).length === 1);
+    ok("S33 nao loga dono, cursor nem id",
+      !/console\.[a-z]+\([^)]*(userId|uid|cursor|requestId|aprovacaoId)/.test(ROTA_CODIGO));
+    ok("S34 o corpo aceito e uma allowlist fechada",
+      /CAMPOS_ACEITOS = new Set\(\["cursor"\]\)/.test(ROTA_CODIGO));
+    ok("S35 o cursor tambem tem allowlist fechada",
+      /CAMPOS_CURSOR_ACEITOS = new Set\(\["criadoEm", "requestId"\]\)/.test(ROTA_CODIGO));
+    ok("S36 o 200 exige coleta ok declarada, e nao sobra de fluxo",
+      /case "ok":/.test(ROTA_CODIGO) && /default:/.test(ROTA_CODIGO));
+  }
+
+  // ─── S3. As fronteiras que o review D2-I2-R1 apontou ───────────────
+
+  secao("S3. Cursor fechado e status fail-closed");
+  {
+    ok("S37 ANCORA: o envelope delegante do observador foi instalado", interceptouObservador);
+
+    const CURSOR_BOM = { criadoEm: "2026-09-01T10:01:40.000+00:00", requestId: "req-0100" };
+
+    // ── F1-A. O cursor legitimo continua funcionando ────────────────
+    roteiroDb(...paginaDb([]));
+    const valido = await pedir({ cursor: CURSOR_BOM });
+    ok("F1-A cursor valido sem extras continua aceito",
+      valido.status === 200 && chamadasDb[0]?.or === expressaoDeContinuacao(CURSOR_BOM));
+
+    // ── F1-B/C/D. Extras dentro do cursor sao RECUSADOS ─────────────
+    //
+    // A regressao: antes eles passavam e eram descartados em silencio.
+    // `userId` ali era inerte — mas um contexto tecnico com contrato
+    // aberto e onde autoridade escondida entra sem ninguem ver.
+    const EXTRAS: Array<[string, Record<string, unknown>]> = [
+      ["userId", { ...CURSOR_BOM, userId: "88888888-8888-4888-8888-888888888888" }],
+      ["user_id", { ...CURSOR_BOM, user_id: "88888888-8888-4888-8888-888888888888" }],
+      ["campo generico", { ...CURSOR_BOM, qualquerOutraCoisa: 1 }],
+    ];
+    let recusados = 0;
+    let semTocarBanco = 0;
+    for (const [, cursor] of EXTRAS) {
+      roteiroDb(...paginaDb([]));
+      const r = await pedir({ cursor });
+      if (r.status === 400) recusados++;
+      if (chamadasDb.length === 0) semTocarBanco++;
+    }
+    ok(`F1-BCD cursor com campo extra -> 400 nos ${EXTRAS.length} casos`,
+      recusados === EXTRAS.length, `${recusados}/${EXTRAS.length}`);
+    ok("F1-E e em nenhum deles o observador chega a ser chamado",
+      semTocarBanco === EXTRAS.length, `${semTocarBanco}/${EXTRAS.length}`);
+
+    // ── F1-F/G/H. Coleta desconhecida NAO vira sucesso ──────────────
+    //
+    // A regressao: com o fall-through antigo, qualquer coleta fora das
+    // tres tratadas caia no `return` final e virava 200.
+    respostaObservadorForcada = {
+      total: 7,
+      idadeMaximaMs: 1,
+      maisAntigaEm: "2026-09-01T10:00:00.000+00:00",
+      porFuncao: { "vendas.consultar": 7 },
+      paginas: 1,
+      esgotado: true,
+      nextCursor: null,
+      coleta: "variacao_futura",
+      inicioEm: "2026-09-01T10:00:00.000+00:00",
+      fimEm: "2026-09-01T10:00:00.000+00:00",
+    };
+    roteiroDb();
+    const desconhecida = await pedir({});
+    const corpoDesconhecida = await desconhecida.text();
+    respostaObservadorForcada = null;
+
+    ok("F1-F coleta desconhecida NAO retorna 200", desconhecida.status !== 200);
+    ok("F1-G e responde 500 fail-closed", desconhecida.status === 500);
+    ok("F1-H sem ecoar o valor interno nem o resumo",
+      !/variacao_futura/.test(corpoDesconhecida) && !/porFuncao|esgotado/.test(corpoDesconhecida),
+      corpoDesconhecida);
+    ok("F1-I e o corpo e o erro generico sanitizado",
+      JSON.parse(corpoDesconhecida).erro === "erro_interno");
+
+    // ── CONTROLE: o envelope volta a delegar ────────────────────────
+    roteiroDb(...paginaDb([abertura(1)], [aprovacaoDe(1)], []));
+    const voltouAoReal = await pedir({});
+    ok("F1-J CONTROLE: com a resposta forcada limpa, o observador real volta",
+      voltouAoReal.status === 200 &&
+      ((await voltouAoReal.json()) as { resumo: { total: number } }).resumo.total === 1);
   }
 }
 
