@@ -152,6 +152,19 @@ export type ResultadoExecucaoFuncao =
  *  recopiado: acrescentar campo a variante `erro` chega aqui sozinho. */
 type ResultadoErro = Extract<ResultadoExecucaoFuncao, { tipo: "erro" }>;
 
+/**
+ * O que uma linha de chamada carrega, sem os campos de RESULTADO.
+ *
+ * Derivado de `EntradaDesfechoDeExecucao`, nunca redigitado: a forma de
+ * uma linha e propriedade de `registro.ts`, e escrever a lista de campos
+ * a mao aqui criaria um segundo contrato de auditoria que precisaria
+ * concordar para sempre. Coluna nova chega ate aqui sozinha.
+ */
+type SnapshotChamada = Omit<
+  EntradaDesfechoDeExecucao,
+  "status" | "codigo" | "mensagem" | "latenciaMs"
+>;
+
 // ─── Auxiliares puros ─────────────────────────────────────────────────
 
 /**
@@ -286,7 +299,7 @@ async function erroSemExecucao(
  * uma decisao de gate, nunca um efeito colateral.
  */
 async function erroDeExecucao(
-  snapshot: Omit<EntradaDesfechoDeExecucao, "status" | "codigo" | "mensagem" | "latenciaMs">,
+  snapshot: SnapshotChamada,
   latenciaMs: number,
   codigo: "executor_falhou" | "saida_invalida" | "erro_interno",
   envelopeCode: string,
@@ -312,6 +325,116 @@ async function erroDeExecucao(
     requestId: snapshot.requestId,
     envelope: seguro.envelope,
     auditoria: registro.estado === "registrada" ? "completa" : "incompleta",
+  };
+}
+
+// ─── O pos-abertura ───────────────────────────────────────────────────
+
+/**
+ * Tudo que acontece DEPOIS de a abertura estar gravada.
+ *
+ * ── Por que isto e uma funcao, e nao um trecho ──────────────────────
+ *
+ * A abertura de uma chamada tem DOIS escritores. Um e `registrarAbertura`,
+ * logo abaixo. O outro e a RPC `aprovacao_consumir_e_abrir`, que grava a
+ * abertura na mesma transacao em que consome a aprovacao — porque
+ * consumir e abrir precisam ser atomicos, e TypeScript nao roda em
+ * transacao.
+ *
+ * O que vem depois da abertura precisa ser o MESMO nos dois casos:
+ * mesma execucao, mesma interpretacao, mesmo envelope, mesmo
+ * fechamento, mesma politica de auditoria incompleta. Duas copias
+ * divergiriam no primeiro conserto feito so de um lado — e a que
+ * divergisse em silencio seria a que registra o que aconteceu.
+ *
+ * ── O que ela deliberadamente NAO faz ───────────────────────────────
+ *
+ * Nao abre chamada e nao gera `request_id`. Ela recebe uma chamada JA
+ * aberta e a fecha pelo MESMO `snapshot.requestId`: um id novo aqui
+ * produziria um desfecho que nao encontra sua abertura, e uma abertura
+ * que nunca e fechada. Quem abriu escolhe a correlacao; quem fecha a
+ * respeita.
+ */
+async function executarComAberturaFeita(
+  snapshot: SnapshotChamada,
+  definicao: DefinicaoFuncao,
+  argumentos: unknown
+): Promise<ResultadoExecucaoFuncao> {
+  // ── Execucao ──────────────────────────────────────────────────────
+  //
+  // O relogio mede a FUNCAO, nao a orquestracao: interpretador, envelope
+  // e auditoria ficam de fora.
+  const inicio = performance.now();
+  let saida: unknown;
+  try {
+    saida = await definicao.executor({ userId: snapshot.userId }, argumentos);
+  } catch {
+    const latenciaMs = Math.round(performance.now() - inicio);
+    return erroDeExecucao(snapshot, latenciaMs, "executor_falhou", "executor_falhou", MSG_EXECUTOR, false);
+  }
+  const latenciaMs = Math.round(performance.now() - inicio);
+
+  // ── Interpretacao ─────────────────────────────────────────────────
+  let leitura;
+  try {
+    leitura = definicao.interpretarSaida(saida);
+  } catch {
+    // Throw do interpretador e bug INTERNO, nao prova de saida invalida.
+    return erroDeExecucao(snapshot, latenciaMs, "erro_interno", "erro_interno", MSG_INTERNO, false);
+  }
+
+  if (leitura.tipo === "invalida") {
+    return erroDeExecucao(snapshot, latenciaMs, "saida_invalida", "saida_invalida", MSG_SAIDA, false);
+  }
+
+  if (leitura.tipo === "erro") {
+    // A Funcao rodou e reportou falha de DOMINIO: categoria
+    // `executor_falhou` na auditoria, codigo especifico no envelope.
+    return erroDeExecucao(
+      snapshot,
+      latenciaMs,
+      "executor_falhou",
+      leitura.codigo,
+      leitura.mensagem,
+      leitura.retryable
+    );
+  }
+
+  // ── Envelope ──────────────────────────────────────────────────────
+  //
+  // Duas camadas: `interpretarSaida` e o contrato da Funcao,
+  // `envelopeValido` e o contrato generico da CDS. Sem `execution_id` —
+  // este executor roda em processo.
+  const envelope: EnvelopeSucesso = {
+    contrato: VERSAO_CONTRATO,
+    ok: true,
+    request_id: snapshot.requestId,
+    data: leitura.data,
+  };
+
+  if (!envelopeValido(envelope)) {
+    return erroDeExecucao(snapshot, latenciaMs, "saida_invalida", "saida_invalida", MSG_SAIDA, false);
+  }
+
+  // ── Desfecho ──────────────────────────────────────────────────────
+  //
+  // A saida NAO e persistida: a auditoria guarda o que aconteceu, nunca
+  // o dado do cliente.
+  const desfecho = await registrarDesfechoDeExecucao({ ...snapshot, status: "sucesso", latenciaMs });
+
+  // Leitura idempotente cujo desfecho nao gravou: o resultado e
+  // verdadeiro e devolve-lo e honesto — mas a auditoria fica incompleta,
+  // e quem chama precisa saber disso. A abertura orfa permanece, e e
+  // exatamente o sinal que o indice parcial `WHERE status='executando'`
+  // existe para encontrar.
+  //
+  // Para ESCRITA a politica e outra — `falha_auditoria`, sem devolver
+  // resultado —, e ela nao e alcancavel aqui porque escrita nao executa.
+  return {
+    tipo: "sucesso",
+    requestId: snapshot.requestId,
+    envelope,
+    auditoria: desfecho.estado === "registrada" ? "completa" : "incompleta",
   };
 }
 
@@ -491,80 +614,10 @@ export async function executarFuncao(
     return { tipo: "falha_auditoria", requestId, etapa: "abertura", reexecutavel: false };
   }
 
-  // ── 9. Execucao ───────────────────────────────────────────────────
+  // ── 9. Execucao, interpretacao, envelope e desfecho ───────────────
   //
-  // O relogio mede a FUNCAO, nao a orquestracao: interpretador, envelope
-  // e auditoria ficam de fora.
-  const inicio = performance.now();
-  let saida: unknown;
-  try {
-    saida = await definicao.executor({ userId }, argumentos);
-  } catch {
-    const latenciaMs = Math.round(performance.now() - inicio);
-    return erroDeExecucao(snapshot, latenciaMs, "executor_falhou", "executor_falhou", MSG_EXECUTOR, false);
-  }
-  const latenciaMs = Math.round(performance.now() - inicio);
-
-  // ── 10. Interpretacao ─────────────────────────────────────────────
-  let leitura;
-  try {
-    leitura = definicao.interpretarSaida(saida);
-  } catch {
-    // Throw do interpretador e bug INTERNO, nao prova de saida invalida.
-    return erroDeExecucao(snapshot, latenciaMs, "erro_interno", "erro_interno", MSG_INTERNO, false);
-  }
-
-  if (leitura.tipo === "invalida") {
-    return erroDeExecucao(snapshot, latenciaMs, "saida_invalida", "saida_invalida", MSG_SAIDA, false);
-  }
-
-  if (leitura.tipo === "erro") {
-    // A Funcao rodou e reportou falha de DOMINIO: categoria
-    // `executor_falhou` na auditoria, codigo especifico no envelope.
-    return erroDeExecucao(
-      snapshot,
-      latenciaMs,
-      "executor_falhou",
-      leitura.codigo,
-      leitura.mensagem,
-      leitura.retryable
-    );
-  }
-
-  // ── 11. Envelope ──────────────────────────────────────────────────
-  //
-  // Duas camadas: `interpretarSaida` e o contrato da Funcao,
-  // `envelopeValido` e o contrato generico da CDS. Sem `execution_id` —
-  // este executor roda em processo.
-  const envelope: EnvelopeSucesso = {
-    contrato: VERSAO_CONTRATO,
-    ok: true,
-    request_id: requestId,
-    data: leitura.data,
-  };
-
-  if (!envelopeValido(envelope)) {
-    return erroDeExecucao(snapshot, latenciaMs, "saida_invalida", "saida_invalida", MSG_SAIDA, false);
-  }
-
-  // ── 12. Desfecho ──────────────────────────────────────────────────
-  //
-  // A saida NAO e persistida: a auditoria guarda o que aconteceu, nunca
-  // o dado do cliente.
-  const desfecho = await registrarDesfechoDeExecucao({ ...snapshot, status: "sucesso", latenciaMs });
-
-  // Leitura idempotente cujo desfecho nao gravou: o resultado e
-  // verdadeiro e devolve-lo e honesto — mas a auditoria fica incompleta,
-  // e quem chama precisa saber disso. A abertura orfa permanece, e e
-  // exatamente o sinal que o indice parcial `WHERE status='executando'`
-  // existe para encontrar.
-  //
-  // Para ESCRITA a politica e outra — `falha_auditoria`, sem devolver
-  // resultado —, e ela nao e alcancavel aqui porque escrita nao executa.
-  return {
-    tipo: "sucesso",
-    requestId,
-    envelope,
-    auditoria: desfecho.estado === "registrada" ? "completa" : "incompleta",
-  };
+  // Daqui para a frente a chamada JA esta aberta, e o que acontece nao
+  // depende de como ela foi aberta. Uma implementacao so — a mesma que
+  // fecha uma abertura vinda da RPC de aprovacao.
+  return executarComAberturaFeita(snapshot, definicao, argumentos);
 }
