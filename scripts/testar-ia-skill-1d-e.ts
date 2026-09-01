@@ -755,7 +755,26 @@ async function principal(): Promise<void> {
   // exporta a funcao nao a consome. E a igualdade e nos DOIS sentidos —
   // um segundo consumidor reprova, e o desaparecimento do autorizado
   // tambem, para que a guarda nunca vire "o compositor existe".
-  const CONSUMIDORES_AUTORIZADOS: readonly string[] = ["lib/agentes/diagnostico/compositor.ts"];
+  // ── TOOL-EXEC-B: o segundo consumidor legitimo ─────────────────────
+  //
+  // O executor de Funcoes (`lib/agentes/execucao-funcoes/executar.ts`)
+  // passou a resolver as conexoes do agente antes de decidir se uma Funcao pode ser
+  // chamada. E o MESMO dado que o compositor usa; resolve-lo por conta
+  // propria seria a duplicacao que esta guarda existe para impedir.
+  //
+  // A exigencia nao afrouxa: continua igualdade de conjunto, por caminho
+  // NOMINAL, nos dois sentidos. Antes { compositor }, agora
+  // { compositor, executar }. Prefixo, pasta ou contagem, nao.
+  const EXECUTOR_FUNCOES = "lib/agentes/execucao-funcoes/executar.ts";
+  const CONSUMIDORES_AUTORIZADOS: readonly string[] = [
+    "lib/agentes/diagnostico/compositor.ts",
+    EXECUTOR_FUNCOES,
+  ];
+  const COMPOSITOR = CONSUMIDORES_AUTORIZADOS[0];
+
+  const mesmoConjunto = (a: readonly string[], b: readonly string[]): boolean =>
+    JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
+
   const consumidores = ["lib", "app"].flatMap((raiz) => {
     const varrer = (dir: string): string[] => {
       const saida: string[] = [];
@@ -770,11 +789,16 @@ async function principal(): Promise<void> {
     };
     return varrer(raiz);
   });
-  const naoAutorizados = consumidores.filter((c) => !CONSUMIDORES_AUTORIZADOS.includes(c));
-  ok(`M12 so o compositor consome o agregador (${consumidores.join(", ") || "nenhum"})`,
-    naoAutorizados.length === 0 &&
-      JSON.stringify(consumidores.slice().sort()) ===
-        JSON.stringify([...CONSUMIDORES_AUTORIZADOS].sort()));
+  ok(`M12 o agregador tem exatamente os consumidores declarados (${consumidores.join(", ") || "nenhum"})`,
+    mesmoConjunto(consumidores, CONSUMIDORES_AUTORIZADOS));
+  ok("M12a CONTROLE: o conjunto exato dos dois autorizados passa",
+    mesmoConjunto([COMPOSITOR, EXECUTOR_FUNCOES], CONSUMIDORES_AUTORIZADOS));
+  ok("M12b CONTROLE: o compositor sumir reprova",
+    !mesmoConjunto([EXECUTOR_FUNCOES], CONSUMIDORES_AUTORIZADOS));
+  ok("M12c CONTROLE: o executor sumir reprova",
+    !mesmoConjunto([COMPOSITOR], CONSUMIDORES_AUTORIZADOS));
+  ok("M12d CONTROLE: um terceiro consumidor reprova",
+    !mesmoConjunto([...CONSUMIDORES_AUTORIZADOS, "app/api/x/route.ts"], CONSUMIDORES_AUTORIZADOS));
 
   console.log(`\n══ ${passou} PASS / ${falhou} FAIL ══\n`);
   process.exitCode = falhou === 0 ? 0 : 1;

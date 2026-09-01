@@ -44,6 +44,7 @@
 import "server-only";
 import {
   criarLeiturasDeVendas,
+  validarFiltroVendas,
   type FiltroVendas,
   type ResultadoVendas,
 } from "@/lib/agentes/dados/vendas";
@@ -105,6 +106,80 @@ export interface RequisitoConexaoFuncao {
   recurso: string;
 }
 
+// ─── Entrada e saida: o que cada Funcao sabe sobre si ─────────────────
+
+/**
+ * O veredicto sobre os ARGUMENTOS, antes de qualquer execucao.
+ *
+ * ── Por que o catalogo passou a ter isto ────────────────────────────
+ *
+ * Ate a TOOL-CALL-B este contrato nao existia, e o docblock abaixo
+ * dizia por que: `vendas.consultar` ja validava dentro do proprio
+ * executor, entao um campo aqui duplicaria a regra. A condicao que ele
+ * mesmo registrou — "quando existir uma Funcao cuja validacao NAO tenha
+ * dono" — foi atingida por outro caminho.
+ *
+ * O executor generico precisa recusar entrada invalida ANTES de abrir a
+ * Tool Call, porque abertura significa "o executor vai ser chamado
+ * agora". Desse ponto de vista a regra nao tem dono alcancavel: chamar
+ * a Funcao para descobrir se o argumento serve seria executa-la.
+ *
+ * A alternativa era um `switch (funcaoId)` dentro do executor — uma
+ * segunda registry de comportamento por Tool, exatamente o que este
+ * modulo existe para impedir.
+ *
+ * ── O que ele NAO faz ───────────────────────────────────────────────
+ *
+ * Nao normaliza. `validarFiltroVendas` nao normaliza hoje, e devolver
+ * argumentos "corrigidos" inventaria comportamento que ninguem pediu —
+ * o executor repassa o argumento ORIGINAL. Nao faz I/O, nao lanca por
+ * contrato, e nao concede capacidade nenhuma: dizer que uma entrada e
+ * valida nao diz que o agente pode usar a Funcao.
+ *
+ * `codigo` e detalhe de DOMINIO (`janela_excedida`), nunca a categoria
+ * de infraestrutura — essa e sempre `entrada_invalida` na Tool Call.
+ */
+export type ResultadoValidacaoEntrada =
+  | { valida: true }
+  | { valida: false; codigo: string };
+
+export type ValidadorEntrada = (argumentos: unknown) => ResultadoValidacaoEntrada;
+
+/**
+ * O veredicto sobre a SAIDA que o executor devolveu.
+ *
+ * ── O problema exato que ele resolve ────────────────────────────────
+ *
+ * `vendas.consultar` devolve `{ linhas, truncado, erro }` e sinaliza
+ * falha POR VALOR: `erro: "erro_consulta_vendas"` e uma consulta que
+ * falhou, nao um resultado vazio. O executor generico recebe `unknown`
+ * e, sem conhecer a forma, chamaria isso de sucesso — gravando na
+ * auditoria que a Funcao funcionou quando ela nao funcionou.
+ *
+ * Quem sabe ler o resultado e a propria Funcao. Por isso o interpretador
+ * mora aqui, ao lado do executor que o produz.
+ *
+ * ── Tres estados, e nao dois ────────────────────────────────────────
+ *
+ *   sucesso    `data` e o resultado canonico que vai para o envelope.
+ *   erro       falha de DOMINIO: a Funcao rodou e reportou problema.
+ *   invalida   a saida nao respeita a forma que a Funcao promete.
+ *
+ * Colapsar `erro` e `invalida` obrigaria o executor generico a adivinhar
+ * entre `executor_falhou` e `saida_invalida`, que a Tool Call ja separa.
+ *
+ * `mensagem` e `retryable` vem daqui porque tambem sao conhecimento da
+ * Funcao: so ela sabe se repetir e seguro. `retryable: true` afirma
+ * "repetir nao causa dano", NUNCA "repita" — nao existe retry no
+ * sistema, e o executor nao reexecuta nada.
+ */
+export type ResultadoInterpretacaoSaida =
+  | { tipo: "sucesso"; data: unknown }
+  | { tipo: "erro"; codigo: string; mensagem: string; retryable: boolean }
+  | { tipo: "invalida" };
+
+export type InterpretadorSaida = (saida: unknown) => ResultadoInterpretacaoSaida;
+
 /**
  * O que se sabe sobre uma Funcao AQUI.
  *
@@ -136,15 +211,21 @@ export interface RequisitoConexaoFuncao {
  * sao estado observado de um sistema que muda FORA deste repositorio, e
  * declara-los aqui criaria um espelho que envelhece sozinho.
  *
- * ── Validacao de argumentos: deliberadamente ausente ────────────────
+ * ── Validacao e interpretacao: o campo que faltava ──────────────────
  *
- * Nao ha `validarEntrada`/`validarSaida` neste contrato. Nao por
- * esquecimento: `vendas.consultar` ja valida dentro do executor, via
- * `validarFiltroVendas`, que e pura e devolve codigos ESTAVEIS. Declarar
- * um validador aqui duplicaria essa regra, e duas validacoes que
- * precisam concordar para sempre acabam discordando. Quando existir uma
- * Funcao cuja validacao NAO tenha dono, o campo se justifica — hoje nao
- * tem.
+ * Este contrato dizia que `validarEntrada` nao existia "por enquanto",
+ * porque `vendas.consultar` ja validava dentro do executor e um campo
+ * aqui duplicaria a regra. A condicao que ele mesmo registrou foi
+ * atingida na TOOL-EXEC: o executor generico precisa decidir ANTES de
+ * abrir a Tool Call, e dali a regra nao tem dono alcancavel.
+ *
+ * Os dois campos NAO duplicam nada. `validarEntrada` de
+ * `vendas.consultar` delega a `validarFiltroVendas`, que continua a
+ * unica autoridade das regras; `interpretarSaida` le o
+ * `ResultadoVendas` que o proprio executor produz. Os dois sao
+ * OBRIGATORIOS: ausencia de validador nao pode significar "aceita
+ * qualquer coisa", e ausencia de interpretador nao pode significar
+ * "qualquer retorno e sucesso". Uma Funcao nova sem eles nao compila.
  *
  * ── Divida aceita ───────────────────────────────────────────────────
  *
@@ -153,7 +234,13 @@ export interface RequisitoConexaoFuncao {
  * valor do servidor, os dois podem divergir sem que nada acuse.
  */
 export interface DefinicaoFuncao {
+  // `executor` PRIMEIRO: existencia e a presenca dele, e a ordem e
+  // cobrada por assert. Os tres primeiros campos sao as
+  // responsabilidades da propria Funcao — validar, executar, interpretar
+  // —; os tres ultimos sao metadados operacionais.
   executor: ExecutorFuncao;
+  validarEntrada: ValidadorEntrada;
+  interpretarSaida: InterpretadorSaida;
   acesso: "leitura" | "escrita";
   idempotente: boolean;
   conexaoNecessaria: RequisitoConexaoFuncao | null;
@@ -210,6 +297,86 @@ async function executarVendasConsultar(
   return lerVendas(argumentos as FiltroVendas);
 }
 
+/**
+ * `validarEntrada` de `vendas.consultar` — delegacao pura.
+ *
+ * `validarFiltroVendas` continua sendo a UNICA autoridade das regras:
+ * `filtro_ausente`, `data_invalida`, `periodo_invertido`,
+ * `janela_excedida` e `marketplace_invalido` nao sao recopiados aqui, e
+ * o wrapper so traduz a forma (`erro: string | null`) para a uniao
+ * discriminada que o executor generico consome.
+ *
+ * O cast existe pelo mesmo motivo do executor: `validarFiltroVendas`
+ * recusa nao-objeto com `filtro_ausente` antes de tocar qualquer campo,
+ * entao ele nunca confia no tipo.
+ */
+function validarEntradaVendasConsultar(argumentos: unknown): ResultadoValidacaoEntrada {
+  const validacao = validarFiltroVendas(argumentos as FiltroVendas);
+  return validacao.erro === null ? { valida: true } : { valida: false, codigo: validacao.erro };
+}
+
+/**
+ * A mensagem que o DONO le quando a consulta falha.
+ *
+ * Uma so, porque depois da validacao pre-execucao existe exatamente UM
+ * codigo alcancavel (`erro_consulta_vendas`, devolvido pelo limite
+ * inicial e pela paginacao). Nao e tabela de traducao: e a unica frase
+ * que esta Funcao precisa. No dia em que forem cinco, a decisao volta a
+ * ser gate.
+ *
+ * Nunca deriva de `error.message`, `details` ou `hint` do driver — o
+ * modulo de dados ja descarta essas mensagens e registra so o codigo.
+ */
+const MENSAGEM_ERRO_VENDAS = "Nao foi possivel ler as vendas do periodo.";
+
+/**
+ * `interpretarSaida` de `vendas.consultar` — e por que ha checagem de
+ * runtime aqui.
+ *
+ * `saida as ResultadoVendas` seria apagado na compilacao e nao provaria
+ * nada: `null`, `[]`, `{}` e `{ erro: 123 }` passariam pelo cast e
+ * quebrariam adiante, ou pior, virariam "sucesso". A forma minima e
+ * conferida de verdade, e o que nao a respeita e `invalida`.
+ *
+ * As LINHAS nao sao validadas uma a uma: `ResultadoVendas` nao promete
+ * mais do que "array", e exigir a forma de cada `LinhaVenda` inventaria
+ * requisito que o contrato nao tem.
+ *
+ * `truncado` atravessa para o `data`. Silencia-lo entregaria um total
+ * incompleto com cara de completo — o proprio contrato de
+ * `ResultadoVendas` diz que quem consome PRECISA propagar isso.
+ */
+function interpretarSaidaVendasConsultar(saida: unknown): ResultadoInterpretacaoSaida {
+  if (typeof saida !== "object" || saida === null) return { tipo: "invalida" };
+  const proto = Object.getPrototypeOf(saida);
+  if (proto !== Object.prototype && proto !== null) return { tipo: "invalida" };
+
+  const bruto = saida as Record<string, unknown>;
+  if (!Array.isArray(bruto.linhas)) return { tipo: "invalida" };
+  if (typeof bruto.truncado !== "boolean") return { tipo: "invalida" };
+
+  const erro = bruto.erro;
+  if (erro === null) {
+    return {
+      tipo: "sucesso",
+      data: { linhas: bruto.linhas, truncado: bruto.truncado, erro: null },
+    };
+  }
+
+  // String vazia nao e codigo de erro nem ausencia de erro: e saida que
+  // nao respeita o proprio contrato.
+  if (typeof erro !== "string" || erro.trim().length === 0) return { tipo: "invalida" };
+
+  return {
+    tipo: "erro",
+    codigo: erro,
+    mensagem: MENSAGEM_ERRO_VENDAS,
+    // Leitura idempotente: repetir nao causa dano. Isto NAO pede retry —
+    // nao existe retry no sistema, e o executor nao reexecuta nada.
+    retryable: true,
+  };
+}
+
 // ─── O registry ───────────────────────────────────────────────────────
 
 /**
@@ -234,6 +401,11 @@ export const FUNCOES: Readonly<Record<string, DefinicaoFuncao>> = Object.freeze(
   // que funciona.
   "vendas.consultar": Object.freeze({
     executor: executarVendasConsultar,
+    // Delega a `validarFiltroVendas`; nenhuma regra e recopiada.
+    validarEntrada: validarEntradaVendasConsultar,
+    // Le o `ResultadoVendas` que o executor acima produz, com checagem
+    // de runtime — o cast sozinho nao provaria nada.
+    interpretarSaida: interpretarSaidaVendasConsultar,
     acesso: "leitura",
     idempotente: true,
     conexaoNecessaria: null,

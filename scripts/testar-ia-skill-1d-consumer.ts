@@ -518,6 +518,25 @@ async function principal(): Promise<void> {
 
   const CONSUMIDOR_AUTORIZADO = "lib/agentes/diagnostico/compositor.ts";
 
+  // ── TOOL-EXEC-B: o segundo consumidor legitimo ─────────────────────
+  //
+  // `resolverConexoesDoAgente` deixou de ter um consumidor unico. O
+  // executor de Funcoes precisa das MESMAS conexoes que o compositor
+  // para decidir se uma Funcao pode ser chamada — e resolve-las por
+  // conta propria seria exatamente a duplicacao que esta guarda existe
+  // para impedir. Ele entra na allowlist NOMINAL, nao por prefixo nem
+  // por pasta: um terceiro consumidor continua reprovando.
+  //
+  // A exigencia nao afrouxa. Antes: conjunto == { compositor }. Agora:
+  // conjunto == { compositor, executar }. Continua sendo igualdade de
+  // conjunto nos DOIS sentidos — o desaparecimento de qualquer um dos
+  // dois tambem reprova.
+  const EXECUTOR_FUNCOES = "lib/agentes/execucao-funcoes/executar.ts";
+  const CONSUMIDORES_CONEXOES: readonly string[] = [CONSUMIDOR_AUTORIZADO, EXECUTOR_FUNCOES];
+
+  const mesmoConjunto = (a: readonly string[], b: readonly string[]): boolean =>
+    JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
+
   const consumidoresDe = (simbolo: string, definicao: string): string[] => {
     const achados: string[] = [];
     const varrer = (dir: string): void => {
@@ -536,8 +555,16 @@ async function principal(): Promise<void> {
   };
 
   const consCon = consumidoresDe("resolverConexoesDoAgente", "lib/agentes/conexoes/agregador.ts");
-  ok("I1  so o compositor consome resolverConexoesDoAgente",
-    JSON.stringify(consCon) === JSON.stringify([CONSUMIDOR_AUTORIZADO]), consCon.join(", "));
+  ok(`I1  o agregador de conexoes tem exatamente os consumidores declarados (${consCon.join(", ") || "nenhum"})`,
+    mesmoConjunto(consCon, CONSUMIDORES_CONEXOES));
+  ok("I1a CONTROLE: o conjunto exato dos dois autorizados passa",
+    mesmoConjunto([CONSUMIDOR_AUTORIZADO, EXECUTOR_FUNCOES], CONSUMIDORES_CONEXOES));
+  ok("I1b CONTROLE: o compositor sumir reprova",
+    !mesmoConjunto([EXECUTOR_FUNCOES], CONSUMIDORES_CONEXOES));
+  ok("I1c CONTROLE: o executor sumir reprova",
+    !mesmoConjunto([CONSUMIDOR_AUTORIZADO], CONSUMIDORES_CONEXOES));
+  ok("I1d CONTROLE: um terceiro consumidor reprova",
+    !mesmoConjunto([...CONSUMIDORES_CONEXOES, "app/api/x/route.ts"], CONSUMIDORES_CONEXOES));
 
   const consDiag = consumidoresDe("diagnosticarSkill", "lib/ia/skills/diagnostico.ts");
   ok("I2  so o compositor consome diagnosticarSkill",

@@ -475,12 +475,36 @@ ok("P6  MOCK_PERMISSOES nao foi tocado nem importado",
     };
     return varrer(raiz);
   });
-  const CONSUMIDORES_AUTORIZADOS: readonly string[] = ["lib/agentes/diagnostico/compositor.ts"];
-  const naoAutorizados = chamadores.filter((c) => !CONSUMIDORES_AUTORIZADOS.includes(c));
-  ok(`P7  so o compositor consome resolverFatosPermissoes (${chamadores.join(", ") || "nenhum"})`,
-    naoAutorizados.length === 0 &&
-      JSON.stringify(chamadores.slice().sort()) ===
-        JSON.stringify([...CONSUMIDORES_AUTORIZADOS].sort()));
+  // ── TOOL-EXEC-B: o segundo consumidor legitimo ─────────────────────
+  //
+  // O executor de Funcoes (`lib/agentes/execucao-funcoes/executar.ts`)
+  // passou a resolver os fatos de permissao antes de decidir se uma Funcao pode ser
+  // chamada. E o MESMO dado que o compositor usa; resolve-lo por conta
+  // propria seria a duplicacao que esta guarda existe para impedir.
+  //
+  // A exigencia nao afrouxa: continua igualdade de conjunto, por caminho
+  // NOMINAL, nos dois sentidos. Antes { compositor }, agora
+  // { compositor, executar }. Prefixo, pasta ou contagem, nao.
+  const EXECUTOR_FUNCOES = "lib/agentes/execucao-funcoes/executar.ts";
+  const CONSUMIDORES_AUTORIZADOS: readonly string[] = [
+    "lib/agentes/diagnostico/compositor.ts",
+    EXECUTOR_FUNCOES,
+  ];
+  const COMPOSITOR = CONSUMIDORES_AUTORIZADOS[0];
+
+  const mesmoConjunto = (a: readonly string[], b: readonly string[]): boolean =>
+    JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
+
+  ok(`P7  resolverFatosPermissoes tem exatamente os consumidores declarados (${chamadores.join(", ") || "nenhum"})`,
+    mesmoConjunto(chamadores, CONSUMIDORES_AUTORIZADOS));
+  ok("P7a CONTROLE: o conjunto exato dos dois autorizados passa",
+    mesmoConjunto([COMPOSITOR, EXECUTOR_FUNCOES], CONSUMIDORES_AUTORIZADOS));
+  ok("P7b CONTROLE: o compositor sumir reprova",
+    !mesmoConjunto([EXECUTOR_FUNCOES], CONSUMIDORES_AUTORIZADOS));
+  ok("P7c CONTROLE: o executor sumir reprova",
+    !mesmoConjunto([COMPOSITOR], CONSUMIDORES_AUTORIZADOS));
+  ok("P7d CONTROLE: um terceiro consumidor reprova",
+    !mesmoConjunto([...CONSUMIDORES_AUTORIZADOS, "app/api/x/route.ts"], CONSUMIDORES_AUTORIZADOS));
 }
 
 // ─── Placar ───────────────────────────────────────────────────────────

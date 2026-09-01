@@ -124,7 +124,24 @@ interface BaseChamada {
 /** Desfecho isolado: o executor nunca foi engajado. */
 export interface EntradaDesfechoSemExecucao extends BaseChamada {
   status: "negado" | "aguardando_aprovacao" | "erro";
-  codigo: CodigoNegacao | Extract<CodigoExecucao, "entrada_invalida">;
+  /**
+   * Os cinco de negacao, mais os DOIS codigos de execucao que podem
+   * acontecer antes de o executor ser engajado:
+   *
+   *   entrada_invalida  o argumento nao passou na validacao da Funcao.
+   *   erro_interno      uma coleta nossa falhou (permissao, conexao).
+   *                     Registrar `permissao_ausente` ali mentiria sobre
+   *                     a configuracao do dono.
+   *
+   * `executor_falhou`, `saida_invalida` e `timeout` ficam de FORA por
+   * tipo: os tres descrevem uma tentativa em que o executor rodou — ou
+   * pode ter rodado —, e essa so existe depois de uma abertura.
+   *
+   * O CHECK do banco NAO faz essa distincao: ele aceita qualquer um dos
+   * cinco em `status='erro'`, com ou sem abertura. A separacao entre
+   * pre e pos-execucao e invariante de TypeScript, provada pelo `tsc`.
+   */
+  codigo: CodigoNegacao | Extract<CodigoExecucao, "entrada_invalida" | "erro_interno">;
   mensagem?: string | null;
 }
 

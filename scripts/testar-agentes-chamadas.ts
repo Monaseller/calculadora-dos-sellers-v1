@@ -17,6 +17,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
+import type { EntradaDesfechoSemExecucao } from "../lib/agentes/chamadas/registro";
 import {
   CODIGOS_EXECUCAO,
   CODIGOS_NEGACAO,
@@ -505,6 +506,52 @@ secao("E4. A API e por FORMA de linha");
     /acesso === "escrita"[\s\S]{0,80}idempotencyKey/.test(REGISTRO_CODIGO));
   ok("E24 desfecho sem execucao nunca carrega idempotency_key",
     /idempotency_key: null/.test(REGISTRO_CODIGO));
+}
+
+secao("E4b. Pre-execucao: quais codigos o TIPO admite");
+{
+  // ── Por que a prova e de COMPILACAO ──────────────────────────────
+  //
+  // O CHECK do banco aceita qualquer um dos cinco codigos de execucao
+  // em `status='erro'`, com ou sem abertura — ele nao tem como saber se
+  // houve uma. A separacao entre pre e pos-execucao e invariante de
+  // TypeScript, e e o `tsc` quem a impoe.
+  //
+  // `AceitaCodigo<C>` responde, em tempo de compilacao, se `C` cabe no
+  // campo. Trocar a uniao em `registro.ts` faz uma destas linhas parar
+  // de compilar — que e exatamente o alarme desejado.
+  type AceitaCodigo<C extends string> =
+    C extends EntradaDesfechoSemExecucao["codigo"] ? true : false;
+
+  // Permitidos antes de o executor ser engajado.
+  const entradaInvalida: AceitaCodigo<"entrada_invalida"> = true;
+  const erroInterno: AceitaCodigo<"erro_interno"> = true;
+
+  // Proibidos: os tres descrevem uma tentativa em que o executor rodou —
+  // ou pode ter rodado —, e essa so existe depois de uma abertura.
+  const executorFalhou: AceitaCodigo<"executor_falhou"> = false;
+  const saidaInvalida: AceitaCodigo<"saida_invalida"> = false;
+  const timeout: AceitaCodigo<"timeout"> = false;
+
+  // As cinco negacoes continuam cabendo.
+  const funcaoInexistente: AceitaCodigo<"funcao_inexistente"> = true;
+  const aprovacaoNecessaria: AceitaCodigo<"aprovacao_necessaria"> = true;
+
+  ok("E4b1 `entrada_invalida` e permitido pre-execucao", entradaInvalida === true);
+  ok("E4b2 `erro_interno` e permitido pre-execucao", erroInterno === true);
+  ok("E4b3 `executor_falhou` e PROIBIDO pre-execucao", executorFalhou === false);
+  ok("E4b4 `saida_invalida` e PROIBIDO pre-execucao", saidaInvalida === false);
+  ok("E4b5 `timeout` e PROIBIDO pre-execucao", timeout === false);
+  ok("E4b6 as negacoes continuam cabendo",
+    funcaoInexistente === true && aprovacaoNecessaria === true);
+
+  // E a mesma separacao, vista pela fonte: o campo cita nominalmente os
+  // dois permitidos e nenhum dos tres proibidos.
+  ok("E4b7 a uniao do campo nomeia so os dois codigos de execucao",
+    /codigo: CodigoNegacao \| Extract<CodigoExecucao, "entrada_invalida" \| "erro_interno">/
+      .test(REGISTRO_CODIGO));
+  ok("E4b8 o caminho pos-execucao continua aceitando CodigoExecucao inteiro",
+    /codigo\?: CodigoExecucao \| null;/.test(REGISTRO_CODIGO));
 }
 
 secao("E5. Snapshot nao e autoridade");

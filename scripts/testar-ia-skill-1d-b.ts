@@ -111,7 +111,14 @@ secao("B. Existencia e a presenca do executor, nunca um campo");
 
 ok("B1  nao existe campo `existe:` no modulo", !/\bexiste\s*:/.test(CODIGO));
 ok("B2  nao existe `existe: true`", !/existe\s*:\s*true/.test(CODIGO));
-ok("B3  DefinicaoFuncao so declara `executor`",
+// O rotulo dizia "so declara `executor`" e envelheceu duas vezes: a
+// TOOL-REGISTRY-B1 acrescentou `acesso`, `idempotente` e
+// `conexaoNecessaria`, e a TOOL-EXEC-B acrescentou `validarEntrada` e
+// `interpretarSaida`. A sonda nunca mediu isso — o que ela SEMPRE
+// mediu, e continua medindo, e que `executor` e o PRIMEIRO campo, que e
+// a forma de dizer "existencia e a presenca do executor". A regex fica
+// intacta; so o nome passa a descrever o que ela faz.
+ok("B3  `executor` e o primeiro campo de DefinicaoFuncao",
   /interface DefinicaoFuncao\s*\{\s*executor:[^}]*\}/s.test(CODIGO));
 ok("B4  toda entrada do registry tem executor",
   (CODIGO.match(/executor:/g) ?? []).length >= IDS.length);
@@ -296,7 +303,17 @@ ok("I10 controle: o detector de bytes enxerga 0x08",
 
 secao("J. Tripwire de tamanho");
 
-const LIMITE = 350;
+// O alarme tocou na TOOL-EXEC-B, e a resposta certa NAO foi dividir a
+// pasta: `lib/agentes/funcoes/` tem tripwire de conteudo exato (tres
+// modulos, H12 aqui e P4 na 1d-d2), entao um quarto arquivo exigiria
+// gate proprio. O que cresceu foram os contratos `ValidadorEntrada` e
+// `InterpretadorSaida` mais os dois wrappers de `vendas.consultar` —
+// codigo que pertence ao catalogo por definicao.
+//
+// O limite sobe para continuar sendo alarme, nao carimbo: 500 deixa
+// pouca folga, e a proxima Funcao registrada volta a fazer alguem
+// decidir se o arquivo ainda cabe em si.
+const LIMITE = 500;
 const linhas = FONTE.split("\n").length;
 ok(`J1  registry abaixo de ${LIMITE} linhas (hoje ${linhas})`, linhas < LIMITE, String(linhas));
 ok("J2  controle: a contagem le o arquivo real", linhas > 50);

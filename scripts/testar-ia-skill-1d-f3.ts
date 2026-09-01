@@ -581,6 +581,36 @@ async function principal(): Promise<void> {
 
   secao("O. Sem consumidor de producao");
 
+  // ── O1 mede CARREGAMENTO, nunca prosa ──────────────────────────────
+  //
+  // A sonda procurava a string `skills/escrita` em TEXTO BRUTO, e por
+  // isso acusava `lib/agentes/chamadas/registro.ts` por um docblock que
+  // cita o modulo como precedente de desenho. Falso positivo nascido no
+  // TOOL-CALL-B (commit 980e755) e so descoberto na varredura ampla do
+  // TOOL-EXEC-B2: o comentario esta certo — a sonda e que media errado.
+  //
+  // A POLITICA continua identica: zero consumidor de producao em `lib/`
+  // e `app/`, o escopo continua sendo as duas pastas inteiras, e o
+  // assert continua sendo assert. O que muda e o que conta como consumo:
+  // importacao/require ESTRUTURAL, nao qualquer ocorrencia do nome.
+  //
+  // Duas defesas em serie, porque cada uma sozinha seria fragil:
+  // comentarios saem ANTES, e o que sobra ainda precisa ter a forma de
+  // um carregamento de modulo.
+  const semComentarios = (f: string) =>
+    f.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
+
+  // `from "…/skills/escrita"` cobre todo import estatico com bindings,
+  // inclusive o multi-linha — `from` e o caminho ficam sempre na mesma
+  // linha. As outras duas alternativas cobrem o import de efeito
+  // colateral, o `import()` dinamico e o `require()` de CommonJS, com
+  // aspas simples ou duplas. Import de TIPO tambem e pego de proposito:
+  // depender do modulo so no tipo continua sendo depender do modulo.
+  const IMPORTA_ESCRITA =
+    /\bfrom\s*["'][^"']*skills\/escrita["']|\bimport\s*\(?\s*["'][^"']*skills\/escrita["']|\brequire\s*\(\s*["'][^"']*skills\/escrita["']/;
+
+  const carregaEscrita = (fonte: string): boolean => IMPORTA_ESCRITA.test(semComentarios(fonte));
+
   const alvos: string[] = [];
   const varrer = (dir: string): void => {
     for (const e of readdirSync(join(RAIZ, dir), { withFileTypes: true })) {
@@ -588,13 +618,45 @@ async function principal(): Promise<void> {
       if (e.isDirectory()) {
         if (!/node_modules|\.next/.test(e.name)) varrer(rel);
       } else if (/\.tsx?$/.test(e.name) && rel !== "lib/agentes/skills/escrita.ts") {
-        if (/skills\/escrita/.test(ler(rel))) alvos.push(rel);
+        if (carregaEscrita(ler(rel))) alvos.push(rel);
       }
     }
   };
   varrer("lib");
   varrer("app");
   ok("O1  zero import de skills/escrita em lib/ e app/", alvos.length === 0, alvos.join(", "));
+
+  // Controles puros: amostras literais, sem tocar em disco. Se um import
+  // real deixar de ser detectado, a protecao virou decorativa — e por
+  // isso os positivos vem antes dos negativos.
+  ok("O1a CONTROLE POSITIVO: import estatico com bindings e detectado",
+    carregaEscrita('import { gravarSkill } from "@/lib/agentes/skills/escrita";'));
+  ok("O1b CONTROLE POSITIVO: import estatico multi-linha e detectado",
+    carregaEscrita('import {\n  gravarSkill,\n} from "../../lib/agentes/skills/escrita";'));
+  ok("O1c CONTROLE POSITIVO: import de efeito colateral e detectado",
+    carregaEscrita('import "@/lib/agentes/skills/escrita";'));
+  ok("O1d CONTROLE POSITIVO: import dinamico e detectado",
+    carregaEscrita('const m = await import("@/lib/agentes/skills/escrita");'));
+  ok("O1e CONTROLE POSITIVO: require com aspas duplas e detectado",
+    carregaEscrita('const m = require("../lib/agentes/skills/escrita");'));
+  ok("O1f CONTROLE POSITIVO: require com aspas simples e detectado",
+    carregaEscrita("const m = require('../lib/agentes/skills/escrita');"));
+  ok("O1g CONTROLE POSITIVO: import de tipo e detectado",
+    carregaEscrita('import type { Gravacao } from "@/lib/agentes/skills/escrita";'));
+
+  ok("O1h CONTROLE NEGATIVO: docblock que cita o modulo NAO e acusado",
+    !carregaEscrita("/**\n * Como em `skills/escrita.ts`, o cliente e parametro explicito.\n */"));
+  ok("O1i CONTROLE NEGATIVO: comentario de linha NAO e acusado",
+    !carregaEscrita("// nunca importar skills/escrita fora da fase de escrita"));
+  ok("O1j CONTROLE NEGATIVO: comentario indentado NAO e acusado",
+    !carregaEscrita("    // ver skills/escrita para o precedente"));
+  ok("O1k CONTROLE NEGATIVO: o nome em texto comum NAO e acusado",
+    !carregaEscrita('const rotulo = "skills/escrita";'));
+
+  // O caso real que originou a correcao, medido no arquivo de verdade.
+  ok("O1l o docblock real de chamadas/registro.ts nao e mais acusado",
+    !carregaEscrita(ler("lib/agentes/chamadas/registro.ts")) &&
+      /skills\/escrita/.test(ler("lib/agentes/chamadas/registro.ts")));
   ok("O2  ANCORA: a varredura leu arquivos de verdade", existe("lib/agentes/skills/fatos.ts"));
   ok("O3  o roteiro nunca foi excedido em nenhum cenario", !excedeuRoteiro);
 

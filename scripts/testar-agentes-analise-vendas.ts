@@ -921,6 +921,30 @@ const ARQUIVOS_SKILL_1D_PERFIL: readonly string[] = [
  */
 const MODULOS_CHAMADAS_1D_TOOL_CALL: readonly string[] = ["contrato.ts", "registro.ts"];
 
+/**
+ * O que a TOOL-EXEC-B acrescentou dentro do `ESCOPO_AGENTES`.
+ *
+ * Um modulo numa pasta NOVA (`lib/agentes/execucao-funcoes/`): o
+ * primeiro executor real, que liga catalogo, guard e auditoria. A suite
+ * dele nao entra aqui — `scripts/` nunca esteve no escopo, e ela e
+ * declarada em `SUITES_AGENTES`.
+ *
+ * Mesma forma colapsada de `ARQUIVOS_1EA` e do bloco acima: enquanto a
+ * pasta estiver inteiramente untracked, o porcelain devolve UMA linha e
+ * nenhum arquivo de dentro aparece. Por isso a entrada colapsada e
+ * aceita aqui e o CONTEUDO e conferido a parte, por disco, em G11z11.
+ */
+const MODULOS_EXECUCAO_FUNCOES: readonly string[] = ["executar.ts"];
+
+const ARQUIVOS_TOOL_EXEC: readonly string[] = [
+  "lib/agentes/execucao-funcoes/",
+  ...MODULOS_EXECUCAO_FUNCOES.map((nome) => `lib/agentes/execucao-funcoes/${nome}`),
+  // O catalogo ganhou os contratos `validarEntrada` e `interpretarSaida`.
+  // Ele nunca precisou ser declarado antes porque estava commitado e
+  // limpo — invisivel para o porcelain. Modificado, entra no escopo.
+  "lib/agentes/funcoes/registry.ts",
+];
+
 const ARQUIVOS_SKILL_1D_TOOL_CALL: readonly string[] = [
   "lib/agentes/chamadas/",
   ...MODULOS_CHAMADAS_1D_TOOL_CALL.map((nome) => `lib/agentes/chamadas/${nome}`),
@@ -964,6 +988,7 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_SKILL_1D_CONSUMER,
   ...ARQUIVOS_SKILL_1D_PERFIL,
   ...ARQUIVOS_SKILL_1D_TOOL_CALL,
+  ...ARQUIVOS_TOOL_EXEC,
 ];
 
 /**
@@ -1041,6 +1066,8 @@ const SUITES_AGENTES: readonly string[] = [
   "testar-agentes-analise-vendas.ts",
   // TOOL-CALL-B: contrato e persistencia append-only de Tool Call.
   "testar-agentes-chamadas.ts",
+  // TOOL-EXEC-B: o executor que liga catalogo, guard e auditoria.
+  "testar-agentes-execucao-funcoes.ts",
   "testar-agentes-execucao-banco.ts",
   "testar-agentes-execucao.ts",
   // ── Divida herdada da TOOL-REGISTRY-B1, medida na TOOL-CALL-BR2 ──
@@ -1739,6 +1766,18 @@ async function main() {
                              MODULOS_CHAMADAS_1D_TOOL_CALL));
     ok("G11z10b CONTROLE NEGATIVO: um modulo que suma de chamadas/ reprova",
        !mesmoConjuntoDeNomes(["contrato.ts"], MODULOS_CHAMADAS_1D_TOOL_CALL));
+
+    // A outra metade da entrada colapsada `lib/agentes/execucao-funcoes/`.
+    // O executor nasceu sozinho de proposito: um `tipos.ts` aparecendo
+    // ali sem gate significa que o modulo comecou a se fragmentar.
+    const conteudoExecucao = readdirSync(join(RAIZ, "lib", "agentes", "execucao-funcoes")).sort();
+
+    ok(`G11z11 lib/agentes/execucao-funcoes contem exatamente o modulo declarado (${conteudoExecucao.join(", ")})`,
+       mesmoConjuntoDeNomes(conteudoExecucao, MODULOS_EXECUCAO_FUNCOES));
+    ok("G11z11a CONTROLE NEGATIVO: um segundo modulo em execucao-funcoes/ reprova",
+       !mesmoConjuntoDeNomes([...MODULOS_EXECUCAO_FUNCOES, "tipos.ts"], MODULOS_EXECUCAO_FUNCOES));
+    ok("G11z11b CONTROLE NEGATIVO: a pasta vazia reprova",
+       !mesmoConjuntoDeNomes([], MODULOS_EXECUCAO_FUNCOES));
 
     // ── G11t..G11w — `scripts/` nunca esteve em ESCOPO_AGENTES ─────
     // Medido na 1E-a: uma suite de agentes inesperada em `scripts/`
