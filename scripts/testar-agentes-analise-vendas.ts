@@ -977,7 +977,12 @@ const ARQUIVOS_TOOL_EXEC: readonly string[] = [
  * de dentro aparece. Por isso a entrada colapsada e aceita aqui e o
  * CONTEUDO e conferido a parte, por disco, em G11z12.
  */
-const MODULOS_APROVACOES: readonly string[] = ["identidade.ts", "persistencia.ts", "stale.ts"];
+const MODULOS_APROVACOES: readonly string[] = [
+  "identidade.ts",
+  "persistencia.ts",
+  "stale.ts",
+  "observabilidade-stale.ts",
+];
 
 const ARQUIVOS_APROVACOES: readonly string[] = [
   "lib/agentes/aprovacoes/",
@@ -1825,25 +1830,32 @@ async function main() {
        !mesmoConjuntoDeNomes([], MODULOS_EXECUCAO_FUNCOES));
 
     // A outra metade da entrada colapsada `lib/agentes/aprovacoes/`.
-    // Sao TRES modulos com fronteiras diferentes — um puro, um de
-    // lifecycle e um read model — e um quarto arquivo aparecendo ali sem
-    // gate significa que a fronteira comecou a se diluir.
+    // Sao QUATRO modulos com fronteiras diferentes — um puro, um de
+    // lifecycle, um read model de pagina e um agregador de paginas — e um
+    // quinto arquivo aparecendo ali sem gate significa que a fronteira
+    // comecou a se diluir.
     const conteudoAprovacoes = readdirSync(join(RAIZ, "lib", "agentes", "aprovacoes")).sort();
 
     ok(`G11z12 lib/agentes/aprovacoes contem exatamente os modulos declarados (${conteudoAprovacoes.join(", ")})`,
        mesmoConjuntoDeNomes(conteudoAprovacoes, MODULOS_APROVACOES));
-    ok("G11z12a CONTROLE NEGATIVO: um quarto modulo em aprovacoes/ reprova",
+    ok("G11z12a CONTROLE NEGATIVO: um quinto modulo em aprovacoes/ reprova",
        !mesmoConjuntoDeNomes([...MODULOS_APROVACOES, "rotas.ts"], MODULOS_APROVACOES));
     ok("G11z12b CONTROLE NEGATIVO: a pasta vazia reprova",
        !mesmoConjuntoDeNomes([], MODULOS_APROVACOES));
     // O sentido que faltava: a lista tambem reprova por FALTA. Sem isto
     // um modulo removido em silencio passaria pelo detector.
     ok("G11z12c CONTROLE NEGATIVO: o read model ausente reprova",
-       !mesmoConjuntoDeNomes(["identidade.ts", "persistencia.ts"], MODULOS_APROVACOES));
+       !mesmoConjuntoDeNomes(
+         ["identidade.ts", "persistencia.ts", "observabilidade-stale.ts"], MODULOS_APROVACOES));
     ok("G11z12d CONTROLE NEGATIVO: a persistencia ausente reprova",
-       !mesmoConjuntoDeNomes(["identidade.ts", "stale.ts"], MODULOS_APROVACOES));
+       !mesmoConjuntoDeNomes(
+         ["identidade.ts", "stale.ts", "observabilidade-stale.ts"], MODULOS_APROVACOES));
     ok("G11z12e CONTROLE NEGATIVO: um nome parecido nao passa por semelhanca",
-       !mesmoConjuntoDeNomes(["identidade.ts", "persistencia.ts", "stale.test.ts"], MODULOS_APROVACOES));
+       !mesmoConjuntoDeNomes(
+         ["identidade.ts", "persistencia.ts", "stale.ts", "observabilidade.ts"], MODULOS_APROVACOES));
+    ok("G11z12f CONTROLE NEGATIVO: o agregador ausente reprova",
+       !mesmoConjuntoDeNomes(
+         ["identidade.ts", "persistencia.ts", "stale.ts"], MODULOS_APROVACOES));
 
     // ── G11t..G11w — `scripts/` nunca esteve em ESCOPO_AGENTES ─────
     // Medido na 1E-a: uma suite de agentes inesperada em `scripts/`

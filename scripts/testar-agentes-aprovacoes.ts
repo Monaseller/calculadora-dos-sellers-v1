@@ -121,19 +121,27 @@ const CORPO_CONSUMIR = corpoFuncao("aprovacao_consumir_e_abrir");
 
 secao("A. A pasta de aprovacoes tem exatamente os modulos autorizados");
 {
-  // `stale.ts` entrou no APPROVAL-B1D-D1: read model de
-  // observabilidade, sem escrita e sem lifecycle. A exigencia nao
-  // afrouxou — continua igualdade de conjunto nos DOIS sentidos, e a
-  // ausencia de qualquer um dos tres reprova.
-  const AUTORIZADOS = ["identidade.ts", "persistencia.ts", "stale.ts"];
+  // `stale.ts` entrou no APPROVAL-B1D-D1 e `observabilidade-stale.ts` no
+  // D2-I1: o primeiro le UMA pagina de aberturas stale, o segundo
+  // percorre paginas e agrega. Nenhum dos dois escreve, e nenhum toca
+  // lifecycle. A exigencia nao afrouxou — continua igualdade de conjunto
+  // nos DOIS sentidos, e a ausencia de qualquer um dos quatro reprova.
+  const AUTORIZADOS = [
+    "identidade.ts",
+    "persistencia.ts",
+    "stale.ts",
+    "observabilidade-stale.ts",
+  ];
   const conteudo = readdirSync(join(RAIZ, "lib", "agentes", "aprovacoes")).sort();
 
   ok(`A1  lib/agentes/aprovacoes contem exatamente os modulos declarados (${conteudo.join(", ")})`,
     conjuntosIguais(conteudo, AUTORIZADOS));
   ok("A2  CONTROLE: um modulo extra reprovaria",
     !conjuntosIguais([...AUTORIZADOS, "rotas.ts"], AUTORIZADOS));
-  ok("A2b CONTROLE: um modulo ausente reprovaria",
-    !conjuntosIguais(["identidade.ts", "persistencia.ts"], AUTORIZADOS));
+  ok("A2b CONTROLE: o observador ausente reprovaria",
+    !conjuntosIguais(["identidade.ts", "persistencia.ts", "stale.ts"], AUTORIZADOS));
+  ok("A2c CONTROLE: o detector ausente reprovaria",
+    !conjuntosIguais(["identidade.ts", "persistencia.ts", "observabilidade-stale.ts"], AUTORIZADOS));
   ok("A3  CONTROLE: a pasta vazia reprovaria", !conjuntosIguais([], AUTORIZADOS));
   ok("A4  ANCORA: a migration foi lida de verdade", SQL_BRUTO.length > 5000);
 }
@@ -1437,13 +1445,317 @@ async function principalStale(): Promise<void> {
           STALE_CODIGO.indexOf("export type ColetaStale")
         )));
 
+    // ── Q62: o detector ganhou UM consumidor, e ele e nomeado ───────
+    //
+    // Ate o APPROVAL-B1D-D1 o detector nao tinha consumidor nenhum, e o
+    // assert exigia conjunto vazio. O D2-I1 criou o observador, que e a
+    // camada logo acima dele — era o objetivo do gate. A exigencia nao
+    // afrouxou: mesmo detector, mesma varredura, e agora igualdade de
+    // conjunto contra a lista declarada.
+    const OBSERVADOR = "lib/agentes/aprovacoes/observabilidade-stale.ts";
+    const CONSUMIDORES_DO_DETECTOR = [OBSERVADOR];
+
     const consumidoresStale = [...varrerFontes("lib"), ...varrerFontes("app")].filter(
       (f) => f !== STALE && /listarAberturasStale/.test(semComentariosTs(ler(f)))
     );
-    ok(`Q62 zero consumidor de producao (${consumidoresStale.join(", ") || "nenhum"})`,
-      consumidoresStale.length === 0);
+    ok(`Q62 os consumidores do detector sao exatamente os declarados (${consumidoresStale.join(", ") || "nenhum"})`,
+      conjuntosIguais(consumidoresStale, CONSUMIDORES_DO_DETECTOR));
+    ok("Q62a CONTROLE: um segundo consumidor reprovaria",
+      !conjuntosIguais([OBSERVADOR, "app/api/x/route.ts"], CONSUMIDORES_DO_DETECTOR));
+    ok("Q62b CONTROLE: o observador sumir tambem reprovaria",
+      !conjuntosIguais([], CONSUMIDORES_DO_DETECTOR));
+    ok("Q62c CONTROLE: um caminho parecido nao passa por semelhanca",
+      !conjuntosIguais(["lib/agentes/aprovacoes/observabilidade.ts"], CONSUMIDORES_DO_DETECTOR));
     ok("Q63 ANCORA: a varredura leu arquivos de verdade",
       [...varrerFontes("lib"), ...varrerFontes("app")].length > 50);
+  }
+
+  // ─── R. O observador que percorre paginas ──────────────────────────
+  //
+  // Ele roda DE VERDADE contra o detector de verdade, que por sua vez
+  // roda contra o duplo do Supabase. Nao ha mock do `listarAberturasStale`
+  // — o que se prova aqui e a maquina de estados inteira, incluindo os
+  // filtros que o detector envia a cada pagina.
+
+  const { observarAberturasStaleDoUsuario, MAX_PAGINAS_OBSERVACAO } = await import(
+    "../lib/agentes/aprovacoes/observabilidade-stale"
+  );
+
+  /** As respostas de banco de UMA pagina do detector. L2 so acontece se
+   *  houver abertura; L3 so se houver aprovacao vinculada. */
+  const paginaDb = (
+    aberturas: readonly unknown[],
+    aprovacoes: readonly unknown[] = [],
+    desfechos: readonly unknown[] = []
+  ): RespostaDb[] => {
+    const saida: RespostaDb[] = [{ data: aberturas }];
+    if (aberturas.length > 0) saida.push({ data: aprovacoes });
+    if (aprovacoes.length > 0) saida.push({ data: desfechos });
+    return saida;
+  };
+
+  /** Quantas vezes o detector abriu uma pagina (L1) neste roteiro. */
+  const paginasPedidas = () =>
+    chamadasDb.filter((c) => c.tabela === "agente_funcao_chamadas" && c.filtros.fase === "abertura")
+      .length;
+
+  /** A expressao de continuacao levada na N-esima pagina (1-based). */
+  const continuacaoDaPagina = (n: number): string | null | undefined =>
+    chamadasDb.filter((c) => c.tabela === "agente_funcao_chamadas" && c.filtros.fase === "abertura")[
+      n - 1
+    ]?.or;
+
+  const observar = (cursorInicial?: { criadoEm: string; requestId: string } | null) =>
+    cursorInicial === undefined
+      ? observarAberturasStaleDoUsuario({ userId: DONO })
+      : observarAberturasStaleDoUsuario({ userId: DONO, cursorInicial });
+
+  secao("R. O observador agrega segmentos, e sabe continuar");
+  {
+    ok("R0  ANCORA: o teto do segmento e o declarado", MAX_PAGINAS_OBSERVACAO === 20);
+
+    // ── R1. Uma pagina, nada a observar ─────────────────────────────
+    roteiroDb(...paginaDb([]));
+    const vazio = await observar();
+    ok("D21 pagina unica sem stale -> total 0 e fonte esgotada",
+      vazio.coleta === "ok" && vazio.total === 0 && vazio.esgotado === true &&
+      vazio.nextCursor === null);
+    ok("D21a e o agregado vem neutro, nao indefinido",
+      vazio.idadeMaximaMs === null && vazio.maisAntigaEm === null &&
+      JSON.stringify(vazio.porFuncao) === "{}" && vazio.paginas === 1);
+    ok("R1  sem cursorInicial, a primeira pagina nao leva continuacao",
+      continuacaoDaPagina(1) === null);
+
+    // ── R2. Uma pagina com stales ───────────────────────────────────
+    roteiroDb(...paginaDb([abertura(1), abertura(2)], [aprovacaoDe(1), aprovacaoDe(2)], []));
+    const cheio = await observar();
+    ok("D22 pagina com stales agrega o que viu",
+      cheio.coleta === "ok" && cheio.total === 2 && cheio.esgotado === true);
+    ok("D27 porFuncao conta por Funcao",
+      JSON.stringify(cheio.porFuncao) === JSON.stringify({ [FUNCAO_ST]: 2 }));
+    ok("D26 maisAntigaEm e o menor criado_em observado",
+      cheio.maisAntigaEm === "2026-09-01T10:00:01.000+00:00");
+    ok("D25 idadeMaximaMs e a maior idade observada",
+      cheio.idadeMaximaMs === Date.parse(cheio.fimEm) - Date.parse("2026-09-01T10:00:01.000+00:00"));
+
+    // ── R3. Duas paginas, e a vazia NAO para o percurso ─────────────
+    //
+    // A primeira pagina traz 101 aberturas sem aprovacao nenhuma: zero
+    // stale, mas ha continuacao. Parar aqui deixaria a segunda pagina
+    // inalcancavel — a regressao que este assert trava.
+    roteiroDb(
+      ...paginaDb(linhas(1, PAGINA_STALE + 1), []),
+      ...paginaDb([abertura(201)], [aprovacaoDe(201)], [])
+    );
+    const duas = await observar();
+    ok("D23 pagina sem stale mas com continuacao NAO encerra o percurso",
+      duas.paginas === 2 && paginasPedidas() === 2);
+    ok("D24 e o segmento soma o que apareceu depois",
+      duas.coleta === "ok" && duas.total === 1 && duas.esgotado === true &&
+      duas.nextCursor === null);
+    ok("R2  a segunda pagina levou o cursor devolvido pela primeira",
+      continuacaoDaPagina(2) ===
+        expressaoDeContinuacao({
+          criadoEm: `2026-09-01T10:01:40.000+00:00`,
+          requestId: `req-${String(PAGINA_STALE).padStart(4, "0")}`,
+        }));
+    ok("D28 inicioEm e o carimbo da PRIMEIRA pagina",
+      typeof duas.inicioEm === "string" && Number.isFinite(Date.parse(duas.inicioEm)));
+    ok("D29 fimEm e o carimbo da ULTIMA, e nao antecede o inicio",
+      Date.parse(duas.fimEm) >= Date.parse(duas.inicioEm));
+
+    // ── R4. O teto do segmento ──────────────────────────────────────
+    //
+    // Vinte paginas cheias, todas sem aprovacao. A vigesima ainda tem
+    // continuacao: o observador precisa parar ali e DEVOLVER o cursor,
+    // sem pedir a pagina 21.
+    // Cada pagina traz linhas DIFERENTES — 20 x 101 = 2.020 fontes. Se
+    // repetissem, o cursor nao andaria e o guard de contrato pararia o
+    // percurso na segunda pagina, que e outro teste.
+    const roteiroCheio: RespostaDb[] = [];
+    for (let p = 0; p < MAX_PAGINAS_OBSERVACAO; p++) {
+      const de = p * (PAGINA_STALE + 1) + 1;
+      roteiroCheio.push(...paginaDb(linhas(de, de + PAGINA_STALE), []));
+    }
+    roteiroDb(...roteiroCheio);
+    const noTeto = await observar();
+
+    ok("R3  o teto para o segmento em MAX_PAGINAS_OBSERVACAO",
+      noTeto.paginas === MAX_PAGINAS_OBSERVACAO && paginasPedidas() === MAX_PAGINAS_OBSERVACAO,
+      `${paginasPedidas()} pagina(s)`);
+    ok("R4  a pagina 21 NAO e pedida nesta execucao",
+      paginasPedidas() <= MAX_PAGINAS_OBSERVACAO);
+    ok("R5  atingir o teto nao e esgotar a fonte",
+      noTeto.coleta === "ok" && noTeto.esgotado === false && noTeto.nextCursor !== null);
+    ok("D19 total 0 COM continuacao e estado valido — nao significa ausencia",
+      noTeto.total === 0 && noTeto.nextCursor !== null);
+
+    // ── R6. A CONTINUACAO ENTRE EXECUCOES ───────────────────────────
+    //
+    // A regressao que este bloco trava: sem `cursorInicial`, a execucao
+    // seguinte releria as mesmas 20 paginas e as posteriores (>2.000
+    // fontes) nunca seriam observadas.
+    const continuar = noTeto.nextCursor!;
+    roteiroDb(...paginaDb([abertura(201)], [aprovacaoDe(201)], []));
+    const segundoSegmento = await observar(continuar);
+
+    ok("R6  o segundo segmento recebe o cursor do primeiro",
+      continuacaoDaPagina(1) === expressaoDeContinuacao(continuar));
+    ok("R7  e NAO recomeca do zero", continuacaoDaPagina(1) !== null);
+    ok("R8  alcancando a stale posterior ao teto (> MAX_PAGINAS)",
+      segundoSegmento.coleta === "ok" && segundoSegmento.total === 1 &&
+      segundoSegmento.esgotado === true && segundoSegmento.nextCursor === null);
+
+    // ── R9. Segmento iniciado por cursor que chega ao fim ───────────
+    roteiroDb(...paginaDb([]));
+    const doCursorAoFim = await observar(continuar);
+    ok("R9  segmento que comeca em cursor e chega ao fim: esgotado, sem proximo",
+      doCursorAoFim.esgotado === true && doCursorAoFim.nextCursor === null &&
+      doCursorAoFim.coleta === "ok");
+
+    // ── R10. Falhas nao viram diagnostico ───────────────────────────
+    roteiroDb(falhaDb);
+    const falha1 = await observar();
+    ok("D30 falha na primeira pagina -> coleta falha_leitura",
+      falha1.coleta === "falha_leitura" && falha1.esgotado === false &&
+      falha1.nextCursor === null);
+    ok("D30a e o agregado volta NEUTRO, para nao virar diagnostico",
+      falha1.total === 0 && falha1.idadeMaximaMs === null && falha1.maisAntigaEm === null &&
+      JSON.stringify(falha1.porFuncao) === "{}");
+
+    roteiroDb(
+      ...paginaDb(linhas(1, PAGINA_STALE + 1), [aprovacaoDe(3)], []),
+      falhaDb
+    );
+    const falha2 = await observar();
+    ok("D31 falha numa pagina POSTERIOR tambem interrompe",
+      falha2.coleta === "falha_leitura" && falha2.paginas === 2);
+    ok("D31a e as metricas parciais da primeira pagina sao descartadas",
+      falha2.total === 0 && JSON.stringify(falha2.porFuncao) === "{}" &&
+      falha2.nextCursor === null && falha2.esgotado === false);
+
+    // ── R11. Contrato quebrado do detector ──────────────────────────
+    roteiroDb();
+    const entradaRuim = await observarAberturasStaleDoUsuario({ userId: "" });
+    ok("D32 entrada invalida vinda do detector NAO vira ok/zero stale",
+      entradaRuim.coleta === "entrada_invalida" && entradaRuim.total === 0 &&
+      entradaRuim.esgotado === false && entradaRuim.nextCursor === null);
+
+    // Cursor que nao anda: a mesma pagina voltaria para sempre.
+    const parado = { criadoEm: "2026-09-01T10:01:40.000+00:00", requestId: "req-0100" };
+    roteiroDb(...paginaDb(linhas(1, PAGINA_STALE + 1), []));
+    const naoAnda = await observar(parado);
+    ok("D33 cursor que volta igual ao anterior quebra o contrato",
+      naoAnda.coleta === "contrato_invalido" && naoAnda.total === 0 &&
+      naoAnda.esgotado === false && naoAnda.nextCursor === null);
+
+    // ── R13. CHAVE DE FUNCAO QUE COLIDE COM O PROTOTIPO ─────────────
+    //
+    // A regressao que este bloco trava: com `{}` como mapa, contar
+    // `__proto__` some (o setter ignora) e contar `constructor` produz
+    // uma STRING dentro de um `Record<string, number>`. O CHECK do banco
+    // recusa esses ids hoje — mas o agregador nao pode estar certo por
+    // acidente de constraint alheia.
+    const ESPECIAIS = ["__proto__", "constructor"] as const;
+    for (const nome of ESPECIAIS) {
+      roteiroDb(
+        ...paginaDb(
+          [abertura(1, { funcao_id: nome }), abertura(2, { funcao_id: nome })],
+          [aprovacaoDe(1, { funcao_id: nome }), aprovacaoDe(2, { funcao_id: nome })],
+          []
+        )
+      );
+      const r = await observar();
+      const contagem = (r.porFuncao as Record<string, unknown>)[nome];
+
+      ok(`R13 funcaoId "${nome}" e contado como numero, e nao some`,
+        contagem === 2 && typeof contagem === "number", JSON.stringify(contagem));
+      ok(`R13a e vira propriedade PROPRIA de porFuncao ("${nome}")`,
+        Object.prototype.hasOwnProperty.call(r.porFuncao, nome));
+      ok(`R13b o total nao diverge da contagem ("${nome}")`, r.total === 2);
+    }
+    ok("R13c CONTROLE: com objeto literal a contagem de __proto__ se perderia",
+      (() => {
+        const ingenuo: Record<string, unknown> = {};
+        for (let i = 0; i < 2; i++) {
+          ingenuo["__proto__"] = ((ingenuo["__proto__"] as number) ?? 0) + 1;
+        }
+        return ingenuo["__proto__"] !== 2;
+      })());
+
+    // ── R14. TIMESTAMPS COM OFFSETS DIFERENTES ──────────────────────
+    //
+    // `2026-09-01T10:00:00-03:00` e 13:00Z — mais NOVO que
+    // `2026-09-01T12:00:00Z`. Na ordem lexical `10:00...` vem antes, e a
+    // implementacao antiga elegeria a mais nova como "mais antiga".
+    const COM_OFFSET = "2026-09-01T10:00:00-03:00";
+    const EM_UTC = "2026-09-01T12:00:00Z";
+    roteiroDb(
+      ...paginaDb(
+        [abertura(1, { criado_em: COM_OFFSET }), abertura(2, { criado_em: EM_UTC })],
+        [aprovacaoDe(1), aprovacaoDe(2)],
+        []
+      )
+    );
+    const comOffsets = await observar();
+
+    ok("R14 ANCORA: os dois carimbos existem e discordam entre texto e tempo",
+      COM_OFFSET < EM_UTC && Date.parse(COM_OFFSET) > Date.parse(EM_UTC));
+    ok("R14a maisAntigaEm e a temporalmente mais antiga, nao a lexicamente menor",
+      comOffsets.maisAntigaEm === EM_UTC, String(comOffsets.maisAntigaEm));
+    ok("R14b e as duas continuam contadas", comOffsets.total === 2);
+
+    // ── R12. Tenant ─────────────────────────────────────────────────
+    roteiroDb(...paginaDb([]));
+    await observar({ criadoEm: "2026-09-01T10:00:00.000+00:00", requestId: "req-9999" });
+    ok("D38 o userId enviado ao detector e o da entrada, sempre",
+      chamadasDb.every((c) => c.filtros.user_id === undefined || c.filtros.user_id === DONO));
+    ok("R10 e o cursor tecnico nunca substitui o tenant",
+      chamadasDb[0]?.filtros.user_id === DONO);
+  }
+
+  secao("R2. O observador so observa — provado pela fonte");
+  {
+    const OBS = "lib/agentes/aprovacoes/observabilidade-stale.ts";
+    const OBS_BRUTO = ler(OBS);
+    const OBS_CODIGO = semComentariosTs(OBS_BRUTO);
+
+    ok("R11 e server-only", /^import "server-only";/m.test(OBS_BRUTO));
+    ok("R12 nao fala com o banco: zero import de supabase",
+      !/supabase/i.test(OBS_CODIGO));
+    ok("R13 consome o detector, e so ele",
+      /from "@\/lib\/agentes\/aprovacoes\/stale"/.test(OBS_CODIGO) &&
+      (OBS_CODIGO.match(/from "/g) ?? []).length === 1);
+    ok("D35 zero escrita",
+      !/\.insert\(|\.update\(|\.upsert\(|\.delete\(|\.rpc\(/.test(OBS_CODIGO));
+    ok("D36 zero executor",
+      !/execucao-funcoes|executarFuncao|retomarAprovacao|executarComAberturaFeita|definicao\.executor/
+        .test(OBS_CODIGO));
+    ok("D37 zero closer",
+      !/chamadas\/registro|registrarAbertura|registrarDesfecho/.test(OBS_CODIGO));
+    ok("D34 zero argumentos", !/argumentos/.test(OBS_CODIGO));
+    ok("D39 nenhuma enumeracao global de tenants",
+      !/perfil|auth\.users|distinct|todos os usuarios/i.test(OBS_CODIGO));
+    ok("R14 nao nomeia a tabela de aprovacoes — quem faz isso e a camada de baixo",
+      !/agente_funcao_aprovacoes|agente_funcao_chamadas/.test(OBS_CODIGO));
+    ok("R15 a entrada publica nao aceita teto, relogio nem SLA",
+      !/(maxPaginas|cutoff|agora|idadeMinima|sla)/i.test(
+        OBS_CODIGO.slice(
+          OBS_CODIGO.indexOf("export interface EntradaObservacaoStale"),
+          OBS_CODIGO.indexOf("function mesmoPonto")
+        )));
+    ok("R16 o teto e constante do modulo",
+      /export const MAX_PAGINAS_OBSERVACAO = 20/.test(OBS_CODIGO));
+    ok("R17 o log nao carrega dono, id nem cursor",
+      !/console\.[a-z]+\([^)]*(userId|requestId|aprovacaoId|cursor)/.test(OBS_CODIGO));
+    ok("R18 nao para por pagina vazia — o criterio e o cursor",
+      !/itens\.length === 0/.test(OBS_CODIGO) && /nextCursor === null/.test(OBS_CODIGO));
+
+    const consumidoresObs = [...varrerFontes("lib"), ...varrerFontes("app")].filter(
+      (f) => f !== OBS && /observarAberturasStaleDoUsuario/.test(semComentariosTs(ler(f)))
+    );
+    ok(`R19 zero consumidor de producao (${consumidoresObs.join(", ") || "nenhum"})`,
+      consumidoresObs.length === 0);
   }
 }
 
