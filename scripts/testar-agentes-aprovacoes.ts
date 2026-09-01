@@ -16,6 +16,9 @@
  * Rodar:  npx tsx scripts/testar-agentes-aprovacoes.ts
  * Sem rede, sem banco, sem IA, sem escrita.
  */
+import "./_server-only-inerte";
+
+import Module from "node:module";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -59,6 +62,28 @@ const SQL_BRUTO = ler(MIGRATION);
 const SQL = semComentariosSql(SQL_BRUTO);
 
 const PERSISTENCIA = "lib/agentes/aprovacoes/persistencia.ts";
+const STALE = "lib/agentes/aprovacoes/stale.ts";
+const STALE_BRUTO = ler(STALE);
+const STALE_CODIGO = semComentariosTs(STALE_BRUTO);
+
+/** Varredura de fontes reais — a mesma que a secao O ja fazia local,
+ *  extraida para que a secao Q prove a ausencia de consumidor sobre
+ *  exatamente o mesmo universo. */
+const varrerFontes = (dir: string): string[] => {
+  const achados: string[] = [];
+  const andar = (atual: string): void => {
+    for (const e of readdirSync(join(RAIZ, atual), { withFileTypes: true })) {
+      const rel = `${atual}/${e.name}`;
+      if (e.isDirectory()) {
+        if (!/node_modules|\.next/.test(e.name)) andar(rel);
+      } else if (/\.tsx?$/.test(e.name)) {
+        achados.push(rel);
+      }
+    }
+  };
+  andar(dir);
+  return achados;
+};
 const PERS_BRUTO = ler(PERSISTENCIA);
 const PERS = semComentariosTs(PERS_BRUTO);
 
@@ -96,13 +121,19 @@ const CORPO_CONSUMIR = corpoFuncao("aprovacao_consumir_e_abrir");
 
 secao("A. A pasta de aprovacoes tem exatamente os modulos autorizados");
 {
-  const AUTORIZADOS = ["identidade.ts", "persistencia.ts"];
+  // `stale.ts` entrou no APPROVAL-B1D-D1: read model de
+  // observabilidade, sem escrita e sem lifecycle. A exigencia nao
+  // afrouxou — continua igualdade de conjunto nos DOIS sentidos, e a
+  // ausencia de qualquer um dos tres reprova.
+  const AUTORIZADOS = ["identidade.ts", "persistencia.ts", "stale.ts"];
   const conteudo = readdirSync(join(RAIZ, "lib", "agentes", "aprovacoes")).sort();
 
   ok(`A1  lib/agentes/aprovacoes contem exatamente os modulos declarados (${conteudo.join(", ")})`,
     conjuntosIguais(conteudo, AUTORIZADOS));
   ok("A2  CONTROLE: um modulo extra reprovaria",
     !conjuntosIguais([...AUTORIZADOS, "rotas.ts"], AUTORIZADOS));
+  ok("A2b CONTROLE: um modulo ausente reprovaria",
+    !conjuntosIguais(["identidade.ts", "persistencia.ts"], AUTORIZADOS));
   ok("A3  CONTROLE: a pasta vazia reprovaria", !conjuntosIguais([], AUTORIZADOS));
   ok("A4  ANCORA: a migration foi lida de verdade", SQL_BRUTO.length > 5000);
 }
@@ -690,9 +721,26 @@ secao("M. Quem pode escrever, e apenas quem");
   };
   const fontes = [...varrer("lib", []), ...varrer("app", [])];
 
+  // ── M1: dois nomeadores, com papeis distintos e declarados ────────
+  //
+  // Ate o APPROVAL-B1D-D1 so `persistencia.ts` nomeava a tabela, e o
+  // assert exigia conjunto unitario. O detector stale a le — SOMENTE
+  // por SELECT, e sem `argumentos` — entao o conjunto passou a ter dois
+  // membros NOMEADOS. A exigencia nao afrouxou: continua igualdade de
+  // conjunto nos dois sentidos, e um terceiro nomeador reprova.
+  const NOMEADORES_AUTORIZADOS = [PERSISTENCIA, STALE];
+
   const tocamTabela = fontes.filter((f) => /agente_funcao_aprovacoes/.test(semComentariosTs(ler(f))));
-  ok(`M1  so persistencia.ts nomeia a tabela em lib/ e app/ (${tocamTabela.join(", ") || "nenhum"})`,
-    conjuntosIguais(tocamTabela, [PERSISTENCIA]));
+  ok(`M1  so os nomeadores declarados citam a tabela em lib/ e app/ (${tocamTabela.join(", ") || "nenhum"})`,
+    conjuntosIguais(tocamTabela, NOMEADORES_AUTORIZADOS));
+  ok("M1a CONTROLE: um terceiro nomeador reprova",
+    !conjuntosIguais([...NOMEADORES_AUTORIZADOS, "app/api/x/route.ts"], NOMEADORES_AUTORIZADOS));
+  ok("M1b CONTROLE: a persistencia sumir reprova",
+    !conjuntosIguais([STALE], NOMEADORES_AUTORIZADOS));
+  ok("M1c CONTROLE: o detector sumir reprova",
+    !conjuntosIguais([PERSISTENCIA], NOMEADORES_AUTORIZADOS));
+  ok("M1d CONTROLE: um caminho parecido nao passa por semelhanca",
+    !conjuntosIguais([PERSISTENCIA, "lib/agentes/aprovacoes/stale.test.ts"], NOMEADORES_AUTORIZADOS));
 
   const chamamRpc = fontes.filter((f) =>
     /aprovacao_criar|aprovacao_decidir|aprovacao_consumir_e_abrir/.test(semComentariosTs(ler(f))));
@@ -915,5 +963,491 @@ secao("P. O consumo entrega contexto, e nao autoridade");
     !/return \{ codigo: "falha_persistencia", (ap|argumentos|contexto)/.test(PERS));
 }
 
-console.log(`\n══ ${passou} PASS / ${falhou} FAIL ══\n`);
-process.exit(falhou === 0 ? 0 : 1);
+// ─── Q. O detector de aberturas stale ─────────────────────────────────
+//
+// ── Por que esta secao precisa de duplo, e as anteriores nao ────────
+//
+// Tudo acima e puro (helpers de identidade) ou varredura de fonte. O
+// detector, nao: ele so significa alguma coisa se as TRES leituras
+// acontecerem na ordem certa, com os filtros certos, e se a paginacao
+// devolver o cursor certo. Isso e comportamento, e comportamento se
+// prova executando.
+//
+// O duplo troca APENAS `supabase-servidor`, pelo mesmo mecanismo de
+// `testar-agentes-execucao-funcoes.ts`. Producao continua com uma
+// assinatura so — o detector nao ganha porta de injecao.
+//
+// ── O que o duplo NAO prova ─────────────────────────────────────────
+//
+// Ele registra os filtros enviados; nao os APLICA. Entao "abertura
+// recente nao aparece" nao pode ser provado por comportamento aqui: o
+// que se prova e que o corte de idade VAI ao banco, com o valor certo.
+// Quem filtra e o Postgres. Confundir as duas coisas seria afirmar que
+// a suite testou o servidor.
+
+interface ChamadaDb {
+  tabela: string;
+  select: string;
+  filtros: Record<string, unknown>;
+  ins: Record<string, readonly unknown[]>;
+  or: string | null;
+  ordens: Array<{ coluna: string; asc: boolean }>;
+  limite: number | null;
+}
+
+interface RespostaDb {
+  data?: unknown;
+  error?: Record<string, unknown> | null;
+}
+
+let chamadasDb: ChamadaDb[] = [];
+let respostasDb: RespostaDb[] = [];
+let consumidasDb = 0;
+
+function roteiroDb(...rs: RespostaDb[]): void {
+  respostasDb = rs;
+  chamadasDb = [];
+  consumidasDb = 0;
+}
+
+function construtorDb(tabela: string): Record<string, unknown> {
+  const c: ChamadaDb = {
+    tabela,
+    select: "",
+    filtros: {},
+    ins: {},
+    or: null,
+    ordens: [],
+    limite: null,
+  };
+  const b: Record<string, unknown> = {
+    select(colunas: string) {
+      c.select = colunas;
+      return b;
+    },
+    eq(coluna: string, valor: unknown) {
+      c.filtros[coluna] = valor;
+      return b;
+    },
+    lt(coluna: string, valor: unknown) {
+      c.filtros[`${coluna}<`] = valor;
+      return b;
+    },
+    in(coluna: string, valores: readonly unknown[]) {
+      c.ins[coluna] = valores;
+      return b;
+    },
+    or(expressao: string) {
+      c.or = expressao;
+      return b;
+    },
+    order(coluna: string, opcoes?: { ascending?: boolean }) {
+      c.ordens.push({ coluna, asc: opcoes?.ascending !== false });
+      return b;
+    },
+    limit(n: number) {
+      c.limite = n;
+      return b;
+    },
+    then(fn: (v: { data: unknown; error: unknown }) => void) {
+      chamadasDb.push(c);
+      const r = respostasDb[consumidasDb++];
+      fn({ data: r?.data ?? null, error: r?.error ?? null });
+    },
+  };
+  return b;
+}
+
+const clienteDb = { from: (t: string) => construtorDb(t) };
+
+const requireOriginalDb = (Module as unknown as { prototype: { require: (id: string) => unknown } })
+  .prototype.require;
+let interceptouDb = false;
+(Module as unknown as { prototype: { require: unknown } }).prototype.require = function (
+  this: unknown,
+  id: string
+) {
+  if (typeof id === "string" && id.includes("supabase-servidor")) {
+    interceptouDb = true;
+    return { getSupabaseServidor: () => clienteDb };
+  }
+  return requireOriginalDb.apply(this, arguments as unknown as [string]);
+};
+
+// ── Fixtures ─────────────────────────────────────────────────────────
+
+const DONO = "user-stale-sintetico";
+const AGENTE_ST = "44444444-4444-4444-8444-444444444444";
+const APROVACAO_ST = "55555555-5555-4555-8555-555555555555";
+const FUNCAO_ST = "vendas.consultar";
+
+/** Uma abertura sintetica, ordenavel pelo indice. */
+const abertura = (i: number, extra: Record<string, unknown> = {}) => ({
+  request_id: `req-${String(i).padStart(4, "0")}`,
+  agente_id: AGENTE_ST,
+  tarefa_id: null,
+  funcao_id: FUNCAO_ST,
+  criado_em: `2026-09-01T10:${String(Math.floor(i / 60)).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}.000+00:00`,
+  nivel_no_momento: "aprovacao",
+  ...extra,
+});
+
+/** A aprovacao consumida que da origem a uma abertura. */
+const aprovacaoDe = (i: number, extra: Record<string, unknown> = {}) => ({
+  id: `${APROVACAO_ST}-${i}`,
+  request_id_consumo: `req-${String(i).padStart(4, "0")}`,
+  funcao_id: FUNCAO_ST,
+  revisao_funcao: "1",
+  agente_id: AGENTE_ST,
+  tarefa_id: null,
+  ...extra,
+});
+
+const desfechoDe = (i: number) => ({ request_id: `req-${String(i).padStart(4, "0")}` });
+
+const linhas = (de: number, ate: number) => {
+  const saida: ReturnType<typeof abertura>[] = [];
+  for (let i = de; i <= ate; i++) saida.push(abertura(i));
+  return saida;
+};
+
+const falhaDb: RespostaDb = { data: null, error: { code: "08006" } };
+
+async function principalStale(): Promise<void> {
+  const {
+    listarAberturasStale,
+    calcularCutoff,
+    expressaoDeContinuacao,
+    IDADE_STALE_APROVACAO_MS,
+    PAGINA_STALE,
+  } = await import("../lib/agentes/aprovacoes/stale");
+
+  const listar = (cursor?: { criadoEm: string; requestId: string } | null) =>
+    listarAberturasStale(cursor === undefined ? { userId: DONO } : { userId: DONO, cursor });
+
+  secao("Q. O detector stale executa de verdade, contra um duplo");
+  {
+    ok("Q0  ANCORA: o duplo de supabase-servidor foi instalado", interceptouDb);
+    ok("Q0a ANCORA: as constantes operacionais existem",
+      IDADE_STALE_APROVACAO_MS === 15 * 60 * 1000 && PAGINA_STALE === 100);
+
+    // ── Q1. Caminho feliz ───────────────────────────────────────────
+    roteiroDb({ data: [abertura(1)] }, { data: [aprovacaoDe(1)] }, { data: [] });
+    const r1 = await listar();
+
+    ok("Q1  abertura velha, com aprovacao consumida e sem desfecho, aparece",
+      r1.coleta === "ok" && r1.itens.length === 1 && r1.itens[0]?.requestId === "req-0001");
+    ok("Q2  o item traz a aprovacao de origem e a revisao dela",
+      r1.itens[0]?.aprovacaoId === `${APROVACAO_ST}-1` && r1.itens[0]?.revisaoFuncao === "1");
+    ok("Q3  e se declara originado de aprovacao", r1.itens[0]?.origem === "approval");
+    ok("Q4  tres leituras, nessa ordem: aberturas, aprovacoes, desfechos",
+      chamadasDb.length === 3 &&
+      chamadasDb[0]?.tabela === "agente_funcao_chamadas" &&
+      chamadasDb[1]?.tabela === "agente_funcao_aprovacoes" &&
+      chamadasDb[2]?.tabela === "agente_funcao_chamadas",
+      chamadasDb.map((c) => c.tabela).join(" → "));
+    ok("Q5  a confirmacao de desfecho e a ULTIMA leitura",
+      chamadasDb[2]?.filtros.fase === "desfecho");
+    ok("Q6  capturadoEm e um instante valido",
+      typeof r1.capturadoEm === "string" && Number.isFinite(Date.parse(r1.capturadoEm)));
+    ok("Q7  idadeMs e coerente com criado_em e o instante da coleta",
+      (r1.itens[0]?.idadeMs ?? 0) === Date.parse(r1.capturadoEm) - Date.parse("2026-09-01T10:00:01.000+00:00"));
+
+    // ── Q8. O corte de idade VAI ao banco ───────────────────────────
+    const corte = chamadasDb[0]?.filtros["criado_em<"];
+    ok("Q8  L1 envia o corte de idade como filtro do banco", typeof corte === "string");
+    ok("Q9  e o corte e agora menos o SLA, nao um numero do chamador",
+      typeof corte === "string" &&
+      Math.abs(
+        Date.parse(r1.capturadoEm) - IDADE_STALE_APROVACAO_MS - Date.parse(corte)
+      ) < 1000);
+    ok("Q10 calcularCutoff e puro e concorda com o filtro enviado",
+      calcularCutoff(Date.parse(r1.capturadoEm)) === corte);
+
+    // ── Q11. Filtros e escopo de tenant ─────────────────────────────
+    ok("Q11 L1 escopa por dono, fase e status",
+      chamadasDb[0]?.filtros.user_id === DONO &&
+      chamadasDb[0]?.filtros.fase === "abertura" &&
+      chamadasDb[0]?.filtros.status === "executando");
+    ok("Q12 L2 escopa por dono e exige aprovacao consumida",
+      chamadasDb[1]?.filtros.user_id === DONO && chamadasDb[1]?.filtros.estado === "consumida");
+    ok("Q13 L3 escopa por dono e olha so desfechos",
+      chamadasDb[2]?.filtros.user_id === DONO && chamadasDb[2]?.filtros.fase === "desfecho");
+    ok("Q14 L2 casa pela ponte request_id_consumo",
+      JSON.stringify(chamadasDb[1]?.ins.request_id_consumo) === JSON.stringify(["req-0001"]));
+    ok("Q15 L1 pede a pagina mais UMA linha, para provar continuacao",
+      chamadasDb[0]?.limite === PAGINA_STALE + 1);
+    ok("Q16 L1 ordena por criado_em e depois por request_id, ambos ascendentes",
+      JSON.stringify(chamadasDb[0]?.ordens) ===
+        JSON.stringify([{ coluna: "criado_em", asc: true }, { coluna: "request_id", asc: true }]));
+    ok("Q17 sem cursor nao ha filtro de continuacao", chamadasDb[0]?.or === null);
+    ok("Q18 L2 NAO seleciona argumentos",
+      typeof chamadasDb[1]?.select === "string" && !/argumentos/.test(chamadasDb[1].select));
+
+    // ── Q19. As exclusoes ───────────────────────────────────────────
+    roteiroDb({ data: [abertura(1)] }, { data: [aprovacaoDe(1)] }, { data: [desfechoDe(1)] });
+    const rFechada = await listar();
+    ok("Q19 abertura que JA tem desfecho nao aparece",
+      rFechada.coleta === "ok" && rFechada.itens.length === 0);
+
+    roteiroDb({ data: [abertura(1)] }, { data: [] });
+    const rAutomatica = await listar();
+    ok("Q20 abertura sem aprovacao vinculada nao aparece",
+      rAutomatica.coleta === "ok" && rAutomatica.itens.length === 0);
+    ok("Q21 e nem chega a perguntar por desfechos", chamadasDb.length === 2);
+
+    // Aprovacao pendente/rejeitada nunca volta da L2, porque a consulta
+    // exige `estado='consumida'` — Q12 prova o filtro, e aqui a
+    // ausencia de par prova o efeito.
+    roteiroDb({ data: [abertura(1)] }, { data: [] });
+    const rNaoConsumida = await listar();
+    ok("Q22 aprovacao nao consumida nao produz item", rNaoConsumida.itens.length === 0);
+
+    // Cross-tenant: a L2 de outro dono devolve vazio porque a consulta
+    // filtra por `user_id`; o detector nunca casa por requestId sozinho.
+    roteiroDb({ data: [abertura(1)] }, { data: [] });
+    const rOutroDono = await listar();
+    ok("Q23 sem par no MESMO dono, nada aparece", rOutroDono.itens.length === 0);
+
+    // ── Q24. Divergencia estrutural falha fechado ───────────────────
+    const divergencias: Array<[string, Record<string, unknown>]> = [
+      ["agente", { agente_id: "99999999-9999-4999-8999-999999999999" }],
+      ["tarefa", { tarefa_id: "66666666-6666-4666-8666-666666666666" }],
+      ["funcao", { funcao_id: "vendas.outra" }],
+    ];
+    let divergentesCorretas = 0;
+    for (const [, campo] of divergencias) {
+      roteiroDb({ data: [abertura(1)] }, { data: [aprovacaoDe(1, campo)] }, { data: [] });
+      const r = await listar();
+      if (r.coleta === "falha_leitura" && r.itens.length === 0 && r.nextCursor === null) {
+        divergentesCorretas++;
+      }
+    }
+    ok("Q24 aprovacao que diverge da abertura falha fechado, e nao vira stale comum",
+      divergentesCorretas === divergencias.length, `${divergentesCorretas}/3`);
+
+    // ── Q25. Falhas de leitura nunca viram lista vazia ──────────────
+    roteiroDb(falhaDb);
+    const rFalha1 = await listar();
+    ok("Q25 falha na L1 -> falha_leitura, e nao 'nenhuma stale'",
+      rFalha1.coleta === "falha_leitura" && rFalha1.itens.length === 0 && rFalha1.nextCursor === null);
+
+    roteiroDb({ data: [abertura(1)] }, falhaDb);
+    const rFalha2 = await listar();
+    ok("Q26 falha na L2 -> falha_leitura", rFalha2.coleta === "falha_leitura" && rFalha2.itens.length === 0);
+
+    roteiroDb({ data: [abertura(1)] }, { data: [aprovacaoDe(1)] }, falhaDb);
+    const rFalha3 = await listar();
+    ok("Q27 falha na L3 -> falha_leitura", rFalha3.coleta === "falha_leitura" && rFalha3.itens.length === 0);
+
+    roteiroDb({ data: [abertura(1, { criado_em: "ontem" })] });
+    const rDeformada = await listar();
+    ok("Q28 timestamp deformado falha fechado, em vez de virar idade NaN",
+      rDeformada.coleta === "falha_leitura");
+
+    roteiroDb({ data: [abertura(1, { nivel_no_momento: "inventado" })] });
+    const rNivel = await listar();
+    ok("Q29 nivel fora do vocabulario tambem falha fechado", rNivel.coleta === "falha_leitura");
+
+    // ── Q30. Entrada ────────────────────────────────────────────────
+    roteiroDb();
+    const rSemDono = await listarAberturasStale({ userId: "" });
+    ok("Q30 userId vazio -> entrada_invalida, sem tocar o banco",
+      rSemDono.coleta === "entrada_invalida" && chamadasDb.length === 0);
+
+    roteiroDb();
+    const rCursorRuim = await listar({ criadoEm: "nao-e-data", requestId: "req-0001" });
+    ok("Q31 cursor malformado -> entrada_invalida, e NAO reinicia a varredura",
+      rCursorRuim.coleta === "entrada_invalida" && chamadasDb.length === 0);
+
+    roteiroDb();
+    const rCursorInjecao = await listar({
+      criadoEm: "2026-09-01T10:00:00.000+00:00",
+      requestId: 'a",b.gt."x',
+    });
+    ok("Q32 requestId fora da forma segura tambem e recusado",
+      rCursorInjecao.coleta === "entrada_invalida" && chamadasDb.length === 0);
+  }
+
+  secao("Q2. Paginacao keyset sem starvation");
+  {
+    // ── Q33. Exatamente a pagina ────────────────────────────────────
+    roteiroDb({ data: linhas(1, PAGINA_STALE) }, { data: [] });
+    const rCheia = await listar();
+    ok("Q33 exatamente PAGINA linhas -> fim da varredura",
+      rCheia.coleta === "ok" && rCheia.nextCursor === null);
+
+    // ── Q34. Pagina + 1 ─────────────────────────────────────────────
+    roteiroDb({ data: linhas(1, PAGINA_STALE + 1) }, { data: [] });
+    const rExcede = await listar();
+    ok("Q34 PAGINA+1 linhas -> ha continuacao", rExcede.nextCursor !== null);
+    ok("Q35 o cursor aponta para a centesima linha-FONTE, nao para a 101a",
+      rExcede.nextCursor?.requestId === `req-${String(PAGINA_STALE).padStart(4, "0")}`);
+    ok("Q36 a linha 101 NAO entra na L2 desta chamada",
+      (chamadasDb[1]?.ins.request_id_consumo ?? []).length === PAGINA_STALE);
+    ok("Q37 e a pagina vazia de stales ainda assim continua",
+      rExcede.itens.length === 0 && rExcede.nextCursor !== null);
+
+    // ── Q38. O cursor vem da FONTE, nao do resultado ────────────────
+    //
+    // A regressao que este assert trava: se o cursor saisse da ultima
+    // stale RETORNADA, uma pagina sem stale devolveria `null` e a
+    // varredura pararia antes do fim — tornando registros posteriores
+    // permanentemente inalcancaveis.
+    roteiroDb({ data: linhas(1, PAGINA_STALE + 1) }, { data: [aprovacaoDe(3)] }, { data: [] });
+    const rMista = await listar();
+    ok("Q38 com UMA stale na posicao 3, o cursor continua sendo a linha 100",
+      rMista.itens.length === 1 &&
+      rMista.itens[0]?.requestId === "req-0003" &&
+      rMista.nextCursor?.requestId === `req-${String(PAGINA_STALE).padStart(4, "0")}`);
+
+    // ── Q39. A continuacao vai ao banco na forma keyset ─────────────
+    const cursor = rExcede.nextCursor;
+    roteiroDb({ data: [] });
+    await listar(cursor);
+    const expressao = chamadasDb[0]?.or;
+    ok("Q39 com cursor, L1 envia a expressao de continuacao", typeof expressao === "string");
+    ok("Q40 e ela e exatamente criado_em > C  OU  (criado_em = C E request_id > R)",
+      expressao === expressaoDeContinuacao(cursor!));
+    ok("Q41 os dois valores vao entre aspas, por causa de '.' e ':' no timestamp",
+      typeof expressao === "string" &&
+      expressao.includes(`criado_em.gt.${JSON.stringify(cursor!.criadoEm)}`) &&
+      expressao.includes(`and(criado_em.eq.${JSON.stringify(cursor!.criadoEm)},request_id.gt.${JSON.stringify(cursor!.requestId)})`));
+    ok("Q42 a continuacao nao reabre o corte de idade nem o escopo de dono",
+      typeof chamadasDb[0]?.filtros["criado_em<"] === "string" &&
+      chamadasDb[0]?.filtros.user_id === DONO);
+
+    // ── Q43. A REGRESSAO DA POSICAO 201 ─────────────────────────────
+    //
+    // 201 aberturas, e a stale e a ULTIMA. Com o desenho antigo — LIMIT
+    // sobre as aprovacoes, sem cursor — ela era inalcancavel para
+    // sempre. Aqui, tres continuacoes chegam nela.
+    // ── Por que cada pagina confere a expressao ENVIADA ─────────────
+    //
+    // O duplo devolve o que foi roteirizado, na ordem em que foi
+    // roteirizado. Entao "a pagina 2 trouxe outras linhas" NAO prova
+    // continuacao: provaria a mesma coisa se a implementacao ignorasse
+    // `entrada.cursor` por completo. O que amarra a cadeia e conferir,
+    // em cada coleta, que a L1 levou ao banco o cursor devolvido pela
+    // coleta anterior — e por isso os asserts abaixo comparam contra
+    // `expressaoDeContinuacao`, o MESMO helper que a producao usa.
+    roteiroDb({ data: linhas(1, PAGINA_STALE + 1) }, { data: [] });
+    const p1 = await listar();
+    ok("Q43 pagina 1 de 201: nenhuma stale, mas ha continuacao",
+      p1.coleta === "ok" && p1.itens.length === 0 && p1.nextCursor !== null);
+    ok("Q43a e a primeira coleta nao leva filtro de continuacao nenhum",
+      chamadasDb[0]?.or === null);
+
+    roteiroDb({ data: linhas(101, 201) }, { data: [] });
+    const p2 = await listar(p1.nextCursor);
+    ok("Q44 pagina 2: continua sem stale, e o cursor avancou",
+      p2.coleta === "ok" && p2.itens.length === 0 &&
+      p2.nextCursor !== null && p2.nextCursor.requestId !== p1.nextCursor?.requestId);
+    ok("Q44a A CADEIA: a query da pagina 2 leva o cursor da pagina 1",
+      chamadasDb[0]?.or === expressaoDeContinuacao(p1.nextCursor!),
+      String(chamadasDb[0]?.or));
+
+    roteiroDb({ data: [abertura(201)] }, { data: [aprovacaoDe(201)] }, { data: [] });
+    const p3 = await listar(p2.nextCursor);
+    ok("Q45 pagina 3: a stale da POSICAO 201 e finalmente alcancada",
+      p3.coleta === "ok" && p3.itens.length === 1 && p3.itens[0]?.requestId === "req-0201");
+    ok("Q45a A CADEIA: a query da pagina 3 leva o cursor da pagina 2",
+      chamadasDb[0]?.or === expressaoDeContinuacao(p2.nextCursor!),
+      String(chamadasDb[0]?.or));
+    ok("Q46 e a ultima pagina encerra a varredura", p3.nextCursor === null);
+
+    // ── Q46a. O CONTROLE que fecha o false-green ────────────────────
+    //
+    // A mutacao hipotetica: uma implementacao que ignore
+    // `entrada.cursor` e nunca chame `.or()`. Ela passaria em Q43-Q46
+    // se estes asserts nao existissem, porque o roteiro entrega paginas
+    // diferentes de qualquer jeito. Aqui a sonda mostra que reprovaria.
+    ok("Q46a CONTROLE: se o cursor fosse ignorado, a cadeia reprovaria",
+      null !== expressaoDeContinuacao(p1.nextCursor!) &&
+      expressaoDeContinuacao(p1.nextCursor!) !== expressaoDeContinuacao(p2.nextCursor!));
+
+    // ── Q47. Ordem e desempate ──────────────────────────────────────
+    const mesmoInstante = "2026-09-01T10:00:00.000+00:00";
+    roteiroDb(
+      {
+        data: [
+          abertura(9, { criado_em: mesmoInstante }),
+          abertura(2, { criado_em: mesmoInstante }),
+          abertura(5, { criado_em: mesmoInstante }),
+        ],
+      },
+      { data: [aprovacaoDe(9), aprovacaoDe(2), aprovacaoDe(5)] },
+      { data: [] }
+    );
+    const rEmpate = await listar();
+    ok("Q47 timestamps iguais sao desempatados por requestId, de forma estavel",
+      rEmpate.itens.map((i) => i.requestId).join(",") === "req-0002,req-0005,req-0009");
+
+    roteiroDb(
+      { data: [abertura(30), abertura(10), abertura(20)] },
+      { data: [aprovacaoDe(30), aprovacaoDe(10), aprovacaoDe(20)] },
+      { data: [] }
+    );
+    const rOrdem = await listar();
+    ok("Q48 e o resultado sai da mais antiga para a mais nova",
+      rOrdem.itens.map((i) => i.requestId).join(",") === "req-0010,req-0020,req-0030");
+
+    // ── Q49. Desfecho que aparece entre L1 e L3 ─────────────────────
+    roteiroDb(
+      { data: [abertura(1), abertura(2)] },
+      { data: [aprovacaoDe(1), aprovacaoDe(2)] },
+      { data: [desfechoDe(2)] }
+    );
+    const rCorrida = await listar();
+    ok("Q49 desfecho gravado antes da ultima leitura remove a candidata",
+      rCorrida.itens.length === 1 && rCorrida.itens[0]?.requestId === "req-0001");
+  }
+
+  secao("Q3. O detector so observa — e a suite prova isso pela fonte");
+  {
+    ok("Q50 stale.ts e server-only", /^import "server-only";/m.test(STALE_BRUTO));
+    ok("Q51 zero escrita: nenhum insert, update, upsert, delete ou rpc",
+      !/\.insert\(|\.update\(|\.upsert\(|\.delete\(|\.rpc\(/.test(STALE_CODIGO));
+    ok("Q52 CONTROLE: a sonda de escrita acharia uma mutacao",
+      /\.insert\(|\.update\(|\.upsert\(|\.delete\(|\.rpc\(/.test('cliente.from(T).insert({})'));
+    ok("Q53 zero executor: nao alcanca a execucao de Funcao",
+      !/execucao-funcoes|executarFuncao|retomarAprovacao|executarComAberturaFeita|definicao\.executor/
+        .test(STALE_CODIGO));
+    ok("Q54 zero closer: nao registra abertura nem desfecho",
+      !/chamadas\/registro|registrarAbertura|registrarDesfecho/.test(STALE_CODIGO));
+    ok("Q55 zero argumentos: a coluna nao e lida nem devolvida",
+      !/argumentos/.test(STALE_CODIGO));
+    ok("Q56 a entrada publica nao aceita idade, corte nem relogio",
+      !/(idadeMinimaMs|cutoff|agora|sla)/i.test(
+        STALE_CODIGO.slice(
+          STALE_CODIGO.indexOf("export interface EntradaAberturasStale"),
+          STALE_CODIGO.indexOf("export function calcularCutoff")
+        )));
+    ok("Q57 o SLA e uma constante do modulo, e nao um parametro",
+      /export const IDADE_STALE_APROVACAO_MS = /.test(STALE_CODIGO));
+    ok("Q58 a origem Approval e ancorada em request_id_consumo",
+      /request_id_consumo/.test(STALE_CODIGO));
+    ok("Q59 nenhum erro cru do driver e propagado",
+      !/error\.message|\.details|\.hint|\.stack/.test(STALE_CODIGO));
+    ok("Q60 o log registra so a origem e o SQLSTATE", /sqlstate \$\{sqlstate/.test(STALE_CODIGO));
+    ok("Q61 o tipo publico nao carrega userId nem payload cru",
+      !/userId/.test(
+        STALE_CODIGO.slice(
+          STALE_CODIGO.indexOf("export interface AberturaStale"),
+          STALE_CODIGO.indexOf("export type ColetaStale")
+        )));
+
+    const consumidoresStale = [...varrerFontes("lib"), ...varrerFontes("app")].filter(
+      (f) => f !== STALE && /listarAberturasStale/.test(semComentariosTs(ler(f)))
+    );
+    ok(`Q62 zero consumidor de producao (${consumidoresStale.join(", ") || "nenhum"})`,
+      consumidoresStale.length === 0);
+    ok("Q63 ANCORA: a varredura leu arquivos de verdade",
+      [...varrerFontes("lib"), ...varrerFontes("app")].length > 50);
+  }
+}
+
+void principalStale().then(() => {
+  console.log(`\n══ ${passou} PASS / ${falhou} FAIL ══\n`);
+  process.exit(falhou === 0 ? 0 : 1);
+});

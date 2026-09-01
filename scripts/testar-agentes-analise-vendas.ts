@@ -960,17 +960,24 @@ const ARQUIVOS_TOOL_EXEC: readonly string[] = [
 /**
  * O que a APPROVAL-B1B acrescentou dentro do `ESCOPO_AGENTES`.
  *
- * A fundacao persistente de aprovacao: uma pasta NOVA com dois modulos
- * — `identidade.ts`, puro, e `persistencia.ts`, server-only — mais a
- * migration da tabela. A suite nao entra aqui: `scripts/` nunca esteve
- * no escopo, e ela e declarada em `SUITES_AGENTES`.
+ * A fundacao persistente de aprovacao: uma pasta NOVA com tres modulos
+ * — `identidade.ts`, puro; `persistencia.ts`, server-only e unica
+ * chamadora das RPCs de lifecycle; e `stale.ts`, server-only e
+ * estritamente READ MODEL — mais a migration da tabela. A suite nao
+ * entra aqui: `scripts/` nunca esteve no escopo, e ela e declarada em
+ * `SUITES_AGENTES`.
+ *
+ * `stale.ts` entrou na APPROVAL-B1D-D1. Ele nao escreve, nao executa
+ * Funcao e nao toca lifecycle: so LE aberturas que ficaram sem desfecho
+ * alem do SLA. Entra aqui NOMINALMENTE, como os outros dois — a lista
+ * continua sendo lista, e nao um curinga de pasta.
  *
  * Mesma forma colapsada dos blocos acima: enquanto a pasta estiver
  * inteiramente untracked o porcelain devolve UMA linha e nenhum arquivo
  * de dentro aparece. Por isso a entrada colapsada e aceita aqui e o
  * CONTEUDO e conferido a parte, por disco, em G11z12.
  */
-const MODULOS_APROVACOES: readonly string[] = ["identidade.ts", "persistencia.ts"];
+const MODULOS_APROVACOES: readonly string[] = ["identidade.ts", "persistencia.ts", "stale.ts"];
 
 const ARQUIVOS_APROVACOES: readonly string[] = [
   "lib/agentes/aprovacoes/",
@@ -1818,17 +1825,25 @@ async function main() {
        !mesmoConjuntoDeNomes([], MODULOS_EXECUCAO_FUNCOES));
 
     // A outra metade da entrada colapsada `lib/agentes/aprovacoes/`.
-    // Sao dois modulos com fronteiras diferentes — um puro, outro
-    // server-only — e um terceiro arquivo aparecendo ali sem gate
-    // significa que a fronteira comecou a se diluir.
+    // Sao TRES modulos com fronteiras diferentes — um puro, um de
+    // lifecycle e um read model — e um quarto arquivo aparecendo ali sem
+    // gate significa que a fronteira comecou a se diluir.
     const conteudoAprovacoes = readdirSync(join(RAIZ, "lib", "agentes", "aprovacoes")).sort();
 
     ok(`G11z12 lib/agentes/aprovacoes contem exatamente os modulos declarados (${conteudoAprovacoes.join(", ")})`,
        mesmoConjuntoDeNomes(conteudoAprovacoes, MODULOS_APROVACOES));
-    ok("G11z12a CONTROLE NEGATIVO: um terceiro modulo em aprovacoes/ reprova",
+    ok("G11z12a CONTROLE NEGATIVO: um quarto modulo em aprovacoes/ reprova",
        !mesmoConjuntoDeNomes([...MODULOS_APROVACOES, "rotas.ts"], MODULOS_APROVACOES));
     ok("G11z12b CONTROLE NEGATIVO: a pasta vazia reprova",
        !mesmoConjuntoDeNomes([], MODULOS_APROVACOES));
+    // O sentido que faltava: a lista tambem reprova por FALTA. Sem isto
+    // um modulo removido em silencio passaria pelo detector.
+    ok("G11z12c CONTROLE NEGATIVO: o read model ausente reprova",
+       !mesmoConjuntoDeNomes(["identidade.ts", "persistencia.ts"], MODULOS_APROVACOES));
+    ok("G11z12d CONTROLE NEGATIVO: a persistencia ausente reprova",
+       !mesmoConjuntoDeNomes(["identidade.ts", "stale.ts"], MODULOS_APROVACOES));
+    ok("G11z12e CONTROLE NEGATIVO: um nome parecido nao passa por semelhanca",
+       !mesmoConjuntoDeNomes(["identidade.ts", "persistencia.ts", "stale.test.ts"], MODULOS_APROVACOES));
 
     // ── G11t..G11w — `scripts/` nunca esteve em ESCOPO_AGENTES ─────
     // Medido na 1E-a: uma suite de agentes inesperada em `scripts/`
