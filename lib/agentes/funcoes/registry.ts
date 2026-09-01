@@ -237,10 +237,27 @@ export interface DefinicaoFuncao {
   // `executor` PRIMEIRO: existencia e a presenca dele, e a ordem e
   // cobrada por assert. Os tres primeiros campos sao as
   // responsabilidades da propria Funcao — validar, executar, interpretar
-  // —; os tres ultimos sao metadados operacionais.
+  // —; `revisao` diz QUAL versao delas; os tres ultimos sao metadados
+  // operacionais.
   executor: ExecutorFuncao;
   validarEntrada: ValidadorEntrada;
   interpretarSaida: InterpretadorSaida;
+  /**
+   * A versao SEMANTICA da acao — o que um humano estaria aprovando.
+   * String opaca, comparada so por igualdade: sem semver, sem ordem,
+   * sem timestamp, sem hash de arquivo, sem SHA de commit.
+   *
+   * BUMP OBRIGATORIO ao mudar `validarEntrada`, a semantica da acao, o
+   * efeito externo, o escopo, `acesso`, `conexaoNecessaria`, ou a
+   * interpretacao que decide sucesso/erro. NAO exige bump: comentario,
+   * mensagem interna, refactor equivalente.
+   *
+   * Ninguem le este campo ainda. Ele existe para que uma aprovacao
+   * humana possa congelar a definicao que aprovou — aprovar a revisao
+   * "1" e executar a "2" seria executar outra acao sob a mesma
+   * autorizacao.
+   */
+  revisao: string;
   acesso: "leitura" | "escrita";
   idempotente: boolean;
   conexaoNecessaria: RequisitoConexaoFuncao | null;
@@ -406,6 +423,8 @@ export const FUNCOES: Readonly<Record<string, DefinicaoFuncao>> = Object.freeze(
     // Le o `ResultadoVendas` que o executor acima produz, com checagem
     // de runtime — o cast sozinho nao provaria nada.
     interpretarSaida: interpretarSaidaVendasConsultar,
+    // Primeira revisao publicada; nenhuma versao anterior existiu.
+    revisao: "1",
     acesso: "leitura",
     idempotente: true,
     conexaoNecessaria: null,

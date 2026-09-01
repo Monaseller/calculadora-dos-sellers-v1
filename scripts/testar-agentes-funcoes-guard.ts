@@ -99,6 +99,36 @@ secao("A. vendas.consultar no catalogo real");
   ok("A9  catalogo nao declara workflowId/settingsHash", !/(workflowId|settingsHash)/.test(src));
   ok("A10 controle: o grep le o arquivo real", bruta.length > 1000 && src.includes("FUNCOES"));
   ok("A11 controle: o grep reprovaria id ausente", !src.includes('"cds.ml.consultar_pedido"'));
+
+  // ── A revisao da Funcao (APPROVAL-B1A) ─────────────────────────────
+  //
+  // Snapshot nominal, no mesmo instrumento de A2..A5: o catalogo e a
+  // unica autoridade, e o valor fica congelado por assert. Mudar a
+  // revisao passa a ser uma edicao visivel aqui, nunca silenciosa.
+  //
+  // O QUE ESTE ASSERT NAO FAZ, e nao deve parecer fazer: ele nao
+  // detecta que alguem mudou a semantica da Funcao e esqueceu o bump.
+  // Isso exigiria hash automatico da definicao — garantia falsa nos
+  // dois sentidos, porque refactor equivalente mudaria o hash e bug
+  // semantico pode nao mudar. O que ele da e revisao explicita, valor
+  // congelado e campo obrigatorio. A cobertura parcial vem de A3/A4/A5
+  // estarem ao lado: mexer em `acesso`, `idempotente` ou
+  // `conexaoNecessaria` reprova e obriga a passar por estas linhas.
+  ok("A12 vendas.consultar declara revisao \"1\"", /revisao:\s*"1"/.test(src));
+
+  const revisaoObrigatoria = (fonte: string): boolean =>
+    /interface DefinicaoFuncao\s*\{[\s\S]*?\brevisao: string;[\s\S]*?\}/.test(fonte) &&
+    !/\brevisao\?\s*:/.test(fonte);
+
+  ok("A13 revisao e OBRIGATORIA na interface, nunca opcional", revisaoObrigatoria(src));
+  ok("A14 CONTROLE POSITIVO: a forma obrigatoria passa",
+    revisaoObrigatoria('interface DefinicaoFuncao {\n  revisao: string;\n  acesso: "leitura";\n}'));
+  ok("A15 CONTROLE NEGATIVO: campo opcional reprova",
+    !revisaoObrigatoria("interface DefinicaoFuncao {\n  revisao?: string;\n}"));
+  ok("A16 CONTROLE NEGATIVO: interface sem revisao reprova",
+    !revisaoObrigatoria('interface DefinicaoFuncao {\n  acesso: "leitura";\n}'));
+  ok("A17 CONTROLE NEGATIVO: a palavra solta em prosa nao basta",
+    !revisaoObrigatoria("const nota = 'a revisao da Funcao';"));
 }
 
 // ─── B. Existencia ────────────────────────────────────────────────────
