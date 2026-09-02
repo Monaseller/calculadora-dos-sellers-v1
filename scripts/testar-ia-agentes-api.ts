@@ -92,9 +92,27 @@ function construtor(tabela: string): unknown {
     }
     if (op.tipo === "escrita" && pendente) {
       // O banco preenche o que o cliente nao manda: uuid e timestamps.
+      //
+      // AGENT-VERTICAL-SLICE-V1-I2: os DEFAULT sao por TABELA, como no
+      // Postgres. `agente_tarefas` nasce `pendente` com progresso 0 e
+      // tentativas 0 (migration 20260916); `agentes` nasce `ativo`. Sem
+      // isto o `status` inicial viria `undefined` e a suite provaria o
+      // 202 contra um campo que o banco real sempre preenche.
+      const padroes =
+        op.tabela === "agente_tarefas"
+          ? {
+              status: "pendente",
+              progresso: 0,
+              tentativas: 0,
+              max_tentativas: 3,
+              resultado: null,
+              erro_tipo: null,
+              erro_mensagem: null,
+            }
+          : { ativo: true };
       const gravada = {
         id: randomUUID(),
-        ativo: true,
+        ...padroes,
         criado_em: new Date().toISOString(),
         atualizado_em: new Date().toISOString(),
         ...pendente,
@@ -516,6 +534,391 @@ async function principal(): Promise<void> {
   ok("I9  nenhuma UI foi criada para esta rota",
     !existsSync(join(RAIZ, "app/(app)/ia/agentes/NovoAgente.tsx")) &&
       readdirSync(join(RAIZ, "app/api/agentes")).sort().join(", ") === "[agenteId], route.ts");
+
+  // ─── J..P. A surface de conversa — AGENT-VERTICAL-SLICE-V1-I2 ───────
+  //
+  // Os handlers REAIS de `app/api/agentes/[agenteId]/conversa` rodam,
+  // com as capabilities reais (`lerAgenteDoDono`, `criarTarefa`,
+  // `lerTarefaDoDono`) contra o mesmo duplo com estado. Nenhum provedor
+  // e alcancado: a rota nunca executa tarefa.
+  {
+    const conversa = await import("../app/api/agentes/[agenteId]/conversa/route");
+
+    const AGENTE_A = randomUUID();
+    const AGENTE_OUTRO = randomUUID();
+
+    const req = (
+      agenteId: string,
+      cookie: string | undefined,
+      opcoes: { corpo?: string; query?: string } = {}
+    ) =>
+      new Request(
+        `http://localhost/api/agentes/${agenteId}/conversa${opcoes.query ?? ""}`,
+        {
+          method: opcoes.corpo === undefined ? "GET" : "POST",
+          headers: cookie ? { cookie } : {},
+          ...(opcoes.corpo === undefined ? {} : { body: opcoes.corpo }),
+        }
+      );
+
+    const post = (agenteId: string, cookie: string | undefined, corpo: string) =>
+      conversa.POST(req(agenteId, cookie, { corpo }), { params: { agenteId } });
+    const get = (agenteId: string, cookie: string | undefined, query: string) =>
+      conversa.GET(req(agenteId, cookie, { query }), { params: { agenteId } });
+
+    const linhaAgenteConversa = (id: string, userId: string, ativo = true) => ({
+      id,
+      user_id: userId,
+      nome: "Agente de conversa",
+      tipo: "mensagens",
+      instrucoes: "RESPONDA_COM_A",
+      ativo,
+      criado_em: new Date().toISOString(),
+      atualizado_em: new Date().toISOString(),
+    });
+
+    const linhaTarefa = (extra: Record<string, unknown>) => ({
+      id: randomUUID(),
+      agente_id: AGENTE_A,
+      user_id: USER_A,
+      tipo: "conversa",
+      entrada: { mensagem: "Ola" },
+      status: "pendente",
+      progresso: 0,
+      resultado: null,
+      erro_tipo: null,
+      erro_mensagem: null,
+      tentativas: 0,
+      max_tentativas: 3,
+      criado_em: new Date().toISOString(),
+      iniciado_em: null,
+      concluido_em: null,
+      heartbeat_em: null,
+      ...extra,
+    });
+
+    const escritasDeTarefa = () =>
+      operacoes.filter((o) => o.tabela === "agente_tarefas" && o.tipo === "escrita");
+
+    secao("J. POST conversa — sessao");
+
+    linhas = [linhaAgenteConversa(AGENTE_A, USER_A)];
+    limpar();
+    const semSessao = await post(AGENTE_A, undefined, JSON.stringify({ mensagem: "Ola" }));
+    ok("J1  sem cookie -> 401", semSessao.status === 401, String(semSessao.status));
+    ok("J2  401 nao consulta nem escreve nada", operacoes.length === 0, String(operacoes.length));
+
+    limpar();
+    const tokenRuim = await post(AGENTE_A, `${COOKIE_SESSAO}=lixo.invalido`, JSON.stringify({ mensagem: "Ola" }));
+    ok("J3  token invalido -> 401", tokenRuim.status === 401, String(tokenRuim.status));
+    ok("J4  e tambem sem tocar o banco", operacoes.length === 0);
+
+    limpar();
+    const idRuim = await post("nao-e-uuid", COOKIE_A, JSON.stringify({ mensagem: "Ola" }));
+    ok("J5  agenteId nao-uuid -> 400", idRuim.status === 400, String(idRuim.status));
+    ok("J6  400 de id nao toca o banco", operacoes.length === 0);
+
+    secao("K. POST conversa — dono do agente");
+
+    limpar();
+    const outroDono = await post(AGENTE_A, COOKIE_B, JSON.stringify({ mensagem: "Ola" }));
+    ok("K1  agente de A, sessao B -> 404", outroDono.status === 404, String(outroDono.status));
+    ok("K2  cross-tenant NAO cria tarefa", escritasDeTarefa().length === 0);
+    ok("K3  404 nao revela existencia",
+      JSON.stringify(await outroDono.clone().json()).includes("Agente não encontrado"));
+
+    limpar();
+    const inexistente = await post(AGENTE_OUTRO, COOKIE_A, JSON.stringify({ mensagem: "Ola" }));
+    ok("K4  agente inexistente -> 404 (mesma resposta)", inexistente.status === 404);
+    ok("K5  e nao cria tarefa", escritasDeTarefa().length === 0);
+
+    linhas = [linhaAgenteConversa(AGENTE_A, USER_A, false)];
+    limpar();
+    const inativo = await post(AGENTE_A, COOKIE_A, JSON.stringify({ mensagem: "Ola" }));
+    ok("K6  agente inativo -> 409", inativo.status === 409, String(inativo.status));
+    ok("K7  inativo NAO cria tarefa", escritasDeTarefa().length === 0);
+    ok("K8  o codigo do erro e agente_inativo",
+      ((await inativo.clone().json()) as { erro?: string }).erro === "agente_inativo");
+
+    secao("L. POST conversa — corpo fechado");
+
+    linhas = [linhaAgenteConversa(AGENTE_A, USER_A)];
+    for (const [rotulo, corpo] of [
+      ["corpo ausente", ""],
+      ["objeto vazio", "{}"],
+      ["mensagem vazia", '{"mensagem":""}'],
+      ["mensagem so espaco", '{"mensagem":"   "}'],
+      ["mensagem nao-string", '{"mensagem":42}'],
+      ["array", "[]"],
+      ["string JSON", '"Ola"'],
+      ["JSON invalido", "{mensagem:}"],
+      ["campo extra", '{"mensagem":"Ola","extra":1}'],
+      ["userId", '{"mensagem":"Ola","userId":"x"}'],
+      ["user_id", '{"mensagem":"Ola","user_id":"x"}'],
+      ["agenteId", '{"mensagem":"Ola","agenteId":"x"}'],
+      ["tipo", '{"mensagem":"Ola","tipo":"analise_vendas"}'],
+      ["instrucoes", '{"mensagem":"Ola","instrucoes":"MALICIOSA"}'],
+      ["provider", '{"mensagem":"Ola","provider":"anthropic"}'],
+      ["model", '{"mensagem":"Ola","model":"x"}'],
+      ["tools", '{"mensagem":"Ola","tools":[]}'],
+      ["maxTentativas", '{"mensagem":"Ola","maxTentativas":99}'],
+      ["status", '{"mensagem":"Ola","status":"concluido"}'],
+      ["resultado", '{"mensagem":"Ola","resultado":{"resposta":"x"}}'],
+    ] as const) {
+      limpar();
+      const r = await post(AGENTE_A, COOKIE_A, corpo);
+      ok(`L  ${rotulo} -> 400 e zero tarefa criada`,
+        r.status === 400 && escritasDeTarefa().length === 0,
+        `${r.status}`);
+    }
+
+    secao("M. POST conversa — criacao");
+
+    linhas = [linhaAgenteConversa(AGENTE_A, USER_A)];
+    limpar();
+    const rpcsAntes = rpcs;
+    const criada = await post(AGENTE_A, COOKIE_A, JSON.stringify({ mensagem: "  Ola  " }));
+    const corpoCriada = (await criada.clone().json()) as Record<string, unknown>;
+    const escrita = escritasDeTarefa()[0];
+    const payload = (escrita?.payload ?? {}) as Record<string, unknown>;
+
+    ok("M1  POST valido -> 202", criada.status === 202, String(criada.status));
+    ok("M2  ANCORA: houve exatamente UMA escrita em agente_tarefas", escritasDeTarefa().length === 1);
+    ok("M3  o insert foi na tabela agente_tarefas", escrita?.tabela === "agente_tarefas");
+    ok("M4  o payload tem EXATAMENTE 4 chaves",
+      Object.keys(payload).sort().join(",") === "agente_id,entrada,tipo,user_id",
+      Object.keys(payload).sort().join(","));
+    ok("M5  user_id = auth.uid", payload.user_id === USER_A);
+    ok("M6  agente_id = id da rota", payload.agente_id === AGENTE_A);
+    ok("M7  tipo e FIXADO em conversa (o caller nao escolhe)", payload.tipo === "conversa");
+    ok("M8  entrada guarda somente a mensagem, aparada",
+      JSON.stringify(payload.entrada) === JSON.stringify({ mensagem: "Ola" }));
+    ok("M9  max_tentativas NAO viaja (DEFAULT do banco manda)", !("max_tentativas" in payload));
+    ok("M10 tarefaId devolvido e o uuid REAL da linha gravada",
+      typeof corpoCriada.tarefaId === "string" && RE_UUID.test(corpoCriada.tarefaId as string) &&
+        linhas.some((l) => l.id === corpoCriada.tarefaId));
+    ok("M11 status inicial REAL do banco (pendente)", corpoCriada.status === "pendente", String(corpoCriada.status));
+    ok("M12 a resposta nao vaza userId/instrucoes/linha crua",
+      !("userId" in corpoCriada) && !("user_id" in corpoCriada) &&
+        !("instrucoes" in corpoCriada) && !("entrada" in corpoCriada));
+    ok("M13 POST NAO executa: zero RPC", rpcs === rpcsAntes);
+    ok("M14 a resposta tem so as 4 chaves do contrato",
+      Object.keys(corpoCriada).sort().join(",") === "modoIaConfiguradoAgora,ok,status,tarefaId",
+      Object.keys(corpoCriada).sort().join(","));
+
+    secao("N. GET conversa — leitura tenant-scoped");
+
+    const T_PENDENTE = linhaTarefa({});
+    // Tarefa de B, no agente de B. A FK composta
+    // `agente_tarefas(agente_id, user_id) -> agentes(id, user_id)` torna
+    // impossivel uma tarefa de B apontar para o agente de A, entao o
+    // fixture cross-tenant precisa ter os DOIS campos de B — senao a
+    // suite provaria o 404 contra um estado que o banco nunca produz.
+    const T_OUTRO_DONO = linhaTarefa({ user_id: USER_B, agente_id: AGENTE_OUTRO });
+    const T_OUTRO_AGENTE = linhaTarefa({ agente_id: AGENTE_OUTRO });
+    const T_OUTRO_TIPO = linhaTarefa({ tipo: "analise_vendas" });
+    const T_OK = linhaTarefa({ status: "concluido", progresso: 100, resultado: { resposta: "PONG: Ola" } });
+    const T_RESULTADO_RUIM = linhaTarefa({ status: "concluido", progresso: 100, resultado: { resumo: "forma da analise" } });
+    const T_FALHOU = linhaTarefa({
+      status: "erro",
+      erro_tipo: "handler_falhou",
+      erro_mensagem: "agente da tarefa nao encontrado",
+    });
+    // AGENT-VERTICAL-SLICE-V1-I2-F1 — fixtures adversariais de LEITURA.
+    //
+    // Nenhuma delas e produzivel pelo escritor TypeScript de hoje
+    // (`classificarErro` fecha o vocabulario, e o handler grava so
+    // `{resposta}`). Mas todas SAO produziveis pelo schema: `erro_tipo`
+    // e `text` sem CHECK de pertencimento e `resultado` e `jsonb` livre.
+    // A fronteira de leitura tem de se defender do que o banco aceita,
+    // nao do que o nosso codigo costuma escrever.
+    const T_ERRO_DESCONHECIDO = linhaTarefa({
+      status: "erro",
+      erro_tipo: "valor_futuro_ou_corrompido",
+      erro_mensagem: "detalhe interno que nao deve sair",
+    });
+    const T_RESULTADO_EXTRA = linhaTarefa({
+      status: "concluido",
+      progresso: 100,
+      resultado: { resposta: "ok", segredo: "NAO_DEVE_PASSAR" },
+    });
+    const T_RESULTADO_VAZIO = linhaTarefa({ status: "concluido", progresso: 100, resultado: {} });
+    const T_RESULTADO_ARRAY = linhaTarefa({ status: "concluido", progresso: 100, resultado: [] });
+
+    linhas = [
+      linhaAgenteConversa(AGENTE_A, USER_A),
+      T_PENDENTE, T_OUTRO_DONO, T_OUTRO_AGENTE, T_OUTRO_TIPO, T_OK, T_RESULTADO_RUIM, T_FALHOU,
+      T_ERRO_DESCONHECIDO, T_RESULTADO_EXTRA, T_RESULTADO_VAZIO, T_RESULTADO_ARRAY,
+    ];
+
+    limpar();
+    const getSemSessao = await get(AGENTE_A, undefined, `?tarefaId=${T_PENDENTE.id}`);
+    ok("N1  GET sem cookie -> 401", getSemSessao.status === 401);
+    ok("N2  401 nao le a tarefa", operacoes.length === 0);
+
+    limpar();
+    ok("N3  tarefaId ausente -> 400", (await get(AGENTE_A, COOKIE_A, "")).status === 400);
+    ok("N4  tarefaId nao-uuid -> 400", (await get(AGENTE_A, COOKIE_A, "?tarefaId=abc")).status === 400);
+    ok("N5  400 de tarefaId nao le nada", operacoes.length === 0);
+
+    limpar();
+    const rpcsGet = rpcs;
+    const pendente = await get(AGENTE_A, COOKIE_A, `?tarefaId=${T_PENDENTE.id}`);
+    const corpoPendente = (await pendente.clone().json()) as { tarefa?: Record<string, unknown> };
+    ok("N6  tarefa pendente -> 200", pendente.status === 200, String(pendente.status));
+    ok("N7  status real devolvido", corpoPendente.tarefa?.status === "pendente");
+    ok("N8  resposta e null enquanto nao concluiu", corpoPendente.tarefa?.resposta === null);
+    ok("N9  GET NAO executa: zero RPC e zero escrita",
+      rpcs === rpcsGet && operacoes.every((o) => o.tipo === "leitura"));
+
+    limpar();
+    // A sessao e de A; a tarefa e de B. `lerTarefaDoDono` filtra por
+    // `user_id`, entao ela nem chega a ser lida — e o 404 e o mesmo de
+    // "nao existe", sem vazar status nem existencia.
+    const alheia = await get(AGENTE_A, COOKIE_A, `?tarefaId=${T_OUTRO_DONO.id}`);
+    ok("N10 tarefa de OUTRO dono -> 404", alheia.status === 404, String(alheia.status));
+    ok("N10a e a resposta e indistinguivel de inexistente",
+      JSON.stringify(await alheia.clone().json()).includes("Conversa não encontrada"));
+    limpar();
+    ok("N11 tarefa do mesmo dono, OUTRO agente -> 404",
+      (await get(AGENTE_A, COOKIE_A, `?tarefaId=${T_OUTRO_AGENTE.id}`)).status === 404);
+    limpar();
+    ok("N12 tarefa do mesmo agente, OUTRO tipo -> 404",
+      (await get(AGENTE_A, COOKIE_A, `?tarefaId=${T_OUTRO_TIPO.id}`)).status === 404);
+    limpar();
+    const naoExiste = await get(AGENTE_A, COOKIE_A, `?tarefaId=${randomUUID()}`);
+    ok("N13 tarefa inexistente -> 404 (mesma resposta das outras tres)",
+      naoExiste.status === 404 &&
+        JSON.stringify(await naoExiste.clone().json()).includes("Conversa não encontrada"));
+
+    limpar();
+    const concluida = await get(AGENTE_A, COOKIE_A, `?tarefaId=${T_OK.id}`);
+    const corpoOk = (await concluida.clone().json()) as { tarefa?: Record<string, unknown> };
+    ok("N14 tarefa concluida -> 200", concluida.status === 200);
+    ok("N15 a resposta EXATA do resultado atravessa", corpoOk.tarefa?.resposta === "PONG: Ola");
+    ok("N16 a tarefa exposta tem so 4 campos",
+      Object.keys(corpoOk.tarefa ?? {}).sort().join(",") === "erroTipo,id,resposta,status",
+      Object.keys(corpoOk.tarefa ?? {}).sort().join(","));
+    ok("N17 GET nao expoe user_id, entrada nem resultado cru",
+      !JSON.stringify(corpoOk).includes(USER_A) && !JSON.stringify(corpoOk).includes("entrada"));
+
+    limpar();
+    const ruim = await get(AGENTE_A, COOKIE_A, `?tarefaId=${T_RESULTADO_RUIM.id}`);
+    ok("N18 concluida com resultado fora do contrato -> 500", ruim.status === 500, String(ruim.status));
+    ok("N19 e NAO devolve o objeto cru nem '[object Object]'",
+      !JSON.stringify(await ruim.clone().json()).includes("forma da analise") &&
+        !JSON.stringify(await ruim.clone().json()).includes("[object Object]"));
+
+    limpar();
+    const falhou = await get(AGENTE_A, COOKIE_A, `?tarefaId=${T_FALHOU.id}`);
+    const corpoFalhou = (await falhou.clone().json()) as { tarefa?: Record<string, unknown> };
+    ok("N20 tarefa falhada -> 200 (a consulta funcionou)", falhou.status === 200);
+    ok("N21 status e erroTipo (vocabulario fechado) sao expostos",
+      corpoFalhou.tarefa?.status === "erro" && corpoFalhou.tarefa?.erroTipo === "handler_falhou");
+    ok("N22 erro_mensagem NAO e exposto",
+      !JSON.stringify(corpoFalhou).includes("agente da tarefa nao encontrado"));
+
+    // ── N23..N29 — F1: o output e FECHADO nos dois contratos ────────
+
+    limpar();
+    const desconhecido = await get(AGENTE_A, COOKIE_A, `?tarefaId=${T_ERRO_DESCONHECIDO.id}`);
+    const corpoDesconhecido = (await desconhecido.clone().json()) as { tarefa?: Record<string, unknown> };
+    const textoDesconhecido = JSON.stringify(corpoDesconhecido);
+    ok("N23 erro_tipo fora do vocabulario -> 200 (a consulta funcionou)", desconhecido.status === 200);
+    ok("N24 o status real continua sendo repassado", corpoDesconhecido.tarefa?.status === "erro");
+    ok("N25 erroTipo desconhecido vira null", corpoDesconhecido.tarefa?.erroTipo === null,
+      String(corpoDesconhecido.tarefa?.erroTipo));
+    ok("N26 a string desconhecida NAO aparece em campo nenhum",
+      !textoDesconhecido.includes("valor_futuro_ou_corrompido"));
+    ok("N27 e o desconhecido NAO e mapeado para um tipo conhecido",
+      !textoDesconhecido.includes("erro_interno") && !textoDesconhecido.includes("handler_falhou"));
+    ok("N28 erro_mensagem segue oculto tambem aqui",
+      !textoDesconhecido.includes("detalhe interno que nao deve sair"));
+    ok("N29 CONTROLE NEGATIVO: o tipo CONHECIDO continua atravessando",
+      corpoFalhou.tarefa?.erroTipo === "handler_falhou");
+
+    // ── N30..N35 — resultado concluido com chaves EXATAS ────────────
+
+    limpar();
+    const extra = await get(AGENTE_A, COOKIE_A, `?tarefaId=${T_RESULTADO_EXTRA.id}`);
+    const textoExtra = JSON.stringify(await extra.clone().json());
+    ok("N30 resultado com chave a mais -> 500", extra.status === 500, String(extra.status));
+    ok("N31 o valor extra NAO vaza", !textoExtra.includes("NAO_DEVE_PASSAR"));
+    ok("N32 e a resposta valida junto dele tambem nao sai parcialmente",
+      !textoExtra.includes('"resposta"') || !textoExtra.includes('"ok"'));
+
+    limpar();
+    ok("N33 resultado {} -> 500",
+      (await get(AGENTE_A, COOKIE_A, `?tarefaId=${T_RESULTADO_VAZIO.id}`)).status === 500);
+    limpar();
+    ok("N34 resultado array -> 500",
+      (await get(AGENTE_A, COOKIE_A, `?tarefaId=${T_RESULTADO_ARRAY.id}`)).status === 500);
+    limpar();
+    ok("N35 CONTROLE NEGATIVO: o resultado no contrato exato continua 200 com a resposta",
+      (await (await get(AGENTE_A, COOKIE_A, `?tarefaId=${T_OK.id}`)).json() as { tarefa?: Record<string, unknown> })
+        .tarefa?.resposta === "PONG: Ola");
+
+    secao("O. Modo de IA configurado — sem mentir sobre proveniencia");
+
+    const FLAG_REAL = "AGENTES_IA_PROVIDER_REAL_ENABLED";
+    const flagAntes = process.env[FLAG_REAL];
+    const tinhaFlag = Object.prototype.hasOwnProperty.call(process.env, FLAG_REAL);
+    try {
+      linhas = [linhaAgenteConversa(AGENTE_A, USER_A), T_OK];
+
+      delete process.env[FLAG_REAL];
+      limpar();
+      const fakePost = (await (await post(AGENTE_A, COOKIE_A, JSON.stringify({ mensagem: "Ola" }))).json()) as Record<string, unknown>;
+      ok("O1  flag ausente -> modoIaConfiguradoAgora = fake", fakePost.modoIaConfiguradoAgora === "fake");
+
+      process.env[FLAG_REAL] = "true";
+      limpar();
+      const realPost = (await (await post(AGENTE_A, COOKIE_A, JSON.stringify({ mensagem: "Ola" }))).json()) as Record<string, unknown>;
+      ok("O2  flag 'true' -> modoIaConfiguradoAgora = real", realPost.modoIaConfiguradoAgora === "real");
+
+      limpar();
+      const realGet = (await (await get(AGENTE_A, COOKIE_A, `?tarefaId=${T_OK.id}`)).json()) as Record<string, unknown>;
+      ok("O3  o GET tambem reporta o modo atual", realGet.modoIaConfiguradoAgora === "real");
+
+      process.env[FLAG_REAL] = "1";
+      limpar();
+      const quase = (await (await post(AGENTE_A, COOKIE_A, JSON.stringify({ mensagem: "Ola" }))).json()) as Record<string, unknown>;
+      ok("O4  fail-closed: '1' NAO liga o provedor real", quase.modoIaConfiguradoAgora === "fake");
+    } finally {
+      if (tinhaFlag) process.env[FLAG_REAL] = flagAntes as string;
+      else delete process.env[FLAG_REAL];
+    }
+
+    secao("P. A rota nao faz o que nao deve");
+
+    const CODIGO_CONVERSA = semComentarios(ler("app/api/agentes/[agenteId]/conversa/route.ts"));
+    ok("P1  ANCORA: a fonte da rota foi lida", CODIGO_CONVERSA.length > 400 && /export async function POST/.test(CODIGO_CONVERSA));
+    ok("P2  zero Supabase direto na rota", !/\.from\(|getSupabaseServidor|SupabaseClient|createClient/.test(CODIGO_CONVERSA));
+    ok("P3  a rota NAO executa tarefa", !/executarTarefa|claim_next_agente_tarefa/.test(CODIGO_CONVERSA));
+    ok("P4  zero Function/Approval/resume", !/executarFuncao|retomarAprovacao|aprovacoes/.test(CODIGO_CONVERSA));
+    ok("P5  o userId vem SO de auth.uid", /auth\.uid/.test(CODIGO_CONVERSA) && !/body\.userId|corpo\.userId|searchParams\.get\("userId"\)/.test(CODIGO_CONVERSA));
+    ok("P6  o tipo e fixado pela constante do handler, nao por string solta",
+      /TIPO_CONVERSA/.test(CODIGO_CONVERSA) && !/tipo:\s*"conversa"/.test(CODIGO_CONVERSA));
+    ok("P7  o modo vem da funcao canonica, nao do texto da resposta",
+      /provedorRealHabilitado\(\)/.test(CODIGO_CONVERSA) && !/includes\("\[fake\]"\)/.test(CODIGO_CONVERSA));
+    ok("P8  a leitura de tarefa e a tenant-scoped, nao a do executor",
+      /lerTarefaDoDono/.test(CODIGO_CONVERSA) && !/lerTarefaParaExecucao/.test(CODIGO_CONVERSA));
+    ok("P9  nenhuma tabela de mensagens foi criada",
+      !/conversas|mensagens|threads|sessions|historico/i.test(CODIGO_CONVERSA));
+    // F1: as duas afirmacoes que o R1 derrubou.
+    ok("P11 erroTipo e fechado pelo vocabulario CANONICO, importado",
+      /TIPOS_ERRO_TAREFA/.test(CODIGO_CONVERSA) &&
+        /from "@\/lib\/agentes\/tipos-execucao"/.test(CODIGO_CONVERSA));
+    ok("P12 a lista de tipos NAO foi reescrita a mao na rota",
+      !/"tipo_desconhecido"/.test(CODIGO_CONVERSA) && !/"handler_falhou"/.test(CODIGO_CONVERSA));
+    ok("P13 o comentario falso sobre CHECK do banco sumiu",
+      !/VOCABULARIO FECHADO — o CHECK do banco/.test(ler("app/api/agentes/[agenteId]/conversa/route.ts")));
+    ok("P14 o resultado concluido exige chave unica",
+      /chaves\.length !== 1 \|\| chaves\[0\] !== "resposta"/.test(CODIGO_CONVERSA));
+    ok("P15 nenhuma coercao String() entrou no caminho", !/String\(/.test(CODIGO_CONVERSA));
+    ok("P10 nenhuma migration entrou nesta frente",
+      !existsSync(join(RAIZ, "supabase/migrations/20260929_conversas.sql")));
+  }
 
   console.log(`\n══ ${passou} PASS / ${falhou} FAIL ══\n`);
   process.exitCode = falhou === 0 ? 0 : 1;
