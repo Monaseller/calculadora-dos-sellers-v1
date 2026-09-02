@@ -378,8 +378,52 @@ async function main() {
     ok("H4 o registry envolve o handler com a interpretacao", /comInterpretacaoDeVendas\(\s*criarHandlerAnaliseVendas\(criarLeiturasDeVendas\(userId\)\),\s*criarInterpretadorDeVendas\(\)\s*\)/.test(codigoReg));
     ok("H5 o `userId` vai SO para a capability, nunca para a IA",
        /criarLeiturasDeVendas\(userId\)/.test(codigoReg) && !/criarInterpretadorDeVendas\(userId\)/.test(codigoReg));
-    ok("H6 nenhum tipo de tarefa novo foi registrado", /TIPO_TESTE_FUNDACAO\]|TIPO_ANALISE_VENDAS\]/.test(codigoReg) &&
-       (codigoReg.match(/^\s*\[TIPO_/gm) ?? []).length === 2);
+    // ── H6 — AGENT-VERTICAL-SLICE-V1 reconciliou este assert ────────
+    //
+    // O rotulo antigo — "nenhum tipo de tarefa novo foi registrado" —
+    // afirmava uma propriedade da 1E-c: AQUELA frente era decorator
+    // puro e nao acrescentava tipo. A afirmacao envelheceu quando
+    // `conversa` entrou, e envelheceu de proposito: o registry ganhou um
+    // terceiro tipo por decisao, nao por acidente.
+    //
+    // O assert nao foi enfraquecido para acomodar a mudanca. Ele deixou
+    // de contar e passou a ancorar NOMINALMENTE quais sao os tres — o
+    // que e mais forte que a versao anterior, nao menos: antes um tipo
+    // novo passaria despercebido se outro fosse removido no mesmo
+    // commit; agora nao passa.
+    const CHAVES_REGISTRY = ["TIPO_ANALISE_VENDAS", "TIPO_CONVERSA", "TIPO_TESTE_FUNDACAO"];
+    const chavesNoMapa = (fonte: string) =>
+      [...fonte.matchAll(/^\s*\[(TIPO_[A-Z_]+)\]/gm)].map((m) => m[1]).sort().join(",");
+
+    ok("H6 o registry tem EXATAMENTE os 3 tipos nominais",
+       chavesNoMapa(codigoReg) === CHAVES_REGISTRY.join(","));
+    ok("H6a a contagem bate com a lista nominal",
+       (codigoReg.match(/^\s*\[TIPO_/gm) ?? []).length === CHAVES_REGISTRY.length);
+    ok("H6b a extracao achou as chaves (anti-vacuidade)",
+       chavesNoMapa(codigoReg).includes("TIPO_CONVERSA"));
+    ok("H6c CONTROLE NEGATIVO: o oraculo reprova tipo A MAIS",
+       chavesNoMapa("  [TIPO_ANALISE_VENDAS]:\n  [TIPO_CONVERSA]:\n  [TIPO_TESTE_FUNDACAO]:\n  [TIPO_X]:") !==
+         CHAVES_REGISTRY.join(","));
+    ok("H6d CONTROLE NEGATIVO: o oraculo reprova tipo A MENOS",
+       chavesNoMapa("  [TIPO_ANALISE_VENDAS]:\n  [TIPO_TESTE_FUNDACAO]:") !== CHAVES_REGISTRY.join(","));
+    ok("H6e CONTROLE NEGATIVO: o oraculo reprova tipo TROCADO",
+       chavesNoMapa("  [TIPO_ANALISE_VENDAS]:\n  [TIPO_CONVERSAS]:\n  [TIPO_TESTE_FUNDACAO]:") !==
+         CHAVES_REGISTRY.join(","));
+    // O terceiro tipo nao pode ter mexido no caminho de vendas: H4/H5
+    // acima ja provam a forma do wrapper, e este confirma que `conversa`
+    // nao entrou no meio dele.
+    const entradaVendas = (codigoReg.match(
+      /\[TIPO_ANALISE_VENDAS\][\s\S]*?criarInterpretadorDeVendas\(\)\s*\)/
+    ) ?? [""])[0];
+    ok("H6f a entrada de vendas foi delimitada (anti-vacuidade)",
+       entradaVendas.length > 40 && entradaVendas.includes("comInterpretacaoDeVendas"));
+    ok("H6g nada de conversa entrou DENTRO da entrada de vendas",
+       !/TIPO_CONVERSA|criarHandlerConversa|criarAdaptadorDeConversa/.test(entradaVendas));
+    // A fabrica de adaptador de conversa vive na camada canonica de
+    // flags — nao no registry e nao no handler.
+    ok("H6h o registry obtem o adaptador de conversa da ativacao",
+       /criarAdaptadorDeConversa/.test(codigoReg) &&
+       /from "@\/lib\/agentes\/ativacao-ia"/.test(codigoReg));
 
     // Com flag OFF, a fabrica do registry produz o handler base cru.
     const nomeOff = await comFlag(undefined, () => resolverHandler("analise_vendas")("dono-x").name);

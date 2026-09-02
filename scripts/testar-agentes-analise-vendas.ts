@@ -992,6 +992,22 @@ const ARQUIVOS_APROVACOES: readonly string[] = [
   "supabase/migrations/20260928_agente_funcao_aprovacoes.sql",
 ];
 
+/**
+ * AGENT-VERTICAL-SLICE-V1 — o handler `conversa`.
+ *
+ * Entra em G11 pelo mesmo motivo de todas as frentes anteriores: o
+ * escopo dos agentes e fechado por NOME, e um arquivo novo em
+ * `lib/agentes/` que ninguem autorizou tem de reprovar.
+ *
+ * Os outros dois arquivos de producao do gate NAO entram aqui, e por
+ * razoes diferentes: `registry.ts` ja consta em `ARQUIVOS_1DD` e
+ * `ativacao-ia.ts` em `ARQUIVOS_1EC`. Repeti-los seria ruido — o
+ * predicado usa igualdade de caminho, nao contagem.
+ */
+const ARQUIVOS_VERTICAL_SLICE_V1: readonly string[] = [
+  "lib/agentes/handlers/conversa.ts",
+];
+
 const ARQUIVOS_SKILL_1D_TOOL_CALL: readonly string[] = [
   "lib/agentes/chamadas/",
   ...MODULOS_CHAMADAS_1D_TOOL_CALL.map((nome) => `lib/agentes/chamadas/${nome}`),
@@ -1037,6 +1053,7 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_SKILL_1D_TOOL_CALL,
   ...ARQUIVOS_TOOL_EXEC,
   ...ARQUIVOS_APROVACOES,
+  ...ARQUIVOS_VERTICAL_SLICE_V1,
 ];
 
 /**
@@ -1545,8 +1562,21 @@ async function main() {
 
   ok("G0  fonte do registry carregada (anti-vacuidade)", srcRegistry.length > 300 && /HANDLERS/.test(srcRegistry));
   ok("G1  o mapa do registry foi delimitado (anti-vacuidade)", mapaRegistry !== null && mapaRegistry.length > 40);
-  ok("G2  registry registra EXATAMENTE 2 tipos", chavesRegistry.length === 2);
-  ok("G3  os tipos sao teste_fundacao e analise_vendas", chavesRegistry.join(",") === "TIPO_ANALISE_VENDAS,TIPO_TESTE_FUNDACAO");
+  // AGENT-VERTICAL-SLICE-V1: terceira chave, `TIPO_CONVERSA`. Como em
+  // toda reconciliacao desta suite, a allowlist e AMPLIADA POR NOME e
+  // nunca afrouxada: `join` sobre a lista ordenada continua reprovando
+  // chave a menos, chave a mais e chave trocada.
+  const CHAVES_ESPERADAS = "TIPO_ANALISE_VENDAS,TIPO_CONVERSA,TIPO_TESTE_FUNDACAO";
+  ok("G2  registry registra EXATAMENTE 3 tipos", chavesRegistry.length === 3);
+  ok("G3  os tipos sao teste_fundacao, analise_vendas e conversa",
+     chavesRegistry.join(",") === CHAVES_ESPERADAS);
+  ok("G3a CONTROLE NEGATIVO: o oraculo reprova chave A MENOS",
+     ["TIPO_ANALISE_VENDAS", "TIPO_TESTE_FUNDACAO"].sort().join(",") !== CHAVES_ESPERADAS);
+  ok("G3b CONTROLE NEGATIVO: o oraculo reprova chave A MAIS",
+     ["TIPO_ANALISE_VENDAS", "TIPO_CONVERSA", "TIPO_TESTE_FUNDACAO", "TIPO_X"].sort().join(",") !==
+       CHAVES_ESPERADAS);
+  ok("G3c a extracao de chaves enxergou TIPO_CONVERSA (anti-vacuidade)",
+     chavesRegistry.includes("TIPO_CONVERSA"));
   ok("G4  registry importa o handler e a capability", /criarHandlerAnaliseVendas/.test(srcRegistry) && /criarLeiturasDeVendas/.test(srcRegistry));
   // AGENTES-FASE1E-c: a expressao mudou de forma — o handler passou a ser
   // ENVOLVIDO por `comInterpretacaoDeVendas`. O que este assert existe

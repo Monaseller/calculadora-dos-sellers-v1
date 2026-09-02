@@ -62,6 +62,12 @@ import type {
 import { identidadeDoContexto } from "@/lib/agentes/observabilidade-ia";
 import type { IdentidadeChamadaIA } from "@/lib/agentes/observabilidade-ia";
 import type { HandlerTarefa } from "@/lib/agentes/tipos-execucao";
+// AGENT-VERTICAL-SLICE-V1: o tipo do que a fabrica de `conversa` devolve
+// mora no HANDLER, nao aqui. Quem declara de que dependencia precisa e
+// quem a consome; esta camada so a satisfaz. Import de TIPO, entao nao
+// cria ciclo em runtime — `conversa.ts` nao importa este modulo.
+import type { ObterAdaptadorDeConversa } from "@/lib/agentes/handlers/conversa";
+import type { AdaptadorIA } from "@/lib/agentes/ia/tipos";
 
 /**
  * O nome da flag.
@@ -269,5 +275,84 @@ export function comInterpretacaoDeVendas(
       [CHAVE_INTERPRETACAO]: interpretado.interpretacao,
       [CHAVE_ORIGEM_INTERPRETACAO]: interpretado.origem,
     };
+  };
+}
+
+/**
+ * A resposta do FAKE de `conversa` — AGENT-VERTICAL-SLICE-V1.
+ *
+ * O fake padrao (`montarAnaliseFake`) produz `{resumo, destaques,
+ * alertas}`, que e o contrato da ANALISE — o validador de `conversa` o
+ * recusaria, e com razao. Entao o `bruto` vai explicito, que e
+ * exatamente para isso que a opcao existe.
+ *
+ * O prefixo `[fake]` e obrigatorio e nao e decoracao: se este texto
+ * chegar a uma tela real, tem de ser obvio na hora que ele nao veio de
+ * modelo nenhum. Mesma doutrina de `montarAnaliseFake`.
+ */
+export const RESPOSTA_FAKE_CONVERSA =
+  "[fake] resposta deterministica de conversa. Nenhum provedor foi chamado.";
+
+/**
+ * A fabrica do adaptador de `conversa` — AGENT-VERTICAL-SLICE-V1.
+ *
+ * ── Por que ela mora AQUI ───────────────────────────────────────────
+ *
+ * Porque este modulo e o unico leitor de flag do runtime dos agentes, e
+ * essa propriedade so vale enquanto ninguem mais ler. Um
+ * `process.env.AGENTES_IA_PROVIDER_REAL_ENABLED` dentro do handler
+ * criaria uma segunda fonte de verdade sobre "quem atende a IA" — duas
+ * que podem divergir e, no dia em que divergirem, ninguem saberia qual
+ * das duas o operador estava lendo.
+ *
+ * ── Por que NAO ha flag nova ────────────────────────────────────────
+ *
+ * `provedorRealHabilitado()` ja e a flag propria de IA real do runtime
+ * de agentes, `false` por padrao. Uma terceira env so para `conversa`
+ * seria mais uma coisa para conferir as tres da manha sem responder
+ * nenhuma pergunta que a existente ja nao responda.
+ *
+ * Note a diferenca para `criarInterpretadorDeVendas`: la, a flag de
+ * INTERPRETACAO decide se a feature existe, porque a analise funciona
+ * sem IA. Aqui nao existe `conversa` sem IA — o handler E a chamada —,
+ * entao so resta a pergunta "quem atende", e ela tem uma flag so.
+ *
+ * ── O import dinamico e a garantia, nao um detalhe ──────────────────
+ *
+ * Com o provedor desligado, o modulo do adaptador — e o SDK inteiro
+ * junto — NUNCA entra em `require.cache`. Nao e "carregado e nao
+ * usado": e ausente. Um import estatico aqui traria o SDK para dentro
+ * do processo de todo mundo que toca o registry, inclusive com a
+ * feature desligada.
+ */
+export function criarAdaptadorDeConversa(): ObterAdaptadorDeConversa {
+  return async (contexto): Promise<AdaptadorIA> => {
+    if (!provedorRealHabilitado()) {
+      // Fake nao e observado: custo zero por construcao, e gravar
+      // contabilidade a partir dele encheria a tabela de ruido. Mesma
+      // decisao ja tomada no caminho de vendas.
+      const { adaptador } = criarAdaptadorFake({
+        bruto: { resposta: RESPOSTA_FAKE_CONVERSA },
+      });
+      return adaptador;
+    }
+
+    const { criarAdaptadorAnthropic, obterModeloInterpretacao } = await import(
+      "@/lib/agentes/adaptador-anthropic"
+    );
+    const { criarAdaptadorObservavel, criarRegistradorSupabase } = await import(
+      "@/lib/agentes/observabilidade-ia"
+    );
+
+    // A identidade contabil e montada AQUI, do contexto — e por isso o
+    // handler nao precisa importar observabilidade nem conhecer
+    // Supabase. Ela vai para a contabilidade, JAMAIS para o `PedidoIA`:
+    // o modelo continua recebendo so instrucao, dados e schema.
+    return criarAdaptadorObservavel(
+      criarAdaptadorAnthropic(),
+      identidadeDoContexto(contexto),
+      criarRegistradorSupabase(),
+      { provedor: "anthropic", modelo: obterModeloInterpretacao() }
+    );
   };
 }

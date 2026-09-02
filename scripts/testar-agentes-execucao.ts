@@ -42,6 +42,20 @@ import {
 // prova — se `teste-fundacao.ts` voltar a defini-la ou a reexporta-la,
 // os asserts da secao M quebram.
 import { ErroEntradaTarefa } from "../lib/agentes/erros";
+// AGENT-VERTICAL-SLICE-V1: o terceiro handler. Importado como VALOR
+// porque a secao P o EXECUTA com doubles — os casos centrais deste gate
+// nao podem depender de grep de fonte.
+import {
+  criarHandlerConversa,
+  prepararPedidoConversa,
+  validarRespostaConversa,
+  INSTRUCAO_MINIMA_CONVERSA,
+  TIPO_CONVERSA,
+} from "../lib/agentes/handlers/conversa";
+// O seam de teste que JA existe. Nenhum provedor real e alcancado: o
+// fake nao tem rede, nao tem SDK e nao le env.
+import { criarAdaptadorFake } from "../lib/agentes/ia/fake";
+import type { LinhaAgente } from "../lib/agentes/tipos";
 import { TIPOS_ERRO_TAREFA, type ContextoTarefa } from "../lib/agentes/tipos-execucao";
 import { INTERVALO_HEARTBEAT_MS } from "../lib/agentes/executar-tarefa";
 import {
@@ -220,9 +234,39 @@ async function main() {
   ok("E1d resolve analise_vendas como FABRICA", typeof resolverHandler("analise_vendas") === "function");
   ok("E1e a fabrica de analise_vendas RECEBE o dono (aridade 1)",
      resolverHandler("analise_vendas").length === 1);
-  ok("E2  exatamente 2 tipos registrados", TIPOS_REGISTRADOS.length === 2);
-  ok("E3  os tipos sao teste_fundacao e analise_vendas",
-     [...TIPOS_REGISTRADOS].sort().join(",") === "analise_vendas,teste_fundacao");
+  // AGENT-VERTICAL-SLICE-V1: entrou `conversa`. A allowlist ganhou um
+  // membro NOMEADO — nao foi afrouxada para `includes`, nem para um piso
+  // `>= 3`, nem para wildcard. Continua reprovando tipo A MENOS e tipo A
+  // MAIS, que e a unica forma de um registry novo nao passar
+  // despercebido por esta suite.
+  const TIPOS_ESPERADOS = "analise_vendas,conversa,teste_fundacao";
+  const uniaoDeTipos = (tipos: readonly string[]) => [...tipos].sort().join(",");
+  ok("E2  exatamente 3 tipos registrados", TIPOS_REGISTRADOS.length === 3);
+  ok("E3  os tipos sao teste_fundacao, analise_vendas e conversa",
+     uniaoDeTipos(TIPOS_REGISTRADOS) === TIPOS_ESPERADOS);
+  ok("E3a CONTROLE NEGATIVO: o oraculo reprova tipo A MENOS",
+     uniaoDeTipos(["analise_vendas", "teste_fundacao"]) !== TIPOS_ESPERADOS);
+  ok("E3b CONTROLE NEGATIVO: o oraculo reprova tipo A MAIS",
+     uniaoDeTipos(["analise_vendas", "conversa", "teste_fundacao", "x"]) !== TIPOS_ESPERADOS);
+  ok("E3c CONTROLE NEGATIVO: o oraculo reprova tipo TROCADO",
+     uniaoDeTipos(["analise_vendas", "conversas", "teste_fundacao"]) !== TIPOS_ESPERADOS);
+  ok("E3d o oraculo aprova o conjunto certo em ordem embaralhada",
+     uniaoDeTipos(["conversa", "teste_fundacao", "analise_vendas"]) === TIPOS_ESPERADOS);
+  ok("E3e a constante do handler e a chave usada no registry",
+     TIPO_CONVERSA === "conversa" && TIPOS_REGISTRADOS.includes(TIPO_CONVERSA));
+
+  // conversa e FABRICA por dono, como analise_vendas. Um handler global
+  // compartilhado leria o agente do PRIMEIRO dono que passasse por aqui.
+  ok("E3f resolve conversa como FABRICA", typeof resolverHandler("conversa") === "function");
+  ok("E3g a fabrica de conversa RECEBE o dono (aridade 1)", resolverHandler("conversa").length === 1);
+  {
+    const construirConversa = resolverHandler("conversa");
+    const cA = construirConversa("dono-A");
+    const cB = construirConversa("dono-B");
+    ok("E3h donos diferentes produzem handlers de conversa DIFERENTES", cA !== cB);
+    ok("E3i o handler de conversa mantem 2 parametros", cA.length === 2 && cB.length === 2);
+    ok("E3j nem o mesmo dono reaproveita instancia global", construirConversa("dono-A") !== cA);
+  }
   ok("E4  LANCA em tipo desconhecido (fechado)", (() => {
        try { resolverHandler("nao_existe"); return false; } catch (e) { return e instanceof ErroTipoTarefaDesconhecido; }
      })());
@@ -588,7 +632,7 @@ async function main() {
   ok("M21 o executor consome a fabrica", /resolverHandler\(tarefa\.tipo\)/.test(exe2) && /construirHandler\(tarefa\.user_id\)/.test(exe2));
   ok("M22 o executor ainda chama handler(contexto, relatarProgresso)",
      /await handler\(contexto, relatarProgresso\)/.test(exe2));
-  ok("M23 exatamente 2 handlers registrados", TIPOS_REGISTRADOS.length === 2);
+  ok("M23 exatamente 3 handlers registrados", TIPOS_REGISTRADOS.length === 3);
 
   // ═══ N. WIRING DE TENANT — AGENTES-FASE1D-d ═══════════════════════
   console.log("N. Wiring de tenant");
@@ -640,6 +684,316 @@ async function main() {
   ok("N17 o handler importa dados/vendas SO como tipo",
      /import type \{[\s\S]*?\} from "@\/lib\/agentes\/dados\/vendas"/.test(srcAnalise) &&
      !/(^|\n)import \{[^}]*\} from "@\/lib\/agentes\/dados\/vendas"/.test(srcAnalise));
+
+  // ═══ P. HANDLER conversa — AGENT-VERTICAL-SLICE-V1 ════════════════
+  //
+  // Os casos centrais EXECUTAM o handler real com doubles das
+  // dependencias externas. Nenhum provedor real e alcancado: o
+  // adaptador vem de `criarAdaptadorFake`, que nao tem rede, SDK nem
+  // env — e o espiao `chamadas` e o que permite afirmar, e nao supor, o
+  // que a IA recebeu.
+  console.log("P. Handler conversa");
+  {
+    const DONO = "dono-U";
+    const ID_A = "aaaaaaaa-1111-1111-1111-111111111111";
+    const ID_B = "bbbbbbbb-2222-2222-2222-222222222222";
+    const RESPOSTA_FAKE = "[fake] resposta de teste";
+
+    const agente = (id: string, instrucoes: string | null, ativo = true): LinhaAgente => ({
+      id,
+      user_id: DONO,
+      nome: id === ID_A ? "Agente A" : "Agente B",
+      tipo: "mensagens",
+      instrucoes,
+      ativo,
+      criado_em: "2026-09-01T00:00:00Z",
+      atualizado_em: "2026-09-01T00:00:00Z",
+    });
+
+    /** Leitura fake + espiao do que foi pedido. */
+    const leitura = (mapa: Record<string, LinhaAgente>, erro: string | null = null) => {
+      const pedidos: string[] = [];
+      return {
+        pedidos,
+        fn: async (agenteId: string) => {
+          pedidos.push(agenteId);
+          if (erro) return { linha: null, erro };
+          return { linha: mapa[agenteId] ?? null, erro: null };
+        },
+      };
+    };
+
+    /** Adaptador fake + contagem de quantas vezes foi OBTIDO. */
+    const adaptador = (resposta = RESPOSTA_FAKE) => {
+      const fake = criarAdaptadorFake({ bruto: { resposta } });
+      const obtencoes: number[] = [];
+      return {
+        chamadas: fake.chamadas,
+        obtencoes,
+        obter: async () => {
+          obtencoes.push(1);
+          return fake.adaptador;
+        },
+      };
+    };
+
+    const ctx = (agenteId: string, entrada: Record<string, unknown>): ContextoTarefa => ({
+      tarefaId: "cccccccc-3333-3333-3333-333333333333",
+      agenteId,
+      userId: DONO,
+      tipo: TIPO_CONVERSA,
+      entrada,
+      tentativa: 1,
+      maxTentativas: 3,
+    });
+
+    const capturar = async (fn: () => Promise<unknown>): Promise<unknown> => {
+      try {
+        await fn();
+        return null;
+      } catch (e) {
+        return e;
+      }
+    };
+
+    const AMBOS = { [ID_A]: agente(ID_A, "INSTRUCAO_A"), [ID_B]: agente(ID_B, "INSTRUCAO_B") };
+
+    // ── P1..P6: o caminho feliz e o mapeamento semantico ────────────
+    const lA = leitura(AMBOS);
+    const aA = adaptador();
+    const rA = await criarHandlerConversa(lA.fn, aA.obter)(
+      ctx(ID_A, { mensagem: "Ola" }),
+      semProgresso
+    );
+
+    ok("P1  a leitura foi chamada EXATAMENTE uma vez", lA.pedidos.length === 1);
+    ok("P2  a leitura recebeu o agenteId DO CONTEXTO", lA.pedidos[0] === ID_A);
+    ok("P3  a IA foi chamada exatamente uma vez", aA.chamadas.length === 1);
+    ok("P4  `instrucao` recebe as instrucoes do agente, VERBATIM",
+       aA.chamadas[0]?.instrucao === "INSTRUCAO_A");
+    ok("P5  `dados` recebe a mensagem da tarefa", aA.chamadas[0]?.dados === "Ola");
+    ok("P6  instrucao e mensagem NAO foram concatenadas",
+       !aA.chamadas[0]?.instrucao.includes("Ola") && !aA.chamadas[0]?.dados.includes("INSTRUCAO_A"));
+
+    // ── P7..P9: o resultado minimo ──────────────────────────────────
+    ok("P7  o resultado devolve a resposta do adaptador",
+       (rA as Record<string, unknown>).resposta === RESPOSTA_FAKE);
+    ok("P8  o resultado tem SO a chave `resposta` (sem metadado)",
+       Object.keys(rA).join(",") === "resposta");
+    ok("P9  o resultado nao carrega provedor/modelo/tokens",
+       !("provedor" in rA) && !("modelo" in rA) && !("tokensEntrada" in rA));
+
+    // ── P10..P13: A PROVA CENTRAL — identidade comportamental ───────
+    const lB = leitura(AMBOS);
+    const aB = adaptador();
+    await criarHandlerConversa(lB.fn, aB.obter)(ctx(ID_B, { mensagem: "Ola" }), semProgresso);
+
+    ok("P10 o agente B foi pedido pelo id de B", lB.pedidos[0] === ID_B);
+    ok("P11 a chamada de B recebe as instrucoes DE B",
+       aB.chamadas[0]?.instrucao === "INSTRUCAO_B");
+    ok("P12 as duas chamadas receberam instrucoes DIFERENTES",
+       aA.chamadas[0]?.instrucao !== aB.chamadas[0]?.instrucao);
+    ok("P13 CONTROLE NEGATIVO: as fixtures sao mesmo distintas",
+       AMBOS[ID_A].instrucoes !== AMBOS[ID_B].instrucoes);
+
+    // ── P14..P17: agente AUSENTE — zero chamadas de IA ──────────────
+    {
+      const l = leitura({});
+      const a = adaptador();
+      const e = await capturar(() =>
+        criarHandlerConversa(l.fn, a.obter)(ctx(ID_A, { mensagem: "Ola" }), semProgresso)
+      );
+      ok("P14 agente ausente LANCA", e instanceof Error);
+      ok("P15 agente ausente NAO e entrada_invalida", !(e instanceof ErroEntradaTarefa));
+      ok("P16 agente ausente: ZERO chamadas de IA", a.chamadas.length === 0);
+      ok("P17 agente ausente: o adaptador nem chegou a ser obtido", a.obtencoes.length === 0);
+    }
+
+    // ── P18..P21: falha de LEITURA — zero chamadas de IA ────────────
+    {
+      const l = leitura(AMBOS, "erro_consulta_agente");
+      const a = adaptador();
+      const e = await capturar(() =>
+        criarHandlerConversa(l.fn, a.obter)(ctx(ID_A, { mensagem: "Ola" }), semProgresso)
+      );
+      ok("P18 erro de leitura LANCA", e instanceof Error);
+      ok("P19 erro de leitura: ZERO chamadas de IA", a.chamadas.length === 0);
+      ok("P20 erro de leitura: adaptador nao obtido", a.obtencoes.length === 0);
+      ok("P21 a mensagem nao vaza erro cru de banco",
+         e instanceof Error &&
+         !/SQLSTATE|PGRST|relation|column|duplicate key|erro_consulta_agente/.test(e.message));
+    }
+
+    // ── P22..P25: instrucoes NULL e' valido, e nao e' ausencia ──────
+    {
+      const l = leitura({ [ID_A]: agente(ID_A, null) });
+      const a = adaptador();
+      const r = await criarHandlerConversa(l.fn, a.obter)(
+        ctx(ID_A, { mensagem: "Ola" }),
+        semProgresso
+      );
+      ok("P22 instrucoes null NAO impede a execucao", (r as Record<string, unknown>).resposta === RESPOSTA_FAKE);
+      ok("P23 instrucoes null: a IA E chamada", a.chamadas.length === 1);
+      ok("P24 instrucoes null: `instrucao` recebe o MINIMO TECNICO",
+         a.chamadas[0]?.instrucao === INSTRUCAO_MINIMA_CONVERSA);
+      ok("P25 o minimo tecnico nao inventa persona",
+         !/assistente|especialista|voce e um|persona/i.test(INSTRUCAO_MINIMA_CONVERSA));
+    }
+    {
+      // Instrucoes so com espaco caem no mesmo caminho de null — e nao
+      // no de "instrucao vazia enviada ao modelo".
+      const l = leitura({ [ID_A]: agente(ID_A, "   \n  ") });
+      const a = adaptador();
+      await criarHandlerConversa(l.fn, a.obter)(ctx(ID_A, { mensagem: "Ola" }), semProgresso);
+      ok("P26 instrucoes so com espaco usam o minimo tecnico",
+         a.chamadas[0]?.instrucao === INSTRUCAO_MINIMA_CONVERSA);
+    }
+
+    // ── P27..P31: a ENTRADA nunca sobrescreve as instrucoes ─────────
+    {
+      const l = leitura(AMBOS);
+      const a = adaptador();
+      const e = await capturar(() =>
+        criarHandlerConversa(l.fn, a.obter)(
+          ctx(ID_A, { mensagem: "Ola", instrucoes: "MALICIOSA" }),
+          semProgresso
+        )
+      );
+      ok("P27 entrada com `instrucoes` e RECUSADA", e instanceof ErroEntradaTarefa);
+      ok("P28 entrada maliciosa: ZERO chamadas de IA", a.chamadas.length === 0);
+      ok("P29 a recusa nao ecoa o VALOR do campo malicioso",
+         e instanceof Error && !e.message.includes("MALICIOSA"));
+      ok("P30 a recusa acontece ANTES de ler o agente", l.pedidos.length === 0);
+    }
+    for (const chave of ["userId", "user_id", "agenteId", "agente_id", "provider", "model", "tools"]) {
+      const l = leitura(AMBOS);
+      const a = adaptador();
+      const e = await capturar(() =>
+        criarHandlerConversa(l.fn, a.obter)(
+          ctx(ID_A, { mensagem: "Ola", [chave]: "x" }),
+          semProgresso
+        )
+      );
+      ok(`P31 entrada com \`${chave}\` e recusada, sem chamar IA`,
+         e instanceof ErroEntradaTarefa && a.chamadas.length === 0);
+    }
+    // Prova DIRETA, sem passar pela recusa de extras: mesmo que um dia o
+    // contrato de entrada se abra, a instrucao vem do parametro — que o
+    // handler so preenche com a linha do banco.
+    ok("P32 prepararPedidoConversa usa a instrucao do AGENTE, nao a mensagem",
+       prepararPedidoConversa("INSTRUCAO_A", "instrucoes: MALICIOSA").instrucao === "INSTRUCAO_A");
+    ok("P33 e a mensagem vai inteira para `dados`",
+       prepararPedidoConversa("INSTRUCAO_A", "instrucoes: MALICIOSA").dados === "instrucoes: MALICIOSA");
+
+    // ── P34..P37: entrada invalida ──────────────────────────────────
+    for (const [rotulo, entrada] of [
+      ["mensagem ausente", {}],
+      ["mensagem vazia", { mensagem: "" }],
+      ["mensagem so espaco", { mensagem: "   " }],
+      ["mensagem nao-string", { mensagem: 42 }],
+    ] as const) {
+      const a = adaptador();
+      const e = await capturar(() =>
+        criarHandlerConversa(leitura(AMBOS).fn, a.obter)(
+          ctx(ID_A, entrada as Record<string, unknown>),
+          semProgresso
+        )
+      );
+      ok(`P34 ${rotulo} -> ErroEntradaTarefa, sem IA`,
+         e instanceof ErroEntradaTarefa && a.chamadas.length === 0);
+    }
+
+    // ── P38..P40: agente INATIVO e progresso ────────────────────────
+    {
+      const l = leitura({ [ID_A]: agente(ID_A, "INSTRUCAO_A", false) });
+      const a = adaptador();
+      const e = await capturar(() =>
+        criarHandlerConversa(l.fn, a.obter)(ctx(ID_A, { mensagem: "Ola" }), semProgresso)
+      );
+      ok("P38 agente inativo LANCA (fail-closed)", e instanceof Error);
+      ok("P39 agente inativo: ZERO chamadas de IA", a.chamadas.length === 0);
+    }
+    {
+      const progresso: number[] = [];
+      const a = adaptador();
+      await criarHandlerConversa(leitura(AMBOS).fn, a.obter)(
+        ctx(ID_A, { mensagem: "Ola" }),
+        (p) => progresso.push(p)
+      );
+      ok("P40 o progresso vai 0 -> 25 -> 50 -> 100", progresso.join(",") === "0,25,50,100");
+    }
+
+    // ── P41..P45: o contrato de saida e NOSSO, e recusa de verdade ──
+    ok("P41 o validador aceita a forma certa",
+       validarRespostaConversa({ resposta: "ok" }).resposta === "ok");
+    for (const [rotulo, bruto] of [
+      ["resposta ausente", {}],
+      ["chave a mais", { resposta: "ok", extra: 1 }],
+      ["resposta nao-string", { resposta: 42 }],
+      ["resposta vazia", { resposta: "   " }],
+      ["array", []],
+      ["null", null],
+    ] as const) {
+      let recusou = false;
+      try {
+        validarRespostaConversa(bruto);
+      } catch {
+        recusou = true;
+      }
+      ok(`P42 o validador recusa: ${rotulo}`, recusou);
+    }
+    {
+      // O fake roda `pedido.validar` de verdade — entao um bruto fora do
+      // contrato faz a TAREFA falhar, e nao vira resultado degradado.
+      const fake = criarAdaptadorFake({ bruto: { resumo: "forma da analise" } });
+      const a = { obter: async () => fake.adaptador };
+      const e = await capturar(() =>
+        criarHandlerConversa(leitura(AMBOS).fn, a.obter)(
+          ctx(ID_A, { mensagem: "Ola" }),
+          semProgresso
+        )
+      );
+      ok("P43 resposta fora do contrato faz a tarefa FALHAR", e instanceof Error);
+      ok("P44 e nao devolve resultado parcial", e !== null);
+    }
+
+    // ── P45..P52: fonte — o que o handler NAO pode fazer ────────────
+    const srcConversa = codigo("lib/agentes/handlers/conversa.ts");
+    ok("P45 a fonte foi carregada (anti-vacuidade)",
+       srcConversa.length > 400 && /criarHandlerConversa/.test(srcConversa));
+    ok("P46 o handler NAO fala com Supabase", !/getSupabaseServidor|SupabaseClient|createClient|\.from\(/.test(srcConversa));
+    ok("P47 o handler NAO le env (a camada canonica e ativacao-ia)", !/process\.env/.test(srcConversa));
+    ok("P48 o handler NAO le as flags de IA por conta propria",
+       !/AGENTES_IA_INTERPRETACAO_ENABLED|AGENTES_IA_PROVIDER_REAL_ENABLED/.test(srcConversa));
+    ok("P49 o handler NAO importa Function/Approval",
+       !/execucao-funcoes|aprovacoes|executarFuncao|retomarAprovacao/.test(srcConversa));
+    ok("P50 o handler NAO instancia SDK de provedor",
+       !/@anthropic|@google\/genai|openai|adaptador-anthropic/i.test(srcConversa));
+    ok("P51 o handler NAO loga", !/console\./.test(srcConversa));
+    ok("P52 CONTROLE NEGATIVO: as sondas acusam quando o padrao existe",
+       /process\.env/.test("process.env.X") && /console\./.test("console.log(1)"));
+
+    // ── P53..P57: o wiring do dono, na fonte do registry ────────────
+    const regC = codigo(REGISTRY);
+    ok("P53 o registry passa agenteId E userId para a capability",
+       /lerAgenteDoDono\(agenteId, userId\)/.test(regC.replace(/\s+/g, " ")));
+    ok("P54 a leitura entregue ao handler tem aridade 1",
+       /criarHandlerConversa\(\s*\(agenteId: string\) =>/.test(regC.replace(/\s+/g, " ")));
+    ok("P55 o dono NAO e passado direto ao handler", !/criarHandlerConversa\(userId/.test(regC));
+    ok("P56 CONTROLE NEGATIVO: P55 reprova se o dono for repassado",
+       /criarHandlerConversa\(userId/.test("criarHandlerConversa(userId, x)"));
+    ok("P57 o registry usa a fabrica canonica de adaptador",
+       /criarAdaptadorDeConversa\(\)/.test(regC) &&
+       /from "@\/lib\/agentes\/ativacao-ia"/.test(regC));
+
+    // ── P58..P60: os handlers anteriores nao mudaram ────────────────
+    ok("P58 teste_fundacao nao passou a ler agente",
+       !/lerAgenteDoDono|instrucoes/.test(codigo(HANDLER)));
+    ok("P59 analise_vendas nao passou a ler agente",
+       !/lerAgenteDoDono|agente\.instrucoes/.test(codigo("lib/agentes/handlers/analise-vendas.ts")));
+    ok("P60 conversa nao criou historico/thread/conversationId",
+       !/conversationId|threadId|historico|mensagens\b/i.test(srcConversa));
+  }
 
   const total = passou + falhou;
   console.log(`\n${"=".repeat(58)}`);

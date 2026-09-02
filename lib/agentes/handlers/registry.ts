@@ -45,7 +45,17 @@ import { criarLeiturasDeVendas } from "@/lib/agentes/dados/vendas";
 import { criarHandlerAnaliseVendas, TIPO_ANALISE_VENDAS } from "@/lib/agentes/handlers/analise-vendas";
 // AGENTES-FASE1E-c: wiring da interpretacao de IA. Le a flag e devolve o
 // FAKE quando ligada — nenhum provedor real, nenhuma rede, nenhuma chave.
-import { comInterpretacaoDeVendas, criarInterpretadorDeVendas } from "@/lib/agentes/ativacao-ia";
+import {
+  comInterpretacaoDeVendas,
+  criarAdaptadorDeConversa,
+  criarInterpretadorDeVendas,
+} from "@/lib/agentes/ativacao-ia";
+// AGENT-VERTICAL-SLICE-V1: `conversa` le o AGENTE, e a leitura ja existia —
+// `lerAgenteDoDono` filtra por `id` E `user_id` desde a 1B. Nao ha capability
+// nova e nao ha modulo novo de dados: o registry so fecha o dono nela
+// antes de entregar ao handler.
+import { lerAgenteDoDono } from "@/lib/agentes/capability";
+import { criarHandlerConversa, TIPO_CONVERSA } from "@/lib/agentes/handlers/conversa";
 
 /**
  * Erro de tipo nao registrado. Classe propria para que o executor o
@@ -104,6 +114,25 @@ export const HANDLERS: Readonly<Record<string, ConstruirHandler>> = Object.freez
     comInterpretacaoDeVendas(
       criarHandlerAnaliseVendas(criarLeiturasDeVendas(userId)),
       criarInterpretadorDeVendas()
+    ),
+
+  // AGENT-VERTICAL-SLICE-V1 — o MESMO least-capability das entradas
+  // acima, agora com duas dependencias em vez de uma.
+  //
+  // A closure de leitura recebe `agenteId` e nada mais; `userId` fica
+  // preso AQUI, fora do alcance do handler. O ALVO vem do contexto da
+  // tarefa, o PODER vem daqui — e por isso o handler nao tem por onde
+  // pedir o agente de outro dono, nem por engano nem de proposito.
+  //
+  // `ContextoTarefa` NAO foi ampliado para isso: o contexto ja carrega
+  // `agenteId` desde a 1C, e e so disso que a leitura precisa.
+  //
+  // A escolha do provedor tambem nao passa por aqui: a fabrica le a
+  // flag na camada que ja e dona dela, e o registry so a chama.
+  [TIPO_CONVERSA]: (userId: string) =>
+    criarHandlerConversa(
+      (agenteId: string) => lerAgenteDoDono(agenteId, userId),
+      criarAdaptadorDeConversa()
     ),
 });
 
