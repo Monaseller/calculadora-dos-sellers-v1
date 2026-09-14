@@ -210,6 +210,12 @@ const ARQUIVOS_UI_EDICAO: readonly string[] = [
   "components/ia/agente/EditarAgente.tsx",
 ];
 
+/** PERMISSOES-FUNCTION-V1-B: a aba Funcoes, primeira superficie de
+ *  CONFIGURACAO de capacidade — configura, nunca executa. */
+const ARQUIVOS_UI_PERMISSOES: readonly string[] = [
+  "components/ia/agente/FuncoesAgente.tsx",
+];
+
 const ARQUIVOS_UI: readonly string[] = [
   ...ARQUIVOS_UI_1B,
   ...ARQUIVOS_UI_1CA,
@@ -221,6 +227,7 @@ const ARQUIVOS_UI: readonly string[] = [
   ...ARQUIVOS_UI_CONSUMER,
   ...ARQUIVOS_UI_CHAT,
   ...ARQUIVOS_UI_EDICAO,
+  ...ARQUIVOS_UI_PERMISSOES,
 ];
 
 /**
@@ -263,8 +270,9 @@ secao("A. Inventario e rotas");
   // ...e 48 na AGENT-VERTICAL-SLICE-V1-I3 (`ChatAgente.tsx`), quando a
   // aba Chat deixou de ser placeholder e ganhou tela de verdade; 49 na
   // EDITAR-AGENTE-V1 (`EditarAgente.tsx`), quando a area passou a poder
-  // ALTERAR um agente, e nao so criar.
-  ok("A2  49 arquivos, nem um a mais", noDisco.length === 49, String(noDisco.length));
+  // ALTERAR um agente, e nao so criar; 50 na PERMISSOES-FUNCTION-V1-B
+  // (`FuncoesAgente.tsx`), quando a aba Funcoes ganhou tela real.
+  ok("A2  50 arquivos, nem um a mais", noDisco.length === 50, String(noDisco.length));
 
   // ── A1b..A1e — o inventario e NOMINAL, nao uma contagem ───────────
   //
@@ -286,7 +294,7 @@ secao("A. Inventario e rotas");
     renomeado.length === declarado.length &&
     JSON.stringify(renomeado) !== JSON.stringify(declarado));
   ok("A1e e a contagem sozinha NAO distinguiria a troca",
-    renomeado.length === 49);
+    renomeado.length === 50);
 
   // ── A1f/A1g — EDITAR-AGENTE-V1 ────────────────────────────────────
   //
@@ -299,7 +307,19 @@ secao("A. Inventario e rotas");
   ok("A1f ANCORA: EditarAgente esta no inventario declarado",
     declarado.includes("components/ia/agente/EditarAgente.tsx"));
   ok("A1g CONTROLE NEGATIVO: a tela de edicao AUSENTE reprova",
-    JSON.stringify(semEdicao) !== JSON.stringify(declarado) && semEdicao.length === 48);
+    JSON.stringify(semEdicao) !== JSON.stringify(declarado) && semEdicao.length === 49);
+
+  // ── A1h/A1i — PERMISSOES-FUNCTION-V1-B ────────────────────────────
+  //
+  // A aba Funcoes entra com os MESMOS dois lados das anteriores: ancora
+  // positiva e controle de ausencia. Sem o segundo, apagar a tela junto
+  // com a linha do inventario deixaria A1 verde.
+  const semFuncoes = declarado.filter((a) => a !== "components/ia/agente/FuncoesAgente.tsx");
+
+  ok("A1h ANCORA: FuncoesAgente esta no inventario declarado",
+    declarado.includes("components/ia/agente/FuncoesAgente.tsx"));
+  ok("A1i CONTROLE NEGATIVO: a tela de funcoes AUSENTE reprova",
+    JSON.stringify(semFuncoes) !== JSON.stringify(declarado) && semFuncoes.length === 49);
 }
 
 const ROTAS = [

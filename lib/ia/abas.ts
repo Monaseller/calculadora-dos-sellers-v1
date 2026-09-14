@@ -22,6 +22,19 @@
  */
 
 /**
+ * ── `funcoes` foi promovida na PERMISSOES-FUNCTION-V1-B ─────────────
+ *
+ * Desta vez com conteudo real: a aba lista as Funcoes que o SERVIDOR
+ * deriva do registry e grava o nivel de autonomia de cada uma em
+ * `agente_permissoes`. Nao ha catalogo simulado nem tela de exemplo —
+ * foi exatamente o que a Bg2 removeu, e a promocao so voltou quando
+ * existiu backend publicado por tras dela.
+ *
+ * `permissoes` NAO foi promovida junto, e isso e deliberado: escolher a
+ * Funcao e escolher o nivel sao a MESMA decisao, e dois lugares
+ * editando o mesmo dado divergiriam. A aba continua pendente, agora
+ * dizendo onde a configuracao vive.
+ *
  * ── Tres abas VOLTARAM a pendentes na SKILL-1D.ui-real-state-Bg2 ────
  *
  * `conexoes`, `funcoes` e `permissoes` foram promovidas na UI-1C.b, e a
@@ -41,7 +54,7 @@ export const ABAS = [
   { id: "chat", rotulo: "Chat", implementada: true },
   { id: "tarefas", rotulo: "Tarefas", implementada: true },
   { id: "conexoes", rotulo: "Conexões", implementada: false },
-  { id: "funcoes", rotulo: "Funções", implementada: false },
+  { id: "funcoes", rotulo: "Funções", implementada: true },
   { id: "permissoes", rotulo: "Permissões", implementada: false },
   { id: "memoria", rotulo: "Memória", implementada: false },
   { id: "custos", rotulo: "Custos", implementada: false },
@@ -81,10 +94,8 @@ type AbaPendente = Extract<(typeof ABAS)[number], { implementada: false }>["id"]
 export const PENDENCIA_ABA: Record<AbaPendente, string> = {
   conexoes:
     "falta conectar esta aba às contas que o agente realmente usa. As contas da sua conta CDS serão atribuídas a cada agente por aqui.",
-  funcoes:
-    "falta poder escolher e vincular as funções deste agente. Nenhuma função é listada até que essa escolha exista — um catálogo de exemplo seria lido como capacidade já concedida.",
   permissoes:
-    "falta conectar esta aba às permissões do agente e ao fluxo de autorização. Enquanto não houver onde registrar quem decidiu e quando, nenhum nível é exibido e nenhum controle é oferecido.",
+    "os níveis de acesso às funções são configurados na aba Funções. Esta aba fica reservada para os controles e o histórico de autorizações, que ainda não estão ligados à tela.",
   memoria: "as instruções fixas já existem e aparecem na Visão geral. Preferências, memória aprendida e exemplos ainda não têm onde morar.",
   custos:
     "falta conectar esta aba aos custos reais de uso de IA deste agente. Nenhum valor é exibido enquanto essa leitura não estiver disponível — um número aproximado seria pior que nenhum.",

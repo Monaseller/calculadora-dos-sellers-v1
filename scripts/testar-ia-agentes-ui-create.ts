@@ -106,20 +106,28 @@ secao("A. A escrita mora num lugar so");
   // contagem de POST NAO suba junto com a chegada do PATCH. A doutrina
   // nominal completa (funcao=verbo, com os controles de troca de verbo)
   // vive em `testar-ia-agentes-ui-source.ts`, e nao e duplicada aqui.
-  ok("A3  tres escritas publicadas, nominais — duas por POST, uma por PATCH",
+  //
+  // ── A3 reconciliado de novo na PERMISSOES-FUNCTION-V1-B ──────────
+  //
+  // Entrou a QUARTA escrita, `definirPermissaoDeFuncao`, tambem por
+  // PATCH: ela grava o nivel de autonomia de uma Funcao. POST continua
+  // em DOIS — a chegada de uma escrita nova nao pode empurrar a
+  // contagem de CRIACAO, e e exatamente isso que esta suite protege.
+  ok("A3  quatro escritas publicadas, nominais — duas por POST, duas por PATCH",
     (CODIGO_TRANSPORTE.match(/method:\s*"POST"/g) ?? []).length === 2 &&
-      (CODIGO_TRANSPORTE.match(/method:\s*"PATCH"/g) ?? []).length === 1 &&
+      (CODIGO_TRANSPORTE.match(/method:\s*"PATCH"/g) ?? []).length === 2 &&
       /export async function criarAgenteViaApi\(/.test(CODIGO_TRANSPORTE) &&
       /export async function enviarMensagemAoAgente\(/.test(CODIGO_TRANSPORTE) &&
       /export async function atualizarAgenteViaApi\(/.test(CODIGO_TRANSPORTE) &&
+      /export async function definirPermissaoDeFuncao\(/.test(CODIGO_TRANSPORTE) &&
       !/"PUT"|"DELETE"/.test(CODIGO_TRANSPORTE));
   ok("A3a a criacao de agente continua sendo uma delas, e por POST",
     /export async function criarAgenteViaApi\(/.test(CODIGO_TRANSPORTE) &&
       /method: "POST"/.test(CODIGO_TRANSPORTE));
   ok("A3b CONTROLE NEGATIVO: um terceiro POST reprovaria a contagem",
     ((CODIGO_TRANSPORTE + '\n  method: "POST"').match(/method:\s*"POST"/g) ?? []).length !== 2);
-  ok("A3c CONTROLE NEGATIVO: um segundo PATCH reprovaria a contagem",
-    ((CODIGO_TRANSPORTE + '\n  method: "PATCH"').match(/method:\s*"PATCH"/g) ?? []).length !== 1);
+  ok("A3c CONTROLE NEGATIVO: um terceiro PATCH reprovaria a contagem",
+    ((CODIGO_TRANSPORTE + '\n  method: "PATCH"').match(/method:\s*"PATCH"/g) ?? []).length !== 2);
   ok("A3d CONTROLE NEGATIVO: a sonda de PUT/DELETE acusa quando o padrao existe",
     /"PUT"|"DELETE"/.test('method: "PUT"') && /"PUT"|"DELETE"/.test('method: "DELETE"'));
   // Criar e alterar sao capacidades separadas, e as telas tambem. O
@@ -129,6 +137,11 @@ secao("A. A escrita mora num lugar so");
   ok("A3e a tela de CRIACAO nao alcanca a capacidade de alterar",
     !/atualizarAgenteViaApi/.test(CODIGO_DIALOGO) &&
       !/atualizarAgenteViaApi/.test(CODIGO_LISTA));
+  // Nem a de CONFIGURAR capacidade: criar um agente nao pode, de
+  // passagem, conceder nivel de autonomia a uma Funcao.
+  ok("A3f nem a capacidade de configurar permissao de Funcao",
+    !/definirPermissaoDeFuncao|listarPermissoesDoAgente/.test(CODIGO_DIALOGO) &&
+      !/definirPermissaoDeFuncao|listarPermissoesDoAgente/.test(CODIGO_LISTA));
   ok("A4  o nome do dominio continua reservado ao servidor",
     /export async function criarAgenteViaApi\(/.test(CODIGO_TRANSPORTE) &&
       !/export async function criarAgente\(/.test(CODIGO_TRANSPORTE));

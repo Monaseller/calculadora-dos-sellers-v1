@@ -58,6 +58,7 @@ import VisaoGeral from "@/components/ia/agente/VisaoGeral";
 import ListaTarefas from "@/components/ia/agente/ListaTarefas";
 import ChatAgente from "@/components/ia/agente/ChatAgente";
 import EditarAgente from "@/components/ia/agente/EditarAgente";
+import FuncoesAgente from "@/components/ia/agente/FuncoesAgente";
 
 /** Sem leitura real de tarefas, ninguem tem tarefa. */
 const NENHUMA_TAREFA: readonly TarefaUI[] = [];
@@ -222,6 +223,11 @@ export default function PaginaAgente({ agenteId, aba }: { agenteId: string; aba:
             placeholder. Ela nao depende de `agoraMs` — o Chat nao deriva
             nada do relogio da pagina, so conversa com a API. */}
         {aba === "chat" && <ChatAgente agenteId={agente.id} />}
+        {/* PERMISSOES-FUNCTION-V1-B: a aba Funcoes deixou de ser
+            placeholder. Ela lista as Funcoes que o SERVIDOR deriva do
+            registry e grava o nivel de cada uma — configura, nunca
+            executa. Como o Chat, nao depende de `agoraMs`. */}
+        {aba === "funcoes" && <FuncoesAgente agenteId={agente.id} />}
 
         {(aba === "visao-geral" || aba === "tarefas") && agoraMs === null && (
           <p className="cds-ia-carregando">Carregando…</p>
@@ -326,7 +332,6 @@ function abaPendente(aba: AbaId): aba is AbaPendente {
  *  dizer as duas coisas: o destino e o que falta para chegar la. */
 const DESCRICAO_ABA: Record<AbaPendente, string> = {
   conexoes: "As contas e os serviços que este agente poderá usar — e o que cada um permite que ele faça.",
-  funcoes: "As funções que este agente poderá executar, cada uma com o acesso que exige.",
   permissoes: "Os limites de cada ação deste agente: o que ele pode fazer sozinho e o que precisa de autorização.",
   memoria: "Instruções fixas, preferências e o que o agente aprendeu ao longo do tempo.",
   custos: "Consumo de IA deste agente por período, modelo e provedor.",

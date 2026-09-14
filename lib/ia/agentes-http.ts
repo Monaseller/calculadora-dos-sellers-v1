@@ -39,6 +39,11 @@
  */
 import { TIPOS_AGENTE_UI } from "@/lib/ia/contratos";
 import type { AgenteUI, TipoAgenteUI } from "@/lib/ia/contratos";
+// O vocabulário canônico dos três níveis. Importado, nunca recopiado:
+// uma segunda lista aqui envelheceria em relação à original no dia em
+// que um quarto nível entrasse.
+import { NIVEIS_AUTONOMIA } from "@/lib/ia/conceitos";
+import type { NivelAutonomia } from "@/lib/ia/conceitos";
 import type { Diagnostico } from "@/lib/ia/skills/diagnostico";
 import type { RequisitoConexao } from "@/lib/ia/skills/contrato";
 
@@ -114,6 +119,54 @@ export type RespostaEdicao =
 export interface AlteracaoAgente {
   nome?: string;
   instrucoes?: string | null;
+}
+
+/**
+ * A permissão de UMA Function, como a tela a recebe.
+ *
+ * `nivel: null` é **ausência de linha**, e continua sendo `null` até a
+ * tela — nunca `"bloqueado"`. As duas coisas negam, mas o servidor as
+ * separa de propósito ("o dono nunca configurou" contra "o dono
+ * proibiu"), e colapsá-las aqui apagaria a intenção dele na única tela
+ * onde ela aparece.
+ *
+ * O catálogo é do servidor: esta interface descreve o que chega, e não
+ * uma lista de Functions que a UI conheça por conta própria.
+ */
+export interface PermissaoDeFuncaoUI {
+  id: string;
+  acesso: "leitura" | "escrita";
+  idempotente: boolean;
+  conexaoNecessaria: { plataforma: string; recurso: string } | null;
+  nivel: NivelAutonomia | null;
+}
+
+/** As permissões de um agente — uma entrada por Function registrada. */
+export type RespostaPermissoes =
+  | { estado: "ok"; permissoes: readonly PermissaoDeFuncaoUI[] }
+  | { estado: "nao_autenticado" }
+  | { estado: "nao_encontrado" }
+  | { estado: "falha" };
+
+/**
+ * Definição do nível de UMA Function.
+ *
+ * `dados_invalidos` existe separado de `falha` pelo mesmo motivo da
+ * criação e da edição: uma o usuário corrige, a outra ele só pode
+ * tentar de novo.
+ */
+export type RespostaDefinicaoPermissao =
+  | { estado: "ok"; funcaoId: string; nivel: NivelAutonomia }
+  | { estado: "dados_invalidos"; mensagem: string }
+  | { estado: "nao_autenticado" }
+  | { estado: "nao_encontrado" }
+  | { estado: "falha" };
+
+/** O que a tela pode definir. Dois campos, e o servidor recusa qualquer
+ *  chave a mais — inclusive `user_id`, `agente_id` e `revisao`. */
+export interface DefinicaoDePermissao {
+  funcaoId: string;
+  nivel: NivelAutonomia;
 }
 
 /**
@@ -356,6 +409,169 @@ export async function atualizarAgenteViaApi(
   if (agente === null) return { estado: "falha" };
 
   return { estado: "ok", agente };
+}
+
+/**
+ * O sufixo vai INLINE, e não numa constante como os dois vizinhos.
+ *
+ * Não é inconsistência por descuido: uma sonda das suítes da área caça
+ * declarações `const *_AGENTES|_TAREFAS|_CONEXOES|_FUNCOES|_PERMISSOES`
+ * fora de `lib/ia/mocks/`, porque é assim que um catálogo simulado
+ * costuma se chamar. Um sufixo de rota não é dado falso, mas a sonda não
+ * tem como distinguir — e afrouxá-la para acomodar uma string de URL
+ * seria pagar com cobertura real. Quem for "restaurar a consistência"
+ * aqui vai reprovar K1/J9.
+ */
+const caminhoDasPermissoes = (agenteId: string) =>
+  `${ROTA_BASE}/${encodeURIComponent(agenteId)}/permissoes`;
+
+const ehNivel = (v: unknown): v is NivelAutonomia =>
+  typeof v === "string" && (NIVEIS_AUTONOMIA as readonly string[]).includes(v);
+
+/**
+ * Uma permissão do corpo da resposta — campo a campo, nunca `as`.
+ *
+ * `nivel` distingue três coisas que um validador frouxo confundiria:
+ * `null` (ausência legítima), um dos três níveis conhecidos, e qualquer
+ * outra coisa — que é resposta fora do contrato e vira `null` de
+ * retorno, condenando a lista inteira.
+ */
+function permissaoDaResposta(bruto: unknown): PermissaoDeFuncaoUI | null {
+  if (!ehObjeto(bruto)) return null;
+  const { id, acesso, idempotente, conexaoNecessaria, nivel } = bruto;
+  if (typeof id !== "string" || id.length === 0) return null;
+  if (acesso !== "leitura" && acesso !== "escrita") return null;
+  if (typeof idempotente !== "boolean") return null;
+  if (nivel !== null && !ehNivel(nivel)) return null;
+
+  let conexao: { plataforma: string; recurso: string } | null = null;
+  if (conexaoNecessaria !== null) {
+    if (!ehObjeto(conexaoNecessaria)) return null;
+    const { plataforma, recurso } = conexaoNecessaria;
+    if (typeof plataforma !== "string" || typeof recurso !== "string") return null;
+    conexao = { plataforma, recurso };
+  }
+
+  return { id, acesso, idempotente, conexaoNecessaria: conexao, nivel };
+}
+
+/**
+ * As permissões de Function de UM agente.
+ *
+ * Leitura pura: não define nada, não cria linha e não executa Function
+ * nenhuma. `agenteId` é o único identificador que trafega, e vai no
+ * caminho.
+ *
+ * A lista inteira vem do servidor, que a deriva do registry real — a
+ * tela não conhece Function alguma por conta própria, e uma Function
+ * nova aparece aqui sem que este arquivo mude.
+ */
+export async function listarPermissoesDoAgente(
+  agenteId: string,
+  signal?: AbortSignal
+): Promise<RespostaPermissoes> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(caminhoDasPermissoes(agenteId), { signal });
+  } catch {
+    // Inclui o abort: quem cancelou não quer mais a resposta.
+    return { estado: "falha" };
+  }
+
+  if (resposta.status === 401) return { estado: "nao_autenticado" };
+  if (resposta.status === 404) return { estado: "nao_encontrado" };
+
+  const corpo = await corpoDe(resposta);
+  if (!resposta.ok || !ehObjeto(corpo) || corpo.ok !== true || !Array.isArray(corpo.permissoes)) {
+    return { estado: "falha" };
+  }
+
+  const permissoes: PermissaoDeFuncaoUI[] = [];
+  for (const bruto of corpo.permissoes) {
+    const permissao = permissaoDaResposta(bruto);
+    // Um item malformado condena a resposta inteira: meia lista
+    // apresentada como lista completa é exatamente o modo de falha que
+    // este retorno discriminado existe para impedir — e aqui ela diria
+    // ao dono que uma Function não existe quando ela existe.
+    if (permissao === null) return { estado: "falha" };
+    permissoes.push(permissao);
+  }
+  return { estado: "ok", permissoes };
+}
+
+/**
+ * As frases que o servidor publica e sobre as quais o usuário consegue AGIR.
+ *
+ * Nenhuma, hoje: os 400 desta rota — `função inválida.`, `nível
+ * inválido.`, `Definição inválida.` — descrevem um cliente mandando o
+ * que não devia, e a tela só oferece os três níveis válidos e os ids que
+ * o próprio servidor listou. Se um deles aparecer, o defeito é nosso.
+ * A lista existe vazia, e não ausente, para que publicar uma frase
+ * acionável no futuro seja acrescentar um item, não reescrever o ramo.
+ */
+const MENSAGENS_DE_PERMISSAO: readonly string[] = [];
+const MENSAGEM_GENERICA_PERMISSAO = "Não foi possível salvar este nível.";
+
+/**
+ * Define o nível de autonomia de UMA Function do agente.
+ *
+ * ── O que NÃO viaja ─────────────────────────────────────────────────
+ *
+ * O corpo é montado chave a chave, com duas chaves. Nunca
+ * `JSON.stringify(selecao)`: `user_id`, `agente_id` e `revisao` não têm
+ * por onde chegar ao servidor — e a rota os recusa de qualquer forma,
+ * o que faz desta camada uma segunda barreira, não a única.
+ *
+ * ── Por que não há AbortSignal ──────────────────────────────────────
+ *
+ * Mesma razão da criação e da edição: abortar uma escrita no navegador
+ * não desfaz o que o servidor gravou.
+ *
+ * ── O nível confirmado é o do SERVIDOR ──────────────────────────────
+ *
+ * O retorno traz `funcaoId` e `nivel` lidos da resposta, não ecoados do
+ * argumento. A tela precisa disso para atualizar o que está PERSISTIDO
+ * sem afirmar uma gravação que não foi confirmada.
+ */
+export async function definirPermissaoDeFuncao(
+  agenteId: string,
+  definicao: DefinicaoDePermissao
+): Promise<RespostaDefinicaoPermissao> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(caminhoDasPermissoes(agenteId), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ funcaoId: definicao.funcaoId, nivel: definicao.nivel }),
+    });
+  } catch {
+    return { estado: "falha" };
+  }
+
+  if (resposta.status === 401) return { estado: "nao_autenticado" };
+  if (resposta.status === 404) return { estado: "nao_encontrado" };
+
+  const corpo = await corpoDe(resposta);
+
+  if (resposta.status === 400) {
+    const bruta = ehObjeto(corpo) && typeof corpo.erro === "string" ? corpo.erro : "";
+    return {
+      estado: "dados_invalidos",
+      mensagem: MENSAGENS_DE_PERMISSAO.includes(bruta) ? bruta : MENSAGEM_GENERICA_PERMISSAO,
+    };
+  }
+
+  if (!resposta.ok || !ehObjeto(corpo) || corpo.ok !== true) return { estado: "falha" };
+
+  const permissao = corpo.permissao;
+  if (!ehObjeto(permissao)) return { estado: "falha" };
+  const { funcaoId, nivel } = permissao;
+  // Shape divergente e FALHA, nunca um nivel meio confirmado entrando na
+  // tela como se tivesse sido gravado.
+  if (typeof funcaoId !== "string" || funcaoId.length === 0) return { estado: "falha" };
+  if (!ehNivel(nivel)) return { estado: "falha" };
+
+  return { estado: "ok", funcaoId, nivel };
 }
 
 /**

@@ -128,8 +128,21 @@ const CARD_FN = ler("components/ia/capabilities/CardFuncao.tsx");
 const FRASE_DE_VAZIO =
   /Nenhuma conex[aã]o atribu[ií]da|Nenhuma fun[cç][aã]o habilitada|Nenhuma permiss[aã]o configurada/i;
 
-/** As tres abas que a Bg2 devolveu para `implementada: false`. */
-const PENDENTES_BG2 = ["conexoes", "funcoes", "permissoes"] as const;
+/**
+ * As abas que a Bg2 devolveu para `implementada: false` e que CONTINUAM
+ * assim.
+ *
+ * `funcoes` saiu desta lista na PERMISSOES-FUNCTION-V1-B: ela ganhou
+ * tela real, com backend publicado por tras. A lista nao encolheu por
+ * conveniencia — ela e a autoridade de D3, D6 e D8 ao mesmo tempo, e
+ * manter `funcoes` aqui depois da promocao faria os tres afirmarem o
+ * contrario do que existe.
+ *
+ * `conexoes` e `permissoes` seguem pendentes, e `permissoes` por decisao
+ * de produto: escolher a Funcao e escolher o nivel sao a MESMA decisao,
+ * entao ela nao ganha uma segunda tela editando o mesmo dado.
+ */
+const PENDENTES_BG2 = ["conexoes", "permissoes"] as const;
 
 const PAGINA_AGENTE = ler("components/ia/agente/PaginaAgente.tsx");
 const ABAS_TS = ler("lib/ia/abas.ts");
@@ -229,9 +242,22 @@ secao("D. As 8 abas: 5 implementadas, 3 pendentes");
   // uma tarefa `conversa` e acompanha o resultado. As outras cinco
   // continuam pendentes, e a lista continua NOMINAL nos dois sentidos —
   // uma aba que sumisse daqui sem ganhar tela reprovaria igual.
-  ok("D4  as cinco pendentes sao exatamente estas",
+  // ── D4 reconciliado na PERMISSOES-FUNCTION-V1-B ──────────────────
+  //
+  // `funcoes` saiu das pendentes porque virou tela real — mesmo
+  // movimento que `chat` fez na I3, e pelo mesmo criterio: existe
+  // backend publicado, a aba consome dado real e nao ha placeholder. A
+  // lista continua NOMINAL nos dois sentidos.
+  ok("D4  as quatro pendentes sao exatamente estas",
     ABAS.filter((a) => !a.implementada).map((a) => a.id).join(",") ===
-    "conexoes,funcoes,permissoes,memoria,custos");
+    "conexoes,permissoes,memoria,custos");
+  ok("D4b `funcoes` saiu das pendentes porque virou tela real",
+    ABAS.find((a) => a.id === "funcoes")?.implementada === true &&
+    /aba === "funcoes"/.test(codigo(PAGINA_AGENTE)) &&
+    /FuncoesAgente/.test(codigo(PAGINA_AGENTE)));
+  ok("D4c e `permissoes` NAO ganhou tela propria — uma decisao, uma tela",
+    ABAS.find((a) => a.id === "permissoes")?.implementada === false &&
+    !/aba === "permissoes"/.test(codigo(PAGINA_AGENTE)));
   ok("D4a `chat` saiu das pendentes porque virou tela real",
     ABAS.find((a) => a.id === "chat")?.implementada === true &&
     /aba === "chat"/.test(codigo(PAGINA_AGENTE)));

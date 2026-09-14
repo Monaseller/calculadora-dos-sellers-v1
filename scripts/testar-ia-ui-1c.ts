@@ -175,25 +175,48 @@ secao("B. As 8 abas");
   // NOMINAL e a contagem continua exata — o que mudou foi a realidade,
   // nao o rigor. Um `includes` ou um `>=` aqui deixaria passar a proxima
   // promocao sem ninguem olhar.
-  ok("B4  as tres abas implementadas sao exatamente estas",
-    ABAS.filter((a) => a.implementada).map((a) => a.id).join(",") ===
-    "visao-geral,chat,tarefas");
+  // ── B4/B5 reconciliados na PERMISSOES-FUNCTION-V1-B ──────────────
+  //
+  // `funcoes` deixou de ser placeholder: a aba lista as Funcoes que o
+  // SERVIDOR deriva do registry e grava o nivel de cada uma. A lista
+  // continua NOMINAL e a contagem continua exata — o que mudou foi a
+  // realidade, nao o rigor.
+  //
+  // `permissoes` NAO foi junto, e o par de asserts registra isso: as
+  // duas decisoes sao a mesma, e dois lugares editando o mesmo dado
+  // divergiriam. Promover as duas aqui passaria despercebido sem a
+  // lista nominal.
+  const IMPLEMENTADAS = "visao-geral,chat,tarefas,funcoes";
+  ok("B4  as quatro abas implementadas sao exatamente estas",
+    ABAS.filter((a) => a.implementada).map((a) => a.id).join(",") === IMPLEMENTADAS);
   ok("B4a CONTROLE NEGATIVO: o oraculo reprova aba a MENOS",
-    ["visao-geral", "tarefas"].join(",") !== "visao-geral,chat,tarefas");
+    ["visao-geral", "chat", "tarefas"].join(",") !== IMPLEMENTADAS);
   ok("B4b CONTROLE NEGATIVO: o oraculo reprova aba a MAIS",
-    ["visao-geral", "chat", "tarefas", "memoria"].join(",") !== "visao-geral,chat,tarefas");
+    ["visao-geral", "chat", "tarefas", "funcoes", "permissoes"].join(",") !== IMPLEMENTADAS);
+  ok("B4c CONTROLE NEGATIVO: TROCA mantendo o total de quatro reprova",
+    ["visao-geral", "chat", "tarefas", "permissoes"].join(",") !== IMPLEMENTADAS);
+  ok("B4d `permissoes` NAO foi promovida junto — uma decisao, uma tela",
+    ABAS.find((a) => a.id === "permissoes")?.implementada === false);
   // O rotulo dizia "6" desde a UI-1C.b, quando eram 3 — numero escrito
   // no nome do assert envelhece calado. Agora sao cinco, e o assert
   // continua cobrando a CONTAGEM junto com a pendencia declarada.
   const pendentes = ABAS.filter((a) => !a.implementada);
-  ok("B5  as 5 nao implementadas declaram pendencia",
-    pendentes.length === 5 &&
+  ok("B5  as 4 nao implementadas declaram pendencia",
+    pendentes.length === 4 &&
     pendentes.every((a) => (PENDENCIA_ABA as Record<string, string>)[a.id]?.length > 20),
     pendentes.map((a) => a.id).join(","));
-  ok("B5a as 5 pendentes sao exatamente estas",
-    pendentes.map((a) => a.id).join(",") === "conexoes,funcoes,permissoes,memoria,custos");
+  ok("B5a as 4 pendentes sao exatamente estas",
+    pendentes.map((a) => a.id).join(",") === "conexoes,permissoes,memoria,custos");
   ok("B5a1 e `chat` saiu do mapa de pendencia",
     !(PENDENCIA_ABA as Record<string, string>).chat);
+  ok("B5a2 `funcoes` tambem saiu do mapa de pendencia",
+    !(PENDENCIA_ABA as Record<string, string>).funcoes);
+  // A pendencia de `permissoes` deixou de dizer "falta tudo" e passou a
+  // dizer ONDE a configuracao vive. O assert cobra a mudanca de sentido,
+  // nao a frase inteira — texto exato aqui viraria teste de redacao.
+  ok("B5a3 a pendencia de `permissoes` aponta para a aba Funcoes",
+    /Fun[cç][oõ]es/.test((PENDENCIA_ABA as Record<string, string>).permissoes ?? ""),
+    (PENDENCIA_ABA as Record<string, string>).permissoes);
 
   // ── A invariavel que faltava: `implementada` x o que a pagina monta ─
   //

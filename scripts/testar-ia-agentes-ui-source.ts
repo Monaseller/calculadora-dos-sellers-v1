@@ -142,10 +142,10 @@ secao("B. O que a UI NAO manda");
   // "o unico cabecalho enviado e o do corpo JSON": as duas contagens
   // sao comparadas ENTRE SI, entao um `headers:` que nao seja aquele
   // cabecalho reprova, e o veto a credencial no cabecalho nao mudou.
-  ok("B3c os UNICOS cabecalhos sao os tres Content-Type do corpo JSON",
-    (CODIGO_TRANSPORTE.match(/headers\s*:/g) ?? []).length === 3 &&
+  ok("B3c os UNICOS cabecalhos sao os quatro Content-Type do corpo JSON",
+    (CODIGO_TRANSPORTE.match(/headers\s*:/g) ?? []).length === 4 &&
       (CODIGO_TRANSPORTE.match(/headers: \{ "Content-Type": "application\/json" \}/g) ?? [])
-        .length === 3 &&
+        .length === 4 &&
       !/"X-|Cookie|Api-Key|Idempotency-Key/i.test(CODIGO_TRANSPORTE));
   ok("B4  `credentials` omitido — o cookie same-origin ja viaja sozinho",
     !/credentials/.test(CODIGO_TRANSPORTE));
@@ -164,11 +164,51 @@ secao("B. O que a UI NAO manda");
   // A consulta de conversa entra AQUI, entre as leituras, e nao entre as
   // escritas: ela e GET puro. Classificar toda funcao que cita
   // `/conversa` como escrita confundiria acompanhar com criar.
-  ok("B5  as tres leituras continuam GET puro, sem method e sem corpo",
-    ["listarAgentes", "obterDiagnostico", "consultarConversaDoAgente"].every((f) => {
+  // ── B5 reconciliado na PERMISSOES-FUNCTION-V1-B ─────────────────
+  //
+  // Entrou a QUARTA leitura, `listarPermissoesDoAgente`. A lista e
+  // NOMINAL, e por isso precisou crescer: se continuasse com tres
+  // nomes, o leitor novo ficaria INVISIVEL — poderia ganhar `method` ou
+  // `body` sem ninguem notar, e este assert seguiria verde afirmando
+  // que "as leituras sao GET puro". Mesma armadilha que o filtro por
+  // `"POST"` teria criado nas escritas.
+  const LEITURAS_AUTORIZADAS = [
+    "listarAgentes",
+    "obterDiagnostico",
+    "consultarConversaDoAgente",
+    "listarPermissoesDoAgente",
+  ];
+  /** Toda funcao exportada SEM `method:` e uma leitura. */
+  const leiturasReais = [...CODIGO_TRANSPORTE.matchAll(/export async function (\w+)\(/g)]
+    .map((m) => m[1])
+    .filter((nome) => !/method\s*:/.test(corpoDaFuncao(nome)))
+    .sort();
+  const leiturasEsperadas = JSON.stringify([...LEITURAS_AUTORIZADAS].sort());
+
+  ok("B5  as quatro leituras continuam GET puro, sem method e sem corpo",
+    LEITURAS_AUTORIZADAS.every((f) => {
       const corpo = corpoDaFuncao(f);
       return corpo.length > 50 && !/method\s*:|body\s*:/.test(corpo);
     }));
+  ok("B5a0 e as leituras publicadas sao EXATAMENTE as quatro nominais",
+    JSON.stringify(leiturasReais) === leiturasEsperadas,
+    leiturasReais.join(", ") || "nenhuma");
+  ok("B5a1 CONTROLE NEGATIVO: um leitor sumir reprovaria",
+    JSON.stringify([...LEITURAS_AUTORIZADAS].slice(1).sort()) !== leiturasEsperadas);
+  ok("B5a2 CONTROLE NEGATIVO: um QUINTO leitor reprovaria",
+    JSON.stringify([...LEITURAS_AUTORIZADAS, "listarQualquerOutraCoisa"].sort()) !==
+      leiturasEsperadas);
+  ok("B5a3 CONTROLE NEGATIVO: TROCA mantendo o total de quatro reprovaria",
+    JSON.stringify(
+      ["listarAgentes", "obterDiagnostico", "consultarConversaDoAgente", "outraLeitura"].sort()
+    ) !== leiturasEsperadas);
+  ok("B5a4 ANCORA: a varredura enxergou leitores de verdade",
+    leiturasReais.length === 4 && corpoDaFuncao("listarPermissoesDoAgente").length > 50);
+  // A leitura de permissoes e leitura: nao define nada, nao cria linha e
+  // nao executa Funcao.
+  ok("B5a5 a leitura de permissoes repassa o sinal e nao escreve",
+    /signal\?: AbortSignal/.test(corpoDaFuncao("listarPermissoesDoAgente")) &&
+      /\{ signal \}/.test(corpoDaFuncao("listarPermissoesDoAgente")));
   // ── B5b reconciliado na AGENT-VERTICAL-SLICE-V1-I3 ──────────────
   //
   // ANTES: "method e body existem SO na capacidade de criacao" — UMA
@@ -188,10 +228,18 @@ secao("B. O que a UI NAO manda");
   // protecao que morre sem ninguem perceber. Agora o conjunto e de
   // VERBOS: toda funcao com `method:` e uma escrita, e cada uma tem de
   // bater com o verbo que lhe foi autorizado, nominalmente.
+  //
+  // ── E de novo na PERMISSOES-FUNCTION-V1-B ───────────────────────
+  //
+  // Quarta escrita: `definirPermissaoDeFuncao`, por PATCH. O mapa
+  // continua sendo de VERBOS, e nao de nomes — e por isso a chegada de
+  // um SEGUNDO PATCH nao afrouxa nada: cada funcao tem de bater com o
+  // verbo que lhe foi autorizado, individualmente.
   const VERBOS_AUTORIZADOS: Readonly<Record<string, string>> = {
     criarAgenteViaApi: "POST",
     enviarMensagemAoAgente: "POST",
     atualizarAgenteViaApi: "PATCH",
+    definirPermissaoDeFuncao: "PATCH",
   };
   const ESCRITAS_AUTORIZADAS = Object.keys(VERBOS_AUTORIZADOS);
   const verboDaFuncao = (nome: string): string | null =>
@@ -219,9 +267,9 @@ secao("B. O que a UI NAO manda");
       (f) =>
         verboDaFuncao(f) === VERBOS_AUTORIZADOS[f] &&
         /body: JSON\.stringify/.test(corpoDaFuncao(f))));
-  ok("B5b2 o transporte tem exatamente tres method e tres body",
-    (CODIGO_TRANSPORTE.match(/method\s*:/g) ?? []).length === 3 &&
-      (CODIGO_TRANSPORTE.match(/body\s*:/g) ?? []).length === 3);
+  ok("B5b2 o transporte tem exatamente quatro method e quatro body",
+    (CODIGO_TRANSPORTE.match(/method\s*:/g) ?? []).length === 4 &&
+      (CODIGO_TRANSPORTE.match(/body\s*:/g) ?? []).length === 4);
   ok("B5b3 a escrita de conversa vai para a rota de conversa, com corpo so de mensagem",
     /ROTA_SUFIXO_CONVERSA/.test(CODIGO_TRANSPORTE) &&
       /body: JSON\.stringify\(\{ mensagem \}\)/.test(corpoDaFuncao("enviarMensagemAoAgente")));
@@ -262,7 +310,26 @@ secao("B. O que a UI NAO manda");
       atualizarAgenteViaApi: "POST",
     }) !== pares(VERBOS_AUTORIZADOS));
   ok("B5b8 ANCORA: a varredura enxergou funcoes de verdade",
-    escritasReais.length === 3 && corpoDaFuncao("criarAgenteViaApi").length > 50);
+    escritasReais.length === 4 && corpoDaFuncao("criarAgenteViaApi").length > 50);
+  // ── A escrita de permissao, nominalmente ─────────────────────────
+  // O caminho e montado por um helper compartilhado com a LEITURA —
+  // como `caminhoDaConversa` ja faz —, entao a sonda mede o helper no
+  // arquivo e o USO dele nas duas funcoes. Exigir a string crua dentro
+  // do corpo obrigaria a duplicar o endereco, que e o oposto do que
+  // este arquivo existe para garantir.
+  ok("B5b9 leitura e escrita de permissao usam o MESMO caminho nominal",
+    /const caminhoDasPermissoes = \(agenteId: string\) =>/.test(CODIGO_TRANSPORTE) &&
+      /encodeURIComponent\(agenteId\)\}\/permissoes`/.test(CODIGO_TRANSPORTE) &&
+      /caminhoDasPermissoes\(agenteId\)/.test(corpoDaFuncao("definirPermissaoDeFuncao")) &&
+      /caminhoDasPermissoes\(agenteId\)/.test(corpoDaFuncao("listarPermissoesDoAgente")));
+  ok("B5b10 e leva o corpo EXATO de duas chaves, montado a mao",
+    /body: JSON\.stringify\(\{ funcaoId: definicao\.funcaoId, nivel: definicao\.nivel \}\)/
+      .test(corpoDaFuncao("definirPermissaoDeFuncao")) &&
+      !/JSON\.stringify\(definicao\)/.test(CODIGO_TRANSPORTE));
+  ok("B5b11 nenhuma chave reservada entra no corpo da permissao",
+    !/user_id|agente_id|revisao/.test(corpoDaFuncao("definirPermissaoDeFuncao")));
+  ok("B5b12 a escrita de permissao NAO aceita sinal de cancelamento",
+    !/signal/.test(corpoDaFuncao("definirPermissaoDeFuncao")));
   ok("B5b8a ANCORA: a sonda de verbo le verbo de verdade",
     verboDaFuncao("atualizarAgenteViaApi") === "PATCH" &&
       verboDaFuncao("listarAgentes") === null);
@@ -293,12 +360,22 @@ secao("B. O que a UI NAO manda");
   // apagar agente e frente propria, com tarefas, aprovacoes e auditoria
   // penduradas nele. O veto nao foi afrouxado; foi reduzido ao que
   // continua verdadeiro.
-  ok("B7b duas criacoes por POST, uma edicao por PATCH — e nada alem",
+  //
+  // ── B7b reconciliado na PERMISSOES-FUNCTION-V1-B ────────────────
+  //
+  // O segundo PATCH entra, e a redacao do assert muda junto: "uma
+  // edicao" deixou de ser verdade. ALTERAR agora cobre duas coisas —
+  // os campos do agente e o nivel de autonomia de uma Funcao.
+  // SUBSTITUIR e APAGAR continuam fora: PUT reabriria por omissao os
+  // campos que cada corpo fecha, e nao ha o que apagar (negar e
+  // `bloqueado`, que GRAVA linha).
+  ok("B7b duas criacoes por POST, duas alteracoes por PATCH — e nada alem",
     (CODIGO_TRANSPORTE.match(/method:\s*"POST"/g) ?? []).length === 2 &&
-      (CODIGO_TRANSPORTE.match(/method:\s*"PATCH"/g) ?? []).length === 1 &&
+      (CODIGO_TRANSPORTE.match(/method:\s*"PATCH"/g) ?? []).length === 2 &&
       /export async function criarAgenteViaApi\(/.test(CODIGO_TRANSPORTE) &&
       /export async function enviarMensagemAoAgente\(/.test(CODIGO_TRANSPORTE) &&
       /export async function atualizarAgenteViaApi\(/.test(CODIGO_TRANSPORTE) &&
+      /export async function definirPermissaoDeFuncao\(/.test(CODIGO_TRANSPORTE) &&
       !/"PUT"|"DELETE"/.test(CODIGO_TRANSPORTE));
   ok("B7c PUT e DELETE continuam vetados em TODA a area, nao so no transporte",
     AREA.filter((a) => /"PUT"|"DELETE"/.test(codigo(ler(a)))).length === 0,
@@ -308,6 +385,12 @@ secao("B. O que a UI NAO manda");
   ok("B7e o PATCH mora SO no transporte nominal",
     AREA.filter((a) => /"PATCH"/.test(codigo(ler(a)))).join(",") === TRANSPORTE,
     AREA.filter((a) => /"PATCH"/.test(codigo(ler(a)))).join(", ") || "nenhum");
+  ok("B7f CONTROLE NEGATIVO: um dos dois PATCH virar PUT reprovaria",
+    pares({ ...VERBOS_AUTORIZADOS, definirPermissaoDeFuncao: "PUT" }) !==
+      pares(VERBOS_AUTORIZADOS));
+  ok("B7g CONTROLE NEGATIVO: a permissao virar POST reprovaria",
+    pares({ ...VERBOS_AUTORIZADOS, definirPermissaoDeFuncao: "POST" }) !==
+      pares(VERBOS_AUTORIZADOS));
 }
 
 secao("C. As telas migradas nao voltam ao simulado");
@@ -572,6 +655,156 @@ async function principal(): Promise<void> {
   ok("G17 200 sem `agente` -> falha",
     (await atualizarAgenteViaApi(UUID_A, { nome: "N" })).estado === "falha");
 
+  // ─── I. Permissoes de Function — PERMISSOES-FUNCTION-V1-B ───────────
+
+  secao("I. listarPermissoesDoAgente — leitura pura, contrato fechado");
+
+  const { listarPermissoesDoAgente, definirPermissaoDeFuncao } = await import(
+    "../lib/ia/agentes-http"
+  );
+  const permissao = (extra: Record<string, unknown> = {}) => ({
+    id: "vendas.consultar",
+    acesso: "leitura",
+    idempotente: true,
+    conexaoNecessaria: null,
+    nivel: null,
+    ...extra,
+  });
+
+  responde(200, { ok: true, permissoes: [permissao()] });
+  const iOk = await listarPermissoesDoAgente(UUID_A);
+  ok("I1  200 -> ok, com a lista do servidor",
+    iOk.estado === "ok" && iOk.permissoes.length === 1 &&
+      iOk.permissoes[0].id === "vendas.consultar", JSON.stringify(iOk));
+  ok("I2  endereco e o do recurso, com o id escapado",
+    chamadas[0]?.url === `/api/agentes/${UUID_A}/permissoes`, String(chamadas[0]?.url));
+  ok("I3  leitura: sem method, sem corpo e sem cabecalho",
+    chamadas[0]?.init?.method === undefined && chamadas[0]?.init?.body === undefined &&
+      chamadas[0]?.init?.headers === undefined);
+
+  responde(200, { ok: true, permissoes: [permissao()] });
+  const controladorPerm = new AbortController();
+  await listarPermissoesDoAgente(UUID_A, controladorPerm.signal);
+  ok("I4  repassa o AbortSignal", chamadas[0]?.init?.signal === controladorPerm.signal);
+
+  // O ponto central da fase: ausencia continua sendo `null` ATE a tela.
+  responde(200, { ok: true, permissoes: [permissao({ nivel: null })] });
+  const iNull = await listarPermissoesDoAgente(UUID_A);
+  ok("I5  `nivel: null` atravessa como null — nao vira 'bloqueado'",
+    iNull.estado === "ok" && iNull.permissoes[0].nivel === null);
+
+  for (const nivel of ["bloqueado", "aprovacao", "automatico"]) {
+    responde(200, { ok: true, permissoes: [permissao({ nivel })] });
+    const r = await listarPermissoesDoAgente(UUID_A);
+    ok(`I6  nivel \`${nivel}\` atravessa literal`,
+      r.estado === "ok" && r.permissoes[0].nivel === nivel);
+  }
+
+  responde(200, { ok: true, permissoes: [permissao({ nivel: "liberado" })] });
+  ok("I7  nivel FORA do vocabulario -> falha, nunca item silencioso",
+    (await listarPermissoesDoAgente(UUID_A)).estado === "falha");
+
+  // Um item torto condena a lista INTEIRA: meia lista diria ao dono que
+  // uma Funcao nao existe quando ela existe.
+  responde(200, { ok: true, permissoes: [permissao(), permissao({ acesso: "total" })] });
+  ok("I8  item malformado condena a lista inteira",
+    (await listarPermissoesDoAgente(UUID_A)).estado === "falha");
+  responde(200, { ok: true, permissoes: [permissao({ idempotente: "sim" })] });
+  ok("I8a `idempotente` nao-booleano -> falha",
+    (await listarPermissoesDoAgente(UUID_A)).estado === "falha");
+  responde(200, { ok: true, permissoes: [permissao({ conexaoNecessaria: { plataforma: 1 } })] });
+  ok("I8b conexao malformada -> falha",
+    (await listarPermissoesDoAgente(UUID_A)).estado === "falha");
+
+  responde(200, { ok: true, permissoes: [permissao({ conexaoNecessaria: { plataforma: "shopee", recurso: "chat" } })] });
+  const iConexao = await listarPermissoesDoAgente(UUID_A);
+  ok("I8c conexao bem formada atravessa campo a campo",
+    iConexao.estado === "ok" &&
+      iConexao.permissoes[0].conexaoNecessaria?.plataforma === "shopee");
+
+  responde(200, { ok: true, permissoes: [] });
+  const iVazio = await listarPermissoesDoAgente(UUID_A);
+  ok("I9  lista VAZIA e resposta completa, nao falha",
+    iVazio.estado === "ok" && iVazio.permissoes.length === 0);
+
+  responde(401, { ok: false });
+  ok("I10 401 -> sessao expirada",
+    (await listarPermissoesDoAgente(UUID_A)).estado === "nao_autenticado");
+  responde(404, { ok: false });
+  ok("I11 404 -> nao_encontrado",
+    (await listarPermissoesDoAgente(UUID_A)).estado === "nao_encontrado");
+  responde(500, { ok: false });
+  ok("I12 500 -> falha, NUNCA lista vazia",
+    (await listarPermissoesDoAgente(UUID_A)).estado === "falha");
+  responde(200, "ilegivel");
+  ok("I13 corpo ilegivel -> falha",
+    (await listarPermissoesDoAgente(UUID_A)).estado === "falha");
+  proxima = "erro";
+  chamadas = [];
+  ok("I14 rede caida -> falha",
+    (await listarPermissoesDoAgente(UUID_A)).estado === "falha");
+
+  secao("I. definirPermissaoDeFuncao — a escrita, com corpo de duas chaves");
+
+  responde(200, { ok: true, permissao: { funcaoId: "vendas.consultar", nivel: "aprovacao" } });
+  const iDef = await definirPermissaoDeFuncao(UUID_A, {
+    funcaoId: "vendas.consultar",
+    nivel: "aprovacao",
+  });
+  ok("I15 200 -> ok, com o nivel do SERVIDOR",
+    iDef.estado === "ok" && iDef.funcaoId === "vendas.consultar" && iDef.nivel === "aprovacao",
+    JSON.stringify(iDef));
+  ok("I16 metodo PATCH", chamadas[0]?.init?.method === "PATCH", String(chamadas[0]?.init?.method));
+  ok("I17 endereco e o do recurso de permissoes",
+    chamadas[0]?.url === `/api/agentes/${UUID_A}/permissoes`, String(chamadas[0]?.url));
+  ok("I18 o unico cabecalho e o do corpo JSON",
+    JSON.stringify(chamadas[0]?.init?.headers) ===
+      JSON.stringify({ "Content-Type": "application/json" }));
+  ok("I19 zero sinal de cancelamento numa escrita",
+    chamadas[0]?.init?.signal === undefined);
+  ok("I20 o corpo leva EXATAMENTE funcaoId e nivel",
+    JSON.stringify(Object.keys(JSON.parse(String(chamadas[0]?.init?.body ?? "{}"))).sort()) ===
+      JSON.stringify(["funcaoId", "nivel"]),
+    String(chamadas[0]?.init?.body));
+
+  // O servidor e a autoridade: se ele devolver outro nivel, e o dele que
+  // vale — a tela nao pode ecoar o que mandou.
+  responde(200, { ok: true, permissao: { funcaoId: "vendas.consultar", nivel: "bloqueado" } });
+  const iEco = await definirPermissaoDeFuncao(UUID_A, {
+    funcaoId: "vendas.consultar",
+    nivel: "automatico",
+  });
+  ok("I21 o nivel confirmado vem da RESPOSTA, nunca do argumento",
+    iEco.estado === "ok" && iEco.nivel === "bloqueado");
+
+  responde(200, { ok: true, permissao: { funcaoId: "vendas.consultar", nivel: "liberado" } });
+  ok("I22 nivel invalido na resposta -> falha",
+    (await definirPermissaoDeFuncao(UUID_A, { funcaoId: "x.y", nivel: "automatico" })).estado ===
+      "falha");
+  responde(200, { ok: true });
+  ok("I23 resposta sem `permissao` -> falha",
+    (await definirPermissaoDeFuncao(UUID_A, { funcaoId: "x.y", nivel: "automatico" })).estado ===
+      "falha");
+
+  responde(400, { ok: false, erro: "nível inválido." });
+  const iRuim = await definirPermissaoDeFuncao(UUID_A, { funcaoId: "x.y", nivel: "automatico" });
+  ok("I24 400 -> dados_invalidos com frase generica, nunca o texto cru",
+    iRuim.estado === "dados_invalidos" &&
+      iRuim.mensagem === "Não foi possível salvar este nível.",
+    JSON.stringify(iRuim));
+  responde(401, { ok: false });
+  ok("I25 401 -> sessao expirada",
+    (await definirPermissaoDeFuncao(UUID_A, { funcaoId: "x.y", nivel: "automatico" })).estado ===
+      "nao_autenticado");
+  responde(404, { ok: false });
+  ok("I26 404 -> nao_encontrado",
+    (await definirPermissaoDeFuncao(UUID_A, { funcaoId: "x.y", nivel: "automatico" })).estado ===
+      "nao_encontrado");
+  responde(500, { ok: false });
+  ok("I27 500 -> falha",
+    (await definirPermissaoDeFuncao(UUID_A, { funcaoId: "x.y", nivel: "automatico" })).estado ===
+      "falha");
+
   globalThis.fetch = fetchOriginal;
 
   // ─── H. A tela de edicao ────────────────────────────────────────────
@@ -644,6 +877,276 @@ async function principal(): Promise<void> {
       /<VisaoGeral agente=\{agente\}/.test(CODIGO_CONTAINER));
     ok("H18 ANCORA: as duas fontes foram lidas de verdade",
       CODIGO_EDITAR.length > 1500 && CODIGO_CONTAINER.length > 1500);
+  }
+
+  // ─── J. A aba Funcoes ───────────────────────────────────────────────
+
+  secao("J. FuncoesAgente — configura capacidade, e nao executa nada");
+
+  {
+    const FUNCOES = "components/ia/agente/FuncoesAgente.tsx";
+    const CODIGO_FUNCOES = codigo(ler(FUNCOES));
+    const CODIGO_CONTAINER = codigo(ler(CONTAINER));
+
+    ok("J1  a tela existe e e Client Component",
+      AREA.includes(FUNCOES) && /^"use client"/m.test(ler(FUNCOES)));
+    ok("J2  exporta default e recebe SO `agenteId`",
+      /export default function FuncoesAgente\(\{ agenteId \}: \{ agenteId: string \}\)/
+        .test(CODIGO_FUNCOES));
+    ok("J3  zero rede propria: usa os dois helpers nominais",
+      !/\bfetch\s*\(/.test(CODIGO_FUNCOES) && !/["'`]\/api\//.test(CODIGO_FUNCOES) &&
+        /listarPermissoesDoAgente/.test(CODIGO_FUNCOES) &&
+        /definirPermissaoDeFuncao/.test(CODIGO_FUNCOES) &&
+        /from "@\/lib\/ia\/agentes-http"/.test(CODIGO_FUNCOES));
+    ok("J4  zero ambiente, banco ou dominio do servidor",
+      !/process\.env|getSupabaseServidor|createClient|service_role|lib\/agentes/
+        .test(CODIGO_FUNCOES));
+    // ── A fronteira desta fase: CONFIGURAR nao e EXECUTAR ───────────
+    ok("J5  zero execucao de Function",
+      !/executarFuncao|autorizarFuncao|retomarAprovacao|aprovacao[A-Z]|criarTarefa|AdaptadorIA|worker|anthropic/
+        .test(CODIGO_FUNCOES));
+    ok("J5a e zero botao de executar, testar ou rodar",
+      !/>\s*(Executar|Rodar|Testar|Chamar)\s*</.test(ler(FUNCOES)) &&
+        !/aria-label="(Executar|Rodar|Testar)/.test(ler(FUNCOES)));
+    ok("J5b CONTROLE: a sonda de execucao acusa quando o padrao existe",
+      /executarFuncao/.test("await executarFuncao(x)"));
+
+    // ── O catalogo e do SERVIDOR ────────────────────────────────────
+    ok("J6  nenhum id de Funcao escrito na tela",
+      !/"vendas\.consultar"|'vendas\.consultar'/.test(CODIGO_FUNCOES) &&
+        !/MOCK_/.test(CODIGO_FUNCOES));
+    ok("J7  a tela NAO pressupoe uma Funcao so",
+      !/permissoes\[0\]|\.length === 1/.test(CODIGO_FUNCOES) &&
+        /\.map\(\(permissao\)/.test(CODIGO_FUNCOES));
+    ok("J7a lista vazia tem estado proprio, e nao some",
+      /permissoes\.length === 0/.test(CODIGO_FUNCOES) && /EstadoVazio/.test(CODIGO_FUNCOES));
+
+    // ── `null` e ausencia, e a tela diz isso ────────────────────────
+    ok("J8  `nivel: null` vira 'Não configurada', nunca um nivel",
+      /permissao\.nivel === null/.test(CODIGO_FUNCOES) &&
+        /Não configurada/.test(ler(FUNCOES)));
+    ok("J8a e o texto explica que a Funcao esta NEGADA",
+      /não pode usar esta função até você escolher um nível/.test(ler(FUNCOES)));
+    ok("J8b a tela nunca chama um nivel ausente de ativo, liberado ou automatico",
+      !/\b(ativa|habilitada|liberada)\b/i.test(ler(FUNCOES)));
+
+    // ── Os tres niveis gravaveis, e so eles ─────────────────────────
+    ok("J9  as opcoes saem do vocabulario canonico, sem lista propria",
+      /NIVEIS_AUTONOMIA\.map\(/.test(CODIGO_FUNCOES) &&
+        /VOCABULARIO_NIVEL\[nivel\]\.rotulo/.test(CODIGO_FUNCOES) &&
+        !/"bloqueado"|"aprovacao"|"automatico"/.test(CODIGO_FUNCOES));
+    ok("J9a o placeholder NAO e gravavel e nao volta para null",
+      /<option value="" disabled>/.test(ler(FUNCOES)) &&
+        !/value=\{null\}|nivel: null/.test(CODIGO_FUNCOES));
+    ok("J9b nao existe DELETE nem 'voltar para nao configurada'",
+      !/\bDELETE\b|removerPermissao|apagarPermissao/.test(CODIGO_FUNCOES));
+
+    // ── Persistido contra selecionado ───────────────────────────────
+    ok("J10 selecao e persistido sao coisas DIFERENTES",
+      /const \[selecao, setSelecao\]/.test(CODIGO_FUNCOES) &&
+        /escolhido !== undefined && escolhido !== permissao\.nivel/.test(CODIGO_FUNCOES));
+    ok("J10a o sucesso usa a resposta do SERVIDOR, nunca o rascunho",
+      /p\.id === funcaoId \? \{ \.\.\.p, nivel: resultado\.nivel \}/.test(CODIGO_FUNCOES) &&
+        /setSelecao\(\(atual\) => \(\{ \.\.\.atual, \[funcaoId\]: resultado\.nivel \}\)\)/
+          .test(CODIGO_FUNCOES) &&
+        !/nivel: escolhido|nivel: nivel[,}]/.test(CODIGO_FUNCOES));
+    ok("J10a1 CONTROLE NEGATIVO: usar o nivel LOCAL reprovaria",
+      !/p\.id === funcaoId \? \{ \.\.\.p, nivel: resultado\.nivel \}/.test(
+        CODIGO_FUNCOES.replace("nivel: resultado.nivel", "nivel: nivel")
+      ));
+    ok("J10b salvar so fica disponivel com alteracao real",
+      /disabled=\{emVoo \|\| !alterado\}/.test(CODIGO_FUNCOES));
+    ok("J10c o erro NAO limpa a selecao do dono",
+      !/setSelecao\(\{\}\)/.test(
+        CODIGO_FUNCOES.slice(CODIGO_FUNCOES.indexOf("const mensagem ="))
+      ));
+
+    // ── Tudo por Funcao, nada global ────────────────────────────────
+    // ── J11.. — a trava, provada por POSICAO e nao por presenca ──────
+    //
+    // O R1 registrou que a versao anterior deste assert so provava que
+    // as pecas existiam: mover a checagem para depois do `await`
+    // passaria batido. Agora a ordem e medida por indice no arquivo.
+    const iSet = CODIGO_FUNCOES.indexOf("const conjuntoDaOperacao = salvandoRef.current;");
+    const iHas = CODIGO_FUNCOES.indexOf("conjuntoDaOperacao.has(funcaoId)");
+    const iAdd = CODIGO_FUNCOES.indexOf("conjuntoDaOperacao.add(funcaoId)");
+    const iAwait = CODIGO_FUNCOES.indexOf("await definirPermissaoDeFuncao(");
+    const iGuard = CODIGO_FUNCOES.indexOf("if (!daMesmaTela()) return;");
+    const iFinally = CODIGO_FUNCOES.indexOf("} finally {");
+    const iDelete = CODIGO_FUNCOES.indexOf("conjuntoDaOperacao.delete(funcaoId);");
+    const iSetLeitura = CODIGO_FUNCOES.indexOf("setLeitura((atual) =>");
+    const iSetErros = CODIGO_FUNCOES.indexOf("setErros((atual) => ({ ...atual, [funcaoId]");
+    const iConfere = CODIGO_FUNCOES.indexOf("resultado.funcaoId !== funcaoId");
+
+    /** captura -> has -> add -> await, nesta ordem. Como PREDICADO, para
+     *  poder ser aplicado tambem a uma fonte MUTADA e provar que a sonda
+     *  discrimina em vez de so encontrar palavras. */
+    const ordemDaTrava = (fonte: string): boolean => {
+      const s = fonte.indexOf("const conjuntoDaOperacao = salvandoRef.current;");
+      const h = fonte.indexOf("conjuntoDaOperacao.has(funcaoId)");
+      const a = fonte.indexOf("conjuntoDaOperacao.add(funcaoId)");
+      const w = fonte.indexOf("await definirPermissaoDeFuncao(");
+      return s > 0 && h > s && a > h && w > a;
+    };
+    const CHAMADA_PATCH =
+      "await definirPermissaoDeFuncao(agenteDaOperacao, { funcaoId, nivel });";
+    const travaDepoisDoAwait = CODIGO_FUNCOES
+      .replace("conjuntoDaOperacao.add(funcaoId);", "")
+      .replace(CHAMADA_PATCH, `${CHAMADA_PATCH}\n      conjuntoDaOperacao.add(funcaoId);`);
+
+    ok("J11 a trava e um Set por funcaoId, capturado e fechado ANTES do await",
+      /salvandoRef = useRef<Set<string>>/.test(CODIGO_FUNCOES) && ordemDaTrava(CODIGO_FUNCOES));
+    ok("J11a `has` e `add` sao adjacentes — nenhum await entre os dois",
+      iHas < iAdd && !/await/.test(CODIGO_FUNCOES.slice(iHas, iAdd)));
+    ok("J11b CONTROLE NEGATIVO: `add` DEPOIS do await reprovaria a ordem",
+      !ordemDaTrava(travaDepoisDoAwait));
+    ok("J11b1 ANCORA: a mutacao de controle mexeu no arquivo de verdade",
+      travaDepoisDoAwait !== CODIGO_FUNCOES &&
+        travaDepoisDoAwait.includes("conjuntoDaOperacao.add(funcaoId)"));
+    ok("J11c a liberacao esta em `finally`",
+      iFinally > iAwait && iDelete > iFinally);
+    ok("J11d CONTROLE NEGATIVO: sem `finally` a sonda reprova",
+      !/\} finally \{/.test(CODIGO_FUNCOES.replace("} finally {", "} // nada {")));
+    // O conjunto liberado e o CAPTURADO, nunca o `current` do momento:
+    // na troca de agente o `current` ja pertence ao agente novo, e um
+    // delete ali liberaria a trava de uma operacao REAL dele.
+    ok("J11e o `finally` libera o conjunto CAPTURADO, nao `salvandoRef.current`",
+      /conjuntoDaOperacao\.delete\(funcaoId\);/.test(CODIGO_FUNCOES) &&
+        !/salvandoRef\.current\.delete\(/.test(CODIGO_FUNCOES));
+    ok("J11f CONTROLE NEGATIVO: trocar o conjunto por `current` no finally reprovaria",
+      /salvandoRef\.current\.delete\(/.test(
+        CODIGO_FUNCOES.replace(
+          "conjuntoDaOperacao.delete(funcaoId);",
+          "salvandoRef.current.delete(funcaoId);"
+        )
+      ));
+    ok("J11g e o Set e RECRIADO na troca, nunca limpo no lugar",
+      /salvandoRef\.current = new Set\(\);/.test(CODIGO_FUNCOES) &&
+        !/salvandoRef\.current\.clear\(\)/.test(CODIGO_FUNCOES));
+
+    // ── J11h..J11n — PATCH TARDIO, o achado M1 do R1 ─────────────────
+    ok("J11h a operacao captura o agente de quem a iniciou",
+      /const agenteDaOperacao = agenteId;/.test(CODIGO_FUNCOES) &&
+        /definirPermissaoDeFuncao\(agenteDaOperacao,/.test(CODIGO_FUNCOES));
+    // A comparacao e contra a REF do agente atual — comparar a closure
+    // consigo mesma seria sempre verdadeira e nao provaria nada.
+    ok("J11i e compara contra o agente ATUAL, por ref",
+      /const agenteAtualRef = useRef\(agenteId\);/.test(CODIGO_FUNCOES) &&
+        /const daMesmaTela = \(\) => agenteAtualRef\.current === agenteDaOperacao;/
+          .test(CODIGO_FUNCOES) &&
+        /agenteAtualRef\.current = agenteId;/.test(CODIGO_FUNCOES));
+
+    // ── J11i1..J11i6 — o TIPO do effect, achado M1 do R2 ─────────────
+    //
+    // `useEffect` e PASSIVO: o React o agenda, nao o roda no commit.
+    // Entre "B ja esta commitado" e "o efeito de B rodou" havia uma
+    // janela real — a continuacao de um `await` e microtask e drena
+    // antes do macrotask em que o React agenda efeitos passivos —, e
+    // nela o ref ainda dizia A. Layout effects rodam SINCRONAMENTE no
+    // commit, o que torna a invariante exata.
+    //
+    // A sonda mede a ATRIBUICAO dentro do callback certo, e nao a
+    // palavra `useLayoutEffect` no import ou num comentario: por isso
+    // ela recorta o bloco pelo indice e exige a atribuicao dentro dele.
+    const iLayout = CODIGO_FUNCOES.indexOf("useLayoutEffect(() => {");
+    const iPassivo = CODIGO_FUNCOES.indexOf("useEffect(() => {");
+    const iAtribui = CODIGO_FUNCOES.indexOf("agenteAtualRef.current = agenteId;");
+    /** A identidade e sincronizada DENTRO do layout effect? */
+    const sincronizaNoCommit = (fonte: string): boolean => {
+      const inicio = fonte.indexOf("useLayoutEffect(() => {");
+      if (inicio < 0) return false;
+      const fim = fonte.indexOf("}, [agenteId]);", inicio);
+      if (fim < 0) return false;
+      return fonte.slice(inicio, fim).includes("agenteAtualRef.current = agenteId;");
+    };
+
+    ok("J11i1 a identidade e sincronizada no COMMIT, por useLayoutEffect",
+      sincronizaNoCommit(CODIGO_FUNCOES));
+    ok("J11i2 o layout effect depende de `agenteId`",
+      /useLayoutEffect\(\(\) => \{\s*agenteAtualRef\.current = agenteId;\s*\}, \[agenteId\]\);/
+        .test(CODIGO_FUNCOES));
+    // UMA atribuicao canonica: duplica-la no efeito passivo faria a
+    // protecao parecer existir em dois lugares e um deles seria tarde.
+    ok("J11i3 existe UMA unica atribuicao da identidade, e ela e a do commit",
+      (CODIGO_FUNCOES.match(/agenteAtualRef\.current = agenteId;/g) ?? []).length === 1 &&
+        iAtribui > iLayout && iAtribui < iPassivo);
+    ok("J11i4 CONTROLE NEGATIVO: trocar o layout effect por useEffect reprovaria",
+      !sincronizaNoCommit(
+        CODIGO_FUNCOES.replace("useLayoutEffect(() => {", "useEffect(() => {")
+      ));
+    ok("J11i5 CONTROLE NEGATIVO: a palavra no import nao basta — sem a atribuicao, reprova",
+      !sincronizaNoCommit(
+        CODIGO_FUNCOES.replace("agenteAtualRef.current = agenteId;", "")
+      ));
+    ok("J11i6 ANCORA: o hook e importado de verdade e os dois effects existem",
+      /import \{[^}]*useLayoutEffect[^}]*\} from "react";/.test(CODIGO_FUNCOES) &&
+        iLayout > 0 && iPassivo > iLayout && iAtribui > 0);
+    ok("J11j o guard roda DEPOIS do await e ANTES de todo setState de desfecho",
+      iGuard > iAwait && iSetLeitura > iGuard && iSetErros > iGuard && iConfere > iGuard);
+    ok("J11k CONTROLE NEGATIVO: remover o guard reprovaria",
+      !/if \(!daMesmaTela\(\)\) return;/.test(
+        CODIGO_FUNCOES.replace("if (!daMesmaTela()) return;", "")
+      ));
+    ok("J11l CONTROLE NEGATIVO: um guard sempre verdadeiro reprovaria",
+      !/agenteAtualRef\.current === agenteDaOperacao/.test(
+        CODIGO_FUNCOES.replace(
+          "agenteAtualRef.current === agenteDaOperacao",
+          "true /* sempre */"
+        )
+      ));
+    // O caminho de ERRO fica atras do MESMO guard: um `return` unico
+    // cobre sucesso e falha, entao nao ha ramo que escreva sem passar
+    // por ele.
+    ok("J11m o caminho de erro tambem esta atras do guard",
+      iSetErros > iGuard &&
+        CODIGO_FUNCOES.slice(iGuard, iSetErros).indexOf("if (!daMesmaTela()) return;") === 0);
+    ok("J11n o `setSalvando` do finally so ocorre se a tela for a mesma",
+      /if \(daMesmaTela\(\)\) \{\s*setSalvando\(/.test(CODIGO_FUNCOES));
+
+    // ── J11o..J11q — a resposta precisa ser sobre a Funcao pedida ────
+    ok("J11o o `funcaoId` da resposta e conferido contra o solicitado",
+      /if \(resultado\.funcaoId !== funcaoId\) \{/.test(CODIGO_FUNCOES) && iConfere < iSetLeitura);
+    ok("J11p divergencia NAO atualiza nada, e vira falha sanitizada",
+      /\[funcaoId\]: MENSAGEM_FALHA_SALVAR/.test(CODIGO_FUNCOES) &&
+        !/resultado\.funcaoId\]/.test(CODIGO_FUNCOES));
+    ok("J11q CONTROLE NEGATIVO: remover a conferencia reprovaria",
+      !/if \(resultado\.funcaoId !== funcaoId\) \{/.test(
+        CODIGO_FUNCOES.replace("if (resultado.funcaoId !== funcaoId) {", "if (false) {")
+      ));
+    ok("J11r ANCORA: todos os indices medidos apontam para codigo real",
+      [iSet, iHas, iAdd, iAwait, iGuard, iFinally, iDelete, iSetLeitura, iSetErros, iConfere]
+        .every((i) => i > 0));
+    ok("J11a erro e selecao tambem sao indexados por funcaoId",
+      /erros\[permissao\.id\]/.test(CODIGO_FUNCOES) &&
+        /selecao\[permissao\.id\]/.test(CODIGO_FUNCOES));
+
+    // ── Troca de agente ─────────────────────────────────────────────
+    ok("J12 a leitura reinicia quando o agente muda, com AbortController",
+      /useCallback\(/.test(CODIGO_FUNCOES) && /\[agenteId\]/.test(CODIGO_FUNCOES) &&
+        /new AbortController\(\)/.test(CODIGO_FUNCOES) &&
+        /controlador\.abort\(\)/.test(CODIGO_FUNCOES));
+    ok("J12a e resposta de agente anterior NAO povoa a tela do novo",
+      /if \(sinal\?\.aborted\) return;/.test(CODIGO_FUNCOES));
+    ok("J12b nem estado de selecao, erro ou envio sobrevive a troca",
+      /setSelecao\(\{\}\);/.test(CODIGO_FUNCOES) && /setErros\(\{\}\);/.test(CODIGO_FUNCOES) &&
+        /salvandoRef\.current = new Set\(\);/.test(CODIGO_FUNCOES));
+
+    ok("J13 os tres estados de leitura existem, e erro tem retry",
+      /"carregando"/.test(CODIGO_FUNCOES) && /"pronto"/.test(CODIGO_FUNCOES) &&
+        /"erro"/.test(CODIGO_FUNCOES) && /Tentar novamente/.test(ler(FUNCOES)));
+    ok("J13a botao de verdade, com rotulo acessivel",
+      (ler(FUNCOES).match(/<button/g) ?? []).length >= 2 &&
+        /aria-label=/.test(ler(FUNCOES)) &&
+        !/<span[^>]*onClick/.test(CODIGO_FUNCOES) && !/<div[^>]*onClick/.test(CODIGO_FUNCOES));
+    ok("J14 nada de HTML cru", !/dangerouslySetInnerHTML/.test(CODIGO_FUNCOES));
+
+    ok("J15 o container monta a aba pelo especificador com @/",
+      /from "@\/components\/ia\/agente\/FuncoesAgente"/.test(CODIGO_CONTAINER) &&
+        /aba === "funcoes" && <FuncoesAgente agenteId=\{agente\.id\} \/>/.test(CODIGO_CONTAINER));
+    ok("J15a e NAO monta uma segunda tela em `permissoes`",
+      !/aba === "permissoes"/.test(CODIGO_CONTAINER));
+    ok("J16 ANCORA: a fonte da tela foi lida de verdade",
+      CODIGO_FUNCOES.length > 2000);
   }
 
   console.log(`\n══ ${passou} PASS / ${falhou} FAIL ══\n`);
