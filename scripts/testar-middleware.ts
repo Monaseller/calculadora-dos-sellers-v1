@@ -168,6 +168,33 @@ t("4e. o dispatcher NAO fica publico, e so por ter segredo proprio", () => {
     "dispatcher sem maxDuration explicito — herdaria 60 s e cortaria a Task em `rodando`");
 });
 
+t("4f. a rota de consultar-vendas e de SESSAO, nao de segredo proprio", () => {
+  // FUNCTION-RUNTIME-V1-B2A. A distincao que este assert protege: as
+  // rotas de `internal/` se autenticam por segredo e por isso o
+  // middleware as deixa CHEGAR sem cookie; esta e de usuario, e tem de
+  // cair no default deny. Coloca-la em `ROTAS_COM_SEGREDO` por engano a
+  // abriria para qualquer um — o handler nao le `CRON_SECRET` nenhum.
+  const caminho = `/api/agentes/${UUID}/consultar-vendas`;
+
+  assert(!(caminho in ROTAS_COM_SEGREDO),
+    "consultar-vendas listada como rota com segredo proprio");
+  assert(!("/api/agentes/[agenteId]/consultar-vendas" in ROTAS_COM_SEGREDO),
+    "consultar-vendas listada com o caminho de template");
+  assert(!(caminho in ROTAS_PUBLICAS),
+    "consultar-vendas listada como rota publica");
+  assert(!PAGINAS_PUBLICAS.has(caminho),
+    "consultar-vendas listada como pagina publica");
+
+  // Sem cookie, TODO verbo e negado.
+  for (const metodo of ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
+    assert(sem(caminho, metodo) === "bloquear_api",
+      `${metodo} em consultar-vendas deveria cair no default deny`);
+
+  // Com cookie, os dois verbos que a rota expoe passam.
+  assert(com(caminho, "POST") === "liberar", "POST bloqueado mesmo com sessao");
+  assert(com(caminho, "GET") === "liberar", "GET bloqueado mesmo com sessao");
+});
+
 t("5. metodo errado numa rota com segredo NAO e liberado", () => {
   // O middleware não inventa método: worker é GET, executar é POST.
   assert(sem("/api/internal/estudio-anuncios/worker", "POST") === "bloquear_api",
@@ -408,7 +435,7 @@ t("29. asset marcado 'publico' precisa constar em ASSETS_PUBLICOS", () => {
 });
 
 // ────────────────────────────────────────────────────────────────────
-console.log("\n[8. cobertura: as 54 rotas do inventario F0.a]");
+console.log("\n[8. cobertura: as 56 rotas do inventario F0.a]");
 
 /** caminho, metodo, decisao esperada SEM sessao. */
 const INVENTARIO: [string, string, Decisao][] = [
@@ -460,7 +487,8 @@ const INVENTARIO: [string, string, Decisao][] = [
   ["/api/sync/iniciar", "POST", "bloquear_api"],
   ["/api/sync/manual", "POST", "bloquear_api"],
   ["/api/sync/status", "GET", "bloquear_api"],
-  // — protegidas: agentes (3; 1 na SKILL-1D.endpoint-B, 2 na agent-source-C)
+  // — protegidas: agentes (5; 1 na SKILL-1D.endpoint-B, 2 na agent-source-C,
+  //   2 na FUNCTION-RUNTIME-V1-B2A)
   // Primeira area de agentes com SESSAO — as outras quatro de
   // `internal/` se autenticam por segredo proprio e ficam la em cima.
   // O mesmo caminho aparece DUAS vezes de proposito: o inventario e por
@@ -470,6 +498,12 @@ const INVENTARIO: [string, string, Decisao][] = [
   [`/api/agentes/${UUID}/diagnostico`, "GET", "bloquear_api"],
   ["/api/agentes", "GET", "bloquear_api"],
   ["/api/agentes", "POST", "bloquear_api"],
+  // FUNCTION-RUNTIME-V1-B2A: a rota que enfileira `consultar_vendas`.
+  // Os DOIS verbos, pelo mesmo motivo do par acima — e porque aqui a
+  // distincao importa: `POST` cria trabalho, `GET` le estado, e nenhum
+  // dos dois pode passar sem sessao.
+  [`/api/agentes/${UUID}/consultar-vendas`, "POST", "bloquear_api"],
+  [`/api/agentes/${UUID}/consultar-vendas`, "GET", "bloquear_api"],
   // — protegidas: Estudio (15)
   ["/api/estudio-anuncios/projetos", "GET", "bloquear_api"],
   [`/api/estudio-anuncios/projetos/${UUID}`, "GET", "bloquear_api"],
@@ -488,7 +522,7 @@ const INVENTARIO: [string, string, Decisao][] = [
   [`/api/estudio-anuncios/projetos/${UUID}/exportacao/${UUID}/arquivo`, "GET", "bloquear_api"],
 ];
 
-t("30. as 54 rotas do inventario caem na classe correta", () => {
+t("30. as 56 rotas do inventario caem na classe correta", () => {
   // 51 → 50 em F0.c.6d: `/api/auth/relay` deixou de existir.
   // 50 → 49 em F0.c.16: `/api/auth/status` deixou de existir.
   // 49 → 50 na AGENTES-FASE1C-FIX1: `/api/internal/agentes/executar` entrou.
@@ -502,7 +536,11 @@ t("30. as 54 rotas do inventario caem na classe correta", () => {
   // 53 -> 54 na FUNCTION-RUNTIME-V1-B1: `/api/internal/agentes/worker`, o
   // dispatcher chamado pelo Vercel Cron. Segunda rota de agentes com
   // segredo proprio, e a unica que nao depende de terminal aberto.
-  assert(INVENTARIO.length === 54, `inventario tem ${INVENTARIO.length} rotas, esperado 54`);
+  // 54 -> 56 na FUNCTION-RUNTIME-V1-B2A: `POST` e `GET` de
+  // `/api/agentes/[agenteId]/consultar-vendas`, a primeira superficie
+  // publica que enfileira uma Funcao real. Duas entradas para um
+  // caminho so, porque o inventario e por (caminho, metodo).
+  assert(INVENTARIO.length === 56, `inventario tem ${INVENTARIO.length} rotas, esperado 56`);
   for (const [caminho, metodo, esperado] of INVENTARIO) {
     const obtido = sem(caminho, metodo);
     assert(obtido === esperado, `${metodo} ${caminho}: esperado ${esperado}, obtido ${obtido}`);

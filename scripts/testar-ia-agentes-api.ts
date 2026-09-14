@@ -1725,6 +1725,189 @@ async function principal(): Promise<void> {
     ok("T19 nenhuma coercao String() no caminho da rota", !/String\(/.test(CODIGO_PERM));
   }
 
+  // ── V. FUNCTION-RUNTIME-V1-B2A — a API de consultar_vendas ───────
+  //
+  // A primeira superficie publica que enfileira uma Funcao REAL. Duas
+  // propriedades a defendem, e nenhuma e obvia por leitura casual:
+  //
+  //  1. ela e PRODUTORA, nunca executora. Se um dia chamar
+  //     `executarFuncao` ou `executarTarefa` direto, a autorizacao de
+  //     Funcao passaria a ter dois donos — e duas autoridades divergem.
+  //
+  //  2. o GET tem TRES pernas de binding: dono, agente e TIPO. A
+  //     terceira e a menos obvia e a mais perigosa de perder: sem ela,
+  //     um `tarefaId` de conversa lido por esta rota devolveria o
+  //     resultado de uma conversa como se fosse resumo de vendas.
+  //
+  // Os controles negativos alimentam os MESMOS predicados com fonte
+  // mutada — sem eles, um assert de ausencia fica verde por nao saber
+  // dizer nao.
+  {
+    secao("V. B2A — API dedicada de consultar_vendas");
+
+    const ROTA_VENDAS = "app/api/agentes/[agenteId]/consultar-vendas/route.ts";
+    const CV = semComentarios(ler(ROTA_VENDAS));
+
+    ok("V1  ANCORA: a fonte da rota foi lida e expoe os dois verbos",
+      CV.length > 800 &&
+      /export async function POST\(/.test(CV) &&
+      /export async function GET\(/.test(CV));
+    ok("V2  nenhum outro verbo e exportado",
+      !/export async function (PUT|PATCH|DELETE|HEAD|OPTIONS)\(/.test(CV));
+
+    // ── Corpo fechado ─────────────────────────────────────────────
+    ok("V3  o corpo aceita EXATAMENTE as tres chaves do filtro",
+      /CAMPOS_ENTRADA = new Set\(\["dataInicio", "dataFim", "marketplace"\]\)/.test(CV) &&
+      /if \(!CAMPOS_ENTRADA\.has\(chave\)\) return \{ ok: false \};/.test(CV));
+    ok("V4  `entrada` e montada campo a campo, nunca por spread",
+      !/\.\.\.corpo/.test(CV) &&
+      !/\.\.\.body/.test(CV) &&
+      /entrada: Record<string, unknown> = \{/.test(CV) &&
+      /dataInicio: corpo\.filtro\.dataInicio,/.test(CV));
+    ok("V5  o chamador nao escolhe tipo, estado, dono nem retry",
+      !/tipo:\s*(corpo|body)/.test(CV) &&
+      !/status:\s*(corpo|body)/.test(CV) &&
+      !/progresso/.test(CV) &&
+      !/max_tentativas/.test(CV) &&
+      !/funcaoId/.test(CV));
+
+    // ── A validacao e REUTILIZADA, nao recopiada ──────────────────
+    //
+    // Se a regra de janela ou o enum de marketplace fossem reescritos
+    // aqui, existiriam duas versoes da mesma regra e elas divergiriam
+    // no primeiro dia em que uma mudasse.
+    ok("V6  usa `validarFiltroVendas` e nao duplica a regra de dominio",
+      /import \{ validarFiltroVendas/.test(CV) &&
+      /validarFiltroVendas\(corpo\.filtro\)/.test(CV) &&
+      !/JANELA_MAXIMA_DIAS/.test(CV) &&
+      !/14/.test(CV) &&
+      !/"Shopee"/.test(CV) &&
+      !/"ML"/.test(CV));
+    ok("V7  input invalido vira 400 com o codigo estavel de dominio",
+      /if \(validacao\.erro\) \{/.test(CV) &&
+      /responder\(\{ ok: false, erro: validacao\.erro \}, 400\)/.test(CV));
+
+    /**
+     * A ORDEM importa: validar DEPOIS de criar a tarefa deixaria uma
+     * `consultar_vendas` no banco so para falhar um minuto depois.
+     */
+    const criaDepoisDeValidar = (texto: string): boolean => {
+      const iValida = texto.indexOf("validarFiltroVendas(corpo.filtro)");
+      const iCria = texto.indexOf("await criarTarefa(");
+      return iValida > 0 && iCria > iValida;
+    };
+    ok("V8  a validacao precede a criacao da tarefa", criaDepoisDeValidar(CV));
+    ok("V8  CONTROLE NEGATIVO: validar depois de criar reprova",
+      !criaDepoisDeValidar(
+        CV.replace("validarFiltroVendas(corpo.filtro)", "__VALIDACAO_MOVIDA__")));
+
+    // ── Producao de tarefa, nunca execucao ────────────────────────
+    ok("V9  a tarefa nasce pela capability publicada, com tipo FIXADO",
+      /import \{ criarTarefa, lerAgenteDoDono, lerTarefaDoDono \}/.test(CV) &&
+      /tipo: TIPO_CONSULTAR_VENDAS,/.test(CV) &&
+      !/tipo:\s*"consultar_vendas"/.test(CV));
+    ok("V10 zero Supabase direto na rota",
+      !/\.from\(|getSupabaseServidor|SupabaseClient|createClient|\.rpc\(/.test(CV));
+
+    /** A invariante que separa produtor de executor. */
+    const soProduz = (texto: string): boolean =>
+      !/executarFuncao/.test(texto) &&
+      !/executarTarefa/.test(texto) &&
+      !/claim_next_agente_tarefa/.test(texto) &&
+      !/reivindicarProximaTarefa/.test(texto) &&
+      !/internal\/agentes/.test(texto) &&
+      !/\bfetch\(/.test(texto);
+    ok("V11 a rota PRODUZ tarefa e nao executa nada", soProduz(CV));
+    ok("V11 CONTROLE NEGATIVO: uma chamada a executarTarefa reprova",
+      !soProduz(CV + "\nawait executarTarefa(tarefa.id);"));
+    ok("V11 CONTROLE NEGATIVO: uma chamada a executarFuncao reprova",
+      !soProduz(CV + "\nawait executarFuncao(FUNCAO_ID, {});"));
+
+    // ── Permissao NAO e decidida aqui ─────────────────────────────
+    //
+    // `executarFuncao` ja produz negado/aguardando_aprovacao/sucesso.
+    // Um segundo guarda nesta rota nao somaria seguranca: criaria uma
+    // resposta que pode discordar da do runtime.
+    ok("V12 a rota nao consulta nem importa permissao como autoridade",
+      !/agente_permissoes/.test(CV) &&
+      !/permissoes/.test(CV) &&
+      !/NivelAutonomia|nivel/.test(CV));
+
+    ok("V13 sucesso e 202 com a projecao minima",
+      /responder\(\{ ok: true, tarefaId: tarefa\.id, status: tarefa\.status \}, 202\)/.test(CV));
+
+    // ── GET: as tres pernas ───────────────────────────────────────
+    ok("V14 o GET exige tarefaId e recusa identificador malformado",
+      /searchParams\.get\("tarefaId"\)/.test(CV) &&
+      /if \(!UUID_REGEX\.test\(tarefaId\)\)/.test(CV));
+    ok("V15 a leitura e tenant-scoped, nunca a do executor",
+      /lerTarefaDoDono\(tarefaId, auth\.uid\)/.test(CV) &&
+      !/lerTarefaParaExecucao/.test(CV));
+
+    /**
+     * As TRES pernas, e o mesmo 404 nas tres. Perder qualquer uma e
+     * IDOR ou confusao de tipo; responder diferente em alguma delas e
+     * um oraculo de existencia.
+     */
+    const bindingCompleto = (texto: string): boolean => {
+      const temDono = /lerTarefaDoDono\(tarefaId, auth\.uid\)/.test(texto);
+      const temAgente = /if \(tarefa\.agente_id !== agenteId\)/.test(texto);
+      const temTipo = /if \(tarefa\.tipo !== TIPO_CONSULTAR_VENDAS\)/.test(texto);
+      if (!temDono || !temAgente || !temTipo) return false;
+
+      // As recusas do GET sao indistinguiveis: mesmo corpo, mesmo 404.
+      // O recorte e obrigatorio — o POST tem 404 proprios ("Agente nao
+      // encontrado"), e conta-los junto compararia recusas de rotas
+      // diferentes. Foi o que a primeira versao desta sonda fez.
+      const get = texto.slice(texto.indexOf("export async function GET("));
+      const recusas = [...get.matchAll(/responder\((\{[^}]*\}), 404\)/g)].map((m) => m[1]);
+      return recusas.length === 3 && new Set(recusas).size === 1;
+    };
+    ok("V16 owner + agente + tipo, com 404 indistinguivel nos tres",
+      bindingCompleto(CV));
+    ok("V16 CONTROLE NEGATIVO: sem a perna do AGENTE reprova (IDOR)",
+      !bindingCompleto(CV.replace("if (tarefa.agente_id !== agenteId)", "if (false)")));
+    ok("V16 CONTROLE NEGATIVO: sem a perna do TIPO reprova (confusao de tipo)",
+      !bindingCompleto(CV.replace("if (tarefa.tipo !== TIPO_CONSULTAR_VENDAS)", "if (false)")));
+    ok("V16 CONTROLE NEGATIVO: um 404 com corpo diferente reprova",
+      !bindingCompleto(
+        CV.replace('if (tarefa.agente_id !== agenteId) {\n      return responder({ ok: false, erro: "Consulta não encontrada." }, 404);',
+                   'if (tarefa.agente_id !== agenteId) {\n      return responder({ ok: false, erro: "Agente divergente." }, 404);')));
+
+    // ── Projecao por allowlist ────────────────────────────────────
+    const corpoDoGet = CV.slice(CV.indexOf("export async function GET("));
+    ok("V17 ANCORA: o corpo do GET foi recortado", corpoDoGet.length > 500);
+    ok("V18 a resposta nao carrega tenant, payload nem relogio interno",
+      !/user_id:/.test(corpoDoGet) &&
+      !/entrada/.test(corpoDoGet) &&
+      !/heartbeat_em:/.test(corpoDoGet) &&
+      !/erro_mensagem/.test(corpoDoGet) &&
+      !/tentativas/.test(corpoDoGet));
+    ok("V19 `erro_tipo` sai PROJETADO pelo vocabulario do codigo",
+      /TIPOS_ERRO_TAREFA/.test(CV) &&
+      /erroTipo: erroTipoConhecido\(tarefa\.erro_tipo\)/.test(CV) &&
+      /return \(TIPOS_ERRO_TAREFA as readonly string\[\]\)\.includes\(bruto\) \? bruto : null;/.test(CV));
+
+    ok("V20 resultado so existe quando a tarefa concluiu",
+      /if \(tarefa\.status === "concluido"\)/.test(CV) &&
+      /let resultado: Record<string, unknown> \| null = null;/.test(CV));
+    ok("V21 o resultado e PROJETADO do que ja esta persistido, sem reconsulta",
+      !/agregar|lerVendas|criarLeiturasDeVendas|pedidos/.test(CV));
+
+    ok("V22 nenhuma acao de Approval e nenhum cancelamento",
+      !/aprovar|rejeitar|retomarAprovacao|consumir/.test(CV) &&
+      !/export async function DELETE/.test(CV) &&
+      !/cancelad/.test(CV));
+
+    ok("V23 nada de runner generico: a Funcao e fixa no servidor",
+      !/req\.body\.funcaoId|corpo\.funcaoId|params\.funcaoId/.test(CV) &&
+      !/jsonSchema|JSONSchema|renderArgs/.test(CV));
+
+    ok("V24 o userId vem SO de auth.uid",
+      /auth\.uid/.test(CV) &&
+      !/corpo\.userId|body\.userId|searchParams\.get\("userId"\)/.test(CV));
+  }
+
   console.log(`\n══ ${passou} PASS / ${falhou} FAIL ══\n`);
   process.exitCode = falhou === 0 ? 0 : 1;
 }
