@@ -82,6 +82,9 @@ function limpar(): void {
 function construtor(tabela: string): unknown {
   const op: Operacao = { tabela, tipo: "leitura", filtros: {} };
   let pendente: Record<string, unknown> | null = null;
+  /** O payload de um UPDATE. Separado de `pendente` porque INSERT cria
+   *  linha e UPDATE altera as que casarem os filtros. */
+  let alteracao: Record<string, unknown> | null = null;
 
   const executar = (): { data: unknown; error: unknown } => {
     operacoes.push(op);
@@ -123,6 +126,13 @@ function construtor(tabela: string): unknown {
     const encontradas = linhas.filter((l) =>
       Object.entries(op.filtros).every(([c, v]) => l[c] === v)
     );
+    // EDITAR-AGENTE-V1: `UPDATE ... WHERE ... RETURNING`, modelado com a
+    // mesma economia do INSERT acima. Sem aplicar a alteracao, a rota
+    // devolveria a linha ANTIGA e a suite provaria a persistencia contra
+    // um valor que nunca mudou — verde por acidente.
+    if (op.tipo === "escrita" && alteracao !== null) {
+      for (const l of encontradas) Object.assign(l, alteracao);
+    }
     return { data: encontradas, error: null };
   };
 
@@ -136,7 +146,12 @@ function construtor(tabela: string): unknown {
       pendente = v;
       return b;
     },
-    update() { op.tipo = "escrita"; return b; },
+    update(v: Record<string, unknown>) {
+      op.tipo = "escrita";
+      op.payload = v;
+      alteracao = v;
+      return b;
+    },
     upsert() { op.tipo = "escrita"; return b; },
     delete() { op.tipo = "escrita"; return b; },
     maybeSingle() {
@@ -918,6 +933,270 @@ async function principal(): Promise<void> {
     ok("P15 nenhuma coercao String() entrou no caminho", !/String\(/.test(CODIGO_CONVERSA));
     ok("P10 nenhuma migration entrou nesta frente",
       !existsSync(join(RAIZ, "supabase/migrations/20260929_conversas.sql")));
+  }
+
+  // ─── Q. PATCH /api/agentes/[agenteId] — EDITAR-AGENTE-V1 ───────────
+  //
+  // A rota REAL roda contra o mesmo duplo com estado, com a capability
+  // real (`atualizarAgenteDoDono`). O que se prova aqui nao e "o mock
+  // devolveu o esperado": e que o CONTRATO e fechado, que a fronteira de
+  // dono e o proprio UPDATE, e que nenhuma chave alem de `nome` e
+  // `instrucoes` alcanca o payload.
+  {
+    const edicao = await import("../app/api/agentes/[agenteId]/route");
+    const CODIGO_EDICAO = semComentarios(ler("app/api/agentes/[agenteId]/route.ts"));
+
+    const patch = (agenteId: string, cookie: string | undefined, corpo?: string) =>
+      edicao.PATCH(
+        new Request(`http://localhost/api/agentes/${agenteId}`, {
+          method: "PATCH",
+          headers: cookie ? { cookie } : {},
+          ...(corpo === undefined ? {} : { body: corpo }),
+        }),
+        { params: { agenteId } }
+      );
+
+    /** O payload do ULTIMO UPDATE observado. `null` = nenhum houve. */
+    const ultimoPayload = (): Record<string, unknown> | null => {
+      const escrita = operacoes.filter((o) => o.tipo === "escrita").pop();
+      return escrita?.payload ?? null;
+    };
+
+    /** Uma linha nova do dono A, plantada direto na "tabela". */
+    const plantar = (extra: Record<string, unknown> = {}) => {
+      const l = linhaAgente(USER_A, "Antes", extra);
+      linhas = [l];
+      limpar();
+      return l;
+    };
+
+    secao("Q. PATCH — sessao e identidade do recurso");
+
+    linhas = []; limpar();
+    const qSem = await patch(randomUUID(), undefined, '{"nome":"X"}');
+    const bQSem = await qSem.json();
+    ok("Q1  sem cookie -> 401", qSem.status === 401);
+    ok("Q2  payload sanitizado, sem motivo nem uid",
+      bQSem.ok === false && bQSem.erro === "Não autenticado." && Object.keys(bQSem).length === 2,
+      JSON.stringify(bQSem));
+    ok("Q3  e ZERO operacao de dominio", operacoes.length === 0);
+
+    limpar();
+    const qIdTorto = await patch("nao-e-uuid", COOKIE_A, '{"nome":"X"}');
+    ok("Q4  agenteId fora de uuid -> 400 e zero dominio",
+      qIdTorto.status === 400 && operacoes.length === 0);
+
+    secao("Q. PATCH — o contrato e FECHADO");
+
+    // Cada recusa e medida com ZERO escrita: o contrato barra antes do
+    // banco, nao depois.
+    const recusa = async (corpo: string | undefined, rotulo: string, erroEsperado: string) => {
+      plantar();
+      const r = await patch(linhas[0].id as string, COOKIE_A, corpo);
+      const b = await r.json();
+      ok(`Q5  ${rotulo} -> 400, sem escrita`,
+        r.status === 400 && b.ok === false && b.erro === erroEsperado && escritas() === 0,
+        `${r.status} · ${JSON.stringify(b)} · escritas=${escritas()}`);
+    };
+
+    const CORPO_INVALIDO = "Corpo da requisição inválido (JSON esperado).";
+    const ALTERACAO_INVALIDA = "Alteração inválida.";
+    const NOME_INVALIDO = "nome inválido.";
+
+    await recusa(undefined, "sem corpo", CORPO_INVALIDO);
+    await recusa("nao e json", "corpo ilegivel", CORPO_INVALIDO);
+    await recusa('"texto"', "corpo string", CORPO_INVALIDO);
+    await recusa("[]", "corpo array", CORPO_INVALIDO);
+    await recusa("null", "corpo null", CORPO_INVALIDO);
+    await recusa("{}", "objeto vazio", ALTERACAO_INVALIDA);
+    await recusa('{"ativo":false}', "ativo isolado", ALTERACAO_INVALIDA);
+    await recusa('{"tipo":"ads"}', "tipo isolado", ALTERACAO_INVALIDA);
+    await recusa('{"user_id":"outro"}', "user_id", ALTERACAO_INVALIDA);
+    await recusa('{"id":"outro"}', "id", ALTERACAO_INVALIDA);
+    await recusa('{"criado_em":"2020-01-01"}', "criado_em", ALTERACAO_INVALIDA);
+    await recusa('{"atualizado_em":"2020-01-01"}', "atualizado_em", ALTERACAO_INVALIDA);
+    // O caso que uma allowlist frouxa deixaria passar: a chave proibida
+    // vem ACOMPANHADA de uma chave valida.
+    await recusa('{"nome":"Novo","ativo":false}', "nome + ativo", ALTERACAO_INVALIDA);
+    await recusa('{"nome":"Novo","tipo":"ads"}', "nome + tipo", ALTERACAO_INVALIDA);
+    await recusa('{"instrucoes":"ok","user_id":"outro"}', "instrucoes + user_id", ALTERACAO_INVALIDA);
+    await recusa('{"nome":"   "}', "nome so com espaco", NOME_INVALIDO);
+    await recusa('{"nome":""}', "nome vazio", NOME_INVALIDO);
+    await recusa('{"nome":123}', "nome nao-string", NOME_INVALIDO);
+    await recusa('{"nome":null}', "nome null", NOME_INVALIDO);
+    // O ponto que a capability sozinha NAO cobre: ela converteria estes
+    // em `null` e APAGARIA as instrucoes em silencio.
+    await recusa('{"instrucoes":123}', "instrucoes numero", ALTERACAO_INVALIDA);
+    await recusa('{"instrucoes":true}', "instrucoes booleano", ALTERACAO_INVALIDA);
+    await recusa('{"instrucoes":{"a":1}}', "instrucoes objeto", ALTERACAO_INVALIDA);
+    await recusa('{"instrucoes":[]}', "instrucoes array", ALTERACAO_INVALIDA);
+
+    secao("Q. PATCH — a alteracao valida persiste, e volta projetada");
+
+    {
+      const l = plantar({ nome: "Antes", instrucoes: "velha" });
+      const r = await patch(l.id as string, COOKIE_A, '{"nome":"Depois"}');
+      const b = await r.json();
+      ok("Q6  so nome -> 200 com a linha persistida",
+        r.status === 200 && b.ok === true && b.agente.nome === "Depois" &&
+          b.agente.instrucoes === "velha",
+        JSON.stringify(b));
+      ok("Q6a a projecao publica tem os SEIS campos, nem um a mais",
+        JSON.stringify(Object.keys(b.agente).sort()) === JSON.stringify(CAMPOS_PUBLICOS),
+        Object.keys(b.agente).sort().join(", "));
+      ok("Q6b `user_id` e `atualizado_em` NAO saem na resposta",
+        !("user_id" in b.agente) && !("atualizado_em" in b.agente));
+      ok("Q6c uma unica escrita, e nenhuma leitura previa (nada de TOCTOU)",
+        escritas() === 1 && leituras() === 0, `escritas=${escritas()} leituras=${leituras()}`);
+      ok("Q6d a escrita foi na tabela `agentes`",
+        operacoes[0]?.tabela === "agentes", operacoes[0]?.tabela);
+      ok("Q6e o filtro e o PAR (id, user_id), na propria instrucao",
+        JSON.stringify(operacoes[0]?.filtros) ===
+          JSON.stringify({ id: l.id, user_id: USER_A }),
+        JSON.stringify(operacoes[0]?.filtros));
+    }
+
+    {
+      const l = plantar({ nome: "Antes", instrucoes: "velha" });
+      const r = await patch(l.id as string, COOKIE_A, '{"instrucoes":"nova"}');
+      const b = await r.json();
+      ok("Q7  so instrucoes -> 200, e o nome nao e tocado",
+        r.status === 200 && b.agente.instrucoes === "nova" && b.agente.nome === "Antes",
+        JSON.stringify(b.agente));
+      ok("Q7a o payload NAO carrega `nome` quando ele nao foi pedido",
+        !("nome" in (ultimoPayload() ?? {})), JSON.stringify(ultimoPayload()));
+    }
+
+    {
+      const l = plantar({ nome: "Antes", instrucoes: "velha" });
+      const r = await patch(l.id as string, COOKIE_A, '{"nome":"N","instrucoes":"I"}');
+      const b = await r.json();
+      ok("Q8  os dois campos juntos -> 200",
+        r.status === 200 && b.agente.nome === "N" && b.agente.instrucoes === "I",
+        JSON.stringify(b.agente));
+    }
+
+    {
+      const l = plantar({ nome: "Antes", instrucoes: "velha" });
+      const r = await patch(l.id as string, COOKIE_A, '{"instrucoes":null}');
+      const b = await r.json();
+      ok("Q9  `instrucoes: null` LIMPA as instrucoes -> 200",
+        r.status === 200 && b.agente.instrucoes === null, JSON.stringify(b.agente));
+    }
+
+    {
+      const l = plantar({ nome: "Antes" });
+      await patch(l.id as string, COOKIE_A, '{"nome":"  Aparado  "}');
+      ok("Q10 o nome chega APARADO ao payload",
+        ultimoPayload()?.nome === "Aparado", JSON.stringify(ultimoPayload()));
+    }
+
+    secao("Q. PATCH — o corpo nao decide dono, id, estado nem tempo");
+
+    {
+      const l = plantar({ nome: "Antes", instrucoes: "velha" });
+      await patch(l.id as string, COOKIE_A, '{"nome":"N","instrucoes":"I"}');
+      const payload = ultimoPayload() ?? {};
+      const chaves = Object.keys(payload).sort();
+      // Igualdade de conjunto: `atualizado_em` e da capability, os dois
+      // outros sao o pedido. Uma chave a mais reprova, e uma a menos
+      // tambem — allowlist que so olha um lado morre em silencio.
+      ok("Q11 o UPDATE leva EXATAMENTE nome, instrucoes e atualizado_em",
+        JSON.stringify(chaves) === JSON.stringify(["atualizado_em", "instrucoes", "nome"]),
+        chaves.join(", "));
+      ok("Q11a nenhuma chave reservada alcanca o UPDATE",
+        ["user_id", "id", "ativo", "tipo", "criado_em"].every((c) => !(c in payload)));
+      ok("Q11b a linha gravada continua do dono A, com o id original",
+        linhas[0].user_id === USER_A && linhas[0].id === l.id);
+      ok("Q11c e `ativo`/`tipo`/`criado_em` seguem intactos na linha",
+        linhas[0].ativo === true && linhas[0].tipo === "mensagens" &&
+          linhas[0].criado_em === "2026-08-01T00:00:00.000Z");
+      ok("Q11d CONTROLE: a sonda de payload enxerga chave de verdade",
+        "nome" in payload && "instrucoes" in payload);
+    }
+
+    secao("Q. PATCH — a fronteira de dono, e a mesma 404 para os dois casos");
+
+    {
+      // Agente REAL, de OUTRO dono. Nada casa o par (id, user_id).
+      const alheio = linhaAgente(USER_B, "Do outro dono", { instrucoes: "intocada" });
+      linhas = [alheio];
+      limpar();
+      const rOutro = await patch(alheio.id as string, COOKIE_A, '{"nome":"Invadido"}');
+      const bOutro = await rOutro.json();
+      ok("Q12 agente de OUTRO dono -> 404", rOutro.status === 404);
+      ok("Q12a a linha alheia NAO foi tocada",
+        linhas[0].nome === "Do outro dono" && linhas[0].instrucoes === "intocada");
+
+      limpar();
+      const rFantasma = await patch(randomUUID(), COOKIE_A, '{"nome":"Invadido"}');
+      const bFantasma = await rFantasma.json();
+      ok("Q13 agente INEXISTENTE -> 404", rFantasma.status === 404);
+      // A resposta precisa ser indistinguivel: qualquer diferenca — status,
+      // corpo, chaves — viraria um oraculo de existencia de ids alheios.
+      ok("Q13a as duas 404 sao BYTE A BYTE iguais",
+        rOutro.status === rFantasma.status &&
+          JSON.stringify(bOutro) === JSON.stringify(bFantasma),
+        `${JSON.stringify(bOutro)} vs ${JSON.stringify(bFantasma)}`);
+      ok("Q13b e a mensagem nao distingue os dois casos",
+        bOutro.erro === "Agente não encontrado." && Object.keys(bOutro).length === 2);
+    }
+
+    secao("Q. PATCH — falha de infraestrutura, sanitizada");
+
+    {
+      const l = plantar();
+      erroInjetado = { code: "42P01", message: "relation agentes does not exist", details: "x" };
+      const rErro = await patch(l.id as string, COOKIE_A, '{"nome":"N"}');
+      const bErro = await rErro.json();
+      ok("Q14 erro do banco -> 500", rErro.status === 500);
+      ok("Q14a e nada do erro interno vaza",
+        bErro.ok === false && bErro.erro === "Falha ao atualizar o agente." &&
+          Object.keys(bErro).length === 2 &&
+          !/42P01|relation|does not exist/i.test(JSON.stringify(bErro)),
+        JSON.stringify(bErro));
+    }
+
+    secao("Q. PATCH — a rota nao faz o que nao deve");
+
+    ok("Q15 ANCORA: a fonte da rota foi lida", CODIGO_EDICAO.length > 800);
+    ok("Q16 a rota real esta no grafo",
+      Object.keys(require.cache)
+        .map((p) => p.replace(/\\/g, "/"))
+        .some((p) => p.includes("/app/api/agentes/[agenteId]/route.ts")));
+    ok("Q17 UM verbo, e e PATCH",
+      /export async function PATCH\(/.test(CODIGO_EDICAO) &&
+        !/export async function (GET|POST|PUT|DELETE|HEAD|OPTIONS)\(/.test(CODIGO_EDICAO));
+    ok("Q18 zero Supabase direto na rota",
+      !/getSupabaseServidor|createClient|service_role|\.from\(/.test(CODIGO_EDICAO));
+    ok("Q19 zero spread do corpo externo",
+      !/\.\.\.\s*(corpo|campos|bruto|body|leitura)/.test(CODIGO_EDICAO));
+    ok("Q20 o objeto entregue ao dominio e montado campo a campo",
+      /campos\.nome = /.test(CODIGO_EDICAO) && /campos\.instrucoes = /.test(CODIGO_EDICAO));
+    ok("Q21 a allowlist de chaves e nominal e fechada",
+      /CAMPOS_ALTERACAO = new Set\(\["nome", "instrucoes"\]\)/.test(CODIGO_EDICAO));
+    ok("Q22 o userId vem SO de auth.uid",
+      (CODIGO_EDICAO.match(/auth\.uid/g) ?? []).length === 1 &&
+        !/\buserId\b\s*=|corpo\.user_id|campos\.user_id/.test(CODIGO_EDICAO));
+    ok("Q23 o agenteId vem do CAMINHO, nunca do corpo",
+      /params\.agenteId/.test(CODIGO_EDICAO) && !/corpo\.(id|agenteId|agente_id)/.test(CODIGO_EDICAO));
+    ok("Q24 a rota NAO executa tarefa, Function, Approval nem provedor",
+      !/executarTarefa|executarFuncao|retomarAprovacao|aprovacoes|AdaptadorIA|anthropic/i
+        .test(CODIGO_EDICAO));
+    ok("Q25 a rota nao cria nem apaga nada",
+      !/criarAgente\b|criarTarefa|\bdelete\b/i.test(CODIGO_EDICAO));
+    ok("Q26 toda resposta sai com no-store",
+      /"Cache-Control": "no-store"/.test(CODIGO_EDICAO) &&
+        (CODIGO_EDICAO.match(/NextResponse\.json\(/g) ?? []).length === 1);
+    ok("Q27 nenhuma migration entrou nesta frente",
+      !existsSync(join(RAIZ, "supabase/migrations/20260929_agentes_edicao.sql")));
+    ok("Q28 a capability de atualizacao e a tenant-scoped, nao outra",
+      /atualizarAgenteDoDono/.test(CODIGO_EDICAO) &&
+        /from "@\/lib\/agentes\/capability"/.test(CODIGO_EDICAO));
+    ok("Q29 nenhuma coercao String() entrou no caminho", !/String\(/.test(CODIGO_EDICAO));
+    ok("Q30 `ativo` e `tipo` nao aparecem como campo aceito",
+      !/campos\.(ativo|tipo)/.test(CODIGO_EDICAO) &&
+        !/CAMPOS_ALTERACAO\.add/.test(CODIGO_EDICAO));
   }
 
   console.log(`\n══ ${passou} PASS / ${falhou} FAIL ══\n`);

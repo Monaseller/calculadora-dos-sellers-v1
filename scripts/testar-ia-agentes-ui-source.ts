@@ -135,10 +135,17 @@ secao("B. O que a UI NAO manda");
   // cabecalho enviado e o do corpo JSON" — mudou quantas vezes ele
   // aparece. TODA ocorrencia de `headers:` tem de ser exatamente aquele
   // cabecalho, e nenhuma credencial entra junto.
-  ok("B3c os UNICOS cabecalhos sao os dois Content-Type do corpo JSON",
-    (CODIGO_TRANSPORTE.match(/headers\s*:/g) ?? []).length === 2 &&
+  //
+  // ── B3c reconciliado de novo na EDITAR-AGENTE-V1 ────────────────
+  //
+  // TRES corpos JSON, tres `Content-Type`. A invariavel continua sendo
+  // "o unico cabecalho enviado e o do corpo JSON": as duas contagens
+  // sao comparadas ENTRE SI, entao um `headers:` que nao seja aquele
+  // cabecalho reprova, e o veto a credencial no cabecalho nao mudou.
+  ok("B3c os UNICOS cabecalhos sao os tres Content-Type do corpo JSON",
+    (CODIGO_TRANSPORTE.match(/headers\s*:/g) ?? []).length === 3 &&
       (CODIGO_TRANSPORTE.match(/headers: \{ "Content-Type": "application\/json" \}/g) ?? [])
-        .length === 2 &&
+        .length === 3 &&
       !/"X-|Cookie|Api-Key|Idempotency-Key/i.test(CODIGO_TRANSPORTE));
   ok("B4  `credentials` omitido — o cookie same-origin ja viaja sozinho",
     !/credentials/.test(CODIGO_TRANSPORTE));
@@ -168,34 +175,97 @@ secao("B. O que a UI NAO manda");
   // escrita, a de agente. DEPOIS: DUAS escritas, nomeadas, e somente
   // essas duas. Nao virou `>= 2` nem contagem solta — a suite sabe
   // QUAIS sao, por igualdade de conjunto nos dois sentidos.
-  const ESCRITAS_AUTORIZADAS = ["criarAgenteViaApi", "enviarMensagemAoAgente"];
+  //
+  // ── B5b reconciliado de novo na EDITAR-AGENTE-V1 ────────────────
+  //
+  // A doutrina antiga era "esta area cria, nunca altera nem apaga", e o
+  // filtro por `method: "POST"` a expressava. A revogacao foi ratificada
+  // e e PARCIAL: entra PATCH, para UM recurso e DOIS campos.
+  //
+  // Trocar o filtro importa mais do que trocar a contagem. Se ele
+  // continuasse so olhando POST, a funcao de PATCH ficaria INVISIVEL e
+  // este assert seguiria verde afirmando "exatamente duas escritas" —
+  // protecao que morre sem ninguem perceber. Agora o conjunto e de
+  // VERBOS: toda funcao com `method:` e uma escrita, e cada uma tem de
+  // bater com o verbo que lhe foi autorizado, nominalmente.
+  const VERBOS_AUTORIZADOS: Readonly<Record<string, string>> = {
+    criarAgenteViaApi: "POST",
+    enviarMensagemAoAgente: "POST",
+    atualizarAgenteViaApi: "PATCH",
+  };
+  const ESCRITAS_AUTORIZADAS = Object.keys(VERBOS_AUTORIZADOS);
+  const verboDaFuncao = (nome: string): string | null =>
+    /method:\s*"([A-Z]+)"/.exec(corpoDaFuncao(nome))?.[1] ?? null;
+
   const escritasReais = [...CODIGO_TRANSPORTE.matchAll(/export async function (\w+)\(/g)]
     .map((m) => m[1])
-    .filter((nome) => /method: "POST"/.test(corpoDaFuncao(nome)))
+    .filter((nome) => verboDaFuncao(nome) !== null)
     .sort();
   const esperadas = JSON.stringify([...ESCRITAS_AUTORIZADAS].sort());
 
-  ok("B5b as escritas publicadas sao EXATAMENTE as duas nominais",
+  /** O par funcao=verbo, que e o que de fato esta sendo protegido: o
+   *  conjunto sozinho passaria se `atualizarAgenteViaApi` virasse PUT. */
+  const pares = (mapa: Readonly<Record<string, string>>): string =>
+    JSON.stringify(Object.keys(mapa).sort().map((n) => `${n}=${mapa[n]}`));
+  const paresReais = JSON.stringify(escritasReais.map((n) => `${n}=${verboDaFuncao(n)}`));
+
+  ok("B5b as escritas publicadas sao EXATAMENTE as tres nominais",
     JSON.stringify(escritasReais) === esperadas, escritasReais.join(", ") || "nenhuma");
-  ok("B5b1 cada escrita leva method POST e corpo JSON",
+  ok("B5b0 cada escrita usa EXATAMENTE o verbo autorizado para ela",
+    paresReais === pares(VERBOS_AUTORIZADOS),
+    escritasReais.map((n) => `${n}=${verboDaFuncao(n)}`).join(", ") || "nenhuma");
+  ok("B5b1 cada escrita leva o seu verbo e corpo JSON",
     ESCRITAS_AUTORIZADAS.every(
-      (f) => /method: "POST"/.test(corpoDaFuncao(f)) && /body: JSON\.stringify/.test(corpoDaFuncao(f))));
-  ok("B5b2 o transporte tem exatamente dois method e dois body",
-    (CODIGO_TRANSPORTE.match(/method\s*:/g) ?? []).length === 2 &&
-      (CODIGO_TRANSPORTE.match(/body\s*:/g) ?? []).length === 2);
+      (f) =>
+        verboDaFuncao(f) === VERBOS_AUTORIZADOS[f] &&
+        /body: JSON\.stringify/.test(corpoDaFuncao(f))));
+  ok("B5b2 o transporte tem exatamente tres method e tres body",
+    (CODIGO_TRANSPORTE.match(/method\s*:/g) ?? []).length === 3 &&
+      (CODIGO_TRANSPORTE.match(/body\s*:/g) ?? []).length === 3);
   ok("B5b3 a escrita de conversa vai para a rota de conversa, com corpo so de mensagem",
     /ROTA_SUFIXO_CONVERSA/.test(CODIGO_TRANSPORTE) &&
       /body: JSON\.stringify\(\{ mensagem \}\)/.test(corpoDaFuncao("enviarMensagemAoAgente")));
+  // A edicao monta o corpo CHAVE A CHAVE, e nunca serializa o objeto
+  // recebido: `JSON.stringify(alteracao)` deixaria uma chave nova do
+  // formulario viajar sozinha para o servidor.
+  ok("B5b3a a edicao monta o corpo chave a chave, sem serializar o argumento",
+    /body: JSON\.stringify\(corpoEnviado\)/.test(corpoDaFuncao("atualizarAgenteViaApi")) &&
+      !/JSON\.stringify\(alteracao\)/.test(CODIGO_TRANSPORTE));
+  ok("B5b3b e o corpo da edicao so pode ganhar `nome` e `instrucoes`",
+    /corpoEnviado\.nome = /.test(corpoDaFuncao("atualizarAgenteViaApi")) &&
+      /corpoEnviado\.instrucoes = /.test(corpoDaFuncao("atualizarAgenteViaApi")) &&
+      !/corpoEnviado\.(ativo|tipo|id|user_id|criado_em)/.test(CODIGO_TRANSPORTE));
   ok("B5b4 CONTROLE NEGATIVO: sumir a criacao de AGENTE reprovaria",
-    JSON.stringify(["enviarMensagemAoAgente"]) !== esperadas);
+    JSON.stringify(["atualizarAgenteViaApi", "enviarMensagemAoAgente"].sort()) !== esperadas);
   ok("B5b5 CONTROLE NEGATIVO: sumir a criacao de CONVERSA reprovaria",
-    JSON.stringify(["criarAgenteViaApi"]) !== esperadas);
-  ok("B5b6 CONTROLE NEGATIVO: uma TERCEIRA escrita reprovaria",
+    JSON.stringify(["atualizarAgenteViaApi", "criarAgenteViaApi"].sort()) !== esperadas);
+  ok("B5b5a CONTROLE NEGATIVO: sumir a EDICAO reprovaria",
+    JSON.stringify(["criarAgenteViaApi", "enviarMensagemAoAgente"].sort()) !== esperadas);
+  ok("B5b6 CONTROLE NEGATIVO: uma QUARTA escrita reprovaria",
     JSON.stringify([...ESCRITAS_AUTORIZADAS, "apagarAgenteViaApi"].sort()) !== esperadas);
-  ok("B5b7 CONTROLE NEGATIVO: TROCA mantendo o total de duas reprovaria",
-    JSON.stringify(["criarAgenteViaApi", "outraEscritaQualquer"].sort()) !== esperadas);
+  ok("B5b7 CONTROLE NEGATIVO: TROCA mantendo o total de tres reprovaria",
+    JSON.stringify(
+      ["criarAgenteViaApi", "enviarMensagemAoAgente", "outraEscritaQualquer"].sort()
+    ) !== esperadas);
+  // Os tres desvios de VERBO, que a igualdade de conjunto sozinha nao
+  // pegaria: o conjunto de nomes continuaria identico nos tres casos.
+  ok("B5b7a CONTROLE NEGATIVO: PATCH virar PUT reprovaria",
+    pares({ ...VERBOS_AUTORIZADOS, atualizarAgenteViaApi: "PUT" }) !==
+      pares(VERBOS_AUTORIZADOS));
+  ok("B5b7b CONTROLE NEGATIVO: PATCH virar POST reprovaria",
+    pares({ ...VERBOS_AUTORIZADOS, atualizarAgenteViaApi: "POST" }) !==
+      pares(VERBOS_AUTORIZADOS));
+  ok("B5b7c CONTROLE NEGATIVO: MOVER o PATCH para outra funcao reprovaria",
+    pares({
+      criarAgenteViaApi: "PATCH",
+      enviarMensagemAoAgente: "POST",
+      atualizarAgenteViaApi: "POST",
+    }) !== pares(VERBOS_AUTORIZADOS));
   ok("B5b8 ANCORA: a varredura enxergou funcoes de verdade",
-    escritasReais.length === 2 && corpoDaFuncao("criarAgenteViaApi").length > 50);
+    escritasReais.length === 3 && corpoDaFuncao("criarAgenteViaApi").length > 50);
+  ok("B5b8a ANCORA: a sonda de verbo le verbo de verdade",
+    verboDaFuncao("atualizarAgenteViaApi") === "PATCH" &&
+      verboDaFuncao("listarAgentes") === null);
   ok("B5c e nenhum outro arquivo da area escreve",
     AREA.filter((a) => /method\s*:\s*"(POST|PUT|PATCH|DELETE)"/.test(codigo(ler(a)))).join(",") ===
       TRANSPORTE);
@@ -211,17 +281,33 @@ secao("B. O que a UI NAO manda");
   ok("B7  POST existe SO no transporte nominal",
     JSON.stringify(comPost.slice().sort()) === JSON.stringify(COM_POST_AUTORIZADO),
     comPost.join(", ") || "nenhum");
-  // ── B7b reconciliado na AGENT-VERTICAL-SLICE-V1-I3 ──────────────
+  // ── B7b reconciliado na EDITAR-AGENTE-V1 ────────────────────────
   //
-  // ANTES: uma unica capacidade de escrita, a criacao de agente.
-  // DEPOIS: duas, e ambas de CRIACAO — agente e tarefa de conversa. O
-  // veto a PUT/PATCH/DELETE nao muda: esta area cria, nunca altera nem
-  // apaga.
-  ok("B7b as capacidades de escrita publicadas sao as duas criacoes",
+  // ANTES: duas capacidades, ambas de CRIACAO, e a frase "esta area
+  // cria, nunca altera nem apaga" vetando PUT, PATCH e DELETE em bloco.
+  //
+  // A revogacao foi ratificada e e PARCIAL, e e importante registrar
+  // ate onde ela vai. ALTERAR entrou: uma funcao, um recurso, dois
+  // campos, por PATCH. SUBSTITUIR e APAGAR continuam fora — PUT
+  // reabriria por omissao os campos que o corpo da edicao fecha, e
+  // apagar agente e frente propria, com tarefas, aprovacoes e auditoria
+  // penduradas nele. O veto nao foi afrouxado; foi reduzido ao que
+  // continua verdadeiro.
+  ok("B7b duas criacoes por POST, uma edicao por PATCH — e nada alem",
     (CODIGO_TRANSPORTE.match(/method:\s*"POST"/g) ?? []).length === 2 &&
+      (CODIGO_TRANSPORTE.match(/method:\s*"PATCH"/g) ?? []).length === 1 &&
       /export async function criarAgenteViaApi\(/.test(CODIGO_TRANSPORTE) &&
       /export async function enviarMensagemAoAgente\(/.test(CODIGO_TRANSPORTE) &&
-      !/"PUT"|"PATCH"|"DELETE"/.test(CODIGO_TRANSPORTE));
+      /export async function atualizarAgenteViaApi\(/.test(CODIGO_TRANSPORTE) &&
+      !/"PUT"|"DELETE"/.test(CODIGO_TRANSPORTE));
+  ok("B7c PUT e DELETE continuam vetados em TODA a area, nao so no transporte",
+    AREA.filter((a) => /"PUT"|"DELETE"/.test(codigo(ler(a)))).length === 0,
+    AREA.filter((a) => /"PUT"|"DELETE"/.test(codigo(ler(a)))).join(", ") || "nenhum");
+  ok("B7d CONTROLE NEGATIVO: a sonda de PUT/DELETE acusa quando o padrao existe",
+    /"PUT"|"DELETE"/.test('method: "PUT"') && /"PUT"|"DELETE"/.test('method: "DELETE"'));
+  ok("B7e o PATCH mora SO no transporte nominal",
+    AREA.filter((a) => /"PATCH"/.test(codigo(ler(a)))).join(",") === TRANSPORTE,
+    AREA.filter((a) => /"PATCH"/.test(codigo(ler(a)))).join(", ") || "nenhum");
 }
 
 secao("C. As telas migradas nao voltam ao simulado");
@@ -404,7 +490,161 @@ async function principal(): Promise<void> {
   ok("F2  obterDiagnostico repassa o AbortSignal",
     chamadas[0]?.init?.signal === controlador.signal);
 
+  // ─── G. A EDICAO — EDITAR-AGENTE-V1 ─────────────────────────────────
+
+  secao("G. atualizarAgenteViaApi — cada resposta no seu lugar");
+
+  const { atualizarAgenteViaApi } = await import("../lib/ia/agentes-http");
+  const corpoEnviado = (): Record<string, unknown> =>
+    JSON.parse(String(chamadas[0]?.init?.body ?? "{}"));
+
+  responde(200, { ok: true, agente: agente(UUID_A, { nome: "Depois" }) });
+  const gOk = await atualizarAgenteViaApi(UUID_A, { nome: "Depois" });
+  ok("G1  200 -> ok, com a linha do servidor",
+    gOk.estado === "ok" && gOk.agente.nome === "Depois", JSON.stringify(gOk));
+  ok("G2  metodo PATCH", chamadas[0]?.init?.method === "PATCH", String(chamadas[0]?.init?.method));
+  ok("G3  endereco e o do recurso, com o id escapado",
+    chamadas[0]?.url === `/api/agentes/${UUID_A}`, String(chamadas[0]?.url));
+  ok("G4  o unico cabecalho e o do corpo JSON",
+    JSON.stringify(chamadas[0]?.init?.headers) ===
+      JSON.stringify({ "Content-Type": "application/json" }),
+    JSON.stringify(chamadas[0]?.init?.headers));
+  ok("G5  zero sinal de cancelamento numa escrita",
+    chamadas[0]?.init?.signal === undefined);
+  ok("G6  o corpo leva SO a chave pedida",
+    JSON.stringify(Object.keys(corpoEnviado()).sort()) === JSON.stringify(["nome"]),
+    JSON.stringify(corpoEnviado()));
+
+  responde(200, { ok: true, agente: agente(UUID_A, { instrucoes: null }) });
+  const gLimpa = await atualizarAgenteViaApi(UUID_A, { instrucoes: null });
+  ok("G7  `instrucoes: null` VIAJA — limpar e pedido explicito",
+    gLimpa.estado === "ok" && corpoEnviado().instrucoes === null &&
+      JSON.stringify(Object.keys(corpoEnviado()).sort()) === JSON.stringify(["instrucoes"]),
+    JSON.stringify(corpoEnviado()));
+
+  responde(200, { ok: true, agente: agente(UUID_A) });
+  await atualizarAgenteViaApi(UUID_A, { nome: "N", instrucoes: "I" });
+  ok("G8  os dois campos juntos viajam, e SO eles",
+    JSON.stringify(Object.keys(corpoEnviado()).sort()) ===
+      JSON.stringify(["instrucoes", "nome"]),
+    JSON.stringify(corpoEnviado()));
+
+  responde(400, { ok: false, erro: "nome inválido." });
+  const gNome = await atualizarAgenteViaApi(UUID_A, { nome: "  " });
+  ok("G9  400 conhecido -> dados_invalidos com a frase do servidor",
+    gNome.estado === "dados_invalidos" && gNome.mensagem === "nome inválido.",
+    JSON.stringify(gNome));
+
+  // A frase que descreve um DEFEITO NOSSO nao chega ao usuario: ele nao
+  // tem como consertar um corpo que a propria tela montou.
+  responde(400, { ok: false, erro: "Alteração inválida." });
+  const gGenerico = await atualizarAgenteViaApi(UUID_A, { nome: "N" });
+  ok("G10 400 desconhecido -> frase generica, nunca o texto cru",
+    gGenerico.estado === "dados_invalidos" &&
+      gGenerico.mensagem === "Não foi possível salvar essas alterações.",
+    JSON.stringify(gGenerico));
+
+  responde(401, { ok: false, erro: "Não autenticado." });
+  ok("G11 401 -> sessao expirada, nunca falha generica",
+    (await atualizarAgenteViaApi(UUID_A, { nome: "N" })).estado === "nao_autenticado");
+
+  responde(404, { ok: false, erro: "Agente não encontrado." });
+  ok("G12 404 -> nao_encontrado, estado proprio",
+    (await atualizarAgenteViaApi(UUID_A, { nome: "N" })).estado === "nao_encontrado");
+
+  responde(500, { ok: false, erro: "Falha ao atualizar o agente." });
+  ok("G13 500 -> falha", (await atualizarAgenteViaApi(UUID_A, { nome: "N" })).estado === "falha");
+
+  proxima = "erro";
+  chamadas = [];
+  ok("G14 rede caida -> falha, nunca sucesso silencioso",
+    (await atualizarAgenteViaApi(UUID_A, { nome: "N" })).estado === "falha");
+
+  responde(200, { ok: true, agente: agente(UUID_A, { ativo: "sim" }) });
+  ok("G15 200 com agente MALFORMADO -> falha, nunca linha meio montada",
+    (await atualizarAgenteViaApi(UUID_A, { nome: "N" })).estado === "falha");
+
+  responde(200, "ilegivel");
+  ok("G16 200 com corpo ilegivel -> falha",
+    (await atualizarAgenteViaApi(UUID_A, { nome: "N" })).estado === "falha");
+
+  responde(200, { ok: true });
+  ok("G17 200 sem `agente` -> falha",
+    (await atualizarAgenteViaApi(UUID_A, { nome: "N" })).estado === "falha");
+
   globalThis.fetch = fetchOriginal;
+
+  // ─── H. A tela de edicao ────────────────────────────────────────────
+
+  secao("H. EditarAgente — o que a tela faz, e o que ela nao faz");
+
+  {
+    const EDITAR = "components/ia/agente/EditarAgente.tsx";
+    const CODIGO_EDITAR = codigo(ler(EDITAR));
+    const CODIGO_CONTAINER = codigo(ler(CONTAINER));
+
+    ok("H1  a tela existe e e Client Component",
+      AREA.includes(EDITAR) && /^"use client"/m.test(ler(EDITAR)));
+    ok("H2  exporta default", /export default function EditarAgente\(/.test(CODIGO_EDITAR));
+    ok("H3  zero rede propria: ela usa o transporte nominal",
+      !/\bfetch\s*\(/.test(CODIGO_EDITAR) && !/["'`]\/api\//.test(CODIGO_EDITAR) &&
+        /atualizarAgenteViaApi/.test(CODIGO_EDITAR) &&
+        /from "@\/lib\/ia\/agentes-http"/.test(CODIGO_EDITAR));
+    ok("H4  zero ambiente, zero banco, zero dominio do servidor",
+      !/process\.env|getSupabaseServidor|createClient|lib\/agentes/.test(CODIGO_EDITAR));
+    ok("H5  botao de verdade para abrir, com rotulo acessivel",
+      /<button[\s\S]{0,200}onClick=\{abrir\}/.test(CODIGO_EDITAR) &&
+        /aria-label=\{`Editar nome e instruções de \$\{agente\.nome\}`\}/.test(CODIGO_EDITAR));
+    ok("H6  nenhum <div>/<span> fingindo botao",
+      !/<span[^>]*onClick/.test(CODIGO_EDITAR) && !/<div[^>]*onClick/.test(CODIGO_EDITAR));
+    ok("H7  os campos partem do valor PERSISTIDO, nao de um rascunho antigo",
+      /setNome\(agente\.nome\)/.test(CODIGO_EDITAR) &&
+        /setInstrucoes\(agente\.instrucoes \?\? ""\)/.test(CODIGO_EDITAR));
+    // Cancelar nao pode ter caminho ate a rede: nao chama o transporte e
+    // nao avisa o pai. A prova e por AUSENCIA dentro do proprio handler.
+    const corpoCancelar = CODIGO_EDITAR.slice(
+      CODIGO_EDITAR.indexOf("function cancelar()"),
+      CODIGO_EDITAR.indexOf("const nomeValido")
+    );
+    ok("H8  Cancelar nao escreve e nao avisa o pai",
+      corpoCancelar.length > 30 &&
+        !/atualizarAgenteViaApi|onAtualizado/.test(corpoCancelar),
+      corpoCancelar.slice(0, 80));
+    ok("H9  envio duplo fechado em DOIS niveis: disabled E o ref",
+      /disabled=\{salvando \|\| !nomeValido\}/.test(CODIGO_EDITAR) &&
+        /if \(salvandoRef\.current \|\| !nomeValido\) return;/.test(CODIGO_EDITAR));
+    // O ponto central da fase: a tela NAO afirma o que digitou.
+    ok("H10 o sucesso usa a LINHA DO SERVIDOR, nunca o rascunho",
+      /onAtualizado\(resultado\.agente\)/.test(CODIGO_EDITAR) &&
+        !/onAtualizado\(\{/.test(CODIGO_EDITAR) &&
+        !/onAtualizado\(nome/.test(CODIGO_EDITAR));
+    ok("H11 o erro NAO fecha o formulario nem limpa o que foi digitado",
+      !/setEditando\(false\)[\s\S]{0,80}setErro\(resultado/.test(CODIGO_EDITAR) &&
+        (CODIGO_EDITAR.match(/setEditando\(false\)/g) ?? []).length === 2 &&
+        !/setNome\(""\)|setInstrucoes\(""\)/.test(CODIGO_EDITAR));
+    ok("H12 os quatro desfechos da escrita tem tratamento proprio",
+      ["dados_invalidos", "nao_autenticado", "nao_encontrado"].every((e) =>
+        CODIGO_EDITAR.includes(`resultado.estado === "${e}"`)) &&
+        /resultado\.estado === "ok"/.test(CODIGO_EDITAR));
+    ok("H13 a tela nao alcanca `ativo` nem `tipo`",
+      !/\bativo\b|\btipo\b/.test(CODIGO_EDITAR));
+    ok("H14 nada de HTML cru",
+      !/dangerouslySetInnerHTML/.test(CODIGO_EDITAR));
+
+    ok("H15 o container monta a edicao pelo especificador com @/",
+      /from "@\/components\/ia\/agente\/EditarAgente"/.test(CODIGO_CONTAINER) &&
+        /<EditarAgente agente=\{agente\} onAtualizado=\{aoAtualizarAgente\}/.test(CODIGO_CONTAINER));
+    // UMA verdade sobre o agente. Um segundo estado com a linha editada
+    // divergiria da lista no primeiro refetch.
+    ok("H16 o container troca a linha DENTRO da lista, sem segundo estado",
+      /setLista\(\(atual\) =>/.test(CODIGO_CONTAINER) &&
+        /a\.id === atualizado\.id \? atualizado : a/.test(CODIGO_CONTAINER) &&
+        !/setAgente\(|useState<AgenteUI/.test(CODIGO_CONTAINER));
+    ok("H17 e a VisaoGeral continua recebendo o agente da lista",
+      /<VisaoGeral agente=\{agente\}/.test(CODIGO_CONTAINER));
+    ok("H18 ANCORA: as duas fontes foram lidas de verdade",
+      CODIGO_EDITAR.length > 1500 && CODIGO_CONTAINER.length > 1500);
+  }
 
   console.log(`\n══ ${passou} PASS / ${falhou} FAIL ══\n`);
   process.exitCode = falhou === 0 ? 0 : 1;

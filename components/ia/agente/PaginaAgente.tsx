@@ -36,7 +36,7 @@
  * vazia: associar as simuladas a um agente de verdade misturaria duas
  * verdades na mesma tela.
  */
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { ABAS, PENDENCIA_ABA, type AbaId } from "@/lib/ia/abas";
 import { CROMO, ESPACO, FONTE, RAIO } from "@/lib/ia/design";
@@ -57,6 +57,7 @@ import AbasAgente from "@/components/ia/agente/AbasAgente";
 import VisaoGeral from "@/components/ia/agente/VisaoGeral";
 import ListaTarefas from "@/components/ia/agente/ListaTarefas";
 import ChatAgente from "@/components/ia/agente/ChatAgente";
+import EditarAgente from "@/components/ia/agente/EditarAgente";
 
 /** Sem leitura real de tarefas, ninguem tem tarefa. */
 const NENHUMA_TAREFA: readonly TarefaUI[] = [];
@@ -95,6 +96,25 @@ export default function PaginaAgente({ agenteId, aba }: { agenteId: string; aba:
     lista !== null && lista.estado === "ok"
       ? (lista.agentes.find((a) => a.id === agenteId) ?? null)
       : null;
+
+  /**
+   * EDITAR-AGENTE-V1 — a edicao volta para DENTRO da lista.
+   *
+   * `agente` e derivado de `lista`; guardar o editado num segundo estado
+   * criaria duas verdades sobre o mesmo agente, e um dia elas
+   * discordariam. A linha trocada e a que o SERVIDOR devolveu — o
+   * formulario nao tem palavra sobre o que ficou gravado.
+   */
+  const aoAtualizarAgente = useCallback((atualizado: AgenteUI) => {
+    setLista((atual) =>
+      atual === null || atual.estado !== "ok"
+        ? atual
+        : {
+            estado: "ok",
+            agentes: atual.agentes.map((a) => (a.id === atualizado.id ? atualizado : a)),
+          }
+    );
+  }, []);
 
   const tarefas = NENHUMA_TAREFA;
 
@@ -185,6 +205,11 @@ export default function PaginaAgente({ agenteId, aba }: { agenteId: string; aba:
       <section className="cds-ia-painel" aria-label={rotuloDaAba(aba)}>
         {aba === "visao-geral" && aparencia && (
           <>
+            {/* EDITAR-AGENTE-V1: a edicao fica ACIMA da Visao geral, e
+                nao dentro dela. A VisaoGeral continua exibindo so o que
+                esta PERSISTIDO — enquanto o formulario esta aberto, ela
+                e a referencia do que ainda vale. */}
+            <EditarAgente agente={agente} onAtualizado={aoAtualizarAgente} />
             <VisaoGeral agente={agente} aparencia={aparencia} tarefas={tarefas} />
             <PainelDiagnostico resposta={diagnostico} />
           </>

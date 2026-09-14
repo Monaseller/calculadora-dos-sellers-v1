@@ -93,16 +93,42 @@ secao("A. A escrita mora num lugar so");
   // AGENTE: ela tem de seguir existindo, por POST, entre as autorizadas.
   // A cobertura do Chat vive em `testar-ia-ui-1c.ts`, e nao e duplicada
   // aqui.
-  ok("A3  duas escritas publicadas, nominais — nem PUT, nem PATCH, nem DELETE",
+  //
+  // ── A3 reconciliado de novo na EDITAR-AGENTE-V1 ──────────────────
+  //
+  // Entrou a TERCEIRA escrita, `atualizarAgenteViaApi`, e ela nao e uma
+  // criacao: e a primeira ALTERACAO da area, por PATCH. O veto em bloco
+  // a PUT/PATCH/DELETE foi revogado so na parte do PATCH — PUT e DELETE
+  // seguem proibidos.
+  //
+  // Esta suite e a da CRIACAO, e continua medindo a criacao: o que ela
+  // protege e que `criarAgenteViaApi` siga existindo, por POST, e que a
+  // contagem de POST NAO suba junto com a chegada do PATCH. A doutrina
+  // nominal completa (funcao=verbo, com os controles de troca de verbo)
+  // vive em `testar-ia-agentes-ui-source.ts`, e nao e duplicada aqui.
+  ok("A3  tres escritas publicadas, nominais — duas por POST, uma por PATCH",
     (CODIGO_TRANSPORTE.match(/method:\s*"POST"/g) ?? []).length === 2 &&
+      (CODIGO_TRANSPORTE.match(/method:\s*"PATCH"/g) ?? []).length === 1 &&
       /export async function criarAgenteViaApi\(/.test(CODIGO_TRANSPORTE) &&
       /export async function enviarMensagemAoAgente\(/.test(CODIGO_TRANSPORTE) &&
-      !/"PUT"|"PATCH"|"DELETE"/.test(CODIGO_TRANSPORTE));
+      /export async function atualizarAgenteViaApi\(/.test(CODIGO_TRANSPORTE) &&
+      !/"PUT"|"DELETE"/.test(CODIGO_TRANSPORTE));
   ok("A3a a criacao de agente continua sendo uma delas, e por POST",
     /export async function criarAgenteViaApi\(/.test(CODIGO_TRANSPORTE) &&
       /method: "POST"/.test(CODIGO_TRANSPORTE));
-  ok("A3b CONTROLE NEGATIVO: uma terceira escrita reprovaria a contagem",
+  ok("A3b CONTROLE NEGATIVO: um terceiro POST reprovaria a contagem",
     ((CODIGO_TRANSPORTE + '\n  method: "POST"').match(/method:\s*"POST"/g) ?? []).length !== 2);
+  ok("A3c CONTROLE NEGATIVO: um segundo PATCH reprovaria a contagem",
+    ((CODIGO_TRANSPORTE + '\n  method: "PATCH"').match(/method:\s*"PATCH"/g) ?? []).length !== 1);
+  ok("A3d CONTROLE NEGATIVO: a sonda de PUT/DELETE acusa quando o padrao existe",
+    /"PUT"|"DELETE"/.test('method: "PUT"') && /"PUT"|"DELETE"/.test('method: "DELETE"'));
+  // Criar e alterar sao capacidades separadas, e as telas tambem. O
+  // dialogo de criacao nao pode ganhar um caminho de edicao por dentro:
+  // seria uma escrita a mais numa tela que o usuario abriu para outra
+  // coisa.
+  ok("A3e a tela de CRIACAO nao alcanca a capacidade de alterar",
+    !/atualizarAgenteViaApi/.test(CODIGO_DIALOGO) &&
+      !/atualizarAgenteViaApi/.test(CODIGO_LISTA));
   ok("A4  o nome do dominio continua reservado ao servidor",
     /export async function criarAgenteViaApi\(/.test(CODIGO_TRANSPORTE) &&
       !/export async function criarAgente\(/.test(CODIGO_TRANSPORTE));

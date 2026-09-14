@@ -205,6 +205,11 @@ const ARQUIVOS_UI_CHAT: readonly string[] = [
   "components/ia/agente/ChatAgente.tsx",
 ];
 
+/** EDITAR-AGENTE-V1: a primeira superficie de ALTERACAO da area. */
+const ARQUIVOS_UI_EDICAO: readonly string[] = [
+  "components/ia/agente/EditarAgente.tsx",
+];
+
 const ARQUIVOS_UI: readonly string[] = [
   ...ARQUIVOS_UI_1B,
   ...ARQUIVOS_UI_1CA,
@@ -215,6 +220,7 @@ const ARQUIVOS_UI: readonly string[] = [
   ...ARQUIVOS_SKILL_1C,
   ...ARQUIVOS_UI_CONSUMER,
   ...ARQUIVOS_UI_CHAT,
+  ...ARQUIVOS_UI_EDICAO,
 ];
 
 /**
@@ -255,8 +261,10 @@ secao("A. Inventario e rotas");
   // desta suite que DESCE quando codigo e removido — por isso ele e a
   // prova de que a remocao foi deliberada, nao acidente.
   // ...e 48 na AGENT-VERTICAL-SLICE-V1-I3 (`ChatAgente.tsx`), quando a
-  // aba Chat deixou de ser placeholder e ganhou tela de verdade.
-  ok("A2  48 arquivos, nem um a mais", noDisco.length === 48, String(noDisco.length));
+  // aba Chat deixou de ser placeholder e ganhou tela de verdade; 49 na
+  // EDITAR-AGENTE-V1 (`EditarAgente.tsx`), quando a area passou a poder
+  // ALTERAR um agente, e nao so criar.
+  ok("A2  49 arquivos, nem um a mais", noDisco.length === 49, String(noDisco.length));
 
   // ── A1b..A1e — o inventario e NOMINAL, nao uma contagem ───────────
   //
@@ -278,7 +286,20 @@ secao("A. Inventario e rotas");
     renomeado.length === declarado.length &&
     JSON.stringify(renomeado) !== JSON.stringify(declarado));
   ok("A1e e a contagem sozinha NAO distinguiria a troca",
-    renomeado.length === 48);
+    renomeado.length === 49);
+
+  // ── A1f/A1g — EDITAR-AGENTE-V1 ────────────────────────────────────
+  //
+  // O arquivo da edicao entra no inventario com os MESMOS dois lados
+  // que o do Chat: ancora positiva e controle de ausencia. Sem o
+  // segundo, um dia alguem apaga a tela de edicao e o A1 continua
+  // verde porque a lista declarada foi apagada junto.
+  const semEdicao = declarado.filter((a) => a !== "components/ia/agente/EditarAgente.tsx");
+
+  ok("A1f ANCORA: EditarAgente esta no inventario declarado",
+    declarado.includes("components/ia/agente/EditarAgente.tsx"));
+  ok("A1g CONTROLE NEGATIVO: a tela de edicao AUSENTE reprova",
+    JSON.stringify(semEdicao) !== JSON.stringify(declarado) && semEdicao.length === 48);
 }
 
 const ROTAS = [

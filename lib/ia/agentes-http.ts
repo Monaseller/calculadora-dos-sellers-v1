@@ -87,6 +87,36 @@ export interface NovoAgente {
 }
 
 /**
+ * Edição de UM agente — EDITAR-AGENTE-V1.
+ *
+ * Mesma forma discriminada da criação, e pelo mesmo motivo: o usuário
+ * corrige `dados_invalidos` e reenvia; `falha` ele só pode tentar de
+ * novo. `nao_encontrado` é próprio porque pede uma terceira coisa —
+ * voltar para a lista.
+ */
+export type RespostaEdicao =
+  | { estado: "ok"; agente: AgenteUI }
+  | { estado: "dados_invalidos"; mensagem: string }
+  | { estado: "nao_autenticado" }
+  | { estado: "nao_encontrado" }
+  | { estado: "falha" };
+
+/**
+ * O que a tela pode alterar. DOIS campos, ambos opcionais.
+ *
+ * `tipo` não está aqui e `ativo` também não: o primeiro é escolha de
+ * partida que a edição não revisita, e desligar um agente para a fila
+ * de tarefas dele — é decisão com consequência própria, não um campo de
+ * formulário. `id`, dono e datas são do servidor.
+ *
+ * `instrucoes: null` é pedido explícito de limpar as instruções.
+ */
+export interface AlteracaoAgente {
+  nome?: string;
+  instrucoes?: string | null;
+}
+
+/**
  * Diagnóstico de UM agente.
  *
  * `semSelecao` chega separado e assim permanece: requisito que existe e
@@ -245,6 +275,84 @@ export async function criarAgenteViaApi(dados: NovoAgente): Promise<RespostaCria
   const agente = agenteDaResposta(corpo.agente);
   // Resposta com formato inesperado e FALHA, nunca um agente meio
   // montado entrando na lista como se fosse real.
+  if (agente === null) return { estado: "falha" };
+
+  return { estado: "ok", agente };
+}
+
+/**
+ * As frases que o servidor publica e que o usuário consegue AGIR sobre.
+ *
+ * Só `nome inválido.` entra: é o único 400 da edição que se corrige
+ * digitando de novo. `Alteração inválida.` e `Corpo da requisição
+ * inválido` descrevem um cliente mandando o que não devia — mostrá-las
+ * pediria ao usuário que consertasse um defeito nosso.
+ */
+const MENSAGENS_DE_EDICAO: readonly string[] = ["nome inválido."];
+const MENSAGEM_GENERICA_EDICAO = "Não foi possível salvar essas alterações.";
+
+/**
+ * Altera UM agente do dono da sessão — EDITAR-AGENTE-V1.
+ *
+ * ── O único PATCH da área ───────────────────────────────────────────
+ *
+ * A área deixou de só criar. A abertura é estreita de propósito: um
+ * recurso, dois campos, um verbo. PUT e DELETE continuam sem função
+ * aqui — substituir o recurso inteiro reabriria por omissão os campos
+ * que este corpo fecha.
+ *
+ * ── O que NÃO viaja ─────────────────────────────────────────────────
+ *
+ * O corpo é montado chave a chave, e só entra o que veio pedido.
+ * Nunca `JSON.stringify(formulario)`: `ativo`, `tipo`, `id`, dono e
+ * datas não têm por onde chegar ao servidor, e a proteção não depende
+ * do tipo — depende de o objeto ser escrito à mão.
+ *
+ * ── Por que não há AbortSignal ──────────────────────────────────────
+ *
+ * Mesma razão da criação: abortar uma escrita no navegador não desfaz
+ * o que o servidor gravou.
+ */
+export async function atualizarAgenteViaApi(
+  agenteId: string,
+  alteracao: AlteracaoAgente
+): Promise<RespostaEdicao> {
+  // CHAVE A CHAVE. Campo ausente no pedido fica ausente no corpo — não
+  // vira `undefined` serializado nem `null` acidental.
+  const corpoEnviado: { nome?: string; instrucoes?: string | null } = {};
+  if (alteracao.nome !== undefined) corpoEnviado.nome = alteracao.nome;
+  if (alteracao.instrucoes !== undefined) corpoEnviado.instrucoes = alteracao.instrucoes;
+
+  let resposta: Response;
+  try {
+    resposta = await fetch(`${ROTA_BASE}/${encodeURIComponent(agenteId)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(corpoEnviado),
+    });
+  } catch {
+    return { estado: "falha" };
+  }
+
+  if (resposta.status === 401) return { estado: "nao_autenticado" };
+  if (resposta.status === 404) return { estado: "nao_encontrado" };
+
+  const corpo = await corpoDe(resposta);
+
+  if (resposta.status === 400) {
+    const bruta = ehObjeto(corpo) && typeof corpo.erro === "string" ? corpo.erro : "";
+    return {
+      estado: "dados_invalidos",
+      mensagem: MENSAGENS_DE_EDICAO.includes(bruta) ? bruta : MENSAGEM_GENERICA_EDICAO,
+    };
+  }
+
+  if (!resposta.ok || !ehObjeto(corpo) || corpo.ok !== true) return { estado: "falha" };
+
+  const agente = agenteDaResposta(corpo.agente);
+  // Resposta com formato inesperado é FALHA. A tela precisa da linha
+  // PERSISTIDA para se atualizar; sem ela, exibir o que foi digitado
+  // seria afirmar uma gravação que não foi confirmada.
   if (agente === null) return { estado: "falha" };
 
   return { estado: "ok", agente };
