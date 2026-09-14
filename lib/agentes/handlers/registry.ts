@@ -56,6 +56,14 @@ import {
 // antes de entregar ao handler.
 import { lerAgenteDoDono } from "@/lib/agentes/capability";
 import { criarHandlerConversa, TIPO_CONVERSA } from "@/lib/agentes/handlers/conversa";
+// FUNCTION-RUNTIME-V1-A: o primeiro handler que executa uma FUNCAO. Ele
+// nao recebe capability de dados: quem alcanca `vendas.consultar` e
+// `executarFuncao`, que resolve guard, auditoria e Approval por dentro.
+// Por isso a fabrica aqui e a mais simples das quatro — so o dono.
+import {
+  criarHandlerConsultarVendas,
+  TIPO_CONSULTAR_VENDAS,
+} from "@/lib/agentes/handlers/consultar-vendas";
 
 /**
  * Erro de tipo nao registrado. Classe propria para que o executor o
@@ -134,6 +142,24 @@ export const HANDLERS: Readonly<Record<string, ConstruirHandler>> = Object.freez
       (agenteId: string) => lerAgenteDoDono(agenteId, userId),
       criarAdaptadorDeConversa()
     ),
+
+  // FUNCTION-RUNTIME-V1-A — o MESMO least-capability, com zero
+  // dependencia de dados.
+  //
+  // Os outros tres recebem aqui a capability que vao usar. Este nao
+  // recebe nenhuma, e isso e o ponto: ele nao le `pedidos`, nao monta
+  // filtro e nao conhece Supabase. Quem alcanca a leitura e o EXECUTOR
+  // DA FUNCAO, depois de passar pelo guard de permissao e pela
+  // auditoria de Tool Call — e `executarFuncao` fecha o dono no
+  // `ContextoFuncao` por conta propria.
+  //
+  // O `userId` continua entrando por CLOSURE, como nos demais: o ALVO
+  // (agente, tarefa) vem do contexto, o PODER vem daqui. O handler nao
+  // tem por onde pedir a Funcao em nome de outro dono.
+  //
+  // `ContextoTarefa` NAO foi ampliado: `agenteId` e `tarefaId` ja estao
+  // la desde a 1C, e e so disso que este handler precisa.
+  [TIPO_CONSULTAR_VENDAS]: (userId: string) => criarHandlerConsultarVendas(userId),
 });
 
 /** Tipos registrados, para diagnostico e para a suite. */

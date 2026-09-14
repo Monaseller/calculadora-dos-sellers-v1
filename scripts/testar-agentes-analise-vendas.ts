@@ -1048,6 +1048,22 @@ const ARQUIVOS_FUNCTION_RUNTIME_P0: readonly string[] = [
   "supabase/migrations/20260929_agente_tarefa_aguardar_aprovacao.sql",
 ];
 
+/**
+ * FUNCTION-RUNTIME-V1-A — o primeiro handler que executa uma Funcao.
+ *
+ * `ESCOPO_AGENTES` cobre `lib/agentes` inteiro, entao um arquivo NOVO
+ * ali que ninguem declarou tem de reprovar o G11. O handler entra aqui,
+ * nominalmente; `handlers/registry.ts` ja esta autorizado desde a 1D-d
+ * e por isso NAO e repetido — repeti-lo seria ruido, e a origem de cada
+ * liberacao precisa continuar legivel.
+ *
+ * Nenhuma migration nesta fase: o tipo de tarefa e `text` e o CHECK da
+ * tabela so exige string nao-vazia.
+ */
+const ARQUIVOS_FUNCTION_RUNTIME_V1A: readonly string[] = [
+  "lib/agentes/handlers/consultar-vendas.ts",
+];
+
 const ARQUIVOS_SKILL_1D_TOOL_CALL: readonly string[] = [
   "lib/agentes/chamadas/",
   ...MODULOS_CHAMADAS_1D_TOOL_CALL.map((nome) => `lib/agentes/chamadas/${nome}`),
@@ -1095,6 +1111,7 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_APROVACOES,
   ...ARQUIVOS_VERTICAL_SLICE_V1,
   ...ARQUIVOS_FUNCTION_RUNTIME_P0,
+  ...ARQUIVOS_FUNCTION_RUNTIME_V1A,
 ];
 
 /**
@@ -1607,17 +1624,25 @@ async function main() {
   // toda reconciliacao desta suite, a allowlist e AMPLIADA POR NOME e
   // nunca afrouxada: `join` sobre a lista ordenada continua reprovando
   // chave a menos, chave a mais e chave trocada.
-  const CHAVES_ESPERADAS = "TIPO_ANALISE_VENDAS,TIPO_CONVERSA,TIPO_TESTE_FUNDACAO";
-  ok("G2  registry registra EXATAMENTE 3 tipos", chavesRegistry.length === 3);
-  ok("G3  os tipos sao teste_fundacao, analise_vendas e conversa",
+  // FUNCTION-RUNTIME-V1-A: quarta chave, `TIPO_CONSULTAR_VENDAS`. Como
+  // em toda reconciliacao desta suite, a allowlist e AMPLIADA POR NOME e
+  // nunca afrouxada: `join` sobre a lista ordenada continua reprovando
+  // chave a menos, chave a mais e chave trocada.
+  const CHAVES_ESPERADAS =
+    "TIPO_ANALISE_VENDAS,TIPO_CONSULTAR_VENDAS,TIPO_CONVERSA,TIPO_TESTE_FUNDACAO";
+  ok("G2  registry registra EXATAMENTE 4 tipos", chavesRegistry.length === 4);
+  ok("G3  os tipos sao teste_fundacao, analise_vendas, conversa e consultar_vendas",
      chavesRegistry.join(",") === CHAVES_ESPERADAS);
   ok("G3a CONTROLE NEGATIVO: o oraculo reprova chave A MENOS",
-     ["TIPO_ANALISE_VENDAS", "TIPO_TESTE_FUNDACAO"].sort().join(",") !== CHAVES_ESPERADAS);
-  ok("G3b CONTROLE NEGATIVO: o oraculo reprova chave A MAIS",
-     ["TIPO_ANALISE_VENDAS", "TIPO_CONVERSA", "TIPO_TESTE_FUNDACAO", "TIPO_X"].sort().join(",") !==
+     ["TIPO_ANALISE_VENDAS", "TIPO_CONVERSA", "TIPO_TESTE_FUNDACAO"].sort().join(",") !==
        CHAVES_ESPERADAS);
+  ok("G3b CONTROLE NEGATIVO: o oraculo reprova chave A MAIS",
+     ["TIPO_ANALISE_VENDAS", "TIPO_CONSULTAR_VENDAS", "TIPO_CONVERSA", "TIPO_TESTE_FUNDACAO", "TIPO_X"]
+       .sort().join(",") !== CHAVES_ESPERADAS);
   ok("G3c a extracao de chaves enxergou TIPO_CONVERSA (anti-vacuidade)",
      chavesRegistry.includes("TIPO_CONVERSA"));
+  ok("G3d a extracao enxergou TIPO_CONSULTAR_VENDAS (anti-vacuidade)",
+     chavesRegistry.includes("TIPO_CONSULTAR_VENDAS"));
   ok("G4  registry importa o handler e a capability", /criarHandlerAnaliseVendas/.test(srcRegistry) && /criarLeiturasDeVendas/.test(srcRegistry));
   // AGENTES-FASE1E-c: a expressao mudou de forma — o handler passou a ser
   // ENVOLVIDO por `comInterpretacaoDeVendas`. O que este assert existe
@@ -1874,6 +1899,19 @@ async function main() {
        soAutorizadosNoEscopo(" M lib/agentes/erros.ts\n"));
     ok("G11f4 aceita `capability-worker.ts`, liberado pela FUNCTION-RUNTIME-P0",
        soAutorizadosNoEscopo(" M lib/agentes/capability-worker.ts\n"));
+    // FUNCTION-RUNTIME-V1-A: o handler novo entra como ARQUIVO NOVO, e
+    // por isso os dois estados importam — untracked antes do `git add`,
+    // `A ` depois dele. Um deles sozinho deixaria metade do ciclo
+    // descoberta.
+    ok("G11f5 aceita o handler da V1-A, untracked",
+       soAutorizadosNoEscopo("?? lib/agentes/handlers/consultar-vendas.ts\n"));
+    ok("G11f6 e tambem staged",
+       soAutorizadosNoEscopo("A  lib/agentes/handlers/consultar-vendas.ts\n"));
+    // CONTROLE NEGATIVO: um SEGUNDO handler novo, que ninguem declarou,
+    // continua reprovando. Sem isto, a liberacao acima poderia estar
+    // abrindo a pasta `handlers/` inteira sem que nada acusasse.
+    ok("G11f7 CONTROLE NEGATIVO: um handler novo NAO declarado reprova",
+       !soAutorizadosNoEscopo("?? lib/agentes/handlers/consultar-anuncios.ts\n"));
     ok("G11g CONTROLE NEGATIVO: migration nova no escopo reprova", !soAutorizadosNoEscopo("?? supabase/migrations/99999999_falsa.sql\n"));
     ok("G11h CONTROLE NEGATIVO: autorizados + intruso reprova", !soAutorizadosNoEscopo(" M lib/agentes/handlers/registry.ts\n M lib/agentes/tipos-execucao.ts\n"));
     ok("G11i CONTROLE NEGATIVO: sufixo parecido em outra pasta reprova", !soAutorizadosNoEscopo("?? outra/pasta/registry.ts\n"));

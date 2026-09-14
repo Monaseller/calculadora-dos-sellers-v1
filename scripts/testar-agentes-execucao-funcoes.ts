@@ -1322,6 +1322,538 @@ async function principal(): Promise<void> {
     catalogoControlado = null;
   }
 
+  // ═══ I. FUNCTION-RUNTIME-V1-A — o primeiro consumidor de Funcao ════
+  //
+  // Ate aqui `executarFuncao` nao tinha consumidor de producao: era
+  // motor sem veiculo. `handlers/consultar-vendas.ts` e o primeiro, e
+  // esta secao prova o que so ele pode quebrar — a traducao entre o
+  // vocabulario do executor de Funcoes e o da maquina de estados de
+  // Tarefa.
+  secao("I. FUNCTION-RUNTIME-V1-A: handler consultar_vendas");
+  {
+    const HANDLER = "lib/agentes/handlers/consultar-vendas.ts";
+    const CODIGO = semComentarios(ler(HANDLER));
+    const mod = await import("../lib/agentes/handlers/consultar-vendas");
+    const {
+      TIPO_CONSULTAR_VENDAS,
+      FUNCAO_ID,
+      lerEntradaConsultarVendas,
+      agregarConsultaDeVendas,
+      mapearResultadoConsultarVendas,
+      criarHandlerConsultarVendas,
+    } = mod;
+    const { ErroEntradaTarefa, PausaPorAprovacao } = await import("../lib/agentes/erros");
+
+    ok("I0  ANCORA: a fonte do handler foi lida", CODIGO.length > 2000);
+
+    // ── A. o wiring com executarFuncao ──────────────────────────────
+    ok("I1  o handler chama executarFuncao, e uma unica vez",
+      (CODIGO.match(/await executarFuncao\(/g) ?? []).length === 1);
+    ok("I2  userId vem da CLOSURE da fabrica, nao do contexto",
+      /export function criarHandlerConsultarVendas\(userId: string\)/.test(CODIGO) &&
+      /^\s+userId,$/m.test(CODIGO) &&
+      !/contexto\.userId/.test(CODIGO));
+    ok("I3  agenteId e tarefaId vem do CONTEXTO",
+      /agenteId: contexto\.agenteId,/.test(CODIGO) &&
+      /tarefaId: contexto\.tarefaId,/.test(CODIGO));
+    ok("I4  funcaoId e CONSTANTE do modulo, nunca da entrada",
+      FUNCAO_ID === "vendas.consultar" &&
+      /funcaoId: FUNCAO_ID,/.test(CODIGO) &&
+      !/funcaoId:\s*(entrada|contexto|bruta)/.test(CODIGO));
+    ok("I5  os argumentos sao o RECORTE, campo a campo",
+      /argumentos: \{\s*dataInicio: entrada\.dataInicio,\s*dataFim: entrada\.dataFim,\s*marketplace: entrada\.marketplace,\s*\}/
+        .test(CODIGO));
+    ok("I6  a entrada crua NAO e repassada inteira",
+      !/argumentos: contexto\.entrada/.test(CODIGO) && !/argumentos: bruta/.test(CODIGO));
+    ok("I7  tarefaId e exigido — nunca null neste caminho",
+      /if \(!contexto\.tarefaId\) throw new Error/.test(CODIGO));
+    ok("I8  o tipo e a chave do registry", TIPO_CONSULTAR_VENDAS === "consultar_vendas");
+    ok("I9  a fabrica tem aridade 1 e devolve funcao de aridade 2",
+      criarHandlerConsultarVendas.length === 1 &&
+      typeof criarHandlerConsultarVendas("dono") === "function" &&
+      criarHandlerConsultarVendas("dono").length === 2);
+
+    // ── B/C. entrada fechada, so estrutura ──────────────────────────
+    const lanca = (fn: () => unknown): unknown => {
+      try { fn(); return null; } catch (e) { return e; }
+    };
+    ok("I10 entrada valida minima e aceita, marketplace vira null",
+      JSON.stringify(lerEntradaConsultarVendas({ dataInicio: "2026-09-11", dataFim: "2026-09-11" })) ===
+      JSON.stringify({ dataInicio: "2026-09-11", dataFim: "2026-09-11", marketplace: null }));
+    ok("I11 marketplace null explicito tambem vira null",
+      lerEntradaConsultarVendas({ dataInicio: "a", dataFim: "b", marketplace: null }).marketplace === null);
+    ok("I12 marketplace texto e PRESERVADO, sem alias nem upper",
+      lerEntradaConsultarVendas({ dataInicio: "a", dataFim: "b", marketplace: "Shopee" }).marketplace === "Shopee");
+    ok("I13 propriedade EXTRA reprova com ErroEntradaTarefa",
+      lanca(() => lerEntradaConsultarVendas({ dataInicio: "a", dataFim: "b", funcaoId: "x" }))
+        instanceof ErroEntradaTarefa);
+    ok("I14 `userId` na entrada tambem reprova — nao ha como escolher dono",
+      lanca(() => lerEntradaConsultarVendas({ dataInicio: "a", dataFim: "b", userId: "outro" }))
+        instanceof ErroEntradaTarefa);
+    ok("I15 dataInicio ausente reprova",
+      lanca(() => lerEntradaConsultarVendas({ dataFim: "b" })) instanceof ErroEntradaTarefa);
+    ok("I16 dataFim nao-textual reprova",
+      lanca(() => lerEntradaConsultarVendas({ dataInicio: "a", dataFim: 20260911 })) instanceof ErroEntradaTarefa);
+    ok("I17 marketplace nao-textual reprova",
+      lanca(() => lerEntradaConsultarVendas({ dataInicio: "a", dataFim: "b", marketplace: 7 }))
+        instanceof ErroEntradaTarefa);
+    ok("I18 array e null reprovam",
+      lanca(() => lerEntradaConsultarVendas([])) instanceof ErroEntradaTarefa &&
+      lanca(() => lerEntradaConsultarVendas(null)) instanceof ErroEntradaTarefa);
+
+    // ── D. regras de DOMINIO nao sao duplicadas ─────────────────────
+    //
+    // O handler nao pode conhecer janela, calendario nem enum: essas
+    // regras tem dono, e o dono e `validarFiltroVendas`.
+    ok("I19 o handler NAO reimplementa as regras de dominio",
+      !/JANELA_MAXIMA|Date\.UTC|MARKETPLACES_VALIDOS|validarFiltroVendas/.test(CODIGO));
+    ok("I20 e uma janela absurda NAO e recusada pelo handler",
+      lerEntradaConsultarVendas({ dataInicio: "2020-01-01", dataFim: "2030-12-31" }).dataFim === "2030-12-31");
+    ok("I21 nem uma data impossivel — quem recusa e o validador da Funcao",
+      lerEntradaConsultarVendas({ dataInicio: "2026-02-31", dataFim: "xxx" }).dataInicio === "2026-02-31");
+
+    // ── E. o switch cobre EXATAMENTE as 7 variantes ─────────────────
+    const VARIANTES = [
+      "sucesso", "negado", "aguardando_aprovacao", "aprovacao_indisponivel",
+      "erro", "falha_auditoria", "indisponivel",
+    ];
+    const cases = [...CODIGO.matchAll(/case "([a-z_]+)":/g)].map((m) => m[1]).sort();
+    ok(`I22 o switch tem exatamente as 7 variantes (${cases.join(", ")})`,
+      cases.join(",") === [...VARIANTES].sort().join(","));
+    ok("I23 CONTROLE NEGATIVO: seis variantes nao satisfariam o oraculo",
+      VARIANTES.slice(0, 6).sort().join(",") !== [...VARIANTES].sort().join(","));
+    ok("I24 ha checagem de exaustividade com never",
+      /const _exaustivo: never = resultado;/.test(CODIGO));
+    ok("I25 nao ha fallback silencioso mandando tudo para handler_falhou",
+      !/else\s*\{[\s\S]{0,80}handler_falhou/.test(CODIGO));
+
+    // ── F..N. cada variante, com objeto sintetico ───────────────────
+    const ENTRADA = { dataInicio: "2026-09-11", dataFim: "2026-09-11", marketplace: null };
+    const mapear = (r: unknown) => mapearResultadoConsultarVendas(r as never, ENTRADA as never);
+    const erroDe = (r: unknown): unknown => { try { mapear(r); return null; } catch (e) { return e; } };
+
+    const eAprovacao = erroDe({
+      tipo: "aguardando_aprovacao", requestId: "r", codigo: "aprovacao_necessaria",
+      aprovacaoId: "ap-1", estadoAprovacao: "criada",
+    });
+    ok("I26 aguardando_aprovacao lanca PausaPorAprovacao", eAprovacao instanceof PausaPorAprovacao);
+    ok("I27 e carrega o aprovacaoId devolvido pelo executor",
+      (eAprovacao as { aprovacaoId?: string })?.aprovacaoId === "ap-1");
+    ok("I28 pausa NAO e erro comum — e semanticamente distinta",
+      eAprovacao instanceof Error && !(eAprovacao instanceof ErroEntradaTarefa) &&
+      (eAprovacao as Error).name === "PausaPorAprovacao");
+
+    for (const codigo of ["permissao_ausente", "permissao_bloqueada", "funcao_inexistente", "conexao_ausente"]) {
+      const e = erroDe({ tipo: "negado", requestId: "r", codigo });
+      ok(`I29 negado:${codigo} TERMINA e nao pausa`,
+        e instanceof Error && !(e instanceof PausaPorAprovacao) &&
+        (e as Error).message === `funcao_negada:${codigo}`);
+    }
+
+    const eIndisp = erroDe({ tipo: "aprovacao_indisponivel", requestId: "r", codigo: "expirada" });
+    ok("I30 aprovacao_indisponivel TERMINA — nunca pausa",
+      eIndisp instanceof Error && !(eIndisp instanceof PausaPorAprovacao) &&
+      (eIndisp as Error).message === "aprovacao_indisponivel:expirada");
+
+    for (const etapa of ["abertura", "desfecho"]) {
+      const e = erroDe({ tipo: "falha_auditoria", requestId: "r", etapa, reexecutavel: false });
+      ok(`I31 falha_auditoria:${etapa} TERMINA preservando a etapa`,
+        e instanceof Error && (e as Error).message === `falha_auditoria:${etapa}`);
+    }
+
+    const eIndisponivel = erroDe({ tipo: "indisponivel", requestId: "r" });
+    ok("I32 indisponivel TERMINA sem oraculo de existencia",
+      eIndisponivel instanceof Error && (eIndisponivel as Error).message === "funcao_indisponivel");
+
+    const envErro = (code: string) => ({
+      tipo: "erro", requestId: "r", auditoria: "completa",
+      envelope: { contrato: "1", ok: false, request_id: "r", error: { code, message: "frase", retryable: false } },
+    });
+    for (const code of ["filtro_ausente", "data_invalida", "periodo_invertido", "janela_excedida", "marketplace_invalido"]) {
+      const e = erroDe(envErro(code));
+      ok(`I33 erro de validacao (${code}) vira ErroEntradaTarefa`,
+        e instanceof ErroEntradaTarefa && (e as Error).message === `entrada_invalida:${code}`);
+    }
+    for (const code of ["executor_falhou", "erro_consulta_vendas", "saida_invalida", "erro_interno"]) {
+      const e = erroDe(envErro(code));
+      ok(`I34 erro de execucao (${code}) e terminal sanitizado`,
+        e instanceof Error && !(e instanceof ErroEntradaTarefa) &&
+        (e as Error).message === `funcao_erro:${code}`);
+    }
+    ok("I35 a frase do envelope NAO vaza para a mensagem do erro",
+      !/frase/.test(String((erroDe(envErro("executor_falhou")) as Error).message)));
+
+    // ── M/N. sucesso e truncado ─────────────────────────────────────
+    const linha = (p: Record<string, unknown>) => ({
+      order_id: "o1", sku: "s1", anuncio: "a", marketplace: "Shopee",
+      qtd: 1, item_subtotal: 10, faturamento: 99, data_pagamento: "2026-09-11", ...p,
+    });
+    const sucesso = (linhas: unknown[], truncado: boolean) => ({
+      tipo: "sucesso", requestId: "r", auditoria: "completa",
+      envelope: { contrato: "1", ok: true, request_id: "r", data: { linhas, truncado, erro: null } },
+    });
+
+    const saida = mapear(sucesso([linha({}), linha({ order_id: "o2", sku: "s2" })], false)) as Record<string, unknown>;
+    ok("I36 sucesso devolve periodo/resumo/marketplaces/truncado, e so isso",
+      Object.keys(saida).sort().join(",") === "marketplaces,periodo,resumo,truncado");
+    ok("I37 o periodo ecoa a entrada aceita",
+      JSON.stringify(saida.periodo) === JSON.stringify(ENTRADA));
+    const resumo = saida.resumo as Record<string, number>;
+    ok("I38 resumo conta linhas, pedidos, unidades e skus distintos",
+      resumo.linhas === 2 && resumo.pedidos === 2 && resumo.unidades === 2 && resumo.skusDistintos === 2);
+    ok("I39 faturamento usa item_subtotal positivo, nao faturamento rateado",
+      resumo.faturamento === 20 && resumo.ticketMedio === 10);
+    ok("I40 truncado=true AINDA conclui, com o sinal propagado",
+      (mapear(sucesso([linha({})], true)) as Record<string, unknown>).truncado === true);
+    ok("I41 envelope, requestId e auditoria NAO viajam para o resultado",
+      !("requestId" in saida) && !("envelope" in saida) && !("auditoria" in saida));
+
+    // ── O. coercao monetaria ────────────────────────────────────────
+    const sujas = [
+      linha({ order_id: "x1", qtd: "3", item_subtotal: "10", faturamento: "20" }),
+      linha({ order_id: "x2", qtd: NaN, item_subtotal: NaN, faturamento: NaN }),
+      linha({ order_id: "x3", qtd: Infinity, item_subtotal: Infinity, faturamento: Infinity }),
+      linha({ order_id: "x4", qtd: null, item_subtotal: null, faturamento: null }),
+      linha({ order_id: "x5", qtd: undefined, item_subtotal: undefined, faturamento: undefined }),
+    ];
+    const agSujo = agregarConsultaDeVendas(sujas as never);
+    ok("I42 string/NaN/Infinity/null/undefined viram 0 — zero concatenacao",
+      agSujo.resumo.unidades === 0 && agSujo.resumo.faturamento === 0 &&
+      typeof agSujo.resumo.faturamento === "number" && Number.isFinite(agSujo.resumo.faturamento));
+    ok("I43 ticketMedio com faturamento 0 e 0, nunca NaN",
+      agSujo.resumo.ticketMedio === 0 && !Number.isNaN(agSujo.resumo.ticketMedio));
+    ok("I44 periodo sem linha nenhuma nao divide por zero",
+      agregarConsultaDeVendas([]).resumo.ticketMedio === 0);
+    ok("I45 o handler nao usa Number()/parseFloat/coercao implicita",
+      !/Number\(/.test(CODIGO) && !/parseFloat|parseInt/.test(CODIGO));
+    ok("I46 faturamento sai arredondado em centavos",
+      agregarConsultaDeVendas([
+        linha({ item_subtotal: 0.1 }), linha({ order_id: "o2", item_subtotal: 0.2 }),
+      ] as never).resumo.faturamento === 0.3);
+    ok("I47 fallback para faturamento quando item_subtotal nao e positivo",
+      agregarConsultaDeVendas([linha({ item_subtotal: 0, faturamento: 7.5 })] as never).resumo.faturamento === 7.5);
+
+    // ── P. buckets FIXOS de marketplace ─────────────────────────────
+    const ag = agregarConsultaDeVendas([
+      linha({ order_id: "a1", marketplace: "Shopee", item_subtotal: 1 }),
+      linha({ order_id: "b1", marketplace: "ML", item_subtotal: 2 }),
+      linha({ order_id: "c1", marketplace: "TikTokShop", item_subtotal: 4 }),
+      linha({ order_id: "c2", marketplace: "Amazon", item_subtotal: 8 }),
+    ] as never);
+    ok("I48 sempre os TRES buckets, na mesma ordem, mesmo zerados",
+      Object.keys(ag.marketplaces).join(",") === "Shopee,ML,outros");
+    ok("I49 marketplace desconhecido cai em `outros`, agregado",
+      ag.marketplaces.outros.linhas === 2 && ag.marketplaces.outros.faturamento === 12 &&
+      ag.marketplaces.outros.pedidos === 2);
+    ok("I50 e o NOME do marketplace desconhecido nao e exposto",
+      !JSON.stringify(ag).includes("TikTokShop") && !JSON.stringify(ag).includes("Amazon"));
+    ok("I51 buckets vazios continuam presentes e zerados",
+      JSON.stringify(agregarConsultaDeVendas([]).marketplaces) ===
+      JSON.stringify({
+        Shopee: { linhas: 0, pedidos: 0, unidades: 0, faturamento: 0 },
+        ML: { linhas: 0, pedidos: 0, unidades: 0, faturamento: 0 },
+        outros: { linhas: 0, pedidos: 0, unidades: 0, faturamento: 0 },
+      }));
+    ok("I52 pedidos do bucket sao cardinalidade DENTRO do bucket",
+      ag.marketplaces.Shopee.pedidos === 1 && ag.marketplaces.ML.pedidos === 1);
+
+    // ── Q. nada de cardinalidade alta no retorno ────────────────────
+    const muitas = Array.from({ length: 500 }, (_, i) =>
+      linha({ order_id: `p${i}`, sku: `sku-${i}`, anuncio: `anuncio ${i}` }));
+    const grande = mapear(sucesso(muitas, false));
+    const json = JSON.stringify(grande);
+    ok("I53 o resultado NAO cresce com o numero de linhas", json.length < 700, String(json.length));
+    ok("I54 zero lista: nem linhas, nem skus, nem pedidos, nem anuncios",
+      !/"linhas":\s*\[/.test(json) && !/"skus"/.test(json) &&
+      !/"orderIds"|"orders"|"pedidosIds"/.test(json) && !/"anuncio/.test(json));
+    ok("I55 nenhum order_id, sku ou anuncio individual vaza",
+      !json.includes("p499") && !json.includes("sku-499") && !json.includes("anuncio 499"));
+    ok("I56 `resumo.linhas` NUMERICO continua permitido",
+      typeof (grande as Record<string, Record<string, unknown>>).resumo.linhas === "number" &&
+      (grande as Record<string, Record<string, unknown>>).resumo.linhas === 500);
+    ok("I57 nenhuma data por pedido no retorno", !/data_pagamento/.test(json));
+
+    // ── R. zero provedor, zero atalho ───────────────────────────────
+    ok("I58 o handler nao alcanca provedor de IA",
+      !/PedidoIA|adaptador|Adaptador|provedorRealHabilitado|AGENTES_IA_PROVIDER_REAL_ENABLED|anthropic|google|openai/i
+        .test(CODIGO));
+    ok("I59 nem rede, nem env, nem banco",
+      !/fetch\(|process\.env|createClient|getSupabaseServidor|\.from\(/.test(CODIGO));
+    ok("I60 nao chama a capability de pausa nem RPC de tarefa",
+      !/aguardarAprovacaoTarefa|concluirTarefa|falharTarefa|\.rpc\(/.test(CODIGO));
+    ok("I61 nao decide, cria nem consome Approval",
+      !/criarAprovacao|decidirAprovacao|consumirAprovacao|retomarAprovacao|agente_funcao_aprovacoes/
+        .test(CODIGO));
+    ok("I62 nao registra Tool Call a mao",
+      !/registrarAbertura|registrarDesfecho|agente_funcao_chamadas/.test(CODIGO));
+    ok("I63 sem cast cego nem supressao de tipo",
+      !/as any|@ts-ignore|@ts-expect-error|eslint-disable/.test(CODIGO));
+    ok("I64 sem retry proprio",
+      !/setTimeout|setInterval|for \(let tentativa|while \(true\)/.test(CODIGO));
+    ok("I65 a funcao de agregacao e PURA — um parametro, nada injetado",
+      agregarConsultaDeVendas.length === 1);
+
+    // ── A excecao arquitetural e NOMINAL ────────────────────────────
+    const CONVERSA = semComentarios(ler("lib/agentes/handlers/conversa.ts"));
+    ok("I66 `conversa` continua SEM alcancar Funcao, Approval ou pausa",
+      !/executarFuncao|execucao-funcoes|vendas\.consultar|PausaPorAprovacao/.test(CONVERSA));
+    const TESTE_FUNDACAO = semComentarios(ler("lib/agentes/handlers/teste-fundacao.ts"));
+    const ANALISE = semComentarios(ler("lib/agentes/handlers/analise-vendas.ts"));
+    ok("I67 e os outros dois handlers tambem continuam fora",
+      !/executarFuncao|execucao-funcoes|PausaPorAprovacao/.test(TESTE_FUNDACAO) &&
+      !/executarFuncao|execucao-funcoes|PausaPorAprovacao/.test(ANALISE));
+    {
+      // A excecao e de UM arquivo, medida por VARREDURA — nao por
+      // confianca. Um quinto handler que alcance a Funcao reprova.
+      const handlers = readdirSync(join(RAIZ, "lib/agentes/handlers"))
+        .filter((f) => f.endsWith(".ts") && f !== "registry.ts");
+      const comFuncao = handlers.filter((f) =>
+        /executarFuncao/.test(semComentarios(ler(`lib/agentes/handlers/${f}`))));
+      ok(`I68 exatamente UM handler alcanca executarFuncao (${comFuncao.join(", ")})`,
+        comFuncao.length === 1 && comFuncao[0] === "consultar-vendas.ts");
+      ok("I69 CONTROLE: dois arquivos nao satisfariam o oraculo",
+        !(["consultar-vendas.ts", "outro.ts"].length === 1));
+    }
+
+    // ── As contagens de auditoria, congeladas por CONTRATO ──────────
+    //
+    // Nao ha DB aqui. O que se congela e o LUGAR do codigo onde cada
+    // contagem e decidida, para que mudar uma delas exija mudar isto.
+    ok("I70 automatico+sucesso: abertura + desfecho = 2 linhas",
+      /const abertura = await registrarAbertura\(/.test(EXECUTOR_CODIGO) &&
+      /registrarDesfechoDeExecucao\(\{ \.\.\.snapshot, status: "sucesso"/.test(EXECUTOR_CODIGO));
+    ok("I71 negado: 1 linha de desfecho, sem abertura",
+      /registrarDesfechoSemExecucao\(\{ \.\.\.snapshot, status: "negado", codigo \}\)/
+        .test(EXECUTOR_CODIGO));
+    ok("I72 aguardando_aprovacao: ZERO Tool Call",
+      (() => {
+        const i = EXECUTOR_CODIGO.indexOf('pedido.codigo === "criada"');
+        const f = EXECUTOR_CODIGO.indexOf("return recusaDeCriacao(", i);
+        const ramo = i > 0 && f > i ? EXECUTOR_CODIGO.slice(i, f) : "";
+        return ramo.length > 100 && !/registrarAbertura|registrarDesfecho/.test(ramo);
+      })());
+
+    // ── V1A-F1: a IDENTIDADE do pedido e (marketplace, order_id) ────
+    //
+    // `order_id` sozinho nao e identidade: `pedidos` so tem unique sobre
+    // a PK interna `id`, nao ha CHECK algum, e os numeros vem de dois
+    // sistemas que nao se conhecem. Uma coincidencia entre Shopee e ML
+    // contaria dois pedidos como um — e `ticketMedio`, que divide por
+    // essa contagem, dobraria junto. Os asserts abaixo sao
+    // COMPORTAMENTAIS: alimentam a funcao real e reprovam a versao
+    // anterior da implementacao.
+    {
+      const cross = agregarConsultaDeVendas([
+        linha({ marketplace: "Shopee", order_id: "123", item_subtotal: 10 }),
+        linha({ marketplace: "ML", order_id: "123", item_subtotal: 20 }),
+      ] as never);
+      ok(`I73 mesmo order_id em marketplaces diferentes = DOIS pedidos (${cross.resumo.pedidos})`,
+        cross.resumo.pedidos === 2);
+      ok("I74 e cada bucket enxerga o seu, um de cada",
+        cross.marketplaces.Shopee.pedidos === 1 && cross.marketplaces.ML.pedidos === 1);
+      ok(`I75 faturamento soma os dois (${cross.resumo.faturamento})`,
+        cross.resumo.faturamento === 30);
+      ok(`I76 ticketMedio divide por DOIS pedidos, nao por um (${cross.resumo.ticketMedio})`,
+        cross.resumo.ticketMedio === 15);
+      // A prova de que a soma dos buckets voltou a bater com o total: com
+      // chave so por `order_id` era 2 contra 1.
+      ok("I77 soma dos buckets = total global em contagem de pedidos",
+        cross.marketplaces.Shopee.pedidos +
+        cross.marketplaces.ML.pedidos +
+        cross.marketplaces.outros.pedidos === cross.resumo.pedidos);
+    }
+
+    {
+      // CONTROLE COMPLEMENTAR: a correcao nao pode ter transformado
+      // LINHA em PEDIDO. Duas linhas do mesmo pedido continuam sendo um.
+      const mesmo = agregarConsultaDeVendas([
+        linha({ marketplace: "Shopee", order_id: "777", sku: "a", item_subtotal: 5 }),
+        linha({ marketplace: "Shopee", order_id: "777", sku: "b", item_subtotal: 5 }),
+      ] as never);
+      ok(`I78 duas linhas do MESMO pedido continuam UM pedido (${mesmo.resumo.pedidos})`,
+        mesmo.resumo.pedidos === 1 && mesmo.marketplaces.Shopee.pedidos === 1);
+      ok("I79 mas as duas linhas continuam contando como duas linhas",
+        mesmo.resumo.linhas === 2 && mesmo.marketplaces.Shopee.linhas === 2);
+      ok(`I80 e o ticketMedio usa o pedido unico (${mesmo.resumo.ticketMedio})`,
+        mesmo.resumo.faturamento === 10 && mesmo.resumo.ticketMedio === 10);
+    }
+
+    {
+      // O bucket `outros` agrega VARIOS marketplaces desconhecidos: ali o
+      // argumento "o marketplace ja esta fixado" nao existe, e a chave
+      // composta e a unica coisa que impede a subcontagem.
+      const desconhecidos = agregarConsultaDeVendas([
+        linha({ marketplace: "TikTokShop", order_id: "9", item_subtotal: 3 }),
+        linha({ marketplace: "Amazon", order_id: "9", item_subtotal: 4 }),
+      ] as never);
+      ok(`I81 dois desconhecidos com o mesmo order_id = DOIS pedidos em outros (${desconhecidos.marketplaces.outros.pedidos})`,
+        desconhecidos.marketplaces.outros.pedidos === 2);
+      ok("I82 e o bucket continua unico e agregado",
+        desconhecidos.marketplaces.outros.linhas === 2 &&
+        desconhecidos.marketplaces.outros.faturamento === 7);
+      ok("I83 os nomes desconhecidos continuam NAO aparecendo no JSON",
+        !JSON.stringify(desconhecidos).includes("TikTokShop") &&
+        !JSON.stringify(desconhecidos).includes("Amazon"));
+    }
+
+    {
+      // A representacao do par tem de ser NAO AMBIGUA. Com um
+      // delimitador ingenuo — `${marketplace}:${orderId}` — os dois pares
+      // abaixo produziriam a MESMA string ("a:b:c") e virariam um pedido
+      // so. Nada no schema impede `:` num marketplace ou num order_id.
+      const ambiguo = agregarConsultaDeVendas([
+        linha({ marketplace: "a:b", order_id: "c", item_subtotal: 1 }),
+        linha({ marketplace: "a", order_id: "b:c", item_subtotal: 1 }),
+      ] as never);
+      ok(`I84 pares que colidiriam sob delimitador ingenuo sao DISTINTOS (${ambiguo.resumo.pedidos})`,
+        ambiguo.resumo.pedidos === 2);
+      ok("I85 CONTROLE: a concatenacao ingenua de fato colidiria",
+        `${"a:b"}:${"c"}` === `${"a"}:${"b:c"}`);
+      ok("I86 e ambos caem em `outros`, sem abrir chave nova",
+        ambiguo.marketplaces.outros.pedidos === 2 &&
+        Object.keys(ambiguo.marketplaces).join(",") === "Shopee,ML,outros");
+    }
+
+    {
+      // BOUND estrutural preservado: 100 marketplaces desconhecidos
+      // distintos nao aumentam o shape nem abrem chave dinamica.
+      const cem = agregarConsultaDeVendas(
+        Array.from({ length: 100 }, (_, i) =>
+          linha({ marketplace: `mp-${i}`, order_id: `o${i}`, item_subtotal: 1 })) as never);
+      ok("I87 100 marketplaces desconhecidos: shape continua com 3 buckets",
+        Object.keys(cem.marketplaces).join(",") === "Shopee,ML,outros");
+      ok("I88 e os 100 pedidos sao contados, um por par",
+        cem.resumo.pedidos === 100 && cem.marketplaces.outros.pedidos === 100);
+      const jsonCem = JSON.stringify(cem);
+      ok("I89 nenhum nome de marketplace desconhecido vaza", !/mp-\d/.test(jsonCem));
+      ok("I90 nenhum order_id vaza, nem a chave composta interna",
+        !/"o\d/.test(jsonCem) && !/\[\\"/.test(jsonCem));
+      ok("I91 e o tamanho continua bounded", jsonCem.length < 400, String(jsonCem.length));
+    }
+
+    // ── V1A-F2: marketplace nao-string e SAIDA INESPERADA ───────────
+    //
+    // A chave composta so e nao ambigua no dominio string x string.
+    // Dentro de um array, `undefined`, `NaN` e `Infinity` nao sao
+    // valores JSON e viram `null` — colidiriam entre si e com `null`,
+    // reproduzindo a subcontagem que o F1 eliminou, por outra porta.
+    // A resposta NAO e sanear a chave: e recusar a linha, porque uma
+    // saida ja declarada SUCESSO com campo fora do contrato nao pode
+    // virar resumo.
+    {
+      // A colisao que a guarda existe para impedir, medida no proprio
+      // `JSON.stringify` — para que o teste nao dependa de acreditar.
+      ok("I92 CONTROLE: undefined, null, NaN e Infinity colidem numa tupla JSON",
+        JSON.stringify([undefined, "1"]) === JSON.stringify([null, "1"]) &&
+        JSON.stringify([NaN, "1"]) === JSON.stringify([null, "1"]) &&
+        JSON.stringify([Infinity, "1"]) === JSON.stringify([null, "1"]));
+      ok("I93 CONTROLE: mas nenhuma STRING colide com null",
+        JSON.stringify(["null", "1"]) !== JSON.stringify([null, "1"]));
+
+      // Fixtures invalidas por CONSTRUCAO: `unknown[]` atravessa a
+      // fronteira de chamada uma vez so, sem `as any` e sem afrouxar
+      // `LinhaVenda`.
+      const agregarCru = agregarConsultaDeVendas as unknown as
+        (l: readonly unknown[]) => unknown;
+      const lancou = (l: readonly unknown[]): unknown => {
+        try { agregarCru(l); return null; } catch (e) { return e; }
+      };
+
+      const MALFORMADOS: readonly [string, unknown][] = [
+        ["undefined", undefined],
+        ["null", null],
+        ["NaN", NaN],
+        ["Infinity", Infinity],
+        ["-Infinity", -Infinity],
+        ["numero", 7],
+        ["boolean", false],
+        ["objeto", { nome: "Shopee" }],
+        ["array", ["Shopee"]],
+      ];
+      for (const [rotulo, valor] of MALFORMADOS) {
+        const e = lancou([linha({ marketplace: valor, order_id: "1", item_subtotal: 10 })]);
+        ok(`I94 marketplace ${rotulo} FALHA FECHADO com saida_inesperada`,
+          e instanceof Error && (e as Error).message === "funcao_erro:saida_inesperada");
+      }
+
+      // Duas linhas malformadas DIFERENTES com o mesmo order_id: antes
+      // da guarda virariam um pedido so e dobrariam o ticket.
+      const eColisao = lancou([
+        linha({ marketplace: undefined, order_id: "1", item_subtotal: 10 }),
+        linha({ marketplace: null, order_id: "1", item_subtotal: 20 }),
+      ]);
+      ok("I95 o par que colidia agora nem chega a produzir resumo",
+        eColisao instanceof Error && (eColisao as Error).message === "funcao_erro:saida_inesperada");
+
+      // ── SEM PARCIALIDADE: o caso discriminante ────────────────────
+      //
+      // Linha valida PRIMEIRO, invalida DEPOIS. Se a guarda estivesse no
+      // lugar errado — ou fosse um `continue` silencioso — sairia um
+      // resumo com faturamento 1010, 1 pedido e ticket 1010: numero
+      // errado com cara de certo.
+      const eParcial = lancou([
+        linha({ marketplace: "Shopee", order_id: "A", item_subtotal: 10 }),
+        linha({ marketplace: null, order_id: "B", item_subtotal: 1000 }),
+      ]);
+      ok("I96 linha valida antes da invalida NAO produz resumo parcial",
+        eParcial instanceof Error && (eParcial as Error).message === "funcao_erro:saida_inesperada");
+      ok("I97 e a falha nao vaza TypeError, stack nem o valor malformado",
+        eParcial instanceof Error &&
+        !/TypeError|undefined|null|1000|Shopee/.test((eParcial as Error).message));
+
+      // A mesma falha atravessa o mapper terminal com o vocabulario
+      // estavel, e NAO vira `entrada_invalida` nem pausa.
+      const eMapper = erroDe(sucesso(
+        [linha({ marketplace: null, order_id: "1", item_subtotal: 5 })], false));
+      ok("I98 pelo mapper de sucesso, a falha chega sanitizada e terminal",
+        eMapper instanceof Error &&
+        !(eMapper instanceof ErroEntradaTarefa) &&
+        !(eMapper instanceof PausaPorAprovacao) &&
+        (eMapper as Error).message === "funcao_erro:saida_inesperada");
+
+      // ── E o que NAO mudou ─────────────────────────────────────────
+      //
+      // A guarda e sobre TIPO em runtime, nunca sobre o enum de
+      // dominio: string desconhecida continua valida e continua em
+      // `outros`. Validar Shopee/ML aqui seria duplicar a regra da
+      // Funcao, que e o que o handler existe para nao fazer.
+      const desconhecida = agregarConsultaDeVendas([
+        linha({ marketplace: "TikTokShop", order_id: "9", item_subtotal: 3 }),
+        linha({ marketplace: "Amazon", order_id: "9", item_subtotal: 4 }),
+      ] as never);
+      ok("I99 string DESCONHECIDA continua aceita e continua em `outros`",
+        desconhecida.marketplaces.outros.pedidos === 2 &&
+        desconhecida.marketplaces.outros.faturamento === 7);
+      ok("I100 e a string vazia tambem e um marketplace valido para o tipo",
+        agregarConsultaDeVendas([
+          linha({ marketplace: "", order_id: "1", item_subtotal: 2 }),
+        ] as never).marketplaces.outros.linhas === 1);
+      ok("I101 o handler continua sem conhecer o enum de dominio",
+        !/"Shopee"\s*\)\s*\|\||MARKETPLACES_VALIDOS|marketplace_invalido.*throw/.test(CODIGO));
+
+      // A assinatura estreitou: nenhum `unknown` sobrou na chave.
+      ok("I102 chavePedido opera sobre string x string",
+        /function chavePedido\(marketplace: string, orderId: string\): string/.test(CODIGO) &&
+        !/chavePedido\(marketplace: unknown/.test(CODIGO));
+      ok("I103 e o comentario nao promete injetividade sobre valor arbitrario",
+        !/injetora para qualquer par/.test(ler(HANDLER)));
+      // A guarda tem de ser a PRIMEIRA instrucao do laco — se vier
+      // depois de um acumulador, a parcialidade volta.
+      {
+        const laco = CODIGO.slice(CODIGO.indexOf("for (const linha of linhas)"));
+        const iGuarda = laco.indexOf('typeof linha.marketplace !== "string"');
+        const iAcumulador = laco.indexOf("unidades += qtd;");
+        const iBucket = laco.indexOf("bucketDe(linha.marketplace)");
+        ok("I104 a guarda precede TODOS os acumuladores da linha",
+          iGuarda > 0 && iAcumulador > iGuarda && iBucket > iGuarda);
+        ok("I105 e nao ha skip silencioso da linha invalida",
+          !/marketplace !== "string"\)\s*\{\s*continue;/.test(CODIGO));
+        ok("I106 nem coercao para string",
+          !/String\(linha\.marketplace\)|`\$\{linha\.marketplace\}`/.test(CODIGO));
+      }
+    }
+  }
+
   console.log(`\n══ ${passou} PASS / ${falhou} FAIL ══\n`);
   process.exit(falhou === 0 ? 0 : 1);
 }

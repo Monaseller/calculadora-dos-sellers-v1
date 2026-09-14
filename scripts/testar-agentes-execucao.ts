@@ -52,6 +52,10 @@ import {
   INSTRUCAO_MINIMA_CONVERSA,
   TIPO_CONVERSA,
 } from "../lib/agentes/handlers/conversa";
+// FUNCTION-RUNTIME-V1-A: so a constante do tipo. A cobertura de
+// comportamento do handler novo vive em `testar-agentes-execucao-funcoes.ts`,
+// que e a suite do executor de Funcoes.
+import { TIPO_CONSULTAR_VENDAS } from "../lib/agentes/handlers/consultar-vendas";
 // O seam de teste que JA existe. Nenhum provedor real e alcancado: o
 // fake nao tem rede, nao tem SDK e nao le env.
 import { criarAdaptadorFake } from "../lib/agentes/ia/fake";
@@ -277,19 +281,35 @@ async function main() {
   // `>= 3`, nem para wildcard. Continua reprovando tipo A MENOS e tipo A
   // MAIS, que e a unica forma de um registry novo nao passar
   // despercebido por esta suite.
-  const TIPOS_ESPERADOS = "analise_vendas,conversa,teste_fundacao";
+  // FUNCTION-RUNTIME-V1-A: entrou `consultar_vendas`, o primeiro tipo
+  // cujo handler executa uma FUNCAO. A allowlist ganhou um QUARTO membro
+  // NOMEADO — nao virou `includes`, nao virou piso `>= 4`, nao virou
+  // wildcard. Continua reprovando tipo A MENOS, A MAIS e TROCADO, que e
+  // a unica forma de um registry novo nao passar despercebido.
+  const TIPOS_ESPERADOS = "analise_vendas,consultar_vendas,conversa,teste_fundacao";
   const uniaoDeTipos = (tipos: readonly string[]) => [...tipos].sort().join(",");
-  ok("E2  exatamente 3 tipos registrados", TIPOS_REGISTRADOS.length === 3);
-  ok("E3  os tipos sao teste_fundacao, analise_vendas e conversa",
+  ok("E2  exatamente 4 tipos registrados", TIPOS_REGISTRADOS.length === 4);
+  ok("E3  os tipos sao teste_fundacao, analise_vendas, conversa e consultar_vendas",
      uniaoDeTipos(TIPOS_REGISTRADOS) === TIPOS_ESPERADOS);
   ok("E3a CONTROLE NEGATIVO: o oraculo reprova tipo A MENOS",
-     uniaoDeTipos(["analise_vendas", "teste_fundacao"]) !== TIPOS_ESPERADOS);
+     uniaoDeTipos(["analise_vendas", "conversa", "teste_fundacao"]) !== TIPOS_ESPERADOS);
   ok("E3b CONTROLE NEGATIVO: o oraculo reprova tipo A MAIS",
-     uniaoDeTipos(["analise_vendas", "conversa", "teste_fundacao", "x"]) !== TIPOS_ESPERADOS);
+     uniaoDeTipos(["analise_vendas", "consultar_vendas", "conversa", "teste_fundacao", "x"]) !==
+       TIPOS_ESPERADOS);
   ok("E3c CONTROLE NEGATIVO: o oraculo reprova tipo TROCADO",
-     uniaoDeTipos(["analise_vendas", "conversas", "teste_fundacao"]) !== TIPOS_ESPERADOS);
+     uniaoDeTipos(["analise_vendas", "consultar_venda", "conversa", "teste_fundacao"]) !==
+       TIPOS_ESPERADOS);
   ok("E3d o oraculo aprova o conjunto certo em ordem embaralhada",
-     uniaoDeTipos(["conversa", "teste_fundacao", "analise_vendas"]) === TIPOS_ESPERADOS);
+     uniaoDeTipos(["conversa", "consultar_vendas", "teste_fundacao", "analise_vendas"]) ===
+       TIPOS_ESPERADOS);
+  // O tipo novo nao pode existir so na allowlist: a constante do handler
+  // e a chave do registry tem de ser a MESMA string.
+  ok("E3h a constante do handler novo e a chave usada no registry",
+     TIPO_CONSULTAR_VENDAS === "consultar_vendas" &&
+     TIPOS_REGISTRADOS.includes(TIPO_CONSULTAR_VENDAS));
+  ok("E3i resolve consultar_vendas como FABRICA por dono (aridade 1)",
+     typeof resolverHandler("consultar_vendas") === "function" &&
+     resolverHandler("consultar_vendas").length === 1);
   ok("E3e a constante do handler e a chave usada no registry",
      TIPO_CONVERSA === "conversa" && TIPOS_REGISTRADOS.includes(TIPO_CONVERSA));
 
@@ -690,7 +710,7 @@ async function main() {
   ok("M21 o executor consome a fabrica", /resolverHandler\(tarefa\.tipo\)/.test(exe2) && /construirHandler\(tarefa\.user_id\)/.test(exe2));
   ok("M22 o executor ainda chama handler(contexto, relatarProgresso)",
      /await handler\(contexto, relatarProgresso\)/.test(exe2));
-  ok("M23 exatamente 3 handlers registrados", TIPOS_REGISTRADOS.length === 3);
+  ok("M23 exatamente 4 handlers registrados", TIPOS_REGISTRADOS.length === 4);
 
   // ═══ N. WIRING DE TENANT — AGENTES-FASE1D-d ═══════════════════════
   console.log("N. Wiring de tenant");
