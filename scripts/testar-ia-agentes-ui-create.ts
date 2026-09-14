@@ -84,9 +84,25 @@ secao("A. A escrita mora num lugar so");
   ok("A2  e e o mesmo boundary de rede de sempre",
     /\bfetch\s*\(/.test(CODIGO_TRANSPORTE) && !/\bfetch\s*\(/.test(CODIGO_DIALOGO) &&
       !/\bfetch\s*\(/.test(CODIGO_LISTA));
-  ok("A3  uma unica escrita publicada — nem PUT, nem PATCH, nem DELETE",
-    (CODIGO_TRANSPORTE.match(/method:\s*"POST"/g) ?? []).length === 1 &&
+  // ── A3 reconciliado na AGENT-VERTICAL-SLICE-V1-I3 ────────────────
+  //
+  // A frase "uma unica escrita publicada" deixou de ser verdadeira: a
+  // aba Chat trouxe a segunda, `enviarMensagemAoAgente`, que cria uma
+  // tarefa de conversa. Sao DUAS, nominais, e somente essas — nao "duas
+  // ou mais". O que esta suite protege continua sendo a CRIACAO DE
+  // AGENTE: ela tem de seguir existindo, por POST, entre as autorizadas.
+  // A cobertura do Chat vive em `testar-ia-ui-1c.ts`, e nao e duplicada
+  // aqui.
+  ok("A3  duas escritas publicadas, nominais — nem PUT, nem PATCH, nem DELETE",
+    (CODIGO_TRANSPORTE.match(/method:\s*"POST"/g) ?? []).length === 2 &&
+      /export async function criarAgenteViaApi\(/.test(CODIGO_TRANSPORTE) &&
+      /export async function enviarMensagemAoAgente\(/.test(CODIGO_TRANSPORTE) &&
       !/"PUT"|"PATCH"|"DELETE"/.test(CODIGO_TRANSPORTE));
+  ok("A3a a criacao de agente continua sendo uma delas, e por POST",
+    /export async function criarAgenteViaApi\(/.test(CODIGO_TRANSPORTE) &&
+      /method: "POST"/.test(CODIGO_TRANSPORTE));
+  ok("A3b CONTROLE NEGATIVO: uma terceira escrita reprovaria a contagem",
+    ((CODIGO_TRANSPORTE + '\n  method: "POST"').match(/method:\s*"POST"/g) ?? []).length !== 2);
   ok("A4  o nome do dominio continua reservado ao servidor",
     /export async function criarAgenteViaApi\(/.test(CODIGO_TRANSPORTE) &&
       !/export async function criarAgente\(/.test(CODIGO_TRANSPORTE));

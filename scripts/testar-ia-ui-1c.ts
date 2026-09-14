@@ -18,6 +18,20 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import { ABAS, ABA_PADRAO, PENDENCIA_ABA, abaSegura } from "../lib/ia/abas";
+// AGENT-VERTICAL-SLICE-V1-I3: as funcoes REAIS que interpretam o
+// contrato da conversa. Nao ha harness React neste repositorio, entao a
+// prova executavel possivel e esta — as puras e as de transporte, contra
+// um `fetch` duplado. O ciclo de vida do componente fica por conta das
+// sondas de fonte da secao N e do teste manual.
+import {
+  MARCADOR_FAKE,
+  STATUS_CONVERSA,
+  condicoesIaRealAtendidas,
+  consultarConversaDoAgente,
+  ehStatusConhecido,
+  ehStatusTerminal,
+  enviarMensagemAoAgente,
+} from "../lib/ia/agentes-http";
 import { NIVEIS_AUTONOMIA, PROCEDENCIAS, RISCOS, DESCRICAO_TIPO } from "../lib/ia/conceitos";
 import { TIPOS_AGENTE_UI, STATUS_TAREFA_UI } from "../lib/ia/contratos";
 import {
@@ -154,17 +168,32 @@ secao("B. As 8 abas");
   // conteudo delas se revelou simulado e foi removido. O assert continua
   // exato: ele lista QUAIS, nao quantas, e por isso acusa os dois
   // movimentos.
-  ok("B4  as duas abas implementadas sao exatamente estas",
+  // ── B4/B5 reconciliados na AGENT-VERTICAL-SLICE-V1-I3 ────────────
+  //
+  // `chat` deixou de ser placeholder: a aba passou a criar uma tarefa
+  // real de conversa e a acompanhar o resultado. A lista continua
+  // NOMINAL e a contagem continua exata — o que mudou foi a realidade,
+  // nao o rigor. Um `includes` ou um `>=` aqui deixaria passar a proxima
+  // promocao sem ninguem olhar.
+  ok("B4  as tres abas implementadas sao exatamente estas",
     ABAS.filter((a) => a.implementada).map((a) => a.id).join(",") ===
-    "visao-geral,tarefas");
+    "visao-geral,chat,tarefas");
+  ok("B4a CONTROLE NEGATIVO: o oraculo reprova aba a MENOS",
+    ["visao-geral", "tarefas"].join(",") !== "visao-geral,chat,tarefas");
+  ok("B4b CONTROLE NEGATIVO: o oraculo reprova aba a MAIS",
+    ["visao-geral", "chat", "tarefas", "memoria"].join(",") !== "visao-geral,chat,tarefas");
   // O rotulo dizia "6" desde a UI-1C.b, quando eram 3 — numero escrito
-  // no nome do assert envelhece calado. Agora sao seis de verdade, e o
-  // assert passou a cobrar a CONTAGEM tambem, para nao envelhecer de novo.
+  // no nome do assert envelhece calado. Agora sao cinco, e o assert
+  // continua cobrando a CONTAGEM junto com a pendencia declarada.
   const pendentes = ABAS.filter((a) => !a.implementada);
-  ok("B5  as 6 nao implementadas declaram pendencia",
-    pendentes.length === 6 &&
+  ok("B5  as 5 nao implementadas declaram pendencia",
+    pendentes.length === 5 &&
     pendentes.every((a) => (PENDENCIA_ABA as Record<string, string>)[a.id]?.length > 20),
     pendentes.map((a) => a.id).join(","));
+  ok("B5a as 5 pendentes sao exatamente estas",
+    pendentes.map((a) => a.id).join(",") === "conexoes,funcoes,permissoes,memoria,custos");
+  ok("B5a1 e `chat` saiu do mapa de pendencia",
+    !(PENDENCIA_ABA as Record<string, string>).chat);
 
   // ── A invariavel que faltava: `implementada` x o que a pagina monta ─
   //
@@ -682,8 +711,238 @@ secao("M. Preservacoes");
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-console.log(`\n══ CDS IA — UI-1C.a: pagina do agente:  ${passou}/${passou + falhou} passaram ══`);
-if (falhou > 0) {
-  console.log(`   ${falhou} FALHARAM`);
-  process.exit(1);
-}
+//
+// A secao N e assincrona porque exercita o transporte de verdade. O
+// placar desceu para dentro dela para que nenhum assert fique de fora da
+// contagem — um placar impresso antes do `await` mentiria por omissao.
+void (async () => {
+  secao("N. Aba Chat — AGENT-VERTICAL-SLICE-V1-I3");
+
+  const AGENTE = "11111111-1111-4111-8111-111111111111";
+  const TAREFA = "22222222-2222-4222-8222-222222222222";
+
+  // ── N1..N8: as funcoes PURAS do contrato ──────────────────────────
+  ok("N1  os 6 status do banco estao no vocabulario da UI",
+    [...STATUS_CONVERSA].sort().join(",") ===
+    "aguardando_aprovacao,cancelado,concluido,erro,pendente,rodando");
+  ok("N2  status desconhecido NAO e reconhecido", !ehStatusConhecido("status_futuro"));
+  ok("N2a nem tipo errado", !ehStatusConhecido(42) && !ehStatusConhecido(null));
+  ok("N3  pendente e rodando NAO sao terminais",
+    !ehStatusTerminal("pendente") && !ehStatusTerminal("rodando"));
+  ok("N4  concluido, erro e cancelado sao terminais",
+    ehStatusTerminal("concluido") && ehStatusTerminal("erro") && ehStatusTerminal("cancelado"));
+  ok("N5  aguardando_aprovacao e TERMINAL (nao entra em loop)",
+    ehStatusTerminal("aguardando_aprovacao"));
+
+  const base = {
+    status: "concluido" as const,
+    modoNoEnvio: "real" as const,
+    modoAtual: "real" as const,
+    resposta: "PONG: Ola",
+  };
+  ok("N6  condicao do piloto atendida: real/real, concluido, sem marcador",
+    condicoesIaRealAtendidas(base));
+  ok("N6a nao atendida se ainda nao concluiu",
+    !condicoesIaRealAtendidas({ ...base, status: "pendente" }));
+  ok("N6b nao atendida em modo fake no envio",
+    !condicoesIaRealAtendidas({ ...base, modoNoEnvio: "fake" }));
+  ok("N6c nao atendida se a configuracao MUDOU entre envio e consulta",
+    !condicoesIaRealAtendidas({ ...base, modoAtual: "fake" }));
+  ok("N6d nao atendida sem resposta",
+    !condicoesIaRealAtendidas({ ...base, resposta: null }));
+  ok("N7  resposta com marcador de fake NAO valida o piloto",
+    !condicoesIaRealAtendidas({ ...base, resposta: `${MARCADOR_FAKE} resposta` }));
+  ok("N8  o marcador e o mesmo que o adaptador carimba", MARCADOR_FAKE === "[fake]");
+
+  // ── N9..N20: o transporte, contra um `fetch` duplado ──────────────
+  const original = globalThis.fetch;
+  const chamadas: Array<{ url: string; init?: RequestInit }> = [];
+  const responder = (corpo: unknown, status: number) => {
+    (globalThis as unknown as { fetch: unknown }).fetch = (url: unknown, init?: RequestInit) => {
+      chamadas.push({ url: String(url), init });
+      return Promise.resolve(new Response(JSON.stringify(corpo), { status }));
+    };
+  };
+
+  try {
+    chamadas.length = 0;
+    responder(
+      { ok: true, tarefaId: TAREFA, status: "pendente", modoIaConfiguradoAgora: "fake" },
+      202
+    );
+    const envio = await enviarMensagemAoAgente(AGENTE, "Ola");
+
+    ok("N9  o POST vai para a rota de conversa do agente",
+      chamadas[0]?.url === `/api/agentes/${AGENTE}/conversa`, chamadas[0]?.url);
+    ok("N10 e usa method POST", chamadas[0]?.init?.method === "POST");
+    ok("N11 o corpo tem EXATAMENTE a chave mensagem",
+      Object.keys(JSON.parse(String(chamadas[0]?.init?.body))).join(",") === "mensagem");
+    ok("N12 e nenhum campo de autoridade viaja no corpo",
+      !/userId|user_id|agenteId|agente_id|tipo|instrucoes|provider|model|tools|maxTentativas/.test(
+        String(chamadas[0]?.init?.body)));
+    ok("N13 o tarefaId real e devolvido",
+      envio.estado === "ok" && envio.tarefaId === TAREFA);
+    ok("N14 o modo do POST e lido da API", envio.estado === "ok" && envio.modo === "fake");
+
+    chamadas.length = 0;
+    responder({ ok: true, tarefaId: TAREFA, status: "pendente", modoIaConfiguradoAgora: "real" }, 202);
+    const real = await enviarMensagemAoAgente(AGENTE, "Ola");
+    ok("N15 modo real tambem atravessa", real.estado === "ok" && real.modo === "real");
+
+    for (const [rotulo, status, esperado] of [
+      ["401", 401, "nao_autenticado"],
+      ["404", 404, "nao_encontrado"],
+      ["409", 409, "agente_inativo"],
+      ["400", 400, "entrada_invalida"],
+      ["500", 500, "falha"],
+    ] as const) {
+      responder({ ok: false }, status);
+      const r = await enviarMensagemAoAgente(AGENTE, "Ola");
+      ok(`N16 POST ${rotulo} -> ${esperado}`, r.estado === esperado, r.estado);
+    }
+
+    responder({ ok: true, tarefaId: TAREFA, status: "status_futuro", modoIaConfiguradoAgora: "real" }, 202);
+    ok("N17 status desconhecido no POST vira FALHA, nunca sucesso",
+      (await enviarMensagemAoAgente(AGENTE, "Ola")).estado === "falha");
+
+    chamadas.length = 0;
+    responder(
+      {
+        ok: true,
+        tarefa: { id: TAREFA, status: "concluido", resposta: "PONG: Ola", erroTipo: null },
+        modoIaConfiguradoAgora: "real",
+      },
+      200
+    );
+    const consulta = await consultarConversaDoAgente(AGENTE, TAREFA);
+    ok("N18 o GET leva o tarefaId na query",
+      chamadas[0]?.url === `/api/agentes/${AGENTE}/conversa?tarefaId=${TAREFA}`, chamadas[0]?.url);
+    ok("N18a e nao manda corpo nem method", chamadas[0]?.init?.method === undefined);
+    ok("N19 a tarefa validada atravessa inteira",
+      consulta.estado === "ok" && consulta.tarefa.resposta === "PONG: Ola" &&
+      consulta.tarefa.status === "concluido");
+
+    responder(
+      { ok: true, tarefa: { id: TAREFA, status: "inventado", resposta: null, erroTipo: null }, modoIaConfiguradoAgora: "real" },
+      200
+    );
+    ok("N20 GET com status desconhecido vira FALHA",
+      (await consultarConversaDoAgente(AGENTE, TAREFA)).estado === "falha");
+  } finally {
+    (globalThis as unknown as { fetch: unknown }).fetch = original;
+  }
+
+  // ── N21..N32: o componente, por sonda de fonte ────────────────────
+  //
+  // LIMITACAO DECLARADA: sem RTL/jsdom, o ciclo de vida (polling,
+  // cancelamento, desmontagem) NAO e executado aqui. Estas sondas provam
+  // que o mecanismo existe e esta ligado nos lugares certos; a prova de
+  // que ele se comporta fica com o teste manual.
+  const chat = ler("components/ia/agente/ChatAgente.tsx");
+  const chatCodigo = codigo(chat);
+
+  ok("N21 ANCORA: a fonte do Chat foi lida", chat.length > 1000 && /ChatAgente/.test(chat));
+  ok("N22 o Chat NAO tem rede propria — fala pelo transporte nominal",
+    !/\bfetch\s*\(/.test(chatCodigo) &&
+    /from "@\/lib\/ia\/agentes-http"/.test(chatCodigo));
+  ok("N23 usa as duas capacidades da conversa",
+    /enviarMensagemAoAgente/.test(chatCodigo) && /consultarConversaDoAgente/.test(chatCodigo));
+  ok("N24 o acompanhamento e encadeado, nao setInterval cego",
+    /setTimeout/.test(chatCodigo) && !/setInterval/.test(chatCodigo));
+  ok("N25 ha cancelamento por desmontagem e por geracao",
+    /clearTimeout/.test(chatCodigo) && /AbortController/.test(chatCodigo) &&
+    /geracao/.test(chatCodigo));
+  ok("N26 os 6 status tem tratamento nomeado",
+    STATUS_CONVERSA.every((s) => new RegExp(s).test(chatCodigo)),
+    STATUS_CONVERSA.filter((s) => !new RegExp(s).test(chatCodigo)).join(","));
+  ok("N27 o envio e bloqueado enquanto ha tarefa em andamento",
+    /disabled=\{bloqueado/.test(chatCodigo) && /ehStatusTerminal/.test(chatCodigo));
+  ok("N28 ha textarea com rotulo associado e botao Enviar",
+    /<textarea/.test(chatCodigo) &&
+    /htmlFor="cds-chat-mensagem"/.test(chatCodigo) &&
+    /id="cds-chat-mensagem"/.test(chatCodigo) &&
+    /Enviar/.test(chatCodigo));
+  ok("N28a o painel de estado e anunciado a leitor de tela",
+    /aria-live="polite"/.test(chatCodigo));
+  ok("N29 a espera na fila e honesta sobre o piloto",
+    /Na fila/.test(chat) && /precisa estar em execu/.test(chat));
+  ok("N29a e NAO cita segredo nem manda o browser executar worker",
+    !/SECRET|secret|worker/i.test(chatCodigo));
+  ok("N30 os dois momentos do modo sao guardados separados",
+    /modoNoEnvio/.test(chatCodigo) && /modoAtual/.test(chatCodigo) &&
+    /modoNoEnvio !== modoAtual/.test(chatCodigo));
+  ok("N31 a resposta e texto React, sem HTML injetavel",
+    !/dangerouslySetInnerHTML/.test(chat) && /white-space: pre-wrap/.test(chat));
+  ok("N32 a condicao do piloto vem da funcao pura, nao de texto solto",
+    /condicoesIaRealAtendidas/.test(chatCodigo));
+  ok("N33 o Chat nao recebe nem envia identidade do dono",
+    !/userId|user_id/.test(chatCodigo));
+  ok("N34 a tela avisa que nao ha memoria conversacional",
+    /forma independente/.test(chat));
+
+  // ── N35..N42 — o retry invalida a geracao (bug achado no I3-R3) ───
+  //
+  // LIMITACAO, dita sem rodeio: isto e SOURCE TRIPWIRE, nao teste de
+  // lifecycle. Sem RTL/jsdom nao ha como montar o componente, clicar
+  // duas vezes em "Atualizar status" e observar a cadeia abortada
+  // escrevendo estado. O que estes asserts ancoram e a FORMA e a ORDEM
+  // do codigo que corrige o bug; a prova de comportamento continua sendo
+  // o teste manual.
+  //
+  // O bug: `reconsultar` era o unico dos quatro pontos que chamava
+  // `encerrarAcompanhamento()` sem subir a geracao. O abort volta do
+  // transporte como `{estado:"falha"}` — indistinguivel de falha real —,
+  // entao a cadeia morta passava pelo proprio check de geracao, exibia
+  // erro falso e podia reagendar um timer, criando DOIS acompanhamentos
+  // da mesma tarefa.
+  const corpoReconsultar = (() => {
+    const i = chatCodigo.indexOf("const reconsultar = useCallback(");
+    if (i < 0) return "";
+    const resto = chatCodigo.slice(i);
+    const fim = resto.indexOf("}, [");
+    return fim < 0 ? resto : resto.slice(0, fim);
+  })();
+
+  const posDe = (re: RegExp) => corpoReconsultar.search(re);
+  const pIncremento = posDe(/geracao\.current \+= 1/);
+  const pCaptura = posDe(/const minhaGeracao = geracao\.current/);
+  const pEncerrar = posDe(/encerrarAcompanhamento\(\)/);
+  const pAcompanhar = posDe(/void acompanhar\(/);
+
+  ok("N35 ANCORA: o corpo de reconsultar foi delimitado",
+    corpoReconsultar.length > 80 && /void acompanhar\(/.test(corpoReconsultar),
+    String(corpoReconsultar.length));
+  ok("N36 reconsultar INCREMENTA a geracao", pIncremento >= 0);
+  ok("N37 e CAPTURA a nova geracao numa constante", pCaptura >= 0);
+  ok("N38 encerra o acompanhamento anterior", pEncerrar >= 0);
+  ok("N39 e chama acompanhar com a NOVA geracao, nunca com o ref cru",
+    /void acompanhar\(conversa\.id, minhaGeracao\)/.test(corpoReconsultar) &&
+      !/acompanhar\(conversa\.id, geracao\.current\)/.test(corpoReconsultar));
+  ok("N40 a ORDEM e incrementar -> capturar -> encerrar -> acompanhar",
+    pIncremento >= 0 && pCaptura > pIncremento && pEncerrar > pCaptura &&
+      pAcompanhar > pEncerrar);
+  ok("N41 CONTROLE NEGATIVO: a forma ANTIGA (sem incremento) reprovaria",
+    !/geracao\.current \+= 1/.test(
+      "if (conversa === null) return;\n encerrarAcompanhamento();\n setFalha(null);\n" +
+      " void acompanhar(conversa.id, geracao.current);"));
+  ok("N42 os QUATRO pontos que encerram acompanhamento sobem a geracao",
+    (chatCodigo.match(/geracao\.current \+= 1/g) ?? []).length ===
+      (chatCodigo.match(/encerrarAcompanhamento\(\)/g) ?? []).length,
+    `incrementos=${(chatCodigo.match(/geracao\.current \+= 1/g) ?? []).length} ` +
+      `encerramentos=${(chatCodigo.match(/encerrarAcompanhamento\(\)/g) ?? []).length}`);
+
+  // A falha de consulta NAO libera novo envio: ela nao prova que a tarefa
+  // terminou, e liberar ali deixaria o usuario criar uma segunda tarefa
+  // com a primeira ainda `pendente`/`rodando` no backend. Fail-closed
+  // deliberado — o bloqueio depende SO do status conhecido.
+  ok("N43 o bloqueio de envio depende do status da tarefa, nao da falha de consulta",
+    /const bloqueado = enviando \|\| emAndamento;/.test(chatCodigo) &&
+      !/falha\?\.onde !== "consulta"/.test(chatCodigo));
+
+  // ═════════════════════════════════════════════════════════════════════
+  console.log(`\n══ CDS IA — UI-1C.a: pagina do agente:  ${passou}/${passou + falhou} passaram ══`);
+  if (falhou > 0) {
+    console.log(`   ${falhou} FALHARAM`);
+    process.exit(1);
+  }
+})();

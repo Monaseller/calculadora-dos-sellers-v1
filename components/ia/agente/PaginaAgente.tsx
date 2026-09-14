@@ -56,6 +56,7 @@ import EmBreve from "@/components/ia/EmBreve";
 import AbasAgente from "@/components/ia/agente/AbasAgente";
 import VisaoGeral from "@/components/ia/agente/VisaoGeral";
 import ListaTarefas from "@/components/ia/agente/ListaTarefas";
+import ChatAgente from "@/components/ia/agente/ChatAgente";
 
 /** Sem leitura real de tarefas, ninguem tem tarefa. */
 const NENHUMA_TAREFA: readonly TarefaUI[] = [];
@@ -192,6 +193,10 @@ export default function PaginaAgente({ agenteId, aba }: { agenteId: string; aba:
         {aba === "tarefas" && agoraMs !== null && (
           <ListaTarefas tarefas={tarefas} agoraMs={agoraMs} />
         )}
+        {/* AGENT-VERTICAL-SLICE-V1-I3: a aba Chat deixou de ser
+            placeholder. Ela nao depende de `agoraMs` — o Chat nao deriva
+            nada do relogio da pagina, so conversa com a API. */}
+        {aba === "chat" && <ChatAgente agenteId={agente.id} />}
 
         {(aba === "visao-geral" || aba === "tarefas") && agoraMs === null && (
           <p className="cds-ia-carregando">Carregando…</p>
@@ -295,7 +300,6 @@ function abaPendente(aba: AbaId): aba is AbaPendente {
 /** O que cada superficie VAI ser. Fica ao lado da pendencia, para a tela
  *  dizer as duas coisas: o destino e o que falta para chegar la. */
 const DESCRICAO_ABA: Record<AbaPendente, string> = {
-  chat: "Conversar diretamente com este agente: pedir análises, dar orientações e entender o que ele encontrou.",
   conexoes: "As contas e os serviços que este agente poderá usar — e o que cada um permite que ele faça.",
   funcoes: "As funções que este agente poderá executar, cada uma com o acesso que exige.",
   permissoes: "Os limites de cada ação deste agente: o que ele pode fazer sozinho e o que precisa de autorização.",

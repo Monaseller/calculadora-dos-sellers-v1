@@ -223,9 +223,23 @@ secao("D. As 8 abas: 5 implementadas, 3 pendentes");
   // existe. Os asserts inverteram junto, e continuam nominais.
   ok("D3  conexoes, funcoes e permissoes voltaram a pendentes",
     PENDENTES_BG2.every((id) => ABAS.find((a) => a.id === id)?.implementada === false));
-  ok("D4  as seis pendentes sao exatamente estas",
+  // ── D4 reconciliado na AGENT-VERTICAL-SLICE-V1-I3 ────────────────
+  //
+  // `chat` saiu da lista porque a aba passou a existir de verdade: cria
+  // uma tarefa `conversa` e acompanha o resultado. As outras cinco
+  // continuam pendentes, e a lista continua NOMINAL nos dois sentidos —
+  // uma aba que sumisse daqui sem ganhar tela reprovaria igual.
+  ok("D4  as cinco pendentes sao exatamente estas",
     ABAS.filter((a) => !a.implementada).map((a) => a.id).join(",") ===
-    "chat,conexoes,funcoes,permissoes,memoria,custos");
+    "conexoes,funcoes,permissoes,memoria,custos");
+  ok("D4a `chat` saiu das pendentes porque virou tela real",
+    ABAS.find((a) => a.id === "chat")?.implementada === true &&
+    /aba === "chat"/.test(codigo(PAGINA_AGENTE)));
+  // Computado, e nao dois literais: com literais o `tsc` resolve a
+  // comparacao em tempo de compilacao e reprova o proprio controle.
+  const listaAtual = ABAS.filter((a) => !a.implementada).map((a) => a.id).join(",");
+  const listaAntiga = ["chat", ...ABAS.filter((a) => !a.implementada).map((a) => a.id)].join(",");
+  ok("D4b CONTROLE NEGATIVO: a lista antiga (com chat) reprovaria", listaAntiga !== listaAtual);
 
   const pag = codigo(PAGINA_AGENTE);
   ok("D5  a pagina NAO monta componente proprio para as tres",

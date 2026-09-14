@@ -44,6 +44,7 @@ import type { RequisitoConexao } from "@/lib/ia/skills/contrato";
 
 const ROTA_BASE = "/api/agentes";
 const ROTA_SUFIXO_DIAGNOSTICO = "/diagnostico";
+const ROTA_SUFIXO_CONVERSA = "/conversa";
 
 /**
  * Um diagnóstico e a identidade de quem foi diagnosticado.
@@ -299,4 +300,194 @@ export async function obterDiagnostico(
     semSelecao: corpo.semSelecao as readonly RequisitoConexao[],
     coleta: "ok",
   };
+}
+
+// ─── Conversa — AGENT-VERTICAL-SLICE-V1-I3 ────────────────────────────
+//
+// O que entra aqui: transporte e leitura do CONTRATO publicado no V1-I2,
+// mais as funcoes puras que interpretam esse contrato. O que NAO entra:
+// `useState`, `useEffect`, temporizador, ciclo de vida de componente ou
+// JSX — polling e desmontagem sao assunto do `ChatAgente`, e misturar as
+// duas coisas tornaria esta fronteira intestavel sem um DOM.
+//
+// Este arquivo continua sendo o unico ponto de rede da area de IA, e e
+// por isso que a aba Chat fala com a API atraves dele em vez de chamar
+// `fetch` por conta propria.
+
+/** Os estados que a tarefa pode assumir, conforme o CHECK do banco. */
+export const STATUS_CONVERSA = [
+  "pendente",
+  "rodando",
+  "aguardando_aprovacao",
+  "concluido",
+  "erro",
+  "cancelado",
+] as const;
+
+export type StatusConversa = (typeof STATUS_CONVERSA)[number];
+
+/** O modo de IA que a API reporta — configuracao do instante, jamais
+ *  proveniencia da execucao. O nome do campo na API diz isso, e o tipo
+ *  aqui nao acrescenta nenhuma promessa. */
+export type ModoIa = "fake" | "real";
+
+/**
+ * O marcador que o adaptador fake carimba na propria resposta.
+ *
+ * Serve como SEGUNDA evidencia visual. A autoridade sobre o modo continua
+ * sendo o campo que a API devolve — texto de resposta e conteudo, nao
+ * configuracao.
+ */
+export const MARCADOR_FAKE = "[fake]";
+
+export interface TarefaConversaUI {
+  id: string;
+  status: StatusConversa;
+  resposta: string | null;
+  erroTipo: string | null;
+}
+
+export type RespostaEnvioConversa =
+  | { estado: "ok"; tarefaId: string; status: StatusConversa; modo: ModoIa }
+  | { estado: "nao_autenticado" }
+  | { estado: "nao_encontrado" }
+  | { estado: "agente_inativo" }
+  | { estado: "entrada_invalida" }
+  | { estado: "falha" };
+
+export type RespostaConsultaConversa =
+  | { estado: "ok"; tarefa: TarefaConversaUI; modo: ModoIa }
+  | { estado: "nao_autenticado" }
+  | { estado: "nao_encontrado" }
+  | { estado: "entrada_invalida" }
+  | { estado: "falha" };
+
+const ehModo = (v: unknown): v is ModoIa => v === "fake" || v === "real";
+
+/** Status vindo da API, validado contra o vocabulario conhecido. Um valor
+ *  fora da lista NAO e convertido para nada: quem chama decide o que
+ *  fazer, e a UI para em vez de supor sucesso. */
+export function ehStatusConhecido(bruto: unknown): bruto is StatusConversa {
+  return typeof bruto === "string" && (STATUS_CONVERSA as readonly string[]).includes(bruto);
+}
+
+/**
+ * Terminal significa: nao adianta perguntar de novo.
+ *
+ * `aguardando_aprovacao` entra como TERMINAL de propósito. Conversa V1
+ * nao usa Funcoes e nao deveria produzir esse estado; se produzir, ficar
+ * perguntando para sempre seria o pior desfecho — a UI para e mostra o
+ * que viu.
+ */
+export function ehStatusTerminal(status: StatusConversa): boolean {
+  return status !== "pendente" && status !== "rodando";
+}
+
+/**
+ * As condicoes OPERACIONAIS do piloto com IA real.
+ *
+ * Isto NAO e proveniencia: nada persiste com que provedor a tarefa foi
+ * atendida. O que esta funcao afirma e mais modesto e verificavel — a
+ * configuracao estava em `real` no envio, continuava em `real` na ultima
+ * consulta, a tarefa concluiu e a resposta nao carrega o marcador do
+ * fake. Sob flag estavel, isso basta para o primeiro teste manual,
+ * porque o provedor real falha fechado: com ele ligado, erro do provedor
+ * derruba a tarefa em vez de cair para o fake.
+ */
+export function condicoesIaRealAtendidas(entrada: {
+  status: StatusConversa;
+  modoNoEnvio: ModoIa | null;
+  modoAtual: ModoIa | null;
+  resposta: string | null;
+}): boolean {
+  if (entrada.status !== "concluido") return false;
+  if (entrada.modoNoEnvio !== "real" || entrada.modoAtual !== "real") return false;
+  if (entrada.modoNoEnvio !== entrada.modoAtual) return false;
+  if (typeof entrada.resposta !== "string") return false;
+  return !entrada.resposta.includes(MARCADOR_FAKE);
+}
+
+function tarefaDaResposta(bruto: unknown): TarefaConversaUI | null {
+  if (!ehObjeto(bruto)) return null;
+  const { id, status, resposta, erroTipo } = bruto;
+  if (typeof id !== "string" || id.length === 0) return null;
+  if (!ehStatusConhecido(status)) return null;
+  if (resposta !== null && typeof resposta !== "string") return null;
+  if (erroTipo !== null && typeof erroTipo !== "string") return null;
+  return { id, status, resposta, erroTipo };
+}
+
+const caminhoDaConversa = (agenteId: string) =>
+  `${ROTA_BASE}/${encodeURIComponent(agenteId)}${ROTA_SUFIXO_CONVERSA}`;
+
+/**
+ * Cria UMA tarefa de conversa. O corpo leva SOMENTE a mensagem: dono,
+ * agente, tipo, provedor e tentativas sao decididos pelo servidor, e a
+ * API recusa qualquer chave a mais.
+ */
+export async function enviarMensagemAoAgente(
+  agenteId: string,
+  mensagem: string,
+  signal?: AbortSignal
+): Promise<RespostaEnvioConversa> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(caminhoDaConversa(agenteId), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mensagem }),
+      signal,
+    });
+  } catch {
+    return { estado: "falha" };
+  }
+
+  if (resposta.status === 401) return { estado: "nao_autenticado" };
+  if (resposta.status === 404) return { estado: "nao_encontrado" };
+  if (resposta.status === 409) return { estado: "agente_inativo" };
+  if (resposta.status === 400) return { estado: "entrada_invalida" };
+
+  const corpo = await corpoDe(resposta);
+  if (!resposta.ok || !ehObjeto(corpo) || corpo.ok !== true) return { estado: "falha" };
+  // Shape divergente e FALHA, nunca uma tarefa meio montada entrando no
+  // acompanhamento com um id que talvez nao exista.
+  if (typeof corpo.tarefaId !== "string" || corpo.tarefaId.length === 0) return { estado: "falha" };
+  if (!ehStatusConhecido(corpo.status)) return { estado: "falha" };
+  if (!ehModo(corpo.modoIaConfiguradoAgora)) return { estado: "falha" };
+
+  return {
+    estado: "ok",
+    tarefaId: corpo.tarefaId,
+    status: corpo.status,
+    modo: corpo.modoIaConfiguradoAgora,
+  };
+}
+
+/** Consulta UMA tarefa de conversa. Leitura pura: nao cria nada, nao
+ *  reexecuta e nao aciona o worker. */
+export async function consultarConversaDoAgente(
+  agenteId: string,
+  tarefaId: string,
+  signal?: AbortSignal
+): Promise<RespostaConsultaConversa> {
+  const consulta = new URLSearchParams({ tarefaId });
+  let resposta: Response;
+  try {
+    resposta = await fetch(`${caminhoDaConversa(agenteId)}?${consulta.toString()}`, { signal });
+  } catch {
+    return { estado: "falha" };
+  }
+
+  if (resposta.status === 401) return { estado: "nao_autenticado" };
+  if (resposta.status === 404) return { estado: "nao_encontrado" };
+  if (resposta.status === 400) return { estado: "entrada_invalida" };
+
+  const corpo = await corpoDe(resposta);
+  if (!resposta.ok || !ehObjeto(corpo) || corpo.ok !== true) return { estado: "falha" };
+  if (!ehModo(corpo.modoIaConfiguradoAgora)) return { estado: "falha" };
+
+  const tarefa = tarefaDaResposta(corpo.tarefa);
+  if (tarefa === null) return { estado: "falha" };
+
+  return { estado: "ok", tarefa, modo: corpo.modoIaConfiguradoAgora };
 }

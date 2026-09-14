@@ -38,7 +38,7 @@
  */
 export const ABAS = [
   { id: "visao-geral", rotulo: "Visão geral", implementada: true },
-  { id: "chat", rotulo: "Chat", implementada: false },
+  { id: "chat", rotulo: "Chat", implementada: true },
   { id: "tarefas", rotulo: "Tarefas", implementada: true },
   { id: "conexoes", rotulo: "Conexões", implementada: false },
   { id: "funcoes", rotulo: "Funções", implementada: false },
@@ -79,8 +79,6 @@ type AbaPendente = Extract<(typeof ABAS)[number], { implementada: false }>["id"]
  * e montado por dentro.
  */
 export const PENDENCIA_ABA: Record<AbaPendente, string> = {
-  chat:
-    "falta conectar esta aba às conversas reais do agente. As mensagens e o histórico aparecerão aqui quando essa integração estiver disponível — uma resposta fabricada seria indistinguível de uma resposta de verdade, e por isso não existe.",
   conexoes:
     "falta conectar esta aba às contas que o agente realmente usa. As contas da sua conta CDS serão atribuídas a cada agente por aqui.",
   funcoes:

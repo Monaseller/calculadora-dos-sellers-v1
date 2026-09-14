@@ -193,6 +193,18 @@ const ARQUIVOS_SKILL_1C: readonly string[] = [
 ];
 
 /** A area inteira. As varreduras de seguranca valem para TUDO. */
+/**
+ * AGENT-VERTICAL-SLICE-V1-I3 — a aba Chat deixou de ser placeholder.
+ *
+ * `ChatAgente.tsx` e a tela que cria uma tarefa `conversa` real e
+ * acompanha o resultado. Ela NAO faz rede propria: chama
+ * `agentes-http.ts`, que segue sendo o unico arquivo da area autorizado
+ * a isso.
+ */
+const ARQUIVOS_UI_CHAT: readonly string[] = [
+  "components/ia/agente/ChatAgente.tsx",
+];
+
 const ARQUIVOS_UI: readonly string[] = [
   ...ARQUIVOS_UI_1B,
   ...ARQUIVOS_UI_1CA,
@@ -202,6 +214,7 @@ const ARQUIVOS_UI: readonly string[] = [
   ...ARQUIVOS_SKILL_1B,
   ...ARQUIVOS_SKILL_1C,
   ...ARQUIVOS_UI_CONSUMER,
+  ...ARQUIVOS_UI_CHAT,
 ];
 
 /**
@@ -241,7 +254,31 @@ secao("A. Inventario e rotas");
   // arquivo novo declarado sem revisao passaria batido. E o unico assert
   // desta suite que DESCE quando codigo e removido — por isso ele e a
   // prova de que a remocao foi deliberada, nao acidente.
-  ok("A2  47 arquivos, nem um a mais", noDisco.length === 47, String(noDisco.length));
+  // ...e 48 na AGENT-VERTICAL-SLICE-V1-I3 (`ChatAgente.tsx`), quando a
+  // aba Chat deixou de ser placeholder e ganhou tela de verdade.
+  ok("A2  48 arquivos, nem um a mais", noDisco.length === 48, String(noDisco.length));
+
+  // ── A1b..A1e — o inventario e NOMINAL, nao uma contagem ───────────
+  //
+  // A2 sozinho seria enganoso: trocar um arquivo por outro mantem 48 e
+  // passaria. A1 ja compara os conjuntos, e os controles abaixo provam
+  // que ele realmente reprova cada um dos quatro desvios possiveis —
+  // ausente, extra, renomeado e troca com contagem preservada.
+  const semChat = declarado.filter((a) => a !== "components/ia/agente/ChatAgente.tsx");
+  const comIntruso = [...semChat, "components/ia/agente/Intruso.tsx"].sort();
+  const renomeado = [...semChat, "components/ia/agente/ChatDoAgente.tsx"].sort();
+
+  ok("A1a ANCORA: ChatAgente esta no inventario declarado",
+    declarado.includes("components/ia/agente/ChatAgente.tsx"));
+  ok("A1b CONTROLE NEGATIVO: arquivo esperado AUSENTE reprova",
+    JSON.stringify(semChat) !== JSON.stringify(declarado));
+  ok("A1c CONTROLE NEGATIVO: arquivo inesperado EXTRA reprova",
+    JSON.stringify(comIntruso) !== JSON.stringify(declarado));
+  ok("A1d CONTROLE NEGATIVO: nome TROCADO reprova mesmo com contagem igual",
+    renomeado.length === declarado.length &&
+    JSON.stringify(renomeado) !== JSON.stringify(declarado));
+  ok("A1e e a contagem sozinha NAO distinguiria a troca",
+    renomeado.length === 48);
 }
 
 const ROTAS = [

@@ -128,9 +128,17 @@ secao("B. O que a UI NAO manda");
   ok("B3b headers so no transporte nominal",
     AREA.filter((a) => /headers\s*:/.test(codigo(ler(a)))).join(",") === TRANSPORTE,
     AREA.filter((a) => /headers\s*:/.test(codigo(ler(a)))).join(", ") || "nenhum");
-  ok("B3c e o UNICO cabecalho enviado e o do corpo JSON",
-    (CODIGO_TRANSPORTE.match(/headers\s*:/g) ?? []).length === 1 &&
-      /headers: \{ "Content-Type": "application\/json" \}/.test(CODIGO_TRANSPORTE) &&
+  // ── B3c reconciliado na AGENT-VERTICAL-SLICE-V1-I3 ──────────────
+  //
+  // Passaram a existir DUAS escritas, e cada corpo JSON traz o seu
+  // `Content-Type`. A invariavel nao afrouxa: continua sendo "o unico
+  // cabecalho enviado e o do corpo JSON" — mudou quantas vezes ele
+  // aparece. TODA ocorrencia de `headers:` tem de ser exatamente aquele
+  // cabecalho, e nenhuma credencial entra junto.
+  ok("B3c os UNICOS cabecalhos sao os dois Content-Type do corpo JSON",
+    (CODIGO_TRANSPORTE.match(/headers\s*:/g) ?? []).length === 2 &&
+      (CODIGO_TRANSPORTE.match(/headers: \{ "Content-Type": "application\/json" \}/g) ?? [])
+        .length === 2 &&
       !/"X-|Cookie|Api-Key|Idempotency-Key/i.test(CODIGO_TRANSPORTE));
   ok("B4  `credentials` omitido — o cookie same-origin ja viaja sozinho",
     !/credentials/.test(CODIGO_TRANSPORTE));
@@ -146,16 +154,48 @@ secao("B. O que a UI NAO manda");
     const j = resto.indexOf("\nexport ");
     return j < 0 ? resto : resto.slice(0, j);
   };
-  ok("B5  as duas leituras continuam GET puro, sem method e sem corpo",
-    ["listarAgentes", "obterDiagnostico"].every((f) => {
+  // A consulta de conversa entra AQUI, entre as leituras, e nao entre as
+  // escritas: ela e GET puro. Classificar toda funcao que cita
+  // `/conversa` como escrita confundiria acompanhar com criar.
+  ok("B5  as tres leituras continuam GET puro, sem method e sem corpo",
+    ["listarAgentes", "obterDiagnostico", "consultarConversaDoAgente"].every((f) => {
       const corpo = corpoDaFuncao(f);
       return corpo.length > 50 && !/method\s*:|body\s*:/.test(corpo);
     }));
-  ok("B5b method e body existem SO na capacidade de criacao",
-    /method: "POST"/.test(corpoDaFuncao("criarAgenteViaApi")) &&
-      /body: JSON\.stringify/.test(corpoDaFuncao("criarAgenteViaApi")) &&
-      (CODIGO_TRANSPORTE.match(/method\s*:/g) ?? []).length === 1 &&
-      (CODIGO_TRANSPORTE.match(/body\s*:/g) ?? []).length === 1);
+  // ── B5b reconciliado na AGENT-VERTICAL-SLICE-V1-I3 ──────────────
+  //
+  // ANTES: "method e body existem SO na capacidade de criacao" — UMA
+  // escrita, a de agente. DEPOIS: DUAS escritas, nomeadas, e somente
+  // essas duas. Nao virou `>= 2` nem contagem solta — a suite sabe
+  // QUAIS sao, por igualdade de conjunto nos dois sentidos.
+  const ESCRITAS_AUTORIZADAS = ["criarAgenteViaApi", "enviarMensagemAoAgente"];
+  const escritasReais = [...CODIGO_TRANSPORTE.matchAll(/export async function (\w+)\(/g)]
+    .map((m) => m[1])
+    .filter((nome) => /method: "POST"/.test(corpoDaFuncao(nome)))
+    .sort();
+  const esperadas = JSON.stringify([...ESCRITAS_AUTORIZADAS].sort());
+
+  ok("B5b as escritas publicadas sao EXATAMENTE as duas nominais",
+    JSON.stringify(escritasReais) === esperadas, escritasReais.join(", ") || "nenhuma");
+  ok("B5b1 cada escrita leva method POST e corpo JSON",
+    ESCRITAS_AUTORIZADAS.every(
+      (f) => /method: "POST"/.test(corpoDaFuncao(f)) && /body: JSON\.stringify/.test(corpoDaFuncao(f))));
+  ok("B5b2 o transporte tem exatamente dois method e dois body",
+    (CODIGO_TRANSPORTE.match(/method\s*:/g) ?? []).length === 2 &&
+      (CODIGO_TRANSPORTE.match(/body\s*:/g) ?? []).length === 2);
+  ok("B5b3 a escrita de conversa vai para a rota de conversa, com corpo so de mensagem",
+    /ROTA_SUFIXO_CONVERSA/.test(CODIGO_TRANSPORTE) &&
+      /body: JSON\.stringify\(\{ mensagem \}\)/.test(corpoDaFuncao("enviarMensagemAoAgente")));
+  ok("B5b4 CONTROLE NEGATIVO: sumir a criacao de AGENTE reprovaria",
+    JSON.stringify(["enviarMensagemAoAgente"]) !== esperadas);
+  ok("B5b5 CONTROLE NEGATIVO: sumir a criacao de CONVERSA reprovaria",
+    JSON.stringify(["criarAgenteViaApi"]) !== esperadas);
+  ok("B5b6 CONTROLE NEGATIVO: uma TERCEIRA escrita reprovaria",
+    JSON.stringify([...ESCRITAS_AUTORIZADAS, "apagarAgenteViaApi"].sort()) !== esperadas);
+  ok("B5b7 CONTROLE NEGATIVO: TROCA mantendo o total de duas reprovaria",
+    JSON.stringify(["criarAgenteViaApi", "outraEscritaQualquer"].sort()) !== esperadas);
+  ok("B5b8 ANCORA: a varredura enxergou funcoes de verdade",
+    escritasReais.length === 2 && corpoDaFuncao("criarAgenteViaApi").length > 50);
   ok("B5c e nenhum outro arquivo da area escreve",
     AREA.filter((a) => /method\s*:\s*"(POST|PUT|PATCH|DELETE)"/.test(codigo(ler(a)))).join(",") ===
       TRANSPORTE);
@@ -171,9 +211,16 @@ secao("B. O que a UI NAO manda");
   ok("B7  POST existe SO no transporte nominal",
     JSON.stringify(comPost.slice().sort()) === JSON.stringify(COM_POST_AUTORIZADO),
     comPost.join(", ") || "nenhum");
-  ok("B7b e a unica capacidade de escrita publicada e a criacao",
-    (CODIGO_TRANSPORTE.match(/method:\s*"POST"/g) ?? []).length === 1 &&
+  // ── B7b reconciliado na AGENT-VERTICAL-SLICE-V1-I3 ──────────────
+  //
+  // ANTES: uma unica capacidade de escrita, a criacao de agente.
+  // DEPOIS: duas, e ambas de CRIACAO — agente e tarefa de conversa. O
+  // veto a PUT/PATCH/DELETE nao muda: esta area cria, nunca altera nem
+  // apaga.
+  ok("B7b as capacidades de escrita publicadas sao as duas criacoes",
+    (CODIGO_TRANSPORTE.match(/method:\s*"POST"/g) ?? []).length === 2 &&
       /export async function criarAgenteViaApi\(/.test(CODIGO_TRANSPORTE) &&
+      /export async function enviarMensagemAoAgente\(/.test(CODIGO_TRANSPORTE) &&
       !/"PUT"|"PATCH"|"DELETE"/.test(CODIGO_TRANSPORTE));
 }
 
