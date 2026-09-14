@@ -112,6 +112,62 @@ t("4c. a rota de agentes NAO fica publica, e so por ter segredo proprio", () => 
     "rota liberada mas nao compara o segredo recebido com o esperado");
 });
 
+t("4d. GET /api/internal/agentes/worker passa sem cookie", () => {
+  // O DISPATCHER. O teste 4b cobre a rota que o worker MANUAL chama; esta
+  // cobre a que o Vercel Cron chama sozinho. Sao portas diferentes, com
+  // segredos diferentes, e so esta ultima faz a fila andar sem terminal.
+  //
+  // O modo de falha aqui e pior que 401: o agendador da Vercel trata 307
+  // como sucesso. Sem esta entrada, o cron rodaria a cada minuto, seria
+  // redirecionado para /login, registraria 100% de sucesso — e nenhuma
+  // Task jamais sairia de `pendente`. Silencio total.
+  assert(sem("/api/internal/agentes/worker", "GET") === "liberar",
+    "dispatcher de agentes bloqueado pelo middleware — o cron falharia como sucesso");
+});
+
+t("4e. o dispatcher NAO fica publico, e so por ter segredo proprio", () => {
+  // GET e o unico verbo. O agendador da Vercel so faz GET.
+  for (const metodo of ["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
+    assert(sem("/api/internal/agentes/worker", metodo) === "bloquear_api",
+      `${metodo} no dispatcher deveria cair no default deny`);
+
+  assert(!("/api/internal/agentes/worker" in ROTAS_PUBLICAS),
+    "dispatcher listado como PUBLICO — ele tem segredo proprio, nao e publico");
+  assert(!PAGINAS_PUBLICAS.has("/api/internal/agentes/worker"),
+    "dispatcher listado como pagina publica");
+
+  // Mesma disciplina do 4c: a liberacao so se justifica porque o HANDLER
+  // autentica. Comparacao sobre a fonte SEM COMENTARIOS — o cabecalho da
+  // rota fala de CRON_SECRET em prosa, e uma busca no arquivo cru passaria
+  // mesmo com a guarda deletada.
+  const fonteWorker = fs
+    .readFileSync(path.join(process.cwd(), "app/api/internal/agentes/worker/route.ts"), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|[^:])\/\/.*$/gm, "$1");
+
+  assert(/process\.env\.CRON_SECRET/.test(fonteWorker),
+    "dispatcher liberado no middleware mas NAO le CRON_SECRET do ambiente");
+  assert(/headers\.get\("authorization"\)/.test(fonteWorker),
+    "dispatcher liberado mas nao le o header Authorization");
+  assert(/!segredo/.test(fonteWorker),
+    "dispatcher liberado mas nao e fail-closed quando CRON_SECRET falta");
+  assert(/auth !== `Bearer \$\{segredo\}`/.test(fonteWorker),
+    "dispatcher liberado mas nao compara o Bearer recebido com o esperado");
+
+  // Uma porta so: o dispatcher NAO aceita o segredo do worker manual, nem
+  // segredo por query string. Duas portas para a mesma fila dobrariam a
+  // superficie sem dobrar utilidade.
+  assert(!/x-worker-secret/.test(fonteWorker),
+    "dispatcher aceita x-worker-secret — ele tem UMA porta, e ela e o CRON_SECRET");
+  assert(!/searchParams/.test(fonteWorker),
+    "dispatcher le query string — segredo em URL vaza em log de acesso");
+
+  // O teto declarado no codigo tem de existir: sem ele a funcao herda os
+  // 60 s do glob de `vercel.json` e o laco e cortado no meio de uma Task.
+  assert(/export const maxDuration = 300/.test(fonteWorker),
+    "dispatcher sem maxDuration explicito — herdaria 60 s e cortaria a Task em `rodando`");
+});
+
 t("5. metodo errado numa rota com segredo NAO e liberado", () => {
   // O middleware não inventa método: worker é GET, executar é POST.
   assert(sem("/api/internal/estudio-anuncios/worker", "POST") === "bloquear_api",
@@ -122,9 +178,10 @@ t("5. metodo errado numa rota com segredo NAO e liberado", () => {
     "GET no executar de agentes deveria cair no default deny");
 });
 
-t("6. as 5 rotas com segredo estao declaradas, nem uma a mais", () => {
-  assert(Object.keys(ROTAS_COM_SEGREDO).length === 5,
-    `esperado 5 rotas com segredo, encontrado ${Object.keys(ROTAS_COM_SEGREDO).length}`);
+t("6. as 6 rotas com segredo estao declaradas, nem uma a mais", () => {
+  // 5 -> 6 na FUNCTION-RUNTIME-V1-B1: entrou o dispatcher de agentes.
+  assert(Object.keys(ROTAS_COM_SEGREDO).length === 6,
+    `esperado 6 rotas com segredo, encontrado ${Object.keys(ROTAS_COM_SEGREDO).length}`);
 });
 
 // ────────────────────────────────────────────────────────────────────
@@ -351,7 +408,7 @@ t("29. asset marcado 'publico' precisa constar em ASSETS_PUBLICOS", () => {
 });
 
 // ────────────────────────────────────────────────────────────────────
-console.log("\n[8. cobertura: as 53 rotas do inventario F0.a]");
+console.log("\n[8. cobertura: as 54 rotas do inventario F0.a]");
 
 /** caminho, metodo, decisao esperada SEM sessao. */
 const INVENTARIO: [string, string, Decisao][] = [
@@ -363,12 +420,14 @@ const INVENTARIO: [string, string, Decisao][] = [
   ["/api/auth/mercadolivre/callback", "GET", "liberar"],
   ["/api/auth/shopee", "GET", "liberar"],
   ["/api/auth/shopee/callback", "GET", "liberar"],
-  // — com segredo proprio (5; era 4 ate a AGENTES-FASE1C-FIX1)
+  // — com segredo proprio (6; era 4 ate a AGENTES-FASE1C-FIX1 e 5 ate a
+  //   FUNCTION-RUNTIME-V1-B1, quando o dispatcher entrou)
   ["/api/sync", "GET", "liberar"],
   ["/api/internal/estudio-anuncios/worker", "GET", "liberar"],
   ["/api/internal/estudio-anuncios/executar", "POST", "liberar"],
   ["/api/internal/sync/executar", "POST", "liberar"],
   ["/api/internal/agentes/executar", "POST", "liberar"],
+  ["/api/internal/agentes/worker", "GET", "liberar"],
   // — excecao temporaria F0.c (1; era 3 ate o cutover F0.c.5 e 2 ate a
   //   F0.c.16, quando /api/auth/status saiu do inventario por ter sido
   //   DELETADA — o caminho segue coberto pelo teste 20)
@@ -429,7 +488,7 @@ const INVENTARIO: [string, string, Decisao][] = [
   [`/api/estudio-anuncios/projetos/${UUID}/exportacao/${UUID}/arquivo`, "GET", "bloquear_api"],
 ];
 
-t("30. as 53 rotas do inventario caem na classe correta", () => {
+t("30. as 54 rotas do inventario caem na classe correta", () => {
   // 51 → 50 em F0.c.6d: `/api/auth/relay` deixou de existir.
   // 50 → 49 em F0.c.16: `/api/auth/status` deixou de existir.
   // 49 → 50 na AGENTES-FASE1C-FIX1: `/api/internal/agentes/executar` entrou.
@@ -440,7 +499,10 @@ t("30. as 53 rotas do inventario caem na classe correta", () => {
   // 51 → 53 na SKILL-1D.agent-source-C: `GET` e `POST /api/agentes`, a
   // fonte real dos agentes do dono. Duas entradas para um caminho so,
   // porque o inventario e por (caminho, metodo).
-  assert(INVENTARIO.length === 53, `inventario tem ${INVENTARIO.length} rotas, esperado 53`);
+  // 53 -> 54 na FUNCTION-RUNTIME-V1-B1: `/api/internal/agentes/worker`, o
+  // dispatcher chamado pelo Vercel Cron. Segunda rota de agentes com
+  // segredo proprio, e a unica que nao depende de terminal aberto.
+  assert(INVENTARIO.length === 54, `inventario tem ${INVENTARIO.length} rotas, esperado 54`);
   for (const [caminho, metodo, esperado] of INVENTARIO) {
     const obtido = sem(caminho, metodo);
     assert(obtido === esperado, `${metodo} ${caminho}: esperado ${esperado}, obtido ${obtido}`);

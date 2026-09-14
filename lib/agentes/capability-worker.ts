@@ -259,3 +259,82 @@ function normalizarLinha(data: unknown): unknown {
   if (Array.isArray(data)) return data.length > 0 ? data[0] : null;
   return data ?? null;
 }
+
+// ─── O claim, para o dispatcher de sistema ────────────────────────────
+
+/** O que o dispatcher precisa saber sobre a tarefa reivindicada: o id.
+ *  Nada mais sai daqui — ver o docblock de `reivindicarProximaTarefa`. */
+export interface TarefaReivindicadaMinima {
+  tarefaId: string;
+}
+
+/**
+ * A forma de um UUID. Mesma do resto do repositorio — a rota interna e a
+ * de conversa ja usam esta constante em suas proprias copias.
+ */
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Reivindica a PROXIMA tarefa elegivel da fila — FUNCTION-RUNTIME-V1-B1.
+ *
+ * ── Fronteira: isto pertence ao DISPATCHER DE SISTEMA ────────────────
+ *
+ * `claim_next_agente_tarefa()` e GLOBAL: varre `agente_tarefas` inteira
+ * e devolve a elegivel MAIS ANTIGA, de QUALQUER dono. Ser global e
+ * defeito quando o gatilho e um usuario — o clique de alguem
+ * reivindicaria a tarefa de outro. E e a propriedade CORRETA quando o
+ * gatilho e o sistema: um dispatcher deve drenar a fila na ordem de
+ * chegada, sem privilegiar quem clicou por ultimo.
+ *
+ * Por isso este wrapper NUNCA pode ser alcancado por rota de usuario.
+ * Ele existe para `app/api/internal/agentes/worker`, que so responde a
+ * `Authorization: Bearer ${CRON_SECRET}`. Nao ha transporte em
+ * `lib/ia/` e nenhuma UI o conhece.
+ *
+ * ── Por que so o `tarefaId` sai daqui ────────────────────────────────
+ *
+ * O chamador precisa de um id para passar a `executarTarefa`, e de mais
+ * nada. A linha reivindicada carrega `user_id`, `agente_id` e `entrada`
+ * — dado de um dono qualquer — e leva-los ate a rota so criaria a
+ * tentacao de loga-los ou devolve-los na resposta HTTP. O tenant e
+ * resolvido adiante, por `executarTarefa`, que le a LINHA de novo.
+ *
+ * ── Sem parametro algum ──────────────────────────────────────────────
+ *
+ * A RPC nao aceita `user_id` nem `tarefa_id`, e este wrapper tambem
+ * nao. Nao existe assinatura pela qual alguem peca "a tarefa do usuario
+ * X" ou "aquela tarefa ali".
+ */
+export async function reivindicarProximaTarefa(): Promise<{
+  tarefa: TarefaReivindicadaMinima | null;
+  erro: string | null;
+}> {
+  const { data, error } = await getSupabaseServidor().rpc("claim_next_agente_tarefa");
+
+  if (error) {
+    // `message` nunca sai daqui: o erro do driver carrega nome de
+    // coluna, de constraint e as vezes de VALOR.
+    console.error("[agentes-interno] RPC claim_next_agente_tarefa falhou");
+    return { tarefa: null, erro: "erro_claim_tarefa" };
+  }
+
+  // Fila vazia. `RETURNS public.agente_tarefas` com `RETURN NULL` chega
+  // pelo PostgREST como objeto composto de colunas nulas — truthy em
+  // JavaScript. A verdade esta no `id`, nunca no invólucro; e o MESMO
+  // criterio que `scripts/agentes-worker.mjs` aplica em producao.
+  const linha = normalizarLinha(data) as { id?: unknown } | null;
+  if (linha === null || typeof linha !== "object") return { tarefa: null, erro: null };
+
+  const id = linha.id;
+  if (id === null || id === undefined) return { tarefa: null, erro: null };
+
+  // Reivindicou algo que nao tem a forma de um id: fail-closed. Nao
+  // adianta seguir para `executarTarefa` com lixo, e devolver a linha
+  // crua para alguem inspecionar seria vazar dado de outro dono.
+  if (typeof id !== "string" || !UUID_REGEX.test(id)) {
+    console.error("[agentes-interno] claim devolveu linha sem id valido");
+    return { tarefa: null, erro: "claim_shape_invalido" };
+  }
+
+  return { tarefa: { tarefaId: id }, erro: null };
+}

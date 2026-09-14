@@ -1064,6 +1064,45 @@ const ARQUIVOS_FUNCTION_RUNTIME_V1A: readonly string[] = [
   "lib/agentes/handlers/consultar-vendas.ts",
 ];
 
+/**
+ * FUNCTION-RUNTIME-V1-B1 — o dispatcher que faz a fila andar sozinha.
+ *
+ * Ate aqui, uma Task so saia de `pendente` se alguem rodasse
+ * `scripts/agentes-worker.mjs` a mao. A rota nova e o alvo do Vercel
+ * Cron: ela reivindica pelo claim global e executa no proprio processo.
+ *
+ * `capability-worker.ts` NAO e repetido: ele ja esta autorizado desde a
+ * FUNCTION-RUNTIME-P0, e a origem de cada liberacao precisa continuar
+ * legivel. Aqui ele ganha so o wrapper do claim, ao lado dos que ja
+ * existiam — coberto nominalmente por G10u.
+ *
+ * ── A forma COLAPSADA, e por que ela vem acompanhada ────────────────
+ *
+ * `app/api/internal/agentes/worker/` e uma pasta inteiramente untracked,
+ * e o `git status --porcelain` a colapsa numa linha so. Medido nesta
+ * arvore:
+ *
+ *     ?? app/api/internal/agentes/worker/     <- com 1 ou com 4 arquivos
+ *
+ * Aceitar a colapsada sozinha abriria uma pasta franca dentro de
+ * `app/api/internal/agentes`, que e escopo. Por isso ela anda em par com
+ * a enumeracao real de disco em G11z5 — mesmo arranjo de `ARQUIVOS_1EA`
+ * e G11l. Quem remover um tem de remover o outro.
+ *
+ * As formas expandidas entram porque o colapso e transitorio: no
+ * instante do `git add` os arquivos passam a aparecer um a um.
+ *
+ * Nenhuma migration nesta fase: `claim_next_agente_tarefa()` ja existe,
+ * ja esta aplicada e ja tem os grants certos — a rota so passou a ser um
+ * segundo chamador dela.
+ */
+const ARQUIVOS_WORKER_V1B1: readonly string[] = ["route.ts"];
+
+const ARQUIVOS_FUNCTION_RUNTIME_V1B1: readonly string[] = [
+  "app/api/internal/agentes/worker/",
+  ...ARQUIVOS_WORKER_V1B1.map((nome) => `app/api/internal/agentes/worker/${nome}`),
+];
+
 const ARQUIVOS_SKILL_1D_TOOL_CALL: readonly string[] = [
   "lib/agentes/chamadas/",
   ...MODULOS_CHAMADAS_1D_TOOL_CALL.map((nome) => `lib/agentes/chamadas/${nome}`),
@@ -1112,6 +1151,7 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_VERTICAL_SLICE_V1,
   ...ARQUIVOS_FUNCTION_RUNTIME_P0,
   ...ARQUIVOS_FUNCTION_RUNTIME_V1A,
+  ...ARQUIVOS_FUNCTION_RUNTIME_V1B1,
 ];
 
 /**
@@ -1755,12 +1795,27 @@ async function main() {
   // `teste-fundacao.ts`, `analise-vendas.ts`, as capabilities de
   // dominio, o middleware e a rota interna continuam exigidos byte a
   // byte.
+  // FUNCTION-RUNTIME-V1-B1: sai UM — `lib/middleware-rotas.ts`.
+  //
+  // A fase cria o dispatcher chamado pelo Vercel Cron, e uma rota que
+  // nao esteja em `ROTAS_COM_SEGREDO` recebe 307 para /login. O
+  // agendador da Vercel conta 307 como SUCESSO: o cron rodaria de minuto
+  // em minuto, reportaria 100% de acerto, e nenhuma Task sairia de
+  // `pendente`. Nao ha como acrescentar uma rota interna sem tocar a
+  // POLITICA — congelar o arquivo byte a byte aqui transformaria a
+  // guarda em impedimento da propria rota que ela existe para proteger.
+  //
+  // Sair do congelamento NAO e ficar sem protecao. O que interessa nao
+  // e "o arquivo nao mudou", e sim que a mudanca so ACRESCENTOU: G10u1
+  // e G10u2 abaixo exigem que as cinco entradas anteriores continuem
+  // intactas, com os mesmos verbos, e que a entrada nova seja GET so.
+  // A politica em si continua coberta por `scripts/testar-middleware.ts`
+  // — 43 asserts, inventario nominal de 54 rotas.
   const CONGELADOS = [
     "lib/agentes/tipos-execucao.ts",
     "lib/agentes/handlers/teste-fundacao.ts",
     "lib/agentes/handlers/analise-vendas.ts",
     "lib/agentes/capability.ts",
-    "lib/middleware-rotas.ts",
     "app/api/internal/agentes/executar/route.ts",
   ];
   for (const rel of CONGELADOS) {
@@ -1860,6 +1915,71 @@ async function main() {
        PRODUCAO.every((f) => !/testar-agentes-vendas-capability/.test(codigo(f))));
   }
 
+  // ── G10u1..G10u4 — a fronteira do que saiu do congelamento na V1-B1 ─
+  //
+  // `lib/middleware-rotas.ts` deixou de ser exigido byte a byte (ver o
+  // comentario de `CONGELADOS`). O que esta suite passa a garantir e
+  // mais estreito e mais util: que a mudanca foi ADITIVA. Uma entrada
+  // REMOVIDA daqui derruba um cron em silencio — e e justamente o tipo
+  // de regressao que um congelamento removido deixaria passar.
+  {
+    // `--unified=0` para que o diff traga so as linhas que mudaram, sem
+    // contexto: um contexto igual apareceria como linha e estragaria a
+    // contagem.
+    const difMid = git("diff", "--unified=0", "--", "lib/middleware-rotas.ts");
+    const adicionadas = difMid.split("\n").filter((l) => /^\+[^+]/.test(l));
+    const removidas = difMid.split("\n").filter((l) => /^-[^-]/.test(l));
+
+    ok(`G10u1 a mudanca no middleware e ADITIVA: nada foi removido (${removidas.length})`,
+      removidas.length === 0);
+    ok(`G10u2 e o que entrou e UMA entrada, so GET, so o dispatcher (${adicionadas.length})`,
+      adicionadas.length === 1 &&
+      /"\/api\/internal\/agentes\/worker": \["GET"\]/.test(adicionadas[0]));
+
+    // Independente do diff: as cinco rotas com segredo que ja existiam
+    // continuam la, com os mesmos verbos. O diff prova que ninguem
+    // apagou nada AGORA; isto prova que elas estao presentes, ponto —
+    // e continua valendo depois de commitado, quando o diff fica vazio.
+    const mid = codigo("lib/middleware-rotas.ts");
+    const ANTERIORES: [string, string][] = [
+      ["/api/sync", '["GET"]'],
+      ["/api/internal/estudio-anuncios/worker", '["GET"]'],
+      ["/api/internal/estudio-anuncios/executar", '["POST"]'],
+      ["/api/internal/sync/executar", '["POST"]'],
+      ["/api/internal/agentes/executar", '["POST"]'],
+    ];
+    ok("G10u3 as cinco rotas com segredo anteriores seguem declaradas, com os mesmos verbos",
+      ANTERIORES.every(([caminho, verbos]) =>
+        mid.includes(`"${caminho}": ${verbos},`)));
+
+    // O default continua NEGAR. Se alguem trocar o fim de
+    // `decidirAcesso` por um `return "liberar"`, todo o resto vira
+    // decoracao — e o congelamento que cobria isso saiu.
+    ok("G10u4 o default do middleware continua sendo NEGAR",
+      /return caminho\.startsWith\("\/api\/"\) \? "bloquear_api" : "redirecionar";/.test(mid));
+  }
+
+  // ── G10v — o que o wrapper do claim NAO pode ter virado ────────────
+  //
+  // `capability-worker.ts` ja estava liberado desde a P0; a V1-B1
+  // acrescenta `reivindicarProximaTarefa`, que chama o claim GLOBAL.
+  // Essa RPC devolve a tarefa mais antiga de QUALQUER dono, e a linha
+  // INTEIRA. Duas coisas nao podem acontecer: o wrapper ganhar um
+  // parametro (que o tornaria alcancavel com alvo escolhido pelo
+  // chamador) e a linha crua sair dele.
+  {
+    const capw = codigo("lib/agentes/capability-worker.ts");
+    ok("G10v ANCORA: o wrapper do claim global existe no capability-worker",
+      /export async function reivindicarProximaTarefa\(\)/.test(capw));
+    ok("G10v o wrapper nao aceita parametro e nao devolve a linha crua",
+      !/reivindicarProximaTarefa\([^)]+\)/.test(capw) &&
+      !/return \{ tarefa: linha/.test(capw) &&
+      /tarefa: \{ tarefaId: id \}/.test(capw));
+    ok("G10v e o unico consumidor dele e a rota do cron, nunca uma rota de usuario",
+      /export async function reivindicarProximaTarefa/.test(capw) &&
+      !/reivindicarProximaTarefa/.test(codigo("app/api/internal/agentes/executar/route.ts")));
+  }
+
   {
     // ── G11 — nada inesperado no escopo dos agentes ────────────────
     // Propriedade arquitetural, nao estado do Git: vale com o handler
@@ -1937,6 +2057,33 @@ async function main() {
        soAutorizadosNoEscopo(ARQUIVOS_IA_ESPERADOS.map((n) => `A  lib/agentes/ia/${n}`).join("\n") + "\n"));
     ok("G11s CONTROLE NEGATIVO: arquivo expandido NAO declarado em ia/ reprova",
        !soAutorizadosNoEscopo("?? lib/agentes/ia/_intruso.ts\n"));
+
+    // ── G11z5..G11z9 — o MESMO par, para a pasta do dispatcher ─────
+    //
+    // `app/api/internal/agentes/worker/` nasce untracked nesta fase,
+    // dentro de `app/api/internal/agentes` — que E escopo. Enquanto o
+    // porcelain a colapsar numa linha, o G11 acima nao enxerga nada la
+    // dentro: uma rota a mais na pasta passaria despercebida, e ela
+    // herdaria a mesma liberacao de middleware da que foi revisada.
+    // Ver o docblock de `ARQUIVOS_FUNCTION_RUNTIME_V1B1`.
+    const soAutorizadosNoWorker = (nomes: readonly string[]): boolean =>
+      nomes.length === ARQUIVOS_WORKER_V1B1.length &&
+      nomes.every((n) => ARQUIVOS_WORKER_V1B1.includes(n));
+
+    const conteudoWorker = readdirSync(
+      join(RAIZ, "app", "api", "internal", "agentes", "worker")
+    ).sort();
+
+    ok("G11z5 a pasta do dispatcher contem exatamente o que foi declarado (V1-B1)",
+       soAutorizadosNoWorker(conteudoWorker));
+    ok("G11z6 ANCORA: o diretorio foi mesmo lido e nao veio vazio",
+       conteudoWorker.length === ARQUIVOS_WORKER_V1B1.length && conteudoWorker.length > 0);
+    ok("G11z7 CONTROLE NEGATIVO: uma segunda rota na pasta reprova",
+       !soAutorizadosNoWorker([...ARQUIVOS_WORKER_V1B1, "outra.ts"]));
+    ok("G11z8 a forma COLAPSADA da pasta e aceita pelo oraculo git (par de G11z5)",
+       soAutorizadosNoEscopo("?? app/api/internal/agentes/worker/\n"));
+    ok("G11z9 CONTROLE NEGATIVO: arquivo expandido NAO declarado na pasta reprova",
+       !soAutorizadosNoEscopo("?? app/api/internal/agentes/worker/_intruso.ts\n"));
 
     // ── G11x..G11z2 — o MESMO par, para lib/agentes/permissoes/ ────
     // Pasta nova da SKILL-1D.d.2, hoje inteiramente untracked: o

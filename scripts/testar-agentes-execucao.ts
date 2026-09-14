@@ -1429,6 +1429,752 @@ async function main() {
       alvos.length >= 5 && alvos.every((a) => ALVOS_PERMITIDOS.includes(a)));
   }
 
+  // ────────────────────────────────────────────────────────────────
+  //
+  // Ate a V1-A, uma Task so andava se alguem rodasse
+  // `scripts/agentes-worker.mjs` a mao: `criarTarefa` a deixa
+  // `pendente`, `executarTarefa` so aceita `rodando`, e a unica ponte e
+  // `claim_next_agente_tarefa()`. O Chat ja publicado enfileirava
+  // trabalho que ninguem executava.
+  //
+  // O dispatcher fecha isso. E ele tem DOIS modos de falha silenciosa,
+  // que sao o motivo desta secao existir:
+  //   1. esquecer a rota em `ROTAS_COM_SEGREDO` — o agendador leva 307
+  //      para /login e registra SUCESSO a cada minuto, para sempre;
+  //   2. esquecer o `maxDuration` — a funcao herda os 60 s do glob de
+  //      `vercel.json` e e cortada no meio, deixando a Task em
+  //      `rodando` ate a recuperacao de orfa, 5 minutos depois.
+  // Nenhum dos dois produz erro visivel. Por isso os asserts Q e R
+  // cruzam as TRES fontes (rota, `vercel.json`, middleware) em vez de
+  // conferir cada uma por si.
+  //
+  // NOTA DE PROCEDIMENTO: a lista literal de itens do §36 do gate nao
+  // sobreviveu a compactacao da sessao. Os asserts A–R abaixo foram
+  // derivados do CONTRATO real do dispatcher (auth, orcamento, laco,
+  // execucao em processo, nao-vazamento e reconciliacao), e nao da
+  // lista original. Registrado como V1B1-I1-L1.
+  console.log("\nS. FUNCTION-RUNTIME-V1-B1 — dispatcher (cron -> claim -> executarTarefa)");
+  {
+    const ROTA_WORKER = "app/api/internal/agentes/worker/route.ts";
+    const CAMINHO_WORKER = "/api/internal/agentes/worker";
+    const brutoWorker = fonte(ROTA_WORKER);
+    const codWorker = codigo(ROTA_WORKER);
+
+    // ── A. ANCORA ─────────────────────────────────────────────────
+    //
+    // Toda varredura de ausencia abaixo (L, O, P) e vacua sobre texto
+    // vazio. Provar primeiro que ha o que varrer.
+    ok("B1-A ANCORA: a rota do dispatcher existe e tem um GET",
+      brutoWorker.length > 1500 &&
+      codWorker.length > 600 &&
+      /export async function GET\(/.test(codWorker));
+
+    // ── B. UM verbo ────────────────────────────────────────────────
+    //
+    // O agendador da Vercel so faz GET. Qualquer outro export daria uma
+    // segunda porta para a mesma fila, com a mesma chave.
+    ok("B1-B GET e o UNICO verbo exportado pela rota",
+      !/export async function (POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\(/.test(codWorker));
+
+    // ── C. Auth fail-closed ────────────────────────────────────────
+    //
+    // As quatro marcas juntas: le do ambiente, le do header, NEGA
+    // quando a variavel falta, e compara. Faltando a terceira, um
+    // ambiente sem `CRON_SECRET` abriria a rota para todo mundo.
+    ok("B1-C a guarda le CRON_SECRET, le o header e e fail-closed",
+      /process\.env\.CRON_SECRET/.test(codWorker) &&
+      /headers\.get\("authorization"\)/.test(codWorker) &&
+      /!segredo \|\| !auth/.test(codWorker) &&
+      /auth !== `Bearer \$\{segredo\}`/.test(codWorker) &&
+      /401/.test(codWorker));
+
+    // ── D. A guarda PRECEDE o laco ─────────────────────────────────
+    //
+    // Autenticar depois de reivindicar seria pior que nao autenticar: a
+    // Task ja teria saido da fila para `rodando` antes do 401.
+    const iGuarda = codWorker.indexOf("process.env.CRON_SECRET");
+    const iWhile = codWorker.indexOf("while (");
+    const iClaim = codWorker.indexOf("await reivindicarProximaTarefa()");
+    const iExec = codWorker.indexOf("await executarTarefa(");
+    ok("B1-D a guarda de segredo precede o laco, o claim e a execucao",
+      iGuarda > 0 && iWhile > iGuarda && iClaim > iWhile && iExec > iClaim);
+
+    // ── E. 401 indistinto ──────────────────────────────────────────
+    //
+    // Uma resposta para "sem segredo no servidor" e outra para "Bearer
+    // errado" contariam ao chamador em que estado esta a configuracao.
+    const corpos401 = [...codWorker.matchAll(/return responder\((\{[^}]*\}), 401\)/g)]
+      .map((m) => m[1]);
+    ok(`B1-E ha exatamente UM corpo de 401, e ele nao diz o que faltou (${corpos401.length})`,
+      corpos401.length === 1 &&
+      !/segredo|env|CRON|ausente|header/i.test(corpos401[0]));
+
+    // ── F. O teto declarado ────────────────────────────────────────
+    ok("B1-F a rota declara maxDuration = 300",
+      /export const maxDuration = 300/.test(codWorker));
+
+    // ── G. As tres constantes, com os valores exatos ───────────────
+    const num = (nome: string): number | null => {
+      const m = codWorker.match(new RegExp("const " + nome + " = ([0-9_]+);"));
+      return m ? Number(m[1].replace(/_/g, "")) : null;
+    };
+    const orcamento = num("ORCAMENTO_MS");
+    const folga = num("FOLGA_MINIMA_MS");
+    const maxTasks = num("MAX_TASKS_PER_RUN");
+    ok(`B1-G as constantes do orcamento sao as declaradas (${orcamento}/${folga}/${maxTasks})`,
+      orcamento === 240_000 && folga === 90_000 && maxTasks === 5);
+
+    // ── H. A janela util e POSITIVA ────────────────────────────────
+    //
+    // Aritmetica, nao fe. Com folga >= orcamento a condicao do laco
+    // nasce falsa: o cron rodaria a cada minuto, responderia 200 com
+    // `processados: 0` e a fila nunca andaria. Verde e silencioso — o
+    // pior resultado possivel.
+    const janela = orcamento !== null && folga !== null ? orcamento - folga : -1;
+    ok(`B1-H a janela util do laco e positiva e vale 150000 ms (${janela})`,
+      janela === 150_000 && orcamento !== null && orcamento < 300_000);
+
+    // ── I. As DUAS condicoes, juntas ───────────────────────────────
+    //
+    // `&&`, nunca `||`: com `||` um dos tetos sozinho ja bastaria para
+    // seguir, e o outro viraria decoracao.
+    const mWhile = codWorker.match(/while \(([\s\S]*?)\) \{/);
+    const condicao = mWhile ? mWhile[1] : "";
+    ok("B1-I o laco exige quantidade E tempo simultaneamente",
+      /processados < MAX_TASKS_PER_RUN/.test(condicao) &&
+      /Date\.now\(\) - inicio < ORCAMENTO_MS - FOLGA_MINIMA_MS/.test(condicao) &&
+      /&&/.test(condicao) &&
+      !/\|\|/.test(condicao));
+
+    // ── J. Avaliadas ANTES de cada claim ───────────────────────────
+    //
+    // `do { } while` reivindicaria uma Task antes de perguntar se ha
+    // tempo — exatamente a iteracao que fica presa em `rodando`.
+    ok("B1-J a condicao e testada ANTES do claim (nao ha do-while)",
+      !/\bdo\s*\{/.test(codWorker) && iWhile > 0 && iWhile < iClaim);
+
+    // ── K. Execucao no MESMO processo ──────────────────────────────
+    //
+    // Chamar `/api/internal/agentes/executar` por HTTP seria um salto de
+    // rede e um SEGUNDO timeout dentro do orcamento, com um segredo a
+    // mais em jogo e nenhum ganho: o executor ja e importavel.
+    ok("B1-K o dispatcher chama executarTarefa em processo, sem salto HTTP",
+      /from "@\/lib\/agentes\/executar-tarefa"/.test(codWorker) &&
+      /await executarTarefa\(tarefa\.tarefaId\)/.test(codWorker) &&
+      !/api\/internal\/agentes\/executar/.test(codWorker));
+
+    // ── L. Zero rede ───────────────────────────────────────────────
+    ok("B1-L a rota nao abre rede por conta propria",
+      !/\bfetch\(/.test(codWorker) &&
+      !/axios|node-fetch|require\("https?"\)|from "https?"/.test(codWorker));
+
+    // ── M. O que conta como PROCESSADA ─────────────────────────────
+    //
+    // 200 do `executarTarefa` significa "chegou a um desfecho
+    // REGISTRADO" — e sao tres: concluido, aguardando_aprovacao e
+    // `ok:false` com a falha ja gravada. Os tres sao trabalho feito. Se
+    // o dispatcher parasse no `ok:false`, uma unica Task quebrada
+    // travaria a fila inteira atras dela.
+    // V1-B1-F1: o dispatcher passou a ler DUAS coisas, e elas decidem
+    // perguntas diferentes. O STATUS separa "houve desfecho registrado"
+    // de "falha operacional"; o `corpo.ok` separa, DENTRO do desfecho
+    // registrado, sucesso de falha de negocio. Conflar os dois foi
+    // exatamente o defeito V1B1-I1-M1. A cadencia em si e provada na
+    // secao S2.
+    ok("B1-M o status separa desfecho de falha operacional, em ramo proprio",
+      /const \{ status, corpo \} = await executarTarefa\(/.test(codWorker) &&
+      /if \(status !== 200\) \{/.test(codWorker) &&
+      /if \(corpo\.ok === false\) break;/.test(codWorker) &&
+      // Os dois ramos sao SEPARADOS: nenhuma condicao mistura os dois
+      // sinais numa expressao so.
+      !/status !== 200 \|\||corpo\.ok === false \|\|/.test(codWorker));
+
+    // ── N. O contador so anda depois do trabalho ───────────────────
+    //
+    // Incrementar antes tornaria `processados` uma contagem de CLAIMS, e
+    // o teto viraria teto de tentativas, nao de execucoes.
+    ok("B1-N `processados` incrementa DEPOIS da execucao bem-sucedida",
+      codWorker.indexOf("processados += 1;") > iExec &&
+      conta(codWorker, /processados \+= 1;/g) === 1);
+
+    // ── O. O wrapper do claim so deixa sair o id ───────────────────
+    //
+    // `claim_next_agente_tarefa()` devolve a LINHA inteira — `user_id`,
+    // `agente_id`, `entrada`. O dispatcher precisa de um id e de nada
+    // mais; o resto e dado de um dono que nao pediu nada disso.
+    const bruCap = fonte("lib/agentes/capability-worker.ts");
+    const iW = bruCap.indexOf("export async function reivindicarProximaTarefa");
+    const wrapper = iW > 0
+      ? bruCap.slice(iW).replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1")
+      : "";
+    ok("B1-O ANCORA: o corpo do wrapper do claim foi recortado", wrapper.length > 400);
+    ok("B1-O o wrapper devolve SO o tarefaId, valida a forma e nao vaza o driver",
+      /return \{ tarefa: \{ tarefaId: id \}, erro: null \};/.test(wrapper) &&
+      /UUID_REGEX\.test\(id\)/.test(wrapper) &&
+      /claim_shape_invalido/.test(wrapper) &&
+      !/user_id|agente_id|entrada|error\.message/.test(wrapper));
+
+    // ── P. A resposta e os logs nao carregam identificador ─────────
+    //
+    // O corpo desta rota vai para o log de invocacao da Vercel, que nao
+    // e multi-tenant: um `tarefaId` ali junta um dono a um horario.
+    const corpos = [...codWorker.matchAll(/responder\((\{[^}]*\})/g)].map((m) => m[1]);
+    ok(`B1-P ANCORA: ha respostas a inspecionar (${corpos.length})`, corpos.length >= 3);
+
+    // A chave e o que o log da Vercel guarda. Conjunto NOMINAL e
+    // fechado: contadores e um codigo de erro de vocabulario proprio.
+    // Uma chave nova entra aqui deliberadamente ou nao entra.
+    const CHAVES_PERMITIDAS = ["ok", "processados", "erro", "duracaoMs"];
+    const chaves = corpos.flatMap((c) => [...c.matchAll(/(\w+):/g)].map((m) => m[1]));
+    ok(`B1-P as respostas so tem chaves de contagem e codigo (${[...new Set(chaves)].join(", ")})`,
+      chaves.length >= 8 && chaves.every((k) => CHAVES_PERMITIDAS.includes(k)));
+
+    ok("B1-P nenhuma resposta e nenhum log carregam id, tenant ou payload",
+      corpos.every((c) => !/\$\{|`/.test(c)) &&
+      !/tarefa|user|agente/i.test(corpos.join(" ")) &&
+      !/userId|user_id|agenteId|agente_id|entrada|resultado|erro_mensagem/.test(codWorker) &&
+      [...codWorker.matchAll(/console\.\w+\(([^)]*)\)/g)].every((m) => !/\$\{|,/.test(m[1])));
+
+    // ── Q. `vercel.json` declara o cron E o teto ───────────────────
+    //
+    // Os dois, sempre juntos: cron sem `maxDuration` cai no glob de
+    // 60 s; `maxDuration` sem cron e um teto que ninguem aciona.
+    const vj = JSON.parse(fonte("vercel.json")) as {
+      crons: { path: string; schedule: string }[];
+      functions: Record<string, { maxDuration?: number }>;
+    };
+    const cronWorker = vj.crons.filter((c) => c.path === CAMINHO_WORKER);
+    ok(`B1-Q o cron do dispatcher esta declarado UMA vez, de minuto em minuto (${cronWorker.length})`,
+      cronWorker.length === 1 && cronWorker[0].schedule === "* * * * *");
+    ok("B1-Q o override de maxDuration bate com o declarado na rota",
+      vj.functions[ROTA_WORKER]?.maxDuration === 300 &&
+      vj.functions["app/api/**"]?.maxDuration === 60);
+
+    // ── R. A reconciliacao que impede o 307 silencioso ─────────────
+    //
+    // Esta e a peca que os outros asserts nao cobrem: os tres lugares
+    // podem estar individualmente certos e ainda assim discordarem
+    // entre si. O caminho do cron TEM de ser o caminho liberado no
+    // middleware, e TEM de ser o caminho do arquivo da rota.
+    ok("B1-R o caminho do cron e o mesmo liberado no middleware, so em GET",
+      ROTAS_COM_SEGREDO[CAMINHO_WORKER]?.length === 1 &&
+      ROTAS_COM_SEGREDO[CAMINHO_WORKER][0] === "GET" &&
+      decidirAcesso(CAMINHO_WORKER, "GET", false) === "liberar");
+    ok("B1-R e o caminho do cron deriva do arquivo da rota, sem folga",
+      "app/api" + CAMINHO_WORKER.slice("/api".length) + "/route.ts" === ROTA_WORKER &&
+      !(CAMINHO_WORKER in ROTAS_PUBLICAS) &&
+      !PAGINAS_PUBLICAS.has(CAMINHO_WORKER) &&
+      ["POST", "PUT", "PATCH", "DELETE"].every(
+        (m) => decidirAcesso(CAMINHO_WORKER, m, false) === "bloquear_api"));
+  }
+
+  // ────────────────────────────────────────────────────────────────
+  //
+  // V1B1-I1-M1 — RETRY ACELERADO, e a prova de que ele fechou.
+  //
+  // `falhar_tarefa` devolve a tarefa para `pendente` enquanto
+  // `tentativas < max_tentativas` (20260917_agentes_execucao.sql), e o
+  // claim entrega sempre a elegivel MAIS ANTIGA. Enquanto o laco
+  // continuava depois de uma falha de negocio, a MESMA tarefa voltava a
+  // ser a mais antiga e era reivindicada de novo na MESMA invocacao:
+  // tres tentativas em segundos, ocupando tres das cinco vagas.
+  //
+  // ── Por que esta secao le ESTRUTURA, e nao a palavra `break` ──────
+  //
+  // Procurar "break" no arquivo provaria nada: ele ja aparece no
+  // encerramento de fila vazia. O que precisa ser provado e uma relacao
+  // de CONTROLE — que, depois da guarda, NAO EXISTE caminho de volta ao
+  // claim dentro da mesma invocacao. Aqui isso e feito sobre o corpo do
+  // laco recortado por casamento de chaves, e cada predicado tem
+  // CONTROLE NEGATIVO: o mesmo predicado e alimentado com a fonte
+  // mutada e tem de reprovar.
+  //
+  // O seam executavel foi tentado e RECUSADO PELO FRAMEWORK: exportar
+  // `drenarFila` de um `route.ts` quebra a checagem de tipos gerada
+  // pelo Next 14 ("Property 'drenarFila' is incompatible with index
+  // signature"). Medido, nao suposto. Um modulo de producao novo so
+  // para o seam ficaria fora do escopo autorizado do F1.
+  console.log("\nS2. FUNCTION-RUNTIME-V1-B1-F1 — retry pacing (NO SAME-RUN RETRY)");
+  {
+    const codW = codigo("app/api/internal/agentes/worker/route.ts");
+
+    /**
+     * O corpo do `while`, recortado por CASAMENTO DE CHAVES.
+     *
+     * Regex guloso pegaria ate o fim do arquivo e regex preguicoso
+     * pararia na primeira chave interna — os dois dariam um recorte
+     * errado, e um recorte errado faz todo assert abaixo virar ruido.
+     * A condicao do laco contem `Date.now()`, entao a abertura e
+     * localizada por `") {"`, que nao aparece dentro dela.
+     */
+    const corpoDoLaco = (texto: string): string => {
+      const iW = texto.indexOf("while (");
+      if (iW < 0) return "";
+      const iAbre = texto.indexOf(") {", iW);
+      if (iAbre < 0) return "";
+      let nivel = 0;
+      for (let k = iAbre + 2; k < texto.length; k++) {
+        if (texto[k] === "{") nivel += 1;
+        else if (texto[k] === "}") {
+          nivel -= 1;
+          if (nivel === 0) return texto.slice(iAbre + 2, k + 1);
+        }
+      }
+      return "";
+    };
+
+    const CLAIM = "await reivindicarProximaTarefa()";
+    const GUARDA_C = "if (corpo.ok === false) break;";
+    const INCREMENTO = "processados += 1;";
+    const RAMO_D = "if (status !== 200) {";
+
+    const laco = corpoDoLaco(codW);
+
+    // ── ANCORA: o recorte e real, e e MENOR que o arquivo ──────────
+    //
+    // Sem isto, um recorte vazio faria todo `indexOf(...) === -1`
+    // passar, e um recorte do arquivo inteiro faria todo `includes`
+    // passar. As duas pontas fechadas.
+    ok("S2-A ANCORA: o corpo do laco foi recortado, e e um subconjunto proprio do arquivo",
+      laco.length > 300 &&
+      laco.length < codW.length &&
+      laco.trim().startsWith("{") &&
+      laco.trim().endsWith("}") &&
+      laco.includes(CLAIM) &&
+      laco.includes("await executarTarefa("));
+
+    /**
+     * A PROPRIEDADE, como predicado sobre texto — para que os controles
+     * negativos possam alimenta-la com fonte mutada sem tocar em
+     * arquivo nenhum.
+     *
+     * Cinco fatos que, juntos, fecham o ciclo de controle:
+     *
+     *  1. ha UM unico ponto de claim no arquivo inteiro;
+     *  2. ele esta dentro do corpo do laco;
+     *  3. a guarda de falha de negocio vem DEPOIS dele;
+     *  4. depois da guarda, nada no corpo reivindica;
+     *  5. a consequencia da guarda e `break`, e nao existe `continue`
+     *     em lugar nenhum — o unico jeito de voltar ao topo seria
+     *     concluir o corpo, e a guarda o encerra antes.
+     */
+    const semRetryNaMesmaRodada = (texto: string): boolean => {
+      const corpo = corpoDoLaco(texto);
+      if (corpo.length === 0) return false;
+
+      const claimsNoArquivo = conta(texto, /await reivindicarProximaTarefa\(\)/g);
+      const iClaim = corpo.indexOf(CLAIM);
+      const iGuarda = corpo.indexOf(GUARDA_C);
+      if (claimsNoArquivo !== 1 || iClaim < 0 || iGuarda < 0) return false;
+      if (iGuarda < iClaim) return false;
+
+      const depoisDaGuarda = corpo.slice(iGuarda + GUARDA_C.length);
+      return (
+        !depoisDaGuarda.includes("reivindicarProximaTarefa") &&
+        !/\bcontinue\b/.test(texto)
+      );
+    };
+
+    ok("S2-B NO SAME-RUN RETRY: apos a falha de negocio nao ha caminho de volta ao claim",
+      semRetryNaMesmaRodada(codW));
+
+    // ── CONTROLES NEGATIVOS — o predicado sabe dizer NAO ───────────
+    //
+    // Estes quatro sao o que separa um assert de uma afirmacao. Cada um
+    // reintroduz o defeito de um jeito diferente; nenhum pode passar.
+    ok("S2-C CONTROLE NEGATIVO: trocar o break por continue reprova",
+      !semRetryNaMesmaRodada(codW.replace(GUARDA_C, "if (corpo.ok === false) continue;")));
+    ok("S2-D CONTROLE NEGATIVO: apagar a guarda inteira reprova",
+      !semRetryNaMesmaRodada(codW.replace(GUARDA_C, "")));
+    ok("S2-E CONTROLE NEGATIVO: um segundo claim depois da guarda reprova",
+      !semRetryNaMesmaRodada(
+        codW.replace(GUARDA_C, GUARDA_C + "\n      await reivindicarProximaTarefa();")));
+    ok("S2-F CONTROLE NEGATIVO: a guarda ANTES do claim reprova",
+      !semRetryNaMesmaRodada(
+        codW.replace(GUARDA_C, "").replace(CLAIM, GUARDA_C + " " + CLAIM)));
+
+    // ── A guarda e a ULTIMA instrucao do corpo ─────────────────────
+    //
+    // Fato estrutural mais forte que "existe um break": nao ha o que
+    // rodar depois dela. Mesmo que alguem trocasse o `break` por algo
+    // que caisse fora, nao sobraria corpo para executar.
+    {
+      const iGuarda = laco.indexOf(GUARDA_C);
+      const resto = laco.slice(iGuarda + GUARDA_C.length).trim();
+      ok(`S2-G a guarda de falha de negocio e a ULTIMA instrucao do laco (resto=${JSON.stringify(resto)})`,
+        iGuarda > 0 && resto === "}");
+    }
+
+    // ── A TENTATIVA CONTA, a falha operacional NAO ─────────────────
+    //
+    // A ordem e o contrato inteiro: o ramo D sai ANTES do incremento
+    // (nao houve desfecho, nao houve tentativa processada), e a guarda
+    // C vem DEPOIS dele (houve desfecho registrado, conta).
+    {
+      const iD = laco.indexOf(RAMO_D);
+      const iInc = laco.indexOf(INCREMENTO);
+      const iC = laco.indexOf(GUARDA_C);
+      ok("S2-H a ordem e: falha operacional -> incremento -> guarda de negocio",
+        iD > 0 && iInc > iD && iC > iInc);
+      ok("S2-I o incremento acontece UMA vez e so no caminho de desfecho registrado",
+        conta(laco, /processados \+= 1;/g) === 1);
+    }
+
+    // ── C NAO e 500 ────────────────────────────────────────────────
+    //
+    // O handler falhou, o banco registrou e a tentativa foi contada: o
+    // dispatcher fez o que devia. Entre o incremento e o fim do corpo
+    // nao pode haver resposta nenhuma — a rodada termina pelo caminho
+    // de sucesso, fora do laco.
+    {
+      const iInc = laco.indexOf(INCREMENTO);
+      const caudaDoLaco = laco.slice(iInc);
+      ok("S2-J ANCORA: a cauda do laco foi recortada e contem a guarda",
+        caudaDoLaco.includes(GUARDA_C) && caudaDoLaco.length > 20);
+      ok("S2-K falha de NEGOCIO nao vira 500: nao ha resposta apos o incremento",
+        !/responder\(/.test(caudaDoLaco));
+      // E a resposta de sucesso vive FORA do laco — e por isso vale
+      // igualmente para A, B e C.
+      const foraDoLaco = codW.slice(codW.indexOf(laco) + laco.length);
+      ok("S2-L a resposta de sucesso da rodada esta FORA do laco",
+        /responder\(\{ ok: true, processados, duracaoMs/.test(foraDoLaco));
+    }
+
+    // ── A e B continuam drenando ───────────────────────────────────
+    //
+    // A prova mais forte disponivel aqui nao e procurar um `break` que
+    // nao existe: e que o dispatcher NAO TEM COMO distinguir `concluido`
+    // de `aguardando_aprovacao`. Ele nunca le `corpo.status`. Se um
+    // drena, o outro drena — nao ha ramo onde eles divirjam.
+    ok("S2-M concluido e aprovacao sao INDISTINGUIVEIS para o dispatcher",
+      !/corpo\.status/.test(codW) && !/aguardando_aprovacao|concluido/.test(codW));
+    ok("S2-N o dispatcher nao le nada do corpo alem do `ok`",
+      conta(codW, /corpo\./g) === 1 && /corpo\.ok/.test(codW));
+
+    // Exatamente DOIS `break` no corpo: fila vazia e falha de negocio.
+    // Um terceiro seria um encerramento que ninguem revisou.
+    ok(`S2-O o corpo do laco tem exatamente dois encerramentos (${conta(laco, /break;/g)})`,
+      conta(laco, /break;/g) === 2 &&
+      /if \(tarefa === null\) break;/.test(laco));
+
+    // ── Os limites do I1 continuam intactos ────────────────────────
+    //
+    // O F1 muda CADENCIA, nunca teto. Se algum destes tivesse mudado
+    // junto, a correcao estaria carregando carona.
+    ok("S2-P o F1 nao mexeu em nenhum dos quatro limites do I1",
+      /export const maxDuration = 300/.test(codW) &&
+      /const ORCAMENTO_MS = 240_000;/.test(codW) &&
+      /const FOLGA_MINIMA_MS = 90_000;/.test(codW) &&
+      /const MAX_TASKS_PER_RUN = 5;/.test(codW));
+  }
+
+  // ────────────────────────────────────────────────────────────────
+  //
+  // O CONTRATO DO CLAIM, protegido nominalmente — V1-B1-F2.
+  //
+  // O R1 mediu tres buracos de cobertura. Nao eram defeitos de codigo:
+  // a propriedade valia em todos os tres casos. O problema era que
+  // NENHUM teste a defendia, e uma propriedade que so vale por acaso
+  // deixa de valer sem ninguem notar.
+  //
+  //   A. nada prendia o wrapper a RPC `claim_next_agente_tarefa` —
+  //      aponta-lo para outra funcao deixava a suite verde;
+  //   B. nada impedia um segundo argumento na chamada, que mudaria a
+  //      semantica do claim em silencio;
+  //   Q. nada impedia uma rota de USUARIO futura de chamar o claim
+  //      global. Essa e a invariante de seguranca do slice inteiro: a
+  //      RPC devolve a tarefa mais antiga de QUALQUER dono, entao um
+  //      clique de um usuario reivindicaria a tarefa de outro.
+  //   L. a guarda de fila vazia existia, mas a ORDEM contra
+  //      `executarTarefa` nao estava protegida.
+  //
+  // Toda varredura abaixo e estrutural — chaves e parenteses
+  // balanceados, nao regex guloso — e toda propriedade e um PREDICADO
+  // sobre texto, para que o controle negativo possa alimenta-lo com
+  // fonte mutada sem tocar em arquivo nenhum.
+  console.log("\nS3. FUNCTION-RUNTIME-V1-B1-F2 — contrato do claim (RPC, args, rotas, ordem)");
+  {
+    const ROTA_W = "app/api/internal/agentes/worker/route.ts";
+    const CAP_WORKER = "lib/agentes/capability-worker.ts";
+    const RPC_DO_CLAIM = "claim_next_agente_tarefa";
+
+    /**
+     * Corpo de uma funcao, por CASAMENTO DE CHAVES a partir da
+     * assinatura. Um regex ate o proximo `}` pararia na primeira chave
+     * interna; um guloso engoliria o resto do arquivo. Os dois dariam
+     * recorte errado — e recorte errado transforma todo assert abaixo
+     * em ruido verde.
+     */
+    const corpoDaFuncao = (texto: string, assinatura: string): string => {
+      const iAss = texto.indexOf(assinatura);
+      if (iAss < 0) return "";
+
+      // 1) Fechar a lista de PARAMETROS, por parenteses balanceados.
+      const iAbreParams = texto.indexOf("(", iAss);
+      if (iAbreParams < 0) return "";
+      let par = 0;
+      let iFechaParams = -1;
+      for (let k = iAbreParams; k < texto.length; k++) {
+        if (texto[k] === "(") par += 1;
+        else if (texto[k] === ")") {
+          par -= 1;
+          if (par === 0) { iFechaParams = k; break; }
+        }
+      }
+      if (iFechaParams < 0) return "";
+
+      // 2) Achar a chave do CORPO — nao a do tipo de retorno.
+      //
+      // Este wrapper declara `): Promise<{ tarefa: ...; erro: ... }> {`.
+      // Pegar o primeiro `{` depois da assinatura recortaria o TIPO, e
+      // `.rpc(` nunca apareceria la dentro: o assert ficaria vermelho
+      // por defeito da sonda, nao do codigo. Foi o que aconteceu na
+      // primeira versao desta secao. A saida e contar `<` e `>`: a chave
+      // do corpo e a primeira em profundidade angular ZERO.
+      let angulo = 0;
+      let iAbre = -1;
+      for (let k = iFechaParams + 1; k < texto.length; k++) {
+        const c = texto[k];
+        if (c === "<") angulo += 1;
+        else if (c === ">") angulo = Math.max(0, angulo - 1);
+        else if (c === "{" && angulo === 0) { iAbre = k; break; }
+      }
+      if (iAbre < 0) return "";
+
+      // 3) Fechar o corpo, por chaves balanceadas.
+      let nivel = 0;
+      for (let k = iAbre; k < texto.length; k++) {
+        if (texto[k] === "{") nivel += 1;
+        else if (texto[k] === "}") {
+          nivel -= 1;
+          if (nivel === 0) return texto.slice(iAbre, k + 1);
+        }
+      }
+      return "";
+    };
+
+    /**
+     * A LISTA DE ARGUMENTOS de `.rpc(...)`, por parenteses balanceados.
+     *
+     * Devolve o texto entre os parenteses da chamada — e so dela. E o
+     * que permite que A e B falem da MESMA call expression: A sobre o
+     * nome, B sobre o que vem depois dele.
+     */
+    const argumentosDoRpc = (corpo: string): string | null => {
+      const iRpc = corpo.indexOf(".rpc(");
+      if (iRpc < 0) return null;
+      const iAbre = iRpc + ".rpc(".length - 1;
+      let nivel = 0;
+      for (let k = iAbre; k < corpo.length; k++) {
+        if (corpo[k] === "(") nivel += 1;
+        else if (corpo[k] === ")") {
+          nivel -= 1;
+          if (nivel === 0) return corpo.slice(iAbre + 1, k);
+        }
+      }
+      return null;
+    };
+
+    const wrapper = corpoDaFuncao(
+      codigo(CAP_WORKER), "export async function reivindicarProximaTarefa"
+    );
+
+    // ANCORA: sem ela, todo `indexOf(...) === -1` abaixo passaria sobre
+    // texto vazio, e o recorte inteiro seria uma ficcao verde.
+    ok("S3-A0 ANCORA: o corpo do wrapper foi recortado por chaves balanceadas",
+      wrapper.length > 300 &&
+      wrapper.length < codigo(CAP_WORKER).length &&
+      wrapper.trim().startsWith("{") &&
+      wrapper.trim().endsWith("}") &&
+      wrapper.includes(".rpc("));
+
+    // ── A e B — a MESMA chamada, duas propriedades ─────────────────
+    const argsDoClaim = argumentosDoRpc(wrapper);
+
+    /**
+     * A: o wrapper chama EXATAMENTE a RPC do claim.
+     *
+     * Ligado ao corpo do wrapper, nunca ao arquivo: `capability-worker`
+     * cita o nome da RPC em prosa em outros pontos, e uma busca no
+     * arquivo inteiro continuaria verde com a chamada apontada para
+     * outra funcao.
+     */
+    const chamaRpcDoClaim = (texto: string): boolean => {
+      const corpo = corpoDaFuncao(texto, "export async function reivindicarProximaTarefa");
+      const args = corpo.length > 0 ? argumentosDoRpc(corpo) : null;
+      if (args === null) return false;
+      const primeiro = args.split(",")[0].trim();
+      return primeiro === `"${RPC_DO_CLAIM}"`;
+    };
+
+    ok(`S3-A o wrapper chama exatamente a RPC do claim (args=${JSON.stringify(argsDoClaim)})`,
+      chamaRpcDoClaim(codigo(CAP_WORKER)));
+    ok("S3-A CONTROLE NEGATIVO: o mesmo predicado reprova outra RPC",
+      !chamaRpcDoClaim(codigo(CAP_WORKER)
+        .replace(`"${RPC_DO_CLAIM}"`, `"${RPC_DO_CLAIM}_ERRADA"`)));
+
+    /**
+     * B: ZERO argumentos alem do nome.
+     *
+     * `claim_next_agente_tarefa()` nao aceita parametro — nao existe
+     * como pedir "a tarefa do usuario X" nem "aquela tarefa ali". Um
+     * segundo argumento aqui seria a porta para exatamente isso, e o
+     * PostgREST o aceitaria sem reclamar do lado do cliente.
+     */
+    const rpcSemArgumentos = (texto: string): boolean => {
+      const corpo = corpoDaFuncao(texto, "export async function reivindicarProximaTarefa");
+      const args = corpo.length > 0 ? argumentosDoRpc(corpo) : null;
+      return args !== null && args.trim() === `"${RPC_DO_CLAIM}"`;
+    };
+
+    ok("S3-B a chamada recebe SO o nome da RPC, sem segundo argumento",
+      rpcSemArgumentos(codigo(CAP_WORKER)));
+    ok("S3-B CONTROLE NEGATIVO: um payload adicional reprova",
+      !rpcSemArgumentos(codigo(CAP_WORKER)
+        .replace(`.rpc("${RPC_DO_CLAIM}")`, `.rpc("${RPC_DO_CLAIM}", { p_tarefa_id: "x" })`)));
+    ok("S3-B CONTROLE NEGATIVO: ate um `undefined` explicito reprova",
+      !rpcSemArgumentos(codigo(CAP_WORKER)
+        .replace(`.rpc("${RPC_DO_CLAIM}")`, `.rpc("${RPC_DO_CLAIM}", undefined)`)));
+
+    // A e B falam da MESMA call expression — nao de duas leituras
+    // independentes que poderiam divergir.
+    ok("S3-AB A e B analisam a mesma chamada, recortada uma vez so",
+      argsDoClaim !== null && argsDoClaim.includes(RPC_DO_CLAIM));
+
+    // ── Q — nenhuma rota de USUARIO toca o claim global ────────────
+    //
+    // Varredura REAL do diretorio, recursiva: a propriedade e sobre
+    // `app/api/agentes/**`, nao sobre a lista de rotas que existiam no
+    // dia em que este assert foi escrito. Uma rota nova nasce coberta.
+    const rotasDeUsuario = (relativo: string): string[] => {
+      const absoluto = join(RAIZ, relativo);
+      const achados: string[] = [];
+      const andar = (dir: string, rel: string): void => {
+        for (const nome of readdirSync(dir).sort()) {
+          const caminho = join(dir, nome);
+          const relFilho = `${rel}/${nome}`;
+          if (statSync(caminho).isDirectory()) andar(caminho, relFilho);
+          else if (nome === "route.ts") achados.push(relFilho);
+        }
+      };
+      andar(absoluto, relativo);
+      return achados;
+    };
+
+    const ROTAS_USUARIO = rotasDeUsuario("app/api/agentes");
+
+    // §11: proibir os SIMBOLOS do claim, nunca o modulo inteiro —
+    // `capability-worker` tem capabilities legitimas fora daqui, e
+    // banir o import derrubaria uso correto junto com o errado.
+    const SIMBOLOS_PROIBIDOS = [RPC_DO_CLAIM, "reivindicarProximaTarefa"];
+
+    const nenhumaRotaReivindica = (
+      fontes: readonly { caminho: string; codigo: string }[]
+    ): boolean => {
+      // Descoberta quebrada devolve lista vazia, e `every` sobre vazio e
+      // VERDADEIRO. O teste tem de ficar vermelho nesse caso, nao verde.
+      if (fontes.length === 0) return false;
+      if (fontes.some((f) => f.codigo.trim().length === 0)) return false;
+      return fontes.every(
+        (f) => !SIMBOLOS_PROIBIDOS.some((sim) => f.codigo.includes(sim))
+      );
+    };
+
+    const FONTES_USUARIO = ROTAS_USUARIO.map((c) => ({ caminho: c, codigo: codigo(c) }));
+
+    ok(`S3-Q0 ANCORA: a varredura achou rotas de usuario de verdade (${ROTAS_USUARIO.length})`,
+      ROTAS_USUARIO.length > 0 &&
+      // O walker desce em subdiretorio dinamico — se ele parasse na
+      // raiz, esta rota aninhada nao apareceria e a prova seria rasa.
+      ROTAS_USUARIO.includes("app/api/agentes/[agenteId]/conversa/route.ts") &&
+      ROTAS_USUARIO.includes("app/api/agentes/route.ts"));
+    ok("S3-Q0 ANCORA: toda rota encontrada foi lida e tem conteudo",
+      FONTES_USUARIO.length === ROTAS_USUARIO.length &&
+      FONTES_USUARIO.every((f) => f.codigo.length > 200));
+
+    ok(`S3-Q nenhuma rota de usuario contem o claim global (${ROTAS_USUARIO.length} auditadas)`,
+      nenhumaRotaReivindica(FONTES_USUARIO));
+
+    ok("S3-Q CONTROLE NEGATIVO: uma rota sintetica que chama o wrapper reprova",
+      !nenhumaRotaReivindica([
+        ...FONTES_USUARIO,
+        { caminho: "app/api/agentes/sintetica/route.ts",
+          codigo: "export async function GET() { await reivindicarProximaTarefa(); }" },
+      ]));
+    ok("S3-Q CONTROLE NEGATIVO: uma rota sintetica que chama a RPC direto reprova",
+      !nenhumaRotaReivindica([
+        ...FONTES_USUARIO,
+        { caminho: "app/api/agentes/sintetica/route.ts",
+          codigo: `export async function POST() { await db.rpc("${RPC_DO_CLAIM}"); }` },
+      ]));
+    ok("S3-Q CONTROLE NEGATIVO: descoberta vazia reprova, nunca passa por vacuidade",
+      !nenhumaRotaReivindica([]));
+
+    // A fronteira dita ao contrario: o claim global VIVE no dispatcher.
+    // Sem isto, apagar a chamada da rota interna deixaria S3-Q verde —
+    // ele so afirma ausencia.
+    ok("S3-Q o claim global continua existindo, e no dispatcher de sistema",
+      /await reivindicarProximaTarefa\(\)/.test(codigo(ROTA_W)) &&
+      !ROTAS_USUARIO.includes(ROTA_W));
+
+    // ── L — fila vazia torna a execucao INALCANCAVEL ───────────────
+    //
+    // Nao basta o `break` existir. A propriedade e de ORDEM: entre o
+    // claim e a guarda de `null` nao pode haver execucao nenhuma, ou
+    // uma fila vazia chamaria `executarTarefa` com o que sobrou.
+    const GUARDA_NULL = "if (tarefa === null) break;";
+    const CLAIM_CALL = "await reivindicarProximaTarefa()";
+    const EXEC_CALL = "await executarTarefa(";
+
+    const corpoDoLacoW = (texto: string): string => {
+      const iW = texto.indexOf("while (");
+      if (iW < 0) return "";
+      const iAbre = texto.indexOf(") {", iW);
+      if (iAbre < 0) return "";
+      let nivel = 0;
+      for (let k = iAbre + 2; k < texto.length; k++) {
+        if (texto[k] === "{") nivel += 1;
+        else if (texto[k] === "}") {
+          nivel -= 1;
+          if (nivel === 0) return texto.slice(iAbre + 2, k + 1);
+        }
+      }
+      return "";
+    };
+
+    const execucaoInalcancavelComFilaVazia = (texto: string): boolean => {
+      const corpo = corpoDoLacoW(texto);
+      if (corpo.length === 0) return false;
+
+      const iClaim = corpo.indexOf(CLAIM_CALL);
+      const iGuarda = corpo.indexOf(GUARDA_NULL);
+      const iExec = corpo.indexOf(EXEC_CALL);
+      if (iClaim < 0 || iGuarda < 0 || iExec < 0) return false;
+
+      // UMA execucao so: uma segunda, em outro ramo, escaparia da ordem.
+      if (conta(corpo, /await executarTarefa\(/g) !== 1) return false;
+
+      // claim -> guarda -> execucao, e NADA de executar entre o claim e
+      // a guarda (garantido pela ordem mais a unicidade acima).
+      return iClaim < iGuarda && iGuarda < iExec;
+    };
+
+    ok("S3-L com a fila vazia, `executarTarefa` nao e alcancavel",
+      execucaoInalcancavelComFilaVazia(codigo(ROTA_W)));
+
+    ok("S3-L CONTROLE NEGATIVO: executar ANTES da guarda de null reprova",
+      !execucaoInalcancavelComFilaVazia(
+        codigo(ROTA_W).replace(
+          GUARDA_NULL,
+          `const { status, corpo } = ${EXEC_CALL}tarefa!.tarefaId);\n      ${GUARDA_NULL}`
+        ).replace(/const \{ status, corpo \} = await executarTarefa\(tarefa\.tarefaId\);/, "")));
+    ok("S3-L CONTROLE NEGATIVO: apagar a guarda de fila vazia reprova",
+      !execucaoInalcancavelComFilaVazia(codigo(ROTA_W).replace(GUARDA_NULL, "")));
+    ok("S3-L CONTROLE NEGATIVO: uma segunda execucao no laco reprova",
+      !execucaoInalcancavelComFilaVazia(
+        codigo(ROTA_W).replace(GUARDA_NULL, `${EXEC_CALL}"x"); ${GUARDA_NULL}`)));
+  }
+
   const total = passou + falhou;
   console.log(`\n${"=".repeat(58)}`);
   console.log(`AGENTES-FASE1C — execucao:  ${passou}/${total} passaram`);

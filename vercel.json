@@ -7,6 +7,10 @@
     {
       "path": "/api/internal/estudio-anuncios/worker",
       "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/internal/agentes/worker",
+      "schedule": "* * * * *"
     }
   ],
   "functions": {
@@ -14,6 +18,9 @@
       "maxDuration": 60
     },
     "app/api/internal/estudio-anuncios/worker/route.ts": {
+      "maxDuration": 300
+    },
+    "app/api/internal/agentes/worker/route.ts": {
       "maxDuration": 300
     }
   }
