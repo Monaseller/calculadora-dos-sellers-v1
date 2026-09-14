@@ -200,6 +200,44 @@ async function main() {
   ok("C15 o claim NAO cancela tarefa de agente inativo",
      !/status\s*=\s*'cancelado'/i.test(claim) && !/DELETE/i.test(claim));
 
+  // ── C16..C18 — a disjuncao de status e FECHADA ────────────────────
+  //
+  // C6 e C7 provam que os dois ramos ESTAO la. Nenhum dos dois proibia
+  // um TERCEIRO. Isso passou a importar na FUNCTION-RUNTIME-P0: a prova
+  // "tarefa pausada nao e reivindicada" deixou de ser feita no banco —
+  // faze-la exigiria chamar o claim GLOBAL, que reivindica a tarefa
+  // elegivel mais antiga de QUALQUER dono — e passou a ser DEDUTIVA,
+  // aqui. A deducao so vale enquanto a disjuncao for exatamente
+  // {pendente, rodando}: bastaria alguem acrescentar
+  // `OR t.status = 'aguardando_aprovacao'` para a conclusao ruir sem
+  // que nenhum assert reclamasse.
+  const whereDoClaim = claim.slice(
+    claim.indexOf("WHERE t.tentativas"),
+    claim.indexOf("ORDER BY")
+  );
+  ok("C16 o WHERE do claim foi recortado (anti-vacuidade)",
+     whereDoClaim.length > 80 && /FOR\s+UPDATE/i.test(whereDoClaim) === false);
+
+  /** O predicado, aplicado tanto ao SQL real quanto ao mutante de C18. */
+  const disjuncaoFechada = (bloco: string) =>
+    conta(bloco, /t\.status\s*=\s*'/g) === 2 &&
+    /t\.status\s*=\s*'pendente'/.test(bloco) &&
+    /t\.status\s*=\s*'rodando'/.test(bloco) &&
+    !/'aguardando_aprovacao'|'concluido'|'cancelado'|'erro'/.test(bloco);
+
+  ok("C17 o status elegivel e EXATAMENTE {pendente, rodando} — terceiro ramo proibido",
+     disjuncaoFechada(whereDoClaim));
+  // CONTROLE NEGATIVO: o mesmo predicado, sobre um WHERE que ganhou o
+  // terceiro ramo, tem de dizer NAO. Sem isto, C17 poderia estar verde
+  // por nunca conseguir reprovar nada.
+  ok("C18 CONTROLE NEGATIVO: com `OR t.status = 'aguardando_aprovacao'` o predicado reprova",
+     !disjuncaoFechada(
+       whereDoClaim.replace(
+         "AND (",
+         "AND ( t.status = 'aguardando_aprovacao' OR"
+       )
+     ));
+
   // ═══ D. MIGRATION — concluir e falhar ═════════════════════════════
   console.log("D. Migration — conclusao e falha");
   const concl = mig.slice(mig.indexOf("FUNCTION public.concluir_tarefa"), mig.indexOf("FUNCTION public.falhar_tarefa"));
@@ -1190,6 +1228,185 @@ async function main() {
       !/setInterval|while \(true\)|for \(;;\)/.test(wrk));
     ok("Q41 e continua sem conhecer Approval",
       !/aprovacaoId|aprovacao_id|retomarAprovacao/.test(wrk));
+  }
+
+  // ═══ R. DB1 — a fronteira do claim GLOBAL no teste de banco ═══════
+  //
+  // `claim_next_agente_tarefa()` nao recebe parametro algum: varre
+  // `agente_tarefas` inteira e reivindica a elegivel MAIS ANTIGA
+  // (`ORDER BY t.criado_em ASC`), de qualquer dono, MUTANDO a linha.
+  // A fixture do teste de banco nasce agora, logo e sempre a mais nova
+  // — com uma tarefa real elegivel na fila, o claim leva a real.
+  //
+  // A DB1 separou o arquivo em duas regioes. Esta secao prova a
+  // fronteira ESTATICAMENTE, porque conferir `if`s a olho e exatamente
+  // o que falha quando alguem acrescentar uma chamada meses depois.
+  console.log("\nR. DB1 — fronteira do claim global (teste de banco)");
+  {
+    const DB_TESTE = "scripts/testar-agentes-execucao-banco.ts";
+    const bruto = fonte(DB_TESTE);
+
+    // O recorte e feito no BRUTO porque o marcador de fim e um
+    // comentario — `codigo()` o apagaria junto com a fronteira.
+    const semComentarios = (t: string) =>
+      t.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+
+    const MARCA_INI = "async function testarClaimGlobalPerigoso(";
+    const MARCA_FIM = "// ═══ FIM DO BLOCO CLAIM GLOBAL PERIGOSO";
+    const iIni = bruto.indexOf(MARCA_INI);
+    const iFim = bruto.indexOf(MARCA_FIM);
+
+    ok("R1  ANCORA: as duas marcas da regiao perigosa existem, na ordem",
+      iIni > 0 && iFim > iIni);
+
+    const perigosa = semComentarios(bruto.slice(iIni, iFim));
+    const segura = semComentarios(bruto.slice(0, iIni) + bruto.slice(iFim));
+    ok("R2  ANCORA: as duas regioes tem conteudo",
+      perigosa.length > 2000 && segura.length > 2000);
+
+    // A CHAMADA e a unica forma de executar o claim. `.rpc("claim…")`
+    // cobre `db.rpc`, `db2.rpc` e `c.rpc` do `map` de 5 clientes.
+    const CHAMADA = /\.rpc\(\s*"claim_next_agente_tarefa"/g;
+    const noArquivo = conta(semComentarios(bruto), CHAMADA);
+    const naPerigosa = conta(perigosa, CHAMADA);
+    const naSegura = conta(segura, CHAMADA);
+
+    ok(`R3  o modo seguro tem ZERO chamadas ao claim global (achadas=${naSegura})`,
+      naSegura === 0);
+    ok(`R4  TODAS as chamadas ao claim vivem na regiao perigosa (${naPerigosa}/${noArquivo})`,
+      naPerigosa > 0 && naPerigosa === noArquivo);
+    // CONTROLE NEGATIVO: a sonda precisa saber dizer NAO. Sem isto, R3
+    // ficaria verde ate se o regex nunca casasse com nada.
+    ok("R5  CONTROLE NEGATIVO: uma chamada injetada na regiao segura reprova",
+      conta(segura + '\nawait db.rpc("claim_next_agente_tarefa");', CHAMADA) === 1);
+
+    // As DUAS flags, e a porta unica.
+    ok("R6  a flag adicional existe, e e literal e longa",
+      /--confirmo-claim-global/.test(bruto) &&
+      !/"--all"|"--full"|"--force"|"--yes"/.test(bruto));
+    ok("R7  a porta do bloco perigoso e a CONJUNCAO das duas flags",
+      /const CLAIM_GLOBAL_LIBERADO = CONFIRMADO && CONFIRMADO_CLAIM_GLOBAL;/.test(bruto));
+
+    // Um unico chamador, e ele esta dentro da guarda.
+    const CHAMADOR = /await testarClaimGlobalPerigoso\(/g;
+    ok("R8  a funcao perigosa tem EXATAMENTE um chamador", conta(segura, CHAMADOR) === 1);
+    const iGuarda = segura.indexOf("if (CLAIM_GLOBAL_LIBERADO) {");
+    const iChamada = segura.indexOf("await testarClaimGlobalPerigoso(");
+    const iElse = segura.indexOf("} else {", iGuarda);
+    ok("R9  e o chamador esta DENTRO da guarda",
+      iGuarda > 0 && iChamada > iGuarda && iElse > iChamada);
+
+    // A secao do P0 — o objetivo do modo seguro — sem claim nenhum.
+    // Ancorado no `console.log` da secao, que e CODIGO: o cabecalho em
+    // comentario foi removido junto com os demais por `semComentarios`.
+    const iP0 = segura.indexOf("11. Pausa por aprovacao");
+    const secaoP0 = iP0 > 0 ? segura.slice(iP0) : "";
+    ok("R10 ANCORA: a secao 11 foi recortada", secaoP0.length > 800);
+    ok("R11 a secao 11 nao chama o claim e promove a fixture por INSERT",
+      conta(secaoP0, CHAMADA) === 0 &&
+      /semearEmRodando\(/.test(secaoP0));
+    ok("R12 e o fencing usa uma tentativa que o TESTE escolheu, nao uma vinda do claim",
+      /const N = \d+;/.test(secaoP0) &&
+      /p_tentativa_esperada: N - 1,/.test(secaoP0) &&
+      /p_tentativa_esperada: N,/.test(secaoP0));
+    ok("R13 e endereca SEMPRE a propria fixture",
+      /p_tarefa_id: F,/.test(secaoP0) && !/p_tarefa_id: t1?\./.test(secaoP0));
+
+    // O INSERT que substitui o claim precisa nascer coerente.
+    ok("R14 `semearEmRodando` insere em rodando com tentativa, iniciado_em e heartbeat",
+      /status: "rodando",/.test(segura) &&
+      /tentativas: opcoes\.tentativas,/.test(segura) &&
+      /iniciado_em: agora,/.test(segura) &&
+      /heartbeat_em: agora,/.test(segura));
+
+    // Limpeza: nenhum DELETE sem filtro, com a tabela de producao cheia.
+    const DELETE_QUALQUER = /\.delete\(/g;
+    const DELETE_POR_PREFIXO = /\.delete\(\)\.like\("user_id", `\$\{PREFIXO\}%`\)/g;
+    ok("R15 todo DELETE do teste e por PREFIXO — nenhum global",
+      conta(segura, DELETE_QUALQUER) === conta(segura, DELETE_POR_PREFIXO) &&
+      conta(segura, DELETE_POR_PREFIXO) === 2 &&
+      conta(perigosa, DELETE_QUALQUER) === 0);
+    ok("R16 e nao ha truncate nem delete sem filtro em lugar nenhum",
+      !/truncate/i.test(bruto) && !/\.delete\(\)\s*;/.test(bruto));
+
+    // 10.3/10.4: contagem escopada, nunca "producao vazia".
+    ok("R17 nenhuma contagem exige a tabela INTEIRA vazia",
+      !/head: true \}\)\s*;/.test(segura) &&
+      !/tabela agentes de volta a ZERO|tabela agente_tarefas de volta a ZERO/.test(bruto));
+
+    // O output nao pode insinuar prova que nao houve.
+    ok("R18 o modo seguro anuncia que o claim global NAO rodou",
+      /CLAIM_GLOBAL_SKIPPED/.test(bruto) && /CLAIM_GLOBAL_DANGEROUS_ENABLED/.test(bruto));
+
+    // ── R19..R23 — a prova pos-limpeza mede TODO o PREFIXO ───────────
+    //
+    // A limpeza apaga por `LIKE '${PREFIXO}%'`. Se a verificacao medir
+    // um universo MENOR — um tenant so, uma fixture so — um residuo de
+    // qualquer outro tenant do prefixo passa verde. E se medir a tabela
+    // INTEIRA, volta a premissa "producao esta vazia", que e falsa.
+    const iLimpeza = segura.indexOf("10. Limpeza");
+    const iPlacar = segura.indexOf("const total = passou + falhou;");
+    const blocoLimpeza = iLimpeza > 0 && iPlacar > iLimpeza ? segura.slice(iLimpeza, iPlacar) : "";
+    ok("R19 ANCORA: o bloco de verificacao pos-limpeza foi recortado",
+      blocoLimpeza.length > 400);
+
+    /** O mesmo predicado, aplicado ao bloco real e aos mutantes de R23. */
+    const mediuTodoOPrefixo = (bloco: string) =>
+      // as DUAS tabelas, pelo predicado do proprio `limpar()`
+      conta(bloco, /\.like\("user_id", ONDE_SINTETICO\)/g) === 4 &&
+      /from\("agente_tarefas"\)\.select\("id", \{ count: "exact", head: true \}\)/.test(bloco) &&
+      /from\("agentes"\)\.select\("id", \{ count: "exact", head: true \}\)/.test(bloco) &&
+      // nenhum estreitamento para um tenant unico
+      !/\.eq\("user_id"/.test(bloco) &&
+      // nenhuma contagem sem filtro (a premissa "tabela vazia")
+      !/head: true \}\)\s*;/.test(bloco);
+
+    ok("R20 a verificacao pos-limpeza usa o MESMO universo que a limpeza",
+      mediuTodoOPrefixo(blocoLimpeza));
+    ok("R21 o universo e definido a partir do PREFIXO, nao de um tenant",
+      /const ONDE_SINTETICO = `\$\{PREFIXO\}%`;/.test(segura));
+    ok("R22 e ainda enumera QUEM sobrou, no mesmo universo",
+      /tenantsResiduais/.test(blocoLimpeza) &&
+      /TENANTS_DO_TESTE/.test(blocoLimpeza) &&
+      /t\.startsWith\(PREFIXO\)/.test(blocoLimpeza));
+
+    // CONTROLE NEGATIVO exigido pelo gate: trocar o `LIKE` do prefixo
+    // por `EQ` de um tenant unico tem de reprovar a sonda.
+    ok("R23 CONTROLE NEGATIVO: estreitar de LIKE PREFIXO para EQ tenant B reprova",
+      !mediuTodoOPrefixo(
+        blocoLimpeza.replace(/\.like\("user_id", ONDE_SINTETICO\)/g, '.eq("user_id", USUARIO_B)')
+      ) &&
+      // e voltar a contagem global tambem reprova
+      !mediuTodoOPrefixo(
+        blocoLimpeza.replace(/\.like\("user_id", ONDE_SINTETICO\)/g, ";")
+      ));
+
+    // ── R24..R27 — os probes de privilegio sao failure-safe ──────────
+    //
+    // Um probe de privilegio so vale se, QUANDO a protecao falhar, ele
+    // ficar vermelho. Duas condicoes: o alvo tem de ser uma linha que a
+    // propria execucao criou, e o assert tem de exigir erro de ACESSO —
+    // um 55000 e o que uma RPC EXECUTADA devolveria.
+    const iPriv = segura.indexOf("9. Privilegios das RPCs");
+    const iP0parc = segura.indexOf("11. Pausa por aprovacao");
+    const blocoPriv = iPriv > 0 && iP0parc > iPriv ? segura.slice(iPriv, iP0parc) : "";
+    ok("R24 ANCORA: o bloco de privilegios seguro foi recortado", blocoPriv.length > 600);
+
+    ok("R25 nenhum probe seguro mira um uuid literal — o alvo e fixture propria",
+      !/0{8}-0{4}-0{4}-0{4}-0{12}/.test(segura) &&
+      /const \{ tarefaId: ALVO_PRIVILEGIO \} = await semear\(db\);/.test(blocoPriv));
+    ok("R26 e o assert exige erro de ACESSO, nao de negocio",
+      /CODIGOS_DE_NEGOCIO/.test(blocoPriv) &&
+      /barradoPorPrivilegio/.test(blocoPriv) &&
+      !/ok\(`9\.x anon NAO executa \$\{fn\}`, !!error/.test(blocoPriv) &&
+      /!barradoPorPrivilegio\(\{ code: "55000" \}\)/.test(blocoPriv));
+
+    // Nenhuma RPC enderecada do modo seguro recebe id de consulta
+    // global: os alvos sao um conjunto NOMINAL e fechado.
+    const alvos = [...segura.matchAll(/p_tarefa_id:\s*([A-Za-z_][\w.]*)/g)].map((m) => m[1]);
+    const ALVOS_PERMITIDOS = ["F", "ALVO_PRIVILEGIO"];
+    ok(`R27 todo p_tarefa_id do modo seguro vem de fixture (${[...new Set(alvos)].join(", ")})`,
+      alvos.length >= 5 && alvos.every((a) => ALVOS_PERMITIDOS.includes(a)));
   }
 
   const total = passou + falhou;
