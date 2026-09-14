@@ -1811,6 +1811,33 @@ async function principalStale(): Promise<void> {
     );
     ok(`R20 retomarAprovacao continua SEM consumidor de producao (${consumidoresResume.join(", ") || "nenhum"})`,
       consumidoresResume.length === 0);
+
+    // ── R21..R24 — a fronteira da FUNCTION-RUNTIME-P0 ───────────────
+    //
+    // O P0 deu ao runtime de Task como PARAR esperando uma decisao
+    // humana. Ele NAO liga nenhuma ponta de Approval: nao cria, nao
+    // decide, nao consome e nao retoma. O sentinel carrega um
+    // `aprovacaoId` como marcador, e so.
+    const erros = semComentariosTs(ler("lib/agentes/erros.ts"));
+    const executor = semComentariosTs(ler("lib/agentes/executar-tarefa.ts"));
+    const capWorker = semComentariosTs(ler("lib/agentes/capability-worker.ts"));
+
+    ok("R21 o sentinel de pausa existe e carrega SO o id da aprovacao",
+      /export class PausaPorAprovacao extends Error/.test(erros) &&
+      /readonly aprovacaoId: string;/.test(erros));
+    ok("R22 e ele NAO alcanca o dominio de Approval",
+      !/criarAprovacao|decidirAprovacao|consumirAprovacao|retomarAprovacao|agente_funcao_aprovacoes/
+        .test(erros));
+    ok("R23 o executor pausa a Task sem tocar em Approval",
+      /PausaPorAprovacao/.test(executor) &&
+      /aguardarAprovacaoTarefa\(/.test(executor) &&
+      !/criarAprovacao|decidirAprovacao|consumirAprovacao|retomarAprovacao|agente_funcao_aprovacoes/
+        .test(executor));
+    ok("R24 e a capability de pausa nao conhece aprovacao nenhuma",
+      /aguardar_aprovacao_tarefa/.test(capWorker) &&
+      !/p_aprovacao_id|agente_funcao_aprovacoes|criarAprovacao|retomarAprovacao/.test(capWorker));
+    ok("R25 CONTROLE: as sondas acusam o padrao que proibem",
+      /retomarAprovacao/.test("await retomarAprovacao({ userId, aprovacaoId })"));
   }
 
   // ─── S. A superficie operacional ───────────────────────────────────

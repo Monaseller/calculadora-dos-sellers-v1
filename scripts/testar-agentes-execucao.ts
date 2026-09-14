@@ -401,8 +401,24 @@ async function main() {
      transicaoTarefaPermitida("rodando", "erro") &&
      transicaoTarefaPermitida("rodando", "pendente") &&
      !transicaoTarefaPermitida("pendente", "concluido"));
-  ok("H6  aguardando_aprovacao NAO e produzido pela 1C",
-     !/aguardando_aprovacao/.test(exe) && !/aguardando_aprovacao/.test(mig) && !/aguardando_aprovacao/.test(wrk));
+  // ── H6 reconciliado na FUNCTION-RUNTIME-P0 ──────────────────────
+  //
+  // A afirmacao "a 1C nao produz `aguardando_aprovacao`" era verdadeira
+  // e deixou de ser: o P0 existe justamente para produzi-lo. Apagar o
+  // assert perderia a cobertura; mante-lo como estava seria exigir que
+  // o terceiro desfecho nunca chegasse.
+  //
+  // Ele passa a medir o estado REAL: a migration FUNDACIONAL da 1C
+  // continua sem produzir o status — ela so o declara no CHECK —, e
+  // quem o produz e a RPC nova, sempre com fencing.
+  ok("H6  a migration da 1C continua sem PRODUZIR aguardando_aprovacao",
+     !/status\s*=\s*'aguardando_aprovacao'/.test(mig));
+  ok("H6a quem produz o status e o executor, via capability dedicada",
+     /aguardarAprovacaoTarefa\(/.test(exe) &&
+     /"aguardando_aprovacao"/.test(exe));
+  ok("H6b e o worker sabe LER o status, sem nunca escrever transicao",
+     /aguardando_aprovacao/.test(wrk) &&
+     !/\.rpc\("(concluir_tarefa|falhar_tarefa|aguardar_aprovacao_tarefa)"/.test(wrk));
   ok("H7  cancelado NAO e produzido pela 1C",
      !/'cancelado'/.test(mig) && !/cancelado/.test(exe));
   ok("H8  os 6 estados da 1B seguem intactos", STATUS_TAREFA.length === 6);
@@ -592,8 +608,12 @@ async function main() {
   // Quem consome, consome da casa nova.
   ok("M5  teste-fundacao importa de @/lib/agentes/erros",
      /import \{ ErroEntradaTarefa \} from "@\/lib\/agentes\/erros"/.test(han2));
-  ok("M6  executor importa de @/lib/agentes/erros",
-     /import \{ ErroEntradaTarefa \} from "@\/lib\/agentes\/erros"/.test(exe2));
+  // A casa dos erros passou a abrigar DOIS: `ErroEntradaTarefa` e o
+  // sentinel de pausa. O assert nao afrouxa — passa a exigir os dois,
+  // da MESMA casa, em vez de um literal que envelheceria no dia
+  // seguinte.
+  ok("M6  executor importa AMBOS os sentinels de @/lib/agentes/erros",
+     /import \{ ErroEntradaTarefa, PausaPorAprovacao \} from "@\/lib\/agentes\/erros"/.test(exe2));
   ok("M7  executor NAO importa mais de handlers/teste-fundacao",
      !/from "@\/lib\/agentes\/handlers\/teste-fundacao"/.test(exe2));
   // erros.ts precisa ser PURO: o executor e server-only, o handler nao.
@@ -993,6 +1013,183 @@ async function main() {
        !/lerAgenteDoDono|agente\.instrucoes/.test(codigo("lib/agentes/handlers/analise-vendas.ts")));
     ok("P60 conversa nao criou historico/thread/conversationId",
        !/conversationId|threadId|historico|mensagens\b/i.test(srcConversa));
+  }
+
+  // ═══ Q. FUNCTION-RUNTIME-P0 — o terceiro desfecho ═════════════════
+  //
+  // O executor conhecia dois finais: devolver (concluir) e lancar
+  // (falhar). O terceiro existe de verdade — a Funcao pedida tem
+  // `nivel = aprovacao`, a aprovacao ja foi criada, e nada mais pode
+  // acontecer sem um humano. Sem ele, a Task terminaria
+  // `handler_falhou` e a aprovacao ficaria pendente sem dono.
+  console.log("\nQ. FUNCTION-RUNTIME-P0 — pausa por aprovacao");
+  {
+    const MIG_P0 = "supabase/migrations/20260929_agente_tarefa_aguardar_aprovacao.sql";
+    const migP0 = sql(MIG_P0);
+    const migP0Bruta = fonte(MIG_P0);
+    const erros = codigo("lib/agentes/erros.ts");
+
+    // ── O sentinel ───────────────────────────────────────────────
+    ok("Q1  o sentinel existe e estende Error",
+      /export class PausaPorAprovacao extends Error/.test(erros));
+    ok("Q2  carrega SO `aprovacaoId`, e ele e readonly",
+      /readonly aprovacaoId: string;/.test(erros) &&
+      /constructor\(aprovacaoId: string\)/.test(erros));
+    ok("Q3  NAO carrega tarefaId, tentativa, dono nem argumentos",
+      !/tarefaId|tentativa|userId|agenteId|argumentos/.test(erros));
+    ok("Q4  `name` estavel, para o `instanceof` nao ser a unica prova",
+      /this\.name = "PausaPorAprovacao";/.test(erros));
+    ok("Q5  `erros.ts` continua PURO",
+      !/import\s+"server-only"/.test(erros) &&
+      !/supabase|createClient|process\.env|fetch\(/i.test(erros));
+
+    // ── O contrato do handler NAO mudou ──────────────────────────
+    ok("Q6  HandlerTarefa continua devolvendo Record<string, unknown>",
+      /=> Promise<Record<string, unknown>>/.test(tex) &&
+      !/tipo: "aguardando_aprovacao"/.test(tex));
+    const blocoContexto = tex.slice(
+      tex.indexOf("export interface ContextoTarefa"),
+      tex.indexOf("export type RelatarProgresso")
+    );
+    ok("Q7  ContextoTarefa continua com SETE campos",
+      blocoContexto.length > 50 && conta(blocoContexto, /readonly \w+:/g) === 7);
+
+    // ── O executor: reconhecer ANTES de classificar ──────────────
+    const iCatch = exe.indexOf("} catch (err) {");
+    const iSentinel = exe.indexOf("err instanceof PausaPorAprovacao");
+    const iClassificar = exe.indexOf("const erroTipo = classificarErro(err);");
+    const iPausa = exe.indexOf("aguardarAprovacaoTarefa(");
+
+    ok("Q8  o executor reconhece o sentinel DENTRO do catch",
+      iCatch > 0 && iSentinel > iCatch);
+    ok("Q9  e ANTES de classificarErro — senao viraria handler_falhou",
+      iSentinel > 0 && iClassificar > iSentinel);
+    ok("Q10 a pausa chama a capability dedicada",
+      iPausa > iSentinel && iPausa < iClassificar);
+    // O FENCING: a tentativa vem da LINHA, nunca do handler.
+    ok("Q11 passa `tarefa.id` e `tarefa.tentativas`, os dois da linha",
+      /aguardarAprovacaoTarefa\(\s*tarefa\.id,\s*tarefa\.tentativas\s*\)/.test(exe));
+    ok("Q12 NAO usa tentativa vinda do sentinel nem do contexto",
+      !/err\.tentativa|contexto\.tentativa/.test(exe));
+    ok("Q13 o `aprovacaoId` NAO participa da transicao",
+      !/aguardarAprovacaoTarefa\([^)]*aprovacaoId/.test(exe));
+
+    // ── Sucesso da pausa ─────────────────────────────────────────
+    const ramoPausa = exe.slice(iSentinel, iClassificar);
+    ok("Q14 o ramo de pausa NAO chama concluir nem falhar",
+      !/concluirTarefa\(|falharTarefa\(/.test(ramoPausa));
+    ok("Q15 sucesso devolve 200 com ok:true e o status honesto",
+      /status: 200,/.test(ramoPausa) &&
+      /ok: true,/.test(ramoPausa) &&
+      /status: "aguardando_aprovacao",/.test(ramoPausa) &&
+      /erroTipo: null,/.test(ramoPausa));
+    ok("Q16 e o `aprovacaoId` nao vaza para a resposta",
+      !/aprovacaoId/.test(ramoPausa.slice(ramoPausa.indexOf("status: 200,"))));
+
+    // ── Falha da pausa ───────────────────────────────────────────
+    ok("Q17 falha devolve 500 sanitizado, sem concluir nem falhar",
+      /if \(erroPausa\) \{/.test(ramoPausa) &&
+      /status: 500, corpo: \{ ok: false, erro: erroPausa \}/.test(ramoPausa));
+    ok("Q18 CONTROLE NEGATIVO: chamar falharTarefa na pausa reprovaria",
+      /falharTarefa\(/.test(ramoPausa + "\nfalharTarefa(x)"));
+
+    // ── A capability ─────────────────────────────────────────────
+    ok("Q19 o wrapper existe e chama a RPC nova",
+      /export async function aguardarAprovacaoTarefa\(/.test(capw) &&
+      /\.rpc\("aguardar_aprovacao_tarefa"/.test(capw));
+    // Recorta o CORPO do wrapper novo: o arquivo inteiro contem
+    // `p_resultado` e `p_erro_tipo`, que sao das irmas.
+    const corpoWrapper = capw.slice(
+      capw.indexOf("export async function aguardarAprovacaoTarefa("),
+      capw.indexOf("export async function aguardarAprovacaoTarefa(") > 0
+        ? capw.indexOf("\n/**", capw.indexOf("export async function aguardarAprovacaoTarefa("))
+        : 0
+    );
+    ok("Q20 recebe SOMENTE tarefa e tentativa",
+      corpoWrapper.length > 200 &&
+      /p_tarefa_id: tarefaId,/.test(corpoWrapper) &&
+      /p_tentativa_esperada: tentativaEsperada,/.test(corpoWrapper) &&
+      !/p_user_id|p_agente_id|p_aprovacao_id|p_status|p_resultado|p_erro_tipo/.test(corpoWrapper));
+    ok("Q21 recusa tentativa que nao poderia ter vindo do claim",
+      /Number\.isInteger\(tentativaEsperada\) \|\| tentativaEsperada <= 0/.test(capw));
+    ok("Q22 e nao vaza a mensagem do driver",
+      !/error\.message/.test(capw));
+
+    // ── A migration: fencing e schema-free ───────────────────────
+    ok("Q23 ANCORA: a migration do P0 foi lida", migP0.trim().length > 800);
+    ok("Q24 cria a RPC com os DOIS parametros",
+      /CREATE OR REPLACE FUNCTION public\.aguardar_aprovacao_tarefa\(/.test(migP0) &&
+      /p_tarefa_id\s+uuid/.test(migP0) &&
+      /p_tentativa_esperada\s+integer/.test(migP0));
+    // O FENCING, medido no SQL.
+    ok("Q25 o WHERE exige tarefa, status rodando E a tentativa esperada",
+      /WHERE id = p_tarefa_id/.test(migP0) &&
+      /AND status = 'rodando'/.test(migP0) &&
+      /AND tentativas = p_tentativa_esperada/.test(migP0));
+    ok("Q26 CONTROLE NEGATIVO: sem a comparacao de tentativas, reprova",
+      !/AND tentativas = p_tentativa_esperada/.test(
+        migP0.replace("AND tentativas = p_tentativa_esperada", "")));
+    ok("Q27 CONTROLE NEGATIVO: sem o guard de status, reprova",
+      !/AND status = 'rodando'/.test(migP0.replace("AND status = 'rodando'", "")));
+    ok("Q28 a pausa limpa batimento, resultado, erro e conclusao",
+      /heartbeat_em  = NULL/.test(migP0) && /resultado     = NULL/.test(migP0) &&
+      /erro_tipo     = NULL/.test(migP0) && /erro_mensagem = NULL/.test(migP0) &&
+      /concluido_em  = NULL/.test(migP0));
+    // Somente o SET: `tentativas` aparece legitimamente no WHERE, que e
+    // justamente o fencing.
+    const setDaPausa = migP0.slice(
+      migP0.indexOf("SET status        = 'aguardando_aprovacao'"),
+      migP0.indexOf("WHERE id = p_tarefa_id")
+    );
+    ok("Q29 e o SET NAO toca progresso, tentativas nem iniciado_em",
+      setDaPausa.length > 50 &&
+      !/progresso/.test(setDaPausa) && !/tentativas/.test(setDaPausa) &&
+      !/iniciado_em/.test(setDaPausa));
+    ok("Q30 mismatch LANCA 55000 — nunca no-op silencioso",
+      /IF NOT FOUND THEN/.test(migP0) && /ERRCODE = '55000'/.test(migP0));
+    ok("Q31 a migration e SCHEMA-FREE",
+      !/ALTER TABLE|CREATE TABLE|ADD COLUMN|CREATE INDEX|CREATE TRIGGER|ROW LEVEL SECURITY|ALTER DEFAULT PRIVILEGES/i
+        .test(migP0));
+    ok("Q32 SECURITY INVOKER e search_path fixo, como as irmas",
+      /SECURITY INVOKER/.test(migP0) && /SET search_path = public/.test(migP0) &&
+      !/SECURITY DEFINER/.test(migP0));
+    ok("Q33 grants no padrao: revoga os tres, concede so a service_role",
+      /REVOKE EXECUTE[\s\S]*FROM PUBLIC/.test(migP0) &&
+      /REVOKE EXECUTE[\s\S]*FROM anon/.test(migP0) &&
+      /REVOKE EXECUTE[\s\S]*FROM authenticated/.test(migP0) &&
+      /GRANT  EXECUTE[\s\S]*TO service_role/.test(migP0));
+    ok("Q34 tem COMMENT, como toda RPC do projeto",
+      /COMMENT ON FUNCTION public\.aguardar_aprovacao_tarefa/.test(migP0Bruta));
+    // O CORPO da funcao — o COMMENT cita `agente_funcao_aprovacoes`
+    // para explicar ONDE o vinculo vive, e citar nao e tocar.
+    const corpoRpc = migP0.slice(
+      migP0.indexOf("CREATE OR REPLACE FUNCTION public.aguardar_aprovacao_tarefa("),
+      migP0.indexOf("COMMENT ON FUNCTION")
+    );
+    ok("Q35 o corpo da RPC so toca `agente_tarefas`",
+      corpoRpc.length > 500 &&
+      /UPDATE public\.agente_tarefas/.test(corpoRpc) &&
+      !/agente_funcao_aprovacoes|agente_funcao_chamadas|agente_permissoes/.test(corpoRpc));
+
+    // ── As RPCs irmas NAO foram tocadas (P0-DEBT-1 segue dividida) ─
+    ok("Q36 as tres RPCs da 1C continuam nominais e intactas",
+      AS_3_RPCS.every((r) => new RegExp(`FUNCTION public\\.${r}\\(`).test(mig)) &&
+      !/aguardar_aprovacao_tarefa/.test(mig));
+
+    // ── O worker ─────────────────────────────────────────────────
+    ok("Q37 o worker distingue concluida de pausada",
+      /corpo\.status === "concluido"/.test(wrk) &&
+      /corpo\.status === "aguardando_aprovacao"/.test(wrk));
+    ok("Q38 e usa rotulo proprio para a pausa",
+      /AGUARDANDO_APROVACAO/.test(wrk));
+    // FAIL-CLOSED: `ok:true` com status desconhecido nao vira CONCLUIDA.
+    ok("Q39 status inesperado NAO e anunciado como concluida",
+      /RESPOSTA INESPERADA/.test(wrk) &&
+      wrk.indexOf("CONCLUIDA") < wrk.indexOf("RESPOSTA INESPERADA"));
+    ok("Q40 o worker nao ganhou retry proprio nem loop",
+      !/setInterval|while \(true\)|for \(;;\)/.test(wrk));
+    ok("Q41 e continua sem conhecer Approval",
+      !/aprovacaoId|aprovacao_id|retomarAprovacao/.test(wrk));
   }
 
   const total = passou + falhou;

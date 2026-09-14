@@ -49,6 +49,7 @@
  */
 import "server-only";
 import {
+  aguardarAprovacaoTarefa,
   concluirTarefa,
   falharTarefa,
   lerTarefaParaExecucao,
@@ -57,7 +58,7 @@ import {
 import { ErroTipoTarefaDesconhecido, resolverHandler } from "@/lib/agentes/handlers/registry";
 // AGENTES-FASE1D-b: a classe saiu de `handlers/teste-fundacao.ts` para
 // uma casa neutra. O executor nao pode depender de um handler de teste.
-import { ErroEntradaTarefa } from "@/lib/agentes/erros";
+import { ErroEntradaTarefa, PausaPorAprovacao } from "@/lib/agentes/erros";
 import type {
   ContextoTarefa,
   ResultadoExecucao,
@@ -219,6 +220,54 @@ export async function executarTarefa(tarefaId: string): Promise<RespostaExecucao
       clearInterval(timerHeartbeat);
     }
   } catch (err) {
+    // ── O TERCEIRO DESFECHO, antes de classificar como falha ────────
+    //
+    // `PausaPorAprovacao` nao e erro do handler: e a Funcao pedida ter
+    // `nivel = aprovacao`, a aprovacao ja existir e nada mais poder
+    // acontecer sem um humano. Cair em `classificarErro` a
+    // transformaria em `handler_falhou` — a tarefa mentiria sobre o
+    // proprio estado e a aprovacao ficaria pendente sem ninguem para
+    // alcanca-la.
+    if (err instanceof PausaPorAprovacao) {
+      // A tentativa vem da LINHA que o claim reivindicou, NUNCA do
+      // handler: aceita-la de quem lanca seria deixar o handler
+      // descrever o proprio fencing. `err.aprovacaoId` e marcador, e
+      // nao participa da transicao.
+      const { erro: erroPausa } = await aguardarAprovacaoTarefa(
+        tarefa.id,
+        tarefa.tentativas
+      );
+
+      if (erroPausa) {
+        // NAO concluir e NAO falhar. `falharTarefa` criaria justamente o
+        // estado que esta fase existe para impedir — aprovacao pendente
+        // + tarefa em erro — e, com tentativa sobrando, devolveria a
+        // tarefa a fila para reencontrar a MESMA aprovacao e tentar
+        // pausar de novo.
+        //
+        // A tarefa fica em `rodando` com o heartbeat ja congelado (o
+        // `finally` interno parou o timer antes deste catch), entao o
+        // recuperador de orfas a devolve a fila em 5 minutos e o retry
+        // converge reutilizando a aprovacao existente.
+        return { status: 500, corpo: { ok: false, erro: erroPausa } };
+      }
+
+      // 200 com `ok: true`: a EXECUCAO terminou corretamente — ela
+      // conseguiu estacionar a tarefa. Nao ha o que re-tentar, e o
+      // worker distingue pelo `status`. `aprovacaoId` NAO entra na
+      // resposta: o worker nao precisa conhecer Approval.
+      return {
+        status: 200,
+        corpo: {
+          ok: true,
+          tarefaId: tarefa.id,
+          status: "aguardando_aprovacao",
+          erroTipo: null,
+          tempoMs: Date.now() - inicio,
+        },
+      };
+    }
+
     const erroTipo = classificarErro(err);
     const { linha, erro: erroRpc } = await falharTarefa(tarefa.id, erroTipo, mensagemSegura(err));
 

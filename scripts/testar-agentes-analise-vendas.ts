@@ -821,6 +821,18 @@ const MIGRATIONS_DA_APPROVAL_B1B: readonly string[] = [
 ];
 
 /**
+ * FUNCTION-RUNTIME-P0 — a RPC que estaciona uma tarefa.
+ *
+ * Afirma PERTENCIMENTO, nao estado do git: continua verdadeira depois
+ * do commit. A migration e SCHEMA-FREE — so
+ * `CREATE OR REPLACE FUNCTION` + `COMMENT` + `REVOKE`/`GRANT` —, e o
+ * assert G12f abaixo cobra exatamente isso.
+ */
+const MIGRATIONS_DO_FUNCTION_RUNTIME_P0: readonly string[] = [
+  "20260929_agente_tarefa_aguardar_aprovacao.sql",
+];
+
+/**
  * Inventario acumulado de `lib/agentes/ia/`, por frente.
  *
  * O guarda de disco (G11l) compara contra ESTA uniao, nunca contra uma
@@ -1013,6 +1025,29 @@ const ARQUIVOS_VERTICAL_SLICE_V1: readonly string[] = [
   "lib/agentes/handlers/conversa.ts",
 ];
 
+/**
+ * FUNCTION-RUNTIME-P0 — a terceira transicao terminal de uma tarefa.
+ *
+ * A fase nao cria modulo novo em `lib/agentes/`: ela altera tres
+ * arquivos existentes e acrescenta UMA migration.
+ *
+ * `executar-tarefa.ts` NAO entra aqui: ele ja consta em
+ * `ARQUIVOS_1DD`, e o predicado usa igualdade de caminho, entao
+ * repeti-lo seria ruido. `erros.ts` e `capability-worker.ts` nunca
+ * estiveram em nenhuma lista de autorizacao — estavam do outro lado, em
+ * `CONGELADOS` —, entao e AQUI que a autorizacao desta fase e
+ * declarada, nominalmente.
+ *
+ * A migration entra pelo mesmo motivo das anteriores: `ESCOPO_AGENTES`
+ * cobre `supabase/migrations` inteiro, entao um arquivo novo ali que
+ * ninguem declarou tem de reprovar. Criada no disco, NAO aplicada.
+ */
+const ARQUIVOS_FUNCTION_RUNTIME_P0: readonly string[] = [
+  "lib/agentes/erros.ts",
+  "lib/agentes/capability-worker.ts",
+  "supabase/migrations/20260929_agente_tarefa_aguardar_aprovacao.sql",
+];
+
 const ARQUIVOS_SKILL_1D_TOOL_CALL: readonly string[] = [
   "lib/agentes/chamadas/",
   ...MODULOS_CHAMADAS_1D_TOOL_CALL.map((nome) => `lib/agentes/chamadas/${nome}`),
@@ -1059,6 +1094,7 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_TOOL_EXEC,
   ...ARQUIVOS_APROVACOES,
   ...ARQUIVOS_VERTICAL_SLICE_V1,
+  ...ARQUIVOS_FUNCTION_RUNTIME_P0,
 ];
 
 /**
@@ -1676,19 +1712,81 @@ async function main() {
   // asserts e continua declarada em `SUITES_AGENTES` — sair daqui muda o
   // congelamento, nunca a execucao. O resto da lista continua exigido
   // byte a byte.
+  //
+  // FUNCTION-RUNTIME-P0: saem TRES — `erros.ts`, `capability-worker.ts`
+  // e `scripts/agentes-worker.mjs` —, exatamente os que a fase esta
+  // autorizada a alterar, pelo mesmo criterio das saidas anteriores.
+  //
+  // `erros.ts` ganha o sentinel `PausaPorAprovacao`; `capability-worker`
+  // ganha o wrapper da RPC nova, ao lado de `concluirTarefa`/
+  // `falharTarefa`; o worker precisa parar de chamar uma tarefa PAUSADA
+  // de CONCLUIDA. Congelar byte a byte os tres transformaria a guarda em
+  // impedimento do terceiro desfecho — e o terceiro desfecho e
+  // justamente o que impede uma Task de mentir sobre o proprio estado.
+  //
+  // Sair do congelamento NAO e ficar sem protecao: G10l..G10t abaixo
+  // cobrem a fronteira que interessa a esta suite — o que cada um dos
+  // tres PODE e NAO PODE fazer —, e `tipos-execucao.ts`,
+  // `teste-fundacao.ts`, `analise-vendas.ts`, as capabilities de
+  // dominio, o middleware e a rota interna continuam exigidos byte a
+  // byte.
   const CONGELADOS = [
     "lib/agentes/tipos-execucao.ts",
-    "lib/agentes/erros.ts",
     "lib/agentes/handlers/teste-fundacao.ts",
     "lib/agentes/handlers/analise-vendas.ts",
     "lib/agentes/capability.ts",
-    "lib/agentes/capability-worker.ts",
     "lib/middleware-rotas.ts",
-    "scripts/agentes-worker.mjs",
     "app/api/internal/agentes/executar/route.ts",
   ];
   for (const rel of CONGELADOS) {
     ok(`G10 ${rel} identico ao HEAD`, gitVivo && gitLimpo(rel));
+  }
+
+  // ── G10l..G10t: a fronteira dos TRES arquivos liberados no P0 ─────
+  //
+  // O que esta suite precisa continuar garantindo nao e "o arquivo nao
+  // mudou", e sim que a mudanca nao trouxe poder novo para dentro dos
+  // agentes.
+  {
+    const erros = codigo("lib/agentes/erros.ts");
+    const capw = codigo("lib/agentes/capability-worker.ts");
+    const wrk = codigo("scripts/agentes-worker.mjs");
+
+    ok("G10l erros.ts continua PURO — sem server-only, SDK, banco, env ou rede",
+      !/import\s+"server-only"/.test(erros) &&
+      !/@anthropic|@google|supabase|createClient|process\.env|fetch\(/i.test(erros));
+    ok("G10m o sentinel do P0 existe e carrega SO a aprovacao",
+      /export class PausaPorAprovacao extends Error/.test(erros) &&
+      /readonly aprovacaoId: string;/.test(erros) &&
+      !/tarefaId|tentativa|userId|agenteId|argumentos/.test(erros));
+    ok("G10n `ErroEntradaTarefa` segue intacto ao lado dele",
+      /export class ErroEntradaTarefa extends Error/.test(erros));
+
+    ok("G10o capability-worker ganhou UM wrapper novo, e ele chama RPC",
+      /export async function aguardarAprovacaoTarefa\(/.test(capw) &&
+      /\.rpc\("aguardar_aprovacao_tarefa"/.test(capw));
+    ok("G10p o wrapper novo recebe SOMENTE tarefa e tentativa",
+      /p_tarefa_id: tarefaId,/.test(capw) &&
+      /p_tentativa_esperada: tentativaEsperada,/.test(capw) &&
+      !/p_user_id|p_agente_id|p_aprovacao_id|p_status/.test(capw));
+    ok("G10q nenhuma transicao de tarefa virou UPDATE direto",
+      !/\.from\("agente_tarefas"\)[\s\S]{0,200}\.update\(\{\s*status/.test(capw));
+    ok("G10r o erro do driver nao vaza pelo wrapper novo",
+      !/error\.message|erro\.message/.test(capw));
+
+    ok("G10s o worker distingue concluida de pausada",
+      /corpo\.status === "concluido"/.test(wrk) &&
+      /corpo\.status === "aguardando_aprovacao"/.test(wrk) &&
+      /AGUARDANDO_APROVACAO/.test(wrk));
+    // O worker LEGITIMAMENTE abre cliente e chama o claim — e o papel
+    // dele. O que ele nao pode e decidir transicao: concluir, falhar ou
+    // pausar sao do executor, atras da rota interna. E ele nao conhece
+    // Approval nem Function.
+    ok("G10t o worker chama SOMENTE o claim, e nao as transicoes",
+      /\.rpc\("claim_next_agente_tarefa"\)/.test(wrk) &&
+      !/\.rpc\("(concluir_tarefa|falhar_tarefa|aguardar_aprovacao_tarefa)"/.test(wrk));
+    ok("G10u e nao alcanca Approval, Function nem executor",
+      !/aprovacaoId|aprovacao_id|executarFuncao|autorizarFuncao|executarTarefa\(/.test(wrk));
   }
 
   // ── G10a..G10k: a fronteira dos DOIS arquivos liberados ───────────
@@ -1756,13 +1854,26 @@ async function main() {
 
     // Controles negativos sinteticos: o predicado precisa saber dizer
     // NAO, e sem depender de mutacao em disco para isso.
-    ok("G11e CONTROLE NEGATIVO: um QUINTO arquivo do escopo reprova", !soAutorizadosNoEscopo(" M lib/agentes/erros.ts\n"));
+    // Os exemplos destes dois controles eram `erros.ts` e
+    // `capability-worker.ts`. A FUNCTION-RUNTIME-P0 os autorizou
+    // nominalmente, entao eles deixaram de servir como intruso — um
+    // controle negativo que aponta para arquivo autorizado nao
+    // discrimina mais nada. Trocados por dois que CONTINUAM fora:
+    // `capability.ts` (a capability de dominio) e a rota interna.
+    ok("G11e CONTROLE NEGATIVO: um arquivo NAO autorizado do escopo reprova",
+       !soAutorizadosNoEscopo(" M lib/agentes/capability.ts\n"));
     // A capability SAIU do congelamento na correcao de performance da
     // 1D-a, entao ela agora e aceita — e quem a protege sao G10a..G10j,
     // nao mais a igualdade byte a byte.
     ok("G11f aceita a capability, liberada pela correcao 1D-a", soAutorizadosNoEscopo(" M lib/agentes/dados/vendas.ts\n"));
-    ok("G11f2 CONTROLE NEGATIVO: outra capability do escopo continua reprovando",
-       !soAutorizadosNoEscopo(" M lib/agentes/capability-worker.ts\n"));
+    ok("G11f2 CONTROLE NEGATIVO: a rota interna do escopo continua reprovando",
+       !soAutorizadosNoEscopo(" M app/api/internal/agentes/executar/route.ts\n"));
+    // E os dois que o P0 liberou passam a ser ACEITOS — nos dois
+    // sentidos, para que a lista nao envelheca calada.
+    ok("G11f3 aceita `erros.ts`, liberado pela FUNCTION-RUNTIME-P0",
+       soAutorizadosNoEscopo(" M lib/agentes/erros.ts\n"));
+    ok("G11f4 aceita `capability-worker.ts`, liberado pela FUNCTION-RUNTIME-P0",
+       soAutorizadosNoEscopo(" M lib/agentes/capability-worker.ts\n"));
     ok("G11g CONTROLE NEGATIVO: migration nova no escopo reprova", !soAutorizadosNoEscopo("?? supabase/migrations/99999999_falsa.sql\n"));
     ok("G11h CONTROLE NEGATIVO: autorizados + intruso reprova", !soAutorizadosNoEscopo(" M lib/agentes/handlers/registry.ts\n M lib/agentes/tipos-execucao.ts\n"));
     ok("G11i CONTROLE NEGATIVO: sufixo parecido em outra pasta reprova", !soAutorizadosNoEscopo("?? outra/pasta/registry.ts\n"));
@@ -1928,7 +2039,8 @@ async function main() {
       MIGRATIONS_DA_SKILL_1DG.includes(m) ||
       MIGRATIONS_DA_SKILL_1D_PERFIL.includes(m) ||
       MIGRATIONS_DA_SKILL_1D_TOOL_CALL.includes(m) ||
-      MIGRATIONS_DA_APPROVAL_B1B.includes(m);
+      MIGRATIONS_DA_APPROVAL_B1B.includes(m) ||
+      MIGRATIONS_DO_FUNCTION_RUNTIME_P0.includes(m);
 
     ok(`G12b nenhuma migration nao declarada no disco (${novasNoDisco.join(", ") || "nenhuma"})`,
        novasNoDisco.every(declarada));

@@ -433,9 +433,84 @@ Pre-requisito: migration 20260917_agentes_execucao.sql ja aplicada.
           const { error } = await dbAnon.rpc(fn, args as never);
           ok(`9.x anon NAO executa ${fn}`, !!error, codigoDe(error));
         }
+        // FUNCTION-RUNTIME-P0: a quarta RPC segue a mesma regra.
+        const { error: eAnonPausa } = await dbAnon.rpc("aguardar_aprovacao_tarefa", {
+          p_tarefa_id: "00000000-0000-0000-0000-000000000000",
+          p_tentativa_esperada: 1,
+        } as never);
+        ok("9.x anon NAO executa aguardar_aprovacao_tarefa", !!eAnonPausa, codigoDe(eAnonPausa));
       } else {
         console.log("  --  NEXT_PUBLIC_SUPABASE_ANON_KEY ausente: 9.x nao executados");
       }
+    }
+
+    // ── 11. FUNCTION-RUNTIME-P0: a pausa, e o fencing por tentativa ──
+    //
+    // O que esta secao prova e que `status = 'rodando'` SOZINHO nao
+    // protege nada: o claim recupera orfa com `rodando -> rodando`
+    // direto, incrementando `tentativas`. Sem o fencing, um worker da
+    // tentativa 1 pausaria a execucao da tentativa 2.
+    console.log("\n11. Pausa por aprovacao (fencing por tentativa)");
+    {
+      const { tarefaId } = await semear(db);
+
+      const { data: cl1 } = await db.rpc("claim_next_agente_tarefa");
+      const t1 = Array.isArray(cl1) ? cl1[0] : cl1;
+      ok("11.1 claim devolve a tarefa em rodando", t1?.id === tarefaId && t1?.status === "rodando");
+      ok("11.2 tentativas = 1", t1?.tentativas === 1, String(t1?.tentativas));
+
+      // ── Tentativa ERRADA: precisa ser recusada ────────────────────
+      const { error: eVelha } = await db.rpc("aguardar_aprovacao_tarefa", {
+        p_tarefa_id: tarefaId,
+        p_tentativa_esperada: t1.tentativas + 1,
+      });
+      ok("11.3 tentativa que nao e a corrente e RECUSADA", codigoDe(eVelha) === "55000", codigoDe(eVelha));
+
+      const { data: intacta } = await db
+        .from("agente_tarefas").select("status, tentativas").eq("id", tarefaId).maybeSingle();
+      ok("11.4 e a tarefa continua em rodando, intacta",
+        intacta?.status === "rodando" && intacta?.tentativas === t1.tentativas);
+
+      // ── Tentativa CORRETA: pausa ─────────────────────────────────
+      const progressoAntes = 42;
+      await db.from("agente_tarefas").update({ progresso: progressoAntes }).eq("id", tarefaId);
+
+      const { data: pa, error: ePausa } = await db.rpc("aguardar_aprovacao_tarefa", {
+        p_tarefa_id: tarefaId,
+        p_tentativa_esperada: t1.tentativas,
+      });
+      const p = Array.isArray(pa) ? pa[0] : pa;
+      ok("11.5 a tentativa corrente PAUSA a tarefa", !ePausa && p?.status === "aguardando_aprovacao",
+        codigoDe(ePausa));
+      ok("11.6 progresso PRESERVADO", p?.progresso === progressoAntes, String(p?.progresso));
+      ok("11.7 tentativas PRESERVADAS", p?.tentativas === t1.tentativas, String(p?.tentativas));
+      ok("11.8 iniciado_em PRESERVADO", !!p?.iniciado_em);
+      ok("11.9 heartbeat_em zerado", p?.heartbeat_em === null, String(p?.heartbeat_em));
+      ok("11.10 resultado NULL", p?.resultado === null);
+      ok("11.11 erro_tipo NULL", p?.erro_tipo === null);
+      ok("11.12 erro_mensagem NULL", p?.erro_mensagem === null);
+      ok("11.13 concluido_em NULL", p?.concluido_em === null, String(p?.concluido_em));
+
+      // ── Pausa DUPLICADA: falha explicita, nunca idempotencia muda ─
+      const { error: eDup } = await db.rpc("aguardar_aprovacao_tarefa", {
+        p_tarefa_id: tarefaId,
+        p_tentativa_esperada: t1.tentativas,
+      });
+      ok("11.14 pausar de novo LANCA 55000", codigoDe(eDup) === "55000", codigoDe(eDup));
+
+      // ── O claim NAO reivindica tarefa pausada ─────────────────────
+      const { data: cl2 } = await db.rpc("claim_next_agente_tarefa");
+      const t2 = Array.isArray(cl2) ? cl2[0] : cl2;
+      ok("11.15 o claim NAO reivindica uma tarefa pausada",
+        !t2 || t2.id !== tarefaId, String(t2?.id));
+
+      // ── E as irmas tambem recusam, fora de rodando ────────────────
+      const { error: eConcluir } = await db.rpc("concluir_tarefa", {
+        p_tarefa_id: tarefaId, p_resultado: {},
+      });
+      ok("11.16 concluir_tarefa recusa tarefa pausada", codigoDe(eConcluir) === "55000", codigoDe(eConcluir));
+
+      await limpar(db);
     }
   } finally {
     console.log("\n10. Limpeza");

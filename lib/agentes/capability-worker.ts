@@ -200,6 +200,56 @@ export async function falharTarefa(
 }
 
 /**
+ * Estaciona a tarefa em `aguardando_aprovacao`. Chama a RPC — NUNCA um
+ * `UPDATE` direto, pelo mesmo motivo das duas irmas acima.
+ *
+ * ── Por que `tentativaEsperada`, e por que ela e obrigatoria ────────
+ *
+ * `status = 'rodando'` NAO e fencing. O `claim_next_agente_tarefa`
+ * recupera tarefa orfa com `rodando -> rodando` direto — ela nunca
+ * passa por `pendente` — e incrementa `tentativas` no caminho. Sem esta
+ * comparacao, um worker da tentativa 1, atrasado alem dos 5 minutos de
+ * heartbeat, pausaria a execucao que a tentativa 2 ja esta rodando.
+ *
+ * `tentativas` serve como fencing token porque so muda no claim: as
+ * RPCs terminais nunca a escrevem, e ela permanece constante durante
+ * uma execucao inteira.
+ *
+ * ── A lista de parametros e a defesa ────────────────────────────────
+ *
+ * Nao entram `userId`, `agenteId`, `aprovacaoId`, `status`, `heartbeat`,
+ * `nivel`, `erro` nem `resultado`. A LINHA e a autoridade sobre todos
+ * eles, e aceitar qualquer um de fora seria deixar o chamador descrever
+ * o estado que a RPC deveria verificar. O vinculo com a aprovacao vive
+ * em `agente_funcao_aprovacoes.tarefa_id` — a Task nao o guarda.
+ */
+export async function aguardarAprovacaoTarefa(
+  tarefaId: string,
+  tentativaEsperada: number
+): Promise<ResultadoTarefaInterna> {
+  if (!tarefaId) return { linha: null, erro: "tarefa_id_ausente" };
+  // Mesma doutrina das irmas: recusa local do que nao identifica nada,
+  // sem reimplementar a validacao que a RPC ja faz. Uma tentativa nao
+  // inteira ou <= 0 nao pode ter vindo do claim.
+  if (!Number.isInteger(tentativaEsperada) || tentativaEsperada <= 0) {
+    return { linha: null, erro: "tentativa_esperada_invalida" };
+  }
+
+  const { data, error } = await getSupabaseServidor().rpc("aguardar_aprovacao_tarefa", {
+    p_tarefa_id: tarefaId,
+    p_tentativa_esperada: tentativaEsperada,
+  });
+
+  if (error) {
+    // `message` nunca sai daqui: o erro do driver carrega nome de
+    // coluna, de constraint e as vezes de VALOR.
+    console.error("[agentes-interno] RPC aguardar_aprovacao_tarefa falhou");
+    return { linha: null, erro: "erro_aguardar_aprovacao" };
+  }
+  return { linha: (normalizarLinha(data) as LinhaTarefa | null) ?? null, erro: null };
+}
+
+/**
  * As RPCs devolvem `RETURNS public.agente_tarefas`. O PostgREST entrega
  * isso ora como objeto, ora como array de um elemento, dependendo da
  * versao — normalizar aqui evita que cada chamador descubra isso

@@ -45,3 +45,47 @@ export class ErroEntradaTarefa extends Error {
     this.name = "ErroEntradaTarefa";
   }
 }
+
+/**
+ * A tarefa PAROU porque existe uma aprovacao esperando decisao humana.
+ *
+ * ── Isto NAO e falha do handler ─────────────────────────────────────
+ *
+ * Ate aqui o executor conhecia dois desfechos: devolver (concluir) e
+ * lancar (falhar). Um terceiro existe de verdade — a Funcao pedida tem
+ * `nivel = aprovacao`, a aprovacao foi criada e nada mais pode
+ * acontecer sem um humano. Representar isso como `handler_falhou`
+ * deixaria a Task mentindo sobre o proprio estado e criaria uma
+ * aprovacao pendente que ninguem alcanca.
+ *
+ * ── Por que sentinel, e nao union no retorno ────────────────────────
+ *
+ * `HandlerTarefa` continua `Promise<Record<string, unknown>>`. Uma
+ * union obrigaria `teste_fundacao`, `analise_vendas` e `conversa` a
+ * declarar um envelope que nenhum deles usa — Approval vazaria para
+ * tres handlers que nao a conhecem. O executor ja discrimina excecao
+ * por `instanceof` em `classificarErro` (`ErroTipoTarefaDesconhecido`,
+ * `ErroEntradaTarefa`); este e o MESMO mecanismo, nao um novo.
+ *
+ * ── A lista de campos e a defesa ────────────────────────────────────
+ *
+ * So `aprovacaoId`. NAO carrega `tarefaId` nem `tentativa`: o executor
+ * ja tem os dois, lidos da LINHA que o claim reivindicou, e aceita-los
+ * de quem lanca seria deixar o handler descrever o proprio fencing.
+ * NAO carrega `userId`, `agenteId`, argumentos nem nada do pedido — o
+ * vinculo autoritativo entre aprovacao e tarefa e
+ * `agente_funcao_aprovacoes.tarefa_id`, garantido pela FK composta e
+ * pelo fingerprint, que ja inclui `tarefa_id`.
+ *
+ * `aprovacaoId` viaja como MARCADOR: serve para log e para prova, e nao
+ * e revalidado no caminho da pausa.
+ */
+export class PausaPorAprovacao extends Error {
+  readonly aprovacaoId: string;
+
+  constructor(aprovacaoId: string) {
+    super("tarefa pausada: aprovacao pendente");
+    this.name = "PausaPorAprovacao";
+    this.aprovacaoId = aprovacaoId;
+  }
+}

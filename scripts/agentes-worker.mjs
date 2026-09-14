@@ -188,12 +188,48 @@ async function main() {
     corpo = { ok: false, erro: `HTTP ${resp.status} — resposta ilegivel` };
   }
 
-  if (resp.status === 200 && corpo.ok === true) {
+  // ── `ok: true` deixou de significar "concluida" ───────────────────
+  //
+  // A execucao passou a ter TRES desfechos, e dois deles terminam bem:
+  // a tarefa concluiu, ou foi estacionada esperando decisao humana. Os
+  // dois devolvem 200 com `ok: true`, porque nos dois a execucao fez o
+  // que devia — nao ha o que re-tentar. Quem os distingue e `status`.
+  //
+  // Ramificar por `corpo.ok` sozinho faria uma tarefa PAUSADA aparecer
+  // no log como CONCLUIDA. O worker nao conhece Approval e nao precisa:
+  // ele so relata o que `executarTarefa` respondeu.
+  if (resp.status === 200 && corpo.ok === true && corpo.status === "concluido") {
     console.log(
       `[agentes-worker] tarefa ${tarefa.id} CONCLUIDA — status=${corpo.status} tempoMs=${corpo.tempoMs}`
     );
     console.log("[agentes-worker] encerrado (execucao unica, sem loop).");
     process.exitCode = 0;
+    return;
+  }
+
+  if (resp.status === 200 && corpo.ok === true && corpo.status === "aguardando_aprovacao") {
+    console.log(
+      `[agentes-worker] tarefa ${tarefa.id} AGUARDANDO_APROVACAO — status=${corpo.status} tempoMs=${corpo.tempoMs}`
+    );
+    console.log(
+      "[agentes-worker] a tarefa NAO volta a fila sozinha: ela espera uma decisao humana."
+    );
+    console.log("[agentes-worker] encerrado (execucao unica, sem loop).");
+    process.exitCode = 0;
+    return;
+  }
+
+  // FAIL-CLOSED: `ok: true` com status que este worker nao conhece NAO
+  // vira "concluida". Um status novo do runtime tem de aparecer como
+  // resposta inesperada ate alguem ensinar o worker a lê-lo — anunciar
+  // conclusao no escuro e exatamente o defeito que o ramo acima
+  // corrigiu. Sem retry proprio: o worker e execucao unica.
+  if (resp.status === 200 && corpo.ok === true) {
+    console.error(
+      `[agentes-worker] tarefa ${tarefa.id} RESPOSTA INESPERADA — status=${corpo.status ?? "(ausente)"}`
+    );
+    console.error("[agentes-worker] o runtime devolveu um desfecho que este worker nao conhece.");
+    process.exitCode = 1;
     return;
   }
 
