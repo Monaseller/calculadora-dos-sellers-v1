@@ -317,11 +317,74 @@ secao("N. Zero leitura, write path, UI, Funcao, Conexao, LLM");
 ok("N1  a leitura da 1D.d.2 existe e continua SEM escrita",
   existe("lib/agentes/permissoes/fatos.ts") &&
     !/\.insert\(|\.update\(|\.delete\(|\.upsert\(|\.rpc\(/.test(ler("lib/agentes/permissoes/fatos.ts")));
-ok("N2  a pasta de permissoes tem exatamente os 2 modulos previstos",
+// ── N2/N3 reconciliados na PERMISSOES-FUNCTION-V1-A ────────────────
+//
+// N3 afirmava que NAO existia write path de permissao. Isso deixou de
+// ser verdade: a fase publicou `escrita.ts`. A revogacao foi ratificada
+// e e ESTREITA — um escritor, uma linha, um upsert, zero delete.
+//
+// Apagar o assert perderia a cobertura, e mante-lo como estava seria
+// pior: a sonda so varria `registry.ts`, entao o escritor novo passaria
+// por baixo dela e N3 ficaria VERDE afirmando algo falso. Ele passa a
+// inspecionar o escritor REAL — o que a 1D.d.1 precisa continuar
+// provando nao e a ausencia de escrita, e sim que ELA nao a trouxe e que
+// a escrita, quando veio, veio fechada.
+ok("N2  a pasta de permissoes tem exatamente os 3 modulos previstos",
   JSON.stringify(readdirSync(join(RAIZ, "lib/agentes/permissoes")).sort()) ===
-    JSON.stringify(["estado.ts", "fatos.ts"]));
-ok("N3  definirPermissaoDoAgente nao existe em lugar nenhum",
-  !/definirPermissaoDoAgente/.test(ler("lib/agentes/funcoes/registry.ts")));
+    JSON.stringify(["escrita.ts", "estado.ts", "fatos.ts"]),
+  readdirSync(join(RAIZ, "lib/agentes/permissoes")).sort().join(", "));
+ok("N2a CONTROLE NEGATIVO: um modulo A MAIS na pasta reprovaria",
+  JSON.stringify(["escrita.ts", "estado.ts", "fatos.ts", "_intruso.ts"].sort()) !==
+    JSON.stringify(["escrita.ts", "estado.ts", "fatos.ts"]));
+ok("N2b CONTROLE NEGATIVO: um modulo A MENOS reprovaria",
+  JSON.stringify(["estado.ts", "fatos.ts"]) !==
+    JSON.stringify(["escrita.ts", "estado.ts", "fatos.ts"]));
+ok("N2c CONTROLE NEGATIVO: TROCA mantendo o total de tres reprovaria",
+  JSON.stringify(["escrita.ts", "estado.ts", "gravacao.ts"].sort()) !==
+    JSON.stringify(["escrita.ts", "estado.ts", "fatos.ts"]));
+{
+  // O docblock de `escrita.ts` NOMEIA o que o modulo nao faz — "nao
+  // chama `executarFuncao`", "sem `toLowerCase`", "nao ha `...entrada`".
+  // Sondar a fonte crua acusaria a propria documentacao. As sondas de
+  // AUSENCIA olham codigo; as de PRESENCA podem olhar a fonte inteira.
+  const FONTE_ESCRITA = ler("lib/agentes/permissoes/escrita.ts");
+  const ESCRITA = FONTE_ESCRITA
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^[ \t]*\/\/.*$/gm, "");
+  ok("N3  o write path de permissao existe, e e `escrita.ts`",
+    existe("lib/agentes/permissoes/escrita.ts") && ESCRITA.length > 500 &&
+      /export async function definirPermissaoDeFuncaoDoAgente\(/.test(ESCRITA));
+  ok("N3a e ele e server-only", /import "server-only"/.test(ESCRITA));
+  ok("N3a1 ANCORA: o strip de comentario preservou o codigo",
+    ESCRITA.length > 400 && ESCRITA.length < FONTE_ESCRITA.length);
+  ok("N3b UMA instrucao de escrita, e e upsert",
+    (ESCRITA.match(/\.upsert\(/g) ?? []).length === 1 &&
+      !/\.insert\(|\.update\(|\.rpc\(/.test(ESCRITA));
+  // Bloqueado PERSISTE aqui. Apagar a linha colapsaria `permissao_ausente` em
+  // `permissao_bloqueada` e perderia QUANDO o dono proibiu.
+  ok("N3c ZERO delete — bloqueado grava linha, nao apaga",
+    !/\.delete\(/.test(ESCRITA));
+  ok("N3d o alvo do conflito e a PK publicada, nominalmente",
+    /onConflict: CONFLITO_IDENTIDADE/.test(ESCRITA) &&
+      /CONFLITO_IDENTIDADE = "agente_id,funcao_id"/.test(ESCRITA));
+  ok("N3e a Funcao e validada pelo REGISTRY, nunca por lista propria",
+    /funcaoExiste\(/.test(ESCRITA) &&
+      /from "@\/lib\/agentes\/funcoes\/registry"/.test(ESCRITA) &&
+      !/"vendas\.consultar"/.test(ESCRITA));
+  ok("N3f o nivel e validado pelo vocabulario canonico, sem alias",
+    /NIVEIS_AUTONOMIA/.test(ESCRITA) &&
+      !/toLowerCase|toUpperCase/.test(ESCRITA));
+  ok("N3g payload campo a campo, sem spread da entrada",
+    /agente_id: agenteId/.test(ESCRITA) && /user_id: userId/.test(ESCRITA) &&
+      /funcao_id: funcaoId/.test(ESCRITA) && /alterado_em: new Date\(\)/.test(ESCRITA) &&
+      !/\.\.\.\s*entrada/.test(ESCRITA));
+  ok("N3h `criado_em` NAO entra no payload — a data da primeira definicao sobrevive",
+    !/criado_em:/.test(ESCRITA));
+  ok("N3i CONFIGURAR nao e EXECUTAR: zero Function, Approval, Tool Call ou Task",
+    !/executarFuncao|autorizarFuncao|aprovacao|criarTarefa|resolverFuncao/i.test(ESCRITA));
+  ok("N3j CONTROLE: as sondas acusam os padroes que proibem",
+    /\.delete\(/.test("x.delete()") && /\.\.\.\s*entrada/.test("{ ...entrada }"));
+}
 ok("N4  registry de Funcoes intocado — 1 Funcao real",
   (ler("lib/agentes/funcoes/registry.ts").match(/": Object\.freeze/g) ?? []).length === 1);
 ok("N5  diagnostico.ts nao menciona agente_permissoes",

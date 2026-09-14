@@ -632,7 +632,12 @@ const ARQUIVOS_SKILL_1DF2: readonly string[] = [
   ...ARQUIVOS_SKILLS_1DF2.map((nome) => `lib/agentes/skills/${nome}`),
 ];
 
+// `escrita.ts` entrou na PERMISSOES-FUNCTION-V1-A: o primeiro write path
+// de permissao. A lista continua NOMINAL — e por isso o arquivo novo
+// precisou ser declarado aqui em vez de passar batido dentro da pasta
+// colapsada pelo porcelain.
 const ARQUIVOS_PERMISSOES_1DD2: readonly string[] = [
+  "escrita.ts",
   "estado.ts",
   "fatos.ts",
 ];

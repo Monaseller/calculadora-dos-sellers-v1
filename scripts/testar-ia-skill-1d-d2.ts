@@ -78,9 +78,17 @@ secao("A. Dois modulos, e so a regra e importavel");
 
 ok("A1  estado.ts existe", existe("lib/agentes/permissoes/estado.ts"));
 ok("A2  fatos.ts existe", existe("lib/agentes/permissoes/fatos.ts"));
-ok("A3  a pasta tem exatamente 2 modulos",
+// ── A3 reconciliado na PERMISSOES-FUNCTION-V1-A ──────────────────────
+// A pasta ganhou `escrita.ts`. Continua igualdade NOMINAL nos dois
+// sentidos, nunca contagem: uma troca de nome mantendo tres passaria por
+// `length === 3` e nao passa por aqui.
+ok("A3  a pasta tem exatamente os 3 modulos nominais",
   JSON.stringify(readdirSync(join(RAIZ, "lib/agentes/permissoes")).sort()) ===
-    JSON.stringify(["estado.ts", "fatos.ts"]));
+    JSON.stringify(["escrita.ts", "estado.ts", "fatos.ts"]),
+  readdirSync(join(RAIZ, "lib/agentes/permissoes")).sort().join(", "));
+ok("A3a ANCORA: a leitura e a escrita sao modulos DIFERENTES",
+  existe("lib/agentes/permissoes/fatos.ts") &&
+    existe("lib/agentes/permissoes/escrita.ts"));
 ok("A4  estado.ts NAO e server-only (por isso esta suite o executa)",
   !/server-only/.test(CODIGO_ESTADO));
 ok("A5  fatos.ts E server-only", /import "server-only"/.test(CODIGO_FATOS));
@@ -144,8 +152,29 @@ for (const [nome, re] of [
 ok("D6  estado.ts tambem nao escreve",
   !/\.insert\(|\.update\(|\.delete\(|\.upsert\(|\.rpc\(/.test(CODIGO_ESTADO));
 ok("D7  CONTROLE: a sonda de escrita acha quando existe", /\.insert\(/.test('x.insert({})'));
-ok("D8  nao ha write path: conceder permissao nao existe nesta fase",
+// ── D8 reconciliado na PERMISSOES-FUNCTION-V1-A ─────────────────────
+//
+// D8 afirmava que conceder permissao "nao existe nesta fase". A fase
+// publicou `escrita.ts` e a afirmacao caiu. A sonda varria apenas
+// `fatos.ts` + `estado.ts`, entao o escritor novo passaria por baixo
+// dela e D8 ficaria VERDE dizendo algo falso — o pior desfecho possivel
+// para um guarda.
+//
+// O que a 1D.d.2 precisa continuar provando e que a LEITURA nao escreve,
+// e isso nao afrouxa: D1..D7 seguem intactos e D8 passa a cobrar a
+// SEPARACAO — quem le nao grava, quem grava e outro modulo, nomeado.
+ok("D8  a leitura continua sem caminho de escrita — conceder mora noutro modulo",
   !/definirPermissao|concederPermissao|revogarPermissao/.test(CODIGO_FATOS + CODIGO_ESTADO));
+ok("D8a e o modulo que grava existe, e e `escrita.ts`",
+  existe("lib/agentes/permissoes/escrita.ts") &&
+    /export async function definirPermissaoDeFuncaoDoAgente\(/.test(
+      ler("lib/agentes/permissoes/escrita.ts")));
+ok("D8b a escrita nao importa a leitura, e a leitura nao importa a escrita",
+  !/permissoes\/escrita/.test(CODIGO_FATOS + CODIGO_ESTADO) &&
+    !/permissoes\/fatos|permissoes\/estado/.test(
+      semComentarios(ler("lib/agentes/permissoes/escrita.ts"))));
+ok("D8c CONTROLE: a sonda de concessao acusa quando o padrao existe",
+  /definirPermissao|concederPermissao|revogarPermissao/.test("definirPermissaoDeFuncaoDoAgente"));
 
 // ─── E. Niveis validos ────────────────────────────────────────────────
 
@@ -485,10 +514,23 @@ ok("P6  MOCK_PERMISSOES nao foi tocado nem importado",
   // A exigencia nao afrouxa: continua igualdade de conjunto, por caminho
   // NOMINAL, nos dois sentidos. Antes { compositor }, agora
   // { compositor, executar }. Prefixo, pasta ou contagem, nao.
+  // ── PERMISSOES-FUNCTION-V1-A: o terceiro consumidor legitimo ───────
+  //
+  // A rota de permissoes le os MESMOS fatos para mostrar ao dono o que
+  // esta configurado. Resolve-los por conta propria — uma segunda query
+  // em `agente_permissoes` dentro da rota — seria exatamente a
+  // duplicacao que esta guarda existe para impedir, e um dia a tela
+  // mostraria um nivel diferente do que o guard aplica.
+  //
+  // A exigencia nao afrouxa: continua igualdade de conjunto, por caminho
+  // NOMINAL, nos dois sentidos. Antes { compositor, executar }, agora
+  // { compositor, executar, rota }. Prefixo, pasta ou contagem, nao.
   const EXECUTOR_FUNCOES = "lib/agentes/execucao-funcoes/executar.ts";
+  const ROTA_PERMISSOES = "app/api/agentes/[agenteId]/permissoes/route.ts";
   const CONSUMIDORES_AUTORIZADOS: readonly string[] = [
     "lib/agentes/diagnostico/compositor.ts",
     EXECUTOR_FUNCOES,
+    ROTA_PERMISSOES,
   ];
   const COMPOSITOR = CONSUMIDORES_AUTORIZADOS[0];
 
@@ -497,14 +539,18 @@ ok("P6  MOCK_PERMISSOES nao foi tocado nem importado",
 
   ok(`P7  resolverFatosPermissoes tem exatamente os consumidores declarados (${chamadores.join(", ") || "nenhum"})`,
     mesmoConjunto(chamadores, CONSUMIDORES_AUTORIZADOS));
-  ok("P7a CONTROLE: o conjunto exato dos dois autorizados passa",
-    mesmoConjunto([COMPOSITOR, EXECUTOR_FUNCOES], CONSUMIDORES_AUTORIZADOS));
+  ok("P7a CONTROLE: o conjunto exato dos tres autorizados passa",
+    mesmoConjunto([COMPOSITOR, EXECUTOR_FUNCOES, ROTA_PERMISSOES], CONSUMIDORES_AUTORIZADOS));
   ok("P7b CONTROLE: o compositor sumir reprova",
-    !mesmoConjunto([EXECUTOR_FUNCOES], CONSUMIDORES_AUTORIZADOS));
+    !mesmoConjunto([EXECUTOR_FUNCOES, ROTA_PERMISSOES], CONSUMIDORES_AUTORIZADOS));
   ok("P7c CONTROLE: o executor sumir reprova",
-    !mesmoConjunto([COMPOSITOR], CONSUMIDORES_AUTORIZADOS));
-  ok("P7d CONTROLE: um terceiro consumidor reprova",
+    !mesmoConjunto([COMPOSITOR, ROTA_PERMISSOES], CONSUMIDORES_AUTORIZADOS));
+  ok("P7c1 CONTROLE: a rota sumir reprova",
+    !mesmoConjunto([COMPOSITOR, EXECUTOR_FUNCOES], CONSUMIDORES_AUTORIZADOS));
+  ok("P7d CONTROLE: um QUARTO consumidor reprova",
     !mesmoConjunto([...CONSUMIDORES_AUTORIZADOS, "app/api/x/route.ts"], CONSUMIDORES_AUTORIZADOS));
+  ok("P7e CONTROLE: TROCA mantendo o total de tres reprova",
+    !mesmoConjunto([COMPOSITOR, EXECUTOR_FUNCOES, "app/api/x/route.ts"], CONSUMIDORES_AUTORIZADOS));
 }
 
 // ─── Placar ───────────────────────────────────────────────────────────

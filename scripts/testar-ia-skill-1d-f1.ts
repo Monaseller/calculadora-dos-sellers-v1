@@ -468,8 +468,17 @@ secao("P. A fase nao tocou banco nem criou caminho de escrita");
 }
 ok("P3  lib/ia/skills continua com 3 modulos",
   readdirSync(join(RAIZ, "lib/ia/skills")).length === 3);
-ok("P4  lib/agentes/permissoes intocada — 2 modulos",
-  readdirSync(join(RAIZ, "lib/agentes/permissoes")).length === 2);
+// ── P4 reconciliado na PERMISSOES-FUNCTION-V1-A ──────────────────────
+//
+// A pasta ganhou `escrita.ts`, o primeiro write path de permissao. O que
+// esta fase precisa continuar provando NAO e "nada mudou desde a 1D.f" —
+// isso ja e falso — e sim que a 1D.f nao deixou modulo proprio la. Por
+// isso o conjunto NOMINAL exato, e nao a contagem: trocar um nome
+// mantendo tres passaria por `length === 3`, e nao passa por aqui.
+ok("P4  lib/agentes/permissoes com o conjunto exato de 3 modulos — nenhum e da 1D.f",
+  JSON.stringify(readdirSync(join(RAIZ, "lib/agentes/permissoes")).sort()) ===
+    JSON.stringify(["escrita.ts", "estado.ts", "fatos.ts"]),
+  readdirSync(join(RAIZ, "lib/agentes/permissoes")).sort().join(", "));
 // O par `selecao-*` entrou na 1D.g.1-C, `selecao-escrita` na 1D.g.2-B e
 // `agregador` na 1D.e-B2. A
 // guarda desta fase e sobre a 1D.f: comparar a lista ordenada prova que

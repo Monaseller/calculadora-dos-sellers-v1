@@ -414,8 +414,15 @@ ok("J1  diagnostico.ts nao foi tocado",
   !/agente_skills|resolverSkillsDoAgente/.test(ler("lib/ia/skills/diagnostico.ts")));
 ok("J2  lib/ia/skills continua com 3 modulos",
   readdirSync(join(RAIZ, "lib/ia/skills")).length === 3);
-ok("J3  lib/agentes/permissoes intocada — 2 modulos",
-  readdirSync(join(RAIZ, "lib/agentes/permissoes")).length === 2);
+// ── J3 reconciliado na PERMISSOES-FUNCTION-V1-A ──────────────────────
+//
+// A pasta ganhou `escrita.ts`. O conjunto NOMINAL substitui a contagem
+// pelo mesmo motivo de sempre: `length === 3` aceitaria uma troca de
+// nome, e o que esta fase prova e que a 1D.f nao deixou modulo la.
+ok("J3  lib/agentes/permissoes com o conjunto exato de 3 modulos — nenhum e da 1D.f",
+  JSON.stringify(readdirSync(join(RAIZ, "lib/agentes/permissoes")).sort()) ===
+    JSON.stringify(["escrita.ts", "estado.ts", "fatos.ts"]),
+  readdirSync(join(RAIZ, "lib/agentes/permissoes")).sort().join(", "));
 // O par `selecao-*` e da 1D.g.1-C, `selecao-escrita` da 1D.g.2-B e
 // `agregador` da 1D.e-B2. Esta
 // fase continua provando o que lhe cabe — que a leitura de Skills nao

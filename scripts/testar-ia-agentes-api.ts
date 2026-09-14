@@ -85,6 +85,10 @@ function construtor(tabela: string): unknown {
   /** O payload de um UPDATE. Separado de `pendente` porque INSERT cria
    *  linha e UPDATE altera as que casarem os filtros. */
   let alteracao: Record<string, unknown> | null = null;
+  /** O payload de um UPSERT e as colunas do `onConflict`. PERMISSOES-
+   *  FUNCTION-V1-A: o upsert nao filtra por `.eq()` — ele identifica a
+   *  linha pelo ALVO DO CONFLITO, e por isso precisa do proprio canal. */
+  let conflito: { valores: Record<string, unknown>; chaves: string[] } | null = null;
 
   const executar = (): { data: unknown; error: unknown } => {
     operacoes.push(op);
@@ -123,8 +127,43 @@ function construtor(tabela: string): unknown {
       linhas.push(gravada);
       return { data: gravada, error: null };
     }
+    // PERMISSOES-FUNCTION-V1-A: `UPSERT ... ON CONFLICT (...) DO UPDATE`.
+    //
+    // Modelado de verdade, e nao como "devolva o esperado": a linha e
+    // procurada pelo ALVO DO CONFLITO. Achou, o payload e aplicado SOBRE
+    // ela — entao `criado_em`, que nao esta no payload, sobrevive. Nao
+    // achou, nasce linha nova com o DEFAULT do banco. Sem isto a suite
+    // provaria idempotencia e preservacao de `criado_em` contra um duplo
+    // que nunca persistiu nada.
+    if (op.tipo === "escrita" && conflito !== null) {
+      const alvo = conflito.chaves.length === 0
+        ? undefined
+        : linhas.find(
+            (l) =>
+              l.__tabela === op.tabela &&
+              conflito!.chaves.every((c) => l[c] === conflito!.valores[c])
+          );
+      if (alvo) {
+        Object.assign(alvo, conflito.valores);
+        return { data: alvo, error: null };
+      }
+      const criada = {
+        __tabela: op.tabela,
+        criado_em: new Date().toISOString(),
+        ...conflito.valores,
+      };
+      linhas.push(criada);
+      return { data: criada, error: null };
+    }
     const encontradas = linhas.filter((l) =>
-      Object.entries(op.filtros).every(([c, v]) => l[c] === v)
+      // `__tabela` so existe nas linhas que o upsert criou. As fixtures
+      // antigas seguem sem marca, e continuam casando como sempre.
+      (l.__tabela === undefined || l.__tabela === op.tabela) &&
+      Object.entries(op.filtros).every(([c, v]) =>
+        v !== null && typeof v === "object" && "__in" in (v as object)
+          ? (v as { __in: unknown[] }).__in.includes(l[c])
+          : l[c] === v
+      )
     );
     // EDITAR-AGENTE-V1: `UPDATE ... WHERE ... RETURNING`, modelado com a
     // mesma economia do INSERT acima. Sem aplicar a alteracao, a rota
@@ -139,6 +178,14 @@ function construtor(tabela: string): unknown {
   const b: Record<string, unknown> = {
     select() { return b; },
     eq(coluna: string, valor: unknown) { op.filtros[coluna] = valor; return b; },
+    // PERMISSOES-FUNCTION-V1-A: `resolverFatosPermissoes` fecha a
+    // consulta nas Funcoes pedidas com `.in("funcao_id", ids)`. Sem
+    // modelar isto o duplo lancava, a leitura virava `falha_leitura` e a
+    // rota devolvia 500 — falha honesta, e foi assim que apareceu.
+    in(coluna: string, valores: readonly unknown[]) {
+      op.filtros[coluna] = { __in: [...valores] };
+      return b;
+    },
     order() { return b; },
     insert(v: Record<string, unknown>) {
       op.tipo = "escrita";
@@ -152,7 +199,15 @@ function construtor(tabela: string): unknown {
       alteracao = v;
       return b;
     },
-    upsert() { op.tipo = "escrita"; return b; },
+    upsert(v: Record<string, unknown>, opcoes?: { onConflict?: string }) {
+      op.tipo = "escrita";
+      op.payload = v;
+      conflito = {
+        valores: v,
+        chaves: String(opcoes?.onConflict ?? "").split(",").map((c) => c.trim()).filter(Boolean),
+      };
+      return b;
+    },
     delete() { op.tipo = "escrita"; return b; },
     maybeSingle() {
       return {
@@ -1197,6 +1252,477 @@ async function principal(): Promise<void> {
     ok("Q30 `ativo` e `tipo` nao aparecem como campo aceito",
       !/campos\.(ativo|tipo)/.test(CODIGO_EDICAO) &&
         !/CAMPOS_ALTERACAO\.add/.test(CODIGO_EDICAO));
+  }
+
+  // ─── R–T. /permissoes — PERMISSOES-FUNCTION-V1-A ───────────────────
+  //
+  // A rota REAL roda contra o mesmo duplo com estado, com o registry
+  // real e a capability real de escrita. O que se prova nao e "o mock
+  // devolveu o esperado": e que o catalogo sai do REGISTRY, que ausencia
+  // continua sendo `null` e nunca "bloqueado", que o contrato e fechado
+  // nos DOIS sentidos, e que o UPSERT persiste de verdade — preservando
+  // `criado_em` e avancando `alterado_em`.
+  {
+    const permissoesRota = await import("../app/api/agentes/[agenteId]/permissoes/route");
+    const { listarFuncoesRegistradas } = await import("../lib/agentes/funcoes/registry");
+    const { NIVEIS_AUTONOMIA } = await import("../lib/ia/conceitos");
+    const CODIGO_PERM = semComentarios(ler("app/api/agentes/[agenteId]/permissoes/route.ts"));
+    const CODIGO_ESCRITA = semComentarios(ler("lib/agentes/permissoes/escrita.ts"));
+
+    const FUNCOES_REAIS = [...listarFuncoesRegistradas()].sort();
+    /** A primeira Funcao REAL do registry. Nunca um id escrito a mao: se
+     *  o catalogo mudar, a suite acompanha sem ninguem editar aqui. */
+    const FUNCAO = FUNCOES_REAIS[0];
+
+    const reqPerm = (agenteId: string, cookie: string | undefined, corpo?: string) =>
+      new Request(`http://localhost/api/agentes/${agenteId}/permissoes`, {
+        method: corpo === undefined ? "GET" : "PATCH",
+        headers: cookie ? { cookie } : {},
+        ...(corpo === undefined ? {} : { body: corpo }),
+      });
+
+    const getPerm = (agenteId: string, cookie?: string) =>
+      permissoesRota.GET(reqPerm(agenteId, cookie), { params: { agenteId } });
+    const patchPerm = (agenteId: string, cookie: string | undefined, corpo?: string) =>
+      permissoesRota.PATCH(reqPerm(agenteId, cookie, corpo ?? "{}"), { params: { agenteId } });
+    // Um PATCH SEM corpo precisa de Request proprio: `corpo ?? "{}"`
+    // acima existe so para forcar o metodo.
+    const patchSemCorpo = (agenteId: string, cookie: string) =>
+      permissoesRota.PATCH(
+        new Request(`http://localhost/api/agentes/${agenteId}/permissoes`, {
+          method: "PATCH",
+          headers: { cookie },
+        }),
+        { params: { agenteId } }
+      );
+
+    /** Um agente do dono A, plantado direto na "tabela". */
+    const plantarAgente = () => {
+      const l = linhaAgente(USER_A, "Com permissoes");
+      linhas = [l];
+      limpar();
+      return l.id as string;
+    };
+
+    /** A linha de permissao persistida, se houver. */
+    const linhaPermissao = (agenteId: string, funcaoId: string) =>
+      linhas.find(
+        (l) =>
+          l.__tabela === "agente_permissoes" &&
+          l.agente_id === agenteId &&
+          l.funcao_id === funcaoId
+      );
+
+    const ultimoPayloadPerm = (): Record<string, unknown> | null =>
+      operacoes.filter((o) => o.tipo === "escrita").pop()?.payload ?? null;
+
+    secao("R. GET permissoes — sessao, identidade e fronteira de dono");
+
+    linhas = []; limpar();
+    const rPermSem = await getPerm(randomUUID());
+    const bPermSem = await rPermSem.json();
+    ok("R1  sem cookie -> 401", rPermSem.status === 401);
+    ok("R2  payload sanitizado", bPermSem.ok === false &&
+      bPermSem.erro === "Não autenticado." && Object.keys(bPermSem).length === 2);
+    ok("R3  e ZERO operacao de dominio", operacoes.length === 0);
+
+    limpar();
+    ok("R4  agenteId fora de uuid -> 400 e zero dominio",
+      (await getPerm("nao-e-uuid", COOKIE_A)).status === 400 && operacoes.length === 0);
+
+    {
+      const alheio = linhaAgente(USER_B, "Do outro dono");
+      linhas = [alheio];
+      limpar();
+      const rOutro = await getPerm(alheio.id as string, COOKIE_A);
+      const bOutro = await rOutro.json();
+      limpar();
+      const rFantasma = await getPerm(randomUUID(), COOKIE_A);
+      const bFantasma = await rFantasma.json();
+      ok("R5  agente de OUTRO dono -> 404", rOutro.status === 404);
+      ok("R6  agente INEXISTENTE -> 404", rFantasma.status === 404);
+      ok("R7  as duas 404 sao BYTE A BYTE iguais",
+        rOutro.status === rFantasma.status &&
+          JSON.stringify(bOutro) === JSON.stringify(bFantasma),
+        `${JSON.stringify(bOutro)} vs ${JSON.stringify(bFantasma)}`);
+      ok("R8  e nenhuma delas leu permissao alguma",
+        operacoes.every((o) => o.tabela !== "agente_permissoes"));
+    }
+
+    secao("R. GET permissoes — o catalogo sai do REGISTRY, e ausencia e null");
+
+    {
+      const ag = plantarAgente();
+      const r = await getPerm(ag, COOKIE_A);
+      const b = await r.json();
+      ok("R9  200 com uma entrada por Funcao REGISTRADA", r.status === 200 && b.ok === true &&
+        Array.isArray(b.permissoes) && b.permissoes.length === FUNCOES_REAIS.length,
+        `${b.permissoes?.length} vs ${FUNCOES_REAIS.length}`);
+      // ── A guarda contra Funcao nova esquecida pela API ─────────────
+      //
+      // Igualdade de CONJUNTO com o registry, nos dois sentidos. Se
+      // amanha entrar uma Funcao nova e a rota nao a projetar, reprova;
+      // se a rota inventar um id que o registry nao tem, reprova
+      // tambem. Nenhum catalogo duplicado nesta suite.
+      ok("R10 os ids projetados sao EXATAMENTE os do registry",
+        JSON.stringify(b.permissoes.map((p: { id: string }) => p.id).sort()) ===
+          JSON.stringify(FUNCOES_REAIS),
+        b.permissoes.map((p: { id: string }) => p.id).join(", "));
+      ok("R10a CONTROLE NEGATIVO: uma Funcao a MENOS reprovaria",
+        JSON.stringify(FUNCOES_REAIS.slice(1)) !== JSON.stringify(FUNCOES_REAIS));
+      ok("R10b CONTROLE NEGATIVO: uma Funcao a MAIS reprovaria",
+        JSON.stringify([...FUNCOES_REAIS, "zzz.nova"].sort()) !== JSON.stringify(FUNCOES_REAIS));
+      ok("R10c ANCORA: o registry tem Funcao de verdade",
+        FUNCOES_REAIS.length >= 1 && typeof FUNCAO === "string" && FUNCAO.includes("."));
+
+      const entrada = b.permissoes.find((p: { id: string }) => p.id === FUNCAO);
+      // O ponto central: sem linha gravada, `nivel` e `null`. NUNCA
+      // "bloqueado" (apagaria a distincao que o guard mantem) e nunca
+      // "automatico" (concederia o que ninguem concedeu).
+      ok("R11 permissao AUSENTE vem como `nivel: null`", entrada.nivel === null,
+        JSON.stringify(entrada));
+      ok("R11a e nao vira `bloqueado` nem `automatico`",
+        entrada.nivel !== "bloqueado" && entrada.nivel !== "automatico");
+      ok("R12 a projecao tem EXATAMENTE os cinco campos publicos",
+        JSON.stringify(Object.keys(entrada).sort()) ===
+          JSON.stringify(["acesso", "conexaoNecessaria", "id", "idempotente", "nivel"]),
+        Object.keys(entrada).sort().join(", "));
+      ok("R13 nenhum campo interno do registry vaza",
+        !("executor" in entrada) && !("validarEntrada" in entrada) &&
+          !("interpretarSaida" in entrada) && !("revisao" in entrada));
+      ok("R14 nenhum campo interno da permissao vaza",
+        !("user_id" in entrada) && !("criado_em" in entrada) && !("alterado_em" in entrada));
+      ok("R15 os metadados vem do registry real",
+        entrada.acesso === "leitura" && entrada.idempotente === true &&
+          entrada.conexaoNecessaria === null);
+      ok("R16 a leitura foi em `agente_permissoes`, e ZERO escrita",
+        operacoes.some((o) => o.tabela === "agente_permissoes" && o.tipo === "leitura") &&
+          escritas() === 0);
+      const filtrosPerm = (operacoes.find((o) => o.tabela === "agente_permissoes")?.filtros ??
+        {}) as Record<string, unknown>;
+      ok("R17 e a leitura carrega o PAR (agente, dono) na propria instrucao",
+        filtrosPerm.agente_id === ag && filtrosPerm.user_id === USER_A,
+        JSON.stringify(Object.keys(filtrosPerm).sort()));
+      // A consulta e FECHADA nas Funcoes do registry: nao varre a tabela
+      // inteira e nao devolve permissao de Funcao que deixou de existir.
+      ok("R17a e e fechada nas Funcoes do registry",
+        JSON.stringify((filtrosPerm.funcao_id as { __in: string[] } | undefined)?.__in) ===
+          JSON.stringify(FUNCOES_REAIS),
+        JSON.stringify(filtrosPerm.funcao_id));
+    }
+
+    secao("S. PATCH permissoes — o contrato e FECHADO nos dois sentidos");
+
+    const recusaPerm = async (corpo: string, rotulo: string, erroEsperado: string) => {
+      const ag = plantarAgente();
+      const r = await patchPerm(ag, COOKIE_A, corpo);
+      const b = await r.json();
+      const escritasEmPermissoes = operacoes.filter(
+        (o) => o.tipo === "escrita" && o.tabela === "agente_permissoes"
+      ).length;
+      ok(`S1  ${rotulo} -> 400, sem escrita`,
+        r.status === 400 && b.ok === false && b.erro === erroEsperado &&
+          escritasEmPermissoes === 0,
+        `${r.status} · ${JSON.stringify(b)} · escritas=${escritasEmPermissoes}`);
+    };
+
+    const CORPO_INVALIDO = "Corpo da requisição inválido (JSON esperado).";
+    const DEFINICAO_INVALIDA = "Definição inválida.";
+    const FUNCAO_INVALIDA = "função inválida.";
+    const NIVEL_INVALIDO = "nível inválido.";
+
+    await recusaPerm("nao e json", "corpo ilegivel", CORPO_INVALIDO);
+    await recusaPerm('"texto"', "corpo string", CORPO_INVALIDO);
+    await recusaPerm("[]", "corpo array", CORPO_INVALIDO);
+    await recusaPerm("null", "corpo null", CORPO_INVALIDO);
+    await recusaPerm("42", "corpo numero", CORPO_INVALIDO);
+    await recusaPerm("{}", "objeto vazio", DEFINICAO_INVALIDA);
+    // SUBSET tambem reprova: meia definicao nao e decisao.
+    await recusaPerm(`{"funcaoId":"${FUNCAO}"}`, "so funcaoId", DEFINICAO_INVALIDA);
+    await recusaPerm('{"nivel":"automatico"}', "so nivel", DEFINICAO_INVALIDA);
+    await recusaPerm(`{"funcaoId":"${FUNCAO}","nivel":"automatico","x":1}`,
+      "chave extra", DEFINICAO_INVALIDA);
+    await recusaPerm(`{"funcaoId":"${FUNCAO}","nivel":"automatico","user_id":"outro"}`,
+      "user_id no corpo", DEFINICAO_INVALIDA);
+    await recusaPerm(`{"funcaoId":"${FUNCAO}","nivel":"automatico","agente_id":"outro"}`,
+      "agente_id no corpo", DEFINICAO_INVALIDA);
+    await recusaPerm(`{"funcaoId":"${FUNCAO}","nivel":"automatico","revisao":"1"}`,
+      "revisao no corpo", DEFINICAO_INVALIDA);
+    await recusaPerm('{"funcaoId":123,"nivel":"automatico"}', "funcaoId nao-string", FUNCAO_INVALIDA);
+    await recusaPerm('{"funcaoId":null,"nivel":"automatico"}', "funcaoId null", FUNCAO_INVALIDA);
+    await recusaPerm('{"funcaoId":"","nivel":"automatico"}', "funcaoId vazio", FUNCAO_INVALIDA);
+    // Forma valida pelo CHECK do banco, mas inexistente no registry.
+    await recusaPerm('{"funcaoId":"vendas.inexistente","nivel":"automatico"}',
+      "Funcao fora do registry", FUNCAO_INVALIDA);
+    await recusaPerm('{"funcaoId":"constructor","nivel":"automatico"}',
+      "id do prototipo NAO existe", FUNCAO_INVALIDA);
+    await recusaPerm(`{"funcaoId":"${FUNCAO}","nivel":123}`, "nivel nao-string", NIVEL_INVALIDO);
+    await recusaPerm(`{"funcaoId":"${FUNCAO}","nivel":"AUTOMATICO"}`,
+      "nivel em maiuscula", NIVEL_INVALIDO);
+    await recusaPerm(`{"funcaoId":"${FUNCAO}","nivel":" automatico "}`,
+      "nivel com espaco", NIVEL_INVALIDO);
+    await recusaPerm(`{"funcaoId":"${FUNCAO}","nivel":"liberado"}`,
+      "nivel fora do vocabulario", NIVEL_INVALIDO);
+
+    {
+      const ag = plantarAgente();
+      const r = await patchSemCorpo(ag, COOKIE_A);
+      ok("S2  PATCH sem corpo -> 400", r.status === 400 &&
+        (await r.json()).erro === CORPO_INVALIDO);
+    }
+
+    secao("S. PATCH permissoes — sessao e fronteira de dono");
+
+    linhas = []; limpar();
+    ok("S3  sem cookie -> 401 e zero dominio",
+      (await patchPerm(randomUUID(), undefined, `{"funcaoId":"${FUNCAO}","nivel":"automatico"}`))
+        .status === 401 && operacoes.length === 0);
+    limpar();
+    ok("S4  agenteId fora de uuid -> 400 e zero dominio",
+      (await patchPerm("nao-e-uuid", COOKIE_A, `{"funcaoId":"${FUNCAO}","nivel":"automatico"}`))
+        .status === 400 && operacoes.length === 0);
+
+    {
+      const alheio = linhaAgente(USER_B, "Do outro dono");
+      linhas = [alheio];
+      limpar();
+      const corpo = `{"funcaoId":"${FUNCAO}","nivel":"automatico"}`;
+      const rOutro = await patchPerm(alheio.id as string, COOKIE_A, corpo);
+      const bOutro = await rOutro.json();
+      const escritasOutro = operacoes.filter((o) => o.tipo === "escrita").length;
+      limpar();
+      const rFantasma = await patchPerm(randomUUID(), COOKIE_A, corpo);
+      const bFantasma = await rFantasma.json();
+      ok("S5  agente de OUTRO dono -> 404, sem escrita",
+        rOutro.status === 404 && escritasOutro === 0);
+      ok("S6  agente INEXISTENTE -> 404", rFantasma.status === 404);
+      ok("S7  as duas 404 sao BYTE A BYTE iguais",
+        JSON.stringify(bOutro) === JSON.stringify(bFantasma));
+      ok("S8  nenhuma linha de permissao nasceu para o agente alheio",
+        linhas.every((l) => l.__tabela !== "agente_permissoes"));
+    }
+
+    secao("S. PATCH permissoes — os tres niveis PERSISTEM, e bloqueado grava linha");
+
+    for (const nivel of NIVEIS_AUTONOMIA) {
+      const ag = plantarAgente();
+      const r = await patchPerm(ag, COOKIE_A, `{"funcaoId":"${FUNCAO}","nivel":"${nivel}"}`);
+      const b = await r.json();
+      const linha = linhaPermissao(ag, FUNCAO);
+      ok(`S9  nivel \`${nivel}\` -> 200 e linha persistida`,
+        r.status === 200 && b.ok === true &&
+          b.permissao.funcaoId === FUNCAO && b.permissao.nivel === nivel &&
+          linha?.nivel === nivel,
+        `${r.status} · ${JSON.stringify(b)} · linha=${JSON.stringify(linha?.nivel)}`);
+      ok(`S9a \`${nivel}\`: a resposta expoe SO funcaoId e nivel`,
+        JSON.stringify(Object.keys(b.permissao).sort()) ===
+          JSON.stringify(["funcaoId", "nivel"]),
+        Object.keys(b.permissao).sort().join(", "));
+    }
+    // O ponto ratificado: bloquear GRAVA, nao apaga. Uma linha com
+    // `bloqueado` e o que separa `permissao_bloqueada` de
+    // `permissao_ausente` no guard.
+    {
+      const ag = plantarAgente();
+      await patchPerm(ag, COOKIE_A, `{"funcaoId":"${FUNCAO}","nivel":"bloqueado"}`);
+      ok("S10 `bloqueado` deixa LINHA no banco — nao e ausencia",
+        linhaPermissao(ag, FUNCAO)?.nivel === "bloqueado" &&
+          linhas.filter((l) => l.__tabela === "agente_permissoes").length === 1);
+      ok("S10a e o GET passa a devolver `bloqueado`, nao `null`",
+        await (async () => {
+          const b = await (await getPerm(ag, COOKIE_A)).json();
+          return b.permissoes.find((p: { id: string }) => p.id === FUNCAO)?.nivel === "bloqueado";
+        })());
+    }
+
+    secao("S. PATCH permissoes — o UPSERT persiste: uma linha, criado_em preservado");
+
+    {
+      const ag = plantarAgente();
+      await patchPerm(ag, COOKIE_A, `{"funcaoId":"${FUNCAO}","nivel":"bloqueado"}`);
+      const primeira = linhaPermissao(ag, FUNCAO)!;
+      const criadoOriginal = primeira.criado_em;
+      const alteradoPrimeiro = primeira.alterado_em;
+      const payloadPrimeiro = ultimoPayloadPerm() ?? {};
+
+      // ── O payload, por igualdade de conjunto ───────────────────────
+      ok("S11 o UPSERT leva EXATAMENTE cinco colunas",
+        JSON.stringify(Object.keys(payloadPrimeiro).sort()) ===
+          JSON.stringify(["agente_id", "alterado_em", "funcao_id", "nivel", "user_id"]),
+        Object.keys(payloadPrimeiro).sort().join(", "));
+      ok("S11a `criado_em` NAO entra no payload",
+        !("criado_em" in payloadPrimeiro));
+      ok("S11b nenhuma chave reservada alcanca o banco",
+        ["id", "revisao", "agenteId", "funcaoId"].every((c) => !(c in payloadPrimeiro)));
+      ok("S11c o dono gravado e o da SESSAO",
+        payloadPrimeiro.user_id === USER_A && payloadPrimeiro.agente_id === ag);
+      ok("S11d CONTROLE: a sonda de payload enxerga chave de verdade",
+        "nivel" in payloadPrimeiro && "funcao_id" in payloadPrimeiro);
+
+      // Segunda definicao, nivel DIFERENTE, mesmo agente e mesma Funcao.
+      await new Promise((r) => setTimeout(r, 5));
+      await patchPerm(ag, COOKIE_A, `{"funcaoId":"${FUNCAO}","nivel":"aprovacao"}`);
+      const segunda = linhaPermissao(ag, FUNCAO)!;
+
+      ok("S12 a segunda definicao ATUALIZA a mesma linha — nao cria outra",
+        linhas.filter((l) => l.__tabela === "agente_permissoes").length === 1 &&
+          segunda.nivel === "aprovacao");
+      ok("S12a `criado_em` PRESERVADO — a data da primeira definicao sobrevive",
+        segunda.criado_em === criadoOriginal, String(segunda.criado_em));
+      ok("S12b `alterado_em` AVANCOU",
+        typeof segunda.alterado_em === "string" &&
+          String(segunda.alterado_em) > String(alteradoPrimeiro),
+        `${alteradoPrimeiro} -> ${segunda.alterado_em}`);
+      ok("S12c o alvo do conflito e a PK publicada",
+        operacoes.filter((o) => o.tipo === "escrita").length === 2);
+
+      // Repetir o MESMO nivel: estado final identico.
+      await patchPerm(ag, COOKIE_A, `{"funcaoId":"${FUNCAO}","nivel":"aprovacao"}`);
+      const terceira = linhaPermissao(ag, FUNCAO)!;
+      ok("S13 repetir o mesmo nivel e IDEMPOTENTE no estado final",
+        linhas.filter((l) => l.__tabela === "agente_permissoes").length === 1 &&
+          terceira.nivel === "aprovacao" && terceira.criado_em === criadoOriginal);
+
+      ok("S14 e o GET reflete o nivel corrente",
+        await (async () => {
+          const b = await (await getPerm(ag, COOKIE_A)).json();
+          return b.permissoes.find((p: { id: string }) => p.id === FUNCAO)?.nivel === "aprovacao";
+        })());
+    }
+
+    secao("S. PATCH permissoes — falha de infraestrutura, sanitizada");
+
+    {
+      const ag = plantarAgente();
+      // O primeiro `from()` da rota e a leitura do agente. Injetar aqui
+      // exercita o 500 da PORTA, que e o caminho que a rota controla.
+      erroInjetado = { code: "42P01", message: "relation agentes does not exist" };
+      const r = await patchPerm(ag, COOKIE_A, `{"funcaoId":"${FUNCAO}","nivel":"automatico"}`);
+      const b = await r.json();
+      ok("S15 erro do banco -> 500", r.status === 500);
+      ok("S15a e nada do erro interno vaza",
+        b.ok === false && b.erro === "Falha ao definir a permissão." &&
+          Object.keys(b).length === 2 &&
+          !/42P01|relation|does not exist/i.test(JSON.stringify(b)));
+
+      limpar();
+      erroInjetado = { code: "42P01", message: "relation agente_permissoes does not exist" };
+      const rG = await getPerm(ag, COOKIE_A);
+      const bG = await rG.json();
+      ok("S16 GET com erro do banco -> 500 sanitizado",
+        rG.status === 500 && bG.erro === "Falha ao ler as permissões." &&
+          !/42P01|relation/i.test(JSON.stringify(bG)));
+    }
+
+    // A capability sozinha, contra a violacao da FK composta: o caminho
+    // que a rota nao alcanca porque a porta ja barrou o agente alheio.
+    {
+      const { definirPermissaoDeFuncaoDoAgente } = await import(
+        "../lib/agentes/permissoes/escrita"
+      );
+      linhas = []; limpar();
+      erroInjetado = { code: "23503", message: "violates foreign key constraint" };
+      const r = await definirPermissaoDeFuncaoDoAgente({
+        userId: USER_A, agenteId: randomUUID(), funcaoId: FUNCAO, nivel: "automatico",
+      });
+      ok("S17 a capability mapeia 23503 para `nao_disponivel`",
+        r.estado === "nao_disponivel", r.estado);
+
+      limpar();
+      const rFuncao = await definirPermissaoDeFuncaoDoAgente({
+        userId: USER_A, agenteId: randomUUID(), funcaoId: "vendas.inexistente", nivel: "automatico",
+      });
+      ok("S18 Funcao fora do registry nao chega ao banco",
+        rFuncao.estado === "entrada_invalida" && operacoes.length === 0);
+      limpar();
+      const rNivel = await definirPermissaoDeFuncaoDoAgente({
+        userId: USER_A, agenteId: randomUUID(), funcaoId: FUNCAO, nivel: "liberado",
+      });
+      ok("S19 nivel fora do vocabulario nao chega ao banco",
+        rNivel.estado === "entrada_invalida" && operacoes.length === 0);
+      limpar();
+      const rDono = await definirPermissaoDeFuncaoDoAgente({
+        userId: "", agenteId: randomUUID(), funcaoId: FUNCAO, nivel: "automatico",
+      });
+      ok("S20 sem dono nao ha escrita", rDono.estado === "entrada_invalida" &&
+        operacoes.length === 0);
+    }
+
+    secao("T. A rota CONFIGURA — e nao executa");
+
+    ok("T1  ANCORA: as duas fontes foram lidas",
+      CODIGO_PERM.length > 900 && CODIGO_ESCRITA.length > 700);
+    ok("T2  a rota real esta no grafo",
+      Object.keys(require.cache).map((p) => p.replace(/\\/g, "/"))
+        .some((p) => p.includes("/app/api/agentes/[agenteId]/permissoes/route.ts")));
+    ok("T3  DOIS verbos, e sao GET e PATCH",
+      /export async function GET\(/.test(CODIGO_PERM) &&
+        /export async function PATCH\(/.test(CODIGO_PERM) &&
+        !/export async function (POST|PUT|DELETE|HEAD|OPTIONS)\(/.test(CODIGO_PERM));
+    ok("T4  zero Supabase direto na rota",
+      !/getSupabaseServidor|createClient|service_role|\.from\(/.test(CODIGO_PERM));
+    ok("T5  zero spread do corpo externo",
+      !/\.\.\.\s*(corpo|bruto|body|leitura|entrada)/.test(CODIGO_PERM));
+    ok("T6  o catalogo sai do REGISTRY, nunca de lista propria ou mock",
+      /listarFuncoesRegistradas\(\)/.test(CODIGO_PERM) &&
+        !/"vendas\.consultar"/.test(CODIGO_PERM) && !/MOCK_/.test(CODIGO_PERM));
+    ok("T7  a leitura reusa `resolverFatosPermissoes`, sem segunda query",
+      /resolverFatosPermissoes/.test(CODIGO_PERM) &&
+        !/agente_permissoes/.test(CODIGO_PERM));
+    ok("T8  `falha_leitura` NAO vira lista sem nivel",
+      /coleta !== "ok"/.test(CODIGO_PERM));
+    // DUAS ocorrencias, e as duas sao a MESMA fonte: a porta usa
+    // `auth.uid` para provar a propriedade do agente e o repassa adiante.
+    // O que o assert protege nao e a contagem — e que nao exista uma
+    // TERCEIRA origem para o dono.
+    //
+    // Contagem seria fragil e diria pouco. O que se afirma e a CADEIA:
+    // a porta produz `userId` a partir de `auth.uid`, e todo consumidor
+    // recebe `porta.userId`. Qualquer `userId:` com terceira origem
+    // reprova, porque a lista de valores e fechada.
+    // A declaracao de TIPO (`userId: string;`) sai antes: ela nao e uma
+    // origem de valor, e mante-la faria a lista fechada aceitar o token
+    // `string` — que nao significa nada em runtime.
+    const VALORES_DE_DONO = CODIGO_PERM.replace(/userId: string;/g, "");
+    const origensDeDono = [...VALORES_DE_DONO.matchAll(/userId:\s*([A-Za-z.]+)/g)].map((m) => m[1]);
+    ok("T9  todo `userId` vem da porta, e a porta vem de auth.uid",
+      /userId: auth\.uid/.test(CODIGO_PERM) &&
+        origensDeDono.length >= 3 &&
+        origensDeDono.every((o) => o === "auth.uid" || o === "porta.userId") &&
+        !/corpo\.user_id|body\.user_id|bruto\.user_id/.test(CODIGO_PERM),
+      origensDeDono.join(", "));
+    ok("T9a CONTROLE: a sonda de origem enxerga uma TERCEIRA fonte",
+      [...("userId: corpo.user_id".matchAll(/userId:\s*([A-Za-z.]+)/g))]
+        .map((m) => m[1])
+        .some((o) => o !== "auth.uid" && o !== "porta.userId"));
+    ok("T9c CONTROLE: a sonda acusaria um dono vindo do corpo",
+      /corpo\.user_id/.test("const u = corpo.user_id;"));
+    ok("T9b a Funcao e conferida contra o REGISTRY antes do dominio",
+      /funcaoExiste\(bruto\.funcaoId\)/.test(CODIGO_PERM) &&
+        /funcaoExiste\(/.test(CODIGO_ESCRITA));
+    ok("T10 o agenteId vem do CAMINHO, nunca do corpo",
+      /params\.agenteId/.test(CODIGO_PERM) &&
+        !/corpo\.(agenteId|agente_id)/.test(CODIGO_PERM));
+    // CONFIGURAR nao e EXECUTAR: a fronteira inteira desta fase.
+    ok("T11 zero execucao de Function na rota",
+      !/executarFuncao|autorizarFuncao|resolverFuncao\(.*\)\.executor|criarTarefa/.test(CODIGO_PERM));
+    ok("T12 zero Approval e zero Tool Call na rota",
+      !/aprovacao|aprovacoes|chamadas\/registro|registrarAbertura/i.test(CODIGO_PERM));
+    ok("T13 zero worker, provider e conexao na rota",
+      !/worker|anthropic|AdaptadorIA|conexoes|selecao/i.test(CODIGO_PERM));
+    ok("T14 a mesma fronteira vale para a capability de escrita",
+      !/executarFuncao|autorizarFuncao|criarTarefa|aprovacao/i.test(CODIGO_ESCRITA));
+    ok("T15 nenhum DELETE em lugar nenhum desta frente",
+      !/\.delete\(/.test(CODIGO_ESCRITA) && !/\.delete\(/.test(CODIGO_PERM) &&
+        !/"DELETE"/.test(CODIGO_PERM));
+    ok("T16 toda resposta sai com no-store",
+      /"Cache-Control": "no-store"/.test(CODIGO_PERM) &&
+        (CODIGO_PERM.match(/NextResponse\.json\(/g) ?? []).length === 1);
+    ok("T17 nenhuma migration entrou nesta frente",
+      !existsSync(join(RAIZ, "supabase/migrations/20260930_agente_permissoes_escrita.sql")));
+    ok("T18 e nenhuma RPC foi criada para gravar permissao",
+      !/\.rpc\(/.test(CODIGO_ESCRITA) && !/\.rpc\(/.test(CODIGO_PERM));
+    ok("T19 nenhuma coercao String() no caminho da rota", !/String\(/.test(CODIGO_PERM));
   }
 
   console.log(`\n══ ${passou} PASS / ${falhou} FAIL ══\n`);
