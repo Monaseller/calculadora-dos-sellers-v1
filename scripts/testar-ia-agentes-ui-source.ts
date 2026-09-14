@@ -142,10 +142,10 @@ secao("B. O que a UI NAO manda");
   // "o unico cabecalho enviado e o do corpo JSON": as duas contagens
   // sao comparadas ENTRE SI, entao um `headers:` que nao seja aquele
   // cabecalho reprova, e o veto a credencial no cabecalho nao mudou.
-  ok("B3c os UNICOS cabecalhos sao os quatro Content-Type do corpo JSON",
-    (CODIGO_TRANSPORTE.match(/headers\s*:/g) ?? []).length === 4 &&
+  ok("B3c os UNICOS cabecalhos sao os cinco Content-Type do corpo JSON",
+    (CODIGO_TRANSPORTE.match(/headers\s*:/g) ?? []).length === 5 &&
       (CODIGO_TRANSPORTE.match(/headers: \{ "Content-Type": "application\/json" \}/g) ?? [])
-        .length === 4 &&
+        .length === 5 &&
       !/"X-|Cookie|Api-Key|Idempotency-Key/i.test(CODIGO_TRANSPORTE));
   ok("B4  `credentials` omitido — o cookie same-origin ja viaja sozinho",
     !/credentials/.test(CODIGO_TRANSPORTE));
@@ -177,6 +177,10 @@ secao("B. O que a UI NAO manda");
     "obterDiagnostico",
     "consultarConversaDoAgente",
     "listarPermissoesDoAgente",
+    // FUNCTION-RUNTIME-V1-B2B: o acompanhamento da tarefa de vendas.
+    // Leitura pura — nao cria tarefa, nao reexecuta, nao aciona o
+    // dispatcher.
+    "consultarConsultaVendasDoAgente",
   ];
   /** Toda funcao exportada SEM `method:` e uma leitura. */
   const leiturasReais = [...CODIGO_TRANSPORTE.matchAll(/export async function (\w+)\(/g)]
@@ -203,7 +207,7 @@ secao("B. O que a UI NAO manda");
       ["listarAgentes", "obterDiagnostico", "consultarConversaDoAgente", "outraLeitura"].sort()
     ) !== leiturasEsperadas);
   ok("B5a4 ANCORA: a varredura enxergou leitores de verdade",
-    leiturasReais.length === 4 && corpoDaFuncao("listarPermissoesDoAgente").length > 50);
+    leiturasReais.length === 5 && corpoDaFuncao("listarPermissoesDoAgente").length > 50);
   // A leitura de permissoes e leitura: nao define nada, nao cria linha e
   // nao executa Funcao.
   ok("B5a5 a leitura de permissoes repassa o sinal e nao escreve",
@@ -238,6 +242,9 @@ secao("B. O que a UI NAO manda");
   const VERBOS_AUTORIZADOS: Readonly<Record<string, string>> = {
     criarAgenteViaApi: "POST",
     enviarMensagemAoAgente: "POST",
+    // FUNCTION-RUNTIME-V1-B2B: enfileira `consultar_vendas`. POST porque
+    // CRIA uma tarefa — e so isso: quem executa e o dispatcher.
+    criarConsultaVendasDoAgente: "POST",
     atualizarAgenteViaApi: "PATCH",
     definirPermissaoDeFuncao: "PATCH",
   };
@@ -267,9 +274,9 @@ secao("B. O que a UI NAO manda");
       (f) =>
         verboDaFuncao(f) === VERBOS_AUTORIZADOS[f] &&
         /body: JSON\.stringify/.test(corpoDaFuncao(f))));
-  ok("B5b2 o transporte tem exatamente quatro method e quatro body",
-    (CODIGO_TRANSPORTE.match(/method\s*:/g) ?? []).length === 4 &&
-      (CODIGO_TRANSPORTE.match(/body\s*:/g) ?? []).length === 4);
+  ok("B5b2 o transporte tem exatamente cinco method e cinco body",
+    (CODIGO_TRANSPORTE.match(/method\s*:/g) ?? []).length === 5 &&
+      (CODIGO_TRANSPORTE.match(/body\s*:/g) ?? []).length === 5);
   ok("B5b3 a escrita de conversa vai para a rota de conversa, com corpo so de mensagem",
     /ROTA_SUFIXO_CONVERSA/.test(CODIGO_TRANSPORTE) &&
       /body: JSON\.stringify\(\{ mensagem \}\)/.test(corpoDaFuncao("enviarMensagemAoAgente")));
@@ -310,7 +317,7 @@ secao("B. O que a UI NAO manda");
       atualizarAgenteViaApi: "POST",
     }) !== pares(VERBOS_AUTORIZADOS));
   ok("B5b8 ANCORA: a varredura enxergou funcoes de verdade",
-    escritasReais.length === 4 && corpoDaFuncao("criarAgenteViaApi").length > 50);
+    escritasReais.length === 5 && corpoDaFuncao("criarAgenteViaApi").length > 50);
   // ── A escrita de permissao, nominalmente ─────────────────────────
   // O caminho e montado por um helper compartilhado com a LEITURA —
   // como `caminhoDaConversa` ja faz —, entao a sonda mede o helper no
@@ -369,11 +376,12 @@ secao("B. O que a UI NAO manda");
   // SUBSTITUIR e APAGAR continuam fora: PUT reabriria por omissao os
   // campos que cada corpo fecha, e nao ha o que apagar (negar e
   // `bloqueado`, que GRAVA linha).
-  ok("B7b duas criacoes por POST, duas alteracoes por PATCH — e nada alem",
-    (CODIGO_TRANSPORTE.match(/method:\s*"POST"/g) ?? []).length === 2 &&
+  ok("B7b tres criacoes por POST, duas alteracoes por PATCH — e nada alem",
+    (CODIGO_TRANSPORTE.match(/method:\s*"POST"/g) ?? []).length === 3 &&
       (CODIGO_TRANSPORTE.match(/method:\s*"PATCH"/g) ?? []).length === 2 &&
       /export async function criarAgenteViaApi\(/.test(CODIGO_TRANSPORTE) &&
       /export async function enviarMensagemAoAgente\(/.test(CODIGO_TRANSPORTE) &&
+      /export async function criarConsultaVendasDoAgente\(/.test(CODIGO_TRANSPORTE) &&
       /export async function atualizarAgenteViaApi\(/.test(CODIGO_TRANSPORTE) &&
       /export async function definirPermissaoDeFuncao\(/.test(CODIGO_TRANSPORTE) &&
       !/"PUT"|"DELETE"/.test(CODIGO_TRANSPORTE));
@@ -1147,6 +1155,331 @@ async function principal(): Promise<void> {
       !/aba === "permissoes"/.test(CODIGO_CONTAINER));
     ok("J16 ANCORA: a fonte da tela foi lida de verdade",
       CODIGO_FUNCOES.length > 2000);
+  }
+
+  // ── K. FUNCTION-RUNTIME-V1-B2B — executar vendas.consultar ───────
+  //
+  // A primeira tela que manda uma Funcao REAL trabalhar. Tres coisas a
+  // defendem, e nenhuma e visivel numa leitura casual:
+  //
+  //  1. ela nao tem rede. Toda chamada passa pelo transporte unico, e
+  //     A1/A2 continuam exigindo UM arquivo — esta secao prova o lado
+  //     de ca: o componente e a lista estao limpos.
+  //
+  //  2. o polling PARA em `aguardando_aprovacao`. Sem isso a tela
+  //     perguntaria para sempre por uma tarefa que so anda quando
+  //     alguem decidir — e a decisao ainda nem existe na interface.
+  //
+  //  3. a permissao aqui e UX. `null` e `bloqueado` nao oferecem o
+  //     botao, mas quem recusa de verdade e o runtime; a tela nunca
+  //     vira a segunda autoridade.
+  secao("K. ExecutarConsultaVendas — dispara a Funcao e acompanha");
+  {
+    const EXECUTOR = "components/ia/agente/ExecutarConsultaVendas.tsx";
+    const FUNCOES_K = "components/ia/agente/FuncoesAgente.tsx";
+    const EX = codigo(ler(EXECUTOR));
+    const FN = codigo(ler(FUNCOES_K));
+
+    ok("K1  ANCORA: a fonte do executor foi lida de verdade",
+      EX.length > 2000 && /export default function ExecutarConsultaVendas\(/.test(EX));
+
+    // ── Rede: nenhuma, dos dois lados ─────────────────────────────
+    const semRede = (texto: string): boolean =>
+      !/\bfetch\s*\(|XMLHttpRequest|axios|WebSocket/.test(texto) &&
+      !/["'`]\/api\//.test(texto);
+    ok("K2  o executor nao tem rede nem endereco de API", semRede(EX));
+    ok("K2  a lista de Funcoes continua sem rede", semRede(FN));
+    ok("K2  CONTROLE NEGATIVO: um fetch no executor reprova",
+      !semRede(EX + "\nawait fetch(url);"));
+    ok("K2  CONTROLE NEGATIVO: um endereco de API no executor reprova",
+      !semRede(EX + '\nconst u = "/api/agentes/x";'));
+    ok("K3  e usa o transporte nominal, pelos dois helpers",
+      /criarConsultaVendasDoAgente/.test(EX) &&
+      /consultarConsultaVendasDoAgente/.test(EX) &&
+      /from "@\/lib\/ia\/agentes-http"/.test(EX));
+
+    // ── O executor nao executa ────────────────────────────────────
+    ok("K4  zero execucao direta de Funcao ou tarefa",
+      !/executarFuncao|executarTarefa|claim_next|reivindicarProximaTarefa|internal\/agentes/.test(EX));
+    ok("K4  zero ambiente, banco ou dominio do servidor",
+      !/process\.env|getSupabaseServidor|createClient|service_role|lib\/agentes/.test(EX));
+
+    // ── Permissao como UX ─────────────────────────────────────────
+    //
+    // O predicado e a autoridade da TELA sobre o que oferecer, e o
+    // controle negativo prova que ele sabe dizer nao.
+    ok("K5  so `aprovacao` e `automatico` habilitam o disparo",
+      /function podeDisparar\(nivel: NivelAutonomia \| null\): boolean \{/.test(EX) &&
+      /return nivel === "aprovacao" \|\| nivel === "automatico";/.test(EX));
+    ok("K5  o bloqueio entra no disabled do botao, nao so no texto",
+      /!podeDisparar\(nivel\) \|\|/.test(EX) && /disabled=\{bloqueado\}/.test(EX));
+    ok("K5  CONTROLE NEGATIVO: incluir `bloqueado` no predicado reprova",
+      !/nivel === "bloqueado"/.test(
+        'return nivel === "aprovacao" || nivel === "automatico";'));
+    ok("K6  `aprovacao` avisa que a execucao pode parar para decisao",
+      /poderá parar e aguardar a sua aprovação/.test(ler(EXECUTOR)));
+
+    // ── Disparo duplo ─────────────────────────────────────────────
+    const bloqueia = (texto: string): boolean => {
+      const m = texto.match(/const bloqueado =([\s\S]*?);/);
+      if (m === null) return false;
+      const cond = m[1];
+      return (
+        /!podeDisparar\(nivel\)/.test(cond) &&
+        /enviando/.test(cond) &&
+        /emAndamento/.test(cond) &&
+        /aguardandoAprovacao/.test(cond)
+      );
+    };
+    ok("K7  submit bloqueado durante envio, execucao viva e espera por aprovacao",
+      bloqueia(EX) &&
+      /const emAndamento =[\s\S]*?"pendente"[\s\S]*?"rodando"/.test(EX) &&
+      /const aguardandoAprovacao =[\s\S]*?"aguardando_aprovacao"/.test(EX));
+    ok("K7  CONTROLE NEGATIVO: sem a perna de aprovacao o guarda reprova",
+      !bloqueia(EX.replace("    aguardandoAprovacao ||\n", "")));
+
+    // ── Polling ───────────────────────────────────────────────────
+    ok("K8  o ritmo e 1500 ms, reagendado por setTimeout",
+      /const INTERVALO_CONSULTA_MS = 1500;/.test(EX) &&
+      /window\.setTimeout\(/.test(EX) &&
+      !/setInterval/.test(EX));
+    ok("K8  CONTROLE NEGATIVO: a sonda acusa setInterval quando existe",
+      /setInterval/.test("timer = setInterval(f, 1500)"));
+
+    /**
+     * A parada. `ehStatusTerminal` e do transporte e trata
+     * `aguardando_aprovacao` como terminal — e e exatamente o que esta
+     * tela precisa: a tarefa nao anda sem uma decisao que a interface
+     * ainda nao oferece.
+     */
+    const paraNosTerminais = (texto: string): boolean =>
+      /if \(ehStatusTerminal\(r\.tarefa\.status\)\) return;/.test(texto) &&
+      /ehStatusTerminal/.test(texto);
+    ok("K9  o acompanhamento para em todo estado terminal",
+      paraNosTerminais(EX));
+    ok("K9  CONTROLE NEGATIVO: remover a parada reprova",
+      !paraNosTerminais(EX.replace("if (ehStatusTerminal(r.tarefa.status)) return;", "")));
+    ok("K9  e `aguardando_aprovacao` conta como terminal no transporte",
+      /status !== "pendente" && status !== "rodando"/.test(CODIGO_TRANSPORTE));
+
+    // ── Resposta velha nao sobrescreve nova ───────────────────────
+    ok("K10 geracao e AbortController protegem contra resposta atrasada",
+      /const geracao = useRef\(0\)/.test(EX) &&
+      /new AbortController\(\)/.test(EX) &&
+      /if \(minhaGeracao !== geracao\.current\) return;/.test(EX));
+    ok("K10 e a desmontagem cancela timer e requisicao",
+      /return \(\) => \{[\s\S]*?geracao\.current \+= 1;[\s\S]*?encerrarAcompanhamento\(\);/.test(EX) &&
+      /controlador\.current\?\.abort\(\)/.test(EX));
+
+    // ── Falha de rede nao vira falha da tarefa ────────────────────
+    ok("K11 falha de acompanhamento e bounded e NAO altera a tarefa",
+      /const FALHAS_TOLERADAS = 3;/.test(EX) &&
+      /falhasSeguidas\.current >= FALHAS_TOLERADAS/.test(EX));
+    ok("K11 e nao existe timeout local que declare erro sozinho",
+      !/30_000|60_000|90_000|setTimeout\([^)]*3000\d/.test(EX));
+
+    // ── Query param ───────────────────────────────────────────────
+    const soIdNaUrl = (texto: string): boolean => {
+      const sets = [...texto.matchAll(/atuais\.set\(([^)]*)\)/g)].map((m) => m[1]);
+      return (
+        /const PARAM_TAREFA = "tarefaVendas";/.test(texto) &&
+        sets.length === 1 &&
+        sets[0] === "PARAM_TAREFA, tarefaId"
+      );
+    };
+    ok("K12 a URL guarda o id da tarefa, e nada mais", soIdNaUrl(EX));
+    ok("K12 CONTROLE NEGATIVO: gravar o resultado na URL reprova",
+      !soIdNaUrl(EX.replace("atuais.set(PARAM_TAREFA, tarefaId);",
+        'atuais.set(PARAM_TAREFA, tarefaId);\n      atuais.set("resultado", JSON.stringify(r));')));
+    ok("K12 zero armazenamento local de dado financeiro",
+      !/localStorage|sessionStorage|indexedDB/i.test(EX));
+    ok("K13 recarregar recupera a tarefa pelo SERVIDOR",
+      /parametros\?\.get\(PARAM_TAREFA\)/.test(EX) &&
+      /UUID_REGEX\.test\(idDaUrl\)/.test(EX) &&
+      /void acompanhar\(idDaUrl, minhaGeracao\)/.test(EX));
+
+    // ── Resultado ─────────────────────────────────────────────────
+    ok("K14 o resultado e validado no transporte, sem cast cego",
+      /function resultadoDaResposta/.test(CODIGO_TRANSPORTE) &&
+      !/as any/.test(EX) &&
+      !/as any/.test(CODIGO_TRANSPORTE));
+    const semDump = (texto: string): boolean =>
+      !/JSON\.stringify\(\s*(resultado|dados|tarefa)/.test(texto) &&
+      !/<pre/.test(texto);
+    ok("K15 nenhum despejo cru do resultado na tela", semDump(EX));
+    ok("K15 CONTROLE NEGATIVO: um JSON.stringify(resultado) reprova",
+      !semDump(EX + "\n<span>{JSON.stringify(resultado)}</span>"));
+    ok("K16 os campos bounded conhecidos sao renderizados",
+      /resumo\.pedidos/.test(EX) && /resumo\.unidades/.test(EX) &&
+      /resumo\.faturamento/.test(EX) && /resumo\.ticketMedio/.test(EX) &&
+      /resumo\.skusDistintos/.test(EX) &&
+      /marketplaces\[nome\]/.test(EX) && /truncado &&/.test(EX));
+    ok("K16 e nenhuma linha de pedido chega a tela",
+      !/pedidos\.map|linhas\.map|order_id|item_subtotal/.test(EX));
+    ok("K17 dinheiro sai formatado em BRL, sem recalcular nada",
+      /Intl\.NumberFormat\("pt-BR", \{ style: "currency", currency: "BRL" \}\)/.test(EX) &&
+      !/\* 100|\/ 100|reduce\(/.test(EX));
+
+    // ── O que a tela NAO faz ──────────────────────────────────────
+    const semAcaoProibida = (texto: string): boolean =>
+      !/>\s*(Cancelar|Aprovar|Rejeitar)\s*</.test(texto) &&
+      !/"DELETE"|"PATCH"/.test(texto) &&
+      !/aprovarAprovacao|rejeitarAprovacao|retomarAprovacao|consumirAprovacao/.test(texto);
+    ok("K18 nenhuma acao de cancelar, aprovar ou rejeitar", semAcaoProibida(ler(EXECUTOR)));
+    ok("K18 CONTROLE NEGATIVO: um botao Cancelar reprova",
+      !semAcaoProibida("<button>Cancelar</button>"));
+    ok("K19 a espera por aprovacao e informada, sem prometer acao",
+      /Esta execução precisa de aprovação/.test(ler(EXECUTOR)) &&
+      /etapa seguinte/.test(ler(EXECUTOR)));
+
+    // ── Sem runner generico ───────────────────────────────────────
+    // A propriedade e "o id NAO vem de fora", nao "a palavra nao
+    // aparece": o predicado local recebe um `funcaoId` para comparar, e
+    // isso e o oposto de um runner generico. O que precisa ser provado e
+    // que o id e constante de modulo e que nenhuma entrada o escolhe.
+    ok("K20 nada de runner generico: a Funcao e fixa no modulo",
+      /export const FUNCAO_EXECUTAVEL = "vendas\.consultar";/.test(EX) &&
+      /export default function ExecutarConsultaVendas\(\{\s*agenteId,\s*nivel,\s*\}/.test(EX) &&
+      !/funcaoId:\s*string;/.test(EX) &&
+      !/body: JSON\.stringify\([^)]*funcaoId/.test(EX) &&
+      !/searchParams.*funcaoId|get\("funcaoId"\)/.test(EX) &&
+      !/jsonSchema|JSONSchema|renderArgs|camposDinamicos/.test(EX));
+    ok("K21 a lista monta o executor pelo predicado, sem escrever o id",
+      /temSuperficieDeExecucao\(permissao\.id\) && \(/.test(FN) &&
+      /<ExecutarConsultaVendas agenteId=\{agenteId\} nivel=\{permissao\.nivel\} \/>/.test(FN) &&
+      !/"vendas\.consultar"|'vendas\.consultar'/.test(FN));
+
+    // ── Formulario ────────────────────────────────────────────────
+    ok("K22 os tres campos existem, com label ligado ao input",
+      /htmlFor="cds-cv-inicio"/.test(EX) && /id="cds-cv-inicio"/.test(EX) &&
+      /htmlFor="cds-cv-fim"/.test(EX) && /id="cds-cv-fim"/.test(EX) &&
+      /htmlFor="cds-cv-marketplace"/.test(EX) && /id="cds-cv-marketplace"/.test(EX));
+    ok("K22 e o marketplace oferece exatamente Todos, Shopee e ML",
+      /<option value="">Todos<\/option>/.test(EX) &&
+      /<option value="Shopee">Shopee<\/option>/.test(EX) &&
+      /<option value="ML">Mercado Livre<\/option>/.test(EX));
+    ok("K23 a tela nao duplica a regra de dominio do servidor",
+      !/JANELA_MAXIMA|\b14\b/.test(EX) && !/validarFiltroVendas/.test(EX));
+
+    // ── K24..K27 — a trava SINCRONA do envio (B2B-F1) ─────────────
+    //
+    // O `disabled` do botao e o guard de `bloqueado` sao os dois
+    // corretos e os dois TARDIOS: ambos dependem de `enviando` ja ter
+    // virado `true` num render. Entre o primeiro evento e esse render
+    // existe uma janela, e dois submits despachados no mesmo frame
+    // atravessam juntos — duas tarefas `consultar_vendas`, duas
+    // execucoes reais e, no nivel `aprovacao`, potencialmente duas
+    // Approvals que ninguem consegue apagar.
+    //
+    // O que fecha a janela e um ref, porque ref muda no instante em que
+    // e escrito. A ordem importa tanto quanto a existencia: ler o ref
+    // DEPOIS do primeiro `await` nao fecharia nada.
+
+    /** O corpo do handler, por chaves balanceadas — a ordem so pode ser
+     *  medida dentro dele. */
+    const corpoDoEnviar = (texto: string): string => {
+      const i = texto.indexOf("async function enviar(");
+      if (i < 0) return "";
+      const iAbre = texto.indexOf("{", texto.indexOf(")", i));
+      if (iAbre < 0) return "";
+      let nivel = 0;
+      for (let k = iAbre; k < texto.length; k++) {
+        if (texto[k] === "{") nivel += 1;
+        else if (texto[k] === "}") {
+          nivel -= 1;
+          if (nivel === 0) return texto.slice(iAbre, k + 1);
+        }
+      }
+      return "";
+    };
+
+    const travaSincrona = (texto: string): boolean => {
+      const corpo = corpoDoEnviar(texto);
+      if (corpo.length === 0) return false;
+
+      const iGuarda = corpo.indexOf("if (envioEmCursoRef.current) return;");
+      const iTrava = corpo.indexOf("envioEmCursoRef.current = true;");
+      const iAwait = corpo.indexOf("await ");
+      if (iGuarda < 0 || iTrava < 0 || iAwait < 0) return false;
+
+      // Ler, travar, e SO entao entrar no assincrono.
+      if (!(iGuarda < iTrava && iTrava < iAwait)) return false;
+
+      // A liberacao nao pode morar aqui: um `finally` devolveria a trava
+      // antes de o render materializar `enviando: false` e, no sucesso,
+      // antes de a tarefa ativa existir — um instante sem guarda nenhum.
+      return (
+        !/envioEmCursoRef\.current = false/.test(corpo) && !/\bfinally\b/.test(corpo)
+      );
+    };
+
+    ok("K24 ANCORA: o corpo do handler de envio foi recortado",
+      corpoDoEnviar(EX).length > 400 && corpoDoEnviar(EX).length < EX.length);
+    ok("K24 a trava e lida e fechada ANTES do primeiro await", travaSincrona(EX));
+    ok("K25 CONTROLE NEGATIVO: sem o early-return da trava, reprova",
+      !travaSincrona(EX.replace("if (envioEmCursoRef.current) return;", "")));
+    ok("K26 CONTROLE NEGATIVO: travar DEPOIS do await reprova",
+      !travaSincrona(
+        EX.replace("    envioEmCursoRef.current = true;\n", "").replace(
+          "    if (minhaGeracao !== geracao.current) return;\n    setEnviando(false);",
+          "    envioEmCursoRef.current = true;\n    if (minhaGeracao !== geracao.current) return;\n    setEnviando(false);"
+        )));
+    ok("K27 CONTROLE NEGATIVO: liberar a trava num finally do handler reprova",
+      !travaSincrona(
+        EX.replace("if (bloqueado) return;",
+          "if (bloqueado) return;\n    try { /* */ } finally { envioEmCursoRef.current = false; }")));
+
+    // A liberacao vive num efeito, que so roda apos o commit.
+    const liberacaoAposRender = (texto: string): boolean =>
+      /useEffect\(\(\) => \{\s*if \(!enviando\) envioEmCursoRef\.current = false;\s*\}, \[enviando\]\);/
+        .test(texto);
+    ok("K28 a trava e devolvida depois do render, atrelada a `enviando`",
+      liberacaoAposRender(EX));
+    ok("K28 CONTROLE NEGATIVO: liberar sem depender de `enviando` reprova",
+      !liberacaoAposRender(EX.replace("}, [enviando]);", "}, []);")));
+
+    // Defesa em profundidade: o ref NAO substituiu os outros dois.
+    ok("K29 `disabled` e o guard de estado continuam no lugar",
+      /disabled=\{bloqueado\}/.test(EX) && /if \(bloqueado\) return;/.test(EX));
+
+    // ── K30..K31 — a query existente sobrevive (B2B-F1) ───────────
+    //
+    // A aba desta tela vive em `?aba=funcoes`. Escrever `tarefaVendas`
+    // sobre uma query nova, em vez de sobre a atual, jogaria o dono
+    // para fora da propria tela em que ele acabou de clicar.
+    const partiuDosParamsAtuais = (texto: string): boolean => {
+      // O argumento contem `)` — `toString()` —, entao nada de
+      // `[^)]*`: a primeira versao desta sonda parava no meio da
+      // expressao e reprovava codigo correto. Contar o literal exato e
+      // comparar com o total de construcoes diz a mesma coisa sem
+      // depender de casar parenteses.
+      const daQueryAtual = (
+        texto.match(/new URLSearchParams\(parametros\?\.toString\(\) \?\? ""\)/g) ?? []
+      ).length;
+      const todas = (texto.match(/new URLSearchParams\(/g) ?? []).length;
+      if (todas === 0 || daQueryAtual !== todas) return false;
+
+      // E so `tarefaVendas` e tocado — nenhum outro param e escrito nem
+      // removido.
+      const tocados = [...texto.matchAll(/atuais\.(?:set|delete)\(([^)]*)\)/g)].map((m) =>
+        m[1].trim()
+      );
+      return (
+        tocados.length === 2 &&
+        tocados.every((a) => a.startsWith("PARAM_TAREFA")) &&
+        /router\.replace\(/.test(texto)
+      );
+    };
+
+    ok("K30 a URL e reescrita a partir dos parametros ATUAIS", partiuDosParamsAtuais(EX));
+    ok("K30 CONTROLE NEGATIVO: comecar de uma query vazia reprova",
+      !partiuDosParamsAtuais(
+        EX.replace(/new URLSearchParams\(parametros\?\.toString\(\) \?\? ""\)/g,
+          "new URLSearchParams()")));
+    ok("K31 CONTROLE NEGATIVO: mexer num segundo parametro reprova",
+      !partiuDosParamsAtuais(
+        EX.replace("atuais.set(PARAM_TAREFA, tarefaId);",
+          'atuais.set(PARAM_TAREFA, tarefaId);\n      atuais.set("aba", "funcoes");')));
   }
 
   console.log(`\n══ ${passou} PASS / ${falhou} FAIL ══\n`);

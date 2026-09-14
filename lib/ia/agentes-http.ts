@@ -50,6 +50,7 @@ import type { RequisitoConexao } from "@/lib/ia/skills/contrato";
 const ROTA_BASE = "/api/agentes";
 const ROTA_SUFIXO_DIAGNOSTICO = "/diagnostico";
 const ROTA_SUFIXO_CONVERSA = "/conversa";
+const ROTA_SUFIXO_CONSULTAR_VENDAS = "/consultar-vendas";
 
 /**
  * Um diagnóstico e a identidade de quem foi diagnosticado.
@@ -814,4 +815,245 @@ export async function consultarConversaDoAgente(
   if (tarefa === null) return { estado: "falha" };
 
   return { estado: "ok", tarefa, modo: corpo.modoIaConfiguradoAgora };
+}
+
+
+// ─── Consulta de vendas — FUNCTION-RUNTIME-V1-B2B ─────────────────────
+//
+// O par abaixo espelha `enviarMensagemAoAgente`/`consultarConversaDoAgente`
+// de proposito: e o mesmo formato de trabalho — POST cria a tarefa e
+// devolve 202, GET acompanha ate um estado terminal. O que muda e a
+// Funcao por tras, e ela e FIXA no servidor.
+//
+// Nao ha `funcaoId` em lugar nenhum daqui. Um transporte que aceitasse o
+// identificador da Funcao pelo chamador transformaria a escolha do que
+// executar em entrada da UI — e a autorizacao dessa escolha vive em
+// `executarFuncao`, no runtime, nao no browser.
+
+/** O periodo pedido, como a tarefa o registrou. */
+export interface PeriodoConsultaVendas {
+  dataInicio: string;
+  dataFim: string;
+  marketplace: string | null;
+}
+
+/** Os numeros de um recorte. Mesmo shape para o total e para cada
+ *  marketplace — e o que o handler persiste. */
+export interface NumerosConsultaVendas {
+  linhas: number;
+  pedidos: number;
+  unidades: number;
+  faturamento: number;
+  ticketMedio: number;
+  skusDistintos: number;
+}
+
+/**
+ * O resultado BOUNDED da tarefa.
+ *
+ * Tres baldes FIXOS, nunca chave dinamica: o tamanho nao cresce com o
+ * volume consultado, e por isso ele pode viajar inteiro ate a tela. Nao
+ * existe linha de pedido aqui, e nao deve passar a existir.
+ */
+export interface ResultadoConsultaVendasUI {
+  periodo: PeriodoConsultaVendas;
+  resumo: NumerosConsultaVendas;
+  marketplaces: {
+    Shopee: NumerosConsultaVendas;
+    ML: NumerosConsultaVendas;
+    outros: NumerosConsultaVendas;
+  };
+  /** O periodo tinha MAIS dados do que couberam na paginacao. Quem mostra
+   *  o resumo precisa dizer isso — calar entregaria um total incompleto
+   *  com cara de completo. */
+  truncado: boolean;
+}
+
+export interface TarefaConsultaVendasUI {
+  id: string;
+  status: StatusConversa;
+  resultado: ResultadoConsultaVendasUI | null;
+  erroTipo: string | null;
+  criadoEm: string | null;
+  iniciadoEm: string | null;
+  concluidoEm: string | null;
+}
+
+/** O marketplace que o formulario pode pedir. `null` e "todos" — e e o
+ *  mesmo pedido que omitir a chave, conforme a API. */
+export type MarketplaceConsultaVendas = "Shopee" | "ML" | null;
+
+export type RespostaCriacaoConsultaVendas =
+  | { estado: "ok"; tarefaId: string; status: StatusConversa }
+  | { estado: "nao_autenticado" }
+  | { estado: "nao_encontrado" }
+  | { estado: "agente_inativo" }
+  | { estado: "entrada_invalida"; codigo: string | null }
+  | { estado: "falha" };
+
+export type RespostaConsultaVendas =
+  | { estado: "ok"; tarefa: TarefaConsultaVendasUI }
+  | { estado: "nao_autenticado" }
+  | { estado: "nao_encontrado" }
+  | { estado: "entrada_invalida" }
+  | { estado: "falha" };
+
+const caminhoDaConsultaVendas = (agenteId: string) =>
+  `${ROTA_BASE}/${encodeURIComponent(agenteId)}${ROTA_SUFIXO_CONSULTAR_VENDAS}`;
+
+function numerosDaResposta(bruto: unknown): NumerosConsultaVendas | null {
+  if (!ehObjeto(bruto)) return null;
+  const chaves = ["linhas", "pedidos", "unidades", "faturamento", "ticketMedio", "skusDistintos"] as const;
+  const saida: Record<string, number> = {};
+  for (const chave of chaves) {
+    const valor = bruto[chave];
+    // `Number.isFinite` e deliberado: `NaN` e `Infinity` chegariam como
+    // `null` pelo JSON, mas um numero invalido vindo por outro caminho
+    // viraria "R$ NaN" na tela. Recusar e melhor que exibir.
+    if (typeof valor !== "number" || !Number.isFinite(valor)) return null;
+    saida[chave] = valor;
+  }
+  return saida as unknown as NumerosConsultaVendas;
+}
+
+/**
+ * Valida o resultado ANTES de deixa-lo chegar a tela.
+ *
+ * Sem `as any` e sem cast cego: `resultado` e `jsonb` do banco, e o que
+ * a tela pode acessar sem checar e exatamente o que um dia vai quebrar
+ * com um `undefined`. Shape divergente vira `null`, e o componente
+ * mostra "resultado indisponivel" em vez de estourar.
+ */
+function resultadoDaResposta(bruto: unknown): ResultadoConsultaVendasUI | null {
+  if (!ehObjeto(bruto)) return null;
+
+  const { periodo, resumo, marketplaces, truncado } = bruto;
+  if (typeof truncado !== "boolean") return null;
+
+  if (!ehObjeto(periodo)) return null;
+  const { dataInicio, dataFim, marketplace } = periodo;
+  if (typeof dataInicio !== "string" || typeof dataFim !== "string") return null;
+  if (marketplace !== null && typeof marketplace !== "string") return null;
+
+  const totais = numerosDaResposta(resumo);
+  if (totais === null) return null;
+
+  if (!ehObjeto(marketplaces)) return null;
+  const shopee = numerosDaResposta(marketplaces.Shopee);
+  const ml = numerosDaResposta(marketplaces.ML);
+  const outros = numerosDaResposta(marketplaces.outros);
+  if (shopee === null || ml === null || outros === null) return null;
+
+  return {
+    periodo: { dataInicio, dataFim, marketplace },
+    resumo: totais,
+    marketplaces: { Shopee: shopee, ML: ml, outros: outros },
+    truncado,
+  };
+}
+
+function tarefaDeVendasDaResposta(bruto: unknown): TarefaConsultaVendasUI | null {
+  if (!ehObjeto(bruto)) return null;
+  const { id, status, resultado, erroTipo, criadoEm, iniciadoEm, concluidoEm } = bruto;
+  if (typeof id !== "string" || id.length === 0) return null;
+  if (!ehStatusConhecido(status)) return null;
+  if (erroTipo !== null && typeof erroTipo !== "string") return null;
+
+  const instante = (v: unknown): string | null => (typeof v === "string" ? v : null);
+
+  // `resultado` so existe em `concluido`. Nos demais estados a API manda
+  // `null`, e um objeto invalido tambem vira `null` — a tela distingue
+  // "ainda nao ha" de "veio quebrado" pelo status, nao pelo campo.
+  return {
+    id,
+    status,
+    resultado: resultado === null ? null : resultadoDaResposta(resultado),
+    erroTipo,
+    criadoEm: instante(criadoEm),
+    iniciadoEm: instante(iniciadoEm),
+    concluidoEm: instante(concluidoEm),
+  };
+}
+
+/**
+ * Cria UMA tarefa `consultar_vendas`.
+ *
+ * O corpo leva SOMENTE o filtro. Dono, agente, tipo, Funcao, tentativas
+ * e estado sao decididos no servidor, e a API recusa qualquer chave a
+ * mais. `marketplace` so viaja quando ha escolha: omitir e mandar `null`
+ * sao o mesmo pedido, e omitir mantem o corpo minimo.
+ */
+export async function criarConsultaVendasDoAgente(
+  agenteId: string,
+  filtro: { dataInicio: string; dataFim: string; marketplace: MarketplaceConsultaVendas },
+  signal?: AbortSignal
+): Promise<RespostaCriacaoConsultaVendas> {
+  const corpoEnviado: Record<string, string> = {
+    dataInicio: filtro.dataInicio,
+    dataFim: filtro.dataFim,
+  };
+  if (filtro.marketplace !== null) corpoEnviado.marketplace = filtro.marketplace;
+
+  let resposta: Response;
+  try {
+    resposta = await fetch(caminhoDaConsultaVendas(agenteId), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(corpoEnviado),
+      signal,
+    });
+  } catch {
+    return { estado: "falha" };
+  }
+
+  if (resposta.status === 401) return { estado: "nao_autenticado" };
+  if (resposta.status === 404) return { estado: "nao_encontrado" };
+  if (resposta.status === 409) return { estado: "agente_inativo" };
+
+  const corpo = await corpoDe(resposta);
+
+  // 400 carrega o codigo ESTAVEL do validador de dominio
+  // (`janela_excedida`, `data_invalida`, ...). E a unica informacao de
+  // erro que atravessa, e ela existe porque o dono precisa saber o que
+  // corrigir. Qualquer outra forma vira `null`.
+  if (resposta.status === 400) {
+    const codigo = ehObjeto(corpo) && typeof corpo.erro === "string" ? corpo.erro : null;
+    return { estado: "entrada_invalida", codigo };
+  }
+
+  if (!resposta.ok || !ehObjeto(corpo) || corpo.ok !== true) return { estado: "falha" };
+  // Shape divergente e FALHA, nunca uma tarefa meio montada entrando no
+  // acompanhamento com um id que talvez nao exista.
+  if (typeof corpo.tarefaId !== "string" || corpo.tarefaId.length === 0) return { estado: "falha" };
+  if (!ehStatusConhecido(corpo.status)) return { estado: "falha" };
+
+  return { estado: "ok", tarefaId: corpo.tarefaId, status: corpo.status };
+}
+
+/** Consulta UMA tarefa de vendas. Leitura pura: nao cria nada, nao
+ *  reexecuta e nao aciona o dispatcher. */
+export async function consultarConsultaVendasDoAgente(
+  agenteId: string,
+  tarefaId: string,
+  signal?: AbortSignal
+): Promise<RespostaConsultaVendas> {
+  const consulta = new URLSearchParams({ tarefaId });
+  let resposta: Response;
+  try {
+    resposta = await fetch(`${caminhoDaConsultaVendas(agenteId)}?${consulta.toString()}`, { signal });
+  } catch {
+    return { estado: "falha" };
+  }
+
+  if (resposta.status === 401) return { estado: "nao_autenticado" };
+  if (resposta.status === 404) return { estado: "nao_encontrado" };
+  if (resposta.status === 400) return { estado: "entrada_invalida" };
+
+  const corpo = await corpoDe(resposta);
+  if (!resposta.ok || !ehObjeto(corpo) || corpo.ok !== true) return { estado: "falha" };
+
+  const tarefa = tarefaDeVendasDaResposta(corpo.tarefa);
+  if (tarefa === null) return { estado: "falha" };
+
+  return { estado: "ok", tarefa };
 }

@@ -48,6 +48,9 @@ import {
   type PermissaoDeFuncaoUI,
 } from "@/lib/ia/agentes-http";
 import EstadoVazio from "@/components/ia/EstadoVazio";
+import ExecutarConsultaVendas, {
+  temSuperficieDeExecucao,
+} from "@/components/ia/agente/ExecutarConsultaVendas";
 
 /** O que a tela sabe sobre a leitura. `carregando` e estado proprio, e
  *  nunca lista vazia: "nao consegui perguntar" e "nao ha nada" pedem
@@ -403,6 +406,16 @@ export default function FuncoesAgente({ agenteId }: { agenteId: string }) {
                 <p className="cds-fn-erro-texto" role="alert">
                   {erro}
                 </p>
+              )}
+
+              {/* FUNCTION-RUNTIME-V1-B2B. O nivel entra como PROP, da
+                  mesma leitura que ja alimenta esta lista: sem segundo
+                  fetch, sem segundo polling de permissao. E vai o nivel
+                  SALVO (`permissao.nivel`), nunca o `escolhido` ainda
+                  pendente no seletor — o runtime decide pelo que esta
+                  gravado, e a tela nao deve prometer diferente. */}
+              {temSuperficieDeExecucao(permissao.id) && (
+                <ExecutarConsultaVendas agenteId={agenteId} nivel={permissao.nivel} />
               )}
             </li>
           );
