@@ -837,15 +837,41 @@ export interface PeriodoConsultaVendas {
   marketplace: string | null;
 }
 
-/** Os numeros de um recorte. Mesmo shape para o total e para cada
- *  marketplace — e o que o handler persiste. */
-export interface NumerosConsultaVendas {
+/**
+ * O total do periodo. SEIS campos.
+ *
+ * ── Por que este tipo e o do balde sao DIFERENTES ───────────────────
+ *
+ * Porque o handler os publica diferentes: `ResumoConsultarVendas` tem
+ * seis campos e `BucketMarketplace` tem quatro. Ticket medio e SKUs
+ * distintos existem SO no total — dividir faturamento por pedidos
+ * dentro de um balde daria um ticket por marketplace que o handler
+ * nunca calculou, e contar SKU por balde exigiria um conjunto que ele
+ * nao mantem.
+ *
+ * A primeira versao deste transporte tinha UM tipo para os dois e o
+ * validador de seis campos era aplicado tambem aos baldes. O efeito
+ * apareceu na primeira execucao real: `marketplaces.Shopee.ticketMedio`
+ * chegava `undefined`, o validador devolvia `null`, e a tela dizia "o
+ * resultado nao pode ser exibido" sobre uma consulta que tinha
+ * funcionado perfeitamente — 252 pedidos lidos e agregados.
+ */
+export interface ResumoConsultaVendasUI {
   linhas: number;
   pedidos: number;
   unidades: number;
   faturamento: number;
   ticketMedio: number;
   skusDistintos: number;
+}
+
+/** O recorte de UM marketplace. QUATRO campos — e a ausencia dos dois
+ *  do total e o contrato, nao uma falta. */
+export interface BucketMarketplaceUI {
+  linhas: number;
+  pedidos: number;
+  unidades: number;
+  faturamento: number;
 }
 
 /**
@@ -857,11 +883,11 @@ export interface NumerosConsultaVendas {
  */
 export interface ResultadoConsultaVendasUI {
   periodo: PeriodoConsultaVendas;
-  resumo: NumerosConsultaVendas;
+  resumo: ResumoConsultaVendasUI;
   marketplaces: {
-    Shopee: NumerosConsultaVendas;
-    ML: NumerosConsultaVendas;
-    outros: NumerosConsultaVendas;
+    Shopee: BucketMarketplaceUI;
+    ML: BucketMarketplaceUI;
+    outros: BucketMarketplaceUI;
   };
   /** O periodo tinha MAIS dados do que couberam na paginacao. Quem mostra
    *  o resumo precisa dizer isso — calar entregaria um total incompleto
@@ -901,19 +927,52 @@ export type RespostaConsultaVendas =
 const caminhoDaConsultaVendas = (agenteId: string) =>
   `${ROTA_BASE}/${encodeURIComponent(agenteId)}${ROTA_SUFIXO_CONSULTAR_VENDAS}`;
 
-function numerosDaResposta(bruto: unknown): NumerosConsultaVendas | null {
+/**
+ * Le uma lista NOMINAL de campos numericos.
+ *
+ * `Number.isFinite` e deliberado: `NaN` e `Infinity` chegariam como
+ * `null` pelo JSON, mas um numero invalido vindo por outro caminho
+ * viraria "R$ NaN" na tela. Recusar e melhor que exibir.
+ *
+ * As chaves entram por parametro justamente para que as duas formas nao
+ * voltem a compartilhar uma lista so.
+ */
+function numerosNominais(
+  bruto: unknown,
+  chaves: readonly string[]
+): Record<string, number> | null {
   if (!ehObjeto(bruto)) return null;
-  const chaves = ["linhas", "pedidos", "unidades", "faturamento", "ticketMedio", "skusDistintos"] as const;
   const saida: Record<string, number> = {};
   for (const chave of chaves) {
     const valor = bruto[chave];
-    // `Number.isFinite` e deliberado: `NaN` e `Infinity` chegariam como
-    // `null` pelo JSON, mas um numero invalido vindo por outro caminho
-    // viraria "R$ NaN" na tela. Recusar e melhor que exibir.
     if (typeof valor !== "number" || !Number.isFinite(valor)) return null;
     saida[chave] = valor;
   }
-  return saida as unknown as NumerosConsultaVendas;
+  return saida;
+}
+
+const CAMPOS_RESUMO = [
+  "linhas",
+  "pedidos",
+  "unidades",
+  "faturamento",
+  "ticketMedio",
+  "skusDistintos",
+] as const;
+
+/** O balde NAO tem `ticketMedio` nem `skusDistintos`, e exigi-los aqui
+ *  reprovaria todo resultado real. Ver o docblock de
+ *  `ResumoConsultaVendasUI`. */
+const CAMPOS_BUCKET = ["linhas", "pedidos", "unidades", "faturamento"] as const;
+
+function resumoDaResposta(bruto: unknown): ResumoConsultaVendasUI | null {
+  const lido = numerosNominais(bruto, CAMPOS_RESUMO);
+  return lido === null ? null : (lido as unknown as ResumoConsultaVendasUI);
+}
+
+function bucketMarketplaceDaResposta(bruto: unknown): BucketMarketplaceUI | null {
+  const lido = numerosNominais(bruto, CAMPOS_BUCKET);
+  return lido === null ? null : (lido as unknown as BucketMarketplaceUI);
 }
 
 /**
@@ -935,13 +994,13 @@ function resultadoDaResposta(bruto: unknown): ResultadoConsultaVendasUI | null {
   if (typeof dataInicio !== "string" || typeof dataFim !== "string") return null;
   if (marketplace !== null && typeof marketplace !== "string") return null;
 
-  const totais = numerosDaResposta(resumo);
+  const totais = resumoDaResposta(resumo);
   if (totais === null) return null;
 
   if (!ehObjeto(marketplaces)) return null;
-  const shopee = numerosDaResposta(marketplaces.Shopee);
-  const ml = numerosDaResposta(marketplaces.ML);
-  const outros = numerosDaResposta(marketplaces.outros);
+  const shopee = bucketMarketplaceDaResposta(marketplaces.Shopee);
+  const ml = bucketMarketplaceDaResposta(marketplaces.ML);
+  const outros = bucketMarketplaceDaResposta(marketplaces.outros);
   if (shopee === null || ml === null || outros === null) return null;
 
   return {

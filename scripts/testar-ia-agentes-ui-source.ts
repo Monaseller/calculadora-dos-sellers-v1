@@ -813,6 +813,140 @@ async function principal(): Promise<void> {
     (await definirPermissaoDeFuncao(UUID_A, { funcaoId: "x.y", nivel: "automatico" })).estado ===
       "falha");
 
+  // ── M. O transporte EXECUTADO contra o shape real ────────────────
+  //
+  // A secao L le a fonte. Esta EXECUTA.
+  //
+  // A distincao nao e academica: a secao L inteira continuaria verde se
+  // alguem trocasse as duas constantes dentro dos validadores —
+  // `resumoDaResposta` passando `CAMPOS_BUCKET` e
+  // `bucketMarketplaceDaResposta` passando `CAMPOS_RESUMO`. As listas
+  // seguiriam com 6 e 4 campos, os call sites seguiriam iguais, e o
+  // defeito de producao voltaria identico: baldes validados contra seis
+  // campos, todo resultado real recusado.
+  //
+  // O fixture abaixo e o resultado REAL da primeira execucao em
+  // producao — 252 pedidos lidos, R$ 10.246,17 —, com a assimetria que
+  // derrubou a primeira tentativa: resumo com SEIS campos, baldes com
+  // QUATRO. Se o transporte voltar a exigir seis dos baldes, M2 fica
+  // vermelho.
+  secao("M. consultarConsultaVendasDoAgente — o shape real de producao");
+  {
+    const { consultarConsultaVendasDoAgente } = await import("../lib/ia/agentes-http");
+
+    const UUID_TAREFA = "d63c5a98-c1e1-4ee8-a5f7-1aff8f1664aa";
+
+    /** O agregado exatamente como o handler o persistiu em producao. */
+    const resultadoReal = () => ({
+      periodo: { dataInicio: "2026-09-12", dataFim: "2026-09-13", marketplace: null },
+      resumo: {
+        linhas: 255,
+        pedidos: 252,
+        unidades: 276,
+        faturamento: 10246.17,
+        ticketMedio: 40.66,
+        skusDistintos: 9,
+      },
+      marketplaces: {
+        // QUATRO campos. Sem `ticketMedio`, sem `skusDistintos` — e isso
+        // e o contrato, nao uma falta.
+        Shopee: { linhas: 9, pedidos: 6, unidades: 11, faturamento: 197.14 },
+        ML: { linhas: 246, pedidos: 246, unidades: 265, faturamento: 10049.03 },
+        outros: { linhas: 0, pedidos: 0, unidades: 0, faturamento: 0 },
+      },
+      truncado: false,
+    });
+
+    const respostaGet = (resultado: unknown) => ({
+      ok: true,
+      tarefa: {
+        id: UUID_TAREFA,
+        status: "concluido",
+        resultado,
+        erroTipo: null,
+        criadoEm: "2026-09-14T21:00:26.856Z",
+        iniciadoEm: "2026-09-14T21:00:38.657Z",
+        concluidoEm: "2026-09-14T21:00:41.282Z",
+      },
+    });
+
+    // ── O caso que falhou em producao, agora executado ────────────
+    responde(200, respostaGet(resultadoReal()));
+    const m = await consultarConsultaVendasDoAgente(UUID_A, UUID_TAREFA);
+
+    ok("M1  200 com o shape real -> estado ok e tarefa concluida",
+      m.estado === "ok" && m.tarefa.status === "concluido", m.estado);
+    ok("M2  O RESULTADO REAL CHEGA PREENCHIDO (era null antes do fix)",
+      m.estado === "ok" && m.tarefa.resultado !== null);
+    ok("M3  o total traz os seis campos, inclusive os que so ele tem",
+      m.estado === "ok" &&
+      m.tarefa.resultado?.resumo.ticketMedio === 40.66 &&
+      m.tarefa.resultado?.resumo.skusDistintos === 9 &&
+      m.tarefa.resultado?.resumo.pedidos === 252 &&
+      m.tarefa.resultado?.resumo.faturamento === 10246.17);
+    ok("M4  o balde de QUATRO campos e aceito — Shopee",
+      m.estado === "ok" &&
+      m.tarefa.resultado?.marketplaces.Shopee.pedidos === 6 &&
+      m.tarefa.resultado?.marketplaces.Shopee.linhas === 9 &&
+      m.tarefa.resultado?.marketplaces.Shopee.unidades === 11 &&
+      m.tarefa.resultado?.marketplaces.Shopee.faturamento === 197.14);
+    ok("M5  o balde de QUATRO campos e aceito — ML",
+      m.estado === "ok" && m.tarefa.resultado?.marketplaces.ML.faturamento === 10049.03);
+    ok("M6  o balde de QUATRO campos e aceito — outros (tudo zero)",
+      m.estado === "ok" && m.tarefa.resultado?.marketplaces.outros.unidades === 0);
+    ok("M7  `marketplace: null` (Todos) atravessa o transporte",
+      m.estado === "ok" && m.tarefa.resultado?.periodo.marketplace === null);
+    ok("M8  truncado false chega como boolean",
+      m.estado === "ok" && m.tarefa.resultado?.truncado === false);
+    ok("M9  o GET foi para a route de consultar-vendas, com o tarefaId",
+      chamadas.length === 1 &&
+      chamadas[0]?.url === `/api/agentes/${UUID_A}/consultar-vendas?tarefaId=${UUID_TAREFA}`,
+      String(chamadas[0]?.url));
+
+    // ── O total continua ESTRITO ──────────────────────────────────
+    //
+    // Corrigir o balde afrouxando o resumo seria trocar um defeito por
+    // outro: `ticketMedio` e `skusDistintos` existem no total, e a tela
+    // os mostra.
+    const semCampoDoTotal = (campo: "ticketMedio" | "skusDistintos") => {
+      const r = resultadoReal();
+      delete (r.resumo as Record<string, unknown>)[campo];
+      return r;
+    };
+
+    responde(200, respostaGet(semCampoDoTotal("ticketMedio")));
+    const mSemTicket = await consultarConsultaVendasDoAgente(UUID_A, UUID_TAREFA);
+    ok("M10 resumo SEM ticketMedio e recusado, fail-closed",
+      mSemTicket.estado === "ok" && mSemTicket.tarefa.resultado === null);
+
+    responde(200, respostaGet(semCampoDoTotal("skusDistintos")));
+    const mSemSkus = await consultarConsultaVendasDoAgente(UUID_A, UUID_TAREFA);
+    ok("M11 resumo SEM skusDistintos e recusado, fail-closed",
+      mSemSkus.estado === "ok" && mSemSkus.tarefa.resultado === null);
+
+    // ── O balde continua ESTRITO nos QUATRO ───────────────────────
+    const semCampoDoBalde = () => {
+      const r = resultadoReal();
+      delete (r.marketplaces.Shopee as Record<string, unknown>).faturamento;
+      return r;
+    };
+    responde(200, respostaGet(semCampoDoBalde()));
+    const mSemFat = await consultarConsultaVendasDoAgente(UUID_A, UUID_TAREFA);
+    ok("M12 balde SEM faturamento e recusado, fail-closed",
+      mSemFat.estado === "ok" && mSemFat.tarefa.resultado === null);
+
+    // ── Numero nao-finito continua recusado ───────────────────────
+    const comInfinito = () => {
+      const r = resultadoReal();
+      (r.marketplaces.Shopee as Record<string, unknown>).faturamento = Infinity;
+      return r;
+    };
+    responde(200, respostaGet(comInfinito()));
+    const mInf = await consultarConsultaVendasDoAgente(UUID_A, UUID_TAREFA);
+    ok("M13 faturamento Infinity num balde e recusado, fail-closed",
+      mInf.estado === "ok" && mInf.tarefa.resultado === null);
+  }
+
   globalThis.fetch = fetchOriginal;
 
   // ─── H. A tela de edicao ────────────────────────────────────────────
@@ -1481,6 +1615,144 @@ async function principal(): Promise<void> {
         EX.replace("atuais.set(PARAM_TAREFA, tarefaId);",
           'atuais.set(PARAM_TAREFA, tarefaId);\n      atuais.set("aba", "funcoes");')));
   }
+
+  // ── L. O resultado real de producao (B2B-E2E-F1) ─────────────────
+  //
+  // Esta secao existe por causa de um defeito que so apareceu na
+  // PRIMEIRA execucao real. A consulta funcionou: o dispatcher
+  // reivindicou a tarefa, `vendas.consultar` leu 252 pedidos e o
+  // agregado foi persistido inteiro. A tela disse "o resultado nao pode
+  // ser exibido".
+  //
+  // A causa era um tipo a menos no transporte. O handler publica DUAS
+  // formas — `ResumoConsultarVendas` com seis campos e
+  // `BucketMarketplace` com quatro —, e o transporte tinha uma so, de
+  // seis, aplicada aos dois. `marketplaces.Shopee.ticketMedio` chegava
+  // `undefined`, o validador devolvia `null`, e um resultado perfeito
+  // virava uma mensagem de erro.
+  //
+  // Os asserts abaixo fixam a diferenca nos dois sentidos: o balde NAO
+  // pode exigir os campos do total, e o total NAO pode parar de
+  // exigi-los. Relaxar qualquer um dos lados reabre um defeito
+  // diferente.
+  secao("L. Resultado de vendas — resumo e balde sao formas distintas");
+  {
+    const TRANSPORTE_L = "lib/ia/agentes-http.ts";
+    const TR = codigo(ler(TRANSPORTE_L));
+
+    ok("L1  ANCORA: o transporte foi lido e tem o validador de resultado",
+      TR.length > 2000 && /function resultadoDaResposta/.test(TR));
+
+    /** As chaves que uma lista NOMINAL do transporte declara. */
+    const camposDe = (nome: string): readonly string[] => {
+      const m = TR.match(new RegExp(`const ${nome} = \\[([\\s\\S]*?)\\] as const;`));
+      if (m === null) return [];
+      return [...m[1].matchAll(/"([a-zA-Z]+)"/g)].map((x) => x[1]).sort();
+    };
+
+    const RESUMO_REAL = ["faturamento", "linhas", "pedidos", "skusDistintos", "ticketMedio", "unidades"];
+    const BUCKET_REAL = ["faturamento", "linhas", "pedidos", "unidades"];
+
+    const campos = (nome: string) => JSON.stringify(camposDe(nome));
+
+    // ── A forma do TOTAL: seis campos ─────────────────────────────
+    ok(`L2  o resumo exige os SEIS campos do total ${campos("CAMPOS_RESUMO")}`,
+      JSON.stringify(camposDe("CAMPOS_RESUMO")) === JSON.stringify(RESUMO_REAL));
+
+    // ── A forma do BALDE: quatro campos ───────────────────────────
+    ok(`L3  o balde de marketplace exige os QUATRO campos ${campos("CAMPOS_BUCKET")}`,
+      JSON.stringify(camposDe("CAMPOS_BUCKET")) === JSON.stringify(BUCKET_REAL));
+
+    // ── O GUARD PRINCIPAL DO F1 ───────────────────────────────────
+    //
+    // A regressao exata: voltar a exigir `ticketMedio` ou
+    // `skusDistintos` do balde. Foi isso que reprovou todo resultado
+    // real de producao.
+    const baldeNaoExigeCamposDoTotal = (texto: string): boolean => {
+      const m = texto.match(/const CAMPOS_BUCKET = \[([\s\S]*?)\] as const;/);
+      if (m === null) return false;
+      const lista = m[1];
+      return !/ticketMedio/.test(lista) && !/skusDistintos/.test(lista);
+    };
+    ok("L4  REGRESSAO: o balde NAO exige ticketMedio nem skusDistintos",
+      baldeNaoExigeCamposDoTotal(TR));
+    // A mutacao altera o CONTEUDO da lista, nao um recorte com quebra
+    // de linha: `CAMPOS_BUCKET` esta numa linha so e `CAMPOS_RESUMO` em
+    // varias. A primeira versao desta sonda casava com o formato
+    // multilinha, nao mutava nada, e por isso ficava vermelha sobre
+    // codigo correto.
+    const comCampoExtraNoBalde = (extra: string): string =>
+      TR.replace(
+        'const CAMPOS_BUCKET = ["linhas", "pedidos", "unidades", "faturamento"] as const;',
+        `const CAMPOS_BUCKET = ["linhas", "pedidos", "unidades", "faturamento", "${extra}"] as const;`
+      );
+    ok("L4  ANCORA: a mutacao do balde altera mesmo a lista",
+      comCampoExtraNoBalde("ticketMedio") !== TR);
+    ok("L4  CONTROLE NEGATIVO: voltar a exigir ticketMedio no balde reprova",
+      !baldeNaoExigeCamposDoTotal(comCampoExtraNoBalde("ticketMedio")));
+    ok("L4  CONTROLE NEGATIVO: voltar a exigir skusDistintos no balde reprova",
+      !baldeNaoExigeCamposDoTotal(comCampoExtraNoBalde("skusDistintos")));
+
+    // ── E o total continua estrito ────────────────────────────────
+    const resumoExigeOsSeis = (texto: string): boolean => {
+      const m = texto.match(/const CAMPOS_RESUMO = \[([\s\S]*?)\] as const;/);
+      if (m === null) return false;
+      return /ticketMedio/.test(m[1]) && /skusDistintos/.test(m[1]);
+    };
+    ok("L5  o total continua exigindo ticketMedio e skusDistintos",
+      resumoExigeOsSeis(TR));
+    ok("L5  CONTROLE NEGATIVO: afrouxar o total reprova",
+      !resumoExigeOsSeis(TR.replace('  "ticketMedio",\n', "")));
+
+    // ── As duas listas sao DIFERENTES, e por construcao ───────────
+    ok("L6  resumo e balde nao compartilham a mesma lista de campos",
+      JSON.stringify(camposDe("CAMPOS_RESUMO")) !== JSON.stringify(camposDe("CAMPOS_BUCKET")) &&
+      camposDe("CAMPOS_RESUMO").length === 6 &&
+      camposDe("CAMPOS_BUCKET").length === 4);
+
+    // ── Cada validador no seu lugar ───────────────────────────────
+    ok("L7  o resumo e validado por resumoDaResposta e os tres baldes pelo do balde",
+      /const totais = resumoDaResposta\(resumo\);/.test(TR) &&
+      /const shopee = bucketMarketplaceDaResposta\(marketplaces\.Shopee\);/.test(TR) &&
+      /const ml = bucketMarketplaceDaResposta\(marketplaces\.ML\);/.test(TR) &&
+      /const outros = bucketMarketplaceDaResposta\(marketplaces\.outros\);/.test(TR));
+    ok("L7  CONTROLE NEGATIVO: validar o balde com o validador do total reprova",
+      !/const shopee = bucketMarketplaceDaResposta/.test(
+        TR.replace("const shopee = bucketMarketplaceDaResposta(marketplaces.Shopee);",
+          "const shopee = resumoDaResposta(marketplaces.Shopee);")));
+
+    // ── O rigor numerico NAO foi relaxado ─────────────────────────
+    ok("L8  numero invalido continua recusado nas duas formas",
+      /typeof valor !== "number" \|\| !Number\.isFinite\(valor\)/.test(TR) &&
+      /function numerosNominais\(/.test(TR));
+    ok("L8  CONTROLE NEGATIVO: aceitar nao-finito reprova",
+      !/!Number\.isFinite\(valor\)/.test(
+        TR.replace('typeof valor !== "number" || !Number.isFinite(valor)',
+          'typeof valor !== "number"')));
+
+    // ── O tipo unico antigo nao voltou ────────────────────────────
+    ok("L9  o tipo unico que causou o defeito nao existe mais",
+      !/NumerosConsultaVendas/.test(TR) &&
+      /export interface ResumoConsultaVendasUI/.test(TR) &&
+      /export interface BucketMarketplaceUI/.test(TR));
+
+    // ── O resto do contrato do resultado ficou intacto ────────────
+    ok("L10 periodo e truncado nao mudaram",
+      /if \(typeof truncado !== "boolean"\) return null;/.test(TR) &&
+      /if \(marketplace !== null && typeof marketplace !== "string"\) return null;/.test(TR) &&
+      /if \(typeof dataInicio !== "string" \|\| typeof dataFim !== "string"\) return null;/.test(TR));
+
+    // ── A tela le do balde so o que o balde tem ───────────────────
+    //
+    // Se o componente um dia pedir `ticketMedio` de um marketplace, o
+    // dado nao existe e o numero teria de ser inventado aqui.
+    const EXEC_L = codigo(ler("components/ia/agente/ExecutarConsultaVendas.tsx"));
+    ok("L11 o componente nao le ticketMedio nem skusDistintos de um balde",
+      !/marketplaces\[nome\]\.ticketMedio/.test(EXEC_L) &&
+      !/marketplaces\[nome\]\.skusDistintos/.test(EXEC_L) &&
+      /marketplaces\[nome\]\.pedidos/.test(EXEC_L));
+  }
+
 
   console.log(`\n══ ${passou} PASS / ${falhou} FAIL ══\n`);
   process.exitCode = falhou === 0 ? 0 : 1;
