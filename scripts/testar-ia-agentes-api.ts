@@ -66,6 +66,12 @@ interface Operacao {
   tipo: "leitura" | "escrita";
   filtros: Record<string, unknown>;
   payload?: Record<string, unknown>;
+  /** APPROVAL-UI-API-A1: ordem e teto passaram a ser afirmaveis. Antes
+   *  `order()` era no-op e `limit()` nem existia, entao uma fila sem
+   *  limite teria passado. */
+  ordens: { coluna: string; asc: boolean }[];
+  limite: number | null;
+  select: string;
 }
 
 /** A "tabela" `agentes` em memoria. */
@@ -80,7 +86,14 @@ function limpar(): void {
 }
 
 function construtor(tabela: string): unknown {
-  const op: Operacao = { tabela, tipo: "leitura", filtros: {} };
+  const op: Operacao = {
+    tabela,
+    tipo: "leitura",
+    filtros: {},
+    ordens: [],
+    limite: null,
+    select: "",
+  };
   let pendente: Record<string, unknown> | null = null;
   /** O payload de um UPDATE. Separado de `pendente` porque INSERT cria
    *  linha e UPDATE altera as que casarem os filtros. */
@@ -159,11 +172,18 @@ function construtor(tabela: string): unknown {
       // `__tabela` so existe nas linhas que o upsert criou. As fixtures
       // antigas seguem sem marca, e continuam casando como sempre.
       (l.__tabela === undefined || l.__tabela === op.tabela) &&
-      Object.entries(op.filtros).every(([c, v]) =>
-        v !== null && typeof v === "object" && "__in" in (v as object)
-          ? (v as { __in: unknown[] }).__in.includes(l[c])
-          : l[c] === v
-      )
+      Object.entries(op.filtros).every(([c, v]) => {
+        if (v !== null && typeof v === "object" && "__in" in (v as object)) {
+          return (v as { __in: unknown[] }).__in.includes(l[c]);
+        }
+        // APPROVAL-UI-API-A1: `.gt()` comparado de verdade. Modelar
+        // como igualdade faria a fila devolver a linha VENCIDA e o
+        // teste de expiracao passaria sobre um filtro que nao filtra.
+        if (v !== null && typeof v === "object" && "__gt" in (v as object)) {
+          return String(l[c]) > String((v as { __gt: unknown }).__gt);
+        }
+        return l[c] === v;
+      })
     );
     // EDITAR-AGENTE-V1: `UPDATE ... WHERE ... RETURNING`, modelado com a
     // mesma economia do INSERT acima. Sem aplicar a alteracao, a rota
@@ -172,12 +192,30 @@ function construtor(tabela: string): unknown {
     if (op.tipo === "escrita" && alteracao !== null) {
       for (const l of encontradas) Object.assign(l, alteracao);
     }
-    return { data: encontradas, error: null };
+
+    // Ordem e teto aplicados de verdade, na ordem em que o Postgres os
+    // aplica: ORDER BY primeiro, LIMIT depois. Limitar antes devolveria
+    // as N primeiras da tabela em vez das N primeiras da ORDEM.
+    let saida = encontradas;
+    if (op.ordens.length > 0) {
+      saida = [...saida].sort((a, b2) => {
+        for (const { coluna, asc } of op.ordens) {
+          const va = String(a[coluna] ?? "");
+          const vb = String(b2[coluna] ?? "");
+          if (va === vb) continue;
+          return (va < vb ? -1 : 1) * (asc ? 1 : -1);
+        }
+        return 0;
+      });
+    }
+    if (op.limite !== null) saida = saida.slice(0, op.limite);
+    return { data: saida, error: null };
   };
 
   const b: Record<string, unknown> = {
-    select() { return b; },
+    select(colunas?: string) { op.select = typeof colunas === "string" ? colunas : ""; return b; },
     eq(coluna: string, valor: unknown) { op.filtros[coluna] = valor; return b; },
+    gt(coluna: string, valor: unknown) { op.filtros[coluna] = { __gt: valor }; return b; },
     // PERMISSOES-FUNCTION-V1-A: `resolverFatosPermissoes` fecha a
     // consulta nas Funcoes pedidas com `.in("funcao_id", ids)`. Sem
     // modelar isto o duplo lancava, a leitura virava `falha_leitura` e a
@@ -186,7 +224,11 @@ function construtor(tabela: string): unknown {
       op.filtros[coluna] = { __in: [...valores] };
       return b;
     },
-    order() { return b; },
+    order(coluna: string, opcoes?: { ascending?: boolean }) {
+      op.ordens.push({ coluna, asc: opcoes?.ascending !== false });
+      return b;
+    },
+    limit(n: number) { op.limite = n; return b; },
     insert(v: Record<string, unknown>) {
       op.tipo = "escrita";
       op.payload = v;
@@ -1906,6 +1948,255 @@ async function principal(): Promise<void> {
     ok("V24 o userId vem SO de auth.uid",
       /auth\.uid/.test(CV) &&
       !/corpo\.userId|body\.userId|searchParams\.get\("userId"\)/.test(CV));
+  }
+
+  // ── W. GET /api/aprovacoes — a fila real do dono ─────────────────
+  //
+  // APPROVAL-UI-API-A1. A rota REAL roda contra o duplo com estado, e
+  // com ela o helper real: a consulta e montada por
+  // `listarAprovacoesPendentesDoDono`, nao por callback de mock.
+  //
+  // O que esta secao existe para provar e, em ordem de importancia:
+  // que a fila de A nunca alcanca a de B; que aprovacao vencida nao
+  // aparece; que NADA e escrito ao abrir a tela; e que nenhum campo
+  // interno atravessa — as fixtures abaixo carregam `fingerprint`,
+  // `argumentos_hash` e `request_id_solicitacao` de proposito, para
+  // que a prova de projecao nao seja vacua.
+  secao("W. GET /api/aprovacoes — leitura owner-scoped, bounded e sem escrita");
+  {
+    const aprovacoesRota = await import("../app/api/aprovacoes/route");
+
+    const AG_A = "cccccccc-3333-4333-8333-cccccccccccc";
+    const AG_B = "eeeeeeee-5555-4555-8555-eeeeeeeeeeee";
+    const ONTEM = "2026-09-13T21:00:00.000Z";
+    const DAQUI_A_UM_DIA = new Date(Date.now() + 24 * 3600_000).toISOString();
+    const JA_VENCEU = new Date(Date.now() - 3600_000).toISOString();
+
+    const aprovacao = (
+      id: string,
+      userId: string,
+      agenteId: string,
+      extra: Record<string, unknown> = {}
+    ) => ({
+      __tabela: "agente_funcao_aprovacoes",
+      id,
+      user_id: userId,
+      agente_id: agenteId,
+      tarefa_id: "dddddddd-4444-4444-8444-dddddddddddd",
+      funcao_id: "vendas.consultar",
+      revisao_funcao: "1",
+      acesso: "leitura",
+      estado: "pendente",
+      criado_em: ONTEM,
+      expira_em: DAQUI_A_UM_DIA,
+      argumentos: { dataInicio: "2026-09-12", dataFim: "2026-09-13" },
+      conexao_plataforma: null,
+      conexao_recurso: null,
+      // Internos, deliberadamente presentes no datastore.
+      argumentos_hash: "a".repeat(64),
+      fingerprint: "b".repeat(64),
+      request_id_solicitacao: "req-solicitacao-interno",
+      request_id_consumo: null,
+      conexao_loja_id: null,
+      decidido_por: null,
+      ...extra,
+    });
+
+    const agente = (id: string, userId: string, nome: string) => ({
+      __tabela: "agentes",
+      id,
+      user_id: userId,
+      nome,
+    });
+
+    const pedirAprovacoes = (cookie?: string) =>
+      aprovacoesRota.GET(
+        new Request("http://localhost/api/aprovacoes", {
+          method: "GET",
+          headers: cookie ? { cookie } : {},
+        })
+      );
+
+    const semearFila = (): void => {
+      linhas = [
+        agente(AG_A, USER_A, "Teste Chat IA Real"),
+        agente(AG_B, USER_B, "Agente do outro dono"),
+        aprovacao("11111111-1111-4111-8111-111111111111", USER_A, AG_A),
+        aprovacao("22222222-2222-4222-8222-222222222222", USER_B, AG_B),
+      ];
+      limpar();
+    };
+
+    // ── W1..W3 — autenticacao ─────────────────────────────────────
+    semearFila();
+    const semSessao = await pedirAprovacoes();
+    ok("W1  sem sessao a fila nao abre", semSessao.status === 401);
+    ok("W2  e nenhuma leitura chegou ao banco", operacoes.length === 0);
+
+    semearFila();
+    const forjado = await pedirAprovacoes("cds_session=nao.e.token");
+    ok("W3  cookie forjado tambem e 401", forjado.status === 401);
+
+    // ── W4..W8 — a fila do dono, e so dele ────────────────────────
+    semearFila();
+    const filaA = await pedirAprovacoes(COOKIE_A);
+    const corpoA = (await filaA.json()) as {
+      ok: boolean;
+      aprovacoes: Record<string, unknown>[];
+    };
+
+    ok("W4  200 com envelope ok", filaA.status === 200 && corpoA.ok === true);
+    ok("W5  a fila de A traz exatamente a aprovacao de A",
+      corpoA.aprovacoes.length === 1 &&
+      corpoA.aprovacoes[0]?.id === "11111111-1111-4111-8111-111111111111",
+      String(corpoA.aprovacoes.length));
+    ok("W6  ISOLAMENTO: a aprovacao de B nao aparece para A",
+      JSON.stringify(corpoA.aprovacoes).indexOf("22222222") === -1);
+    ok("W7  o filtro de dono foi ao DATASTORE, nao aplicado depois",
+      operacoes.some(
+        (o) => o.tabela === "agente_funcao_aprovacoes" && o.filtros["user_id"] === USER_A
+      ));
+
+    const filaB = await pedirAprovacoes(COOKIE_B);
+    const corpoB = (await filaB.json()) as { aprovacoes: Record<string, unknown>[] };
+    ok("W8  e a fila de B traz somente a de B",
+      corpoB.aprovacoes.length === 1 &&
+      corpoB.aprovacoes[0]?.id === "22222222-2222-4222-8222-222222222222");
+
+    // ── W9..W12 — projecao bounded ────────────────────────────────
+    const item = corpoA.aprovacoes[0] ?? {};
+    ok("W9  a resposta expoe exatamente os doze campos publicos",
+      JSON.stringify(Object.keys(item).sort()) ===
+        JSON.stringify([
+          "acesso", "agenteId", "agenteNome", "argumentos", "conexao", "criadoEm",
+          "estado", "expiraEm", "funcaoId", "id", "revisaoFuncao", "tarefaId",
+        ]),
+      Object.keys(item).join(", "));
+    ok("W10 o nome do agente e o REAL, lido da tabela de agentes",
+      item.agenteNome === "Teste Chat IA Real");
+
+    const textoA = JSON.stringify(corpoA);
+    ok("W11 NENHUM campo interno atravessa, em nenhuma grafia",
+      !/user_id|userId/.test(textoA) &&
+      !/argumentos_hash|argumentosHash/.test(textoA) &&
+      !/fingerprint/.test(textoA) &&
+      !/request_id|requestId/.test(textoA) &&
+      !/conexao_loja_id|conexaoLojaId|loja_id|lojaId/.test(textoA) &&
+      !/decidido|cancelado|motivo_recusa|motivoRecusa/.test(textoA),
+      textoA.slice(0, 160));
+    ok("W12 CONTROLE: os internos EXISTEM no datastore — a prova nao e vacua",
+      linhas.some((l) => typeof l.fingerprint === "string" && typeof l.argumentos_hash === "string"));
+
+    // ── W13..W15 — argumentos ─────────────────────────────────────
+    ok("W13 argumentos chegam como OBJETO, nao como texto serializado",
+      typeof item.argumentos === "object" && item.argumentos !== null &&
+      (item.argumentos as Record<string, unknown>).dataInicio === "2026-09-12");
+    ok("W14 e nao sao transformados, completados nem inferidos",
+      JSON.stringify(item.argumentos) ===
+        JSON.stringify({ dataInicio: "2026-09-12", dataFim: "2026-09-13" }));
+    ok("W15 `estado` e sempre pendente nesta fila", item.estado === "pendente");
+
+    // ── W16..W18 — vencida nao aparece, e nao e reescrita ─────────
+    linhas = [
+      agente(AG_A, USER_A, "Teste Chat IA Real"),
+      aprovacao("33333333-3333-4333-8333-333333333333", USER_A, AG_A, {
+        expira_em: JA_VENCEU,
+      }),
+    ];
+    limpar();
+    const comVencida = await pedirAprovacoes(COOKIE_A);
+    const corpoVencida = (await comVencida.json()) as { aprovacoes: unknown[] };
+
+    ok("W16 aprovacao VENCIDA nao entra na fila", corpoVencida.aprovacoes.length === 0);
+    ok("W17 e ela continua `pendente` no banco — GET nao materializa expiracao",
+      linhas.some((l) => l.id === "33333333-3333-4333-8333-333333333333" && l.estado === "pendente"));
+    ok("W18 nenhuma escrita aconteceu ao abrir a fila",
+      operacoes.every((o) => o.tipo === "leitura") && rpcs === 0,
+      `escritas=${operacoes.filter((o) => o.tipo === "escrita").length} rpcs=${rpcs}`);
+
+    // ── W19 — decidida nao aparece ────────────────────────────────
+    linhas = [
+      agente(AG_A, USER_A, "Teste Chat IA Real"),
+      aprovacao("44444444-4444-4444-8444-444444444444", USER_A, AG_A, { estado: "aprovada" }),
+    ];
+    limpar();
+    const comAprovada = await pedirAprovacoes(COOKIE_A);
+    ok("W19 aprovacao ja decidida nao entra na fila de pendentes",
+      ((await comAprovada.json()) as { aprovacoes: unknown[] }).aprovacoes.length === 0);
+
+    // ── W20..W22 — ordem e teto ───────────────────────────────────
+    linhas = [agente(AG_A, USER_A, "Teste Chat IA Real")];
+    for (let i = 0; i < 60; i++) {
+      linhas.push(
+        aprovacao(
+          `5${String(i).padStart(7, "0")}-6666-4666-8666-666666666666`,
+          USER_A,
+          AG_A,
+          { criado_em: `2026-09-${String(10 + (i % 5)).padStart(2, "0")}T0${i % 10}:00:00.000Z` }
+        )
+      );
+    }
+    limpar();
+    const cheia = await pedirAprovacoes(COOKIE_A);
+    const corpoCheia = (await cheia.json()) as { aprovacoes: { criadoEm: string }[] };
+
+    ok("W20 a fila e BOUNDED em 50, mesmo com 60 pendentes",
+      corpoCheia.aprovacoes.length === 50, String(corpoCheia.aprovacoes.length));
+    ok("W21 e o limite chegou ao datastore, nao foi cortado depois",
+      operacoes.some((o) => o.tabela === "agente_funcao_aprovacoes" && o.limite === 50));
+    const datas = corpoCheia.aprovacoes.map((a) => a.criadoEm);
+    ok("W22 mais recente primeiro",
+      JSON.stringify(datas) === JSON.stringify([...datas].sort().reverse()));
+
+    // ── W23..W25 — fail-closed ────────────────────────────────────
+    linhas = [
+      // Agente do dono AUSENTE de proposito: a FK impede isso no banco,
+      // e se mesmo assim acontecer a fila nao inventa rotulo.
+      aprovacao("77777777-7777-4777-8777-777777777777", USER_A, AG_A),
+    ];
+    limpar();
+    const semAgente = await pedirAprovacoes(COOKIE_A);
+    const corpoSemAgente = await semAgente.text();
+    ok("W23 agente ausente vira 500, nunca `Agente desconhecido`",
+      semAgente.status === 500 && !/desconhecid/i.test(corpoSemAgente));
+
+    semearFila();
+    erroInjetado = { message: 'select * from agente_funcao_aprovacoes where user_id = ...', code: "42P01", hint: "tabela" };
+    const comErro = await pedirAprovacoes(COOKIE_A);
+    const corpoErro = await comErro.text();
+    ok("W24 falha do banco vira 500", comErro.status === 500);
+    ok("W25 e o texto bruto do Supabase NAO vaza para o cliente",
+      !/select |from agente_funcao|42P01|hint/i.test(corpoErro), corpoErro.slice(0, 120));
+
+    // ── W26 — fila vazia e resposta completa ──────────────────────
+    linhas = [agente(AG_A, USER_A, "Teste Chat IA Real")];
+    limpar();
+    const vazia = await pedirAprovacoes(COOKIE_A);
+    const corpoVazio = (await vazia.json()) as { ok: boolean; aprovacoes: unknown[] };
+    ok("W26 fila vazia e 200 com lista vazia, nao 404",
+      vazia.status === 200 && corpoVazio.ok === true && corpoVazio.aprovacoes.length === 0);
+
+    // ── W27..W32 — a FONTE da rota ────────────────────────────────
+    const AP = semComentarios(ler("app/api/aprovacoes/route.ts"));
+
+    ok("W27 a rota exporta SOMENTE GET",
+      JSON.stringify([...AP.matchAll(/export async function ([A-Z]+)\(/g)].map((m) => m[1])) ===
+        JSON.stringify(["GET"]));
+    ok("W28 CONTROLE: um segundo metodo reprovaria",
+      JSON.stringify(
+        [...(AP + "\nexport async function POST(").matchAll(/export async function ([A-Z]+)\(/g)]
+          .map((m) => m[1])
+      ) !== JSON.stringify(["GET"]));
+    ok("W29 a identidade vem SO de auth.uid",
+      /auth\.uid/.test(AP) &&
+      !/searchParams|request\.json\(\)|headers\.get\("x-user/.test(AP));
+    ok("W30 a rota nao abre banco nem escreve",
+      !/getSupabaseServidor|\.from\(|\.rpc\(|\.insert\(|\.update\(|\.delete\(/.test(AP));
+    ok("W31 nao importa decisao, consumo nem retomada",
+      !/decidirAprovacao|consumirAprovacaoEAbrir|retomarAprovacao|criarAprovacao/.test(AP));
+    ok("W32 a resposta e no-store e dinamica",
+      /"Cache-Control": "no-store"/.test(AP) &&
+      /export const dynamic = "force-dynamic"/.test(AP));
   }
 
   console.log(`\n══ ${passou} PASS / ${falhou} FAIL ══\n`);

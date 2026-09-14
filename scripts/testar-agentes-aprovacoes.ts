@@ -63,6 +63,7 @@ const SQL = semComentariosSql(SQL_BRUTO);
 
 const PERSISTENCIA = "lib/agentes/aprovacoes/persistencia.ts";
 const STALE = "lib/agentes/aprovacoes/stale.ts";
+const LEITURA = "lib/agentes/aprovacoes/leitura.ts";
 const STALE_BRUTO = ler(STALE);
 const STALE_CODIGO = semComentariosTs(STALE_BRUTO);
 
@@ -86,6 +87,9 @@ const varrerFontes = (dir: string): string[] => {
 };
 const PERS_BRUTO = ler(PERSISTENCIA);
 const PERS = semComentariosTs(PERS_BRUTO);
+
+const LEITURA_BRUTO = ler(LEITURA);
+const LEIT = semComentariosTs(LEITURA_BRUTO);
 
 const IDENTIDADE = semComentariosTs(ler("lib/agentes/aprovacoes/identidade.ts"));
 const REGISTRO = semComentariosTs(ler("lib/agentes/chamadas/registro.ts"));
@@ -126,11 +130,16 @@ secao("A. A pasta de aprovacoes tem exatamente os modulos autorizados");
   // percorre paginas e agrega. Nenhum dos dois escreve, e nenhum toca
   // lifecycle. A exigencia nao afrouxou — continua igualdade de conjunto
   // nos DOIS sentidos, e a ausencia de qualquer um dos quatro reprova.
+  //
+  // A1 (APPROVAL-UI-API-A1): o quinto modulo e a fila do dono. Ele le,
+  // e so: nenhuma RPC, nenhuma escrita, nenhum lifecycle. A exigencia
+  // continua igualdade de conjunto nos dois sentidos.
   const AUTORIZADOS = [
     "identidade.ts",
     "persistencia.ts",
     "stale.ts",
     "observabilidade-stale.ts",
+    "leitura.ts",
   ];
   const conteudo = readdirSync(join(RAIZ, "lib", "agentes", "aprovacoes")).sort();
 
@@ -142,6 +151,10 @@ secao("A. A pasta de aprovacoes tem exatamente os modulos autorizados");
     !conjuntosIguais(["identidade.ts", "persistencia.ts", "stale.ts"], AUTORIZADOS));
   ok("A2c CONTROLE: o detector ausente reprovaria",
     !conjuntosIguais(["identidade.ts", "persistencia.ts", "observabilidade-stale.ts"], AUTORIZADOS));
+  ok("A2d CONTROLE: a fila ausente reprovaria",
+    !conjuntosIguais(
+      ["identidade.ts", "persistencia.ts", "stale.ts", "observabilidade-stale.ts"],
+      AUTORIZADOS));
   ok("A3  CONTROLE: a pasta vazia reprovaria", !conjuntosIguais([], AUTORIZADOS));
   ok("A4  ANCORA: a migration foi lida de verdade", SQL_BRUTO.length > 5000);
 }
@@ -736,7 +749,12 @@ secao("M. Quem pode escrever, e apenas quem");
   // por SELECT, e sem `argumentos` — entao o conjunto passou a ter dois
   // membros NOMEADOS. A exigencia nao afrouxou: continua igualdade de
   // conjunto nos dois sentidos, e um terceiro nomeador reprova.
-  const NOMEADORES_AUTORIZADOS = [PERSISTENCIA, STALE];
+  //
+  // APPROVAL-UI-API-A1: a fila do dono le a tabela — SOMENTE por SELECT,
+  // sem RPC e sem escrita — entao o conjunto passou de dois para tres
+  // membros NOMEADOS. A exigencia continua a mesma: igualdade de
+  // conjunto nos dois sentidos, e um quarto nomeador reprova.
+  const NOMEADORES_AUTORIZADOS = [PERSISTENCIA, STALE, LEITURA];
 
   const tocamTabela = fontes.filter((f) => /agente_funcao_aprovacoes/.test(semComentariosTs(ler(f))));
   ok(`M1  so os nomeadores declarados citam a tabela em lib/ e app/ (${tocamTabela.join(", ") || "nenhum"})`,
@@ -1039,6 +1057,10 @@ function construtorDb(tabela: string): Record<string, unknown> {
     },
     lt(coluna: string, valor: unknown) {
       c.filtros[`${coluna}<`] = valor;
+      return b;
+    },
+    gt(coluna: string, valor: unknown) {
+      c.filtros[`${coluna}>`] = valor;
       return b;
     },
     in(coluna: string, valores: readonly unknown[]) {
@@ -2097,6 +2119,265 @@ async function principalStale(): Promise<void> {
     ok("F1-J CONTROLE: com a resposta forcada limpa, o observador real volta",
       voltouAoReal.status === 200 &&
       ((await voltouAoReal.json()) as { resumo: { total: number } }).resumo.total === 1);
+  }
+
+  // ── T. A fila do dono: leitura real, executada ───────────────────
+  //
+  // APPROVAL-UI-API-A1. A secao M prova pela FONTE quem pode nomear a
+  // tabela; esta EXECUTA `listarAprovacoesPendentesDoDono` contra o
+  // duplo e le a consulta que ela montou. As duas coisas sao
+  // necessarias: fonte nao prova o filtro que chega ao datastore, e
+  // execucao sozinha nao prova que ninguem mais escreve.
+  //
+  // O ponto que mais importa aqui e a AUSENCIA: nenhuma RPC, nenhum
+  // insert, nenhum update. Uma fila que grava ao ser aberta teria
+  // escrito duas vezes numa tela recarregada.
+  secao("T. A fila de aprovacoes pendentes do dono");
+  {
+    const { listarAprovacoesPendentesDoDono, LIMITE_FILA_APROVACOES } = await import(
+      "../lib/agentes/aprovacoes/leitura"
+    );
+
+    const DONO = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
+    const AG = "cccccccc-3333-4333-8333-cccccccccccc";
+    const TF = "dddddddd-4444-4444-8444-dddddddddddd";
+
+    /** Uma linha como o Postgres a devolveria — INCLUSIVE os campos
+     *  internos, para que a prova de projecao nao seja vacua. */
+    const linhaAprovacao = (extra: Record<string, unknown> = {}) => ({
+      id: "11111111-1111-4111-8111-111111111111",
+      agente_id: AG,
+      tarefa_id: TF,
+      funcao_id: "vendas.consultar",
+      revisao_funcao: "1",
+      acesso: "leitura",
+      estado: "pendente",
+      criado_em: "2026-09-14T21:00:26.856Z",
+      expira_em: "2026-09-15T21:00:26.856Z",
+      argumentos: { dataInicio: "2026-09-12", dataFim: "2026-09-13" },
+      conexao_plataforma: null,
+      conexao_recurso: null,
+      // Os internos. Se a projecao vazar, estes aparecem.
+      user_id: DONO,
+      argumentos_hash: "a".repeat(64),
+      fingerprint: "b".repeat(64),
+      request_id_solicitacao: "req-solicitacao",
+      request_id_consumo: null,
+      conexao_loja_id: null,
+      decidido_por: null,
+      ...extra,
+    });
+
+    const linhaAgente = { id: AG, nome: "Teste Chat IA Real" };
+
+    // ── T1..T6 — a CONSULTA que chegou ao datastore ───────────────
+    roteiroDb({ data: [linhaAprovacao()] }, { data: [linhaAgente] });
+    const r = await listarAprovacoesPendentesDoDono(DONO);
+    const q1 = chamadasDb[0];
+    const q2 = chamadasDb[1];
+
+    ok("T1  ANCORA: o duplo foi exercitado por duas leituras",
+      chamadasDb.length === 2 &&
+      q1?.tabela === "agente_funcao_aprovacoes" &&
+      q2?.tabela === "agentes",
+      `${chamadasDb.length}`);
+    ok("T2  a consulta filtra pelo DONO no datastore, nao depois em JS",
+      q1?.filtros["user_id"] === DONO);
+    ok("T3  e filtra estado pendente no datastore",
+      q1?.filtros["estado"] === "pendente");
+    ok("T4  e exige expira_em ACIMA do instante da leitura",
+      typeof q1?.filtros["expira_em>"] === "string" &&
+      !Number.isNaN(Date.parse(String(q1?.filtros["expira_em>"]))));
+    ok("T5  ordena mais recente primeiro, com desempate estavel por id",
+      JSON.stringify(q1?.ordens) ===
+        JSON.stringify([
+          { coluna: "criado_em", asc: false },
+          { coluna: "id", asc: false },
+        ]),
+      JSON.stringify(q1?.ordens));
+    ok("T6  a fila e BOUNDED e o teto e o declarado",
+      q1?.limite === LIMITE_FILA_APROVACOES && LIMITE_FILA_APROVACOES === 50,
+      String(q1?.limite));
+
+    // ── T7..T9 — o SELECT e nominal ───────────────────────────────
+    const colunas = String(q1?.select ?? "").split(",").map((c) => c.trim()).filter(Boolean);
+    ok("T7  o select e nominal, nunca `*`",
+      !colunas.includes("*") && !/\*/.test(String(q1?.select ?? "")));
+    ok(`T8  e pede exatamente as doze colunas publicas (${colunas.length})`,
+      JSON.stringify([...colunas].sort()) ===
+        JSON.stringify([
+          "acesso", "agente_id", "argumentos", "conexao_plataforma", "conexao_recurso",
+          "criado_em", "estado", "expira_em", "funcao_id", "id", "revisao_funcao", "tarefa_id",
+        ]),
+      colunas.join(", "));
+    ok("T9  nenhuma coluna interna e sequer LIDA do banco",
+      !/user_id|argumentos_hash|fingerprint|request_id|conexao_loja_id|decidido_por|cancelado_por|motivo_recusa/
+        .test(String(q1?.select ?? "")));
+
+    // ── T10..T12 — o lookup do nome, em lote e escopado ───────────
+    ok("T10 o nome do agente vem de UMA leitura em lote, nao N+1",
+      Array.isArray(q2?.ins["id"]) && (q2?.ins["id"] as unknown[]).length === 1);
+    ok("T11 e essa leitura tambem e escopada ao dono",
+      q2?.filtros["user_id"] === DONO);
+    ok("T12 o lookup pede apenas id e nome",
+      String(q2?.select ?? "").replace(/\s/g, "") === "id,nome");
+
+    // ── T13..T16 — o que SAI ──────────────────────────────────────
+    const item = r.linhas[0] as unknown as Record<string, unknown>;
+    ok("T13 a fila devolve a aprovacao com o nome real do agente",
+      r.erro === null && r.linhas.length === 1 && item?.agenteNome === "Teste Chat IA Real");
+    ok("T14 a projecao tem exatamente os doze campos publicos",
+      JSON.stringify(Object.keys(item ?? {}).sort()) ===
+        JSON.stringify([
+          "acesso", "agenteId", "agenteNome", "argumentos", "conexao", "criadoEm",
+          "estado", "expiraEm", "funcaoId", "id", "revisaoFuncao", "tarefaId",
+        ]),
+      Object.keys(item ?? {}).join(", "));
+    ok("T15 NENHUM campo interno atravessa, apesar de existir na linha lida",
+      !/userId|user_id|argumentosHash|argumentos_hash|fingerprint|requestId|request_id|lojaId|loja_id|decidido/
+        .test(JSON.stringify(item ?? {})));
+    ok("T16 os argumentos saem como OBJETO, nao como texto serializado",
+      typeof item?.argumentos === "object" && item?.argumentos !== null &&
+      (item?.argumentos as Record<string, unknown>).dataInicio === "2026-09-12");
+
+    // ── T17..T20 — contrato do schema respeitado ──────────────────
+    roteiroDb({ data: [linhaAprovacao({ tarefa_id: null })] }, { data: [linhaAgente] });
+    const semTarefa = await listarAprovacoesPendentesDoDono(DONO);
+    ok("T17 tarefaId null e valor legitimo, nao defeito",
+      semTarefa.erro === null && semTarefa.linhas.length === 1 &&
+      semTarefa.linhas[0]?.tarefaId === null);
+
+    roteiroDb(
+      { data: [linhaAprovacao({ conexao_plataforma: "mercado_livre", conexao_recurso: "ads" })] },
+      { data: [linhaAgente] }
+    );
+    const comConexao = await listarAprovacoesPendentesDoDono(DONO);
+    ok("T18 requisito de conexao completo vira rotulo, sem loja e sem credencial",
+      JSON.stringify(comConexao.linhas[0]?.conexao) ===
+        JSON.stringify({ plataforma: "mercado_livre", recurso: "ads" }));
+
+    roteiroDb({ data: [linhaAprovacao({ conexao_recurso: "ads" })] }, { data: [linhaAgente] });
+    const meiaConexao = await listarAprovacoesPendentesDoDono(DONO);
+    ok("T19 MEIA conexao e recusada fail-closed — alvo que nao existe",
+      meiaConexao.erro === "erro_consulta_aprovacao" && meiaConexao.linhas.length === 0);
+
+    roteiroDb({ data: [linhaAprovacao({ argumentos: ["nao", "e", "objeto"] })] }, { data: [linhaAgente] });
+    const argsArray = await listarAprovacoesPendentesDoDono(DONO);
+    ok("T20 argumentos que nao sao objeto reprovam a leitura inteira",
+      argsArray.erro === "erro_consulta_aprovacao" && argsArray.linhas.length === 0);
+
+    // ── T21..T24 — fail-closed ────────────────────────────────────
+    roteiroDb({ data: [linhaAprovacao()] }, { data: [] });
+    const semNome = await listarAprovacoesPendentesDoDono(DONO);
+    ok("T21 agente ausente e ERRO, nunca `Agente desconhecido` inventado",
+      semNome.erro === "erro_consulta_aprovacao" && semNome.linhas.length === 0);
+
+    roteiroDb({ error: { message: "select ... from agente_funcao_aprovacoes where user_id = x" } });
+    const falhaLeitura = await listarAprovacoesPendentesDoDono(DONO);
+    ok("T22 falha do banco vira codigo interno, sem o texto bruto",
+      falhaLeitura.erro === "erro_consulta_aprovacao" &&
+      !/select|from|where/i.test(String(falhaLeitura.erro)));
+
+    roteiroDb({ data: [linhaAprovacao()] }, { error: { message: "boom" } });
+    const falhaNome = await listarAprovacoesPendentesDoDono(DONO);
+    ok("T23 falha no lookup do nome tambem e fail-closed",
+      falhaNome.erro === "erro_consulta_aprovacao" && falhaNome.linhas.length === 0);
+
+    roteiroDb();
+    const semDono = await listarAprovacoesPendentesDoDono("");
+    ok("T24 sem dono nao ha leitura nenhuma — nem uma ida ao banco",
+      semDono.linhas.length === 0 && semDono.erro === null && chamadasDb.length === 0);
+
+    // ── T25 — fila vazia e resposta completa ──────────────────────
+    roteiroDb({ data: [] });
+    const vazia = await listarAprovacoesPendentesDoDono(DONO);
+    ok("T25 fila vazia e resposta COMPLETA, e nao dispara o segundo lookup",
+      vazia.erro === null && vazia.linhas.length === 0 && chamadasDb.length === 1);
+  }
+
+  // ── U. A fila NAO escreve, NAO decide e NAO retoma ───────────────
+  //
+  // Guard de fonte, e o mais importante deste gate. Enquanto o estagio
+  // Resume nao existir, aprovar deixaria a Approval `aprovada` e a
+  // tarefa parada em `aguardando_aprovacao` para sempre — o claim nao
+  // alcanca esse status. Rejeitar encalha igual. Por isso a ausencia e
+  // verificada, nao apenas pretendida.
+  secao("U. A fila e read-only por construcao");
+  {
+    const PRODUCAO_A1 = [LEITURA, "app/api/aprovacoes/route.ts"];
+    const fontesA1 = PRODUCAO_A1.map((f) => semComentariosTs(ler(f)));
+
+    ok("U0  ANCORA: os dois paths de producao foram lidos",
+      fontesA1.every((f) => f.length > 200));
+
+    ok("U1  nenhum dos dois chama `.rpc(`",
+      fontesA1.every((f) => !/\.rpc\(/.test(f)));
+    ok("U2  nenhum dos dois escreve no banco",
+      fontesA1.every((f) => !/\.(insert|update|upsert|delete)\(/.test(f)));
+    ok("U3  nenhum nomeia as RPCs de aprovacao",
+      fontesA1.every((f) =>
+        !/aprovacao_criar|aprovacao_decidir|aprovacao_consumir_e_abrir|aguardar_aprovacao_tarefa/.test(f)));
+    ok("U4  nenhum importa decisao, consumo ou retomada",
+      fontesA1.every((f) =>
+        !/decidirAprovacao|consumirAprovacaoEAbrir|retomarAprovacao|criarAprovacao/.test(f)));
+    ok("U5  CONTROLE: a sonda de escrita reprovaria um insert",
+      /\.(insert|update|upsert|delete)\(/.test('cliente.from("x").insert({})'));
+    ok("U6  CONTROLE: a sonda de RPC reprovaria uma chamada",
+      /\.rpc\(/.test('cliente.rpc("aprovacao_decidir")'));
+
+    // A rota expoe UM metodo, e a ausencia dos outros e o contrato.
+    const ROTA = semComentariosTs(ler("app/api/aprovacoes/route.ts"));
+    const metodos = [...ROTA.matchAll(/export async function ([A-Z]+)\(/g)].map((m) => m[1]);
+    ok(`U7  a rota exporta somente GET (${metodos.join(", ") || "nenhum"})`,
+      JSON.stringify(metodos) === JSON.stringify(["GET"]));
+    ok("U8  CONTROLE: um POST na rota reprovaria",
+      JSON.stringify([...(ROTA + "\nexport async function POST(").matchAll(/export async function ([A-Z]+)\(/g)]
+        .map((m) => m[1])) !== JSON.stringify(["GET"]));
+
+    // ── Mutacoes: cada filtro e LOAD-BEARING ──────────────────────
+    //
+    // Um teste que so confere o nome da variavel passaria com o filtro
+    // removido. Estas sondas leem a consulta montada e cada uma tem o
+    // seu controle negativo.
+    const LEIT_FONTE = semComentariosTs(ler(LEITURA));
+    const temFiltroDono = (t: string) => /\.eq\("user_id", String\(userId\)\)/.test(t);
+    const temFiltroEstado = (t: string) => /\.eq\("estado", "pendente"\)/.test(t);
+    const temFiltroExpiracao = (t: string) => /\.gt\("expira_em", agora\)/.test(t);
+
+    ok("U9  o filtro de dono existe na consulta da fila", temFiltroDono(LEIT_FONTE));
+    // Global: o escopo de dono aparece DUAS vezes (fila e lookup de
+    // nome). Remover so a primeira deixaria a segunda casando, e a
+    // sonda ficaria verde sobre codigo mutilado — foi assim que este
+    // controle apareceu vermelho pela primeira vez.
+    ok("U9  CONTROLE: remover o filtro de dono reprova",
+      !temFiltroDono(
+        LEIT_FONTE.split('.eq("user_id", String(userId))').join("")));
+    ok("U10 o filtro de estado pendente existe", temFiltroEstado(LEIT_FONTE));
+    ok("U10 CONTROLE: remover o filtro de estado reprova",
+      !temFiltroEstado(LEIT_FONTE.replace('.eq("estado", "pendente")', "")));
+    ok("U11 o filtro de expiracao existe", temFiltroExpiracao(LEIT_FONTE));
+    ok("U11 CONTROLE: remover o filtro de expiracao reprova",
+      !temFiltroExpiracao(LEIT_FONTE.replace('.gt("expira_em", agora)', "")));
+
+    // O lookup do nome tem o SEU proprio escopo de dono, e ele e outro
+    // `.eq` — a mutacao precisa distinguir os dois.
+    const escoposDeDono = [...LEIT_FONTE.matchAll(/\.eq\("user_id", String\(userId\)\)/g)].length;
+    ok("U12 as DUAS leituras carregam o escopo do dono", escoposDeDono === 2, String(escoposDeDono));
+    ok("U12 CONTROLE: uma das duas perder o escopo reprova",
+      [...LEIT_FONTE.replace('.eq("user_id", String(userId))', "").matchAll(
+        /\.eq\("user_id", String\(userId\)\)/g
+      )].length !== 2);
+
+    // A projecao nominal e o que impede coluna nova de vazar sozinha.
+    const projecaoNominal = (t: string) =>
+      /const COLUNAS_APROVACAO =/.test(t) && !/\.select\("\*"\)/.test(t);
+    ok("U13 a projecao e nominal e nao ha `select(\"*\")`", projecaoNominal(LEIT_FONTE));
+    ok("U13 CONTROLE: trocar por select(\"*\") reprova",
+      !projecaoNominal(LEIT_FONTE.replace(".select(COLUNAS_APROVACAO)", '.select("*")')));
+
+    ok("U14 o lookup de nome e escopado e em lote, nao por aprovacao",
+      /\.in\("id", ids\)/.test(LEIT_FONTE) && !/for \([\s\S]{0,80}await cliente/.test(LEIT_FONTE));
+    ok("U15 a fila e server-only", /^import "server-only";/m.test(ler(LEITURA)));
   }
 }
 

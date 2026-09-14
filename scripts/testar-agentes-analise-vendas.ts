@@ -999,6 +999,9 @@ const MODULOS_APROVACOES: readonly string[] = [
   "persistencia.ts",
   "stale.ts",
   "observabilidade-stale.ts",
+  // APPROVAL-UI-API-A1: listagem owner-scoped read-only da fila de
+  // Approvals pendentes. Nominal como os outros quatro.
+  "leitura.ts",
 ];
 
 const ARQUIVOS_APROVACOES: readonly string[] = [
