@@ -1922,25 +1922,32 @@ async function main() {
   // mais estreito e mais util: que a mudanca foi ADITIVA. Uma entrada
   // REMOVIDA daqui derruba um cron em silencio — e e justamente o tipo
   // de regressao que um congelamento removido deixaria passar.
+  //
+  // ── POR QUE ESTE BLOCO NAO OLHA MAIS PARA O GIT ───────────────────
+  //
+  // A primeira versao de G10u1/G10u2 lia
+  // `git diff --unified=0 -- lib/middleware-rotas.ts` e contava linhas
+  // `+` e `-`. Funcionou enquanto a mudanca estava na worktree e
+  // quebrou no instante do commit, quando o diff fica VAZIO: G10u2
+  // passou a exigir uma linha adicionada que nao existe mais, e G10u1
+  // passou a valer por VACUIDADE — zero removidas sobre diff vazio e
+  // trivialmente verdadeiro. Verde pelo motivo errado e vermelho para
+  // sempre, no mesmo bloco.
+  //
+  // O defeito era medir ESTADO DE VCS no lugar de uma PROPRIEDADE. A
+  // mesma armadilha do G1 da suite do adaptador, na direcao oposta.
+  //
+  // A propriedade que interessa nao precisa de Git nenhum: o conjunto
+  // de rotas com segredo tem de ser EXATAMENTE as cinco anteriores mais
+  // o dispatcher. Isso diz "nada foi removido" e "entrou exatamente uma"
+  // de uma vez so, e vale identico antes do commit, depois do commit e
+  // num checkout limpo.
   {
-    // `--unified=0` para que o diff traga so as linhas que mudaram, sem
-    // contexto: um contexto igual apareceria como linha e estragaria a
-    // contagem.
-    const difMid = git("diff", "--unified=0", "--", "lib/middleware-rotas.ts");
-    const adicionadas = difMid.split("\n").filter((l) => /^\+[^+]/.test(l));
-    const removidas = difMid.split("\n").filter((l) => /^-[^-]/.test(l));
-
-    ok(`G10u1 a mudanca no middleware e ADITIVA: nada foi removido (${removidas.length})`,
-      removidas.length === 0);
-    ok(`G10u2 e o que entrou e UMA entrada, so GET, so o dispatcher (${adicionadas.length})`,
-      adicionadas.length === 1 &&
-      /"\/api\/internal\/agentes\/worker": \["GET"\]/.test(adicionadas[0]));
-
-    // Independente do diff: as cinco rotas com segredo que ja existiam
-    // continuam la, com os mesmos verbos. O diff prova que ninguem
-    // apagou nada AGORA; isto prova que elas estao presentes, ponto —
-    // e continua valendo depois de commitado, quando o diff fica vazio.
     const mid = codigo("lib/middleware-rotas.ts");
+
+    // A UNICA fonte nominal das cinco anteriores. G10u1 e G10u3 leem
+    // desta mesma lista — duas listas divergentes seriam a proxima
+    // maneira de o guarda mentir.
     const ANTERIORES: [string, string][] = [
       ["/api/sync", '["GET"]'],
       ["/api/internal/estudio-anuncios/worker", '["GET"]'],
@@ -1948,6 +1955,102 @@ async function main() {
       ["/api/internal/sync/executar", '["POST"]'],
       ["/api/internal/agentes/executar", '["POST"]'],
     ];
+    const WORKER_AGENTES = "/api/internal/agentes/worker";
+    const ESPERADAS: [string, string][] = [...ANTERIORES, [WORKER_AGENTES, '["GET"]']];
+
+    /**
+     * As entradas declaradas em `ROTAS_COM_SEGREDO`, lidas do literal.
+     *
+     * Recorte por chaves balanceadas a partir da declaracao — o objeto
+     * e seguido de outras tabelas no mesmo arquivo, e um regex ate a
+     * proxima `}` pegaria a tabela errada. Os verbos vem normalizados
+     * sem espaco para que formatacao nao mude o veredito.
+     */
+    const rotasComSegredoDeclaradas = (texto: string): [string, string][] => {
+      const iNome = texto.indexOf("ROTAS_COM_SEGREDO");
+      if (iNome < 0) return [];
+      const iAbre = texto.indexOf("{", iNome);
+      if (iAbre < 0) return [];
+      let nivel = 0;
+      let iFecha = -1;
+      for (let k = iAbre; k < texto.length; k++) {
+        if (texto[k] === "{") nivel += 1;
+        else if (texto[k] === "}") {
+          nivel -= 1;
+          if (nivel === 0) { iFecha = k; break; }
+        }
+      }
+      if (iFecha < 0) return [];
+      const corpo = texto.slice(iAbre + 1, iFecha);
+      return [...corpo.matchAll(/"([^"]+)"\s*:\s*(\[[^\]]*\])/g)]
+        .map((m) => [m[1], m[2].replace(/\s+/g, "")] as [string, string]);
+    };
+
+    /**
+     * O conjunto declarado e EXATAMENTE o esperado — mesma cardinalidade
+     * e mesmos verbos, caminho a caminho.
+     *
+     * Cardinalidade exata, nunca `>=`: sem ela, uma sexta rota franca
+     * entraria sem que nada reclamasse, e e precisamente uma rota com
+     * segredo a mais que ninguem revisou o que este guarda existe para
+     * impedir. Parser quebrado devolve lista vazia e REPROVA.
+     */
+    const conjuntoDeRotasComSegredoExato = (
+      texto: string,
+      esperadas: readonly [string, string][]
+    ): boolean => {
+      const achadas = rotasComSegredoDeclaradas(texto);
+      if (achadas.length === 0) return false;
+      if (achadas.length !== esperadas.length) return false;
+      const declarado = new Map(achadas);
+      return esperadas.every(([caminho, verbos]) => declarado.get(caminho) === verbos);
+    };
+
+    const declaradas = rotasComSegredoDeclaradas(mid);
+    ok(`G10u0 ANCORA: o literal de ROTAS_COM_SEGREDO foi lido (${declaradas.length} entradas)`,
+      declaradas.length === 6 && declaradas.every(([c, v]) => c.startsWith("/api/") && v.startsWith("[")));
+
+    ok("G10u1 ROTAS_COM_SEGREDO e EXATAMENTE as cinco anteriores mais o dispatcher",
+      conjuntoDeRotasComSegredoExato(mid, ESPERADAS));
+
+    // Controles negativos — o MESMO predicado, alimentado com fonte
+    // mutada. Sem eles, G10u1 poderia estar verde por nao saber dizer
+    // nao.
+    const semUmaAntiga = mid.replace('"/api/sync": ["GET"],', "");
+    const semODispatcher = mid.replace(`"${WORKER_AGENTES}": ["GET"],`, "");
+    const comRotaExtra = mid.replace(
+      `"${WORKER_AGENTES}": ["GET"],`,
+      `"${WORKER_AGENTES}": ["GET"],\n  "/api/internal/intrusa": ["GET"],`
+    );
+    ok("G10u1 CONTROLE NEGATIVO: remover uma das rotas anteriores reprova",
+      !conjuntoDeRotasComSegredoExato(semUmaAntiga, ESPERADAS));
+    ok("G10u1 CONTROLE NEGATIVO: remover o dispatcher reprova",
+      !conjuntoDeRotasComSegredoExato(semODispatcher, ESPERADAS));
+    ok("G10u1 CONTROLE NEGATIVO: uma sexta rota com segredo inesperada reprova",
+      !conjuntoDeRotasComSegredoExato(comRotaExtra, ESPERADAS));
+    ok("G10u1 CONTROLE NEGATIVO: parser cego (texto sem a tabela) reprova",
+      !conjuntoDeRotasComSegredoExato("const OUTRA_COISA = {};", ESPERADAS));
+
+    /**
+     * G10u2: o verbo do dispatcher, nominalmente.
+     *
+     * GET e o unico metodo que o agendador da Vercel usa. Um POST
+     * liberado aqui seria uma segunda porta para a fila global, com a
+     * mesma chave e sem revisao.
+     */
+    const dispatcherSoGet = (texto: string): boolean =>
+      new Map(rotasComSegredoDeclaradas(texto)).get(WORKER_AGENTES) === '["GET"]';
+
+    ok("G10u2 o dispatcher esta declarado com exatamente [\"GET\"]", dispatcherSoGet(mid));
+    ok("G10u2 CONTROLE NEGATIVO: POST no lugar de GET reprova",
+      !dispatcherSoGet(mid.replace(`"${WORKER_AGENTES}": ["GET"],`, `"${WORKER_AGENTES}": ["POST"],`)));
+    ok("G10u2 CONTROLE NEGATIVO: GET mais um verbo extra reprova",
+      !dispatcherSoGet(mid.replace(`"${WORKER_AGENTES}": ["GET"],`, `"${WORKER_AGENTES}": ["GET", "POST"],`)));
+    ok("G10u2 CONTROLE NEGATIVO: dispatcher ausente reprova", !dispatcherSoGet(semODispatcher));
+
+    // G10u3 continua exigindo as cinco anteriores com os mesmos verbos,
+    // lendo a MESMA lista nominal. Redundante com G10u1 de proposito:
+    // ele falha com uma mensagem que diz qual propriedade se perdeu.
     ok("G10u3 as cinco rotas com segredo anteriores seguem declaradas, com os mesmos verbos",
       ANTERIORES.every(([caminho, verbos]) =>
         mid.includes(`"${caminho}": ${verbos},`)));
