@@ -52,6 +52,8 @@ Cenario hibrido, camada grafica (@vercel/og), regeneracao individual e score vis
   runtime: tarefa parada com o ponteiro igual ao id da aprovacao que ela aguarda.
 - **D3 — limpeza.** A overload legada `aguardar_aprovacao_tarefa(uuid, integer)` foi
   **removida do banco**. Sobrou apenas a de tres argumentos, unica sobrevivente.
+- **D4 — lifecycle de decisao.** Rejeitar e cancelar encerram a tarefa causal; aprovar a
+  preserva de proposito, como insumo do resume. Instalado no banco e **provado em runtime**.
 
 ### ATENCAO — rollback floor ATIVO
 `POST_D3_ROLLBACK_FLOOR = d1998901a404fc034711be0392175da62de05c8e`.
@@ -65,9 +67,9 @@ passa a receber PGRST202 por causa dele. Equivalencia de COMPORTAMENTO, porem, e
 coisa — qualquer deployment tecnicamente compativel agora chama a funcao ja com o
 comportamento D4.
 
-### D4 — APLICADO em producao · comportamento ainda NAO provado em runtime
-A decisao humana passou a encerrar a tarefa causal, e isso agora vale no banco. O codigo esta
-publicado e a migration
+### D4 — APLICADO e PROVADO em producao · lifecycle de decisao fechado
+A decisao humana passou a encerrar a tarefa causal, isso vale no banco e **foi provado em
+runtime**. O codigo esta publicado e a migration
 `supabase/migrations/20261004_aprovacao_decidir_encerra_tarefa.sql` foi **aplicada** (remote
 version `20260915184935`, remote name `aprovacao_decidir_encerra_tarefa`; history 20 -> 21).
 A funcao foi substituida in-place: `aprovacao_decidir(text, uuid, text, text)` preservou
@@ -84,11 +86,33 @@ o COMMENT live conferem exatamente com o artefato versionado.
 - **reject/cancel** levam a tarefa causal a `cancelado` com ponteiro NULL e invariantes
   terminais, na mesma transacao, sem Tool Call e sem executar Funcao.
 
-### ATENCAO — instalar nao e provar comportamento
-`D4_BEHAVIOR_RUNTIME_PROVEN = NO`. O apply provou **identidade** (OID, assinatura, corpo,
-COMMENT, seguranca, ACL) e que nenhum dado de negocio se moveu — nao provou o comportamento.
-Nenhuma decisao foi executada contra fixture live: `aprovacao_decidir` **nao** foi chamada.
-Nao registrar o D4 como validado ponta-a-ponta.
+### Prova comportamental live — `D4_BEHAVIOR_RUNTIME_PROVEN = YES`
+Duas fixtures novas e isoladas foram criadas em producao para isso (`RUN_ID
+b739950f-45e9-4015-9a67-9801b110a953`), sem tocar nenhum registro historico. Cinco decisoes
+controladas cobriram os dois ramos terminais — **Fixture A:** aprovar -> `ja_aprovada` ->
+cancelar; **Fixture B:** rejeitar -> `ja_rejeitada`.
+
+O que ficou provado, e nao apenas afirmado:
+- **Aprovar nao toca a Task.** Ela seguiu em `aguardando_aprovacao` com o ponteiro intacto.
+- **Repetir uma decisao ja tomada nao escreve nada.** `ja_aprovada` e `ja_rejeitada` nao
+  produziram nenhuma versao nova de linha. Uma segunda rejeicao enviada com motivo DIFERENTE
+  nao substituiu o motivo original — a string nova nao existe em lugar nenhum do banco.
+- **Cancelar e rejeitar encerram Approval e Task na MESMA transacao.** As duas linhas ficaram
+  com o mesmo identificador de transacao, e os carimbos de tempo coincidem.
+- **Cancelar preserva a decisao anterior:** `decidido_por` e `decidido_em` do approve continuam
+  la, ao lado de `cancelado_*`.
+- **O motivo de recusa e normalizado** — espacos nas pontas somem na persistencia.
+- **`progresso` e `tentativas` sobrevivem** a terminalizacao, e o ponteiro sai no mesmo UPDATE
+  que o status.
+- **Zero Tool Call e zero execucao de Funcao.** Nenhuma API de marketplace foi chamada.
+
+A coluna de sistema `xmin` foi o INSTRUMENTO que separou "nao escreveu" de "reescreveu igual".
+Ela nao vira contrato: nao entra em codigo de produto nem em suite versionada.
+
+**O que isto NAO prova:** o resume do **D5**, a **UI**, e a **autorizacao HTTP** da aplicacao.
+A prova rodou contra a funcao no banco; o caminho por `service_role` foi provado separadamente
+pela ACL. As duas fixtures terminaram em estado terminal e ficam como artefato auditavel —
+nenhuma limpeza e necessaria.
 
 ### NAO concluido — nao registrar como feito
 - **D5 (resume claim / reentrada do worker): nao implementado.**
@@ -108,11 +132,12 @@ Nao registrar o D4 como validado ponta-a-ponta.
   **Nao usar essa tarefa como fixture** da prova comportamental.
 
 ### Proxima etapa (aguardando autorizacao)
-1. **Prova comportamental controlada do D4**, em fixture causal criada para isso — nao usar a
-   tarefa legada pre-D1 nem as aprovacoes pendentes que ja existem no banco.
-2. Depois: **D5** (resume claim / reentrada do worker).
-3. **D7** (scanner/reparo de aprovacoes orfas e da corrida C0-R3-L1).
-4. So depois de D5 e D7: API de decisao e UI Aprovar/Recusar.
+1. **Publicar esta reconciliacao documental** — commit e push do DOC3.
+2. **D5 — arquitetura e auditoria** do resume claim / reentrada do worker.
+3. **D5 — implementacao, revisao e prova de runtime**, no mesmo rito que fechou o D4.
+4. **D7** (scanner/reparo de aprovacoes orfas e da corrida C0-R3-L1), antes de a UI de decisao
+   ficar alcancavel.
+5. So depois de D5 e D7: API de decisao e UI Aprovar/Recusar ponta-a-ponta.
 
 ---
 

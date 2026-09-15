@@ -1154,10 +1154,31 @@ numerado quando uma fase inteira (como "PARTE 2") se encerra de vez.
   Das tres transicoes que `TRANSICOES_TAREFA` declara em
   `aguardando_aprovacao -> {concluido, cancelado, rodando}`, o D4 acende **apenas** `cancelado`;
   `concluido` e `rodando` seguem letra morta ate o D5.
-- **`D4_FUNCTION_INSTALLED = YES`, `D4_BEHAVIOR_RUNTIME_PROVEN = NO`.** O apply provou
-  identidade (OID, assinatura, corpo, COMMENT, seguranca, ACL) e que nenhuma contagem de negocio
-  se moveu. Nenhuma decisao foi executada contra fixture live. **Nao** registrar o D4 como
-  concluido ponta-a-ponta.
+- **`D4_FUNCTION_INSTALLED = YES`, `D4_BEHAVIOR_RUNTIME_PROVEN = YES`.** Alem da identidade
+  provada no apply, o comportamento foi exercitado em producao contra duas fixtures novas e
+  isoladas (`RUN_ID b739950f-45e9-4015-9a67-9801b110a953`), criadas numa unica transacao
+  all-or-nothing e sem tocar nenhum registro historico. Cinco decisoes controladas cobriram:
+  - **aprovar** — Approval `pendente -> aprovada`; a Task causal **permanece** em
+    `aguardando_aprovacao` com o ponteiro intacto;
+  - **aprovar de novo** — `ja_aprovada`, sem nenhuma escrita observavel;
+  - **cancelar de aprovada** — Approval `-> cancelada`, Task causal `-> cancelado`, ponteiro
+    NULL, e `decidido_por`/`decidido_em` do approve **preservados**;
+  - **rejeitar** — Approval `-> rejeitada` com motivo normalizado (espacos nas pontas
+    removidos), Task causal `-> cancelado`, ponteiro NULL;
+  - **rejeitar de novo** — `ja_rejeitada`, sem escrita, e um motivo DIFERENTE enviado no repeat
+    **nao** substituiu o original.
+  Em ambos os ramos terminais, Approval e Task terminaram com o mesmo identificador de
+  transacao e carimbos de tempo coincidentes — `now()` e STABLE dentro da transacao. `progresso`
+  e `tentativas` foram preservados (fixtures nasceram com sentinelas nao-zero e distintas, 37/1 e
+  58/2, para que "preservado" fosse falsificavel), e `resultado`/`erro_*` terminaram NULL
+  conforme o contrato. Delta causal de Tool Call = **0**, execucao de Funcao = **0**, registros
+  historicos **inalterados**. A prova usou a coluna de sistema `xmin` como INSTRUMENTO para
+  separar "nao escreveu" de "reescreveu igual"; ela nao integra a API nem e invariante
+  permanente. As fixtures ficaram em estado terminal auditavel, sem necessidade de limpeza.
+- **O que o D4 NAO prova:** o resume (**D5**) e o scanner (**D7**) continuam sem implementacao,
+  a API de decisao nao existe, os botoes Aprovar/Recusar seguem `disabled`, e a autorizacao
+  HTTP da aplicacao nao foi exercitada — a prova rodou contra a funcao no banco, e o caminho
+  por `service_role` foi provado separadamente pela ACL.
 - **Ainda NAO estrutural:** o resume claim (**D5**) e o scanner de aprovacoes orfas (**D7**)
   continuam sem implementacao, e a superficie de decisao em API/UI segue desconectada — a API e
   GET-only e os botoes Aprovar/Recusar continuam `disabled`.

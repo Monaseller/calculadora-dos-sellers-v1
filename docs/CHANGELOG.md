@@ -2,6 +2,21 @@
 
 > Ordem cronológica reversa. Toda tarefa que criar, corrigir ou remover funcionalidade deve adicionar uma entrada aqui antes de finalizar.
 
+## 2026-09-15 (4) — Decisao de aprovacao: comportamento provado em producao
+
+- **O D4 deixou de ser uma promessa de codigo e virou comportamento medido.** A migration ja estava aplicada, mas instalacao nao e prova: ate aqui ninguem tinha chamado `aprovacao_decidir` contra um caso real. Agora chamou — cinco vezes, sob controle.
+- **Duas fixtures novas e isoladas, criadas para isso** (`RUN_ID b739950f-45e9-4015-9a67-9801b110a953`), num unico bloco transacional all-or-nothing. Nenhum registro historico foi usado como alvo: a tarefa parada legada e o par do D2 ficaram intocados, e foram reconferidos byte a byte depois.
+- **Fixture A — aprovar -> `ja_aprovada` -> cancelar. Fixture B — rejeitar -> `ja_rejeitada`.** Os dois ramos terminais e os dois caminhos de repeticao, sem precisar de uma terceira fixture.
+- **Aprovar nao toca a Task.** Ela seguiu em `aguardando_aprovacao` com o ponteiro intacto — que e exatamente o par que o resume do D5 vai reivindicar.
+- **Repetir uma decisao ja tomada nao escreve nada.** `ja_aprovada` e `ja_rejeitada` nao geraram nenhuma versao nova de linha. A segunda rejeicao foi enviada de proposito com um motivo DIFERENTE, e ele nao substituiu o original: a string nova nao existe em lugar nenhum da tabela. Sem esse contraste, "o motivo continua igual" seria uma observacao vazia.
+- **Cancelar e rejeitar encerram Approval e Task na MESMA transacao.** As duas linhas terminaram com o mesmo identificador de transacao, e os carimbos de tempo coincidem — consequencia de `now()` ser STABLE dentro da transacao, verificada e nao presumida.
+- **Cancelar preserva a decisao anterior:** quem aprovou e quando continuam registrados ao lado de quem cancelou.
+- **`progresso` e `tentativas` sobrevivem** a terminalizacao, e o ponteiro sai no mesmo UPDATE que o status. As fixtures nasceram com valores sentinela nao-zero e distintos entre si (37/1 e 58/2) justamente para que "preservado" fosse uma afirmacao falsificavel — com os defaults `0/0`, um bug que zerasse os campos passaria despercebido.
+- **O instrumento foi a coluna de sistema `xmin`**, que distingue "nao escreveu" de "reescreveu o mesmo valor" — algo que comparar valores nunca provaria. Ela nao entra em codigo de produto nem em suite versionada; serviu a esta prova e fica fora do contrato.
+- **Zero Tool Call e zero execucao de Funcao.** `vendas.consultar` nao rodou, nenhuma API de marketplace foi chamada, nenhuma conexao foi usada. Decidir nao e executar.
+- **Nenhuma limpeza e necessaria.** As quatro linhas terminaram em estado terminal, fora do indice de aprovacoes ativas, e ficam como artefato auditavel — nenhum DELETE foi executado.
+- **Fronteira que este resultado NAO atravessa:** o resume (**D5**) e o scanner (**D7**) continuam nao implementados, a API de decisao nao existe, os botoes da UI seguem `disabled`, e a autorizacao HTTP da aplicacao **nao** foi provada aqui — a prova rodou contra a funcao no banco, e o caminho por `service_role` ja fora provado separadamente pela ACL.
+
 ## 2026-09-15 (3) — Decisao de aprovacao: migration aplicada em producao
 
 - **A migration D4 foi aplicada em producao, exatamente uma vez.** Arquivo local `20261004_aprovacao_decidir_encerra_tarefa.sql`; no remoto ficou registrada como version `20260915184935`, name `aprovacao_decidir_encerra_tarefa`. A migration history foi de 20 para 21 linhas, sem duplicata e sem nenhuma migration alheia no intervalo. Como ja acontecera no D1 e no D3, a version remota e atribuida pelo Supabase e **nao** corresponde ao prefixo do arquivo local.
