@@ -1845,9 +1845,25 @@ async function main() {
     const migsD4 = [...readdirSync(join(RAIZ, "supabase", "migrations"))].sort();
     const NOME_D4 = "20261004_aprovacao_decidir_encerra_tarefa.sql";
 
-    ok("U14 a D4 existe e e a ultima migration do disco",
-      migsD4.includes(NOME_D4) && migsD4[migsD4.length - 1] === NOME_D4);
-    ok("U15 e vem depois da limpeza do D3",
+    // A ULTIMA migration do disco deixou de ser a D4 quando o
+    // APPROVAL-DECISION-RESUME-D5 foi commitado em `a8609dfe`. O guard
+    // nao foi afrouxado: ele continua congelando QUAL e a ultima, agora
+    // pelo nome exato da D5, e a cobertura historica da D4 permanece —
+    // ela tem de existir e tem de vir ANTES.
+    const NOME_D5 = "20261005_agente_retomada_aprovacao.sql";
+
+    ok("U14 a D4 existe e continua precedendo a ultima migration",
+      migsD4.includes(NOME_D4) && migsD4.indexOf(NOME_D4) < migsD4.indexOf(NOME_D5));
+    ok("U14a a D5 existe com o nome EXATO e e a ultima do disco",
+      migsD4.includes(NOME_D5) && migsD4[migsD4.length - 1] === NOME_D5);
+    ok("U14b CONTROLE: uma migration posterior inesperada reprovaria",
+      [...migsD4, "20261006_migration_nao_declarada.sql"].sort().at(-1) !== NOME_D5);
+    // O prefixo `20261005` identifica UM arquivo so, e o guard congela o
+    // nome inteiro: se alguem acrescentasse outra migration com o mesmo
+    // carimbo, o congelamento por prefixo deixaria de discriminar.
+    ok("U14c CONTROLE: o carimbo 20261005 pertence a UMA migration, e e a exata",
+      migsD4.filter((m) => m.startsWith("20261005")).join(",") === NOME_D5);
+    ok("U15 e a D4 vem depois da limpeza do D3",
       migsD4.indexOf("20261003_remover_aguardar_aprovacao_tarefa_2args.sql") <
       migsD4.indexOf(NOME_D4));
 

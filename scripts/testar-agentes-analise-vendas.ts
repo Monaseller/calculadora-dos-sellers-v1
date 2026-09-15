@@ -1290,6 +1290,31 @@ const ARQUIVOS_SKILL_1D_CONSUMER: readonly string[] = [
   ...MODULOS_DIAGNOSTICO_1D_CONSUMER.map((nome) => `lib/agentes/diagnostico/${nome}`),
 ];
 
+/**
+ * APPROVAL-DECISION-RESUME-D5-C1 — a camada compartilhada de retomada.
+ *
+ * Sao DOIS modulos novos, e so dois: o contrato puro de
+ * `consultar_vendas` (leitura da entrada, agregacao e traducao dos
+ * desfechos, extraidos do handler sem alteracao) e o registry que
+ * aponta para essas MESMAS referencias.
+ *
+ * `handlers/consultar-vendas.ts` NAO e repetido: ele ja esta autorizado
+ * desde a FUNCTION-RUNTIME-V1-A, e a origem de cada liberacao precisa
+ * continuar legivel.
+ *
+ * A migration do D5 tambem nao entra: ela ja foi commitada em
+ * `a8609dfe`, esta limpa e por isso nao aparece no porcelain — declarar
+ * caminho que o guard nunca ve seria ruido.
+ *
+ * Caminhos EXATOS, nunca prefixo: `lib/agentes/` ou `handlers/` abriria
+ * a pasta inteira e destruiria a propriedade que o G11 existe para
+ * medir.
+ */
+const ARQUIVOS_RESUME_D5_C1: readonly string[] = [
+  "lib/agentes/handlers/consultar-vendas-contrato.ts",
+  "lib/agentes/resume-contratos.ts",
+];
+
 /** Uniao EXPLICITA. Qualquer caminho fora dela reprova o G11. */
 const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_1DD,
@@ -1321,6 +1346,7 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_APPROVAL_DECISION_D4,
   ...ARQUIVOS_FUNCTION_RUNTIME_V1A,
   ...ARQUIVOS_FUNCTION_RUNTIME_V1B1,
+  ...ARQUIVOS_RESUME_D5_C1,
 ];
 
 /**
@@ -2335,6 +2361,39 @@ async function main() {
     // abrindo a pasta `handlers/` inteira sem que nada acusasse.
     ok("G11f7 CONTROLE NEGATIVO: um handler novo NAO declarado reprova",
        !soAutorizadosNoEscopo("?? lib/agentes/handlers/consultar-anuncios.ts\n"));
+    // ── APPROVAL-DECISION-RESUME-D5-C1 ─────────────────────────────
+    //
+    // Os dois modulos compartilhados da retomada entram nominalmente. O
+    // que se prova aqui nao e "eles passam" — e que a liberacao continua
+    // sendo de DOIS CAMINHOS EXATOS, e nao da pasta.
+    ok("G11f8 a lista D5-C1 tem exatamente 2 caminhos",
+       ARQUIVOS_RESUME_D5_C1.length === 2);
+    ok("G11f9 e sao exatamente os dois modulos autorizados",
+       [...ARQUIVOS_RESUME_D5_C1].sort().join(",") ===
+       "lib/agentes/handlers/consultar-vendas-contrato.ts,lib/agentes/resume-contratos.ts");
+    ok("G11f10 nenhum deles e diretorio, prefixo ou glob",
+       ARQUIVOS_RESUME_D5_C1.every((p) =>
+         p.endsWith(".ts") && !p.endsWith("/") && !p.includes("*")));
+    ok("G11f11 os dois entram na uniao que o G11 consulta",
+       ARQUIVOS_RESUME_D5_C1.every((p) => ARQUIVOS_ESPERADOS.includes(p)));
+    // Os dois estados de versionamento, como o handler da V1-A ja exige.
+    ok("G11f12 aceita o contrato puro, untracked e staged",
+       soAutorizadosNoEscopo("?? lib/agentes/handlers/consultar-vendas-contrato.ts\n") &&
+       soAutorizadosNoEscopo("A  lib/agentes/handlers/consultar-vendas-contrato.ts\n"));
+    ok("G11f13 aceita o registry de contratos, untracked e staged",
+       soAutorizadosNoEscopo("?? lib/agentes/resume-contratos.ts\n") &&
+       soAutorizadosNoEscopo("A  lib/agentes/resume-contratos.ts\n"));
+    // CONTROLES NEGATIVOS: a liberacao nao pode ter aberto a pasta nem
+    // passado a aceitar untracked generico em `lib/agentes`.
+    ok("G11f14 CONTROLE NEGATIVO: um TERCEIRO modulo de resume reprova",
+       !soAutorizadosNoEscopo("?? lib/agentes/resume-orquestrador.ts\n"));
+    ok("G11f15 CONTROLE NEGATIVO: outro contrato de handler nao declarado reprova",
+       !soAutorizadosNoEscopo("?? lib/agentes/handlers/analise-vendas-contrato.ts\n"));
+    ok("G11f16 CONTROLE NEGATIVO: sufixo parecido em outra pasta reprova",
+       !soAutorizadosNoEscopo("?? outra/pasta/resume-contratos.ts\n"));
+    ok("G11f17 CONTROLE NEGATIVO: autorizado + intruso reprova",
+       !soAutorizadosNoEscopo(
+         "?? lib/agentes/resume-contratos.ts\n?? lib/agentes/resume-worker.ts\n"));
     ok("G11g CONTROLE NEGATIVO: migration nova no escopo reprova", !soAutorizadosNoEscopo("?? supabase/migrations/99999999_falsa.sql\n"));
     ok("G11h CONTROLE NEGATIVO: autorizados + intruso reprova", !soAutorizadosNoEscopo(" M lib/agentes/handlers/registry.ts\n M lib/agentes/tipos-execucao.ts\n"));
     ok("G11i CONTROLE NEGATIVO: sufixo parecido em outra pasta reprova", !soAutorizadosNoEscopo("?? outra/pasta/registry.ts\n"));

@@ -1332,8 +1332,18 @@ async function principal(): Promise<void> {
   secao("I. FUNCTION-RUNTIME-V1-A: handler consultar_vendas");
   {
     const HANDLER = "lib/agentes/handlers/consultar-vendas.ts";
-    const CODIGO = semComentarios(ler(HANDLER));
+    const CONTRATO = "lib/agentes/handlers/consultar-vendas-contrato.ts";
+    // A FABRICA e o que sobrou no handler: so a chamada ao executor.
+    const FABRICA = semComentarios(ler(HANDLER));
+    const PURO = semComentarios(ler(CONTRATO));
+    // D5-C1: a implementacao de `consultar_vendas` passou a viver em DOIS
+    // arquivos. `CODIGO` continua sendo "a implementacao", agora somada —
+    // e isso importa mais para as assercoes de AUSENCIA do que para as de
+    // presenca: apontar `!/process\.env/` so para a fabrica encolhida as
+    // deixaria vacuamente verdes justamente onde o codigo se mudou.
+    const CODIGO = `${FABRICA}\n${PURO}`;
     const mod = await import("../lib/agentes/handlers/consultar-vendas");
+    const puro = await import("../lib/agentes/handlers/consultar-vendas-contrato");
     const {
       TIPO_CONSULTAR_VENDAS,
       FUNCAO_ID,
@@ -1344,7 +1354,43 @@ async function principal(): Promise<void> {
     } = mod;
     const { ErroEntradaTarefa, PausaPorAprovacao } = await import("../lib/agentes/erros");
 
-    ok("I0  ANCORA: a fonte do handler foi lida", CODIGO.length > 2000);
+    ok("I0  ANCORA: as duas fontes da implementacao foram lidas",
+      FABRICA.length > 500 && PURO.length > 2000);
+
+    // ── D5-C1: a separacao e REAL, e o reexport nao cria copia ──────
+    ok("I0a a fabrica NAO carrega mais a logica pura",
+      !/function agregarConsultaDeVendas|function lerEntradaConsultarVendas|case "sucesso":/.test(FABRICA));
+    ok("I0b e o modulo puro NAO chama o executor",
+      !/executarFuncao\(/.test(PURO));
+    ok("I0c o reexport devolve a MESMA referencia, nunca um invólucro",
+      mod.lerEntradaConsultarVendas === puro.lerEntradaConsultarVendas &&
+      mod.mapearResultadoConsultarVendas === puro.mapearResultadoConsultarVendas &&
+      mod.agregarConsultaDeVendas === puro.agregarConsultaDeVendas &&
+      mod.FUNCAO_ID === puro.FUNCAO_ID &&
+      mod.TIPO_CONSULTAR_VENDAS === puro.TIPO_CONSULTAR_VENDAS);
+    ok("I0d CONTROLE: duas funcoes distintas NAO satisfariam o oraculo",
+      ((a: unknown, b: unknown) => a !== b)(() => 1, () => 1));
+    ok("I0e o literal `vendas.consultar` tem UMA fonte",
+      (PURO.match(/"vendas\.consultar"/g) ?? []).length === 1 &&
+      !/"vendas\.consultar"/.test(FABRICA));
+    // A SEQUENCIA do caminho automatico, congelada por posicao: ler ->
+    // 25 -> executar -> 75 -> mapear -> 100 -> devolver. A extracao nao
+    // podia reordenar nada, e antes disto nada media a ordem.
+    {
+      const pos = (re: RegExp) => FABRICA.search(re);
+      const iLer = pos(/const entrada = lerEntradaConsultarVendas\(contexto\.entrada\)/);
+      const i25 = pos(/relatarProgresso\(25\)/);
+      const iExec = pos(/await executarFuncao\(/);
+      const i75 = pos(/relatarProgresso\(75\)/);
+      const iMapear = pos(/const saida = mapearResultadoConsultarVendas\(resultado, entrada\)/);
+      const i100 = pos(/relatarProgresso\(100\)/);
+      const iRet = pos(/return saida;/);
+      ok("I0f a sequencia do caminho automatico esta preservada, em ordem",
+        iLer > 0 && iLer < i25 && i25 < iExec && iExec < i75 &&
+        i75 < iMapear && iMapear < i100 && i100 < iRet);
+      ok("I0g e o progresso comeca em 0 antes de tudo",
+        pos(/relatarProgresso\(0\)/) > 0 && pos(/relatarProgresso\(0\)/) < iLer);
+    }
 
     // ── A. o wiring com executarFuncao ──────────────────────────────
     ok("I1  o handler chama executarFuncao, e uma unica vez",
@@ -1835,8 +1881,11 @@ async function principal(): Promise<void> {
       ok("I102 chavePedido opera sobre string x string",
         /function chavePedido\(marketplace: string, orderId: string\): string/.test(CODIGO) &&
         !/chavePedido\(marketplace: unknown/.test(CODIGO));
+      // Le o CONTRATO, e nao mais o handler: o comentario mudou de casa
+      // junto com `chavePedido`, e apontar para a fabrica deixaria esta
+      // assercao de ausencia vacuamente verde.
       ok("I103 e o comentario nao promete injetividade sobre valor arbitrario",
-        !/injetora para qualquer par/.test(ler(HANDLER)));
+        /chavePedido/.test(ler(CONTRATO)) && !/injetora para qualquer par/.test(ler(CONTRATO)));
       // A guarda tem de ser a PRIMEIRA instrucao do laco — se vier
       // depois de um acumulador, a parcialidade volta.
       {
@@ -1851,6 +1900,128 @@ async function principal(): Promise<void> {
         ok("I106 nem coercao para string",
           !/String\(linha\.marketplace\)|`\$\{linha\.marketplace\}`/.test(CODIGO));
       }
+    }
+  }
+
+  // ── J. APPROVAL-DECISION-RESUME-D5-C1: contratos de retomada ──────
+  //
+  // O registry existe para que a retomada pos-aprovacao prepare a MESMA
+  // entrada e interprete o MESMO resultado do caminho automatico. A
+  // propriedade que interessa nao e "existe um contrato" — e que ele
+  // aponta para as FUNCOES REAIS, nao para copias que um dia divergem.
+  //
+  // Nada aqui ativa D5: o registry continua sem chamador de producao.
+  secao("J. RESUME-D5-C1: registry de contratos, dormente");
+  {
+    const RESUME = "lib/agentes/resume-contratos.ts";
+    const RESUME_CODIGO = semComentarios(ler(RESUME));
+    const CONTRATO_PURO = "lib/agentes/handlers/consultar-vendas-contrato.ts";
+    const PURO_CODIGO = semComentarios(ler(CONTRATO_PURO));
+
+    const reg = await import("../lib/agentes/resume-contratos");
+    const puro = await import("../lib/agentes/handlers/consultar-vendas-contrato");
+    const { resolverContratoResume, tiposComContratoResume } = reg;
+
+    ok("J0  ANCORA: as duas fontes foram lidas",
+      RESUME_CODIGO.length > 300 && PURO_CODIGO.length > 2000);
+
+    // ── §23. IDENTIDADE ESTRITA — o coracao deste slice ────────────
+    const contrato = resolverContratoResume("consultar_vendas");
+    ok("J1  consultar_vendas TEM contrato", contrato !== null);
+    ok("J2  funcaoId e a MESMA constante do caminho automatico",
+      contrato?.funcaoId === puro.FUNCAO_ID && contrato?.funcaoId === "vendas.consultar");
+    ok("J3  prepararEntrada === lerEntradaConsultarVendas (referencia, nao copia)",
+      contrato?.prepararEntrada === puro.lerEntradaConsultarVendas);
+    ok("J4  continuarAposFuncao === mapearResultadoConsultarVendas",
+      contrato?.continuarAposFuncao === puro.mapearResultadoConsultarVendas);
+    ok("J5  CONTROLE: um adaptador equivalente NAO satisfaria J3/J4",
+      ((f: unknown) => f !== puro.lerEntradaConsultarVendas)(
+        (bruta: unknown) => puro.lerEntradaConsultarVendas(bruta)));
+    ok("J6  e o contrato nao embrulha: zero arrow/bind na tabela",
+      !/=>\s*lerEntradaConsultarVendas|=>\s*mapearResultadoConsultarVendas|\.bind\(/
+        .test(RESUME_CODIGO));
+
+    // ── §24. tipo desconhecido FALHA FECHADO ───────────────────────
+    ok("J7  tipo inexistente devolve null, nunca contrato de reserva",
+      resolverContratoResume("tipo_que_nao_existe") === null);
+    ok("J8  e chave de prototipo tambem — `toString` nao e contrato",
+      resolverContratoResume("toString") === null &&
+      resolverContratoResume("constructor") === null);
+    ok("J9  so `consultar_vendas` esta registrado",
+      tiposComContratoResume().join(",") === "consultar_vendas");
+    ok("J10 CONTROLE: um tipo a mais nao satisfaria J9",
+      ["consultar_vendas", "outro"].join(",") !== "consultar_vendas");
+
+    // ── §25. TRIPWIRE do grafo: aresta de VALOR e proibida ─────────
+    //
+    // `import type` desaparece na compilacao; `import` de valor nao. A
+    // checagem distingue os dois, entao trocar um pelo outro por
+    // descuido deixa esta suite vermelha em vez de criar um ciclo.
+    const importsDeValor = (codigo: string): string[] =>
+      [...codigo.matchAll(/^import\s+(?!type\s)([\s\S]*?)from\s+"([^"]+)";/gm)]
+        .filter((m) => !/^\s*\{\s*type\s/.test(m[1]))
+        .map((m) => m[2]);
+    const alvosResume = importsDeValor(RESUME_CODIGO);
+    const alvosPuro = importsDeValor(PURO_CODIGO);
+
+    ok(`J11 resume-contratos NAO importa o handler que executa (${alvosResume.join(", ")})`,
+      !alvosResume.some((a) => /handlers\/consultar-vendas$/.test(a)));
+    ok("J12 nem alcanca o executor por valor",
+      !alvosResume.some((a) => /execucao-funcoes\/executar$/.test(a)));
+    ok("J13 o modulo puro tambem nao importa o executor por valor",
+      !alvosPuro.some((a) => /execucao-funcoes\/executar$/.test(a)));
+    ok("J14 mas ele USA o tipo do executor — por `import type`",
+      /^import type \{ ResultadoExecucaoFuncao \} from "@\/lib\/agentes\/execucao-funcoes\/executar";$/m
+        .test(PURO_CODIGO));
+    ok("J15 CONTROLE: o detector reconhece uma aresta de VALOR se ela surgir",
+      importsDeValor('import { executarFuncao } from "@/lib/agentes/execucao-funcoes/executar";')
+        .join(",") === "@/lib/agentes/execucao-funcoes/executar" &&
+      importsDeValor('import type { X } from "@/lib/agentes/execucao-funcoes/executar";').length === 0);
+    ok("J16 e o unico import de valor do resume e o contrato puro",
+      alvosResume.join(",") === "@/lib/agentes/handlers/consultar-vendas-contrato");
+
+    // ── §26. CRUZAMENTO handler x contrato ─────────────────────────
+    //
+    // Limitacao declarada: o cruzamento e por VARREDURA de fonte, nao
+    // por AST. Ele responde "quais handlers alcancam executarFuncao" e
+    // "quais tipos tem contrato" — o bastante para o estado atual, e
+    // deterministico. Um handler que alcance a Funcao por um modulo
+    // intermediario escaparia desta rede; hoje nenhum o faz, e I68 ja
+    // congela esse fato.
+    {
+      const handlers = readdirSync(join(RAIZ, "lib/agentes/handlers"))
+        .filter((f) => f.endsWith(".ts") && f !== "registry.ts");
+      const comFuncao = handlers.filter((f) =>
+        /executarFuncao\(/.test(semComentarios(ler(`lib/agentes/handlers/${f}`))));
+      const registrados = tiposComContratoResume();
+      ok(`J17 exatamente um handler CHAMA executarFuncao (${comFuncao.join(", ")})`,
+        comFuncao.length === 1 && comFuncao[0] === "consultar-vendas.ts");
+      ok("J18 e o tipo dele TEM contrato de retomada",
+        registrados.includes("consultar_vendas"));
+      ok("J19 CONTROLE: um tipo sem contrato seria detectado",
+        !registrados.includes("consultar_anuncios"));
+    }
+
+    // ── DORMENCIA: o registry nao tem chamador de producao ─────────
+    {
+      const producao = ["lib/agentes", "app", "components"];
+      const alcanca: string[] = [];
+      const varrer = (dir: string): void => {
+        for (const e of readdirSync(join(RAIZ, dir), { withFileTypes: true })) {
+          const rel = `${dir}/${e.name}`;
+          if (e.isDirectory()) varrer(rel);
+          // IMPORT, nunca mencao: o modulo puro CITA `resume-contratos`
+          // no comentario que explica por que o grafo e aciclico, e
+          // contar isso como chamador transformaria documentacao em
+          // violacao.
+          else if (/\.tsx?$/.test(e.name) && rel !== RESUME &&
+                   /(?:from|import\()\s*"[^"]*resume-contratos"/.test(semComentarios(ler(rel))))
+            alcanca.push(rel);
+        }
+      };
+      for (const d of producao) varrer(d);
+      ok(`J20 D5_ACTIVE = NO: zero referencia de producao ao registry (${alcanca.join(", ") || "nenhuma"})`,
+        alcanca.length === 0);
     }
   }
 
