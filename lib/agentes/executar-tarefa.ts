@@ -269,7 +269,15 @@ export async function executarTarefa(tarefaId: string): Promise<RespostaExecucao
     }
 
     const erroTipo = classificarErro(err);
-    const { linha, erro: erroRpc } = await falharTarefa(tarefa.id, erroTipo, mensagemSegura(err));
+    // `tarefa.tentativas` e o valor que o CLAIM gravou nesta linha — nao
+    // um calculo. Somar ou subtrair aqui inventaria um dono que nunca
+    // existiu, e `maxTentativas` descreveria o limite, nao a tentativa.
+    const { linha, erro: erroRpc } = await falharTarefa(
+      tarefa.id,
+      erroTipo,
+      mensagemSegura(err),
+      tarefa.tentativas
+    );
 
     if (erroRpc) {
       return { status: 500, corpo: { ok: false, erro: erroRpc } };
@@ -289,7 +297,11 @@ export async function executarTarefa(tarefaId: string): Promise<RespostaExecucao
     };
   }
 
-  const { linha, erro: erroConclusao } = await concluirTarefa(tarefa.id, resultado);
+  const { linha, erro: erroConclusao } = await concluirTarefa(
+    tarefa.id,
+    resultado,
+    tarefa.tentativas
+  );
   if (erroConclusao) {
     return { status: 500, corpo: { ok: false, erro: erroConclusao } };
   }

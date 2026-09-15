@@ -154,13 +154,18 @@ export async function registrarProgresso(
  */
 export async function concluirTarefa(
   tarefaId: string,
-  resultado: Record<string, unknown>
+  resultado: Record<string, unknown>,
+  tentativaEsperada: number
 ): Promise<ResultadoTarefaInterna> {
   if (!tarefaId) return { linha: null, erro: "tarefa_id_ausente" };
 
   const { data, error } = await getSupabaseServidor().rpc("concluir_tarefa", {
     p_tarefa_id: tarefaId,
     p_resultado: resultado ?? {},
+    // APPROVAL-DECISION-RESUME-B0: a tentativa viaja para que a RPC
+    // recuse um executor atrasado. Vem de quem leu a linha apos o
+    // claim — este wrapper nao a calcula nem a adivinha.
+    p_tentativa_esperada: tentativaEsperada,
   });
 
   if (error) {
@@ -179,13 +184,17 @@ export async function concluirTarefa(
 export async function falharTarefa(
   tarefaId: string,
   erroTipo: string,
-  erroMensagem: string
+  erroMensagem: string,
+  tentativaEsperada: number
 ): Promise<ResultadoTarefaInterna> {
   if (!tarefaId) return { linha: null, erro: "tarefa_id_ausente" };
 
   const { data, error } = await getSupabaseServidor().rpc("falhar_tarefa", {
     p_tarefa_id: tarefaId,
     p_erro_tipo: erroTipo,
+    // Mesmo fence da irma: sem ele, um executor velho leria
+    // `tentativas` da tentativa alheia e escolheria o desfecho dela.
+    p_tentativa_esperada: tentativaEsperada,
     // Truncado tambem aqui, alem do `left(...,500)` da RPC: mensagem de
     // excecao pode carregar trecho de dado, e o caminho mais curto ate
     // o banco e o melhor lugar para cortar.

@@ -833,6 +833,22 @@ const MIGRATIONS_DO_FUNCTION_RUNTIME_P0: readonly string[] = [
 ];
 
 /**
+ * APPROVAL-DECISION-RESUME-B0 — o fencing por tentativa nas duas RPCs
+ * terminais.
+ *
+ * A migration RECRIA `concluir_tarefa` e `falhar_tarefa` exigindo
+ * `tentativas = p_tentativa_esperada`, e DROPA nominalmente as
+ * assinaturas antigas — sem o DROP o Postgres deixaria um overload sem
+ * fence vivo e concedido.
+ *
+ * O nome do grupo diz apenas o que este slice fez: fencing de
+ * terminalizacao. Decision e Resume NAO foram implementados aqui.
+ */
+const MIGRATIONS_DO_TASK_FENCING_B0: readonly string[] = [
+  "20260930_tarefa_fencing_por_tentativa.sql",
+];
+
+/**
  * Inventario acumulado de `lib/agentes/ia/`, por frente.
  *
  * O guarda de disco (G11l) compara contra ESTA uniao, nunca contra uma
@@ -1052,6 +1068,17 @@ const ARQUIVOS_FUNCTION_RUNTIME_P0: readonly string[] = [
 ];
 
 /**
+ * APPROVAL-DECISION-RESUME-B0 — os paths do fencing por tentativa.
+ *
+ * `capability-worker.ts` e `executar-tarefa.ts` ja constam de frentes
+ * anteriores; repeti-los seria ruido, porque o predicado usa igualdade
+ * de caminho e nao contagem. So a migration e nova no escopo.
+ */
+const ARQUIVOS_TASK_FENCING_B0: readonly string[] = [
+  "supabase/migrations/20260930_tarefa_fencing_por_tentativa.sql",
+];
+
+/**
  * FUNCTION-RUNTIME-V1-A — o primeiro handler que executa uma Funcao.
  *
  * `ESCOPO_AGENTES` cobre `lib/agentes` inteiro, entao um arquivo NOVO
@@ -1153,6 +1180,7 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_APROVACOES,
   ...ARQUIVOS_VERTICAL_SLICE_V1,
   ...ARQUIVOS_FUNCTION_RUNTIME_P0,
+  ...ARQUIVOS_TASK_FENCING_B0,
   ...ARQUIVOS_FUNCTION_RUNTIME_V1A,
   ...ARQUIVOS_FUNCTION_RUNTIME_V1B1,
 ];
@@ -2331,7 +2359,8 @@ async function main() {
       MIGRATIONS_DA_SKILL_1D_PERFIL.includes(m) ||
       MIGRATIONS_DA_SKILL_1D_TOOL_CALL.includes(m) ||
       MIGRATIONS_DA_APPROVAL_B1B.includes(m) ||
-      MIGRATIONS_DO_FUNCTION_RUNTIME_P0.includes(m);
+      MIGRATIONS_DO_FUNCTION_RUNTIME_P0.includes(m) ||
+      MIGRATIONS_DO_TASK_FENCING_B0.includes(m);
 
     ok(`G12b nenhuma migration nao declarada no disco (${novasNoDisco.join(", ") || "nenhuma"})`,
        novasNoDisco.every(declarada));

@@ -358,8 +358,9 @@ Pre-requisitos: migrations 20260917_agentes_execucao.sql e
 
         for (const fn of ["concluir_tarefa", "falhar_tarefa"]) {
           const args = fn === "concluir_tarefa"
-            ? { p_tarefa_id: ALVO_PRIVILEGIO, p_resultado: {} }
-            : { p_tarefa_id: ALVO_PRIVILEGIO, p_erro_tipo: "x", p_erro_mensagem: "y" };
+            ? { p_tarefa_id: ALVO_PRIVILEGIO, p_resultado: {}, p_tentativa_esperada: 1 }
+            : { p_tarefa_id: ALVO_PRIVILEGIO, p_erro_tipo: "x", p_erro_mensagem: "y",
+                p_tentativa_esperada: 1 };
           const { error } = await dbAnon.rpc(fn, args as never);
           ok(`9.x anon barrado por PRIVILEGIO em ${fn}`, barradoPorPrivilegio(error), codigoDe(error));
         }
@@ -470,7 +471,7 @@ Pre-requisitos: migrations 20260917_agentes_execucao.sql e
 
       // ── E as irmas tambem recusam, fora de rodando ────────────────
       const { error: eConcluir } = await db.rpc("concluir_tarefa", {
-        p_tarefa_id: F, p_resultado: {},
+        p_tarefa_id: F, p_resultado: {}, p_tentativa_esperada: 1,
       });
       ok("11.18 concluir_tarefa recusa tarefa pausada", codigoDe(eConcluir) === "55000", codigoDe(eConcluir));
 
@@ -598,6 +599,8 @@ async function testarClaimGlobalPerigoso(db: SupabaseClient, url: string, chave:
     const { data: cc, error: eCc } = await db.rpc("concluir_tarefa", {
       p_tarefa_id: tarefaId,
       p_resultado: resultadoDoHandler,
+      // Um claim aconteceu nesta secao, entao a tentativa corrente e 1.
+      p_tentativa_esperada: 1,
     });
     const f = Array.isArray(cc) ? cc[0] : cc;
     ok("1.7 concluir_tarefa devolve a linha", !!f?.id, codigoDe(eCc));
@@ -610,10 +613,13 @@ async function testarClaimGlobalPerigoso(db: SupabaseClient, url: string, chave:
     ok("1.12 heartbeat_em zerado no terminal", f?.heartbeat_em === null, String(f?.heartbeat_em));
 
     // Fora de ordem LANCA — nunca no-op silencioso.
-    const { error: eDup } = await db.rpc("concluir_tarefa", { p_tarefa_id: tarefaId, p_resultado: {} });
+    const { error: eDup } = await db.rpc("concluir_tarefa", {
+      p_tarefa_id: tarefaId, p_resultado: {}, p_tentativa_esperada: 1,
+    });
     ok("1.13 concluir de novo LANCA (55000)", codigoDe(eDup) === "55000", codigoDe(eDup));
     const { error: eFal } = await db.rpc("falhar_tarefa", {
       p_tarefa_id: tarefaId, p_erro_tipo: "handler_falhou", p_erro_mensagem: "x",
+      p_tentativa_esperada: 1,
     });
     ok("1.14 falhar apos concluir LANCA — nunca ambos", codigoDe(eFal) === "55000", codigoDe(eFal));
     await limpar(db);
@@ -696,6 +702,7 @@ async function testarClaimGlobalPerigoso(db: SupabaseClient, url: string, chave:
     ok("5.1 1o claim, tentativas=1", (Array.isArray(a) ? a[0] : a)?.tentativas === 1);
     const { data: f1 } = await db.rpc("falhar_tarefa", {
       p_tarefa_id: tarefaId, p_erro_tipo: "handler_falhou", p_erro_mensagem: "falha 1",
+      p_tentativa_esperada: 1,
     });
     const l1 = Array.isArray(f1) ? f1[0] : f1;
     ok("5.2 falha com tentativa sobrando -> volta a PENDENTE", l1?.status === "pendente", String(l1?.status));
@@ -709,6 +716,7 @@ async function testarClaimGlobalPerigoso(db: SupabaseClient, url: string, chave:
     ok("5.4 2o claim, tentativas=2", (Array.isArray(b) ? b[0] : b)?.tentativas === 2);
     const { data: f2 } = await db.rpc("falhar_tarefa", {
       p_tarefa_id: tarefaId, p_erro_tipo: "handler_falhou", p_erro_mensagem: "falha 2",
+      p_tentativa_esperada: 2,
     });
     const l2 = Array.isArray(f2) ? f2[0] : f2;
     ok("5.5 tentativas esgotadas -> ERRO terminal", l2?.status === "erro", String(l2?.status));
@@ -760,19 +768,25 @@ async function testarClaimGlobalPerigoso(db: SupabaseClient, url: string, chave:
   console.log("\n7. Validacao de parametro e estado");
   {
     const { tarefaId } = await semear(db);
-    const { error: e1 } = await db.rpc("concluir_tarefa", { p_tarefa_id: tarefaId, p_resultado: {} });
+    const { error: e1 } = await db.rpc("concluir_tarefa", {
+      p_tarefa_id: tarefaId, p_resultado: {}, p_tentativa_esperada: 0,
+    });
     ok("7.1 concluir tarefa PENDENTE LANCA (55000)", codigoDe(e1) === "55000", codigoDe(e1));
     const { error: e2 } = await db.rpc("falhar_tarefa", {
       p_tarefa_id: tarefaId, p_erro_tipo: "x", p_erro_mensagem: "y",
+      p_tentativa_esperada: 0,
     });
     ok("7.2 falhar tarefa PENDENTE LANCA (55000)", codigoDe(e2) === "55000", codigoDe(e2));
 
     await db.rpc("claim_next_agente_tarefa");
     const { error: e3 } = await db.rpc("falhar_tarefa", {
       p_tarefa_id: tarefaId, p_erro_tipo: "   ", p_erro_mensagem: "y",
+      p_tentativa_esperada: 1,
     });
     ok("7.3 erro_tipo vazio LANCA (22023)", codigoDe(e3) === "22023", codigoDe(e3));
-    const { error: e4 } = await db.rpc("concluir_tarefa", { p_tarefa_id: null, p_resultado: {} });
+    const { error: e4 } = await db.rpc("concluir_tarefa", {
+      p_tarefa_id: null, p_resultado: {}, p_tentativa_esperada: 1,
+    });
     ok("7.4 tarefa_id NULL LANCA (22023)", codigoDe(e4) === "22023", codigoDe(e4));
     await limpar(db);
   }

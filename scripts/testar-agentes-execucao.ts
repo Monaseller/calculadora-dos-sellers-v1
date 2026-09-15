@@ -99,6 +99,16 @@ function ok(nome: string, condicao: boolean) {
 const conta = (t: string, re: RegExp) => (t.match(re) ?? []).length;
 
 const MIGRATION = "supabase/migrations/20260917_agentes_execucao.sql";
+/**
+ * APPROVAL-DECISION-RESUME-B0 — a migration que RECRIOU as duas RPCs
+ * terminais com fencing por tentativa.
+ *
+ * O Postgres nao versiona funcao por migration de origem: o estado real
+ * de `concluir_tarefa` e `falhar_tarefa` e o desta, nao o da 1C. Por
+ * isso a secao D continua descrevendo a 1C como documento historico, e
+ * a secao R abaixo e a AUTORIDADE sobre o que esta no banco.
+ */
+const MIGRATION_B0 = "supabase/migrations/20260930_tarefa_fencing_por_tentativa.sql";
 const REGISTRY = "lib/agentes/handlers/registry.ts";
 const HANDLER = "lib/agentes/handlers/teste-fundacao.ts";
 const EXECUTOR = "lib/agentes/executar-tarefa.ts";
@@ -243,7 +253,15 @@ async function main() {
      ));
 
   // ═══ D. MIGRATION — concluir e falhar ═════════════════════════════
-  console.log("D. Migration — conclusao e falha");
+  // ── AVISO DE VIGENCIA (APPROVAL-DECISION-RESUME-B0) ─────────────
+  //
+  // Os asserts desta secao leem a migration 1C. Eles continuam
+  // verdadeiros SOBRE AQUELE ARQUIVO, e e por isso que nao foram
+  // apagados — mas a definicao VIGENTE das duas RPCs mora na B0, e
+  // quem a prova e a secao R. Ler D como retrato do banco seria repetir
+  // exatamente o erro que a regra de precedencia de migrations existe
+  // para evitar.
+  console.log("D. Migration 1C — conclusao e falha (historico; vigente e a secao R)");
   const concl = mig.slice(mig.indexOf("FUNCTION public.concluir_tarefa"), mig.indexOf("FUNCTION public.falhar_tarefa"));
   const falha = mig.slice(mig.indexOf("FUNCTION public.falhar_tarefa"));
   ok("D0  corpos isolados (anti-vacuidade)", concl.length > 200 && falha.length > 200);
@@ -770,6 +788,249 @@ async function main() {
   // adaptador vem de `criarAdaptadorFake`, que nao tem rede, SDK nem
   // env — e o espiao `chamadas` e o que permite afirmar, e nao supor, o
   // que a IA recebeu.
+  console.log("R. Migration B0 — fencing por tentativa esperada");
+  {
+    const migB0 = sql(MIGRATION_B0);
+    const brutoB0 = fonte(MIGRATION_B0);
+
+    // O recorte por funcao: tudo entre o CREATE de uma e o da proxima.
+    const iConcl = migB0.indexOf("FUNCTION public.concluir_tarefa");
+    const iFalha = migB0.indexOf("FUNCTION public.falhar_tarefa");
+    const conclB0 = migB0.slice(iConcl, iFalha);
+    const falhaB0 = migB0.slice(iFalha);
+
+    ok("R0  ANCORA: a migration B0 foi lida e os dois corpos isolados",
+      migB0.length > 800 && conclB0.length > 300 && falhaB0.length > 300);
+
+    // ── R1..R4 — A FASE A E ESTRITAMENTE ADITIVA ──────────────────
+    //
+    // Estes asserts JA exigiram o contrario: que a migration dropasse
+    // as assinaturas antigas. Estava tecnicamente certo e operacional-
+    // mente errado — remover no mesmo release em que se cria abre uma
+    // janela em que producao e banco discordam, em qualquer ordem:
+    //
+    //   migration primeiro  o codigo publicado chama com duas chaves e
+    //                       a funcao de duas chaves ja nao existe.
+    //   codigo primeiro     o codigo novo chama com tres e a de tres
+    //                       ainda nao existe.
+    //
+    // Dois crons de minuto garantem que a janela seja exercitada. Por
+    // isso a Fase A COEXISTE: as antigas ficam, as novas entram, e o
+    // DROP vive numa migration separada, criada so depois de o novo
+    // caller estar provado em producao.
+    //
+    // Os asserts foram INVERTIDOS, nao removidos: continuam afirmando o
+    // que a migration faz com as assinaturas antigas — so que agora a
+    // resposta correta e "nada".
+    const dropaConcluirAntiga = (t: string) =>
+      /DROP\s+FUNCTION[\s\S]{0,40}?public\.concluir_tarefa\(\s*uuid\s*,\s*jsonb\s*\)/i.test(t);
+    const dropaFalharAntiga = (t: string) =>
+      /DROP\s+FUNCTION[\s\S]{0,40}?public\.falhar_tarefa\(\s*uuid\s*,\s*text\s*,\s*text\s*\)/i.test(t);
+
+    ok("R1  a Fase A NAO dropa a assinatura antiga de concluir",
+      !dropaConcluirAntiga(migB0));
+    ok("R1  CONTROLE NEGATIVO: um DROP de concluir na Fase A reprova",
+      dropaConcluirAntiga(
+        migB0 + "\nDROP FUNCTION IF EXISTS public.concluir_tarefa(uuid, jsonb);"));
+    ok("R2  a Fase A NAO dropa a assinatura antiga de falhar",
+      !dropaFalharAntiga(migB0));
+    ok("R2  CONTROLE NEGATIVO: um DROP de falhar na Fase A reprova",
+      dropaFalharAntiga(
+        migB0 + "\nDROP FUNCTION IF EXISTS public.falhar_tarefa(uuid, text, text);"));
+
+    // Nem por outro mecanismo: `ALTER`, `CREATE OR REPLACE` da antiga ou
+    // mexida de privilegio nela sao todos formas de alterar objeto que
+    // producao esta usando agora.
+    ok("R3  a Fase A nao altera as antigas por nenhum outro mecanismo",
+      !/DROP\s+FUNCTION/i.test(migB0) &&
+      !/ALTER\s+FUNCTION/i.test(migB0) &&
+      !/(REVOKE|GRANT)[\s\S]{0,120}?concluir_tarefa\(\s*uuid\s*,\s*jsonb\s*\)/i.test(migB0) &&
+      !/(REVOKE|GRANT)[\s\S]{0,120}?falhar_tarefa\(\s*uuid\s*,\s*text\s*,\s*text\s*\)/i.test(migB0));
+    ok("R3  CONTROLE NEGATIVO: um ALTER na Fase A reprova",
+      /ALTER\s+FUNCTION/i.test(migB0 + "\nALTER FUNCTION public.concluir_tarefa(uuid, jsonb) OWNER TO postgres;"));
+
+    // E a assinatura antiga tambem nao pode ser RECRIADA aqui: isso
+    // sobrescreveria em producao a funcao que esta em uso.
+    ok("R4  a migration nao recria a assinatura antiga",
+      !/FUNCTION\s+public\.concluir_tarefa\(\s*\n?\s*p_tarefa_id\s+uuid,\s*\n?\s*p_resultado\s+jsonb\s*\n?\s*\)/i
+        .test(migB0) &&
+      !/FUNCTION\s+public\.falhar_tarefa\(\s*\n?\s*p_tarefa_id\s+uuid,\s*\n?\s*p_erro_tipo\s+text,\s*\n?\s*p_erro_mensagem\s+text\s*\n?\s*\)/i
+        .test(migB0));
+
+    // ── R4b — a migration de cleanup AINDA NAO PODE EXISTIR ───────
+    //
+    // Barreira arquitetural, e nao preferencia: o CLI aplica TODAS as
+    // migrations pendentes de uma vez. Aditiva e cleanup no mesmo
+    // repositorio viram, na pratica, o cutover destrutivo que a Fase A
+    // existe para evitar — com a aparencia de um rollout em fases.
+    const migrationsNoDisco = readdirSync(join(RAIZ, "supabase", "migrations"));
+    ok("R4b nenhuma migration de cleanup existe ainda no repo",
+      !migrationsNoDisco.some((m) => /remover.*fencing|drop.*tarefa_rpc|tarefa_rpc.*sem_fencing/i.test(m)));
+    ok("R4c ANCORA: a varredura enxergou as migrations de verdade",
+      migrationsNoDisco.length > 10 &&
+      migrationsNoDisco.includes("20260930_tarefa_fencing_por_tentativa.sql"));
+
+    // ── R5..R6 — AS ASSINATURAS NOVAS ─────────────────────────────
+    ok("R5  concluir_tarefa declara p_tentativa_esperada integer",
+      /FUNCTION\s+public\.concluir_tarefa\([\s\S]{0,200}?p_tentativa_esperada\s+integer/i.test(migB0));
+    ok("R6  falhar_tarefa declara p_tentativa_esperada integer",
+      /FUNCTION\s+public\.falhar_tarefa\([\s\S]{0,240}?p_tentativa_esperada\s+integer/i.test(migB0));
+
+    // ── R7..R9 — O FENCE DE CONCLUIR ──────────────────────────────
+    //
+    // Os TRES juntos. O `status` continua porque uma tarefa PAUSADA
+    // pode carregar a mesma tentativa e nao deve ser terminalizavel.
+    const fenceConcluir = (t: string) =>
+      /AND\s+status\s*=\s*'rodando'[\s\S]{0,300}?AND\s+tentativas\s*=\s*p_tentativa_esperada/i.test(t);
+
+    ok("R7  o UPDATE de concluir exige id + rodando + tentativa esperada",
+      /WHERE\s+id\s*=\s*p_tarefa_id/i.test(conclB0) && fenceConcluir(conclB0));
+    ok("R7  CONTROLE NEGATIVO: remover o fence de tentativa reprova",
+      !fenceConcluir(
+        conclB0.replace(/AND\s+tentativas\s*=\s*p_tentativa_esperada/gi, "")));
+    ok("R8  CONTROLE NEGATIVO: trocar = por >= reprova",
+      !fenceConcluir(
+        conclB0.replace(/AND\s+tentativas\s*=\s*p_tentativa_esperada/gi,
+          "AND tentativas >= p_tentativa_esperada")));
+    ok("R9  o status NAO foi substituido pelo fence de tentativa",
+      /status\s*=\s*'rodando'/i.test(conclB0));
+
+    // ── R10..R13 — O FENCE DE FALHAR, NOS DOIS PONTOS ─────────────
+    //
+    // O SELECT decide entre retry e erro lendo `tentativas`; sem fence
+    // ali, um executor atrasado escolheria o desfecho da tentativa
+    // ALHEIA. E o UPDATE precisa repetir, senao a janela entre os dois
+    // reabre.
+    const fencesEmFalhar = (t: string) =>
+      (t.match(/AND\s+t?\.?tentativas\s*=\s*p_tentativa_esperada/gi) ?? []).length;
+
+    ok("R10 falhar tem o fence em DOIS pontos (SELECT e UPDATE)",
+      fencesEmFalhar(falhaB0) === 2, );
+    ok("R11 o SELECT que decide o desfecho carrega o fence",
+      /SELECT\s+CASE[\s\S]{0,400}?FROM\s+public\.agente_tarefas[\s\S]{0,200}?AND\s+t\.tentativas\s*=\s*p_tentativa_esperada/i
+        .test(falhaB0));
+    ok("R12 CONTROLE NEGATIVO: remover UM dos dois fences reprova",
+      fencesEmFalhar(
+        falhaB0.replace(/AND\s+t\.tentativas\s*=\s*p_tentativa_esperada/i, "")) !== 2);
+    ok("R13 CONTROLE NEGATIVO: remover o fence do UPDATE reprova",
+      fencesEmFalhar(
+        falhaB0.replace(/AND\s+tentativas\s*=\s*p_tentativa_esperada/i, "")) !== 2);
+
+    // ── R14..R16 — O QUE NAO PODE TER MUDADO ──────────────────────
+    ok("R14 a politica de retry continua intacta",
+      /tentativas\s*<\s*t?\.?max_tentativas\s+THEN\s+'pendente'/i.test(falhaB0) &&
+      /ELSE\s+'erro'/i.test(falhaB0));
+    ok("R15 concluir continua forcando progresso 100 e limpando o erro",
+      /progresso\s*=\s*100/i.test(conclB0) &&
+      /erro_tipo\s*=\s*NULL/i.test(conclB0) && /erro_mensagem\s*=\s*NULL/i.test(conclB0));
+    ok("R16 falhar continua gravando erro nos DOIS caminhos e so datando o terminal",
+      /erro_tipo\s*=\s*btrim\(p_erro_tipo\)/i.test(falhaB0) &&
+      /concluido_em\s*=\s*CASE\s+WHEN\s+v_status\s*=\s*'erro'/i.test(falhaB0));
+
+    // ── R17..R18 — FAIL-CLOSED ────────────────────────────────────
+    ok("R17 zero linha LANCA 55000 nas duas, nunca no-op",
+      (conclB0.match(/ERRCODE\s*=\s*'55000'/gi) ?? []).length >= 2 &&
+      (falhaB0.match(/ERRCODE\s*=\s*'55000'/gi) ?? []).length >= 2);
+    // R18 nao e so validacao de parametro: e o que sustenta o cutover.
+    // O PostgREST resolve o overload pelo CONJUNTO DE CHAVES do corpo.
+    // Com DEFAULT em `p_tentativa_esperada`, o payload antigo de duas
+    // chaves passaria a casar as DUAS assinaturas e a resposta viraria
+    // 300. Sem default, cada payload casa exatamente uma.
+    ok("R18 a tentativa esperada e OBRIGATORIA, sem default",
+      /p_tentativa_esperada\s+IS\s+NULL[\s\S]{0,200}?ERRCODE\s*=\s*'22023'/i.test(conclB0) &&
+      /p_tentativa_esperada\s+IS\s+NULL[\s\S]{0,200}?ERRCODE\s*=\s*'22023'/i.test(falhaB0) &&
+      !/p_tentativa_esperada\s+integer\s+DEFAULT/i.test(migB0));
+
+    // ── R19..R21 — ACL ────────────────────────────────────────────
+    //
+    // Padrao rigoroso: revoga tambem de `service_role` antes de
+    // conceder, porque este projeto tem ALTER DEFAULT PRIVILEGES dando
+    // EXECUTE a toda funcao nova — herdar seria confiar num default.
+    for (const [rotulo, papel] of [
+      ["R19", "public"], ["R19", "anon"], ["R20", "authenticated"], ["R20", "service_role"],
+    ] as const) {
+      ok(`${rotulo} 2 REVOKE FROM ${papel} (um por funcao)`,
+        conta(migB0, new RegExp(`REVOKE\\s+ALL[\\s\\S]{0,120}?FROM\\s+${papel}\\b`, "gi")) === 2);
+    }
+    ok("R21 2 GRANT EXECUTE TO service_role, e nada alem",
+      conta(migB0, /GRANT\s+EXECUTE[\s\S]{0,120}?TO\s+service_role/gi) === 2 &&
+      !/GRANT[\s\S]{0,120}?TO\s+(anon|authenticated|public)\b/i.test(migB0));
+    ok("R22 as duas continuam SECURITY INVOKER com search_path fixo",
+      conta(migB0, /SECURITY\s+INVOKER/gi) === 2 &&
+      conta(migB0, /SET\s+search_path\s*=\s*public/gi) === 2);
+
+    // ── R23..R26 — O CALLER PROPAGA A TENTATIVA CERTA ─────────────
+    ok("R23 o wrapper de concluir recebe e envia a tentativa",
+      /concluirTarefa\([\s\S]{0,160}?tentativaEsperada:\s*number/.test(capw) &&
+      /p_tentativa_esperada:\s*tentativaEsperada/.test(capw));
+    /** O corpo de UM wrapper, por fatia ate o proximo `export`. Contar
+     *  no arquivo inteiro daria 3 — `aguardarAprovacaoTarefa` ja usava
+     *  `p_tentativa_esperada` desde o P0, e a primeira versao desta
+     *  sonda exigia 2 e ficava vermelha sobre codigo correto. */
+    const corpoDoWrapper = (nome: string): string => {
+      const i = capw.indexOf(`export async function ${nome}(`);
+      if (i < 0) return "";
+      const j = capw.indexOf("export async function", i + 10);
+      return j < 0 ? capw.slice(i) : capw.slice(i, j);
+    };
+
+    ok("R24 o wrapper de falhar recebe e envia a tentativa",
+      /tentativaEsperada:\s*number/.test(corpoDoWrapper("falharTarefa")) &&
+      /p_tentativa_esperada:\s*tentativaEsperada/.test(corpoDoWrapper("falharTarefa")));
+    ok("R24 ANCORA: os dois corpos foram recortados de verdade",
+      corpoDoWrapper("falharTarefa").length > 200 &&
+      corpoDoWrapper("concluirTarefa").length > 200 &&
+      corpoDoWrapper("falharTarefa") !== corpoDoWrapper("concluirTarefa"));
+    ok("R24 CONTROLE NEGATIVO: um wrapper sem o parametro reprova",
+      !/p_tentativa_esperada/.test(
+        corpoDoWrapper("falharTarefa").split("p_tentativa_esperada").join("")));
+    // A pausa tambem carrega a tentativa — e desde o P0, nao pelo B0.
+    ok("R24b a pausa ja tinha o proprio fence, e continua tendo",
+      /p_tentativa_esperada/.test(corpoDoWrapper("aguardarAprovacaoTarefa")));
+
+    /** O executor tem de mandar o valor LIDO, nao um calculo. */
+    const mandaTentativaDaLinha = (t: string, fn: string): boolean =>
+      new RegExp(`${fn}\\([\\s\\S]{0,220}?tarefa\\.tentativas`).test(t);
+
+    ok("R25 o executor manda tarefa.tentativas ao concluir",
+      mandaTentativaDaLinha(exe, "concluirTarefa"));
+    ok("R25 CONTROLE NEGATIVO: constante no lugar da tentativa reprova",
+      !mandaTentativaDaLinha(
+        exe.replace(/concluirTarefa\(([\s\S]{0,220}?)tarefa\.tentativas/, "concluirTarefa($11"),
+        "concluirTarefa"));
+    ok("R26 o executor manda tarefa.tentativas ao falhar",
+      mandaTentativaDaLinha(exe, "falharTarefa"));
+    ok("R26 CONTROLE NEGATIVO: mandar maxTentativas reprova",
+      !mandaTentativaDaLinha(
+        exe.replace(/falharTarefa\(([\s\S]{0,220}?)tarefa\.tentativas/,
+          "falharTarefa($1tarefa.max_tentativas"),
+        "falharTarefa"));
+
+    // ── R27..R28 — O QUE O B0 NAO PODE TER TOCADO ─────────────────
+    //
+    // O ramo de pausa continua com a RPC dele, que ja tinha fence
+    // proprio desde o P0 — e continua sem chamar as duas terminais.
+    ok("R27 a pausa continua usando aguardar_aprovacao_tarefa com a tentativa",
+      /aguardarAprovacaoTarefa\(\s*\n?\s*tarefa\.id,\s*\n?\s*tarefa\.tentativas/.test(exe));
+    ok("R28 o B0 nao tocou claim, Approval nem Resume",
+      !/claim_next_agente_tarefa/i.test(migB0) &&
+      !/agente_funcao_aprovacoes|aprovacao_decidir|aprovacao_consumir/i.test(migB0) &&
+      !/retomarAprovacao|consumirAprovacaoEAbrir|decidirAprovacao/.test(exe + capw));
+
+    // ── R29 — a suite de banco acompanhou ─────────────────────────
+    //
+    // Ela nao e executada aqui (banco real), mas deixar payload
+    // obsoleto nela seria publicar codigo que o banco ja recusa.
+    const bancoSrc = fonte("scripts/testar-agentes-execucao-banco.ts");
+    const chamadasTerminais =
+      conta(bancoSrc, /rpc\(\s*"(concluir_tarefa|falhar_tarefa)"/g) +
+      conta(bancoSrc, /p_erro_tipo:\s*"x",\s*p_erro_mensagem:\s*"y",\s*\n\s*p_tentativa_esperada/g) * 0;
+    ok("R29 a suite de banco leva a tentativa em TODA chamada terminal",
+      conta(bancoSrc, /p_tentativa_esperada/g) >= chamadasTerminais + 1,
+      );
+    ok("R29 ANCORA: ela realmente chama as duas RPCs", chamadasTerminais >= 8);
+  }
+
   console.log("P. Handler conversa");
   {
     const DONO = "dono-U";
