@@ -1107,3 +1107,39 @@ numerado quando uma fase inteira (como "PARTE 2") se encerra de vez.
 - Proveniencia de imagem (metodo, versao, houve_ia, 3 checksums) na mesma tabela das imagens de IA.
 - `sharp` em producao (~20MB, limite 250MB/function).
 - Limitacoes abertas: CAPA1 (decoracao vem junto no recorte) e CAPA2 (transparencia parcial) — ver BUGS.md.
+## CDS IA — Approval/Decision/Resume (2026-09-15)
+
+- **Ponteiro causal Task -> Approval.** `agente_tarefas.aprovacao_aguardada_id` (uuid, null),
+  FK composta `(aprovacao_aguardada_id, user_id) -> agente_funcao_aprovacoes(id, user_id)` com
+  RESTRICT, e CHECK `agente_tarefas_ponteiro_so_na_espera`: o ponteiro so pode existir enquanto
+  `status = 'aguardando_aprovacao'`. Cancelar ou concluir a tarefa exige limpar o ponteiro no
+  MESMO UPDATE.
+- **Pausa com aprovacao causal.** `aguardar_aprovacao_tarefa(uuid, integer, uuid)` e a UNICA
+  assinatura viva. Valida no mesmo UPDATE que a aprovacao pertence a tarefa, ao dono e ao agente,
+  e que esta em `pendente`/`aprovada` e nao vencida. `SECURITY INVOKER`, `search_path=public`,
+  EXECUTE apenas para `service_role`.
+- **Assinatura legada removida.** `aguardar_aprovacao_tarefa(uuid, integer)` nao existe mais.
+- **Ordem de lock congelada: Approval -> Task.** `aprovacao_decidir` e `aprovacao_consumir_e_abrir`
+  travam a Approval primeiro; a pausa escreve a Task e le a Approval por MVCC **sem** `FOR UPDATE`,
+  justamente para nao inverter a ordem do sistema. Nenhuma rotina trava Task antes de Approval.
+- **Piso de compatibilidade de producao:** `d1998901a404fc034711be0392175da62de05c8e`. Deployments
+  anteriores nao sao compativeis com o banco atual.
+- **Migrations estruturais desta frente, aplicadas** — identificador e o nome do
+  arquivo local; a *remote version* e atribuida pelo Supabase no apply e **nao**
+  corresponde ao prefixo do arquivo:
+  - `20260929_agente_tarefa_aguardar_aprovacao.sql`
+    — remote version `20260914173454`, remote name `agente_tarefa_aguardar_aprovacao`
+  - `20260930_tarefa_fencing_por_tentativa.sql`
+    — remote version `20260915132455`, remote name `tarefa_fencing_por_tentativa`
+  - `20261001_remover_tarefa_rpc_sem_fencing.sql`
+    — remote version `20260915140459`, remote name `remover_tarefa_rpc_sem_fencing`
+  - `20261002_tarefa_aprovacao_aguardada.sql`
+    — remote version `20260915151735`, remote name `tarefa_aprovacao_aguardada`
+  - `20261003_remover_aguardar_aprovacao_tarefa_2args.sql`
+    — remote version `20260915170748`, remote name `remover_aguardar_aprovacao_tarefa_2args`
+- **Ainda NAO estrutural — nao existe no banco nem no codigo:** o lifecycle de decisao (a
+  decisao humana **nao** encerra a tarefa; rejeitar deixa a tarefa parada), o resume claim e o
+  scanner de aprovacoes orfas. Nos termos dos gates desta frente: **D4 NAO IMPLEMENTADO**
+  (apenas desenhado e auditado), **D5 e D7 pendentes**. `TRANSICOES_TAREFA` declara
+  `aguardando_aprovacao -> {concluido, cancelado, rodando}`, mas **nenhuma** das tres tem
+  implementacao: continuam letra morta.

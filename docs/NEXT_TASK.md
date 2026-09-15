@@ -34,6 +34,60 @@ Cenario hibrido, camada grafica (@vercel/og), regeneracao individual e score vis
 
 ---
 
+## CDS IA — Approval/Decision/Resume — 2026-09-15
+
+> Modulo diferente do Estudio de Anuncios. Registrado aqui porque `CLAUDE.md`
+> define este arquivo como fonte unica do "onde paramos" do projeto.
+
+**Commit em producao:** `bafce6db4a7feec008d46804d32852d930cb6233` · deployment
+`dpl_EGMKrRo7SfezryNZN5Uw8TyCUusb` READY · migration
+`20261003_remover_aguardar_aprovacao_tarefa_2args.sql` **aplicada**
+(remote version `20260915170748`, remote name
+`remover_aguardar_aprovacao_tarefa_2args`) · tsc limpo · build verde.
+
+### Concluido
+- **D1 — ponteiro duravel.** `agente_tarefas.aprovacao_aguardada_id`, com FK por dono e
+  CHECK "ponteiro so na espera", mais a pausa `aguardar_aprovacao_tarefa(uuid, integer, uuid)`.
+- **D2 — caller de producao.** A pausa passou a gravar o id da Approval causal. Provado em
+  runtime: tarefa parada com o ponteiro igual ao id da aprovacao que ela aguarda.
+- **D3 — limpeza.** A overload legada `aguardar_aprovacao_tarefa(uuid, integer)` foi
+  **removida do banco**. Sobrou apenas a de tres argumentos, unica sobrevivente.
+
+### ATENCAO — rollback floor ATIVO
+`POST_D3_ROLLBACK_FLOOR = d1998901a404fc034711be0392175da62de05c8e`.
+Rollback de codigo para SHA **anterior** a esse e incompativel com o banco atual: o caller
+antigo envia dois argumentos e recebe PGRST202. **Nao usar `23fb46c` nem anteriores** com
+rollback de deploy sozinho — voltar para pre-floor exigiria antes uma migration forward
+recriando a overload de dois argumentos. O Vercel nao conhece esse piso.
+
+### NAO concluido — nao registrar como feito
+- **D4 esta DESENHADO e AUDITADO, mas NAO IMPLEMENTADO.** Contrato ratificado: `aprovacao_decidir`
+  mantem a MESMA assinatura (`CREATE OR REPLACE`, sem nova overload); trava a **Approval
+  primeiro** e a **Task causal depois**; **approve** deixa a tarefa em `aguardando_aprovacao`
+  com o ponteiro intacto (insumo do D5); **reject/cancel** levam a tarefa a `cancelado` com
+  ponteiro NULL e invariantes terminais, na mesma transacao, sem Tool Call e sem executar Funcao.
+- **D5 (resume claim / reentrada do worker): nao implementado.**
+- **D7 (scanner de aprovacoes expiradas/rejeitadas/canceladas orfas e da corrida C0-R3-L1):
+  nao implementado.**
+- **API de decisao nao existe** (`/api/aprovacoes` e GET-only) e os botoes **Aprovar/Recusar
+  seguem `disabled`**. Nao conectar a UI antes de D5 e D7.
+
+### Dividas registradas (nao sao a proxima tarefa)
+- **D3-A0-M1 — OPEN / MEDIUM.** `scripts/testar-agentes-execucao-banco.ts` ainda chama o
+  contrato legado de dois argumentos em quatro pontos. **NAO EXECUTAR essa suite.** Criterio de
+  saida: migrar para a overload de tres argumentos criando/usando uma Approval causal valida
+  (mesma tarefa, dono e agente) e passar EXATAMENTE essa `Approval.id` em `p_aprovacao_id`.
+  O marcador esta no topo do proprio arquivo.
+- **Tarefa parada legada (pre-D1)** tem `Approval.tarefa_id` preenchido e ponteiro NULL; sob o
+  desenho do D4 ela fica nao-decidivel. Cura prevista no D7 ou em reparo forward separado.
+
+### Proxima etapa (aguardando autorizacao)
+1. **D4-I1** — implementacao local: migration + wrapper + guards. Sem API, sem UI, sem apply.
+2. Review, stage, commit, push/deploy e apply do banco em gates separados.
+3. Depois: **D5** (resume) e **D7** (scanner).
+
+---
+
 ## CDS — SEC-1: privilegios do schema public — 2026-08-19
 
 **APLICADA NO BANCO.** Migration em `supabase/migrations/20260819_sec1_revogar_privilegios_nao_utilizados.sql` — **ainda NAO commitada**.
