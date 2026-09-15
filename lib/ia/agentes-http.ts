@@ -45,12 +45,16 @@ import type { AgenteUI, TipoAgenteUI } from "@/lib/ia/contratos";
 import { NIVEIS_AUTONOMIA } from "@/lib/ia/conceitos";
 import type { NivelAutonomia } from "@/lib/ia/conceitos";
 import type { Diagnostico } from "@/lib/ia/skills/diagnostico";
+import type { AprovacaoRealUI } from "@/lib/ia/aprovacoes";
 import type { RequisitoConexao } from "@/lib/ia/skills/contrato";
 
 const ROTA_BASE = "/api/agentes";
 const ROTA_SUFIXO_DIAGNOSTICO = "/diagnostico";
 const ROTA_SUFIXO_CONVERSA = "/conversa";
 const ROTA_SUFIXO_CONSULTAR_VENDAS = "/consultar-vendas";
+/** APPROVAL-UI-API-A2. Fila do DONO, nao de um agente — por isso nao
+ *  pendura em `ROTA_BASE`. */
+const ROTA_APROVACOES = "/api/aprovacoes";
 
 /**
  * Um diagnóstico e a identidade de quem foi diagnosticado.
@@ -1115,4 +1119,122 @@ export async function consultarConsultaVendasDoAgente(
   if (tarefa === null) return { estado: "falha" };
 
   return { estado: "ok", tarefa };
+}
+
+// ── A fila de aprovacoes do dono (APPROVAL-UI-API-A2) ────────────────
+//
+// UMA leitura, e so leitura. Nao ha funcao de decidir aqui, e a ausencia
+// e a decisao de arquitetura: aprovar hoje deixaria a Approval
+// `aprovada` e a tarefa parada em `aguardando_aprovacao` para sempre,
+// porque o claim nao alcanca esse status e nada consome a aprovacao.
+// Decisao entra junto do Resume, num gate so.
+
+export type RespostaAprovacoes =
+  | { estado: "ok"; aprovacoes: readonly AprovacaoRealUI[] }
+  | { estado: "nao_autenticado" }
+  | { estado: "falha" };
+
+const texto = (v: unknown): string | null =>
+  typeof v === "string" && v.length > 0 ? v : null;
+
+/**
+ * Uma Approval da resposta, campo a campo.
+ *
+ * `null` derruba a lista INTEIRA em quem chama — nunca este item so. Uma
+ * fila com um card a menos e pior que um erro: quem decide nao tem como
+ * saber que faltou pedido, e "nenhuma pendencia" e justamente a
+ * mensagem que leva a fechar a aba.
+ */
+function aprovacaoDaResposta(bruto: unknown): AprovacaoRealUI | null {
+  if (!ehObjeto(bruto)) return null;
+
+  const id = texto(bruto.id);
+  const agenteId = texto(bruto.agenteId);
+  const agenteNome = texto(bruto.agenteNome);
+  const funcaoId = texto(bruto.funcaoId);
+  const revisaoFuncao = texto(bruto.revisaoFuncao);
+  const acesso = texto(bruto.acesso);
+  const criadoEm = texto(bruto.criadoEm);
+  const expiraEm = texto(bruto.expiraEm);
+  if (
+    id === null || agenteId === null || agenteNome === null || funcaoId === null ||
+    revisaoFuncao === null || acesso === null || criadoEm === null || expiraEm === null
+  ) {
+    return null;
+  }
+
+  // O vocabulario do contrato de Funcao, nao uma string qualquer.
+  if (acesso !== "leitura" && acesso !== "escrita") return null;
+
+  // Esta fila e de PENDENTES. Uma decidida chegando aqui significa que o
+  // servidor mudou de contrato, e exibi-la como decidivel seria oferecer
+  // uma decisao ja tomada.
+  if (bruto.estado !== "pendente") return null;
+
+  // Nullable de verdade: Funcao sem tarefa existe.
+  const tarefaId =
+    bruto.tarefaId === null || bruto.tarefaId === undefined ? null : texto(bruto.tarefaId);
+  if (tarefaId === null && bruto.tarefaId !== null && bruto.tarefaId !== undefined) return null;
+
+  const argumentos = bruto.argumentos;
+  if (!ehObjeto(argumentos)) return null;
+
+  // Tudo-ou-nada, como o CHECK `par_requisito_conexao` do banco. Meia
+  // conexao descreveria um alvo que nao existe.
+  let conexao: AprovacaoRealUI["conexao"] = null;
+  if (bruto.conexao !== null && bruto.conexao !== undefined) {
+    if (!ehObjeto(bruto.conexao)) return null;
+    const plataforma = texto(bruto.conexao.plataforma);
+    const recurso = texto(bruto.conexao.recurso);
+    if (plataforma === null || recurso === null) return null;
+    conexao = { plataforma, recurso };
+  }
+
+  return {
+    id,
+    agenteId,
+    agenteNome,
+    tarefaId,
+    funcaoId,
+    revisaoFuncao,
+    acesso,
+    estado: "pendente",
+    criadoEm,
+    expiraEm,
+    argumentos,
+    conexao,
+  };
+}
+
+/**
+ * Os pedidos de autorizacao que ainda esperam por este dono.
+ *
+ * Uma chamada, sem corpo e sem cabecalho: o cookie same-origin e toda a
+ * credencial, e o servidor filtra pelo dono. Lista vazia e resposta
+ * COMPLETA — nao e ausencia de resposta e nao vira erro.
+ */
+export async function listarAprovacoesPendentes(
+  signal?: AbortSignal
+): Promise<RespostaAprovacoes> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(ROTA_APROVACOES, { signal });
+  } catch {
+    return { estado: "falha" };
+  }
+
+  if (resposta.status === 401) return { estado: "nao_autenticado" };
+
+  const corpo = await corpoDe(resposta);
+  if (!resposta.ok || !ehObjeto(corpo) || corpo.ok !== true) return { estado: "falha" };
+  if (!Array.isArray(corpo.aprovacoes)) return { estado: "falha" };
+
+  const aprovacoes: AprovacaoRealUI[] = [];
+  for (const bruta of corpo.aprovacoes) {
+    const lida = aprovacaoDaResposta(bruta);
+    if (lida === null) return { estado: "falha" };
+    aprovacoes.push(lida);
+  }
+
+  return { estado: "ok", aprovacoes };
 }

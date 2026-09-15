@@ -175,3 +175,180 @@ export function maisAntigasPrimeiro(aprovacoes: readonly AprovacaoUI[]): Aprovac
     (a, b) => (Date.parse(a.solicitadaEm) || 0) - (Date.parse(b.solicitadaEm) || 0)
   );
 }
+
+// ══ A fila REAL (APPROVAL-UI-API-A2) ══════════════════════════════════
+//
+// Tudo acima descreve a era do mock e continua servindo `Timeline`, o
+// Escritorio e o que mais ainda simula. O que vem abaixo e outra coisa:
+// e o contrato que `GET /api/aprovacoes` publica de verdade, e ele e
+// MENOR.
+//
+// A diferenca nao e detalhe. `AprovacaoUI` tem `motivo`, `impacto`,
+// `risco`, `procedencia`, `acao.rotulo` e `acao.irreversivel`; a
+// infraestrutura real nao tem nenhum dos seis, e nao ha de onde
+// deriva-los. Reaproveitar aquele tipo obrigaria a preencher esses
+// campos com algo — e "algo" numa tela de autorizacao e exatamente o que
+// nao pode existir. Por isso sao dois tipos, e nao um flexibilizado.
+
+/** O requisito de conexao de uma Approval real. Dois rotulos, e so.
+ *  Sem conta, sem id de loja, sem estado — o contrato nao os tem. */
+export interface ConexaoDaAprovacaoReal {
+  plataforma: string;
+  recurso: string;
+}
+
+/**
+ * Uma Approval pendente como o servidor a entrega.
+ *
+ * Os doze campos do contrato A1, nem um a mais. `estado` e sempre
+ * `"pendente"` — a rota so devolve pendentes ainda validas —, mas vem
+ * no tipo porque e o contrato, e omiti-lo obrigaria quem le a supor.
+ */
+export interface AprovacaoRealUI {
+  id: string;
+  agenteId: string;
+  agenteNome: string;
+  tarefaId: string | null;
+  funcaoId: string;
+  revisaoFuncao: string;
+  acesso: string;
+  estado: string;
+  criadoEm: string;
+  expiraEm: string;
+  argumentos: Record<string, unknown>;
+  conexao: ConexaoDaAprovacaoReal | null;
+}
+
+// ── Rotulo da Funcao ──────────────────────────────────────────────────
+
+/**
+ * Nome humano por Funcao conhecida.
+ *
+ * Mapa fechado de propósito: Funcao nova aparece pelo proprio id ate
+ * alguem escrever o rotulo dela. Um gerador automatico — trocar ponto
+ * por espaco, capitalizar — produziria "Vendas Consultar" e coisas
+ * piores, com cara de texto revisado.
+ */
+const ROTULO_FUNCAO: Readonly<Record<string, string>> = {
+  "vendas.consultar": "Consultar vendas",
+};
+
+/** O rotulo, ou o proprio id quando nao ha rotulo. Nunca uma descricao
+ *  inventada a partir do id. */
+export function rotuloDaFuncao(funcaoId: string): string {
+  return ROTULO_FUNCAO[funcaoId] ?? funcaoId;
+}
+
+// ── Argumentos, por Funcao ────────────────────────────────────────────
+
+/**
+ * Um par rotulo/valor ja pronto para a tela. Mesmo formato do
+ * `ArgumentoExibivel` da era mock, mas produzido por um renderer
+ * NOMINAL por Funcao — nunca por varredura de chaves.
+ */
+export interface DetalheArgumento {
+  rotulo: string;
+  valor: string;
+}
+
+/**
+ * `null` significa "nao sei mostrar isto com honestidade".
+ *
+ * Tres caminhos levam a `null`, e todos sao desejaveis: Funcao sem
+ * renderer; argumentos com forma inesperada; valor fora do vocabulario.
+ * Em nenhum deles a tela cai para JSON cru — despejar o objeto seria
+ * transformar a falta de um renderer em vazamento de forma interna, e
+ * quem decide nao teria como distinguir o que e dado do que e estrutura.
+ */
+export type DetalhesDaSolicitacao = readonly DetalheArgumento[] | null;
+
+/**
+ * `2026-09-12` -> `12/09/2026`, por CORTE de string.
+ *
+ * Nada de `new Date("2026-09-12")`: essa forma e interpretada como UTC
+ * meia-noite e, em qualquer fuso a oeste de Greenwich — o Brasil
+ * inteiro —, `getDate()` devolve o dia ANTERIOR. O periodo consultado
+ * apareceria deslocado em um dia na tela de autorizacao.
+ */
+export function dataCivil(iso: string): string | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+  if (m === null) return null;
+  const [, ano, mes, dia] = m;
+  const nMes = Number(mes);
+  const nDia = Number(dia);
+  if (nMes < 1 || nMes > 12 || nDia < 1 || nDia > 31) return null;
+  return `${dia}/${mes}/${ano}`;
+}
+
+/** O vocabulario real de marketplace de `vendas.consultar`. Ausente e
+ *  `null` significam "Todos"; qualquer outro valor NAO e traduzido. */
+const ROTULO_MARKETPLACE: Readonly<Record<string, string>> = {
+  Shopee: "Shopee",
+  ML: "Mercado Livre",
+};
+
+export function rotuloDeMarketplace(bruto: unknown): string | null {
+  if (bruto === undefined || bruto === null) return "Todos";
+  if (typeof bruto !== "string") return null;
+  return ROTULO_MARKETPLACE[bruto] ?? null;
+}
+
+/**
+ * Os detalhes de `vendas.consultar`: periodo e marketplace.
+ *
+ * Allowlist de TRES campos. Um quarto campo que a Funcao passe a aceitar
+ * nao aparece aqui sozinho — e isso e a propriedade, nao uma limitacao.
+ */
+function detalhesDeConsultarVendas(argumentos: Record<string, unknown>): DetalhesDaSolicitacao {
+  const inicio = argumentos.dataInicio;
+  const fim = argumentos.dataFim;
+  if (typeof inicio !== "string" || typeof fim !== "string") return null;
+
+  const de = dataCivil(inicio);
+  const ate = dataCivil(fim);
+  if (de === null || ate === null) return null;
+
+  const marketplace = rotuloDeMarketplace(argumentos.marketplace);
+  if (marketplace === null) return null;
+
+  return [
+    { rotulo: "Período", valor: `${de} a ${ate}` },
+    { rotulo: "Marketplace", valor: marketplace },
+  ];
+}
+
+/** O registro de renderers. Fechado: Funcao ausente daqui devolve
+ *  `null`, e a tela diz que nao sabe mostrar. */
+const RENDERERS: Readonly<
+  Record<string, (a: Record<string, unknown>) => DetalhesDaSolicitacao>
+> = {
+  "vendas.consultar": detalhesDeConsultarVendas,
+};
+
+export function detalhesDaSolicitacao(aprovacao: AprovacaoRealUI): DetalhesDaSolicitacao {
+  const renderer = RENDERERS[aprovacao.funcaoId];
+  if (renderer === undefined) return null;
+  return renderer(aprovacao.argumentos);
+}
+
+/** Texto unico para os tres casos de "nao da para mostrar". Um so,
+ *  porque distinguir "Funcao desconhecida" de "argumento estranho" na
+ *  tela nao ajuda quem decide e descreve o nosso codigo, nao o pedido. */
+export const SEM_DETALHES = "Detalhes da solicitação indisponíveis para esta função.";
+
+// ── Expiracao ─────────────────────────────────────────────────────────
+
+/**
+ * A API so devolve Approval ainda valida NO INSTANTE do GET. Uma aba
+ * aberta por horas continua exibindo o que era verdade quando carregou.
+ *
+ * Isto NAO escreve nada e nao pede nada ao servidor: apenas compara, e a
+ * tela para de apresentar a linha como decidivel. Fingir validade
+ * enquanto o relogio passou seria oferecer uma decisao que o banco ja
+ * recusaria.
+ */
+export function expirouLocalmente(aprovacao: Pick<AprovacaoRealUI, "expiraEm">, agoraMs: number): boolean {
+  const t = Date.parse(aprovacao.expiraEm);
+  if (Number.isNaN(t)) return false;
+  return agoraMs >= t;
+}

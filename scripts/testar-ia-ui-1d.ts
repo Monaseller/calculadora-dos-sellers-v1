@@ -237,8 +237,26 @@ secao("E. Fila: pendentes, ordem e estado vazio");
   ok("E3  a fila nao tem nocao de item decidido",
     !/status\s*===\s*"(aprovada|recusada|aprovado|recusado)"/.test(codigo(FILA)) &&
     !/\.filter\([^)]*decid/i.test(codigo(FILA)));
-  ok("E3b a fila renderiza a fila pendente, e so ela",
-    /MOCK_APROVACOES/.test(codigo(FILA)) && /maisAntigasPrimeiro/.test(codigo(FILA)));
+  // ── E3b migrado na APPROVAL-UI-API-A2 ───────────────────────────
+  //
+  // Ate aqui este assert exigia que a fila usasse `MOCK_APROVACOES`, e
+  // estava certo: ela usava. Agora ela le `GET /api/aprovacoes` pelo
+  // transporte, e o assert foi INVERTIDO, nao afrouxado — continua
+  // afirmando de onde a fila tira os dados, so que a resposta mudou.
+  // Exigir as duas pontas (ausencia do mock E presenca do transporte)
+  // e o que impede a fila de ficar sem fonte nenhuma e passar.
+  ok("E3b a fila vem da rota real, e NAO do mock",
+    !/MOCK_APROVACOES/.test(codigo(FILA)) &&
+    /listarAprovacoesPendentes/.test(codigo(FILA)));
+  ok("E3b1 CONTROLE NEGATIVO: voltar ao mock reprova",
+    /MOCK_APROVACOES/.test("import { MOCK_APROVACOES } from '@/lib/ia/mocks';"));
+  ok("E3b2 CONTROLE NEGATIVO: perder o transporte reprova",
+    !/listarAprovacoesPendentes/.test(
+      codigo(FILA).split("listarAprovacoesPendentes").join("")));
+  // A ordem agora e do SERVIDOR (`criado_em DESC, id DESC`). Reordenar
+  // aqui criaria duas verdades sobre qual e o topo da fila.
+  ok("E3b3 a fila nao reordena o que o servidor ja ordenou",
+    !/maisAntigasPrimeiro/.test(codigo(FILA)) && !/\.sort\(/.test(codigo(FILA)));
   ok("E3c controle negativo: a sonda acha um filtro de decididas",
     /status\s*===\s*"(aprovada|recusada|aprovado|recusado)"/.test('x.status === "aprovada"'));
   ok("E4  aponta o historico para Atividade", /Atividade/.test(FILA));
@@ -249,7 +267,16 @@ secao("E. Fila: pendentes, ordem e estado vazio");
       { id: "nova", solicitadaEm: ha(60_000) } as AprovacaoUI,
       { id: "velha", solicitadaEm: ha(600_000) } as AprovacaoUI,
     ]).map((a) => a.id).join(",") === "velha,nova");
-  ok("E7  a fila avisa que os dados sao simulados", /MOCK_AVISO/.test(FILA));
+  // ── E7 migrado na APPROVAL-UI-API-A2 ────────────────────────────
+  //
+  // O aviso de simulacao saiu porque a superficie deixou de simular —
+  // manter o selo sobre dado real seria mentir na direcao oposta. O
+  // guard equivalente para as superficies que AINDA simulam continua em
+  // `testar-ia-ui.ts` (F3), com allowlist nominal fechada nos dois
+  // sentidos; aqui provamos apenas a ponta desta tela.
+  ok("E7  a fila NAO se anuncia mais como simulada", !/MOCK_AVISO/.test(FILA));
+  ok("E7a e o aviso continua existindo para quem ainda simula",
+    /MOCK_AVISO/.test(ler("components/ia/atividade/Timeline.tsx")));
 
   ok("E8  'há X' formatado", desdeQuando(ha(120_000), AGORA) === "há 2 min");
   ok("E9  menos de 1 min", desdeQuando(ha(20_000), AGORA) === "agora há pouco");
@@ -270,7 +297,18 @@ secao("F. Mocks e cenarios");
     MOCK_APROVACOES.every((a) => !/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(a.tarefaId)));
   ok("F4  TODA acao esta marcada como cenario futuro",
     MOCK_APROVACOES.every((a) => a.procedencia === "em_breve"));
-  ok("F5  o card exibe 'Cenário futuro'", /Cenário futuro/.test(CARD));
+  // ── F5 migrado na APPROVAL-UI-API-A2 ────────────────────────────
+  //
+  // O card deixou de ser cenario futuro: ele mostra uma Approval que
+  // existe no banco. O que NAO mudou e que ninguem decide ainda, e e
+  // isso que o assert passou a exigir — com a mesma severidade, so que
+  // sobre a afirmacao correta.
+  ok("F5  o card real NAO se apresenta como cenario ficticio",
+    !/Cenário futuro/.test(CARD) && !/simulad/i.test(CARD));
+  ok("F5a mas continua dizendo, em texto, que a decisao nao esta disponivel",
+    /EXPLICACAO_INELEGIVEL/.test(CARD));
+  ok("F5b e nao afirma nenhum desfecho que nao aconteceu",
+    !/\bAprovado\b|\bRecusado\b|\bRejeitado\b/.test(CARD));
   ok("F6  cobre risco baixo, medio e alto",
     RISCOS.every((r) => MOCK_APROVACOES.some((a) => a.risco === r)),
     RISCOS.filter((r) => !MOCK_APROVACOES.some((a) => a.risco === r)).join(","));
@@ -384,10 +422,33 @@ secao("G. Zero backend e zero segredo");
 secao("H. Acessibilidade e responsividade");
 
 {
-  ok("H1  risco tem simbolo E texto",
-    /SIMBOLO_RISCO/.test(CARD) && /ROTULO_RISCO/.test(CARD));
-  ok("H2  estado da conexao tem icone E texto",
-    /VOCABULARIO_CONEXAO\[[^\]]+\]\.icone/.test(CARD) && /VOCABULARIO_CONEXAO\[[^\]]+\]\.rotulo/.test(CARD));
+  // ── H1 migrado na APPROVAL-UI-API-A2 ────────────────────────────
+  //
+  // `risco` era campo do mock. `agente_funcao_aprovacoes` nao o tem, e
+  // nao ha de onde deriva-lo: exibi-lo obrigaria a inventar um nivel de
+  // perigo numa tela de autorizacao. O assert nao foi removido — passou
+  // a proibir exatamente o que antes exigia.
+  ok("H1  o card NAO inventa risco, simbolo nem rotulo de risco",
+    !/SIMBOLO_RISCO/.test(CARD) && !/ROTULO_RISCO/.test(CARD) &&
+    !/\.risco\b/.test(codigo(CARD)));
+  ok("H1a CONTROLE NEGATIVO: a sonda acha risco se ele voltar",
+    /SIMBOLO_RISCO/.test("const x = SIMBOLO_RISCO[a.risco];"));
+  // O que substitui o selo de risco e o dado que EXISTE: o acesso
+  // declarado pela Funcao, com icone e texto.
+  ok("H1b o acesso continua com icone E texto",
+    /ROTULO_ACESSO/.test(CARD) && /acesso\.icone/.test(CARD) && /acesso\.rotulo/.test(CARD));
+  // ── H2 migrado na APPROVAL-UI-API-A2 ────────────────────────────
+  //
+  // O contrato real de conexao tem DOIS rotulos — plataforma e recurso
+  // — e mais nada: sem conta, sem id de loja, sem estado. O card nao
+  // pode pintar um estado que o servidor nao informa.
+  ok("H2  o card NAO inventa estado nem conta de conexao",
+    !/VOCABULARIO_CONEXAO/.test(CARD) &&
+    !/conexao\.conta|conexao\.estado/.test(codigo(CARD)));
+  ok("H2a e quando ha conexao mostra so os dois rotulos reais",
+    /conexao\.plataforma/.test(CARD) && /conexao\.recurso/.test(CARD));
+  ok("H2b sem conexao a tela diz isso em texto, nao em simbolo",
+    /Não depende de conta externa/.test(CARD));
   ok("H3  headings hierarquicos (h2 fila, h3 card, h5 detalhe)",
     /<h2/.test(FILA) && /<h3/.test(CARD) && /<h5/.test(DETALHE));
   ok("H4  o card e rotulado para leitor de tela", /aria-labelledby/.test(CARD));

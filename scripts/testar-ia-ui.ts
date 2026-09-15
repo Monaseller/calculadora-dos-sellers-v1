@@ -592,9 +592,14 @@ secao("F. Mocks centralizados e ficticios");
   // tela nova exibindo o aviso reprova, e tela autorizada que parar de
   // exibi-lo tambem, porque allowlist com item obsoleto e protecao que
   // morre sem ninguem perceber.
+  //
+  // APPROVAL-UI-API-A2: a fila de aprovacoes SAIU desta allowlist
+  // porque deixou de simular — ela le `GET /api/aprovacoes`. A saida e
+  // nominal, e a igualdade nos dois sentidos continua intacta: se a
+  // fila voltar a exibir o aviso, `aMais` a pega; se uma das duas
+  // restantes parar de exibi-lo, `sumiram` a pega.
   const SUPERFICIES_QUE_AVISAM: readonly string[] = [
     "app/(app)/ia/page.tsx",                        // Escritorio: MOCK_AGENTES/MOCK_TAREFAS
-    "components/ia/aprovacoes/FilaAprovacoes.tsx",  // fila: MOCK_APROVACOES
     "components/ia/atividade/Timeline.tsx",         // feed: MOCK_ATIVIDADES
   ];
   const exibem = ARQUIVOS_UI.filter((a) => !ehMock(a) && /MOCK_AVISO/.test(codigo(ler(a))));

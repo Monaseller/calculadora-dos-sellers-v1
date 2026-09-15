@@ -181,6 +181,11 @@ secao("B. O que a UI NAO manda");
     // Leitura pura — nao cria tarefa, nao reexecuta, nao aciona o
     // dispatcher.
     "consultarConsultaVendasDoAgente",
+    // APPROVAL-UI-API-A2: a fila de aprovacoes do dono. SEXTA leitura, e
+    // nominal como as outras cinco — uma lista que parasse de crescer
+    // deixaria o leitor novo invisivel, livre para ganhar `method` ou
+    // `body` sem ninguem notar.
+    "listarAprovacoesPendentes",
   ];
   /** Toda funcao exportada SEM `method:` e uma leitura. */
   const leiturasReais = [...CODIGO_TRANSPORTE.matchAll(/export async function (\w+)\(/g)]
@@ -189,17 +194,17 @@ secao("B. O que a UI NAO manda");
     .sort();
   const leiturasEsperadas = JSON.stringify([...LEITURAS_AUTORIZADAS].sort());
 
-  ok("B5  as quatro leituras continuam GET puro, sem method e sem corpo",
+  ok("B5  as leituras nominais continuam GET puro, sem method e sem corpo",
     LEITURAS_AUTORIZADAS.every((f) => {
       const corpo = corpoDaFuncao(f);
       return corpo.length > 50 && !/method\s*:|body\s*:/.test(corpo);
     }));
-  ok("B5a0 e as leituras publicadas sao EXATAMENTE as quatro nominais",
+  ok("B5a0 e as leituras publicadas sao EXATAMENTE as nominais",
     JSON.stringify(leiturasReais) === leiturasEsperadas,
     leiturasReais.join(", ") || "nenhuma");
   ok("B5a1 CONTROLE NEGATIVO: um leitor sumir reprovaria",
     JSON.stringify([...LEITURAS_AUTORIZADAS].slice(1).sort()) !== leiturasEsperadas);
-  ok("B5a2 CONTROLE NEGATIVO: um QUINTO leitor reprovaria",
+  ok("B5a2 CONTROLE NEGATIVO: um leitor A MAIS reprovaria",
     JSON.stringify([...LEITURAS_AUTORIZADAS, "listarQualquerOutraCoisa"].sort()) !==
       leiturasEsperadas);
   ok("B5a3 CONTROLE NEGATIVO: TROCA mantendo o total de quatro reprovaria",
@@ -207,7 +212,7 @@ secao("B. O que a UI NAO manda");
       ["listarAgentes", "obterDiagnostico", "consultarConversaDoAgente", "outraLeitura"].sort()
     ) !== leiturasEsperadas);
   ok("B5a4 ANCORA: a varredura enxergou leitores de verdade",
-    leiturasReais.length === 5 && corpoDaFuncao("listarPermissoesDoAgente").length > 50);
+    leiturasReais.length === 6 && corpoDaFuncao("listarPermissoesDoAgente").length > 50);
   // A leitura de permissoes e leitura: nao define nada, nao cria linha e
   // nao executa Funcao.
   ok("B5a5 a leitura de permissoes repassa o sinal e nao escreve",
@@ -945,6 +950,336 @@ async function principal(): Promise<void> {
     const mInf = await consultarConsultaVendasDoAgente(UUID_A, UUID_TAREFA);
     ok("M13 faturamento Infinity num balde e recusado, fail-closed",
       mInf.estado === "ok" && mInf.tarefa.resultado === null);
+  }
+
+  // ── N. listarAprovacoesPendentes — a fila real, EXECUTADA ────────
+  //
+  // APPROVAL-UI-API-A2. O transporte roda de verdade contra o duplo, e
+  // a propriedade central desta secao e a ausencia de tolerancia: uma
+  // linha invalida derruba a lista INTEIRA.
+  //
+  // Isso nao e rigor decorativo. Uma fila com um card a menos e pior
+  // que um erro explicito — quem decide nao tem como saber que faltou
+  // pedido, e "nenhuma pendencia" e exatamente a mensagem que leva a
+  // fechar a aba com uma autorizacao esperando.
+  secao("N. listarAprovacoesPendentes — a fila real do dono");
+  {
+    const { listarAprovacoesPendentes } = await import("../lib/ia/agentes-http");
+
+    /** Uma Approval como a rota A1 a publica. */
+    const aprovacaoReal = (extra: Record<string, unknown> = {}) => ({
+      id: "11111111-1111-4111-8111-111111111111",
+      agenteId: UUID_A,
+      agenteNome: "Teste Chat IA Real",
+      tarefaId: "dddddddd-4444-4444-8444-dddddddddddd",
+      funcaoId: "vendas.consultar",
+      revisaoFuncao: "1",
+      acesso: "leitura",
+      estado: "pendente",
+      criadoEm: "2026-09-14T21:00:26.856Z",
+      expiraEm: "2026-09-15T21:00:26.856Z",
+      argumentos: { dataInicio: "2026-09-12", dataFim: "2026-09-13" },
+      conexao: null,
+      ...extra,
+    });
+
+    // ── N1..N4 — o caminho feliz ──────────────────────────────────
+    responde(200, { ok: true, aprovacoes: [aprovacaoReal()] });
+    const n1 = await listarAprovacoesPendentes();
+    ok("N1  200 com fila valida -> estado ok",
+      n1.estado === "ok" && n1.aprovacoes.length === 1, n1.estado);
+    ok("N2  o GET foi para /api/aprovacoes, sem parametro de dono",
+      chamadas.length === 1 && chamadas[0]?.url === "/api/aprovacoes",
+      String(chamadas[0]?.url));
+    ok("N3  os doze campos do contrato atravessam",
+      n1.estado === "ok" &&
+      JSON.stringify(Object.keys(n1.aprovacoes[0] ?? {}).sort()) ===
+        JSON.stringify([
+          "acesso", "agenteId", "agenteNome", "argumentos", "conexao", "criadoEm",
+          "estado", "expiraEm", "funcaoId", "id", "revisaoFuncao", "tarefaId",
+        ]),
+      Object.keys((n1 as { aprovacoes?: unknown[] }).aprovacoes?.[0] ?? {}).join(", "));
+    ok("N4  os argumentos chegam como OBJETO, nao texto",
+      n1.estado === "ok" &&
+      (n1.aprovacoes[0]?.argumentos as Record<string, unknown>).dataInicio === "2026-09-12");
+
+    // ── N5 — vazio e sucesso, nao erro ────────────────────────────
+    responde(200, { ok: true, aprovacoes: [] });
+    const n5 = await listarAprovacoesPendentes();
+    ok("N5  fila VAZIA e sucesso, nao falha",
+      n5.estado === "ok" && n5.aprovacoes.length === 0);
+
+    // ── N6..N9 — os desfechos de transporte ───────────────────────
+    responde(401, { ok: false, erro: "Não autenticado." });
+    ok("N6  401 vira estado proprio, distinguivel de falha",
+      (await listarAprovacoesPendentes()).estado === "nao_autenticado");
+
+    responde(500, { ok: false, erro: "Falha ao listar as aprovações." });
+    ok("N7  500 vira falha controlada",
+      (await listarAprovacoesPendentes()).estado === "falha");
+
+    responde(200, "ilegivel");
+    ok("N8  JSON ilegivel vira falha, nao excecao",
+      (await listarAprovacoesPendentes()).estado === "falha");
+
+    proxima = "erro";
+    chamadas = [];
+    ok("N8b rede caindo vira falha, nao excecao que sobe",
+      (await listarAprovacoesPendentes()).estado === "falha");
+
+    responde(200, { ok: false, aprovacoes: [] });
+    ok("N9  `ok: false` com 200 nao e sucesso",
+      (await listarAprovacoesPendentes()).estado === "falha");
+
+    responde(200, { ok: true, aprovacoes: "nao e lista" });
+    ok("N10 `aprovacoes` que nao e array vira falha",
+      (await listarAprovacoesPendentes()).estado === "falha");
+
+    // ── N11..N17 — o shape, campo a campo ─────────────────────────
+    const recusa = async (nome: string, extra: Record<string, unknown>) => {
+      responde(200, { ok: true, aprovacoes: [aprovacaoReal(extra)] });
+      const r = await listarAprovacoesPendentes();
+      ok(nome, r.estado === "falha", r.estado);
+    };
+
+    responde(200, { ok: true, aprovacoes: [aprovacaoReal({ tarefaId: null })] });
+    const semTarefa = await listarAprovacoesPendentes();
+    ok("N11 tarefaId null e ACEITO — Funcao sem tarefa existe",
+      semTarefa.estado === "ok" && semTarefa.aprovacoes[0]?.tarefaId === null);
+
+    await recusa("N12 estado diferente de pendente e recusado", { estado: "aprovada" });
+    await recusa("N13 argumentos em ARRAY e recusado", { argumentos: ["a", "b"] });
+    await recusa("N14 agenteNome vazio e recusado", { agenteNome: "" });
+    await recusa("N15 conexao pela METADE e recusada", { conexao: { plataforma: "ml" } });
+    await recusa("N16 acesso fora do vocabulario e recusado", { acesso: "inventado" });
+    await recusa("N17 id ausente e recusado", { id: null });
+
+    responde(200, {
+      ok: true,
+      aprovacoes: [aprovacaoReal({ conexao: { plataforma: "mercado_livre", recurso: "ads" } })],
+    });
+    const comConexao = await listarAprovacoesPendentes();
+    ok("N18 conexao COMPLETA atravessa como dois rotulos",
+      comConexao.estado === "ok" &&
+      JSON.stringify(comConexao.aprovacoes[0]?.conexao) ===
+        JSON.stringify({ plataforma: "mercado_livre", recurso: "ads" }));
+
+    // ── N19 — O ASSERT QUE MAIS IMPORTA ───────────────────────────
+    //
+    // Duas validas e uma quebrada no meio. Meia fila seria verde num
+    // teste que so olhasse "tem itens".
+    responde(200, {
+      ok: true,
+      aprovacoes: [
+        aprovacaoReal({ id: "aaaa1111-1111-4111-8111-111111111111" }),
+        aprovacaoReal({ id: "bbbb2222-2222-4222-8222-222222222222", agenteNome: "" }),
+        aprovacaoReal({ id: "cccc3333-3333-4333-8333-333333333333" }),
+      ],
+    });
+    const parcial = await listarAprovacoesPendentes();
+    ok("N19 UMA linha invalida derruba a lista INTEIRA, nunca meia fila",
+      parcial.estado === "falha", parcial.estado);
+  }
+
+  // ── O. Os renderers da fila real ─────────────────────────────────
+  //
+  // Funcoes puras, exercitadas de verdade. A regra que elas existem
+  // para impor: nada e mostrado por varredura de chaves, e o que nao da
+  // para mostrar com honestidade nao e mostrado.
+  secao("O. Rotulos, datas e marketplace da fila real");
+  {
+    const {
+      dataCivil, rotuloDaFuncao, rotuloDeMarketplace, detalhesDaSolicitacao, expirouLocalmente,
+    } = await import("../lib/ia/aprovacoes");
+
+    const base = {
+      id: "x", agenteId: "y", agenteNome: "Agente", tarefaId: null,
+      funcaoId: "vendas.consultar", revisaoFuncao: "1", acesso: "leitura",
+      estado: "pendente", criadoEm: "2026-09-14T21:00:00.000Z",
+      expiraEm: "2026-09-15T21:00:00.000Z",
+      argumentos: {} as Record<string, unknown>, conexao: null,
+    };
+
+    // ── O1..O3 — data civil, sem deslocamento de fuso ─────────────
+    //
+    // `new Date("2026-09-12")` e lido como UTC meia-noite; em qualquer
+    // fuso a oeste de Greenwich, `getDate()` devolveria 11. O periodo
+    // da consulta apareceria um dia deslocado.
+    ok("O1  2026-09-12 vira 12/09/2026", dataCivil("2026-09-12") === "12/09/2026");
+    ok("O2  o primeiro dia do mes nao retrocede para o mes anterior",
+      dataCivil("2026-09-01") === "01/09/2026");
+    ok("O3  data malformada vira null, nunca `NaN/NaN/NaN`",
+      dataCivil("12/09/2026") === null && dataCivil("2026-13-01") === null &&
+      dataCivil("") === null);
+
+    // ── O4..O7 — marketplace ──────────────────────────────────────
+    ok("O4  ausente e null significam Todos",
+      rotuloDeMarketplace(undefined) === "Todos" && rotuloDeMarketplace(null) === "Todos");
+    ok("O5  Shopee e Shopee", rotuloDeMarketplace("Shopee") === "Shopee");
+    ok("O6  ML vira Mercado Livre", rotuloDeMarketplace("ML") === "Mercado Livre");
+    ok("O7  valor fora do vocabulario e fail-closed, nao ecoado",
+      rotuloDeMarketplace("Amazon") === null && rotuloDeMarketplace(7) === null);
+
+    // ── O8..O9 — rotulo da Funcao ─────────────────────────────────
+    ok("O8  vendas.consultar tem rotulo humano",
+      rotuloDaFuncao("vendas.consultar") === "Consultar vendas");
+    ok("O9  Funcao sem rotulo cai no PROPRIO id, sem descricao inventada",
+      rotuloDaFuncao("ads.campanha.pausar") === "ads.campanha.pausar");
+
+    // ── O10..O14 — os detalhes, por Funcao ────────────────────────
+    const d1 = detalhesDaSolicitacao({
+      ...base,
+      argumentos: { dataInicio: "2026-09-12", dataFim: "2026-09-13" },
+    });
+    ok("O10 vendas.consultar rende periodo e marketplace",
+      JSON.stringify(d1) ===
+        JSON.stringify([
+          { rotulo: "Período", valor: "12/09/2026 a 13/09/2026" },
+          { rotulo: "Marketplace", valor: "Todos" },
+        ]),
+      JSON.stringify(d1));
+
+    const d2 = detalhesDaSolicitacao({
+      ...base,
+      argumentos: { dataInicio: "2026-09-12", dataFim: "2026-09-13", marketplace: "ML" },
+    });
+    ok("O11 e traduz o marketplace real", JSON.stringify(d2).includes("Mercado Livre"));
+
+    ok("O12 FUNCAO DESCONHECIDA nao despeja argumentos — devolve null",
+      detalhesDaSolicitacao({
+        ...base,
+        funcaoId: "ads.campanha.pausar",
+        argumentos: { campanhaId: "123", investimento: 120 },
+      }) === null);
+
+    ok("O13 argumentos com forma inesperada sao fail-closed",
+      detalhesDaSolicitacao({ ...base, argumentos: {} }) === null &&
+      detalhesDaSolicitacao({ ...base, argumentos: { dataInicio: 1, dataFim: 2 } }) === null);
+
+    ok("O14 marketplace invalido derruba os detalhes inteiros",
+      detalhesDaSolicitacao({
+        ...base,
+        argumentos: { dataInicio: "2026-09-12", dataFim: "2026-09-13", marketplace: "Amazon" },
+      }) === null);
+
+    // ── O15..O16 — expiracao local, sem write ─────────────────────
+    const t = Date.parse("2026-09-15T21:00:00.000Z");
+    ok("O15 antes do prazo nao esta expirada",
+      !expirouLocalmente({ expiraEm: base.expiraEm }, t - 1));
+    ok("O16 no prazo ou depois esta expirada",
+      expirouLocalmente({ expiraEm: base.expiraEm }, t) &&
+      expirouLocalmente({ expiraEm: base.expiraEm }, t + 60_000));
+  }
+
+  // ── P. A fila real, pela FONTE ───────────────────────────────────
+  //
+  // As secoes N e O executam. Esta le, porque ha propriedades que
+  // execucao nao alcanca: que a tela NAO tem fetch proprio, que ela NAO
+  // volta ao mock quando falha, e que nenhum botao decide.
+  secao("P. FilaAprovacoes e CardAprovacao — o que a fonte garante");
+  {
+    const FILA = codigo(ler("components/ia/aprovacoes/FilaAprovacoes.tsx"));
+    const CARD = codigo(ler("components/ia/aprovacoes/CardAprovacao.tsx"));
+    const APROV = codigo(ler("lib/ia/aprovacoes.ts"));
+
+    ok("P0  ANCORA: os tres arquivos foram lidos",
+      FILA.length > 800 && CARD.length > 800 && APROV.length > 800);
+
+    // ── P1..P3 — o mock saiu DAQUI, e so daqui ────────────────────
+    ok("P1  a fila NAO importa MOCK_APROVACOES",
+      !/MOCK_APROVACOES/.test(FILA));
+    ok("P2  e nao exibe mais o aviso de simulacao",
+      !/MOCK_AVISO/.test(FILA));
+    ok("P3  o mock CONTINUA existindo para quem ainda simula",
+      /export const MOCK_APROVACOES/.test(ler("lib/ia/mocks/aprovacoes.ts")) &&
+      /MOCK_APROVACOES/.test(ler("components/ia/atividade/Timeline.tsx")) &&
+      /MOCK_APROVACOES/.test(ler("lib/ia/mocks/index.ts")));
+
+    // ── P4..P6 — a rede pertence ao transporte ────────────────────
+    ok("P4  a fila usa o transporte, nao fetch proprio",
+      /listarAprovacoesPendentes/.test(FILA) && !/fetch\(/.test(FILA));
+    ok("P5  o card nao faz rede nenhuma",
+      !/fetch\(/.test(CARD) && !/listarAprovacoesPendentes/.test(CARD));
+    ok("P6  o endereco da rota vive SO no transporte",
+      /"\/api\/aprovacoes"/.test(codigo(ler(TRANSPORTE))) &&
+      !/\/api\/aprovacoes/.test(FILA) && !/\/api\/aprovacoes/.test(CARD));
+
+    // ── P7 — erro NAO cai para mock ───────────────────────────────
+    //
+    // O pior desfecho possivel nesta tela: falha de rede virar
+    // "nenhuma pendencia", com o dono fechando a aba.
+    ok("P7  falha nao vira dado ficticio",
+      /fase: "erro"/.test(FILA) && !/MOCK/.test(FILA));
+
+    // ── P8..P11 — os quatro estados ───────────────────────────────
+    ok("P8  ha estado de carregamento", /fase === "carregando"/.test(FILA));
+    ok("P9  ha estado vazio real", /EstadoVazio/.test(FILA) && /length === 0/.test(FILA));
+    ok("P10 ha estado de erro com alerta", /role="alert"/.test(FILA));
+    ok("P11 e a fila pendente renderiza cards",
+      /CardAprovacao/.test(FILA) && /fila\.map/.test(FILA));
+
+    // ── P12..P14 — refresh, sem polling ───────────────────────────
+    ok("P12 existe acao de atualizar", /Atualizar/.test(FILA) && /onClick/.test(FILA));
+    ok("P13 SEM polling: nenhum intervalo, socket ou realtime",
+      !/setInterval|setTimeout|WebSocket|realtime|subscribe\(/.test(FILA));
+
+    /** A trava e SINCRONA: `fase === "carregando"` so vira verdade num
+     *  render, e dois cliques no mesmo frame atravessam essa janela. */
+    const travaSincrona = (t: string): boolean => {
+      const iGuarda = t.indexOf("if (emCursoRef.current) return;");
+      const iTrava = t.indexOf("emCursoRef.current = true;");
+      const iAwait = t.indexOf("await listarAprovacoesPendentes");
+      return iGuarda >= 0 && iTrava >= 0 && iAwait >= 0 && iGuarda < iTrava && iTrava < iAwait;
+    };
+    ok("P14 duplo clique e barrado ANTES do await, por ref", travaSincrona(FILA));
+    ok("P14 CONTROLE NEGATIVO: sem o early-return, reprova",
+      !travaSincrona(FILA.replace("if (emCursoRef.current) return;", "")));
+    ok("P14 CONTROLE NEGATIVO: travar DEPOIS do await reprova",
+      !travaSincrona(
+        FILA.replace("emCursoRef.current = true;", "")
+          .replace("const resposta = await listarAprovacoesPendentes();",
+            "const resposta = await listarAprovacoesPendentes();\n    emCursoRef.current = true;")));
+
+    // ── P15 — resposta velha nao sobrescreve a nova ───────────────
+    ok("P15 ha contador de geracao e guarda de desmontagem",
+      /geracao\.current/.test(FILA) && /vivo\.current/.test(FILA) &&
+      /minha !== geracao\.current/.test(FILA));
+
+    // ── P16..P19 — NADA decide ────────────────────────────────────
+    ok("P16 FLUXO_APROVACAO_CONECTADO continua false",
+      /export const FLUXO_APROVACAO_CONECTADO = false;/.test(APROV));
+    ok("P17 os dois botoes existem e estao disabled",
+      /Recusar/.test(CARD) && /Aprovar/.test(CARD) &&
+      (CARD.match(/disabled/g) ?? []).length >= 2);
+    ok("P18 o card nao tem handler nenhum",
+      !/onClick|onSubmit|onChange/.test(CARD));
+    ok("P19 nem transporte, nem fila, nem card sabem decidir ou retomar",
+      [FILA, CARD, codigo(ler(TRANSPORTE))].every((f) =>
+        !/decidirAprovacao|retomarAprovacao|consumirAprovacaoEAbrir|aprovacao_decidir/.test(f)));
+    ok("P20 o transporte nao ganhou metodo de escrita para aprovacoes",
+      !/method:\s*"(POST|PATCH|PUT|DELETE)"[\s\S]{0,400}\/api\/aprovacoes/.test(
+        codigo(ler(TRANSPORTE))) &&
+      !/\/api\/aprovacoes[\s\S]{0,200}method:/.test(codigo(ler(TRANSPORTE))));
+
+    // ── P21..P23 — argumentos, nunca crus ─────────────────────────
+    ok("P21 NENHUM dos tres despeja JSON",
+      [FILA, CARD, APROV].every((f) => !/JSON\.stringify\(\s*\w*[Aa]rgumentos/.test(f)) &&
+      !/Object\.entries\(\s*\w*[Aa]rgumentos/.test(CARD) &&
+      !/Object\.entries\(\s*\w*[Aa]rgumentos/.test(APROV));
+    ok("P22 o card mostra detalhes pelo renderer nominal",
+      /detalhesDaSolicitacao/.test(CARD) && /SEM_DETALHES/.test(CARD));
+    ok("P23 o renderer e por Funcao, com allowlist de tres campos",
+      /"vendas\.consultar": detalhesDeConsultarVendas/.test(APROV) &&
+      /argumentos\.dataInicio/.test(APROV) && /argumentos\.dataFim/.test(APROV) &&
+      /argumentos\.marketplace/.test(APROV));
+
+    // ── P24..P26 — o card nao inventa o que nao existe ────────────
+    ok("P24 o card nao usa risco, impacto, motivo nem procedencia",
+      !/SIMBOLO_RISCO|ROTULO_RISCO|\.risco|\.impacto|\.motivo\b|ROTULO_PROCEDENCIA/.test(CARD));
+    ok("P25 e nao inventa estado nem conta de conexao",
+      !/VOCABULARIO_CONEXAO/.test(CARD) && !/conexao\.conta|conexao\.estado/.test(CARD));
+    ok("P26 o card real nao importa o detalhe da era mock",
+      !/DetalheAprovacao/.test(CARD));
   }
 
   globalThis.fetch = fetchOriginal;
