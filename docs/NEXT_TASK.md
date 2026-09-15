@@ -60,12 +60,23 @@ antigo envia dois argumentos e recebe PGRST202. **Nao usar `23fb46c` nem anterio
 rollback de deploy sozinho — voltar para pre-floor exigiria antes uma migration forward
 recriando a overload de dois argumentos. O Vercel nao conhece esse piso.
 
+### D4 — implementado no codigo e revisado · migration ainda NAO APLICADA
+A decisao humana passou a encerrar a tarefa causal. O codigo esta escrito e revisado, mas
+**nada disso vale no banco ainda**: a migration
+`supabase/migrations/20261004_aprovacao_decidir_encerra_tarefa.sql` continua **UNAPPLIED** e,
+enquanto nao for aplicada, o comportamento em producao permanece o antigo — rejeitar uma
+aprovacao ainda deixa a tarefa parada para sempre.
+- **Mesma assinatura.** `aprovacao_decidir` e recriada com `CREATE OR REPLACE`, sem nova
+  overload: nenhum caller precisa mudar.
+- **Ordem de travamento:** a **Approval primeiro**, a **Task causal depois** — nunca o inverso.
+- **Vinculo exato.** A Task so e alcancada pelo vinculo causal completo; qualquer
+  incompatibilidade recusa fail-closed (`tarefa_incompativel`), **antes** de qualquer escrita
+  de decisao.
+- **approve** deixa a tarefa em `aguardando_aprovacao` com o ponteiro intacto (insumo do D5).
+- **reject/cancel** levam a tarefa causal a `cancelado` com ponteiro NULL e invariantes
+  terminais, na mesma transacao, sem Tool Call e sem executar Funcao.
+
 ### NAO concluido — nao registrar como feito
-- **D4 esta DESENHADO e AUDITADO, mas NAO IMPLEMENTADO.** Contrato ratificado: `aprovacao_decidir`
-  mantem a MESMA assinatura (`CREATE OR REPLACE`, sem nova overload); trava a **Approval
-  primeiro** e a **Task causal depois**; **approve** deixa a tarefa em `aguardando_aprovacao`
-  com o ponteiro intacto (insumo do D5); **reject/cancel** levam a tarefa a `cancelado` com
-  ponteiro NULL e invariantes terminais, na mesma transacao, sem Tool Call e sem executar Funcao.
 - **D5 (resume claim / reentrada do worker): nao implementado.**
 - **D7 (scanner de aprovacoes expiradas/rejeitadas/canceladas orfas e da corrida C0-R3-L1):
   nao implementado.**
@@ -82,9 +93,12 @@ recriando a overload de dois argumentos. O Vercel nao conhece esse piso.
   desenho do D4 ela fica nao-decidivel. Cura prevista no D7 ou em reparo forward separado.
 
 ### Proxima etapa (aguardando autorizacao)
-1. **D4-I1** — implementacao local: migration + wrapper + guards. Sem API, sem UI, sem apply.
-2. Review, stage, commit, push/deploy e apply do banco em gates separados.
-3. Depois: **D5** (resume) e **D7** (scanner).
+1. **Versionar e publicar o slice D4** — commit isolado, push e deployment, em gates separados.
+2. **Preflight live obrigatorio** no banco antes de tocar na funcao.
+3. **Apply controlado** de `20261004_aprovacao_decidir_encerra_tarefa.sql` — uma unica vez.
+4. **Prova pos-apply** em runtime; so entao `PROJECT_STATE.md` e atualizado.
+5. Depois: **D5** (resume claim).
+6. **D7** (scanner/reparo) antes de a UI de decisao ficar alcancavel.
 
 ---
 

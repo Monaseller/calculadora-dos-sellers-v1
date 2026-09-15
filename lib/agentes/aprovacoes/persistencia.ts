@@ -66,6 +66,13 @@ export type CodigoAprovacao =
   | "funcao_inexistente"
   | "agente_indisponivel"
   | "tarefa_indisponivel"
+  // APPROVAL-DECISION-RESUME-D4: a decisao e elegivel, mas a tarefa causal
+  // nao esta esperando por ESTA aprovacao (sumiu, mudou de status, ou o
+  // ponteiro aponta para outra). Nada foi escrito — nem na aprovacao, nem
+  // na tarefa. Rejeitar a aprovacao e deixar a tarefa encalhada e o defeito
+  // que o D4 existe para eliminar; reproduzi-lo sob mismatch seria o mesmo
+  // bug com outra roupa.
+  | "tarefa_incompativel"
   | "permissao_ausente"
   | "permissao_bloqueada"
   | "permissao_nao_exige_aprovacao"

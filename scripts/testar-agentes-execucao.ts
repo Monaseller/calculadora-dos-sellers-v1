@@ -25,6 +25,7 @@
  */
 import "./_server-only-inerte";
 import "./_env-inerte";
+import { createHash } from "crypto";
 import { readFileSync, readdirSync, statSync } from "fs";
 import { join } from "path";
 
@@ -142,6 +143,17 @@ const MIGRATION_D1 =
  */
 const MIGRATION_D3 =
   "supabase/migrations/20261003_remover_aguardar_aprovacao_tarefa_2args.sql";
+/**
+ * APPROVAL-DECISION-RESUME-D4 — a migration que RECRIA `aprovacao_decidir`
+ * para encerrar a tarefa causal no reject/cancel.
+ *
+ * Mesma assinatura, substituicao in-place: nao nasce overload. A secao U
+ * abaixo e a autoridade sobre a FORMA dela — e, ao contrario do D3, aqui
+ * ha corpo plpgsql com `$$`, entao o parser de statements do T14 NAO
+ * serve: a premissa dele era justamente a ausencia de dollar quoting.
+ */
+const MIGRATION_D4 =
+  "supabase/migrations/20261004_aprovacao_decidir_encerra_tarefa.sql";
 /** A pausa do P0, historica: a secao T prova que ela NAO foi tocada. */
 const MIGRATION_PAUSA_P0 =
   "supabase/migrations/20260929_agente_tarefa_aguardar_aprovacao.sql";
@@ -1297,8 +1309,11 @@ async function main() {
       migsDisco.includes(NOME_D3));
     ok("T13b a ordem de aplicacao e cleanup B0 -> aditiva D1 -> limpeza D3",
       ordemDasFases(migsDisco));
-    ok("T13c e a limpeza D3 e a ultima migration desta frente",
-      migsDisco[migsDisco.length - 1] === NOME_D3);
+    // Migrado na APPROVAL-DECISION-RESUME-D4, pela mesma razao que o D3
+    // migrou este assert: "D3 e a ultima" era verdade enquanto o D4 nao
+    // existia. A prova de ORDEM nao sai daqui — ela ganha mais um elo.
+    ok("T13c a limpeza D3 vem depois da aditiva D1",
+      migsDisco.indexOf(NOME_D1) < migsDisco.indexOf(NOME_D3));
     ok("T13d CONTROLE NEGATIVO: a limpeza antes da aditiva reprova",
       !ordemDasFases([NOME_D3, NOME_B0_CLEANUP, NOME_D1]));
     ok("T13e ANCORA: a varredura enxergou as migrations de verdade",
@@ -1597,6 +1612,256 @@ async function main() {
     ok("T17a e ele esta registrado na propria migration D3",
       brutoD3.includes(PISO_DE_ROLLBACK_POS_D3) &&
       /POST_D3_ROLLBACK_FLOOR/i.test(brutoD3));
+  }
+
+  console.log("U. Migration D4 — a decisao encerra a tarefa");
+  {
+    const brutoD4 = fonte(MIGRATION_D4);
+
+    /**
+     * Statements TOP-LEVEL de um arquivo SQL, com dollar quoting.
+     *
+     * O parser do T14 declarava a premissa "este arquivo nao tem `$$`".
+     * Aqui ela seria falsa: o corpo plpgsql tem dezenas de `;` dentro de
+     * `$$ ... $$`. Contar com `split(";")` daria dezenas de statements
+     * fantasma — medi no arquivo real e da 64.
+     *
+     * Maquina de estados, caractere a caractere. Fora de qualquer
+     * contexto citado, reconhece:
+     *   --  ate o fim da linha
+     *   /* ... *\/  bloco
+     *   '...'  string, com '' escapado
+     *   "..."  identificador
+     *   $tag$ ... $tag$  dollar quoting, tag vazia ou nomeada
+     * e so conta `;` em profundidade zero.
+     */
+    const statementsTopLevel = (bruto: string): string[] => {
+      const fora: string[] = [];
+      let atual = "";
+      let i = 0;
+      while (i < bruto.length) {
+        const c = bruto[i];
+        const dois = bruto.slice(i, i + 2);
+
+        if (dois === "--") {
+          const fim = bruto.indexOf("\n", i);
+          i = fim === -1 ? bruto.length : fim;
+          continue;
+        }
+        if (dois === "/*") {
+          const fim = bruto.indexOf("*/", i + 2);
+          i = fim === -1 ? bruto.length : fim + 2;
+          continue;
+        }
+        if (c === "'" || c === '"') {
+          const aspa = c;
+          let j = i + 1;
+          while (j < bruto.length) {
+            if (bruto[j] === aspa) {
+              if (bruto[j + 1] === aspa) { j += 2; continue; }
+              break;
+            }
+            j += 1;
+          }
+          atual += bruto.slice(i, j + 1);
+          i = j + 1;
+          continue;
+        }
+        if (c === "$") {
+          const m = /^\$[A-Za-z_][A-Za-z0-9_]*\$|^\$\$/.exec(bruto.slice(i));
+          if (m) {
+            const tag = m[0];
+            const fim = bruto.indexOf(tag, i + tag.length);
+            const ate = fim === -1 ? bruto.length : fim + tag.length;
+            atual += bruto.slice(i, ate);
+            i = ate;
+            continue;
+          }
+        }
+        if (c === ";") {
+          if (atual.trim()) fora.push(atual.trim().replace(/\s+/g, " "));
+          atual = "";
+          i += 1;
+          continue;
+        }
+        atual += c;
+        i += 1;
+      }
+      if (atual.trim()) fora.push(atual.trim().replace(/\s+/g, " "));
+      return fora;
+    };
+
+    /** O contador ingenuo, guardado so para o controle de anti-vacuidade. */
+    const statementsIngenuos = (bruto: string): number =>
+      bruto.replace(/--[^\n]*/g, " ").split(";").filter((s) => s.trim()).length;
+
+    const stmtsD4 = statementsTopLevel(brutoD4);
+
+    // ── U0..U2 — ANTI-VACUIDADE DO PARSER ─────────────────────────
+    //
+    // Se o parser ingenuo e o correto derem o MESMO numero, o parser
+    // dollar-aware nao esta fazendo trabalho nenhum e nao prova nada.
+    ok("U0  ANCORA: a migration D4 foi lida e tem dollar quoting",
+      brutoD4.length > 3000 && brutoD4.includes("$$"));
+    ok("U1  o contador ingenuo se perde no corpo plpgsql",
+      statementsIngenuos(brutoD4) > 20);
+    ok("U2  e o parser dollar-aware discorda dele — prova que faz trabalho",
+      statementsTopLevel(brutoD4).length !== statementsIngenuos(brutoD4));
+
+    // ── U3 — CASOS SINTETICOS DO PARSER ───────────────────────────
+    //
+    // Um `;` em cada contexto citado nao pode criar statement novo.
+    const UM = "select 1";
+    ok("U3  `;` dentro de $$ nao cria statement",
+      statementsTopLevel("create function f() as $$ begin a; b; c; end; $$;").length === 1);
+    ok("U3a `;` dentro de $tag$ nao cria statement",
+      statementsTopLevel("create function f() as $corpo$ x; y; $corpo$;").length === 1);
+    ok("U3b `;` dentro de string simples nao cria statement",
+      statementsTopLevel(`${UM} where s = 'a;b;c';`).length === 1);
+    ok("U3c `;` dentro de identificador com aspas nao cria statement",
+      statementsTopLevel(`${UM} as "col;estranha";`).length === 1);
+    ok("U3d `;` dentro de comentario de linha nao cria statement",
+      statementsTopLevel(`${UM}; -- comentario; com; ponto e virgula\n`).length === 1);
+    ok("U3e `;` dentro de comentario de bloco nao cria statement",
+      statementsTopLevel(`${UM}; /* bloco; com; varios */`).length === 1);
+    ok("U3f CONTROLE: dois statements REAIS contam dois",
+      statementsTopLevel(`${UM}; select 2;`).length === 2);
+    ok("U3g CONTROLE: aspa escapada nao encerra a string",
+      statementsTopLevel(`${UM} where s = 'a''b;c';`).length === 1);
+
+    // ── U4..U6 — A FORMA DA MIGRATION D4 ──────────────────────────
+    //
+    // 1 create or replace + 1 comment on function + 4 revoke + 1 grant.
+    // O COMMENT segue o precedente da propria 20260928, que comenta esta
+    // mesma funcao — a documentacao in-database e parte da forma da casa.
+    ok("U4  a migration D4 tem SETE statements top-level",
+      stmtsD4.length === 7);
+    ok("U5  exatamente um CREATE OR REPLACE, e nenhum DROP/ALTER",
+      stmtsD4.filter((s) => /^create or replace function/i.test(s)).length === 1 &&
+      !stmtsD4.some((s) => /^drop /i.test(s)) &&
+      !stmtsD4.some((s) => /^alter /i.test(s)));
+    ok("U6  quatro REVOKE, um GRANT e um COMMENT",
+      stmtsD4.filter((s) => /^revoke /i.test(s)).length === 4 &&
+      stmtsD4.filter((s) => /^grant /i.test(s)).length === 1 &&
+      stmtsD4.filter((s) => /^comment on function/i.test(s)).length === 1);
+
+    // ── U6b..U6e — o COMMENT e da ASSINATURA CERTA ────────────────
+    //
+    // Endurecido no D4-F2 (achado D4-R2-L4). Contar um COMMENT nao basta:
+    // um COMMENT apontando para OUTRA assinatura mantem a contagem em
+    // sete e passaria. O alvo tem de ser verificado nominalmente.
+    const ALVO_COMMENT = "comment on function public.aprovacao_decidir(text, uuid, text, text)";
+    const commentsNoAlvo = (lista: readonly string[]) =>
+      lista.filter((s) => s.toLowerCase().startsWith(ALVO_COMMENT)).length;
+
+    ok("U6b o COMMENT aponta para a assinatura de QUATRO parametros",
+      commentsNoAlvo(stmtsD4) === 1);
+    ok("U6c CONTROLE NEGATIVO: COMMENT ausente reprova",
+      commentsNoAlvo(statementsTopLevel(
+        brutoD4.replace(/comment on function[\s\S]*?';/i, ""))) !== 1);
+    ok("U6d CONTROLE NEGATIVO: COMMENT com assinatura ERRADA reprova, mesmo mantendo a contagem",
+      (() => {
+        const errado = brutoD4.replace(
+          "comment on function public.aprovacao_decidir(text, uuid, text, text) is",
+          "comment on function public.aprovacao_decidir(text, uuid, text) is");
+        const st = statementsTopLevel(errado);
+        return st.length === 7 && commentsNoAlvo(st) !== 1;
+      })());
+    ok("U6e CONTROLE NEGATIVO: um segundo COMMENT no alvo reprova",
+      commentsNoAlvo(statementsTopLevel(
+        `${brutoD4}\ncomment on function public.aprovacao_decidir(text, uuid, text, text) is 'duplicado';`))
+        !== 1);
+
+    // ── U7..U11 — CONTROLES NEGATIVOS DA FORMA ────────────────────
+    //
+    // Todos sobre texto SINTETICO: mutar o arquivo bruto pegaria o
+    // cabecalho, que cita em prosa tudo o que a migration NAO faz.
+    ok("U7  CONTROLE NEGATIVO: um segundo statement top-level reprova",
+      statementsTopLevel(`${brutoD4}\nselect 1;`).length !== 7);
+    ok("U8  CONTROLE NEGATIVO: uma segunda funcao reprova",
+      statementsTopLevel(`${brutoD4}\ncreate function public.x() returns int language sql as $$ select 1; $$;`)
+        .filter((s) => /^create (or replace )?function/i.test(s)).length !== 1);
+    ok("U9  CONTROLE NEGATIVO: um DROP acrescentado reprova",
+      statementsTopLevel(`${brutoD4}\ndrop function public.x();`).some((s) => /^drop /i.test(s)));
+    ok("U10 CONTROLE NEGATIVO: um GRANT a anon reprova",
+      /grant[^;]*\bto\s+anon\b/i.test(
+        statementsTopLevel(`${brutoD4}\ngrant execute on function public.aprovacao_decidir(text, uuid, text, text) to anon;`)
+          .join("\n")));
+    ok("U11 CONTROLE NEGATIVO: remover um REVOKE reprova",
+      statementsTopLevel(
+        brutoD4.replace("revoke all on function public.aprovacao_decidir(text, uuid, text, text) from anon;", "")
+      ).filter((s) => /^revoke /i.test(s)).length !== 4);
+
+    // ── U12..U13 — A ANCORA HISTORICA, E O QUE ELA NAO PROVA ──────
+    //
+    // STATIC_GUARD_IS_NOT_LIVE_PREFLIGHT: este bloco compara BYTES DE
+    // ARQUIVO. Ele nao enxerga o banco e nao detecta drift na funcao
+    // live. O gate de apply tera de verificar, imediatamente antes,
+    // OID/prosrc/ACL/config reais — e abortar em qualquer divergencia.
+    const OID_HISTORICO_APROVACAO_DECIDIR = 28483;
+    const MD5_CORPO_PRE_D4 = "f7cf9cffc2526dcc2b722e930d93f3f2";
+    const MIGRATION_ORIGEM_DECIDIR = "supabase/migrations/20260928_agente_funcao_aprovacoes.sql";
+
+    /**
+     * O corpo plpgsql historico de `aprovacao_decidir`, extraido do
+     * arquivo que o criou.
+     *
+     * Endurecido no D4-F2 (achado D4-R2-L3). Antes a ancora era uma
+     * constante comparada consigo mesma — nao detectaria divergencia
+     * nenhuma. Agora o md5 e DERIVADO do arquivo real, entre os
+     * delimitadores dollar-quoted daquela funcao.
+     *
+     * Normaliza CRLF: o baseline foi calculado sobre o conteudo logico, e
+     * um checkout com final de linha diferente nao pode mudar o hash.
+     */
+    const corpoHistoricoDecidir = (fonteSql: string): string => {
+      const texto = fonteSql.replace(/\r\n/g, "\n");
+      const i = texto.indexOf("create or replace function public.aprovacao_decidir(");
+      if (i < 0) return "";
+      const a = texto.indexOf("$$", i);
+      const b = texto.indexOf("$$", a + 2);
+      return a < 0 || b < 0 ? "" : texto.slice(a + 2, b);
+    };
+    const md5De = (s: string) => createHash("md5").update(s, "utf8").digest("hex");
+
+    const sqlOrigem = fonte(MIGRATION_ORIGEM_DECIDIR);
+    const corpoPreD4 = corpoHistoricoDecidir(sqlOrigem);
+
+    ok("U12 ANCORA: existe EXATAMENTE uma definicao historica da funcao alvo",
+      (sqlOrigem.match(/create or replace function public\.aprovacao_decidir\(/gi) ?? []).length === 1 &&
+      corpoPreD4.length > 2000);
+    ok("U12b o md5 da baseline e DERIVADO do corpo historico real, nao hardcoded contra si",
+      md5De(corpoPreD4) === MD5_CORPO_PRE_D4);
+    ok("U12c CONTROLE NEGATIVO: um unico byte alterado no corpo muda o md5",
+      md5De(`${corpoPreD4} `) !== MD5_CORPO_PRE_D4 &&
+      md5De(corpoPreD4.replace("v_estado text;", "v_estado  text;")) !== MD5_CORPO_PRE_D4);
+    ok("U12d o OID historico segue registrado, para o preflight live",
+      Number.isInteger(OID_HISTORICO_APROVACAO_DECIDIR) &&
+      OID_HISTORICO_APROVACAO_DECIDIR === 28483);
+    ok("U13 a migration que criou a versao pre-D4 segue intocada no disco",
+      sqlOrigem.includes("create or replace function public.aprovacao_decidir("));
+
+    // ── U14..U15 — ORDEM E INVENTARIO DAS MIGRATIONS ──────────────
+    const migsD4 = [...readdirSync(join(RAIZ, "supabase", "migrations"))].sort();
+    const NOME_D4 = "20261004_aprovacao_decidir_encerra_tarefa.sql";
+
+    ok("U14 a D4 existe e e a ultima migration do disco",
+      migsD4.includes(NOME_D4) && migsD4[migsD4.length - 1] === NOME_D4);
+    ok("U15 e vem depois da limpeza do D3",
+      migsD4.indexOf("20261003_remover_aguardar_aprovacao_tarefa_2args.sql") <
+      migsD4.indexOf(NOME_D4));
+
+    // ── U16 — O D4 NAO REESCREVE HISTORIA ─────────────────────────
+    // O D4 e arquivo NOVO: as historicas continuam no disco e nenhuma
+    // delas e reescrita. Note que o D1 CITA `aprovacao_decidir` em prosa
+    // (ele documenta a ordem de lock do sistema) — por isso a sonda e
+    // sobre o EXECUTAVEL do D4, nao sobre mencao textual alheia.
+    ok("U16 as cinco migrations historicas seguem no disco, intocadas",
+      [MIGRATION_PAUSA_P0, MIGRATION_B0, MIGRATION_B0_CLEANUP, MIGRATION_D1, MIGRATION_D3]
+        .every((m) => fonte(m).length > 0));
+    ok("U16b o D4 nao dropa nem altera nenhum objeto historico",
+      !stmtsD4.some((s) => /^(drop|alter)/i.test(s)) &&
+      !stmtsD4.some((s) => /aguardar_aprovacao_tarefa|concluir_tarefa|falhar_tarefa|claim_next/i.test(s)));
   }
 
   console.log("P. Handler conversa");

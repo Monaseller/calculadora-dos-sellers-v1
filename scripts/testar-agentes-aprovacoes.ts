@@ -119,6 +119,19 @@ function corpoFuncao(nome: string): string {
 
 const CORPO_CRIAR = corpoFuncao("aprovacao_criar");
 const CORPO_DECIDIR = corpoFuncao("aprovacao_decidir");
+
+/**
+ * APPROVAL-DECISION-RESUME-D4 — a migration que RECRIOU `aprovacao_decidir`
+ * para encerrar a tarefa causal.
+ *
+ * O Postgres nao versiona funcao por migration de origem: o estado real
+ * da RPC e o DESTA, nao o da 1E-b. Por isso a secao J acima continua
+ * valendo como documento HISTORICO — ela descreve o corpo que a 20260928
+ * criou — e a secao W abaixo e a AUTORIDADE sobre o contrato vigente.
+ */
+const MIGRATION_D4 = "supabase/migrations/20261004_aprovacao_decidir_encerra_tarefa.sql";
+const SQL_D4_BRUTO = ler(MIGRATION_D4);
+const SQL_D4 = semComentariosSql(SQL_D4_BRUTO);
 const CORPO_CONSUMIR = corpoFuncao("aprovacao_consumir_e_abrir");
 
 // ─── A. A pasta nova ──────────────────────────────────────────────────
@@ -2660,6 +2673,350 @@ async function principalStale(): Promise<void> {
     ok("V42 CONTROLE NEGATIVO: um oitavo campo reprova",
       ((blocoCtx + "\n  readonly aprovacaoId: string;").match(/readonly\s+\w+\s*:/g) ?? []).length !== 7);
   }
+}
+
+// ─── W. D4 — a decisao encerra a tarefa ─────────────────────────────
+
+secao("W. D4 — decisao + reject/cancel lifecycle");
+{
+  const d4 = SQL_D4;
+
+  // ── W0..W3 — MESMA ASSINATURA, SEM NOVA OVERLOAD ──────────────
+  //
+  // O D3 custou cinco gates para remover uma overload legada. Repetir
+  // o padrao sem necessidade criaria a mesma divida: a informacao que
+  // faltava (QUAL tarefa) ja vive em `agente_funcao_aprovacoes.tarefa_id`.
+  ok("W0  ANCORA: a migration D4 foi lida e tem corpo plpgsql",
+    SQL_D4_BRUTO.length > 3000 && SQL_D4_BRUTO.includes("$$"));
+  ok("W1  substitui a MESMA assinatura de quatro parametros",
+    /create\s+or\s+replace\s+function\s+public\.aprovacao_decidir\(\s*p_user_id\s+text,\s*p_aprovacao_id\s+uuid,\s*p_decisao\s+text,\s*p_motivo\s+text\s*\)/i
+      .test(d4));
+  ok("W1b e devolve text, como antes", /\)\s*returns\s+text/i.test(d4));
+  ok("W2  exatamente UM create/replace de funcao, zero overload",
+    (d4.match(/create\s+(or\s+replace\s+)?function/gi) ?? []).length === 1 &&
+    !/drop\s+function/i.test(d4) &&
+    !/alter\s+function/i.test(d4));
+  ok("W3  nenhum parametro ganhou DEFAULT",
+    !/p_(user_id|aprovacao_id|decisao|motivo)\s+\w+\s+default/i.test(d4));
+  ok("W3b CONTROLE NEGATIVO: um DEFAULT reprova",
+    /p_motivo\s+text\s+default/i.test(d4.replace("p_motivo text", "p_motivo text default null")));
+
+  // ── W4..W6 — SEGURANCA E ACL, RESTATADAS ──────────────────────
+  //
+  // O D4-R1 NAO conseguiu provar em sessao que `create or replace`
+  // preserva ACL. Restatar custa cinco linhas e e fail-closed sob as
+  // duas hipoteses — e o `pg_default_acl` deste projeto concede
+  // EXECUTE a anon/authenticated em funcao nova (classe SEC1).
+  ok("W4  SECURITY INVOKER explicito, nunca DEFINER",
+    /security\s+invoker/i.test(d4) && !/security\s+definer/i.test(d4));
+  ok("W5  search_path fixado em public",
+    /set\s+search_path\s*=\s*public/i.test(d4));
+  //
+  // Contar quatro REVOKEs NAO basta: quatro linhas identicas `from anon`
+  // tambem somam quatro, e nesse estado PUBLIC e authenticated ficariam
+  // com EXECUTE — exatamente a classe SEC1 que ja custou um bug a este
+  // projeto. Por isso os recipients sao extraidos e comparados como
+  // CONJUNTO. Foi o achado D4-R2-M2.
+  const recipientesRevoke = (fonte: string): string[] =>
+    [...fonte.matchAll(
+      /revoke all on function public\.aprovacao_decidir\(text, uuid, text, text\) from (\w+);/gi)]
+      .map((m) => m[1].toLowerCase());
+  const recipientesGrant = (fonte: string): string[] =>
+    [...fonte.matchAll(
+      /grant (\w+) on function public\.aprovacao_decidir\(text, uuid, text, text\) to (\w+);/gi)]
+      .map((m) => `${m[1].toLowerCase()}:${m[2].toLowerCase()}`);
+
+  const revD4 = recipientesRevoke(d4);
+  const grantD4 = recipientesGrant(d4);
+  const ESPERADO_REVOKE = ["anon", "authenticated", "public", "service_role"];
+
+  ok("W6  quatro REVOKE, e os quatro recipients sao DISTINTOS e exatos",
+    revD4.length === 4 &&
+    new Set(revD4).size === 4 &&
+    [...revD4].sort().join(",") === ESPERADO_REVOKE.join(","));
+  ok("W6b um unico GRANT, execute, exclusivo do service_role",
+    grantD4.length === 1 && grantD4[0] === "execute:service_role");
+  ok("W6c nenhum GRANT para public, anon ou authenticated",
+    !grantD4.some((g) => /:(public|anon|authenticated)$/.test(g)));
+
+  // ── CONTROLES NEGATIVOS DE ACL — a matriz inteira ─────────────
+  const semRevoke = (quem: string) =>
+    d4.replace(
+      `revoke all on function public.aprovacao_decidir(text, uuid, text, text) from ${quem};`, "");
+  const aclOk = (fonte: string) => {
+    const r = recipientesRevoke(fonte);
+    const g = recipientesGrant(fonte);
+    return r.length === 4 && new Set(r).size === 4 &&
+      [...r].sort().join(",") === ESPERADO_REVOKE.join(",") &&
+      g.length === 1 && g[0] === "execute:service_role";
+  };
+
+  ok("W6d ANCORA: a ACL da fonte real passa no predicado completo", aclOk(d4));
+  ok("W6e CONTROLE NEGATIVO A: sem REVOKE public reprova", !aclOk(semRevoke("public")));
+  ok("W6f CONTROLE NEGATIVO B: sem REVOKE anon reprova", !aclOk(semRevoke("anon")));
+  ok("W6g CONTROLE NEGATIVO C: sem REVOKE authenticated reprova", !aclOk(semRevoke("authenticated")));
+  ok("W6h CONTROLE NEGATIVO D: sem REVOKE service_role reprova", !aclOk(semRevoke("service_role")));
+  ok("W6i CONTROLE NEGATIVO E: quatro REVOKEs para o MESMO recipient reprova",
+    !aclOk(d4.replace(
+      /revoke all on function public\.aprovacao_decidir\(text, uuid, text, text\) from \w+;/gi,
+      "revoke all on function public.aprovacao_decidir(text, uuid, text, text) from anon;")));
+  ok("W6j CONTROLE NEGATIVO F: sem GRANT service_role reprova",
+    !aclOk(d4.replace(
+      "grant execute on function public.aprovacao_decidir(text, uuid, text, text) to service_role;", "")));
+  ok("W6k CONTROLE NEGATIVO G: um GRANT a anon reprova",
+    !aclOk(`${d4}\ngrant execute on function public.aprovacao_decidir(text, uuid, text, text) to anon;`));
+  ok("W6l CONTROLE NEGATIVO H: um GRANT a authenticated reprova",
+    !aclOk(`${d4}\ngrant execute on function public.aprovacao_decidir(text, uuid, text, text) to authenticated;`));
+
+  // ── W7..W9 — ORDEM DE LOCK: APPROVAL ANTES DA TASK ────────────
+  //
+  // Nao basta os dois `for update` existirem: o que importa e a ORDEM.
+  // Invertida, fecharia ciclo com `aprovacao_consumir_e_abrir`, que
+  // trava a aprovacao primeiro.
+  const iLockAprov = d4.search(/from public\.agente_funcao_aprovacoes a[\s\S]{0,200}?for update/i);
+  const iLockTaref = d4.search(/from public\.agente_tarefas t[\s\S]{0,400}?for update/i);
+
+  ok("W7  ANCORA: os dois locks explicitos existem",
+    iLockAprov > 0 && iLockTaref > 0);
+  ok("W8  a APROVACAO e travada ANTES da tarefa",
+    iLockAprov < iLockTaref);
+  ok("W8b CONTROLE NEGATIVO: com a ordem invertida o assert cai",
+    !(d4.slice(iLockTaref).search(/from public\.agente_funcao_aprovacoes a[\s\S]{0,200}?for update/i) >= 0
+      && iLockTaref < iLockAprov));
+  ok("W9  a aprovacao e travada por id E por dono",
+    /where a\.id = p_aprovacao_id\s*and a\.user_id = p_user_id\s*for update/i
+      .test(d4.replace(/\s+/g, " ").replace(/ and /g, "\n    and ").replace(/\s+/g, " ")) ||
+    /a\.id\s*=\s*p_aprovacao_id[\s\S]{0,80}a\.user_id\s*=\s*p_user_id[\s\S]{0,40}for update/i.test(d4));
+
+  // ── W10..W13 — ORDEM DAS CHECAGENS ────────────────────────────
+  //
+  // `tarefa_incompativel` NUNCA pode mascarar um `ja_aprovada` ou um
+  // `expirada`: quem clica duas vezes precisa do motivo real.
+  const iJa = d4.indexOf("'ja_consumida'");
+  const iTarefa = d4.indexOf("agente_tarefas t");
+  const iMismatch = d4.indexOf("'tarefa_incompativel'");
+
+  ok("W10 ANCORA: os tres marcos de ordem existem",
+    iJa > 0 && iTarefa > 0 && iMismatch > 0);
+  ok("W11 os estados ja_*/expirada sao resolvidos ANTES de olhar a tarefa",
+    iJa < iTarefa && iJa < iMismatch);
+  ok("W12 a expiracao e materializada antes de tudo e devolve 'expirada'",
+    /set estado = 'expirada'/i.test(d4) &&
+    d4.indexOf("set estado = 'expirada'") < iTarefa);
+  ok("W13 a tarefa so e consultada quando ha vinculo causal",
+    /if v_aprovacao\.tarefa_id is not null then/i.test(d4));
+
+  // ── W14..W15 — OS CINCO FENCES CAUSAIS ────────────────────────
+  const janelaTarefa = iTarefa > 0 ? d4.slice(iTarefa, iTarefa + 700) : "";
+  ok("W14 ANCORA: o bloco da tarefa foi recortado", janelaTarefa.length > 300);
+  ok("W15 os CINCO fences causais estao presentes",
+    /t\.id\s*=\s*v_aprovacao\.tarefa_id/i.test(janelaTarefa) &&
+    /t\.user_id\s*=\s*v_aprovacao\.user_id/i.test(janelaTarefa) &&
+    /t\.agente_id\s*=\s*v_aprovacao\.agente_id/i.test(janelaTarefa) &&
+    /t\.status\s*=\s*'aguardando_aprovacao'/i.test(janelaTarefa) &&
+    /t\.aprovacao_aguardada_id\s*=\s*v_aprovacao\.id/i.test(janelaTarefa));
+  ok("W15b e nao fenceia por tentativas — espera humana nao e retry",
+    !/t\.tentativas/i.test(janelaTarefa));
+
+  // ── W16..W17 — MISMATCH ANTES DE QUALQUER ESCRITA ─────────────
+  //
+  // O desenho proibido: UPDATE na aprovacao, depois descobrir que a
+  // tarefa nao casa, e devolver um codigo. Isso persistiria metade da
+  // transicao — o defeito que o D4 existe para eliminar.
+  //
+  // Corrigido no D4-F2 (achado D4-R2-M1). A versao anterior comparava um
+  // indice da string ORIGINAL com um indice da string MUTADA — dois
+  // espacos de endereco diferentes. Passava por coincidencia posicional
+  // e nao provava ordenacao nenhuma.
+  //
+  // Agora e uma PROPRIEDADE de uma unica fonte. E ela precisa distinguir
+  // o UPDATE de expiracao, que e legitimo e roda ANTES da fase da tarefa,
+  // das escritas de DECISAO, que tem de vir depois do mismatch. Por isso
+  // o alvo e `estado = 'aprovada'|'rejeitada'|'cancelada'`, nunca
+  // `'expirada'`.
+  const ESCRITAS_DE_DECISAO =
+    /set\s+estado\s*=\s*'(aprovada|rejeitada|cancelada)'/gi;
+
+  const mismatchAntesDosWritesDecisao = (fonte: string): boolean => {
+    const iMis = fonte.indexOf("'tarefa_incompativel'");
+    const primeira = [...fonte.matchAll(ESCRITAS_DE_DECISAO)]
+      .map((m) => m.index ?? -1)
+      .filter((i) => i >= 0)
+      .sort((a, b) => a - b)[0];
+    if (iMis < 0 || primeira === undefined) return false;
+    return iMis < primeira;
+  };
+
+  ok("W16 ANCORA: a fonte real tem mismatch E escrita de decisao",
+    d4.includes("'tarefa_incompativel'") &&
+    [...d4.matchAll(ESCRITAS_DE_DECISAO)].length === 3);
+  ok("W17 tarefa_incompativel e decidido ANTES de qualquer escrita de decisao",
+    mismatchAntesDosWritesDecisao(d4));
+
+  // A mutacao injeta uma escrita de decisao REAL antes do mismatch, e o
+  // helper roda sobre essa MESMA string mutada — nunca cruzando indices.
+  const d4ComWriteAntes = d4.replace(
+    "return 'tarefa_incompativel';",
+    "update public.agente_funcao_aprovacoes set estado = 'rejeitada' where id = p_aprovacao_id;\n      return 'tarefa_incompativel';");
+
+  ok("W17b ANCORA: a mutacao realmente injetou a escrita",
+    d4ComWriteAntes !== d4 &&
+    [...d4ComWriteAntes.matchAll(ESCRITAS_DE_DECISAO)].length === 4);
+  ok("W17c CONTROLE NEGATIVO: com escrita de decisao antes do mismatch, a propriedade CAI",
+    !mismatchAntesDosWritesDecisao(d4ComWriteAntes));
+  ok("W17d CONTROLE: o UPDATE de expiracao NAO conta como escrita de decisao",
+    /set estado = 'expirada'/i.test(d4) &&
+    !ESCRITAS_DE_DECISAO.test("set estado = 'expirada'"));
+
+  // ── W18..W20 — APPROVE NAO TOCA A TAREFA ──────────────────────
+  //
+  // Branch-aware: a funcao inteira TEM update de tarefa (reject e
+  // cancel precisam). O que se prova aqui e que o ramo do aprovar
+  // retorna antes de chegar nele.
+  const iAprovar = d4.search(/if p_decisao = 'aprovar' then/i);
+  const iRetornoAprovada = d4.indexOf("return 'aprovada';");
+  const iUpdateTarefa = d4.search(/update public\.agente_tarefas/i);
+
+  ok("W18 ANCORA: o ramo do aprovar e o update da tarefa existem",
+    iAprovar > 0 && iRetornoAprovada > 0 && iUpdateTarefa > 0);
+  ok("W19 o ramo do aprovar RETORNA antes do update da tarefa",
+    iAprovar < iRetornoAprovada && iRetornoAprovada < iUpdateTarefa);
+  //
+  // Endurecido no D4-F2 (achado D4-R2-L2). Antes o assert observava que o
+  // UPDATE real fica textualmente depois do return — verdadeiro, mas nao
+  // provaria nada contra uma REGRESSAO FUTURA que pusesse um UPDATE
+  // dentro do ramo. Agora e um helper sobre o ramo delimitado, com
+  // mutacao que injeta exatamente essa regressao.
+  const ramoAprovar = (fonte: string): string => {
+    const i = fonte.search(/if p_decisao = 'aprovar' then/i);
+    if (i < 0) return "";
+    const f = fonte.indexOf("return 'aprovada';", i);
+    return f < 0 ? "" : fonte.slice(i, f);
+  };
+  const aprovarNaoTocaTarefa = (fonte: string): boolean => {
+    const ramo = ramoAprovar(fonte);
+    return ramo.length > 100 && !/update\s+public\.agente_tarefas/i.test(ramo);
+  };
+
+  ok("W20 ANCORA: o ramo do aprovar foi delimitado", ramoAprovar(d4).length > 100);
+  ok("W20b no ramo do aprovar nao existe UPDATE de tarefa", aprovarNaoTocaTarefa(d4));
+
+  const d4ComTarefaNoAprovar = d4.replace(
+    "if p_decisao = 'aprovar' then",
+    "if p_decisao = 'aprovar' then\n    update public.agente_tarefas set status = 'cancelado' where id = v_tarefa_id;");
+
+  ok("W20c ANCORA: a mutacao injetou o UPDATE dentro do ramo",
+    d4ComTarefaNoAprovar !== d4 &&
+    /update\s+public\.agente_tarefas/i.test(ramoAprovar(d4ComTarefaNoAprovar)));
+  ok("W20d CONTROLE NEGATIVO: UPDATE de tarefa dentro do ramo approve REPROVA",
+    !aprovarNaoTocaTarefa(d4ComTarefaNoAprovar));
+
+  // ── W21..W24 — O UPDATE TERMINAL DA TAREFA ────────────────────
+  const iSetTerminal = d4.search(/update public\.agente_tarefas\s+set/i);
+  const updTarefa = iSetTerminal > 0 ? d4.slice(iSetTerminal, d4.indexOf("where id = v_tarefa_id") + 40) : "";
+
+  ok("W21 ANCORA: o UPDATE terminal da tarefa foi recortado",
+    updTarefa.length > 200 && /where id = v_tarefa_id/.test(updTarefa));
+  ok("W22 status e ponteiro mudam no MESMO UPDATE (exigencia do CHECK)",
+    /status\s*=\s*'cancelado'/i.test(updTarefa) &&
+    /aprovacao_aguardada_id\s*=\s*null/i.test(updTarefa));
+  ok("W23 invariantes terminais explicitos",
+    /heartbeat_em\s*=\s*null/i.test(updTarefa) &&
+    /concluido_em\s*=\s*now\(\)/i.test(updTarefa) &&
+    /resultado\s*=\s*null/i.test(updTarefa) &&
+    /erro_tipo\s*=\s*null/i.test(updTarefa) &&
+    /erro_mensagem\s*=\s*null/i.test(updTarefa));
+  ok("W24 progresso e tentativas sao PRESERVADOS",
+    !/progresso\s*=/i.test(updTarefa) && !/tentativas\s*=/i.test(updTarefa));
+  ok("W24b CONTROLE NEGATIVO: sobrescrever progresso reprova",
+    /progresso\s*=/i.test(updTarefa + "\n progresso = 100,"));
+
+  // ── W25..W26 — ZERO TOOL CALL, ZERO FUNCAO ────────────────────
+  ok("W25 nao cria Tool Call nem consome a aprovacao",
+    !/agente_funcao_chamadas/i.test(d4) &&
+    !/aprovacao_consumir_e_abrir/i.test(d4));
+  ok("W26 cancelar NAO toca decidido_por/em",
+    !/set\s+estado\s*=\s*'cancelada'[\s\S]{0,200}decidido_por\s*=/i.test(d4) &&
+    /cancelado_por\s*=\s*p_user_id/i.test(d4));
+
+  // ── W27..W28 — ROWCOUNT INESPERADO ABORTA ─────────────────────
+  //
+  // Ja sob os dois locks, um UPDATE que afete quantidade diferente de
+  // 1 e bug nosso, nao situacao de negocio: levanta e derruba a
+  // transacao inteira, em vez de devolver codigo apos escrita parcial.
+  //
+  // Endurecido no D4-F2 (achado D4-R2-L1). Antes exigia `>= 4` com a
+  // realidade em 5: remover UM invariante continuaria verde. Agora o
+  // numero nao e solto — ele e amarrado ao INVENTARIO de escritas, e as
+  // tres contagens tem de coincidir.
+  const escritasDe = (fonte: string) =>
+    (fonte.match(/update\s+public\.(agente_funcao_aprovacoes|agente_tarefas)/gi) ?? []).length;
+  const diagnosticsDe = (fonte: string) =>
+    (fonte.match(/get diagnostics v_afetadas = row_count/gi) ?? []).length;
+  const raisesDe = (fonte: string) =>
+    (fonte.match(/raise exception[\s\S]{0,240}?errcode = '55000'/gi) ?? []).length;
+
+  const ESCRITAS_ESPERADAS = 5; // expiry + aprovar + rejeitar + cancelar + tarefa terminal
+
+  ok("W27 ANCORA: a funcao tem exatamente as cinco escritas do inventario",
+    escritasDe(d4) === ESCRITAS_ESPERADAS);
+  ok("W27b toda escrita confere row_count — uma por escrita, sem sobra",
+    diagnosticsDe(d4) === ESCRITAS_ESPERADAS);
+  ok("W28 e toda escrita LEVANTA 55000 se o row_count surpreender",
+    raisesDe(d4) === ESCRITAS_ESPERADAS);
+  ok("W28b CONTROLE NEGATIVO: remover UM get diagnostics reprova",
+    diagnosticsDe(d4.replace("get diagnostics v_afetadas = row_count;", "")) !== ESCRITAS_ESPERADAS);
+  ok("W28c CONTROLE NEGATIVO: remover UM raise 55000 reprova",
+    raisesDe(d4.replace(/raise exception[\s\S]{0,240}?errcode = '55000';/i, "")) !== ESCRITAS_ESPERADAS);
+
+  // ── W29..W31 — VOCABULARIO DE RETORNO ─────────────────────────
+  ok("W29 todos os codigos historicos preservados",
+    ["entrada_invalida", "decisao_invalida", "aprovacao_inexistente",
+     "ja_aprovada", "ja_rejeitada", "ja_cancelada", "ja_consumida",
+     "expirada", "aprovada", "rejeitada", "cancelada"]
+      .every((c) => d4.includes(`'${c}'`)));
+  ok("W30 e o unico codigo NOVO e tarefa_incompativel",
+    d4.includes("'tarefa_incompativel'"));
+  ok("W31 o vocabulario de decisao nao cresceu",
+    /p_decisao not in \('aprovar', 'rejeitar', 'cancelar'\)/i.test(d4));
+
+  // ── W32..W33 — tarefa_id NULL segue Approval-only ─────────────
+  ok("W32 aprovacao sem tarefa nao procura nem trava tarefa",
+    /if v_aprovacao\.tarefa_id is not null then[\s\S]{0,900}?end if;/i.test(d4));
+  ok("W33 o update terminal so roda quando houve tarefa casada",
+    /if v_tarefa_id is not null then[\s\S]{0,120}update public\.agente_tarefas/i.test(d4));
+
+  // ── W34..W36 — O WRAPPER ──────────────────────────────────────
+  const wrapper = ler("lib/agentes/aprovacoes/persistencia.ts");
+  ok("W34 o wrapper reconhece tarefa_incompativel",
+    /\|\s*"tarefa_incompativel"/.test(wrapper));
+  ok("W35 e nao ganhou politica nova nem consulta a tarefa",
+    !/agente_tarefas/.test(wrapper) &&
+    (wrapper.match(/rpc\(RPC_DECIDIR/g) ?? []).length === 1);
+  ok("W36 falha inesperada continua virando falha_persistencia",
+    /falha_persistencia/.test(wrapper));
+
+  // ── W37..W38 — FRONTEIRAS: ZERO API, ZERO UI ──────────────────
+  const rotaAprov = ler("app/api/aprovacoes/route.ts");
+  const cardAprov = ler("components/ia/aprovacoes/CardAprovacao.tsx");
+
+  ok("W37 a rota de aprovacoes continua GET-only",
+    /export async function GET\(/.test(rotaAprov) &&
+    !/export async function (POST|PATCH|PUT|DELETE)\(/.test(rotaAprov));
+  // Comentarios saem ANTES da sonda: este arquivo DOCUMENTA que nao tem
+  // `onClick` ("Sem `onClick`, sem estado local, sem toast"), e uma busca
+  // ingenua casaria com a propria explicacao, reprovando pelo motivo errado.
+  const cardCodigo = semComentariosTs(cardAprov);
+  ok("W38 os botoes continuam desabilitados, sem onClick e sem fetch",
+    /cds-ia-ap-recusar" disabled/.test(cardCodigo.replace(/\s+/g, " ")) &&
+    !/onClick/.test(cardCodigo) && !/fetch\(/.test(cardCodigo));
+  ok("W38b ANCORA: o arquivo MENCIONA onClick em comentario, e isso nao reprova",
+    /onClick/.test(cardAprov) && !/onClick/.test(cardCodigo));
+
+  // ── W39 — O D4 NAO FAZ O TRABALHO DO D5 NEM DO D7 ─────────────
+  ok("W39 nem resume, nem scanner, nem execucao de Funcao",
+    !/claim[_ ]?next/i.test(d4) && !/executar/i.test(d4) &&
+    !/scanner|varredura/i.test(d4));
 }
 
 void principalStale().then(() => {

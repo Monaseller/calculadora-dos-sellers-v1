@@ -2,6 +2,21 @@
 
 > Ordem cronológica reversa. Toda tarefa que criar, corrigir ou remover funcionalidade deve adicionar uma entrada aqui antes de finalizar.
 
+## 2026-09-15 (2) — Decisao de aprovacao encerra a tarefa causal em reject/cancel
+
+- **Rejeitar deixou de ser um beco sem saida.** Ate aqui, `aprovacao_decidir` resolvia a Approval e nada mais: a tarefa que esperava por ela ficava em `aguardando_aprovacao` para sempre, porque o claim do worker nunca alcanca esse estado. A decisao humana passou a encerrar a tarefa causal na mesma transacao.
+- **Mesma assinatura, sem nova overload.** A funcao e recriada com `CREATE OR REPLACE` em `public.aprovacao_decidir(text, uuid, text, text)` — nenhum caller precisa mudar e nao ha fase de cutover como houve na pausa.
+- **Ordem de travamento preservada: Approval primeiro, Task depois.** E a mesma ordem que o resto do sistema ja usa; inverte-la aqui criaria o unico par capaz de fechar um ciclo de deadlock com `aguardar_aprovacao_tarefa`.
+- **A Task so e alcancada pelo vinculo causal completo** — mesma tarefa, mesmo dono, mesmo agente, ainda em `aguardando_aprovacao` e com o ponteiro apontando exatamente para aquela Approval. Qualquer divergencia recusa fail-closed com `tarefa_incompativel`, detectada **antes** de qualquer escrita de decisao: uma tarefa incompativel nunca deixa a Approval decidida pela metade.
+- **A resolucao de estado vem antes da validacao da Task**, de proposito: assim `tarefa_incompativel` nunca mascara `ja_rejeitada`, `ja_consumida` ou `expirada`.
+- **`aprovar` deixa a tarefa parada de proposito.** O ponteiro continua intacto — ele e o insumo do D5, que ainda nao existe. Aprovar hoje resolve a Approval e nao retoma nada.
+- **`rejeitar` e `cancelar` levam a tarefa causal a `cancelado`** com ponteiro NULL, heartbeat NULL, `concluido_em` preenchido e os campos de resultado/erro zerados, tudo no mesmo UPDATE — o CHECK "ponteiro so na espera" exige que status e ponteiro mudem juntos. `progresso` e `tentativas` sao preservados como historico. Nenhum Tool Call e criado e nenhuma Funcao e executada.
+- **`tarefa_incompativel` entrou no contrato TypeScript** (`CodigoAprovacao`). O wrapper continua sem tocar em `agente_tarefas`: quem decide e o banco.
+- **ACL restatada fail-closed.** `REVOKE` para `public`, `anon`, `authenticated` e `service_role`, e `GRANT EXECUTE` apenas para `service_role`. Nao foi possivel provar em sessao que `CREATE OR REPLACE` preserva ACL; restatar e correto sob as duas hipoteses, e este projeto tem `ALTER DEFAULT PRIVILEGES` concedendo `EXECUTE` a `anon`/`authenticated` em toda funcao nova — a causa do bug SEC1.
+- **Migration criada: `20261004_aprovacao_decidir_encerra_tarefa.sql`. AINDA NAO APLICADA.** Enquanto o apply nao acontecer, o comportamento em producao continua o antigo. O preflight live, o apply controlado e a prova pos-apply sao gates proprios.
+- **Guards:** contagem de escritas/`get diagnostics`/`raise` na funcao, recipientes de ACL verificados nominalmente (quatro `REVOKE` para quatro principais distintos, nao quatro `REVOKE` quaisquer), ordem mismatch-antes-de-escrita, ausencia de UPDATE de tarefa no ramo `aprovar`, e um parser de statements ciente de dollar-quoting — `split(";")` enxerga 64 pseudo-statements onde ha 7. Cada guard nasceu com controle negativo: uma revisao independente encontrou seis que passavam vacuamente e todos foram endurecidos e re-verificados por mutacao. tsc limpo, matriz non-DB completa verde.
+- **Ainda em aberto:** a API de decisao nao existe e os botoes da UI seguem `disabled` de proposito; **D5** (resume claim / reentrada do worker) e **D7** (scanner de aprovacoes orfas) continuam nao implementados. A tarefa parada legada pre-D1, com ponteiro NULL, segue nao-decidivel — cura prevista no D7.
+
 ## 2026-09-15 — Pausa de tarefa por aprovacao: ponteiro causal e remocao da assinatura legada
 
 - **A tarefa parada passou a dizer DE QUE aprovacao ela esta esperando.** Ate aqui, uma tarefa em `aguardando_aprovacao` e a aprovacao correspondente so podiam ser correlacionadas por `tarefa_id` — deterministico, mas nao causal: nada provava que a tarefa parou *por causa daquela* aprovacao. `agente_tarefas` ganhou `aprovacao_aguardada_id`, com FK composta por dono (`(aprovacao_aguardada_id, user_id)`) e um CHECK que so permite o ponteiro existir enquanto o status e `aguardando_aprovacao`.

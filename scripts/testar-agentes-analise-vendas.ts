@@ -906,6 +906,24 @@ const MIGRATIONS_DO_APPROVAL_PAUSE_D3_CLEANUP: readonly string[] = [
 ];
 
 /**
+ * APPROVAL-DECISION-RESUME-D4 — a migration que RECRIA `aprovacao_decidir`
+ * para encerrar a tarefa causal no reject/cancel.
+ *
+ * Grupo proprio, e nao um item a mais nos do D1/D3, pela razao de sempre:
+ * sao gates diferentes, autorizados depois de provas diferentes. O D1
+ * abriu o ponteiro, o D3 fechou a overload velha, e este muda o que a
+ * DECISAO faz. Colapsar os tres faria o inventario mentir sobre a origem
+ * de cada liberacao.
+ *
+ * Criada no disco e NAO aplicada — o G12b mede pertencimento ao
+ * inventario, nunca estado do banco. Nome exato, nunca prefixo, range ou
+ * wildcard: uma quinta migration continua reprovando.
+ */
+const MIGRATIONS_DO_APPROVAL_DECISION_D4: readonly string[] = [
+  "20261004_aprovacao_decidir_encerra_tarefa.sql",
+];
+
+/**
  * Inventario acumulado de `lib/agentes/ia/`, por frente.
  *
  * O guarda de disco (G11l) compara contra ESTA uniao, nunca contra uma
@@ -1175,6 +1193,26 @@ const ARQUIVOS_APPROVAL_PAUSE_D3_CLEANUP: readonly string[] = [
 ];
 
 /**
+ * APPROVAL-DECISION-RESUME-D4 — os paths do slice que caem DENTRO do
+ * escopo protegido.
+ *
+ * Sao dois, e so dois: a migration nova e o wrapper que ganhou o codigo
+ * `tarefa_incompativel`. As duas suites de teste do slice
+ * (`testar-agentes-aprovacoes.ts` e `testar-agentes-execucao.ts`) NAO
+ * entram aqui — `ESCOPO_AGENTES` cobre `lib/agentes`,
+ * `app/api/internal/agentes` e `supabase/migrations`, e `scripts/` esta
+ * fora. Este grupo reflete o contrato do guard, nao o slice Git inteiro.
+ *
+ * Nenhum path de API ou UI acompanha, e isso e requisito do gate, nao
+ * economia: o D4 muda o contrato no banco e deixa a decisao inalcancavel
+ * pela tela ate o D5 e o D7 existirem.
+ */
+const ARQUIVOS_APPROVAL_DECISION_D4: readonly string[] = [
+  "supabase/migrations/20261004_aprovacao_decidir_encerra_tarefa.sql",
+  "lib/agentes/aprovacoes/persistencia.ts",
+];
+
+/**
  * FUNCTION-RUNTIME-V1-A — o primeiro handler que executa uma Funcao.
  *
  * `ESCOPO_AGENTES` cobre `lib/agentes` inteiro, entao um arquivo NOVO
@@ -1280,6 +1318,7 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_TASK_FENCING_B0_CLEANUP,
   ...ARQUIVOS_APPROVAL_RESUME_D1,
   ...ARQUIVOS_APPROVAL_PAUSE_D3_CLEANUP,
+  ...ARQUIVOS_APPROVAL_DECISION_D4,
   ...ARQUIVOS_FUNCTION_RUNTIME_V1A,
   ...ARQUIVOS_FUNCTION_RUNTIME_V1B1,
 ];
@@ -2493,7 +2532,8 @@ async function main() {
       MIGRATIONS_DO_TASK_FENCING_B0.includes(m) ||
       MIGRATIONS_DO_TASK_FENCING_B0_CLEANUP.includes(m) ||
       MIGRATIONS_DO_APPROVAL_RESUME_D1.includes(m) ||
-      MIGRATIONS_DO_APPROVAL_PAUSE_D3_CLEANUP.includes(m);
+      MIGRATIONS_DO_APPROVAL_PAUSE_D3_CLEANUP.includes(m) ||
+      MIGRATIONS_DO_APPROVAL_DECISION_D4.includes(m);
 
     ok(`G12b nenhuma migration nao declarada no disco (${novasNoDisco.join(", ") || "nenhuma"})`,
        novasNoDisco.every(declarada));
@@ -2547,6 +2587,62 @@ async function main() {
        MIGRATIONS_DO_APPROVAL_RESUME_D1.length === 1 &&
        !MIGRATIONS_DO_APPROVAL_RESUME_D1.includes(
          "20261003_remover_aguardar_aprovacao_tarefa_2args.sql"));
+
+    // ── G12r..G12u — o D4, mesma forma duravel ─────────────────────
+    //
+    // Anti-vacuidade primeiro: um grupo VAZIO passaria por qualquer
+    // predicado de pertencimento e nao provaria nada. Por isso o tamanho
+    // e nominal, e os valores sao comparados um a um.
+    ok("G12r a migration do D4 esta declarada nome a nome",
+       MIGRATIONS_DO_APPROVAL_DECISION_D4.length === 1 &&
+       MIGRATIONS_DO_APPROVAL_DECISION_D4[0] ===
+         "20261004_aprovacao_decidir_encerra_tarefa.sql");
+    ok("G12s e ela existe no disco, onde o guarda a espera",
+       disco.includes("20261004_aprovacao_decidir_encerra_tarefa.sql"));
+    ok("G12t os DOIS paths protegidos do D4 estao declarados, e so eles",
+       ARQUIVOS_APPROVAL_DECISION_D4.length === 2 &&
+       ARQUIVOS_APPROVAL_DECISION_D4.includes(
+         "supabase/migrations/20261004_aprovacao_decidir_encerra_tarefa.sql") &&
+       ARQUIVOS_APPROVAL_DECISION_D4.includes("lib/agentes/aprovacoes/persistencia.ts"));
+    ok("G12t2 e os dois pertencem MESMO ao escopo protegido",
+       ARQUIVOS_APPROVAL_DECISION_D4.every(
+         (p) => ESCOPO_AGENTES.some((e) => p.startsWith(e))));
+    ok("G12t3 as suites do slice NAO entram: `scripts/` esta fora do escopo",
+       !ARQUIVOS_APPROVAL_DECISION_D4.some((p) => p.startsWith("scripts/")) &&
+       !ESCOPO_AGENTES.some((e) => "scripts/testar-agentes-aprovacoes.ts".startsWith(e)));
+    ok("G12u CONTROLE NEGATIVO: a lista do D4 nao aceita migration alheia",
+       !MIGRATIONS_DO_APPROVAL_DECISION_D4.includes("99999999_intrusa.sql") &&
+       !MIGRATIONS_DO_APPROVAL_DECISION_D4.some((m) => m.includes("*")) &&
+       !ARQUIVOS_APPROVAL_DECISION_D4.some((p) => p.includes("*")));
+
+    // ── G12v..G12x — o novo grupo NAO virou wildcard ───────────────
+    //
+    // Os tres controles que o F1 exige, sobre listas SINTETICAS: nenhum
+    // arquivo real e criado, e o predicado e testado diretamente.
+    const declaradaComD4 = (m: string) => declarada(m);
+    ok("G12v CONTROLE NEGATIVO: migration fake com prefixo parecido reprova",
+       !declaradaComD4("20261004_fake_approval_decision.sql"));
+    ok("G12w CONTROLE NEGATIVO: path sintetico no escopo protegido reprova",
+       !ARQUIVOS_ESPERADOS.includes("lib/agentes/aprovacoes/fake-d4.ts") &&
+       !soAutorizadosNoEscopo("?? lib/agentes/aprovacoes/fake-d4.ts\n"));
+    ok("G12x CONTROLE NEGATIVO: perder um dos dois paths esperados reprova",
+       !mesmoConjuntoDeNomes(
+         ARQUIVOS_APPROVAL_DECISION_D4.filter((p) => p !== "lib/agentes/aprovacoes/persistencia.ts"),
+         [...ARQUIVOS_APPROVAL_DECISION_D4]));
+
+    // ── G12y — SEPARACAO ENTRE OS GRUPOS DA FRENTE ─────────────────
+    //
+    // Cada gate liberou o que liberou. Se um dia alguem fundir dois
+    // grupos, isto cai antes de o inventario ficar mentindo sobre a
+    // origem de cada autorizacao.
+    ok("G12y D1, D3 e D4 continuam nominalmente separados",
+       MIGRATIONS_DO_APPROVAL_RESUME_D1.length === 1 &&
+       MIGRATIONS_DO_APPROVAL_PAUSE_D3_CLEANUP.length === 1 &&
+       MIGRATIONS_DO_APPROVAL_DECISION_D4.length === 1 &&
+       !MIGRATIONS_DO_APPROVAL_RESUME_D1.includes("20261004_aprovacao_decidir_encerra_tarefa.sql") &&
+       !MIGRATIONS_DO_APPROVAL_PAUSE_D3_CLEANUP.includes("20261004_aprovacao_decidir_encerra_tarefa.sql") &&
+       !MIGRATIONS_DO_APPROVAL_DECISION_D4.includes("20261003_remover_aguardar_aprovacao_tarefa_2args.sql") &&
+       !MIGRATIONS_DO_APPROVAL_DECISION_D4.includes("20261002_tarefa_aprovacao_aguardada.sql"));
 
     ok("G12c nenhuma migration desapareceu do disco", sumidasDoDisco.length === 0);
     ok("G12d as duas migrations desta frente seguem no HEAD", head.includes("20260916_agentes_fundacao.sql") && head.includes("20260917_agentes_execucao.sql"));
