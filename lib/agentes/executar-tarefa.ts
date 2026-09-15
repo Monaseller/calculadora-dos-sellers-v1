@@ -231,11 +231,19 @@ export async function executarTarefa(tarefaId: string): Promise<RespostaExecucao
     if (err instanceof PausaPorAprovacao) {
       // A tentativa vem da LINHA que o claim reivindicou, NUNCA do
       // handler: aceita-la de quem lanca seria deixar o handler
-      // descrever o proprio fencing. `err.aprovacaoId` e marcador, e
-      // nao participa da transicao.
+      // descrever o proprio fencing.
+      //
+      // `err.aprovacaoId` deixou de ser marcador na
+      // APPROVAL-DECISION-RESUME-D2 e passou a participar da transicao.
+      // Ele vem de `executarFuncao`, que acabou de criar ou reutilizar a
+      // aprovacao, e atravessa o handler dentro do proprio sentinel —
+      // nao e procurado por `tarefa_id`, nao e "o mais recente" e nao
+      // passa por `ContextoTarefa`. A RPC o revalida contra dono,
+      // agente, tarefa e estado antes de grava-lo no ponteiro.
       const { erro: erroPausa } = await aguardarAprovacaoTarefa(
         tarefa.id,
-        tarefa.tentativas
+        tarefa.tentativas,
+        err.aprovacaoId
       );
 
       if (erroPausa) {

@@ -1940,10 +1940,41 @@ async function main() {
     ok("G10o capability-worker ganhou UM wrapper novo, e ele chama RPC",
       /export async function aguardarAprovacaoTarefa\(/.test(capw) &&
       /\.rpc\("aguardar_aprovacao_tarefa"/.test(capw));
-    ok("G10p o wrapper novo recebe SOMENTE tarefa e tentativa",
-      /p_tarefa_id: tarefaId,/.test(capw) &&
-      /p_tentativa_esperada: tentativaEsperada,/.test(capw) &&
-      !/p_user_id|p_agente_id|p_aprovacao_id|p_status/.test(capw));
+    // ── G10p migrado na APPROVAL-DECISION-RESUME-D2 ───────────────
+    //
+    // O assert proibia `p_aprovacao_id` porque, quando foi escrito, nao
+    // havia onde guardar o vinculo: a Task nao tinha coluna, e mandar o
+    // id seria dar a RPC um dado sem destino.
+    //
+    // O D1 criou `agente_tarefas.aprovacao_aguardada_id` e a revalidacao
+    // dentro do proprio UPDATE; o D2 liga o caminho. A correcao NAO foi
+    // tirar o termo da lista de proibidos — isso deixaria de exigir o
+    // que o slice existe para provar. O assert passou a EXIGIR a chave,
+    // positivamente.
+    //
+    // O que ele continua garantindo e o mesmo de antes, e e o ponto:
+    // nenhum parametro que descreva ESTADO que a LINHA ja conhece.
+    // `p_aprovacao_id` nao descreve estado — e o retorno do executor de
+    // Funcao que acabou de criar ou reutilizar a aprovacao, e a RPC o
+    // confere contra dono, agente, tarefa e estado antes de grava-lo.
+    // `p_status`, `p_resultado` e `p_erro_tipo` entram na lista de
+    // proibidos, que antes nao os citava.
+    // A lista de proibidos passou a incluir `p_resultado` e `p_erro_tipo`,
+    // e por isso o recorte deixou de ser o arquivo inteiro: os wrappers
+    // IRMAOS — `concluirTarefa` e `falharTarefa` — enviam esses campos
+    // legitimamente. Medir o arquivo todo acusaria a pausa por payload
+    // que nao e dela.
+    const iPausa = capw.indexOf("export async function aguardarAprovacaoTarefa(");
+    const iDepois = capw.indexOf("\nfunction ", iPausa);
+    const corpoPausa = capw.slice(iPausa, iDepois > 0 ? iDepois : capw.length);
+
+    ok("G10p ANCORA: o corpo do wrapper de pausa foi recortado",
+      corpoPausa.length > 200 && corpoPausa.includes("aguardar_aprovacao_tarefa"));
+    ok("G10p o wrapper recebe tarefa, tentativa e a aprovacao — e nada de estado",
+      /p_tarefa_id: tarefaId,/.test(corpoPausa) &&
+      /p_tentativa_esperada: tentativaEsperada,/.test(corpoPausa) &&
+      /p_aprovacao_id: aprovacaoId,/.test(corpoPausa) &&
+      !/p_user_id|p_agente_id|p_status|p_resultado|p_erro_tipo|p_heartbeat/.test(corpoPausa));
     ok("G10q nenhuma transicao de tarefa virou UPDATE direto",
       !/\.from\("agente_tarefas"\)[\s\S]{0,200}\.update\(\{\s*status/.test(capw));
     ok("G10r o erro do driver nao vaza pelo wrapper novo",

@@ -226,15 +226,32 @@ export async function falharTarefa(
  *
  * ── A lista de parametros e a defesa ────────────────────────────────
  *
- * Nao entram `userId`, `agenteId`, `aprovacaoId`, `status`, `heartbeat`,
- * `nivel`, `erro` nem `resultado`. A LINHA e a autoridade sobre todos
- * eles, e aceitar qualquer um de fora seria deixar o chamador descrever
- * o estado que a RPC deveria verificar. O vinculo com a aprovacao vive
- * em `agente_funcao_aprovacoes.tarefa_id` — a Task nao o guarda.
+ * Nao entram `userId`, `agenteId`, `status`, `heartbeat`, `nivel`,
+ * `erro` nem `resultado`. A LINHA e a autoridade sobre todos eles, e
+ * aceitar qualquer um de fora seria deixar o chamador descrever o
+ * estado que a RPC deveria verificar.
+ *
+ * ── Por que `aprovacaoId` E uma excecao legitima ────────────────────
+ *
+ * Ate a APPROVAL-DECISION-RESUME-D1 ele tambem ficava de fora, e o
+ * vinculo com a aprovacao vivia so em
+ * `agente_funcao_aprovacoes.tarefa_id`. Aquele caminho nao IDENTIFICA:
+ * o unico indice unico sobre estado ativo e `(user_id, fingerprint)`, e
+ * fingerprint descreve uma ACAO — duas aprovacoes ativas para a mesma
+ * tarefa sao possiveis. Localizar "a aprovacao da tarefa" por
+ * `tarefa_id` seria escolher deterministicamente, nao causalmente.
+ *
+ * O id que entra aqui nao e descricao de estado: e o retorno do proprio
+ * executor de Funcao que acabou de criar ou reutilizar a aprovacao,
+ * carregado por `PausaPorAprovacao`. E a RPC NAO confia nele — revalida
+ * dono, agente, pertencimento a esta tarefa e estado ativo, tudo no
+ * mesmo `UPDATE`. Passar o id e dar a ela o que conferir, nao afirmar
+ * nada por ela.
  */
 export async function aguardarAprovacaoTarefa(
   tarefaId: string,
-  tentativaEsperada: number
+  tentativaEsperada: number,
+  aprovacaoId: string
 ): Promise<ResultadoTarefaInterna> {
   if (!tarefaId) return { linha: null, erro: "tarefa_id_ausente" };
   // Mesma doutrina das irmas: recusa local do que nao identifica nada,
@@ -243,10 +260,16 @@ export async function aguardarAprovacaoTarefa(
   if (!Number.isInteger(tentativaEsperada) || tentativaEsperada <= 0) {
     return { linha: null, erro: "tentativa_esperada_invalida" };
   }
+  // O terceiro parametro ganha a MESMA recusa local que os outros dois.
+  // A RPC ja e fail-closed para id ausente (22023), mas deixar o unico
+  // parametro sem guarda local seria assimetria sem motivo — e o erro
+  // nomeado aqui diz o que faltou, enquanto o do driver nao sai daqui.
+  if (!aprovacaoId) return { linha: null, erro: "aprovacao_id_ausente" };
 
   const { data, error } = await getSupabaseServidor().rpc("aguardar_aprovacao_tarefa", {
     p_tarefa_id: tarefaId,
     p_tentativa_esperada: tentativaEsperada,
+    p_aprovacao_id: aprovacaoId,
   });
 
   if (error) {

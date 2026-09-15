@@ -1855,9 +1855,24 @@ async function principalStale(): Promise<void> {
       /aguardarAprovacaoTarefa\(/.test(executor) &&
       !/criarAprovacao|decidirAprovacao|consumirAprovacao|retomarAprovacao|agente_funcao_aprovacoes/
         .test(executor));
-    ok("R24 e a capability de pausa nao conhece aprovacao nenhuma",
+    // ── R24 migrado na APPROVAL-DECISION-RESUME-D2 ────────────────
+    //
+    // Ate aqui a capability nao podia conhecer aprovacao NENHUMA, e
+    // estava certo: nao havia onde guardar o vinculo, entao qualquer
+    // mencao seria o worker opinando sobre um dominio que nao e dele.
+    //
+    // O D1 criou o lugar — `agente_tarefas.aprovacao_aguardada_id` — e o
+    // D2 liga o caminho. O assert nao afrouxou: ele passou a exigir que
+    // a capability conheca EXATAMENTE uma coisa, o `p_aprovacao_id` que
+    // repassa, e continue sem conhecer a TABELA de aprovacoes, sem criar
+    // e sem retomar. Ela transporta um id; nao decide nada sobre ele.
+    ok("R24 a capability de pausa transporta o id, e so isso",
       /aguardar_aprovacao_tarefa/.test(capWorker) &&
-      !/p_aprovacao_id|agente_funcao_aprovacoes|criarAprovacao|retomarAprovacao/.test(capWorker));
+      /p_aprovacao_id:\s*aprovacaoId/.test(capWorker) &&
+      !/agente_funcao_aprovacoes|criarAprovacao|retomarAprovacao|decidirAprovacao|consumirAprovacao/
+        .test(capWorker));
+    ok("R24 CONTROLE NEGATIVO: tocar a tabela de aprovacoes reprova",
+      /agente_funcao_aprovacoes/.test(capWorker + '\nfrom("agente_funcao_aprovacoes")'));
     ok("R25 CONTROLE: as sondas acusam o padrao que proibem",
       /retomarAprovacao/.test("await retomarAprovacao({ userId, aprovacaoId })"));
   }
@@ -2601,14 +2616,49 @@ async function principalStale(): Promise<void> {
     // Requisito, nao divida. Publicar o caller antes de a migration
     // estar aplicada faria producao chamar uma assinatura que o banco
     // ainda nao tem — a metade errada do cutover.
-    const CAP_D1 = semComentariosTs(ler("lib/agentes/capability-worker.ts"));
-    const EXE_D1 = semComentariosTs(ler("lib/agentes/executar-tarefa.ts"));
-    ok("V39 o wrapper de pausa ainda envia o payload de DUAS chaves",
-      /rpc\("aguardar_aprovacao_tarefa"/.test(CAP_D1) && !/p_aprovacao_id/.test(CAP_D1));
-    ok("V40 e o executor continua descartando o marcador da pausa",
-      !/aprovacaoId/.test(EXE_D1));
-    ok("V39 CONTROLE NEGATIVO: a sonda enxergaria um cutover precoce",
-      /p_aprovacao_id/.test("p_aprovacao_id: aprovacaoId,"));
+    // ── V39..V42 migrados na APPROVAL-DECISION-RESUME-D2 ──────────
+    //
+    // Estes asserts exigiam o CONTRARIO: que o caller continuasse na
+    // overload de dois argumentos. Era requisito do D1, nao divida —
+    // publicar o caller antes de a migration existir no banco faria
+    // producao chamar uma assinatura inexistente.
+    //
+    // A migration foi aplicada e provada; agora o contrato e o oposto, e
+    // os asserts foram INVERTIDOS, nao removidos.
+    const CAP_D2 = semComentariosTs(ler("lib/agentes/capability-worker.ts"));
+    const EXE_D2 = semComentariosTs(ler("lib/agentes/executar-tarefa.ts"));
+
+    ok("V39 o wrapper de pausa envia as TRES chaves da overload nova",
+      /rpc\("aguardar_aprovacao_tarefa"/.test(CAP_D2) &&
+      /p_tarefa_id:\s*tarefaId/.test(CAP_D2) &&
+      /p_tentativa_esperada:\s*tentativaEsperada/.test(CAP_D2) &&
+      /p_aprovacao_id:\s*aprovacaoId/.test(CAP_D2));
+    ok("V39 CONTROLE NEGATIVO: perder a chave nova reprova",
+      !/p_aprovacao_id/.test(CAP_D2.split("p_aprovacao_id").join("")));
+
+    // A identidade causal e o ponto do D1-R1: o id vem do sentinel que o
+    // executor de Funcao lancou, e NAO de uma busca por `tarefa_id`.
+    ok("V40 o executor passa err.aprovacaoId, direto do sentinel",
+      /aguardarAprovacaoTarefa\([\s\S]{0,120}?err\.aprovacaoId/.test(EXE_D2));
+    ok("V40 CONTROLE NEGATIVO: outra origem para o id reprova",
+      !/aguardarAprovacaoTarefa\([\s\S]{0,120}?err\.aprovacaoId/.test(
+        EXE_D2.replace("err.aprovacaoId", "tarefa.id")));
+    ok("V41 o executor nao procura a aprovacao por tarefa_id nem por recencia",
+      !/from\("agente_funcao_aprovacoes"\)/.test(EXE_D2) &&
+      !/order\(\s*"criado_em"/.test(EXE_D2) &&
+      !/randomUUID/.test(EXE_D2));
+
+    // E o ponteiro NAO vira campo de contexto do handler: ele viaja do
+    // catch ao wrapper e para ali.
+    const CTX_D2 = semComentariosTs(ler("lib/agentes/tipos-execucao.ts"));
+    const blocoCtx = CTX_D2.slice(
+      CTX_D2.indexOf("export interface ContextoTarefa"),
+      CTX_D2.indexOf("}", CTX_D2.indexOf("export interface ContextoTarefa")));
+    ok("V42 ContextoTarefa continua com os mesmos 7 campos, sem aprovacao",
+      (blocoCtx.match(/readonly\s+\w+\s*:/g) ?? []).length === 7 &&
+      !/aprovacao/i.test(blocoCtx));
+    ok("V42 CONTROLE NEGATIVO: um oitavo campo reprova",
+      ((blocoCtx + "\n  readonly aprovacaoId: string;").match(/readonly\s+\w+\s*:/g) ?? []).length !== 7);
   }
 }
 

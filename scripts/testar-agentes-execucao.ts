@@ -1231,14 +1231,30 @@ async function main() {
     // Requisito deste gate, nao divida. Publicar o caller antes de a
     // migration existir no banco faria producao chamar uma assinatura
     // que ainda nao ha — a metade errada do cutover, e a que quebra.
-    ok("T11 o wrapper de pausa continua com o payload de duas chaves",
+    // ── T11..T12 migrados na APPROVAL-DECISION-RESUME-D2 ──────────
+    //
+    // Eles exigiam que o caller NAO tivesse sido publicado ainda — a
+    // metade errada do cutover quebra producao, e o guard existia para
+    // impedir a pressa. A migration esta aplicada e provada; o contrato
+    // agora e o inverso.
+    ok("T11 o wrapper chama a overload de TRES argumentos",
       /rpc\("aguardar_aprovacao_tarefa"/.test(capD1) &&
-      !/p_aprovacao_id/.test(capD1));
-    ok("T12 o executor continua descartando err.aprovacaoId",
-      !/aprovacaoId/.test(exeD1) &&
-      /aguardarAprovacaoTarefa\(\s*\n?\s*tarefa\.id,\s*\n?\s*tarefa\.tentativas\s*\n?\s*\)/.test(exeD1));
-    ok("T12 CONTROLE NEGATIVO: a sonda enxergaria um cutover precoce",
-      /p_aprovacao_id/.test('p_aprovacao_id: err.aprovacaoId,'));
+      /p_aprovacao_id:\s*aprovacaoId/.test(capD1));
+    ok("T12 o executor entrega o id vindo do sentinel",
+      /aguardarAprovacaoTarefa\([\s\S]{0,140}?tarefa\.id,[\s\S]{0,60}?tarefa\.tentativas,[\s\S]{0,60}?err\.aprovacaoId/
+        .test(exeD1));
+    // ── T12b — SEM FALLBACK PARA A OVERLOAD ANTIGA ────────────────
+    //
+    // O risco especifico deste cutover: tentar tres chaves e, ao falhar,
+    // repetir com duas. Isso transformaria a recusa fail-closed da RPC
+    // nova numa pausa sem ponteiro — o estado legado que o D1 existe
+    // para parar de produzir. A capability chama a RPC de pausa UMA vez.
+    ok("T12b nao existe fallback para a overload de dois argumentos",
+      (capD1.match(/rpc\("aguardar_aprovacao_tarefa"/g) ?? []).length === 1 &&
+      !/catch[\s\S]{0,200}?aguardar_aprovacao_tarefa/.test(capD1));
+    ok("T12b CONTROLE NEGATIVO: uma segunda chamada da RPC reprova",
+      ((capD1 + '\nawait rpc("aguardar_aprovacao_tarefa", { p_tarefa_id, p_tentativa_esperada });')
+        .match(/rpc\("aguardar_aprovacao_tarefa"/g) ?? []).length !== 1);
 
     // ── T13..T14 — ORDEM E AUSENCIA DE LIMPEZA ────────────────────
     const migsDisco = [...readdirSync(join(RAIZ, "supabase", "migrations"))].sort();
@@ -1606,11 +1622,28 @@ async function main() {
       iPausa > iSentinel && iPausa < iClassificar);
     // O FENCING: a tentativa vem da LINHA, nunca do handler.
     ok("Q11 passa `tarefa.id` e `tarefa.tentativas`, os dois da linha",
-      /aguardarAprovacaoTarefa\(\s*tarefa\.id,\s*tarefa\.tentativas\s*\)/.test(exe));
+      /aguardarAprovacaoTarefa\(\s*tarefa\.id,\s*tarefa\.tentativas\s*,/.test(exe));
     ok("Q12 NAO usa tentativa vinda do sentinel nem do contexto",
       !/err\.tentativa|contexto\.tentativa/.test(exe));
-    ok("Q13 o `aprovacaoId` NAO participa da transicao",
-      !/aguardarAprovacaoTarefa\([^)]*aprovacaoId/.test(exe));
+    // ── Q13 migrado na APPROVAL-DECISION-RESUME-D2 ────────────────
+    //
+    // Ate aqui o `aprovacaoId` NAO podia participar da transicao, e a
+    // razao era boa: nao havia coluna para recebe-lo, entao passa-lo
+    // seria dar a RPC um dado que ela nao teria onde gravar.
+    //
+    // O D1 criou a coluna e a revalidacao. Agora ele participa — e o
+    // assert passou a exigir a ORIGEM certa, que e o ponto todo: o id
+    // vem do sentinel lancado por quem criou a aprovacao, nunca de uma
+    // busca por `tarefa_id`, que identificaria a acao errada quando a
+    // tarefa tem mais de uma aprovacao ativa.
+    ok("Q13 o `aprovacaoId` participa da transicao, vindo do sentinel",
+      /aguardarAprovacaoTarefa\([\s\S]{0,140}?err\.aprovacaoId/.test(exe));
+    ok("Q13 CONTROLE NEGATIVO: trocar a origem do id reprova",
+      !/aguardarAprovacaoTarefa\([\s\S]{0,140}?err\.aprovacaoId/.test(
+        exe.replace("err.aprovacaoId", "tarefa.id")));
+    ok("Q13 e a tentativa continua sendo N, sem aritmetica",
+      !/tarefa\.tentativas\s*[+-]\s*1/.test(exe) &&
+      !/aguardarAprovacaoTarefa\([\s\S]{0,140}?maxTentativas/.test(exe));
 
     // ── Sucesso da pausa ─────────────────────────────────────────
     const ramoPausa = exe.slice(iSentinel, iClassificar);
@@ -1643,11 +1676,30 @@ async function main() {
         ? capw.indexOf("\n/**", capw.indexOf("export async function aguardarAprovacaoTarefa("))
         : 0
     );
-    ok("Q20 recebe SOMENTE tarefa e tentativa",
+    // ── Q20 migrado na APPROVAL-DECISION-RESUME-D2 ────────────────
+    //
+    // A lista continua sendo a defesa: o que NAO entra e tudo que a
+    // LINHA ja sabe — dono, agente, status, heartbeat, erro, resultado.
+    // Aceitar qualquer um desses seria deixar o chamador descrever o
+    // estado que a RPC deveria verificar.
+    //
+    // `p_aprovacao_id` entrou, e e excecao legitima por um motivo
+    // especifico: ele NAO descreve estado. E o retorno do executor de
+    // Funcao que acabou de criar ou reutilizar a aprovacao, e a RPC o
+    // revalida contra dono, agente, tarefa e estado antes de grava-lo.
+    ok("Q20 recebe tarefa, tentativa e a aprovacao — e mais nada",
       corpoWrapper.length > 200 &&
       /p_tarefa_id: tarefaId,/.test(corpoWrapper) &&
       /p_tentativa_esperada: tentativaEsperada,/.test(corpoWrapper) &&
-      !/p_user_id|p_agente_id|p_aprovacao_id|p_status|p_resultado|p_erro_tipo/.test(corpoWrapper));
+      /p_aprovacao_id: aprovacaoId,/.test(corpoWrapper) &&
+      !/p_user_id|p_agente_id|p_status|p_resultado|p_erro_tipo|p_heartbeat/.test(corpoWrapper));
+    ok("Q20 CONTROLE NEGATIVO: uma quarta chave de estado reprova",
+      /p_user_id/.test(corpoWrapper + "\n      p_user_id: userId,"));
+    ok("Q20b a assinatura exige a aprovacao, sem opcional e sem default",
+      /aprovacaoId:\s*string\s*\n?\s*\):/.test(corpoWrapper) &&
+      !/aprovacaoId\?:/.test(corpoWrapper) &&
+      !/aprovacaoId\s*[:=][^,)]*=\s*/.test(corpoWrapper) &&
+      !/aprovacaoId\s*\?\?/.test(corpoWrapper));
     ok("Q21 recusa tentativa que nao poderia ter vindo do claim",
       /Number\.isInteger\(tentativaEsperada\) \|\| tentativaEsperada <= 0/.test(capw));
     ok("Q22 e nao vaza a mensagem do driver",
