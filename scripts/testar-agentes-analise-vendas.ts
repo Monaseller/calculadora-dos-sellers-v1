@@ -869,6 +869,23 @@ const MIGRATIONS_DO_TASK_FENCING_B0_CLEANUP: readonly string[] = [
 ];
 
 /**
+ * APPROVAL-DECISION-RESUME-D1 — a correlacao duravel entre uma tarefa
+ * parada e a aprovacao que ela aguarda.
+ *
+ * Grupo proprio, e nao um item a mais no do B0: sao frentes diferentes.
+ * O B0 tratava de QUEM pode terminalizar uma tentativa; este trata de
+ * DE QUE a tarefa esta esperando. Colapsar os dois faria o inventario
+ * mentir sobre a origem de cada liberacao.
+ *
+ * Criada no disco e NAO aplicada neste gate — o G12b mede pertencimento
+ * ao inventario, nunca estado do banco. Nome exato, nunca prefixo,
+ * range ou wildcard.
+ */
+const MIGRATIONS_DO_APPROVAL_RESUME_D1: readonly string[] = [
+  "20261002_tarefa_aprovacao_aguardada.sql",
+];
+
+/**
  * Inventario acumulado de `lib/agentes/ia/`, por frente.
  *
  * O guarda de disco (G11l) compara contra ESTA uniao, nunca contra uma
@@ -1112,6 +1129,18 @@ const ARQUIVOS_TASK_FENCING_B0_CLEANUP: readonly string[] = [
 ];
 
 /**
+ * APPROVAL-DECISION-RESUME-D1 — o path da migration da correlacao.
+ *
+ * `ESCOPO_AGENTES` cobre `supabase/migrations` inteiro, entao o arquivo
+ * novo ali reprovaria o G11 ate ser declarado. Nenhum path de producao
+ * acompanha, e isso e requisito do gate, nao economia: o caller so passa
+ * a enviar `p_aprovacao_id` depois que esta migration estiver aplicada.
+ */
+const ARQUIVOS_APPROVAL_RESUME_D1: readonly string[] = [
+  "supabase/migrations/20261002_tarefa_aprovacao_aguardada.sql",
+];
+
+/**
  * FUNCTION-RUNTIME-V1-A — o primeiro handler que executa uma Funcao.
  *
  * `ESCOPO_AGENTES` cobre `lib/agentes` inteiro, entao um arquivo NOVO
@@ -1215,6 +1244,7 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_FUNCTION_RUNTIME_P0,
   ...ARQUIVOS_TASK_FENCING_B0,
   ...ARQUIVOS_TASK_FENCING_B0_CLEANUP,
+  ...ARQUIVOS_APPROVAL_RESUME_D1,
   ...ARQUIVOS_FUNCTION_RUNTIME_V1A,
   ...ARQUIVOS_FUNCTION_RUNTIME_V1B1,
 ];
@@ -2395,7 +2425,8 @@ async function main() {
       MIGRATIONS_DA_APPROVAL_B1B.includes(m) ||
       MIGRATIONS_DO_FUNCTION_RUNTIME_P0.includes(m) ||
       MIGRATIONS_DO_TASK_FENCING_B0.includes(m) ||
-      MIGRATIONS_DO_TASK_FENCING_B0_CLEANUP.includes(m);
+      MIGRATIONS_DO_TASK_FENCING_B0_CLEANUP.includes(m) ||
+      MIGRATIONS_DO_APPROVAL_RESUME_D1.includes(m);
 
     ok(`G12b nenhuma migration nao declarada no disco (${novasNoDisco.join(", ") || "nenhuma"})`,
        novasNoDisco.every(declarada));

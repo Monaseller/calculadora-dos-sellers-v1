@@ -120,6 +120,19 @@ const MIGRATION_B0 = "supabase/migrations/20260930_tarefa_fencing_por_tentativa.
  */
 const MIGRATION_B0_CLEANUP =
   "supabase/migrations/20261001_remover_tarefa_rpc_sem_fencing.sql";
+/**
+ * APPROVAL-DECISION-RESUME-D1 — a migration que da a uma tarefa parada
+ * o direito de dizer DE QUE aprovacao ela esta esperando.
+ *
+ * Fase aditiva: cria um overload de tres argumentos da pausa e deixa o
+ * de dois intacto. O caller de producao so muda no gate seguinte — e a
+ * secao T abaixo existe para impedir que ele mude aqui.
+ */
+const MIGRATION_D1 =
+  "supabase/migrations/20261002_tarefa_aprovacao_aguardada.sql";
+/** A pausa do P0, historica: a secao T prova que ela NAO foi tocada. */
+const MIGRATION_PAUSA_P0 =
+  "supabase/migrations/20260929_agente_tarefa_aguardar_aprovacao.sql";
 const REGISTRY = "lib/agentes/handlers/registry.ts";
 const HANDLER = "lib/agentes/handlers/teste-fundacao.ts";
 const EXECUTOR = "lib/agentes/executar-tarefa.ts";
@@ -1120,6 +1133,121 @@ async function main() {
       conta(bancoSrc, /p_tentativa_esperada/g) >= chamadasTerminais + 1,
       );
     ok("R29 ANCORA: ela realmente chama as duas RPCs", chamadasTerminais >= 8);
+  }
+
+  console.log("T. Migration D1 — o ponteiro da espera, fase aditiva");
+  {
+    const migD1 = sql(MIGRATION_D1);
+    const pausaP0 = sql(MIGRATION_PAUSA_P0);
+    const exeD1 = codigo(EXECUTOR);
+    const capD1 = codigo(CAP_WORKER);
+
+    ok("T0  ANCORA: as duas migrations da pausa foram lidas",
+      migD1.length > 1500 && pausaP0.length > 400);
+
+    // ── T1..T3 — A FASE ADITIVA, OUTRA VEZ ────────────────────────
+    //
+    // Mesmo desenho do B0, pelo mesmo motivo: o caller de producao
+    // chama a assinatura de dois argumentos AGORA. Removê-la no mesmo
+    // release em que a de tres nasce abriria a janela em que producao e
+    // banco discordam — e ha dois crons de minuto para exercita-la.
+    ok("T1  a migration da pausa do P0 continua intocada por D1",
+      !/aprovacao_aguardada_id/i.test(pausaP0) &&
+      /aguardar_aprovacao_tarefa\(\s*\n?\s*p_tarefa_id\s+uuid,\s*\n?\s*p_tentativa_esperada integer\s*\n?\s*\)/i.test(pausaP0));
+    ok("T2  D1 cria a assinatura de TRES argumentos",
+      /function public\.aguardar_aprovacao_tarefa\([\s\S]{0,160}?p_aprovacao_id\s+uuid\s*\)/i.test(migD1));
+    ok("T3  D1 nao dropa nem altera a assinatura de dois argumentos",
+      !/\bdrop\b/i.test(migD1) &&
+      !/alter\s+function/i.test(migD1) &&
+      !/aguardar_aprovacao_tarefa\(\s*uuid\s*,\s*integer\s*\)/i.test(migD1));
+    ok("T3  CONTROLE NEGATIVO: um DROP da antiga reprova",
+      /\bdrop\b/i.test(
+        migD1 + "\nDROP FUNCTION IF EXISTS public.aguardar_aprovacao_tarefa(uuid, integer);"));
+    // A fase aditiva nao remove NADA — nem constraint. Ver V12 na suite
+    // de aprovacoes: `drop constraint if exists` tambem e remocao, e num
+    // arquivo que nunca leu o catalogo ele apaga objeto nao inspecionado.
+    ok("T3b D1 nao contem DROP de especie alguma",
+      !/\bdrop\b/i.test(migD1));
+    // Criar objeto novo tambem e fail-closed: `if not exists` adotaria
+    // coluna alheia e `or replace` sobrescreveria funcao alheia. As duas
+    // sao a mesma decisao cega que o `drop` acima ja custou um gate.
+    ok("T3d os objetos novos nascem fail-closed",
+      /add column aprovacao_aguardada_id uuid null/i.test(migD1) &&
+      !/add\s+column\s+if\s+not\s+exists/i.test(migD1) &&
+      /create\s+function\s+public\.aguardar_aprovacao_tarefa\(/i.test(migD1) &&
+      !/create\s+or\s+replace/i.test(migD1));
+    ok("T3d CONTROLE NEGATIVO: OR REPLACE na overload nova reprova",
+      /create\s+or\s+replace/i.test(
+        migD1.replace("create function public.aguardar_aprovacao_tarefa(",
+                      "create or replace function public.aguardar_aprovacao_tarefa(")));
+    ok("T3d CONTROLE NEGATIVO: IF NOT EXISTS na coluna reprova",
+      /add\s+column\s+if\s+not\s+exists/i.test(
+        migD1.replace("add column aprovacao_aguardada_id", "add column if not exists aprovacao_aguardada_id")));
+    ok("T3b CONTROLE NEGATIVO: um `drop constraint` reprova",
+      /\bdrop\b/i.test(
+        migD1 + "\nalter table public.agente_tarefas drop constraint if exists agente_tarefas_ponteiro_so_na_espera;"));
+    // Grafia com espacos internos tambem e destrutiva — D1-R1-L1.
+    ok("T3c CONTROLE NEGATIVO: REVOKE da antiga com espacos internos reprova",
+      /aguardar_aprovacao_tarefa\(\s*uuid\s*,\s*integer\s*\)/i.test(
+        migD1 + "\nrevoke execute on function public.aguardar_aprovacao_tarefa( uuid, integer ) from service_role;"));
+
+    // ── T4 — NO DEFAULT, e por que ────────────────────────────────
+    //
+    // O PostgREST resolve overload pelo CONJUNTO DE CHAVES do corpo.
+    // Com DEFAULT no parametro novo, o payload de duas chaves casaria as
+    // DUAS assinaturas e a resposta viraria 300. Sem default, cada
+    // payload casa exatamente uma — que e o que sustenta o cutover.
+    ok("T4  nenhum parametro do overload novo tem DEFAULT",
+      !/p_aprovacao_id\s+uuid\s+default/i.test(migD1) &&
+      !/p_tentativa_esperada\s+integer\s+default/i.test(migD1));
+
+    // ── T5..T8 — O CONTRATO DA PAUSA NAO MUDA ─────────────────────
+    const corpoD1 = migD1.slice(migD1.indexOf("p_aprovacao_id"));
+    const setD1 = corpoD1.slice(corpoD1.indexOf("set status"), corpoD1.indexOf("where t.id"));
+
+    ok("T5  ANCORA: o SET da pausa nova foi recortado", setD1.length > 120);
+    ok("T6  o fence continua sendo rodando + tentativa esperada",
+      /t\.status\s*=\s*'rodando'/i.test(corpoD1) &&
+      /t\.tentativas\s*=\s*p_tentativa_esperada/i.test(corpoD1));
+    // Espera humana nao e retry. O numero que identifica o dono da
+    // tentativa nao pode mudar porque alguem demorou a decidir — e e
+    // esse mesmo numero que as terminais do B0 exigem de volta.
+    ok("T7  a pausa nova nao mexe em tentativas nem em progresso",
+      !/tentativas/i.test(setD1) && !/progresso/i.test(setD1));
+    ok("T8  o heartbeat continua sendo zerado na pausa",
+      /heartbeat_em\s*=\s*null/i.test(setD1));
+    ok("T9  o ponteiro nasce no MESMO SET que muda o status",
+      /status\s*=\s*'aguardando_aprovacao'/i.test(setD1) &&
+      /aprovacao_aguardada_id\s*=\s*p_aprovacao_id/i.test(setD1));
+
+    // ── T10 — D1 NAO ENCOSTA NO QUE JA ESTA PROVADO ───────────────
+    ok("T10 D1 nao toca terminais, claim, decisao nem criacao de aprovacao",
+      !/concluir_tarefa|falhar_tarefa/i.test(migD1) &&
+      !/claim_next_agente_tarefa/i.test(migD1) &&
+      !/function public\.aprovacao_(decidir|criar|consumir)/i.test(migD1));
+
+    // ── T11..T12 — O CALLER AINDA E O ANTIGO ──────────────────────
+    //
+    // Requisito deste gate, nao divida. Publicar o caller antes de a
+    // migration existir no banco faria producao chamar uma assinatura
+    // que ainda nao ha — a metade errada do cutover, e a que quebra.
+    ok("T11 o wrapper de pausa continua com o payload de duas chaves",
+      /rpc\("aguardar_aprovacao_tarefa"/.test(capD1) &&
+      !/p_aprovacao_id/.test(capD1));
+    ok("T12 o executor continua descartando err.aprovacaoId",
+      !/aprovacaoId/.test(exeD1) &&
+      /aguardarAprovacaoTarefa\(\s*\n?\s*tarefa\.id,\s*\n?\s*tarefa\.tentativas\s*\n?\s*\)/.test(exeD1));
+    ok("T12 CONTROLE NEGATIVO: a sonda enxergaria um cutover precoce",
+      /p_aprovacao_id/.test('p_aprovacao_id: err.aprovacaoId,'));
+
+    // ── T13..T14 — ORDEM E AUSENCIA DE LIMPEZA ────────────────────
+    const migsDisco = [...readdirSync(join(RAIZ, "supabase", "migrations"))].sort();
+    ok("T13 D1 e a ultima migration desta frente, depois do cleanup do B0",
+      migsDisco.indexOf("20261001_remover_tarefa_rpc_sem_fencing.sql") <
+      migsDisco.indexOf("20261002_tarefa_aprovacao_aguardada.sql") &&
+      migsDisco[migsDisco.length - 1] === "20261002_tarefa_aprovacao_aguardada.sql");
+    ok("T14 nenhuma migration de limpeza do overload de pausa existe ainda",
+      !migsDisco.some((m) => /remover.*aguardar_aprovacao|pausa.*sem_ponteiro/i.test(m)));
   }
 
   console.log("P. Handler conversa");

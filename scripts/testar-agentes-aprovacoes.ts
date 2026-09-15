@@ -2379,6 +2379,237 @@ async function principalStale(): Promise<void> {
       /\.in\("id", ids\)/.test(LEIT_FONTE) && !/for \([\s\S]{0,80}await cliente/.test(LEIT_FONTE));
     ok("U15 a fila e server-only", /^import "server-only";/m.test(ler(LEITURA)));
   }
+
+  // ── V. APPROVAL-DECISION-RESUME-D1 ────────────────────────────────
+  //
+  // O ponteiro que faltava. Ate aqui uma tarefa parada nao dizia de QUE
+  // aprovacao estava esperando, e a ligacao inversa — `tarefa_id` na
+  // aprovacao — nao identifica: o unico indice unico sobre estado ativo
+  // e `(user_id, fingerprint)`, e fingerprint descreve uma ACAO. Duas
+  // aprovacoes ativas para a mesma tarefa sao possiveis.
+  //
+  // Esta secao prova a FASE ADITIVA: o schema ganha a correlacao, a RPC
+  // de pausa ganha um overload que a grava, e NADA de producao muda.
+  secao("V. D1 — o ponteiro Task -> Approval, fase aditiva");
+  {
+    const D1 = "supabase/migrations/20261002_tarefa_aprovacao_aguardada.sql";
+    const bruto = ler(D1);
+    const mig = semComentariosSql(bruto);
+
+    ok("V0  ANCORA: a migration D1 existe e foi lida",
+      bruto.length > 2000 && mig.includes("aprovacao_aguardada_id"));
+
+    // ── A UNIQUE que torna a FK composta possivel ─────────────────
+    ok("V1  adiciona UNIQUE (id, user_id) em agente_funcao_aprovacoes",
+      /add constraint agente_funcao_aprovacoes_id_por_dono\s+unique\s*\(\s*id\s*,\s*user_id\s*\)/i.test(mig));
+    ok("V1  CONTROLE NEGATIVO: sem a UNIQUE, a sonda reprova",
+      !/add constraint agente_funcao_aprovacoes_id_por_dono/i.test(
+        mig.replace(/add constraint agente_funcao_aprovacoes_id_por_dono[^;]*;/i, "")));
+    ok("V2  a PK das aprovacoes nao e removida nem substituida",
+      !/drop constraint[^;]*agente_funcao_aprovacoes_pk/i.test(mig) &&
+      !/primary key/i.test(mig));
+
+    // ── A coluna ──────────────────────────────────────────────────
+    // ── CRIACAO FAIL-CLOSED ───────────────────────────────────────
+    //
+    // `if not exists` parece cuidado e e decisao as cegas: diante de uma
+    // coluna com este nome que ja existisse — de outra pessoa, com outro
+    // tipo e outro significado — ele ADOTA em silencio. Este arquivo nao
+    // consulta o catalogo; a resposta honesta a uma colisao e abortar.
+    //
+    // O assert e ESPECIFICO de `add column`, e nao um veto geral a
+    // `if not exists`: o proprio corpo da RPC usa `IF NOT EXISTS (...)`
+    // como controle de fluxo plpgsql no diagnostico das duas recusas.
+    ok("V3  o ponteiro e uuid, nullable, e entra por ADD COLUMN simples",
+      /add column aprovacao_aguardada_id uuid null\s*;/i.test(mig) &&
+      !/add\s+column\s+if\s+not\s+exists/i.test(mig));
+    ok("V3  CONTROLE NEGATIVO: reintroduzir IF NOT EXISTS reprova",
+      /add\s+column\s+if\s+not\s+exists/i.test(
+        mig.replace("add column aprovacao_aguardada_id", "add column if not exists aprovacao_aguardada_id")));
+    ok("V4  o ponteiro NAO tem DEFAULT",
+      !/aprovacao_aguardada_id[^;]*\bdefault\b/i.test(mig));
+
+    // ── A FK composta ─────────────────────────────────────────────
+    //
+    // Sem o par `(ponteiro, user_id)` a tarefa poderia apontar para a
+    // aprovacao de OUTRO dono sem o banco reclamar.
+    ok("V5  FK composta: (ponteiro, user_id) -> aprovacoes (id, user_id)",
+      /foreign key\s*\(\s*aprovacao_aguardada_id\s*,\s*user_id\s*\)\s*references\s+public\.agente_funcao_aprovacoes\s*\(\s*id\s*,\s*user_id\s*\)/i.test(mig));
+    ok("V6  a FK e ON UPDATE RESTRICT", /on update restrict/i.test(mig));
+    ok("V7  a FK e ON DELETE RESTRICT", /on delete restrict/i.test(mig));
+    ok("V8  zero CASCADE no SQL executavel", !/\bcascade\b/i.test(mig));
+    ok("V8  CONTROLE NEGATIVO: trocar RESTRICT por CASCADE reprova",
+      /\bcascade\b/i.test(mig.replace("on delete restrict", "on delete cascade")));
+
+    // ── O CHECK meio-lado ─────────────────────────────────────────
+    //
+    // Proibe ponteiro fora da espera. NAO exige ponteiro dentro dela:
+    // existem tarefas paradas anteriores a esta coluna, e o bicondicional
+    // faria o apply falhar. Elas falham FECHADO depois, nunca erram de
+    // alvo.
+    ok("V9  existe o CHECK meio-lado do ponteiro",
+      /add constraint agente_tarefas_ponteiro_so_na_espera\s+check\s*\(\s*status\s*=\s*'aguardando_aprovacao'\s+or\s+aprovacao_aguardada_id\s+is\s+null\s*\)/i.test(mig));
+    ok("V10 o CHECK ainda NAO e bicondicional",
+      !/\(\s*status\s*=\s*'aguardando_aprovacao'\s*\)\s*=\s*\(/i.test(mig) &&
+      !/aprovacao_aguardada_id\s+is\s+not\s+null/i.test(mig));
+
+    // ── Aditiva de verdade ────────────────────────────────────────
+    ok("V11 zero DML e zero backfill",
+      !/\binsert\s+into\b/i.test(mig) &&
+      !/\bdelete\s+from\b/i.test(mig) &&
+      !/\btruncate\b/i.test(mig) &&
+      (mig.match(/\bupdate\s+public\./gi) ?? []).length === 1 &&
+      /update public\.agente_tarefas t/i.test(mig));
+    // ── ADITIVIDADE ESTRITA ───────────────────────────────────────
+    //
+    // Nao e "nenhum DROP de funcao": e nenhum DROP, ponto. A versao
+    // anterior deste assert listava classes — function, table, column,
+    // index — e deixava `drop constraint` passar, porque ele parecia
+    // idioma de reexecucao. Nao e: `drop constraint if exists` + `add`
+    // torna a migration rerunnable REMOVENDO o que encontrar, e num
+    // arquivo que nunca consultou o catalogo isso apaga objeto que
+    // ninguem inspecionou. A migration nao precisa ser rerunnable
+    // destrutivamente — precisa abortar quando o nome ja existir.
+    //
+    // A palavra-chave inteira, sobre SQL ja sem comentarios: o
+    // cabecalho fala de DROP varias vezes, e prosa nao pode reprovar
+    // nem aprovar nada.
+    ok("V12 ZERO DROP executavel, de qualquer especie",
+      !/\bdrop\b/i.test(mig));
+    ok("V12 CONTROLE NEGATIVO: um `drop constraint` reprova",
+      /\bdrop\b/i.test(mig +
+        "\nalter table public.agente_tarefas drop constraint if exists agente_tarefas_ponteiro_so_na_espera;"));
+    ok("V12 CONTROLE NEGATIVO: um `drop function` tambem reprova",
+      /\bdrop\b/i.test(mig + "\ndrop function if exists public.qualquer(uuid);"));
+    // E o guard nao pode ser contornado por idempotencia dinamica: um
+    // bloco que engula `duplicate_object` faria o mesmo estrago de forma
+    // mais dificil de ler.
+    ok("V13 nenhuma idempotencia por bloco dinamico",
+      !/(?:^|\n)\s*do\s*\$/i.test(mig) &&
+      !/\bexecute\s+(?:format|')/i.test(mig) &&
+      !/duplicate_object/i.test(mig));
+    // O inventario fechado das TRES formas de colidir em silencio. Elas
+    // parecem diferentes e decidem a mesma coisa sem olhar: apagar,
+    // adotar, sobrescrever.
+    ok("V13b as tres formas de colisao silenciosa estao ausentes",
+      !/\bdrop\b/i.test(mig) &&
+      !/add\s+column\s+if\s+not\s+exists/i.test(mig) &&
+      !/create\s+or\s+replace/i.test(mig));
+    ok("V13 ANCORA: as tres constraints entram SO por add constraint",
+      [...mig.matchAll(/add constraint\s+([a-z0-9_]+)/gi)].map((m) => m[1]).length === 3);
+    ok("V14 nenhum indice de fila/claim nasce neste gate",
+      !/create\s+(unique\s+)?index/i.test(mig));
+
+    // ── O overload ────────────────────────────────────────────────
+    ok("V15 cria o overload de TRES argumentos da pausa",
+      /function public\.aguardar_aprovacao_tarefa\(\s*p_tarefa_id\s+uuid,\s*p_tentativa_esperada\s+integer,\s*p_aprovacao_id\s+uuid\s*\)/i.test(mig));
+    // Mesma regra da coluna, do outro lado: `or replace` diante de uma
+    // assinatura inesperada SOBRESCREVE corpo que ninguem leu. A de tres
+    // argumentos nao existe hoje; se existir no apply, e precondicao
+    // quebrada, nao detalhe a contornar.
+    ok("V15b a overload nova entra por CREATE FUNCTION, sem OR REPLACE",
+      /create\s+function\s+public\.aguardar_aprovacao_tarefa\(/i.test(mig) &&
+      !/create\s+or\s+replace/i.test(mig));
+    ok("V15b CONTROLE NEGATIVO: trocar por CREATE OR REPLACE reprova",
+      /create\s+or\s+replace/i.test(
+        mig.replace("create function public.aguardar_aprovacao_tarefa(",
+                    "create or replace function public.aguardar_aprovacao_tarefa(")));
+    ok("V16 nao dropa, nao altera e nao recria a assinatura de dois argumentos",
+      !/drop\s+function/i.test(mig) &&
+      !/alter\s+function/i.test(mig) &&
+      !/function public\.aguardar_aprovacao_tarefa\(\s*p_tarefa_id\s+uuid,\s*p_tentativa_esperada\s+integer\s*\)/i.test(mig) &&
+      !/aguardar_aprovacao_tarefa\(\s*uuid\s*,\s*integer\s*\)/i.test(mig));
+    // NO DEFAULT nao e capricho: o PostgREST resolve overload pelo
+    // CONJUNTO DE CHAVES do corpo. Com default, o payload de duas chaves
+    // casaria as duas assinaturas e a resposta viraria 300.
+    ok("V17 nenhum parametro do overload novo tem DEFAULT",
+      !/p_aprovacao_id\s+uuid\s+default/i.test(mig) &&
+      !/p_tentativa_esperada\s+integer\s+default/i.test(mig) &&
+      !/p_tarefa_id\s+uuid\s+default/i.test(mig));
+    ok("V18 o overload novo e SECURITY INVOKER com search_path fixo",
+      /security invoker[\s\S]{0,60}set search_path = public/i.test(mig));
+    ok("V19 ACL do overload novo: quatro REVOKE e um GRANT a service_role",
+      (mig.match(/revoke all on function public\.aguardar_aprovacao_tarefa\(uuid, integer, uuid\)/gi) ?? []).length === 4 &&
+      (mig.match(/grant execute on function public\.aguardar_aprovacao_tarefa\(uuid, integer, uuid\) to service_role/gi) ?? []).length === 1);
+    ok("V20 nenhum REVOKE/GRANT nomeia a assinatura de dois argumentos",
+      !/(revoke|grant)[^;]*aguardar_aprovacao_tarefa\(\s*uuid\s*,\s*integer\s*\)/i.test(mig));
+
+    // ── O corpo: fence da tarefa ──────────────────────────────────
+    const corpo = mig.slice(mig.indexOf("p_aprovacao_id"));
+    ok("V21 ANCORA: o corpo do overload novo foi recortado", corpo.length > 800);
+    ok("V22 o UPDATE cerca status e tentativa esperada",
+      /t\.status\s*=\s*'rodando'/i.test(corpo) &&
+      /t\.tentativas\s*=\s*p_tentativa_esperada/i.test(corpo));
+
+    const setPausa = corpo.slice(corpo.indexOf("set status"), corpo.indexOf("where t.id"));
+    ok("V23 ANCORA: a lista do SET foi recortada", setPausa.length > 120);
+    // Espera humana nao e tentativa. O numero que identifica o dono da
+    // execucao nao pode mudar porque alguem demorou a decidir.
+    ok("V24 o SET nao toca tentativas nem progresso",
+      !/tentativas/i.test(setPausa) && !/progresso/i.test(setPausa));
+    ok("V25 o SET preserva a semantica atual da pausa",
+      /heartbeat_em\s*=\s*null/i.test(setPausa) &&
+      /resultado\s*=\s*null/i.test(setPausa) &&
+      /erro_tipo\s*=\s*null/i.test(setPausa) &&
+      /erro_mensagem\s*=\s*null/i.test(setPausa) &&
+      /concluido_em\s*=\s*null/i.test(setPausa));
+    ok("V26 o ponteiro nasce no MESMO SET que muda o status",
+      /aprovacao_aguardada_id\s*=\s*p_aprovacao_id/i.test(setPausa));
+    ok("V26 CONTROLE NEGATIVO: um segundo UPDATE do ponteiro reprova",
+      ((mig + "\nupdate public.agente_tarefas set aprovacao_aguardada_id = p_aprovacao_id;")
+        .match(/\bupdate\s+public\./gi) ?? []).length !== 1);
+
+    // ── O corpo: revalidacao da aprovacao ─────────────────────────
+    const validacao = corpo.slice(corpo.indexOf("exists ("), corpo.indexOf("returning t.*"));
+    ok("V27 ANCORA: a subconsulta da aprovacao foi recortada", validacao.length > 200);
+    ok("V28 a aprovacao e conferida por id", /a\.id\s*=\s*p_aprovacao_id/i.test(validacao));
+    ok("V29 ... pelo mesmo dono", /a\.user_id\s*=\s*t\.user_id/i.test(validacao));
+    ok("V30 ... pelo mesmo agente", /a\.agente_id\s*=\s*t\.agente_id/i.test(validacao));
+    ok("V31 ... e por pertencer a ESTA tarefa", /a\.tarefa_id\s*=\s*t\.id/i.test(validacao));
+    ok("V32 ... so em estado ativo", /a\.estado in \('pendente', 'aprovada'\)/i.test(validacao));
+    ok("V33 ... e nao vencida", /a\.expira_em\s*>\s*now\(\)/i.test(validacao));
+    ok("V34 CONTROLE NEGATIVO: perder o vinculo com a tarefa reprova",
+      !/a\.tarefa_id\s*=\s*t\.id/i.test(validacao.replace(/and a\.tarefa_id\s*=\s*t\.id/i, "")));
+    ok("V35 CONTROLE NEGATIVO: aceitar `rejeitada` reprova",
+      !/a\.estado in \('pendente', 'aprovada'\)/i.test(
+        validacao.replace("'pendente', 'aprovada'", "'pendente', 'aprovada', 'rejeitada'")));
+
+    // ── A regra de lock ───────────────────────────────────────────
+    //
+    // Esta RPC comeca pela TAREFA. As primitivas de aprovacao ja
+    // publicadas travam a APROVACAO primeiro. Se esta tambem travasse a
+    // aprovacao, a ordem seria Tarefa -> Aprovacao e teriamos inversao
+    // contra o que ja roda em producao. Por isso a leitura e MVCC pura.
+    ok("V36 a revalidacao da aprovacao NAO trava a linha",
+      !/for\s+update/i.test(corpo) &&
+      !/for\s+share/i.test(corpo) &&
+      !/for\s+no\s+key\s+update/i.test(corpo) &&
+      !/for\s+key\s+share/i.test(corpo));
+    ok("V36 CONTROLE NEGATIVO: um FOR UPDATE na subconsulta reprova",
+      /for\s+update/i.test(corpo.replace("a.expira_em > now()", "a.expira_em > now() for update")));
+
+    // ── Fail-closed, e distinguivel ───────────────────────────────
+    ok("V37 as duas recusas sao 55000 e dizem coisas diferentes",
+      (corpo.match(/errcode = '55000'/gi) ?? []).length === 2 &&
+      /nao esta em rodando na tentativa/i.test(corpo) &&
+      /nao pertence a tarefa/i.test(corpo));
+    ok("V38 os tres parametros obrigatorios lancam 22023",
+      (corpo.match(/errcode = '22023'/gi) ?? []).length === 3);
+
+    // ── O caller de producao NAO muda neste gate ──────────────────
+    //
+    // Requisito, nao divida. Publicar o caller antes de a migration
+    // estar aplicada faria producao chamar uma assinatura que o banco
+    // ainda nao tem — a metade errada do cutover.
+    const CAP_D1 = semComentariosTs(ler("lib/agentes/capability-worker.ts"));
+    const EXE_D1 = semComentariosTs(ler("lib/agentes/executar-tarefa.ts"));
+    ok("V39 o wrapper de pausa ainda envia o payload de DUAS chaves",
+      /rpc\("aguardar_aprovacao_tarefa"/.test(CAP_D1) && !/p_aprovacao_id/.test(CAP_D1));
+    ok("V40 e o executor continua descartando o marcador da pausa",
+      !/aprovacaoId/.test(EXE_D1));
+    ok("V39 CONTROLE NEGATIVO: a sonda enxergaria um cutover precoce",
+      /p_aprovacao_id/.test("p_aprovacao_id: aprovacaoId,"));
+  }
 }
 
 void principalStale().then(() => {
