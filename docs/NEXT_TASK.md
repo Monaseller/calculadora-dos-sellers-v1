@@ -39,11 +39,11 @@ Cenario hibrido, camada grafica (@vercel/og), regeneracao individual e score vis
 > Modulo diferente do Estudio de Anuncios. Registrado aqui porque `CLAUDE.md`
 > define este arquivo como fonte unica do "onde paramos" do projeto.
 
-**Commit em producao:** `bafce6db4a7feec008d46804d32852d930cb6233` · deployment
-`dpl_EGMKrRo7SfezryNZN5Uw8TyCUusb` READY · migration
-`20261003_remover_aguardar_aprovacao_tarefa_2args.sql` **aplicada**
-(remote version `20260915170748`, remote name
-`remover_aguardar_aprovacao_tarefa_2args`) · tsc limpo · build verde.
+**Commit em producao:** `bb505e9073b6f660034fc454d4f7be412adb916c` · deployment
+`dpl_98WfCfD5AsTY6Yj3bKu7r1PW7Xax` READY · migration
+`20261004_aprovacao_decidir_encerra_tarefa.sql` **aplicada**
+(remote version `20260915184935`, remote name
+`aprovacao_decidir_encerra_tarefa`) · tsc limpo · matriz non-DB verde.
 
 ### Concluido
 - **D1 — ponteiro duravel.** `agente_tarefas.aprovacao_aguardada_id`, com FK por dono e
@@ -60,14 +60,22 @@ antigo envia dois argumentos e recebe PGRST202. **Nao usar `23fb46c` nem anterio
 rollback de deploy sozinho — voltar para pre-floor exigiria antes uma migration forward
 recriando a overload de dois argumentos. O Vercel nao conhece esse piso.
 
-### D4 — implementado no codigo e revisado · migration ainda NAO APLICADA
-A decisao humana passou a encerrar a tarefa causal. O codigo esta escrito e revisado, mas
-**nada disso vale no banco ainda**: a migration
-`supabase/migrations/20261004_aprovacao_decidir_encerra_tarefa.sql` continua **UNAPPLIED** e,
-enquanto nao for aplicada, o comportamento em producao permanece o antigo — rejeitar uma
-aprovacao ainda deixa a tarefa parada para sempre.
-- **Mesma assinatura.** `aprovacao_decidir` e recriada com `CREATE OR REPLACE`, sem nova
-  overload: nenhum caller precisa mudar.
+O D4 **nao** move esse piso: assinatura e OID foram preservados, entao nenhum deployment
+passa a receber PGRST202 por causa dele. Equivalencia de COMPORTAMENTO, porem, e outra
+coisa — qualquer deployment tecnicamente compativel agora chama a funcao ja com o
+comportamento D4.
+
+### D4 — APLICADO em producao · comportamento ainda NAO provado em runtime
+A decisao humana passou a encerrar a tarefa causal, e isso agora vale no banco. O codigo esta
+publicado e a migration
+`supabase/migrations/20261004_aprovacao_decidir_encerra_tarefa.sql` foi **aplicada** (remote
+version `20260915184935`, remote name `aprovacao_decidir_encerra_tarefa`; history 20 -> 21).
+A funcao foi substituida in-place: `aprovacao_decidir(text, uuid, text, text)` preservou
+**OID 28483** e a assinatura, com `SECURITY INVOKER`, `search_path=public` e ACL fail-closed
+(EXECUTE so para `service_role`; `PUBLIC`, `anon` e `authenticated` sem privilegio). O corpo e
+o COMMENT live conferem exatamente com o artefato versionado.
+- **Mesma assinatura.** `aprovacao_decidir` foi recriada com `CREATE OR REPLACE`, sem nova
+  overload: nenhum caller precisou mudar.
 - **Ordem de travamento:** a **Approval primeiro**, a **Task causal depois** — nunca o inverso.
 - **Vinculo exato.** A Task so e alcancada pelo vinculo causal completo; qualquer
   incompatibilidade recusa fail-closed (`tarefa_incompativel`), **antes** de qualquer escrita
@@ -75,6 +83,12 @@ aprovacao ainda deixa a tarefa parada para sempre.
 - **approve** deixa a tarefa em `aguardando_aprovacao` com o ponteiro intacto (insumo do D5).
 - **reject/cancel** levam a tarefa causal a `cancelado` com ponteiro NULL e invariantes
   terminais, na mesma transacao, sem Tool Call e sem executar Funcao.
+
+### ATENCAO — instalar nao e provar comportamento
+`D4_BEHAVIOR_RUNTIME_PROVEN = NO`. O apply provou **identidade** (OID, assinatura, corpo,
+COMMENT, seguranca, ACL) e que nenhum dado de negocio se moveu — nao provou o comportamento.
+Nenhuma decisao foi executada contra fixture live: `aprovacao_decidir` **nao** foi chamada.
+Nao registrar o D4 como validado ponta-a-ponta.
 
 ### NAO concluido — nao registrar como feito
 - **D5 (resume claim / reentrada do worker): nao implementado.**
@@ -90,15 +104,15 @@ aprovacao ainda deixa a tarefa parada para sempre.
   (mesma tarefa, dono e agente) e passar EXATAMENTE essa `Approval.id` em `p_aprovacao_id`.
   O marcador esta no topo do proprio arquivo.
 - **Tarefa parada legada (pre-D1)** tem `Approval.tarefa_id` preenchido e ponteiro NULL; sob o
-  desenho do D4 ela fica nao-decidivel. Cura prevista no D7 ou em reparo forward separado.
+  D4 agora instalado ela fica nao-decidivel. Cura prevista no D7 ou em reparo forward separado.
+  **Nao usar essa tarefa como fixture** da prova comportamental.
 
 ### Proxima etapa (aguardando autorizacao)
-1. **Versionar e publicar o slice D4** — commit isolado, push e deployment, em gates separados.
-2. **Preflight live obrigatorio** no banco antes de tocar na funcao.
-3. **Apply controlado** de `20261004_aprovacao_decidir_encerra_tarefa.sql` — uma unica vez.
-4. **Prova pos-apply** em runtime; so entao `PROJECT_STATE.md` e atualizado.
-5. Depois: **D5** (resume claim).
-6. **D7** (scanner/reparo) antes de a UI de decisao ficar alcancavel.
+1. **Prova comportamental controlada do D4**, em fixture causal criada para isso — nao usar a
+   tarefa legada pre-D1 nem as aprovacoes pendentes que ja existem no banco.
+2. Depois: **D5** (resume claim / reentrada do worker).
+3. **D7** (scanner/reparo de aprovacoes orfas e da corrida C0-R3-L1).
+4. So depois de D5 e D7: API de decisao e UI Aprovar/Recusar.
 
 ---
 

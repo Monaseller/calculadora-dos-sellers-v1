@@ -2,6 +2,17 @@
 
 > Ordem cronológica reversa. Toda tarefa que criar, corrigir ou remover funcionalidade deve adicionar uma entrada aqui antes de finalizar.
 
+## 2026-09-15 (3) — Decisao de aprovacao: migration aplicada em producao
+
+- **A migration D4 foi aplicada em producao, exatamente uma vez.** Arquivo local `20261004_aprovacao_decidir_encerra_tarefa.sql`; no remoto ficou registrada como version `20260915184935`, name `aprovacao_decidir_encerra_tarefa`. A migration history foi de 20 para 21 linhas, sem duplicata e sem nenhuma migration alheia no intervalo. Como ja acontecera no D1 e no D3, a version remota e atribuida pelo Supabase e **nao** corresponde ao prefixo do arquivo local.
+- **A substituicao foi in-place, nao um drop/recreate.** `public.aprovacao_decidir(text, uuid, text, text)` preservou o **OID 28483** e a assinatura — era exatamente o que o `CREATE OR REPLACE` de mesma assinatura prometia, e agora esta medido, nao suposto.
+- **O que esta no banco e o que foi versionado.** O corpo live confere com o artefato do commit (`prosrc` md5 `1e77b385c90ba2ea2ff63a27745e30db`, 6.140 octetos / 5.866 caracteres), e o COMMENT tambem (md5 `d6f9cc1438ee5bccb6b486ab10138085`, 822 octetos). Nada foi reconstruido ou normalizado na aplicacao: o que subiu foi o conteudo exato do arquivo, COMMENT e REVOKEs inclusos.
+- **Seguranca inalterada:** `SECURITY INVOKER`, `search_path=public` como unica entrada de `proconfig`, owner `postgres`, e ACL fail-closed — `EXECUTE` apenas para `service_role`, com `PUBLIC`, `anon`, `authenticated` e `authenticator` sem privilegio, zero grantee inesperado. Os `REVOKE` explicitos continuam valendo a pena: nao foi possivel provar que `CREATE OR REPLACE` preserva ACL, e restata-los da o mesmo resultado sob as duas hipoteses.
+- **Zero DML de negocio.** As contagens de Approval e Task foram medidas antes e depois do apply e sao identicas em todas as metricas. Nenhuma RPC de negocio foi chamada; nenhuma linha de `agente_funcao_aprovacoes`, `agente_tarefas` ou `agente_funcao_chamadas` foi tocada.
+- **Instalacao nao e prova de comportamento — e este e o ponto que mais importa nao confundir.** O apply provou identidade e ausencia de drift; **nao** provou que rejeitar encerra a tarefa. `aprovacao_decidir` nao foi executada contra nenhuma fixture. `D4_BEHAVIOR_RUNTIME_PROVEN = NO`.
+- **O piso de rollback nao se moveu.** Assinatura e OID preservados significam que nenhum deployment passa a receber PGRST202 por causa do D4. Mas equivalencia comportamental e **NAO**: um deployment antigo, tecnicamente compativel, agora chama a funcao ja com o comportamento novo.
+- **Ainda em aberto:** a prova comportamental live do D4, o **D5** (resume claim / reentrada do worker), o **D7** (scanner de aprovacoes orfas) e a superficie de decisao em API/UI, que segue desconectada e com os botoes `disabled`. A tarefa parada legada pre-D1, com ponteiro NULL, continua nao-decidivel e nao deve ser usada como fixture.
+
 ## 2026-09-15 (2) — Decisao de aprovacao encerra a tarefa causal em reject/cancel
 
 - **Rejeitar deixou de ser um beco sem saida.** Ate aqui, `aprovacao_decidir` resolvia a Approval e nada mais: a tarefa que esperava por ela ficava em `aguardando_aprovacao` para sempre, porque o claim do worker nunca alcanca esse estado. A decisao humana passou a encerrar a tarefa causal na mesma transacao.

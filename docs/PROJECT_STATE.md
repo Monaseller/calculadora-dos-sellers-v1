@@ -1123,7 +1123,9 @@ numerado quando uma fase inteira (como "PARTE 2") se encerra de vez.
   travam a Approval primeiro; a pausa escreve a Task e le a Approval por MVCC **sem** `FOR UPDATE`,
   justamente para nao inverter a ordem do sistema. Nenhuma rotina trava Task antes de Approval.
 - **Piso de compatibilidade de producao:** `d1998901a404fc034711be0392175da62de05c8e`. Deployments
-  anteriores nao sao compativeis com o banco atual.
+  anteriores nao sao compativeis com o banco atual. O D4 **nao** moveu esse piso — preservou
+  assinatura e OID —, mas equivalencia de comportamento e **NAO**: um deployment antigo,
+  tecnicamente compativel, ja chama `aprovacao_decidir` com o comportamento novo.
 - **Migrations estruturais desta frente, aplicadas** — identificador e o nome do
   arquivo local; a *remote version* e atribuida pelo Supabase no apply e **nao**
   corresponde ao prefixo do arquivo:
@@ -1137,9 +1139,25 @@ numerado quando uma fase inteira (como "PARTE 2") se encerra de vez.
     — remote version `20260915151735`, remote name `tarefa_aprovacao_aguardada`
   - `20261003_remover_aguardar_aprovacao_tarefa_2args.sql`
     — remote version `20260915170748`, remote name `remover_aguardar_aprovacao_tarefa_2args`
-- **Ainda NAO estrutural — nao existe no banco nem no codigo:** o lifecycle de decisao (a
-  decisao humana **nao** encerra a tarefa; rejeitar deixa a tarefa parada), o resume claim e o
-  scanner de aprovacoes orfas. Nos termos dos gates desta frente: **D4 NAO IMPLEMENTADO**
-  (apenas desenhado e auditado), **D5 e D7 pendentes**. `TRANSICOES_TAREFA` declara
-  `aguardando_aprovacao -> {concluido, cancelado, rodando}`, mas **nenhuma** das tres tem
-  implementacao: continuam letra morta.
+  - `20261004_aprovacao_decidir_encerra_tarefa.sql`
+    — remote version `20260915184935`, remote name `aprovacao_decidir_encerra_tarefa`
+- **Lifecycle de decisao — ESTRUTURAL desde 2026-09-15 (D4).** `aprovacao_decidir(text, uuid,
+  text, text)` foi substituida in-place por `CREATE OR REPLACE`: **OID 28483 preservado**, mesma
+  assinatura, `SECURITY INVOKER`, `search_path=public`, owner `postgres`, e `EXECUTE` apenas
+  para `service_role` — `PUBLIC`, `anon` e `authenticated` sem privilegio. O corpo e o COMMENT
+  live conferem com o artefato versionado (`prosrc` md5 `1e77b385c90ba2ea2ff63a27745e30db`,
+  6.140 octetos; COMMENT md5 `d6f9cc1438ee5bccb6b486ab10138085`, 822 octetos). Rejeitar ou
+  cancelar agora encerram a Task causal — `cancelado`, ponteiro NULL, heartbeat e resultado/erro
+  zerados, `concluido_em` carimbado, `progresso` e `tentativas` preservados — no MESMO UPDATE que
+  o CHECK exige. Aprovar **nao** toca a Task, de proposito: esse par e o insumo do resume.
+  Vinculo causal incompleto recusa fail-closed (`tarefa_incompativel`) antes de qualquer escrita.
+  Das tres transicoes que `TRANSICOES_TAREFA` declara em
+  `aguardando_aprovacao -> {concluido, cancelado, rodando}`, o D4 acende **apenas** `cancelado`;
+  `concluido` e `rodando` seguem letra morta ate o D5.
+- **`D4_FUNCTION_INSTALLED = YES`, `D4_BEHAVIOR_RUNTIME_PROVEN = NO`.** O apply provou
+  identidade (OID, assinatura, corpo, COMMENT, seguranca, ACL) e que nenhuma contagem de negocio
+  se moveu. Nenhuma decisao foi executada contra fixture live. **Nao** registrar o D4 como
+  concluido ponta-a-ponta.
+- **Ainda NAO estrutural:** o resume claim (**D5**) e o scanner de aprovacoes orfas (**D7**)
+  continuam sem implementacao, e a superficie de decisao em API/UI segue desconectada — a API e
+  GET-only e os botoes Aprovar/Recusar continuam `disabled`.
