@@ -1,0 +1,27 @@
+-- APPROVAL-DECISION-RESUME-D3 — remocao da overload legada da pausa.
+--
+-- Fase de LIMPEZA. A aditiva (20261002) criou
+-- `aguardar_aprovacao_tarefa(uuid, integer, uuid)` e deixou a de dois
+-- argumentos intacta; o caller de producao passou a enviar as tres
+-- chaves em d199890, e o runtime provou o ponteiro gravado. Esta
+-- migration fecha a porta antiga, e so ela.
+--
+-- Por que arquivo separado da aditiva: enquanto as duas moram em
+-- arquivos distintos, a ordem do rollout fica legivel no disco e
+-- auditavel no historico. Fundir apagaria a evidencia das fases.
+--
+-- Sem IF EXISTS: se a funcao ja nao estiver la, alguem a removeu por
+-- fora e isso tem de falhar e aparecer, nunca passar em silencio.
+--
+-- Sem CASCADE: o D3-A0 provou zero dependentes em `pg_depend`, zero
+-- funcoes e zero views citando o alvo. O RESTRICT implicito e a rede —
+-- se um dependente surgir entre a auditoria e o apply, o certo e o
+-- apply falhar e nomea-lo, nunca arrastar o dependente junto.
+--
+-- A overload de TRES argumentos nao e tocada aqui, em nenhuma forma.
+--
+-- POST_D3_ROLLBACK_FLOOR = d1998901a404fc034711be0392175da62de05c8e
+-- Depois do apply, rollback de codigo para qualquer SHA anterior a esse
+-- quebra a pausa: o caller antigo manda duas chaves e recebe PGRST202.
+
+DROP FUNCTION public.aguardar_aprovacao_tarefa(uuid, integer);

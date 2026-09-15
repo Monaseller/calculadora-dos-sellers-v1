@@ -7,6 +7,44 @@
  * │ `testar-agentes-execucao.ts`, que continua a custo zero.         │
  * └──────────────────────────────────────────────────────────────────┘
  *
+ * D3-A0-M1 — DIVIDA ABERTA. NAO EXECUTAR ESTA SUITE.
+ *
+ * D3-A0-M1: esta suite ainda contem chamadas ao contrato legado de DOIS
+ * argumentos de `aguardar_aprovacao_tarefa` — quatro call sites, todos
+ * montando corpo `{ p_tarefa_id, p_tentativa_esperada }`.
+ *
+ * Apos o apply da migration
+ * `20261003_remover_aguardar_aprovacao_tarefa_2args.sql`, essa overload
+ * deixa de existir no banco. A partir dai esta suite NAO e valida para
+ * execucao: os quatro call sites passariam a receber PGRST202 (funcao
+ * inexistente) no lugar dos codigos de negocio que eles afirmam. O
+ * assert de privilegio do anon ficaria pior ainda — passaria pelo
+ * motivo errado, porque PGRST202 tambem nao e codigo de negocio.
+ *
+ * As quatro chamadas ficam como estao, DE PROPOSITO. Corrigi-las aqui
+ * exigiria desenhar Approval fixtures novas numa suite que nao pode ser
+ * executada nesta fase — isso transformaria o D3 de limpeza de schema
+ * em redesenho de suite proibida. Pior: converter para tres argumentos
+ * com UUID falso, `null`, `randomUUID()` ou assert desligado faria a
+ * divida sumir do texto sem sumir do mundo. A divida fica visivel e
+ * verdadeira ate ser paga.
+ *
+ * CRITERIO DE SAIDA — D3-A0-M1 so fecha quando esta suite for
+ * redesenhada para CRIAR/USAR uma Approval causal valida (mesma tarefa,
+ * mesmo dono, mesmo agente, estado ativo) e passar EXATAMENTE essa
+ * Approval.id como p_aprovacao_id, o terceiro argumento da overload de
+ * TRES argumentos.
+ *
+ * A amarracao E o criterio, e nao as duas metades soltas. Uma Approval
+ * causal criada e depois NAO usada no terceiro argumento nao fecha a
+ * divida; e chamar a overload de tres argumentos com um id de outra
+ * origem fecha menos ainda — a RPC recusaria fail-closed, e o teste
+ * passaria a provar a recusa, nunca a pausa. Nao fecha no D3.
+ *
+ * `scripts/testar-agentes-execucao.ts` (secao T) contem um guard
+ * estatico que exige este marcador enquanto houver chamada legada aqui:
+ * apagar o marcador sem migrar as chamadas deixa a matriz VERMELHA.
+ *
  *     npx tsx scripts/testar-agentes-execucao-banco.ts --confirmo
  *
  * SEM `--confirmo` nao toca o banco: imprime o que faria e sai com 0.

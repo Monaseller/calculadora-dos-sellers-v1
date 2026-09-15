@@ -886,6 +886,26 @@ const MIGRATIONS_DO_APPROVAL_RESUME_D1: readonly string[] = [
 ];
 
 /**
+ * APPROVAL-DECISION-RESUME-D3 — a migration que REMOVE a overload
+ * legada de dois argumentos da pausa.
+ *
+ * Grupo proprio, e nao um item a mais no do D1, pela mesma razao que o
+ * cleanup do B0 nao entrou no grupo da aditiva do B0: sao gates
+ * diferentes, autorizados depois de provas diferentes. O D1 abriu o
+ * contrato novo; este fecha o antigo. Colapsar os dois faria o
+ * inventario mentir sobre a origem de cada liberacao — e, pior,
+ * permitiria que a remocao entrasse de carona numa autorizacao que era
+ * so de adicao.
+ *
+ * Criada no disco e NAO aplicada neste gate — o G12b mede pertencimento
+ * ao inventario, nunca estado do banco. Nome exato, nunca prefixo,
+ * range ou wildcard: uma quarta migration continua reprovando.
+ */
+const MIGRATIONS_DO_APPROVAL_PAUSE_D3_CLEANUP: readonly string[] = [
+  "20261003_remover_aguardar_aprovacao_tarefa_2args.sql",
+];
+
+/**
  * Inventario acumulado de `lib/agentes/ia/`, por frente.
  *
  * O guarda de disco (G11l) compara contra ESTA uniao, nunca contra uma
@@ -1141,6 +1161,20 @@ const ARQUIVOS_APPROVAL_RESUME_D1: readonly string[] = [
 ];
 
 /**
+ * APPROVAL-DECISION-RESUME-D3 — o path da migration de limpeza.
+ *
+ * `ESCOPO_AGENTES` cobre `supabase/migrations` inteiro, entao o arquivo
+ * novo ali reprovaria o G11 ate ser declarado. Nenhum path de producao
+ * acompanha, e isso e o ponto do slice inteiro: o caller ja envia as
+ * tres chaves desde d199890 e foi provado em runtime, e e justamente
+ * por isso que a overload velha pode cair sem tocar em TypeScript de
+ * producao.
+ */
+const ARQUIVOS_APPROVAL_PAUSE_D3_CLEANUP: readonly string[] = [
+  "supabase/migrations/20261003_remover_aguardar_aprovacao_tarefa_2args.sql",
+];
+
+/**
  * FUNCTION-RUNTIME-V1-A — o primeiro handler que executa uma Funcao.
  *
  * `ESCOPO_AGENTES` cobre `lib/agentes` inteiro, entao um arquivo NOVO
@@ -1245,6 +1279,7 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_TASK_FENCING_B0,
   ...ARQUIVOS_TASK_FENCING_B0_CLEANUP,
   ...ARQUIVOS_APPROVAL_RESUME_D1,
+  ...ARQUIVOS_APPROVAL_PAUSE_D3_CLEANUP,
   ...ARQUIVOS_FUNCTION_RUNTIME_V1A,
   ...ARQUIVOS_FUNCTION_RUNTIME_V1B1,
 ];
@@ -2457,7 +2492,8 @@ async function main() {
       MIGRATIONS_DO_FUNCTION_RUNTIME_P0.includes(m) ||
       MIGRATIONS_DO_TASK_FENCING_B0.includes(m) ||
       MIGRATIONS_DO_TASK_FENCING_B0_CLEANUP.includes(m) ||
-      MIGRATIONS_DO_APPROVAL_RESUME_D1.includes(m);
+      MIGRATIONS_DO_APPROVAL_RESUME_D1.includes(m) ||
+      MIGRATIONS_DO_APPROVAL_PAUSE_D3_CLEANUP.includes(m);
 
     ok(`G12b nenhuma migration nao declarada no disco (${novasNoDisco.join(", ") || "nenhuma"})`,
        novasNoDisco.every(declarada));
@@ -2489,6 +2525,28 @@ async function main() {
     ok("G12m CONTROLE NEGATIVO: a lista do perfil nao aceita migration alheia",
        !MIGRATIONS_DA_SKILL_1D_PERFIL.includes("99999999_intrusa.sql") &&
        !MIGRATIONS_DA_SKILL_1D_PERFIL.some((m) => m.includes("*")));
+
+    // ── G12n..G12p — a limpeza do D3, mesma forma duravel ──────────
+    //
+    // O grupo do D3 fica SEPARADO do grupo do D1 de proposito: um
+    // autorizou adicionar a overload de tres argumentos, o outro
+    // autoriza remover a de dois. Sao decisoes de risco diferente, e o
+    // inventario tem de continuar dizendo qual gate liberou o que.
+    ok("G12n a migration de limpeza do D3 esta declarada nome a nome",
+       MIGRATIONS_DO_APPROVAL_PAUSE_D3_CLEANUP.length === 1 &&
+       MIGRATIONS_DO_APPROVAL_PAUSE_D3_CLEANUP[0] ===
+         "20261003_remover_aguardar_aprovacao_tarefa_2args.sql");
+    ok("G12o e ela existe no disco, onde o guarda a espera",
+       disco.includes("20261003_remover_aguardar_aprovacao_tarefa_2args.sql"));
+    ok("G12p CONTROLE NEGATIVO: a lista do D3 nao aceita migration alheia",
+       !MIGRATIONS_DO_APPROVAL_PAUSE_D3_CLEANUP.includes("99999999_intrusa.sql") &&
+       !MIGRATIONS_DO_APPROVAL_PAUSE_D3_CLEANUP.some((m) => m.includes("*")));
+    // E o grupo do D1 NAO absorveu a limpeza: se um dia alguem fundir os
+    // dois, este assert cai antes de o inventario ficar mentindo.
+    ok("G12q o grupo do D1 continua contendo SO a aditiva",
+       MIGRATIONS_DO_APPROVAL_RESUME_D1.length === 1 &&
+       !MIGRATIONS_DO_APPROVAL_RESUME_D1.includes(
+         "20261003_remover_aguardar_aprovacao_tarefa_2args.sql"));
 
     ok("G12c nenhuma migration desapareceu do disco", sumidasDoDisco.length === 0);
     ok("G12d as duas migrations desta frente seguem no HEAD", head.includes("20260916_agentes_fundacao.sql") && head.includes("20260917_agentes_execucao.sql"));

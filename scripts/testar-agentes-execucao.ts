@@ -130,6 +130,18 @@ const MIGRATION_B0_CLEANUP =
  */
 const MIGRATION_D1 =
   "supabase/migrations/20261002_tarefa_aprovacao_aguardada.sql";
+/**
+ * APPROVAL-DECISION-RESUME-D3 — a migration que REMOVE a overload de
+ * dois argumentos da pausa.
+ *
+ * Fase de LIMPEZA, em arquivo proprio pela mesma razao que o cleanup do
+ * B0 ficou separado da aditiva do B0: enquanto as duas moram em
+ * arquivos distintos, a ordem do rollout fica legivel no disco. A
+ * secao T abaixo e a autoridade sobre a FORMA dela — e `DROP FUNCTION`
+ * e a operacao menos reversivel do repositorio.
+ */
+const MIGRATION_D3 =
+  "supabase/migrations/20261003_remover_aguardar_aprovacao_tarefa_2args.sql";
 /** A pausa do P0, historica: a secao T prova que ela NAO foi tocada. */
 const MIGRATION_PAUSA_P0 =
   "supabase/migrations/20260929_agente_tarefa_aguardar_aprovacao.sql";
@@ -1256,14 +1268,335 @@ async function main() {
       ((capD1 + '\nawait rpc("aguardar_aprovacao_tarefa", { p_tarefa_id, p_tentativa_esperada });')
         .match(/rpc\("aguardar_aprovacao_tarefa"/g) ?? []).length !== 1);
 
-    // ── T13..T14 — ORDEM E AUSENCIA DE LIMPEZA ────────────────────
+    // ── T13 — A ORDEM DAS TRES FASES ──────────────────────
+    //
+    // Migrado na APPROVAL-DECISION-RESUME-D3. Antes o assert dizia que
+    // D1 era a ULTIMA migration da frente — verdade enquanto a limpeza
+    // nao existia, e a forma de impedir que ela chegasse cedo demais.
+    // A limpeza chegou; a prova do D1 NAO sai daqui, ganha um vizinho.
+    //
+    // A ordem no disco E a ordem de aplicacao num banco novo. Se a
+    // limpeza ordenasse antes da aditiva, um banco novo droparia uma
+    // funcao antes de criar a substituta, e o rollout em fases viraria
+    // ficcao — a mesma razao do R4e no B0.
+    const NOME_B0_CLEANUP = "20261001_remover_tarefa_rpc_sem_fencing.sql";
+    const NOME_D1 = "20261002_tarefa_aprovacao_aguardada.sql";
+    const NOME_D3 = "20261003_remover_aguardar_aprovacao_tarefa_2args.sql";
+
     const migsDisco = [...readdirSync(join(RAIZ, "supabase", "migrations"))].sort();
-    ok("T13 D1 e a ultima migration desta frente, depois do cleanup do B0",
-      migsDisco.indexOf("20261001_remover_tarefa_rpc_sem_fencing.sql") <
-      migsDisco.indexOf("20261002_tarefa_aprovacao_aguardada.sql") &&
-      migsDisco[migsDisco.length - 1] === "20261002_tarefa_aprovacao_aguardada.sql");
-    ok("T14 nenhuma migration de limpeza do overload de pausa existe ainda",
-      !migsDisco.some((m) => /remover.*aguardar_aprovacao|pausa.*sem_ponteiro/i.test(m)));
+
+    // Funcao de LISTA, nao de disco, para que o controle negativo possa
+    // alimentar um inventario sintetico sem criar arquivo nenhum.
+    const ordemDasFases = (lista: readonly string[]) =>
+      lista.indexOf(NOME_B0_CLEANUP) < lista.indexOf(NOME_D1) &&
+      lista.indexOf(NOME_D1) < lista.indexOf(NOME_D3);
+
+    ok("T13 as tres migrations da frente existem no disco",
+      migsDisco.includes(NOME_B0_CLEANUP) &&
+      migsDisco.includes(NOME_D1) &&
+      migsDisco.includes(NOME_D3));
+    ok("T13b a ordem de aplicacao e cleanup B0 -> aditiva D1 -> limpeza D3",
+      ordemDasFases(migsDisco));
+    ok("T13c e a limpeza D3 e a ultima migration desta frente",
+      migsDisco[migsDisco.length - 1] === NOME_D3);
+    ok("T13d CONTROLE NEGATIVO: a limpeza antes da aditiva reprova",
+      !ordemDasFases([NOME_D3, NOME_B0_CLEANUP, NOME_D1]));
+    ok("T13e ANCORA: a varredura enxergou as migrations de verdade",
+      migsDisco.length > 10 &&
+      migsDisco.includes("20260929_agente_tarefa_aguardar_aprovacao.sql"));
+
+    // ── T14 — O CONTRATO POSITIVO DA LIMPEZA D3 ───────────────────
+    //
+    // Ate o D1 este guard dizia "nenhuma limpeza da pausa existe
+    // ainda": um tripwire, plantado para que a remocao nao entrasse de
+    // carona numa autorizacao que era so de adicao. A condicao caiu —
+    // a remocao foi autorizada, provada quiescente e escrita. O
+    // tripwire NAO foi apagado junto: virou contrato de FORMA, como o
+    // R4b..R4n fizeram no cleanup do B0.
+    //
+    // Antes a pergunta era "existe limpeza?" e a resposta certa era
+    // nao; agora e "a limpeza remove EXATAMENTE o que foi autorizado?",
+    // e a resposta tem de ser sim — nem uma funcao a mais, nem uma a
+    // menos, nem CASCADE, nem IF EXISTS.
+    //
+    // Por que a forma importa tanto aqui: um DROP a mais nao falha, nao
+    // avisa, e so aparece quando alguem chamar a funcao que sumiu.
+
+    /**
+     * Os statements EXECUTAVEIS de um arquivo SQL, normalizados.
+     *
+     * Comentarios saem ANTES do split, e nao depois, por dois motivos:
+     * um `-- ... ;` contaria como statement, e — pior — um segundo DROP
+     * escondido num comentario passaria por statement legitimo.
+     *
+     * O split por `;` deixa um fragmento final vazio quando o arquivo
+     * termina em `;`; o filtro de vazios cuida disso, e e por isso que
+     * ponto-e-virgula final nao vira statement fantasma.
+     *
+     * Vale para ESTE arquivo porque ele nao tem corpo `$$` — o T14a
+     * verifica essa premissa em vez de presumi-la. Num arquivo com
+     * corpo de funcao, o `;` interno exigiria um parser de verdade.
+     */
+    const statementsDe = (bruto: string): string[] =>
+      bruto
+        .replace(/\/\*[\s\S]*?\*\//g, " ")
+        .replace(/--[^\n]*/g, " ")
+        .split(";")
+        .map((s) => s.replace(/\s+/g, " ").trim())
+        .filter((s) => s.length > 0)
+        .map((s) => `${s};`);
+
+    const brutoD3 = fonte(MIGRATION_D3);
+    const stmtsD3 = statementsDe(brutoD3);
+    const executavelD3 = stmtsD3.join("\n");
+    const DROP_D3 = "DROP FUNCTION public.aguardar_aprovacao_tarefa(uuid, integer);";
+
+    ok("T14a ANCORA: o arquivo D3 foi lido e nao tem corpo $$ (premissa do parser)",
+      brutoD3.length > 400 && !brutoD3.includes("$$"));
+    ok("T14b a limpeza D3 tem EXATAMENTE um statement executavel",
+      stmtsD3.length === 1);
+    ok("T14c e esse statement e EXATAMENTE o DROP da overload de dois argumentos",
+      stmtsD3[0] === DROP_D3);
+
+    // Os bans rodam sobre o EXECUTAVEL, nunca sobre o arquivo bruto: o
+    // cabecalho explica em prosa por que nao ha `IF EXISTS` nem
+    // `CASCADE`, e uma regex ampla demais reprovaria a propria
+    // justificativa. Foi a licao do D1-F2.
+    ok("T14d zero IF EXISTS no executavel",
+      !/\bIF\s+EXISTS\b/i.test(executavelD3));
+    ok("T14e zero CASCADE no executavel",
+      !/\bCASCADE\b/i.test(executavelD3));
+    ok("T14e2 ANCORA: o cabecalho MENCIONA os dois, e isso nao reprova",
+      /IF EXISTS/i.test(brutoD3) && /CASCADE/i.test(brutoD3));
+    ok("T14f a overload de TRES argumentos nao aparece em DROP nenhum",
+      !stmtsD3.some((s) =>
+        /DROP\s+FUNCTION[\s\S]*?aguardar_aprovacao_tarefa\s*\(\s*uuid\s*,\s*integer\s*,\s*uuid\s*\)/i
+          .test(s)));
+    ok("T14g a limpeza nao cria, nao altera e nao mexe em privilegio",
+      !/CREATE\s+(OR\s+REPLACE\s+)?FUNCTION/i.test(executavelD3) &&
+      !/\b(CREATE|ALTER|GRANT|REVOKE)\b/i.test(executavelD3));
+    ok("T14g2 a limpeza nao tem DML nem DDL de tabela",
+      !/\b(INSERT|UPDATE|DELETE|TRUNCATE)\b/i.test(executavelD3) &&
+      !/DROP\s+(TABLE|SCHEMA|INDEX|TYPE|TRIGGER|VIEW)/i.test(executavelD3));
+    ok("T14g3 a limpeza nao usa DO, SQL dinamico nem EXCEPTION",
+      !/\bDO\s*\$/i.test(executavelD3) &&
+      !/\bEXECUTE\b/i.test(executavelD3) &&
+      !/\bEXCEPTION\b/i.test(executavelD3));
+
+    // ── T14h..T14m — CONTROLES NEGATIVOS DA FORMA ─────────────────
+    //
+    // Todos sobre texto SINTETICO, montado a partir do statement real:
+    // mutar o arquivo bruto pegaria o cabecalho antes do statement — o
+    // comentario tambem cita as assinaturas — e o controle mediria a
+    // coisa errada, sem morder e sem avisar que nao mordeu.
+    const comStatement = (s: string) => statementsDe(`-- cabecalho sintetico\n${s}`);
+    const COM_CASCADE = DROP_D3.replace(");", ") CASCADE;");
+
+    ok("T14h CONTROLE NEGATIVO: trocar o alvo pela overload de TRES argumentos reprova",
+      comStatement("DROP FUNCTION public.aguardar_aprovacao_tarefa(uuid, integer, uuid);")[0]
+        !== DROP_D3);
+    ok("T14i CONTROLE NEGATIVO: um CASCADE reprova",
+      comStatement(COM_CASCADE)[0] !== DROP_D3 &&
+      /\bCASCADE\b/i.test(comStatement(COM_CASCADE).join("\n")));
+    ok("T14j CONTROLE NEGATIVO: um IF EXISTS reprova",
+      comStatement(DROP_D3.replace("DROP FUNCTION ", "DROP FUNCTION IF EXISTS "))[0]
+        !== DROP_D3);
+    ok("T14k CONTROLE NEGATIVO: um segundo statement executavel reprova",
+      statementsDe(`${brutoD3}\nDROP FUNCTION public.sintetica(uuid);`).length !== 1);
+    ok("T14l CONTROLE NEGATIVO: um GRANT acrescentado reprova",
+      /\b(CREATE|ALTER|GRANT|REVOKE)\b/i.test(
+        statementsDe(`${brutoD3}\ngrant execute on function public.x() to service_role;`)
+          .join("\n")));
+    // O reverso do T14k, e o que prova que o parser nao e ingenuo: um
+    // segundo DROP COMENTADO nao e executavel e nao pode inflar a conta.
+    ok("T14m CONTROLE: um segundo DROP escondido em comentario NAO conta como statement",
+      statementsDe(`${brutoD3}\n-- DROP FUNCTION public.sintetica(uuid);`).length === 1);
+
+    // ── T15 — D3-A0-M1: a divida da suite de banco, VISIVEL ───────
+    //
+    // A suite de banco continua chamando o contrato de dois argumentos.
+    // Depois do apply ela deixa de ser executavel — e como ela esta sob
+    // proibicao permanente de execucao, ninguem veria o vermelho. Uma
+    // divida que nenhuma matriz consegue mostrar e uma divida que some.
+    //
+    // Este guard NAO afirma que a suite esta valida. Afirma o oposto:
+    // que ela esta bloqueada, e que isso esta escrito la dentro.
+    // DUAS representacoes do mesmo arquivo, com papeis que nao se
+    // misturam — corrigido no D3-F1 (achado D3-R1-M1):
+    //
+    //   `bancoD3`       BRUTO, com comentarios. So os asserts que leem
+    //                   o TEXTO do marcador podem usar isto, porque o
+    //                   marcador E um comentario.
+    //   `bancoD3Codigo` sem comentarios. Toda CONTAGEM de chamada e de
+    //                   argumento usa isto.
+    //
+    // Antes a contagem lia o bruto, e um comentario citando
+    // `p_aprovacao_id` perto de uma chamada legada a fazia parecer
+    // migrada. O T15k abaixo guarda essa fronteira para sempre.
+    const BANCO_TS = "scripts/testar-agentes-execucao-banco.ts";
+    const bancoD3 = fonte(BANCO_TS);
+    const bancoD3Codigo = codigo(BANCO_TS);
+
+    /**
+     * O mesmo despir de comentarios do `codigo()`, aplicavel a TEXTO.
+     *
+     * Existe para os controles negativos poderem trabalhar sobre texto
+     * sintetico sem escrever arquivo nenhum. Nao e um segundo dialeto:
+     * o T15h ancora que ele produz exatamente o mesmo resultado que
+     * `codigo()` sobre o arquivo real — se um dia divergirem, cai ali.
+     */
+    const semComentarios = (texto: string) =>
+      texto.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+
+    const MARCA_PAUSA = 'rpc("aguardar_aprovacao_tarefa"';
+
+    /**
+     * Janelas de texto a partir de cada chamada da RPC de pausa.
+     *
+     * Recorte por janela, e nao contagem no arquivo inteiro: as outras
+     * RPCs tambem tem payload, e `p_aprovacao_id` precisa ser procurado
+     * DENTRO da chamada certa. Foi o defeito do D2-F1.
+     */
+    const callSitesDePausa = (fonteTs: string): string[] => {
+      const marcas: string[] = [];
+      let i = fonteTs.indexOf(MARCA_PAUSA);
+      while (i !== -1) {
+        marcas.push(fonteTs.slice(i, i + 240));
+        i = fonteTs.indexOf(MARCA_PAUSA, i + 1);
+      }
+      return marcas;
+    };
+
+    const legadasEm = (texto: string) =>
+      callSitesDePausa(texto).filter((j) => !j.includes("p_aprovacao_id")).length;
+
+    // CONTAGEM: sempre sobre o codigo, nunca sobre o bruto.
+    const pausasNoBanco = callSitesDePausa(bancoD3Codigo);
+    const legadosNoBanco = pausasNoBanco.filter((j) => !j.includes("p_aprovacao_id"));
+
+    ok("T15 ANCORA: a suite de banco chama a RPC de pausa quatro vezes",
+      pausasNoBanco.length === 4);
+    ok("T15a e as QUATRO sao do contrato legado de dois argumentos",
+      legadosNoBanco.length === 4);
+    ok("T15b ENQUANTO houver chamada legada, o marcador D3-A0-M1 existe",
+      legadosNoBanco.length === 0 || bancoD3.includes("D3-A0-M1"));
+    ok("T15c o marcador diz que a suite esta BLOQUEADA, nao que esta valida",
+      bancoD3.includes("DIVIDA ABERTA") &&
+      bancoD3.includes("NAO EXECUTAR ESTA SUITE"));
+    // ── T15d — O CRITERIO DE SAIDA, AMARRADO ──────────────────────
+    //
+    // Corrigido no D3-F1 (achado D3-R1-L1). Antes eram tres substrings
+    // independentes: "Approval causal valida", "overload de TRES" e o
+    // titulo. Tres metades soltas nao provam ligacao nenhuma — davam
+    // por satisfeito um criterio que dissesse "crie uma Approval causal
+    // e chame a overload de tres argumentos", sem nunca exigir que o id
+    // DELA fosse o terceiro argumento. Era exatamente a brecha que o
+    // paragrafo anterior do marcador proibe em prosa.
+    //
+    // Agora o assert exige a CADEIA, numa unica passagem ordenada:
+    // Approval causal -> essa Approval.id -> p_aprovacao_id -> terceiro
+    // argumento da overload de tres.
+    const iCriterio = bancoD3.indexOf("CRITERIO DE SAIDA");
+    const criterioDeSaida = bancoD3
+      .slice(iCriterio, iCriterio + 800)
+      .replace(/^\s*\*\s?/gm, " ")
+      .replace(/\s+/g, " ");
+    const CADEIA_DE_SAIDA =
+      /Approval causal valida[\s\S]{0,200}?passar EXATAMENTE essa Approval\.id como p_aprovacao_id, o terceiro argumento da overload de TRES argumentos/i;
+
+    ok("T15d ANCORA: o bloco do criterio de saida foi recortado",
+      iCriterio > 0 && criterioDeSaida.length > 250);
+    ok("T15d o criterio amarra Approval causal -> essa Approval.id -> terceiro argumento",
+      CADEIA_DE_SAIDA.test(criterioDeSaida));
+    ok("T15d2 CONTROLE NEGATIVO: criterio sem a amarracao reprova",
+      !CADEIA_DE_SAIDA.test(
+        "CRITERIO DE SAIDA - so fecha quando criar uma Approval causal valida " +
+        "e chamar a overload de TRES argumentos."));
+    ok("T15d3 o criterio diz que as duas metades soltas NAO fecham a divida",
+      /NAO usada no terceiro argumento nao fecha/i.test(criterioDeSaida));
+    ok("T15e o marcador nomeia a migration que torna a suite invalida",
+      bancoD3.includes(NOME_D3));
+    ok("T15f CONTROLE NEGATIVO: apagar o marcador com chamada legada viva reprova",
+      !(legadosNoBanco.length === 0 ||
+        bancoD3.replace(/D3-A0-M1/g, "").includes("D3-A0-M1")));
+
+    // ── T15h..T15k — D3-R1-M1: PROSA NAO E CHAMADA ────────────────
+    //
+    // O defeito corrigido no D3-F1: com a contagem lendo o arquivo
+    // bruto, bastava um comentario citando `p_aprovacao_id` dentro da
+    // janela de 240 chars de uma chamada legada para ela ser
+    // classificada como migrada. A divida nao sumia em silencio (o
+    // T15a caia), mas caia pelo motivo errado — a mesma patologia que
+    // o proprio marcador denuncia no assert de privilegio do anon.
+    const iPrimeiraPausa = bancoD3.indexOf(MARCA_PAUSA);
+    const fimDaLinha = bancoD3.indexOf("\n", iPrimeiraPausa);
+    const injetarApos = (linha: string) =>
+      bancoD3.slice(0, fimDaLinha + 1) + linha + "\n" + bancoD3.slice(fimDaLinha + 1);
+
+    ok("T15h ANCORA: o despir de texto concorda com codigo() no arquivo real",
+      semComentarios(bancoD3) === bancoD3Codigo &&
+      iPrimeiraPausa > 0 && fimDaLinha > iPrimeiraPausa);
+    ok("T15i CONTROLE D3-R1-M1: prosa citando p_aprovacao_id NAO reclassifica a chamada",
+      legadasEm(semComentarios(injetarApos("          // p_aprovacao_id: controle"))) === 4);
+    ok("T15j CONTROLE: o MESMO texto como CODIGO reclassifica — a sonda sabe dizer nao",
+      legadasEm(semComentarios(injetarApos("          p_aprovacao_id: aprovacao.id,"))) === 3);
+    ok("T15k TESTEMUNHA DE REGRESSAO: sobre o BRUTO a prosa enganaria",
+      legadasEm(injetarApos("          // p_aprovacao_id: controle")) === 3);
+    ok("T15l nenhuma janela contada encosta em comentario",
+      pausasNoBanco.every((j) => !j.includes("//") && !j.includes("/*")));
+
+    // ── T15g — A DIVIDA NAO PODE SER NORMALIZADA ──────────────────
+    //
+    // A tentacao obvia seria "consertar" a suite mandando um terceiro
+    // argumento qualquer. Um UUID sintetico, `null` ou `randomUUID()`
+    // fariam a divida sumir do texto sem sumir do mundo: a RPC nova
+    // recusa fail-closed quem nao for a aprovacao daquela tarefa, e o
+    // teste passaria a provar a recusa, nunca a pausa.
+    // Sobre o CODIGO: o que importa e o que seria enviado ao banco, e a
+    // prosa do proprio marcador cita `null` e `randomUUID()` justamente
+    // para proibi-los — medir o bruto reprovaria a proibicao.
+    ok("T15g nenhum approvalId sintetico foi injetado na suite de banco",
+      !/p_aprovacao_id:\s*(null|undefined|randomUUID|"[0-9a-fA-F-]{8})/i.test(bancoD3Codigo));
+    ok("T15g2 CONTROLE: as formas invalidas sao reconhecidas, as causais nao",
+      [`p_aprovacao_id: null,`, `p_aprovacao_id: undefined,`,
+       `p_aprovacao_id: randomUUID(),`,
+       `p_aprovacao_id: "2e7a354c-48e2-4c1d-9df0-b7adc12623c8",`]
+        .every((c) => /p_aprovacao_id:\s*(null|undefined|randomUUID|"[0-9a-fA-F-]{8})/i.test(c)) &&
+      [`p_aprovacao_id: aprovacao.id,`, `p_aprovacao_id: aprovacaoCriada.id,`,
+       `p_aprovacao_id: APROVACAO_FIXTURE,`]
+        .every((c) => !/p_aprovacao_id:\s*(null|undefined|randomUUID|"[0-9a-fA-F-]{8})/i.test(c)));
+
+    // ── T16 — ZERO CALLER DE DOIS ARGUMENTOS EM PRODUCAO ──────────
+    //
+    // Independente da migration, de proposito: e este numero, e nao o
+    // arquivo SQL, que autoriza o DROP. Se um caller de duas chaves
+    // reaparecer em producao, o DROP passa a ser quebra de producao — e
+    // o guard tem de dizer isso ANTES do apply, nao depois.
+    const pausasProducao = [CAP_WORKER, EXECUTOR]
+      .flatMap((p) => callSitesDePausa(codigo(p)));
+
+    ok("T16 producao chama a RPC de pausa exatamente uma vez",
+      pausasProducao.length === 1);
+    ok("T16a CALLERS_2ARG_EM_PRODUCAO = 0",
+      pausasProducao.filter((j) => !j.includes("p_aprovacao_id")).length === 0);
+    ok("T16b CONTROLE NEGATIVO: uma chamada de duas chaves seria contada",
+      callSitesDePausa('rpc("aguardar_aprovacao_tarefa", { p_tarefa_id, p_tentativa_esperada });')
+        .filter((j) => !j.includes("p_aprovacao_id")).length === 1);
+
+    // ── T17 — O PISO DE ROLLBACK POS-D3 ───────────────────────────
+    //
+    // Depois do apply, rollback de codigo para qualquer SHA anterior a
+    // este quebra a pausa: o caller antigo manda duas chaves e recebe
+    // PGRST202. O Vercel nao sabe disso — todos os deployments antigos
+    // seguem marcados como candidatos a rollback. A fronteira e
+    // processual, e some se nao ficar escrita em algo que roda.
+    const PISO_DE_ROLLBACK_POS_D3 = "d1998901a404fc034711be0392175da62de05c8e";
+
+    ok("T17 o piso de rollback pos-D3 e um SHA completo",
+      /^[0-9a-f]{40}$/.test(PISO_DE_ROLLBACK_POS_D3));
+    ok("T17a e ele esta registrado na propria migration D3",
+      brutoD3.includes(PISO_DE_ROLLBACK_POS_D3) &&
+      /POST_D3_ROLLBACK_FLOOR/i.test(brutoD3));
   }
 
   console.log("P. Handler conversa");
