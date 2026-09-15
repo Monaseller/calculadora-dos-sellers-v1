@@ -1,0 +1,57 @@
+-- ══════════════════════════════════════════════════════════════════════
+-- APPROVAL-DECISION-RESUME-B0 — FASE D: fechar a porta que ficou aberta.
+--
+-- A 20260930 criou `concluir_tarefa(uuid, jsonb, integer)` e
+-- `falhar_tarefa(uuid, text, text, integer)` SEM remover as assinaturas
+-- antigas. Isso foi deliberado, e nao esquecimento: aditiva primeiro,
+-- codigo depois, remocao por ultimo — a unica ordem em que producao e
+-- banco nunca discordam durante o rollout.
+--
+-- ── Por que a remocao pode acontecer agora ───────────────────────────
+--
+-- Porque as tres condicoes que faltavam foram provadas, nesta ordem:
+--
+--   1. as novas overloads existem no banco e resolvem por PostgREST,
+--      cada payload casando exatamente uma assinatura (a ausencia de
+--      DEFAULT e o que torna isso possivel);
+--   2. o codigo publicado envia `p_tentativa_esperada` nas duas RPCs
+--      terminais, e esse objeto esta em producao;
+--   3. uma tarefa real atravessou o worker de producao — claim,
+--      handler, terminalizacao — pelo caller novo.
+--
+-- Enquanto qualquer uma dessas faltasse, remover as antigas seria
+-- apostar que ninguem ainda as chama. Agora e afirmacao verificada.
+--
+-- ── O que sobra depois daqui ─────────────────────────────────────────
+--
+-- Duas assinaturas, nao quatro. A partir da aplicacao desta migration,
+-- um executor que chame `concluir_tarefa` com duas chaves recebe erro
+-- de resolucao de funcao — e e exatamente esse o ponto: nao existe mais
+-- caminho para terminalizar uma tarefa sem dizer de qual tentativa se
+-- esta falando. O overload sem fence era, ele proprio, o bug.
+--
+-- ── Fronteira de rollback ────────────────────────────────────────────
+--
+-- Depois desta migration, voltar o codigo para qualquer commit anterior
+-- ao fencing DEIXA de ser compativel: aquele codigo chama as
+-- assinaturas de duas/tres chaves, que nao existirao mais. Rollback
+-- para o commit do fencing continua correto. Quem precisar reverter
+-- alem disso tem de reverter tambem esta migration, recriando as
+-- antigas a partir da 20260917 — e nao existe `IF EXISTS` que faca isso
+-- sozinho.
+--
+-- ── Por que NAO ha CASCADE ───────────────────────────────────────────
+--
+-- CASCADE removeria em silencio qualquer objeto que dependesse destas
+-- funcoes. Se essa dependencia existir, ela e uma descoberta — nao um
+-- estorvo a ser varrido. Sem CASCADE o apply falha fechado, nomeia o
+-- dependente e nos manda investigar; com CASCADE ele apagaria o
+-- dependente e diria que deu certo.
+--
+-- `IF EXISTS` esta aqui por idempotencia da migration, nao por duvida:
+-- as duas funcoes existem hoje, conferidas no catalogo.
+-- ══════════════════════════════════════════════════════════════════════
+
+DROP FUNCTION IF EXISTS public.concluir_tarefa(uuid, jsonb);
+
+DROP FUNCTION IF EXISTS public.falhar_tarefa(uuid, text, text);

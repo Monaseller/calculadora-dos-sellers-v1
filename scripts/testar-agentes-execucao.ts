@@ -109,6 +109,17 @@ const MIGRATION = "supabase/migrations/20260917_agentes_execucao.sql";
  * a secao R abaixo e a AUTORIDADE sobre o que esta no banco.
  */
 const MIGRATION_B0 = "supabase/migrations/20260930_tarefa_fencing_por_tentativa.sql";
+/**
+ * APPROVAL-DECISION-RESUME-B0 — FASE D, a migration que REMOVE as duas
+ * assinaturas sem fence.
+ *
+ * Ela existe separada da aditiva de proposito: enquanto as duas moram
+ * em arquivos distintos, a ordem do rollout fica legivel no disco e
+ * auditavel no historico. Fundir as duas apagaria a evidencia de que o
+ * cutover foi feito em fases.
+ */
+const MIGRATION_B0_CLEANUP =
+  "supabase/migrations/20261001_remover_tarefa_rpc_sem_fencing.sql";
 const REGISTRY = "lib/agentes/handlers/registry.ts";
 const HANDLER = "lib/agentes/handlers/teste-fundacao.ts";
 const EXECUTOR = "lib/agentes/executar-tarefa.ts";
@@ -857,18 +868,98 @@ async function main() {
       !/FUNCTION\s+public\.falhar_tarefa\(\s*\n?\s*p_tarefa_id\s+uuid,\s*\n?\s*p_erro_tipo\s+text,\s*\n?\s*p_erro_mensagem\s+text\s*\n?\s*\)/i
         .test(migB0));
 
-    // ── R4b — a migration de cleanup AINDA NAO PODE EXISTIR ───────
+    // ── R4b..R4n — A MIGRATION DE CLEANUP, EM ESTADO FINAL ────────
     //
-    // Barreira arquitetural, e nao preferencia: o CLI aplica TODAS as
-    // migrations pendentes de uma vez. Aditiva e cleanup no mesmo
-    // repositorio viram, na pratica, o cutover destrutivo que a Fase A
-    // existe para evitar — com a aparencia de um rollout em fases.
+    // Estes asserts exigiam, ate a Fase D, que NENHUMA migration de
+    // cleanup existisse: enquanto o caller novo nao estivesse provado em
+    // producao, aditiva e cleanup no mesmo repositorio viravam, na
+    // pratica, o cutover destrutivo que a Fase A existe para evitar —
+    // com a aparencia de um rollout em fases.
+    //
+    // Essa condicao caiu, e a protecao NAO foi apagada junto: virou
+    // contrato de forma. Antes a pergunta era "existe cleanup?" e a
+    // resposta certa era nao; agora e "o cleanup remove EXATAMENTE o
+    // que foi autorizado?", e a resposta tem de ser sim — nem mais uma
+    // funcao, nem uma a menos, nem CASCADE.
+    //
+    // Por que a forma importa tanto: `DROP FUNCTION` e a operacao menos
+    // reversivel do repositorio. Um DROP a mais nao falha, nao avisa e
+    // so aparece quando alguem chamar a funcao que sumiu.
     const migrationsNoDisco = readdirSync(join(RAIZ, "supabase", "migrations"));
-    ok("R4b nenhuma migration de cleanup existe ainda no repo",
-      !migrationsNoDisco.some((m) => /remover.*fencing|drop.*tarefa_rpc|tarefa_rpc.*sem_fencing/i.test(m)));
-    ok("R4c ANCORA: a varredura enxergou as migrations de verdade",
+    const cleanupsNoDisco = migrationsNoDisco.filter(
+      (m) => /remover.*fencing|drop.*tarefa_rpc|tarefa_rpc.*sem_fencing/i.test(m));
+
+    ok("R4b existe EXATAMENTE uma migration de cleanup do B0",
+      cleanupsNoDisco.length === 1);
+    ok("R4c e o nome dela e o acordado, nominalmente",
+      cleanupsNoDisco[0] === "20261001_remover_tarefa_rpc_sem_fencing.sql");
+    ok("R4d ANCORA: a varredura enxergou as migrations de verdade",
       migrationsNoDisco.length > 10 &&
       migrationsNoDisco.includes("20260930_tarefa_fencing_por_tentativa.sql"));
+
+    // A ordem no disco E a ordem de aplicacao. Se a cleanup ordenasse
+    // antes da aditiva, um banco novo perderia as antigas antes de
+    // ganhar as novas — e o rollout em fases viraria ficcao.
+    const ordenadas = [...migrationsNoDisco].sort();
+    ok("R4e a aditiva vem ANTES da cleanup na ordem de aplicacao",
+      ordenadas.indexOf("20260930_tarefa_fencing_por_tentativa.sql") <
+      ordenadas.indexOf("20261001_remover_tarefa_rpc_sem_fencing.sql"));
+
+    // Daqui para baixo, sobre o CONTEUDO — ja sem comentarios, para que
+    // nenhum assert seja satisfeito por um DROP que so foi mencionado
+    // em prosa.
+    const limpeza = sql(MIGRATION_B0_CLEANUP);
+
+    // O inventario FECHADO: cada statement `DROP FUNCTION` normalizado,
+    // comparado por igualdade contra as duas assinaturas legadas. Nao e
+    // "procurar duas strings" — e afirmar que nao existe uma terceira.
+    const dropsDaLimpeza = (limpeza.match(/DROP\s+FUNCTION[\s\S]*?;/gi) ?? [])
+      .map((d) => d.replace(/\s+/g, " ").trim());
+    const ASSINATURAS_LEGADAS = [
+      "DROP FUNCTION IF EXISTS public.concluir_tarefa(uuid, jsonb);",
+      "DROP FUNCTION IF EXISTS public.falhar_tarefa(uuid, text, text);",
+    ];
+
+    ok("R4f o cleanup tem EXATAMENTE dois DROP FUNCTION",
+      dropsDaLimpeza.length === 2);
+    ok("R4g o conjunto dropado e EXATAMENTE as duas assinaturas legadas",
+      ASSINATURAS_LEGADAS.every((a) => dropsDaLimpeza.includes(a)) &&
+      dropsDaLimpeza.every((d) => ASSINATURAS_LEGADAS.includes(d)));
+    ok("R4g CONTROLE NEGATIVO: um terceiro DROP quebra o inventario",
+      ((limpeza + "\nDROP FUNCTION IF EXISTS public.sintetica(uuid);")
+        .match(/DROP\s+FUNCTION[\s\S]*?;/gi) ?? []).length !== 2);
+
+    // As NOVAS nao podem ser mencionadas de forma destrutiva em lugar
+    // nenhum do arquivo. Elas ja estao corretas e live-proven; qualquer
+    // mexida aqui seria mexer no que acabou de ser provado.
+    ok("R4h o cleanup nao dropa nem altera as assinaturas NOVAS",
+      !/\binteger\b/i.test(limpeza) &&
+      !/p_tentativa_esperada/i.test(limpeza));
+    ok("R4h CONTROLE NEGATIVO: dropar a nova concluir reprova",
+      /\binteger\b/i.test(
+        limpeza + "\nDROP FUNCTION IF EXISTS public.concluir_tarefa(uuid, jsonb, integer);"));
+
+    // CASCADE apagaria em silencio qualquer dependente. Sem ele o apply
+    // falha fechado e nomeia o dependente — que e o comportamento util.
+    ok("R4i zero CASCADE", !/\bCASCADE\b/i.test(limpeza));
+    ok("R4i CONTROLE NEGATIVO: um CASCADE reprova",
+      /\bCASCADE\b/i.test(limpeza.replace(/\)\s*;/, ") CASCADE;")));
+
+    // E nenhum outro DDL/DML: cleanup que cria, altera, concede ou
+    // escreve linha deixou de ser cleanup.
+    ok("R4j o cleanup nao cria nem recria funcao",
+      !/CREATE\s+(OR\s+REPLACE\s+)?FUNCTION/i.test(limpeza));
+    ok("R4k o cleanup nao tem ALTER",
+      !/\bALTER\b/i.test(limpeza));
+    ok("R4l o cleanup nao mexe em privilegio",
+      !/\b(GRANT|REVOKE)\b/i.test(limpeza));
+    ok("R4m o cleanup nao tem DML nem DDL de tabela",
+      !/\b(INSERT|UPDATE|DELETE|TRUNCATE)\b/i.test(limpeza) &&
+      !/DROP\s+(TABLE|SCHEMA|INDEX|TYPE|TRIGGER)/i.test(limpeza));
+    ok("R4n ANCORA: o arquivo de cleanup foi mesmo lido",
+      limpeza.includes("public.concluir_tarefa") &&
+      limpeza.includes("public.falhar_tarefa") &&
+      fonte(MIGRATION_B0_CLEANUP).length > 800);
 
     // ── R5..R6 — AS ASSINATURAS NOVAS ─────────────────────────────
     ok("R5  concluir_tarefa declara p_tentativa_esperada integer",

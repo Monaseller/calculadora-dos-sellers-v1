@@ -837,15 +837,35 @@ const MIGRATIONS_DO_FUNCTION_RUNTIME_P0: readonly string[] = [
  * terminais.
  *
  * A migration RECRIA `concluir_tarefa` e `falhar_tarefa` exigindo
- * `tentativas = p_tentativa_esperada`, e DROPA nominalmente as
- * assinaturas antigas — sem o DROP o Postgres deixaria um overload sem
- * fence vivo e concedido.
+ * `tentativas = p_tentativa_esperada`. Ela e ADITIVA: as assinaturas
+ * antigas CONTINUAM vivas depois dela, de proposito. Remover no mesmo
+ * release em que se cria abriria uma janela em que producao e banco
+ * discordam, em qualquer ordem de rollout — e ha dois crons de minuto
+ * para exercita-la. A remocao vive no grupo da Fase D, abaixo.
  *
  * O nome do grupo diz apenas o que este slice fez: fencing de
  * terminalizacao. Decision e Resume NAO foram implementados aqui.
  */
 const MIGRATIONS_DO_TASK_FENCING_B0: readonly string[] = [
   "20260930_tarefa_fencing_por_tentativa.sql",
+];
+
+/**
+ * APPROVAL-DECISION-RESUME-B0 — FASE D, a remocao das assinaturas sem
+ * fence.
+ *
+ * Grupo SEPARADO do da Fase A, e nao um segundo item na mesma lista:
+ * as duas migrations respondem a perguntas diferentes — uma cria o
+ * contrato novo, a outra fecha o antigo — e sao autorizadas por gates
+ * diferentes, depois de provas diferentes. Colapsar as duas num grupo
+ * so apagaria essa fronteira no inventario.
+ *
+ * Criada no disco e NAO aplicada neste gate — o G12b mede pertencimento
+ * ao inventario, nunca estado do banco. Nome exato, nunca prefixo,
+ * range ou wildcard: uma terceira migration continua reprovando.
+ */
+const MIGRATIONS_DO_TASK_FENCING_B0_CLEANUP: readonly string[] = [
+  "20261001_remover_tarefa_rpc_sem_fencing.sql",
 ];
 
 /**
@@ -1079,6 +1099,19 @@ const ARQUIVOS_TASK_FENCING_B0: readonly string[] = [
 ];
 
 /**
+ * APPROVAL-DECISION-RESUME-B0 — FASE D, o path da migration de cleanup.
+ *
+ * `ESCOPO_AGENTES` cobre `supabase/migrations` inteiro, entao o arquivo
+ * novo ali reprovaria o G11 ate ser declarado. Nenhum path de producao
+ * acompanha: a Fase D nao mexe em TypeScript — o caller ja envia a
+ * tentativa desde a Fase A, e e justamente por isso que a remocao pode
+ * acontecer sem tocar em codigo.
+ */
+const ARQUIVOS_TASK_FENCING_B0_CLEANUP: readonly string[] = [
+  "supabase/migrations/20261001_remover_tarefa_rpc_sem_fencing.sql",
+];
+
+/**
  * FUNCTION-RUNTIME-V1-A — o primeiro handler que executa uma Funcao.
  *
  * `ESCOPO_AGENTES` cobre `lib/agentes` inteiro, entao um arquivo NOVO
@@ -1181,6 +1214,7 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_VERTICAL_SLICE_V1,
   ...ARQUIVOS_FUNCTION_RUNTIME_P0,
   ...ARQUIVOS_TASK_FENCING_B0,
+  ...ARQUIVOS_TASK_FENCING_B0_CLEANUP,
   ...ARQUIVOS_FUNCTION_RUNTIME_V1A,
   ...ARQUIVOS_FUNCTION_RUNTIME_V1B1,
 ];
@@ -2360,7 +2394,8 @@ async function main() {
       MIGRATIONS_DA_SKILL_1D_TOOL_CALL.includes(m) ||
       MIGRATIONS_DA_APPROVAL_B1B.includes(m) ||
       MIGRATIONS_DO_FUNCTION_RUNTIME_P0.includes(m) ||
-      MIGRATIONS_DO_TASK_FENCING_B0.includes(m);
+      MIGRATIONS_DO_TASK_FENCING_B0.includes(m) ||
+      MIGRATIONS_DO_TASK_FENCING_B0_CLEANUP.includes(m);
 
     ok(`G12b nenhuma migration nao declarada no disco (${novasNoDisco.join(", ") || "nenhuma"})`,
        novasNoDisco.every(declarada));
