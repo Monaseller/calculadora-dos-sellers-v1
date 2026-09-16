@@ -2715,6 +2715,179 @@ async function principal(): Promise<void> {
       /await executarTarefa\(/.test(semComentarios(ler("app/api/internal/agentes/executar/route.ts"))));
   }
 
+  // ─── M. RESUME-D5-C3-I0: a porta estreita da lane de retomada ──────
+
+  secao("M. RESUME-D5-C3-I0: a porta estreita da lane de retomada");
+  {
+    const EXEC_M = ler("lib/agentes/execucao-funcoes/executar.ts");
+    const EXEC_M_CODIGO = semComentarios(EXEC_M);
+    const { executarFuncaoAprovada } = await import("../lib/agentes/execucao-funcoes/executar");
+
+    /** Corpo EXATO de uma funcao: da assinatura ate o `}` na coluna 0. */
+    const corpoM = (fonte: string, nome: string): string => {
+      const linhas = fonte.split("\n");
+      const ini = linhas.findIndex((l) =>
+        new RegExp(`^(export )?(async )?function ${nome}\\b`).test(l));
+      if (ini < 0) return "";
+      for (let j = ini + 1; j < linhas.length; j++) {
+        if (linhas[j] === "}") return linhas.slice(ini, j + 1).join("\n");
+      }
+      return "";
+    };
+    const CORPO_APROVADA = corpoM(EXEC_M_CODIGO, "executarFuncaoAprovada");
+
+    ok("M0  ANCORA: a nova porta existe e foi isolada",
+      typeof executarFuncaoAprovada === "function" && CORPO_APROVADA.length > 300);
+
+    // ── §14. SnapshotChamada continua PRIVADO ───────────────────────
+    ok("M1  SnapshotChamada NAO e exportado",
+      !/export\s+(type|interface)\s+SnapshotChamada/.test(EXEC_M_CODIGO));
+    ok("M2  nem executarComAberturaFeita",
+      !/export\s+async\s+function\s+executarComAberturaFeita/.test(EXEC_M_CODIGO));
+    ok("M3  CONTROLE: um export real seria detectado",
+      /export\s+(type|interface)\s+SnapshotChamada/.test("export type SnapshotChamada = X;"));
+
+    // ── §22/§23. A API NAO aceita lifecycle de Tarefa nem Approval ──
+    const ENTRADA = (() => {
+      const i = EXEC_M_CODIGO.indexOf("export interface EntradaExecucaoFuncaoAprovada");
+      return i < 0 ? "" : EXEC_M_CODIGO.slice(i, EXEC_M_CODIGO.indexOf("\n}", i));
+    })();
+    ok("M4  ANCORA: o tipo de entrada foi isolado",
+      ENTRADA.length > 100 && ENTRADA.includes("requestId"));
+    for (const proibido of ["aprovacaoId", "approvalId", "tentativas", "tentativa",
+                            "maxTentativas", "status", "heartbeat", "retomada_request_id"]) {
+      ok(`M5  a entrada NAO aceita \`${proibido}\``, !ENTRADA.includes(proibido));
+    }
+    ok("M6  e tambem nao aceita o que vem da DEFINICAO",
+      !/\bacesso\b/.test(ENTRADA) && !/\bplataforma\b/.test(ENTRADA) &&
+      !/\brecurso\b/.test(ENTRADA));
+    ok("M7  CONTROLE: um campo proibido no tipo seria detectado",
+      "  tentativas: number;".includes("tentativas"));
+
+    // ── §12. UMA delegacao, e so para a primitiva certa ─────────────
+    ok("M8  delega para executarComAberturaFeita",
+      (CORPO_APROVADA.match(/executarComAberturaFeita\(/g) ?? []).length === 1);
+    ok("M9  e NAO chama executarFuncao nem retomarAprovacao",
+      !/\bexecutarFuncao\(/.test(CORPO_APROVADA) &&
+      !/\bretomarAprovacao\b/.test(CORPO_APROVADA));
+
+    // ── §11/§16. Nao abre Tool Call, nao toca Approval ──────────────
+    for (const proibido of ["registrarAbertura", "consumirAprovacaoEAbrir", "criarAprovacao",
+                            "iniciarRetomadaAprovacao", "autorizarFuncao"]) {
+      ok(`M10 a porta nao chama \`${proibido}\``,
+        !new RegExp(`\\b${proibido}\\s*\\(`).test(CORPO_APROVADA));
+    }
+
+    // ── §15. Zero lifecycle de Tarefa ──────────────────────────────
+    for (const proibido of ["concluirTarefa", "falharTarefa", "aguardarAprovacaoTarefa",
+                            "concluirTarefaRetomada", "falharTarefaRetomada",
+                            "registrarHeartbeatRetomada", "registrarProgresso"]) {
+      ok(`M11 a porta nao chama \`${proibido}\``,
+        !new RegExp(`\\b${proibido}\\b`).test(CORPO_APROVADA));
+    }
+
+    // ── §10. O R nao e gerado nem trocado ───────────────────────────
+    ok("M12 a porta NAO gera UUID",
+      !/randomUUID/.test(CORPO_APROVADA));
+    ok("M13 e o requestId do snapshot e o RECEBIDO",
+      /requestId,/.test(CORPO_APROVADA) &&
+      !/requestId:\s*(?!requestId)/.test(CORPO_APROVADA.replace(/requestId,/g, "")));
+
+    // ── COMPORTAMENTO: o snapshot chega ao desfecho ─────────────────
+    //
+    // O duplo registra a linha realmente inserida em
+    // `agente_funcao_chamadas`. Nao e leitura de fonte: e o que a
+    // auditoria receberia.
+    const R_CAUSAL = "req-causal-c3i0";
+    roteiro({ data: [{ id: 1 }] }, { data: null, error: null });
+    roteiroRpc();
+    const entradaBoa = {
+      userId: USER,
+      agenteId: AGENTE,
+      tarefaId: TAREFA,
+      funcaoId: "vendas.consultar",
+      lojaId: null,
+      nivelNoMomento: "aprovacao" as const,
+      requestId: R_CAUSAL,
+      argumentos: FILTRO_OK,
+    };
+    const r = await executarFuncaoAprovada(entradaBoa);
+    const desfecho = chamadas.find((c) => c.escrita && c.tabela === "agente_funcao_chamadas");
+
+    ok("M14 o resultado tem a forma de ResultadoExecucaoFuncao",
+      typeof r === "object" && r !== null && typeof (r as { tipo?: unknown }).tipo === "string");
+    ok("M15 o requestId devolvido e o R RECEBIDO, nunca outro",
+      (r as { requestId?: unknown }).requestId === R_CAUSAL);
+    ok("M16 uma linha de desfecho foi gravada na auditoria",
+      desfecho !== undefined && desfecho.linha?.fase === "desfecho");
+    ok("M17 e ela carrega o MESMO R — e por ele que o desfecho acha a abertura",
+      desfecho?.linha?.request_id === R_CAUSAL);
+    ok("M18 com a identidade recebida, sem invencao",
+      desfecho?.linha?.user_id === USER &&
+      desfecho?.linha?.agente_id === AGENTE &&
+      desfecho?.linha?.tarefa_id === TAREFA &&
+      desfecho?.linha?.funcao_id === "vendas.consultar");
+    ok("M19 e o nivel lido da abertura viaja intacto",
+      desfecho?.linha?.nivel_no_momento === "aprovacao");
+    ok("M20 acesso vem da DEFINICAO, nao do chamador",
+      desfecho?.linha?.acesso === FUNCOES["vendas.consultar"].acesso);
+    ok("M21 plataforma/recurso tambem saem da definicao",
+      desfecho?.linha?.plataforma ===
+        (FUNCOES["vendas.consultar"].conexaoNecessaria?.plataforma ?? null) &&
+      desfecho?.linha?.recurso ===
+        (FUNCOES["vendas.consultar"].conexaoNecessaria?.recurso ?? null));
+    ok("M22 nenhuma ABERTURA foi gravada — a porta nao abre Tool Call",
+      !chamadas.some((c) => c.escrita && c.linha?.fase === "abertura"));
+    ok("M23 e nenhuma RPC foi chamada",
+      chamadasRpc.length === 0);
+
+    // ── FAIL CLOSED, sem inventar correlacao ────────────────────────
+    for (const [nome, mut] of [
+      ["userId vazio", { userId: "" }],
+      ["agenteId vazio", { agenteId: "" }],
+      ["requestId vazio", { requestId: "" }],
+      ["funcaoId desconhecido", { funcaoId: "vendas.inexistente" }],
+    ] as Array<[string, Record<string, unknown>]>) {
+      roteiro();
+      roteiroRpc();
+      const rr = await executarFuncaoAprovada({ ...entradaBoa, ...mut } as typeof entradaBoa);
+      ok(`M24 ${nome} recusa fechado como indisponivel`,
+        (rr as { tipo?: unknown }).tipo === "indisponivel");
+      ok(`M25 ${nome} nao escreve auditoria nem chama RPC`,
+        chamadas.filter((c) => c.escrita).length === 0 && chamadasRpc.length === 0);
+    }
+    roteiro();
+    roteiroRpc();
+    const rVazio = await executarFuncaoAprovada({ ...entradaBoa, requestId: "" });
+    ok("M26 na recusa o requestId devolvido e o recebido — nenhuma correlacao inventada",
+      (rVazio as { requestId?: unknown }).requestId === "");
+
+    // ── §17. Barreira F4: a porta nao e retomarAprovacao ────────────
+    ok("M27 a porta nao referencia retomarAprovacao",
+      !/retomarAprovacao/.test(CORPO_APROVADA));
+    ok("M28 e nao alcanca a RPC generica de consumo",
+      !/aprovacao_consumir_e_abrir/.test(CORPO_APROVADA));
+
+    // ── DORMENCIA ───────────────────────────────────────────────────
+    {
+      const producao = ["lib/agentes", "app", "components"];
+      const alcanca: string[] = [];
+      const varrer = (dir: string): void => {
+        for (const e of readdirSync(join(RAIZ, dir), { withFileTypes: true })) {
+          const rel = `${dir}/${e.name}`;
+          if (e.isDirectory()) varrer(rel);
+          else if (/\.tsx?$/.test(e.name) &&
+                   rel !== "lib/agentes/execucao-funcoes/executar.ts" &&
+                   /\bexecutarFuncaoAprovada\b/.test(semComentarios(ler(rel))))
+            alcanca.push(rel);
+        }
+      };
+      for (const d of producao) varrer(d);
+      ok(`M29 zero chamador de producao da porta nova (${alcanca.join(", ") || "nenhum"})`,
+        alcanca.length === 0);
+    }
+  }
+
   console.log(`\n══ ${passou} PASS / ${falhou} FAIL ══\n`);
   process.exit(falhou === 0 ? 0 : 1);
 }

@@ -847,3 +847,106 @@ export async function retomarAprovacao(
 
   return executarComAberturaFeita(snapshot, contexto.definicao, contexto.argumentos);
 }
+
+// ─── A porta da lane de RETOMADA ──────────────────────────────────────
+
+/**
+ * O que esta camada precisa saber para executar uma Funcao cuja abertura
+ * JA existe — e nada alem disso.
+ *
+ * A lista curta e a defesa, pelo mesmo motivo de
+ * `EntradaExecucaoFuncao`. Nao entram, e a ausencia e deliberada:
+ *
+ *   `aprovacaoId`   — a aprovacao ja cumpriu o papel dela antes desta
+ *                     camada; quem executa nao decide autorizacao.
+ *   `tentativas`/`N`— fencing token do ciclo de vida da TAREFA. Quem
+ *                     termina a tarefa precisa dele; quem roda a Funcao,
+ *                     nao. Aceita-lo aqui misturaria as duas camadas.
+ *   `maxTentativas` — mesma razao.
+ *   estado da tarefa, heartbeat — idem.
+ *
+ * `acesso`, `plataforma` e `recurso` tambem NAO entram: vem da
+ * DEFINICAO, como no caminho automatico. Aceita-los de fora deixaria o
+ * chamador descrever a propria autorizacao.
+ */
+export interface EntradaExecucaoFuncaoAprovada {
+  userId: string;
+  agenteId: string;
+  tarefaId: string | null;
+  /** Id canonico da Funcao aprovada. A definicao vem do CATALOGO. */
+  funcaoId: string;
+  lojaId: string | null;
+  /** Lido da linha de ABERTURA, nunca recalculado aqui. */
+  nivelNoMomento: "automatico" | "aprovacao" | "bloqueado";
+  /** O `request_id` do ciclo — o R. Nunca gerado nem trocado aqui. */
+  requestId: string;
+  /** O snapshot congelado na criacao da aprovacao. */
+  argumentos: unknown;
+}
+
+/**
+ * Executa uma Funcao cuja abertura ja foi gravada, e registra o desfecho.
+ *
+ * ── Por que esta porta existe ───────────────────────────────────────
+ *
+ * `executarFuncao` carrega o ciclo inteiro — permissao, aprovacao,
+ * abertura — e por isso e da lane normal. `retomarAprovacao` consome a
+ * aprovacao pela RPC generica e NAO estabelece o marcador causal da
+ * tarefa, entao tambem nao serve a retomada do D5. O que a lane de
+ * retomada precisa e do miolo: executar e registrar o desfecho de uma
+ * abertura que o start ja criou atomicamente.
+ *
+ * Esta funcao expoe exatamente esse miolo, e nada mais.
+ *
+ * ── O que ela NAO faz ───────────────────────────────────────────────
+ *
+ * Nao abre Tool Call, nao consome aprovacao, nao chama o start, nao
+ * mantem heartbeat e nao terminaliza tarefa. Recebe o contexto de uma
+ * abertura confirmada e devolve o resultado da execucao; quem chamou
+ * decide o que fazer com a TAREFA.
+ *
+ * ── O R nao e negociavel ────────────────────────────────────────────
+ *
+ * `requestId` chega pronto e viaja intacto ate o desfecho. Gerar um id
+ * aqui gravaria o desfecho numa chamada que nao existe: a unicidade e
+ * `(user_id, request_id, fase)`, e um R diferente simplesmente nao
+ * encontra a abertura que o start criou.
+ *
+ * ── `SnapshotChamada` continua privado ──────────────────────────────
+ *
+ * Ele e montado AQUI dentro. Expo-lo convidaria a forjar snapshot a mao
+ * e gravar desfecho sobre chamada alheia — e a forma da linha de
+ * auditoria e propriedade de `registro.ts`, nao do chamador.
+ */
+export async function executarFuncaoAprovada(
+  entrada: EntradaExecucaoFuncaoAprovada
+): Promise<ResultadoExecucaoFuncao> {
+  const { userId, agenteId, funcaoId, requestId } = entrada;
+
+  // Recusa fechada, e sem inventar id: o `requestId` devolvido e o que
+  // veio, mesmo vazio. Gerar um aqui criaria correlacao falsa.
+  if (!userId || !agenteId || !requestId || !funcaoExiste(funcaoId)) {
+    return { tipo: "indisponivel", requestId };
+  }
+
+  // Do CATALOGO, como no caminho automatico. A revisao ja foi conferida
+  // contra a aprovacao pelo start; aqui a definicao e a autoridade do
+  // acesso e do requisito de conexao.
+  const definicao: DefinicaoFuncao = FUNCOES[funcaoId];
+  const requisito = definicao.conexaoNecessaria;
+
+  const snapshot: SnapshotChamada = {
+    userId,
+    agenteId,
+    requestId,
+    tarefaId: entrada.tarefaId,
+    funcaoId,
+    acesso: definicao.acesso,
+    nivelNoMomento: entrada.nivelNoMomento,
+    plataforma: requisito === null ? null : requisito.plataforma,
+    recurso: requisito === null ? null : requisito.recurso,
+    lojaId: entrada.lojaId,
+  };
+
+  return executarComAberturaFeita(snapshot, definicao, entrada.argumentos);
+}
