@@ -422,6 +422,228 @@ export async function decidirAprovacao(entrada: EntradaDecidirAprovacao): Promis
   return { codigo: codigo ?? "falha_persistencia" };
 }
 
+// ─── Pre-leitura da aprovacao — FONTE UNICA das duas lanes ─────
+
+/**
+ * A aprovacao congelada, ja conferida contra o catalogo.
+ *
+ * ── O que NAO esta aqui, e por que ─────────────────────────
+ *
+ * `DefinicaoFuncao` nao viaja: quem executa resolve do catalogo, e
+ * entregar a definicao aqui deixaria o chamador escolher qual delas
+ * usar. `nivelNoMomento` tambem nao: ele nasce na ABERTURA, que ainda
+ * nao existe quando esta leitura acontece — devolve-lo seria inventar
+ * o unico dado que a lane de retomada existe para ler de volta. E o
+ * cliente Supabase fica dentro: expo-lo daria a capacidade generica de
+ * consultar qualquer tabela com o papel mais privilegiado do projeto.
+ *
+ * `plataforma`, `recurso` e `acesso` saem do CATALOGO, nao da linha —
+ * os tres ja foram provados iguais antes de chegar aqui, e a definicao
+ * e a autoridade do requisito.
+ */
+export interface AprovacaoParaRetomada {
+  readonly agenteId: string;
+  readonly tarefaId: string | null;
+  readonly funcaoId: string;
+  readonly acesso: "leitura" | "escrita";
+  readonly plataforma: string | null;
+  readonly recurso: string | null;
+  readonly lojaId: string | null;
+  readonly argumentos: unknown;
+  readonly revisao: string;
+}
+
+/**
+ * O motivo FINO da recusa.
+ *
+ * Existe porque `CodigoAprovacao` colapsa cinco causas distintas em
+ * `aprovacao_desatualizada`, e o caminho generico DEPENDE desse
+ * colapso — mudar o codigo publico mudaria o contrato dele. A lane de
+ * retomada precisa da granularidade para dizer, no retorno, o que
+ * exatamente impediu o inicio. Os dois viajam juntos: `codigo` e o
+ * contrato publico, `detalhe` e o diagnostico.
+ */
+export type DetalheRecusaAprovacao =
+  | "entrada_invalida"
+  | "leitura_indisponivel"
+  | "inexistente"
+  | "identidade_invalida"
+  | "funcao_desconhecida"
+  | "revisao_divergente"
+  | "acesso_divergente"
+  | "conexao_divergente"
+  | "argumentos_invalidos"
+  | "conexao_indisponivel";
+
+export type ResultadoAprovacaoParaRetomada =
+  | { readonly ok: true; readonly aprovacao: AprovacaoParaRetomada }
+  | {
+      readonly ok: false;
+      readonly codigo: Exclude<CodigoAprovacao, "consumida">;
+      readonly detalhe: DetalheRecusaAprovacao;
+    };
+
+/**
+ * Le a aprovacao e prova, contra o catalogo, que ela ainda descreve a
+ * MESMA acao que o humano aprovou. Nao muta nada.
+ *
+ * ── Uma fonte, dois consumidores ────────────────────────
+ *
+ * Este corpo era o inicio de `consumirAprovacaoEAbrir`. Ele saiu de la
+ * por EXTRACAO, sem mudar a ordem das recusas nem o codigo devolvido, e
+ * aquela funcao passou a chama-lo. A lane de retomada precisa
+ * exatamente destas provas ANTES de gerar o `request_id`, e copia-las
+ * criaria duas listas de colunas e duas sequencias de igualdade que
+ * teriam de concordar para sempre.
+ *
+ * A ORDEM das recusas e contrato, nao estilo: recusar conexao antes de
+ * revisao mudaria qual codigo o chamador de hoje recebe.
+ */
+export async function lerAprovacaoParaRetomada(
+  entrada: EntradaConsumirAprovacao
+): Promise<ResultadoAprovacaoParaRetomada> {
+  const { userId, aprovacaoId } = entrada;
+  if (!userId || !aprovacaoId) {
+    return { ok: false, codigo: "entrada_invalida", detalhe: "entrada_invalida" };
+  }
+
+  const leitura = await getSupabaseServidor()
+    .from(TABELA)
+    .select("id, funcao_id, revisao_funcao, acesso, conexao_plataforma, conexao_recurso, conexao_loja_id, argumentos, agente_id, tarefa_id")
+    .eq("id", aprovacaoId)
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (leitura.error) {
+    logarFalha("leitura_aprovacao", leitura.error);
+    return { ok: false, codigo: "falha_persistencia", detalhe: "leitura_indisponivel" };
+  }
+
+  const ap = leitura.data as {
+    funcao_id?: unknown;
+    revisao_funcao?: unknown;
+    acesso?: unknown;
+    conexao_plataforma?: unknown;
+    conexao_recurso?: unknown;
+    conexao_loja_id?: unknown;
+    argumentos?: unknown;
+    agente_id?: unknown;
+    tarefa_id?: unknown;
+  } | null;
+
+  // Inexistente e de outro dono chegam iguais, porque o filtro ja
+  // escopou por `user_id`.
+  if (!ap) return { ok: false, codigo: "aprovacao_inexistente", detalhe: "inexistente" };
+
+  // Forma das colunas de identidade. Elas sao NOT NULL / uuid no banco,
+  // entao um valor fora da forma e bug nosso — nao situacao de negocio —
+  // e vira falha em vez de virar `null` por interpretacao.
+  const agenteId = ap.agente_id;
+  if (typeof agenteId !== "string" || agenteId.length === 0) {
+    return { ok: false, codigo: "falha_persistencia", detalhe: "identidade_invalida" };
+  }
+
+  const tarefaId = ap.tarefa_id ?? null;
+  if (tarefaId !== null && typeof tarefaId !== "string") {
+    return { ok: false, codigo: "falha_persistencia", detalhe: "identidade_invalida" };
+  }
+
+  const lojaId = ap.conexao_loja_id ?? null;
+  if (lojaId !== null && typeof lojaId !== "string") {
+    return { ok: false, codigo: "falha_persistencia", detalhe: "identidade_invalida" };
+  }
+
+  const funcaoId = ap.funcao_id;
+  if (typeof funcaoId !== "string" || !funcaoExiste(funcaoId)) {
+    return { ok: false, codigo: "aprovacao_desatualizada", detalhe: "funcao_desconhecida" };
+  }
+  const definicao: DefinicaoFuncao = FUNCOES[funcaoId];
+
+  // A definicao precisa ser a MESMA que o humano aprovou.
+  if (ap.revisao_funcao !== definicao.revisao) {
+    return { ok: false, codigo: "aprovacao_desatualizada", detalhe: "revisao_divergente" };
+  }
+
+  // Defensivo: `acesso` e o requisito de conexao sao versionados pela
+  // revisao, entao divergirem com a mesma revisao significa que alguem
+  // mudou a definicao sem bump. Recusar e o unico caminho honesto.
+  if (ap.acesso !== definicao.acesso) {
+    return { ok: false, codigo: "aprovacao_desatualizada", detalhe: "acesso_divergente" };
+  }
+
+  const requisito = definicao.conexaoNecessaria;
+  const platEsperada = requisito === null ? null : requisito.plataforma;
+  const recEsperado = requisito === null ? null : requisito.recurso;
+  if (ap.conexao_plataforma !== platEsperada || ap.conexao_recurso !== recEsperado) {
+    return { ok: false, codigo: "aprovacao_desatualizada", detalhe: "conexao_divergente" };
+  }
+
+  // O argumento congelado precisa continuar valido para a definicao
+  // atual. Nao adaptar, nao normalizar: recusar.
+  let validacao;
+  try {
+    validacao = definicao.validarEntrada(ap.argumentos);
+  } catch {
+    return { ok: false, codigo: "falha_persistencia", detalhe: "argumentos_invalidos" };
+  }
+  if (!validacao.valida) {
+    return { ok: false, codigo: "aprovacao_desatualizada", detalhe: "argumentos_invalidos" };
+  }
+
+  // A conexao precisa estar utilizavel AGORA, e apontando para a MESMA
+  // loja congelada. A RPC reconfirma o vinculo atomicamente; aqui o que
+  // se prova e a usabilidade, que o banco nao sabe julgar.
+  if (requisito !== null) {
+    const alvo = await resolverAlvo(userId, agenteId, requisito);
+    if ("codigo" in alvo) {
+      return { ok: false, codigo: alvo.codigo, detalhe: "conexao_indisponivel" };
+    }
+    if (alvo.lojaId !== lojaId) {
+      return { ok: false, codigo: "conexao_indisponivel", detalhe: "conexao_indisponivel" };
+    }
+  }
+
+  return {
+    ok: true,
+    aprovacao: {
+      agenteId,
+      tarefaId,
+      funcaoId,
+      acesso: definicao.acesso,
+      // Do CATALOGO, nao da linha: os dois ja foram provados iguais
+      // acima, e a definicao e a autoridade do requisito.
+      plataforma: platEsperada,
+      recurso: recEsperado,
+      lojaId,
+      argumentos: ap.argumentos,
+      revisao: definicao.revisao,
+    },
+  };
+}
+
+/**
+ * O nivel da abertura, para quem NAO tem cliente Supabase na mao.
+ *
+ * `lerNivelDaAbertura` continua privada e continua recebendo o cliente:
+ * ela e chamada DENTRO do consumo, com o mesmo cliente daquele fluxo.
+ * Este invólucro existe para a lane de retomada, que abre a chamada por
+ * OUTRA RPC e precisa ler a mesma linha depois — e que nao pode receber
+ * o cliente, porque isso lhe daria a capacidade generica de consultar
+ * qualquer tabela com o papel mais privilegiado do projeto.
+ *
+ * Os filtros sao os mesmos: `user_id`, `request_id` e `fase`. NAO ha
+ * filtro de `status`: `unique (user_id, request_id, fase)` ja e a
+ * identidade da linha, e exigir `executando` faria uma abertura ja
+ * desfechada parecer inexistente.
+ */
+export async function lerNivelDaAberturaDeRetomada(
+  userId: string,
+  requestId: string
+): Promise<"automatico" | "aprovacao" | "bloqueado" | null> {
+  if (!userId || !requestId) return null;
+  return lerNivelDaAbertura(getSupabaseServidor(), userId, requestId);
+}
+
 // ─── Consumir ─────────────────────────────────────────────────────────
 
 /**
@@ -443,86 +665,17 @@ export async function consumirAprovacaoEAbrir(
   entrada: EntradaConsumirAprovacao
 ): Promise<ResultadoConsumo> {
   const { userId, aprovacaoId } = entrada;
-  if (!userId || !aprovacaoId) return { codigo: "entrada_invalida" };
 
+  // As provas locais vivem em `lerAprovacaoParaRetomada`, que este
+  // caminho e a lane de retomada COMPARTILHAM. `detalhe` nao e lido
+  // aqui: o contrato publico desta funcao e `codigo`, e traduzi-lo
+  // mudaria o que os chamadores de hoje recebem.
+  const pre = await lerAprovacaoParaRetomada(entrada);
+  if (!pre.ok) return { codigo: pre.codigo };
+
+  const ap = pre.aprovacao;
+  const definicao: DefinicaoFuncao = FUNCOES[ap.funcaoId];
   const cliente = getSupabaseServidor();
-
-  const leitura = await cliente
-    .from(TABELA)
-    .select("id, funcao_id, revisao_funcao, acesso, conexao_plataforma, conexao_recurso, conexao_loja_id, argumentos, agente_id, tarefa_id")
-    .eq("id", aprovacaoId)
-    .eq("user_id", userId)
-    .maybeSingle();
-
-  if (leitura.error) return falha("leitura_aprovacao", leitura.error);
-
-  const ap = leitura.data as {
-    funcao_id?: unknown;
-    revisao_funcao?: unknown;
-    acesso?: unknown;
-    conexao_plataforma?: unknown;
-    conexao_recurso?: unknown;
-    conexao_loja_id?: unknown;
-    argumentos?: unknown;
-    agente_id?: unknown;
-    tarefa_id?: unknown;
-  } | null;
-
-  // Inexistente e de outro dono chegam iguais, porque o filtro ja
-  // escopou por `user_id`.
-  if (!ap) return { codigo: "aprovacao_inexistente" };
-
-  // Forma das colunas de identidade. Elas sao NOT NULL / uuid no banco,
-  // entao um valor fora da forma e bug nosso — nao situacao de negocio —
-  // e vira falha em vez de virar `null` por interpretacao.
-  const agenteId = ap.agente_id;
-  if (typeof agenteId !== "string" || agenteId.length === 0) return { codigo: "falha_persistencia" };
-
-  const tarefaId = ap.tarefa_id ?? null;
-  if (tarefaId !== null && typeof tarefaId !== "string") return { codigo: "falha_persistencia" };
-
-  const lojaId = ap.conexao_loja_id ?? null;
-  if (lojaId !== null && typeof lojaId !== "string") return { codigo: "falha_persistencia" };
-
-  const funcaoId = ap.funcao_id;
-  if (typeof funcaoId !== "string" || !funcaoExiste(funcaoId)) {
-    return { codigo: "aprovacao_desatualizada" };
-  }
-  const definicao: DefinicaoFuncao = FUNCOES[funcaoId];
-
-  // A definicao precisa ser a MESMA que o humano aprovou.
-  if (ap.revisao_funcao !== definicao.revisao) return { codigo: "aprovacao_desatualizada" };
-
-  // Defensivo: `acesso` e o requisito de conexao sao versionados pela
-  // revisao, entao divergirem com a mesma revisao significa que alguem
-  // mudou a definicao sem bump. Recusar e o unico caminho honesto.
-  if (ap.acesso !== definicao.acesso) return { codigo: "aprovacao_desatualizada" };
-
-  const requisito = definicao.conexaoNecessaria;
-  const platEsperada = requisito === null ? null : requisito.plataforma;
-  const recEsperado = requisito === null ? null : requisito.recurso;
-  if (ap.conexao_plataforma !== platEsperada || ap.conexao_recurso !== recEsperado) {
-    return { codigo: "aprovacao_desatualizada" };
-  }
-
-  // O argumento congelado precisa continuar valido para a definicao
-  // atual. Nao adaptar, nao normalizar: recusar.
-  let validacao;
-  try {
-    validacao = definicao.validarEntrada(ap.argumentos);
-  } catch {
-    return { codigo: "falha_persistencia" };
-  }
-  if (!validacao.valida) return { codigo: "aprovacao_desatualizada" };
-
-  // A conexao precisa estar utilizavel AGORA, e apontando para a MESMA
-  // loja congelada. A RPC reconfirma o vinculo atomicamente; aqui o que
-  // se prova e a usabilidade, que o banco nao sabe julgar.
-  if (requisito !== null) {
-    const alvo = await resolverAlvo(userId, agenteId, requisito);
-    if ("codigo" in alvo) return { codigo: alvo.codigo };
-    if (alvo.lojaId !== lojaId) return { codigo: "conexao_indisponivel" };
-  }
 
   const requestId = randomUUID();
 
@@ -552,16 +705,14 @@ export async function consumirAprovacaoEAbrir(
     codigo,
     requestId,
     contexto: {
-      agenteId,
-      tarefaId,
-      funcaoId,
+      agenteId: ap.agenteId,
+      tarefaId: ap.tarefaId,
+      funcaoId: ap.funcaoId,
       definicao,
-      acesso: definicao.acesso,
-      // Do CATALOGO, nao da linha: os dois ja foram provados iguais
-      // acima, e a definicao e a autoridade do requisito.
-      plataforma: platEsperada,
-      recurso: recEsperado,
-      lojaId,
+      acesso: ap.acesso,
+      plataforma: ap.plataforma,
+      recurso: ap.recurso,
+      lojaId: ap.lojaId,
       nivelNoMomento,
       argumentos: ap.argumentos,
     },

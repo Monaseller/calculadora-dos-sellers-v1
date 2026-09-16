@@ -1374,6 +1374,44 @@ const ARQUIVOS_RESUME_D5_C2_I1: readonly string[] = [
   ...ARQUIVOS_RETOMADA_D5_C2_I1.map((nome) => `lib/agentes/retomada/${nome}`),
 ];
 
+/**
+ * APPROVAL-DECISION-RESUME-D5-C3-I1 — o executor DORMENTE da retomada.
+ *
+ * DOIS caminhos, e a origem de cada um e distinta:
+ *
+ *   `executar-retomada.ts`        nasce AQUI. E o orquestrador da lane:
+ *                                 pre-read, start, read-backs, heartbeat,
+ *                                 Funcao e terminalizador dedicado.
+ *   `persistencia-retomada.ts`    ja era autorizado pelo C2-I1, e volta a
+ *                                 mudar neste slice — a lista de la
+ *                                 continua sendo quem o libera, e repeti-lo
+ *                                 aqui apagaria a origem.
+ *
+ * `lib/agentes/aprovacoes/persistencia.ts` tambem NAO entra: ele ja esta
+ * liberado desde o APPROVAL-DECISION-D4, e a extracao do pre-read e uma
+ * alteracao daquele mesmo arquivo. Cada liberacao guarda a revisao que a
+ * autorizou.
+ */
+const ARQUIVOS_RETOMADA_D5_C3_I1: readonly string[] = [
+  "executar-retomada.ts",
+];
+
+const ARQUIVOS_RESUME_D5_C3_I1: readonly string[] = [
+  ...ARQUIVOS_RETOMADA_D5_C3_I1.map((nome) => `lib/agentes/retomada/${nome}`),
+];
+
+/**
+ * Inventario ACUMULADO de `lib/agentes/retomada/`, por frente.
+ *
+ * O guarda de disco compara contra ESTA uniao, nunca contra uma frente
+ * isolada — senao cada fase nova reprovaria a anterior. Mesmo desenho de
+ * `ARQUIVOS_IA_ESPERADOS`.
+ */
+const ARQUIVOS_RETOMADA_ESPERADOS: readonly string[] = [
+  ...ARQUIVOS_RETOMADA_D5_C2_I1,
+  ...ARQUIVOS_RETOMADA_D5_C3_I1,
+];
+
 /** Uniao EXPLICITA. Qualquer caminho fora dela reprova o G11. */
 const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_1DD,
@@ -1408,6 +1446,7 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_RESUME_D5_C1,
   ...ARQUIVOS_RESUME_D5_C2_I0,
   ...ARQUIVOS_RESUME_D5_C2_I1,
+  ...ARQUIVOS_RESUME_D5_C3_I1,
 ];
 
 /**
@@ -2507,6 +2546,34 @@ async function main() {
          "?? lib/agentes/retomada/worker-retomada.ts\n"));
     ok("G11f35 as duas listas de Resume sao DISJUNTAS",
        ARQUIVOS_RESUME_D5_C2_I0.every((p) => !ARQUIVOS_RESUME_D5_C2_I1.includes(p)));
+    // ── APPROVAL-DECISION-RESUME-D5-C3-I1 ──────────────────────────
+    ok("G11f36 o slice do executor declara exatamente 1 modulo novo",
+       ARQUIVOS_RETOMADA_D5_C3_I1.length === 1 &&
+       ARQUIVOS_RETOMADA_D5_C3_I1[0] === "executar-retomada.ts");
+    ok("G11f37 e ele entra na uniao que o G11 consulta",
+       ARQUIVOS_ESPERADOS.includes("lib/agentes/retomada/executar-retomada.ts"));
+    ok("G11f38 aceita o executor, untracked e staged",
+       soAutorizadosNoEscopo("?? lib/agentes/retomada/executar-retomada.ts\n") &&
+       soAutorizadosNoEscopo("A  lib/agentes/retomada/executar-retomada.ts\n"));
+    ok("G11f39 e aceita os dois MOD deste slice",
+       soAutorizadosNoEscopo(" M lib/agentes/retomada/persistencia-retomada.ts\n") &&
+       soAutorizadosNoEscopo(" M lib/agentes/aprovacoes/persistencia.ts\n"));
+    ok("G11f40 a lista do C2-I1 NAO e quem autoriza o executor",
+       !ARQUIVOS_RESUME_D5_C2_I1.includes("lib/agentes/retomada/executar-retomada.ts") &&
+       !ARQUIVOS_RETOMADA_D5_C2_I1.includes("executar-retomada.ts"));
+    ok("G11f41 as duas frentes da pasta sao DISJUNTAS",
+       ARQUIVOS_RETOMADA_D5_C2_I1.every((n) => !ARQUIVOS_RETOMADA_D5_C3_I1.includes(n)));
+    ok("G11f42 a uniao acumulada tem os dois, sem glob",
+       ARQUIVOS_RETOMADA_ESPERADOS.length === 2 &&
+       ARQUIVOS_RETOMADA_ESPERADOS.includes("persistencia-retomada.ts") &&
+       ARQUIVOS_RETOMADA_ESPERADOS.includes("executar-retomada.ts") &&
+       ARQUIVOS_RETOMADA_ESPERADOS.every((n) => !n.includes("*")));
+    ok("G11f43 CONTROLE NEGATIVO: um TERCEIRO modulo na pasta continua reprovando",
+       !soAutorizadosNoEscopo("?? lib/agentes/retomada/descoberta-retomada.ts\n") &&
+       !soAutorizadosNoEscopo("?? lib/agentes/retomada/orquestrador-retomada.ts\n"));
+    ok("G11f44 CONTROLE NEGATIVO: mesmo basename em outra pasta reprova",
+       !soAutorizadosNoEscopo("?? lib/agentes/executar-retomada.ts\n") &&
+       !soAutorizadosNoEscopo("?? outra/pasta/executar-retomada.ts\n"));
     ok("G11g CONTROLE NEGATIVO: migration nova no escopo reprova", !soAutorizadosNoEscopo("?? supabase/migrations/99999999_falsa.sql\n"));
     ok("G11h CONTROLE NEGATIVO: autorizados + intruso reprova", !soAutorizadosNoEscopo(" M lib/agentes/handlers/registry.ts\n M lib/agentes/tipos-execucao.ts\n"));
     ok("G11i CONTROLE NEGATIVO: sufixo parecido em outra pasta reprova", !soAutorizadosNoEscopo("?? outra/pasta/registry.ts\n"));
@@ -2568,20 +2635,25 @@ async function main() {
     // segundo modulo la dentro — o orquestrador, a lane de heartbeat —
     // entraria de carona na revisao deste. Ver o docblock de
     // `ARQUIVOS_RESUME_D5_C2_I1`.
+    // FASE D5-C3-I1: compara contra a UNIAO acumulada, nunca contra uma
+    // frente isolada — senao o slice novo reprovaria o anterior.
     const soAutorizadosNaRetomada = (nomes: readonly string[]): boolean =>
-      mesmoConjuntoDeNomes(nomes, ARQUIVOS_RETOMADA_D5_C2_I1);
+      mesmoConjuntoDeNomes(nomes, ARQUIVOS_RETOMADA_ESPERADOS);
 
     const conteudoRetomada = readdirSync(join(RAIZ, "lib", "agentes", "retomada")).sort();
 
-    ok("G11z10 lib/agentes/retomada contem exatamente o modulo declarado (D5-C2-I1)",
+    ok("G11z10 lib/agentes/retomada contem exatamente os modulos declarados (C2-I1 + C3-I1)",
        soAutorizadosNaRetomada(conteudoRetomada));
-    ok("G11z11 ANCORA: o diretorio foi mesmo lido e nao veio vazio",
-       conteudoRetomada.length === ARQUIVOS_RETOMADA_D5_C2_I1.length &&
-       conteudoRetomada.length > 0);
-    ok("G11z12 CONTROLE NEGATIVO: um segundo modulo na pasta reprova",
-       !soAutorizadosNaRetomada([...ARQUIVOS_RETOMADA_D5_C2_I1, "orquestrador-retomada.ts"]));
+    ok("G11z11 ANCORA: o diretorio foi mesmo lido e veio com os dois",
+       conteudoRetomada.length === ARQUIVOS_RETOMADA_ESPERADOS.length &&
+       conteudoRetomada.length === 2);
+    ok("G11z12 CONTROLE NEGATIVO: um TERCEIRO modulo na pasta reprova",
+       !soAutorizadosNaRetomada([...ARQUIVOS_RETOMADA_ESPERADOS, "orquestrador-retomada.ts"]));
     ok("G11z13 CONTROLE NEGATIVO: mesma quantidade, nome trocado, reprova",
-       !soAutorizadosNaRetomada(["heartbeat-retomada.ts"]));
+       !soAutorizadosNaRetomada(["heartbeat-retomada.ts", "persistencia-retomada.ts"]) &&
+       !soAutorizadosNaRetomada(["executar-retomada.ts", "heartbeat-retomada.ts"]));
+    ok("G11z13a CONTROLE NEGATIVO: a fase ANTERIOR, com so um modulo, agora reprova",
+       !soAutorizadosNaRetomada(["persistencia-retomada.ts"]));
     ok("G11z14 a forma COLAPSADA da pasta e aceita pelo oraculo git (par de G11z10)",
        soAutorizadosNoEscopo("?? lib/agentes/retomada/\n"));
 

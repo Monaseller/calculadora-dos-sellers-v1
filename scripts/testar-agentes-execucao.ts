@@ -3430,7 +3430,10 @@ async function main() {
     // controles do G11: assim os cenarios negativos alimentam inventario
     // sintetico sem criar arquivo nenhum na arvore. A leitura real
     // acontece uma vez, e `null` representa a pasta ausente.
-    const RETOMADA_ESPERADO = ["persistencia-retomada.ts"];
+    // FASE D5-C3-I1: a pasta ganhou o executor. A tripwire avancou de
+    // novo em vez de ser apagada — o que ela mede continua sendo
+    // IDENTIDADE do conteudo, agora contra dois nomes.
+    const RETOMADA_ESPERADO = ["executar-retomada.ts", "persistencia-retomada.ts"];
     const vereditoRetomada = (conteudo: readonly string[] | null): boolean => {
       if (conteudo === null) return false;
       const a = [...conteudo].sort();
@@ -3443,25 +3446,79 @@ async function main() {
       ? readdirSync(DIR_RETOMADA).sort()
       : null;
 
-    ok("T14 `lib/agentes/retomada/` existe e tem so o modulo autorizado do I1",
+    ok("T14 `lib/agentes/retomada/` existe e tem so os dois modulos autorizados",
       vereditoRetomada(conteudoRetomada));
-    ok("T14a ANCORA: a pasta foi mesmo lida e o modulo esta no disco",
-      conteudoRetomada !== null && conteudoRetomada.length === 1 &&
-      existsSync(join(DIR_RETOMADA, "persistencia-retomada.ts")));
+    ok("T14a ANCORA: a pasta foi mesmo lida e os dois modulos estao no disco",
+      conteudoRetomada !== null && conteudoRetomada.length === 2 &&
+      existsSync(join(DIR_RETOMADA, "persistencia-retomada.ts")) &&
+      existsSync(join(DIR_RETOMADA, "executar-retomada.ts")));
     ok("T14b CONTROLE NEGATIVO: pasta AUSENTE reprova",
       !vereditoRetomada(null));
-    ok("T14c CONTROLE NEGATIVO: pasta VAZIA, sem o modulo esperado, reprova",
+    ok("T14c CONTROLE NEGATIVO: pasta VAZIA reprova",
       !vereditoRetomada([]));
+    ok("T14c2 CONTROLE NEGATIVO: a fase ANTERIOR, com so um modulo, agora reprova",
+      !vereditoRetomada(["persistencia-retomada.ts"]) &&
+      !vereditoRetomada(["executar-retomada.ts"]));
     ok("T14d CONTROLE NEGATIVO: um sibling a mais reprova",
-      !vereditoRetomada(["persistencia-retomada.ts", "orquestrador-retomada.ts"]) &&
-      !vereditoRetomada(["persistencia-retomada.ts", "heartbeat-retomada.ts"]));
+      !vereditoRetomada(["executar-retomada.ts", "persistencia-retomada.ts", "orquestrador-retomada.ts"]) &&
+      !vereditoRetomada(["executar-retomada.ts", "persistencia-retomada.ts", "heartbeat-retomada.ts"]) &&
+      !vereditoRetomada(["executar-retomada.ts", "persistencia-retomada.ts", "descoberta-retomada.ts"]));
     ok("T14e CONTROLE NEGATIVO: nome PARECIDO nao passa por igualdade exata",
-      !vereditoRetomada(["persistencia-retomada.tsx"]) &&
-      !vereditoRetomada(["persistencia-retomada.ts.bak"]) &&
-      !vereditoRetomada(["persistencia_retomada.ts"]) &&
-      !vereditoRetomada(["Persistencia-Retomada.ts"]));
-    ok("T14f CONTROLE POSITIVO: somente o modulo esperado passa",
-      vereditoRetomada(["persistencia-retomada.ts"]));
+      !vereditoRetomada(["executar-retomada.tsx", "persistencia-retomada.ts"]) &&
+      !vereditoRetomada(["executar-retomada.ts.bak", "persistencia-retomada.ts"]) &&
+      !vereditoRetomada(["executar_retomada.ts", "persistencia-retomada.ts"]) &&
+      !vereditoRetomada(["Executar-Retomada.ts", "persistencia-retomada.ts"]));
+    ok("T14f CONTROLE POSITIVO: somente os dois esperados passam, em qualquer ordem",
+      vereditoRetomada(["executar-retomada.ts", "persistencia-retomada.ts"]) &&
+      vereditoRetomada(["persistencia-retomada.ts", "executar-retomada.ts"]));
+
+    // ── T15 — O HEARTBEAT DA LANE DE RETOMADA, sem import proibido ──
+    //
+    // A lane Resume NAO pode importar `executar-tarefa.ts`: aquele
+    // modulo carrega `concluirTarefa`, `falharTarefa` e
+    // `aguardarAprovacaoTarefa`, e um `import` de constante arrastaria
+    // os tres para o grafo dela. A constante e, entao, DUPLICADA de
+    // proposito — o mesmo padrao que `consultar-vendas-contrato.ts` ja
+    // usa para nao descongelar `analise-vendas.ts`.
+    //
+    // Esta suite e o ponto de encontro: ela ja importa a constante da
+    // lane normal, e aqui le a da lane de retomada. A duplicacao fica
+    // CONFERIDA, nao silenciosa. Producao continua sem a dependencia.
+    {
+      const FONTE_RETOMADA = readFileSync(
+        join(RAIZ, "lib/agentes/retomada/executar-retomada.ts"), "utf8");
+      const m = /export const INTERVALO_HEARTBEAT_RETOMADA_MS = ([0-9_]+);/.exec(FONTE_RETOMADA);
+      const valorRetomada = m === null ? NaN : Number(m[1].replace(/_/g, ""));
+
+      ok("T15 ANCORA: a constante da lane de retomada foi encontrada no fonte",
+        m !== null && Number.isFinite(valorRetomada));
+      ok("T15a as duas lanes batem no MESMO intervalo",
+        valorRetomada === INTERVALO_HEARTBEAT_MS);
+      ok("T15b e o valor e 15 s",
+        valorRetomada === 15_000);
+      ok("T15c relacao 20x com o corte de orfa de 5 min da retomada",
+        valorRetomada * 20 === 300_000);
+      ok("T15d CONTROLE NEGATIVO: um valor divergente reprova",
+        !((30_000 as number) === (INTERVALO_HEARTBEAT_MS as number)));
+      // IMPORT, nunca mencao: o docblock do executor CITA
+      // `INTERVALO_HEARTBEAT_MS` justamente para explicar por que NAO o
+      // importa, e contar documentacao como violacao seria punir a
+      // explicacao. Mesmo criterio do J20 em
+      // `testar-agentes-execucao-funcoes.ts`.
+      const CODIGO_RETOMADA = FONTE_RETOMADA
+        .replace(/\/\*[\s\S]*?\*\//g, " ")
+        .replace(/(^|[^:])\/\/.*$/gm, "");
+      ok("T15e o executor Resume NAO importa a lane normal",
+        !/from "@\/lib\/agentes\/executar-tarefa"/.test(CODIGO_RETOMADA) &&
+        !/from "@\/lib\/agentes\/capability-worker"/.test(CODIGO_RETOMADA) &&
+        !/INTERVALO_HEARTBEAT_MS/.test(CODIGO_RETOMADA));
+      ok("T15e2 ANCORA: o corpo sem comentarios ainda tem a constante local",
+        /INTERVALO_HEARTBEAT_RETOMADA_MS/.test(CODIGO_RETOMADA) &&
+        CODIGO_RETOMADA.length > 1000);
+      ok("T15f CONTROLE: um import da lane normal seria detectado",
+        /from "@\/lib\/agentes\/executar-tarefa"/
+          .test('import { x } from "@/lib/agentes/executar-tarefa";'));
+    }
   }
 
   // ────────────────────────────────────────────────────────────────

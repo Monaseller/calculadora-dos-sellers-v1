@@ -358,7 +358,78 @@ export async function concluirTarefaRetomada(
   return { ok: true, linha };
 }
 
-// ─── 5. Prova de vida da retomada ─────────────────────────────────────
+// ─── 5. A tentativa autoritativa do ciclo de retomada ───────────
+
+/**
+ * O desfecho da leitura de N.
+ *
+ * `sem_correspondencia` NAO e erro: significa que nenhuma linha casou
+ * as quatro cercas causais. Depois de um inicio confirmado isso quer
+ * dizer que o ciclo mudou entre o start e esta leitura — a tarefa
+ * terminalizou, saiu de `rodando`, ou o marcador nao e mais este. Quem
+ * descobre isso por uma leitura nao tem contexto para decidir nada.
+ */
+export type ResultadoTentativaRetomada =
+  | { readonly ok: true; readonly tentativas: number }
+  | { readonly ok: false; readonly falha: "sem_correspondencia" | "indisponivel" };
+
+/**
+ * Le a tentativa N da tarefa que ESTA retomada acabou de colocar em
+ * `rodando`.
+ *
+ * ── Por que a lane normal nao serve ────────────────────────
+ *
+ * `lerTarefaParaExecucao` ganhou `.is("retomada_request_id", null)` no
+ * D5-C2-I2-F3: ela e a cerca de ENTRADA da lane normal e, por
+ * construcao, nao enxerga tarefa retomada. Usa-la aqui devolveria
+ * sempre `null`.
+ *
+ * ── Quatro cercas, e N e o DADO ───────────────────────────
+ *
+ *   id                   a tarefa
+ *   user_id              o dono
+ *   status = 'rodando'   o ciclo esta aberto
+ *   retomada_request_id  ESTE ciclo, e nao outro
+ *
+ * `tentativas` NAO e cerca nesta leitura — e o que se quer descobrir.
+ * Ela vira cerca depois, no heartbeat e nos terminalizadores, onde o
+ * valor ja e conhecido. Chamar isto de "cinco cercas" confundiria as
+ * duas coisas.
+ *
+ * ── Leitura, e nada alem ────────────────────────────────
+ *
+ * Uma query, zero escrita, zero retry. Erro do driver nao vira excecao
+ * e nao carrega `message`, `details` nem `hint` — so o rotulo.
+ */
+export async function lerTentativaDaRetomada(
+  tarefaId: string,
+  userId: string,
+  retomadaRequestId: string
+): Promise<ResultadoTentativaRetomada> {
+  const { data, error } = await getSupabaseServidor()
+    .from("agente_tarefas")
+    .select("tentativas")
+    .eq("id", tarefaId)
+    .eq("user_id", userId)
+    .eq("status", "rodando")
+    .eq("retomada_request_id", retomadaRequestId)
+    .maybeSingle();
+
+  if (error) {
+    console.error("[agentes-retomada] leitura da tentativa da retomada falhou");
+    return { ok: false, falha: "indisponivel" };
+  }
+
+  // `maybeSingle` devolve `null` com `error` null quando nao ha linha:
+  // ausencia e desfecho normal aqui, nao falha de transporte.
+  const bruto = (data as { tentativas?: unknown } | null)?.tentativas;
+  if (typeof bruto !== "number" || !Number.isInteger(bruto)) {
+    return { ok: false, falha: "sem_correspondencia" };
+  }
+  return { ok: true, tentativas: bruto };
+}
+
+// ─── 6. Prova de vida da retomada ─────────────────────────────────────
 
 /**
  * O desfecho de UM tick de heartbeat. Tres estados, e nenhum deles e

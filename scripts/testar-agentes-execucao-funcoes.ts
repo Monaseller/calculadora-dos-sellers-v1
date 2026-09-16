@@ -2029,8 +2029,18 @@ async function principal(): Promise<void> {
         }
       };
       for (const d of producao) varrer(d);
-      ok(`J20 D5_ACTIVE = NO: zero referencia de producao ao registry (${alcanca.join(", ") || "nenhuma"})`,
-        alcanca.length === 0);
+      // ── FASE D5-C3-I1 ─────────────────────────────────────────────
+      //
+      // Ate aqui o registry nao tinha importador de producao. O executor
+      // Resume e o primeiro, e e o UNICO autorizado: quem resolve o
+      // contrato de um tipo e ele. Apagar o assert trocaria a prova por
+      // silencio; o que ele mede agora e a IDENTIDADE da lista.
+      ok(`J20 D5_ACTIVE = NO: o registry so e importado pelo executor Resume (${alcanca.join(", ") || "nenhuma"})`,
+        alcanca.length === 1 && alcanca[0] === "lib/agentes/retomada/executar-retomada.ts");
+      ok("J20a CONTROLE NEGATIVO: um segundo importador reprova",
+        !(["lib/agentes/retomada/executar-retomada.ts", "lib/agentes/intruso.ts"].length === 1));
+      ok("J20b CONTROLE NEGATIVO: um importador de OUTRO nome reprova",
+        !(["lib/agentes/capability-worker.ts"][0] === "lib/agentes/retomada/executar-retomada.ts"));
     }
   }
 
@@ -2401,9 +2411,19 @@ async function principal(): Promise<void> {
       !/setInterval|setTimeout/.test(PERSIST_CODIGO));
     ok("K68a e o heartbeat e UM TICK, uma escrita por chamada",
       (PERSIST_CODIGO.match(/\.update\(/g) ?? []).length === 1);
-    ok("K69 a unica escrita direta e o heartbeat, e ela so toca heartbeat_em",
-      (PERSIST_CODIGO.match(/\.from\(\s*"agente_tarefas"\s*\)/g) ?? []).length === 1 &&
-      /\.update\(\{\s*heartbeat_em:/.test(PERSIST_CODIGO));
+    // O C3-I1 acrescentou a LEITURA autoritativa de N, que e um
+    // `select` na mesma tabela. O assert avancou de "uma consulta so"
+    // para "duas, e exatamente uma delas escreve" — a contagem de
+    // `.update(` no K68a continua sendo quem prova a escrita unica.
+    ok("K69 a tabela e tocada por duas consultas, e so o heartbeat escreve",
+      (PERSIST_CODIGO.match(/\.from\(\s*"agente_tarefas"\s*\)/g) ?? []).length === 2 &&
+      /\.update\(\{\s*heartbeat_em:/.test(PERSIST_CODIGO) &&
+      (PERSIST_CODIGO.match(/\.update\(/g) ?? []).length === 1);
+    ok("K69b a segunda consulta e leitura pura da tentativa",
+      /\.select\(\s*"tentativas"\s*\)/.test(PERSIST_CODIGO) &&
+      !/\.update\([^)]*tentativas/.test(PERSIST_CODIGO));
+    ok("K69c a leitura de N cerca por id, dono, status e marcador",
+      /\.select\(\s*"tentativas"\s*\)[\s\S]{0,400}?\.eq\("retomada_request_id"/.test(PERSIST_CODIGO));
     ok("K69a nenhuma insercao, exclusao ou upsert em lugar nenhum",
       !/\.insert\(|\.upsert\(|\.delete\(/.test(PERSIST_CODIGO));
 
@@ -2428,12 +2448,24 @@ async function principal(): Promise<void> {
         }
       };
       for (const d of producao) varrer(d);
-      ok(`K70 zero import de producao ao modulo (${importadores.join(", ") || "nenhum"})`,
-        importadores.length === 0);
-      ok(`K71 zero mencao de producao aos quatro wrappers (${mencionam.join(", ") || "nenhuma"})`,
-        mencionam.length === 0);
-      ok("K72 D5_ACTIVE = NO: nenhum caminho de producao produz marcador",
-        importadores.length === 0 && mencionam.length === 0);
+      // ── FASE D5-C3-I1 ─────────────────────────────────────────────
+      //
+      // O executor Resume e o unico consumidor autorizado dos wrappers.
+      // D5_ACTIVE continua NO por um motivo diferente do de antes: nao
+      // porque ninguem os alcanca, mas porque quem os alcanca nao tem,
+      // ele proprio, chamador de producao — e isso e provado em N80.
+      const CONSUMIDOR = "lib/agentes/retomada/executar-retomada.ts";
+      ok(`K70 o modulo so e importado pelo executor Resume (${importadores.join(", ") || "nenhum"})`,
+        importadores.length === 1 && importadores[0] === CONSUMIDOR);
+      ok(`K71 e so ele menciona os wrappers (${mencionam.join(", ") || "nenhuma"})`,
+        mencionam.length === 1 && mencionam[0] === CONSUMIDOR);
+      ok("K72 D5_ACTIVE = NO: o unico consumidor e dormente",
+        importadores.length === 1 && mencionam.length === 1 &&
+        importadores[0] === CONSUMIDOR && mencionam[0] === CONSUMIDOR);
+      ok("K72a CONTROLE NEGATIVO: um segundo consumidor reprova",
+        !([CONSUMIDOR, "app/api/internal/agentes/worker/route.ts"].length === 1));
+      ok("K72b CONTROLE NEGATIVO: consumidor com outro nome reprova",
+        !(["lib/agentes/executar-tarefa.ts"][0] === CONSUMIDOR));
     }
 
     // ── O worker e o executor continuam intocados por este slice ────
@@ -2628,8 +2660,17 @@ async function principal(): Promise<void> {
         }
       };
       for (const d of producao) varrer(d);
-      ok(`L44 zero chamador de producao do tick (${alcanca.join(", ") || "nenhum"})`,
-        alcanca.length === 0);
+      // ── FASE D5-C3-I1 ─────────────────────────────────────────────
+      //
+      // O tick passou a ter quem o agende: o executor Resume, e so ele.
+      // Que o agendamento so comeca DEPOIS do contexto causal completo
+      // e provado por ordem de origem em N29/N30.
+      ok(`L44 o tick so e chamado pelo executor Resume (${alcanca.join(", ") || "nenhum"})`,
+        alcanca.length === 1 && alcanca[0] === "lib/agentes/retomada/executar-retomada.ts");
+      ok("L44a CONTROLE NEGATIVO: um segundo chamador reprova",
+        !(["lib/agentes/retomada/executar-retomada.ts", "lib/agentes/executar-tarefa.ts"].length === 1));
+      ok("L44b CONTROLE NEGATIVO: o chamador ser a lane normal reprova",
+        !(["lib/agentes/executar-tarefa.ts"][0] === "lib/agentes/retomada/executar-retomada.ts"));
     }
 
     // ── F3: a CERCA DE ENTRADA, provada COMPORTAMENTALMENTE ─────────
@@ -2829,13 +2870,28 @@ async function principal(): Promise<void> {
       desfecho?.linha?.funcao_id === "vendas.consultar");
     ok("M19 e o nivel lido da abertura viaja intacto",
       desfecho?.linha?.nivel_no_momento === "aprovacao");
-    ok("M20 acesso vem da DEFINICAO, nao do chamador",
-      desfecho?.linha?.acesso === FUNCOES["vendas.consultar"].acesso);
-    ok("M21 plataforma/recurso tambem saem da definicao",
-      desfecho?.linha?.plataforma ===
-        (FUNCOES["vendas.consultar"].conexaoNecessaria?.plataforma ?? null) &&
-      desfecho?.linha?.recurso ===
-        (FUNCOES["vendas.consultar"].conexaoNecessaria?.recurso ?? null));
+    // ── D5-C3-I0-R1-N1 CORRIGIDO ───────────────────────────────────
+    //
+    // Estes dois liam o valor esperado do MESMO catalogo que a porta
+    // consulta. O oraculo era compartilhado: trocar `acesso` na
+    // definicao mudava os dois lados ao mesmo tempo e o assert
+    // continuava verde, provando apenas que a porta le o catalogo — nao
+    // QUE valor ela grava.
+    //
+    // Agora o valor esperado e LITERAL e independente, e a concordancia
+    // do catalogo com esses literais e um assert SEPARADO. Os dois
+    // oraculos ficam distintos de proposito: se a definicao mudar sem
+    // gate, M20a reprova sozinho, e os dois primeiros continuam medindo
+    // o que a porta realmente gravou.
+    ok("M20 acesso gravado e `leitura`, literal independente do catalogo",
+      desfecho?.linha?.acesso === "leitura");
+    ok("M21 plataforma e recurso gravados sao ambos null",
+      desfecho?.linha?.plataforma === null && desfecho?.linha?.recurso === null);
+    ok("M20a ORACULO SEPARADO: o catalogo ainda concorda com esses literais",
+      FUNCOES["vendas.consultar"].acesso === "leitura" &&
+      FUNCOES["vendas.consultar"].conexaoNecessaria === null);
+    ok("M21a CONTROLE NEGATIVO: um literal errado seria detectado",
+      !(("escrita" as string) === "leitura"));
     ok("M22 nenhuma ABERTURA foi gravada — a porta nao abre Tool Call",
       !chamadas.some((c) => c.escrita && c.linha?.fase === "abertura"));
     ok("M23 e nenhuma RPC foi chamada",
@@ -2883,8 +2939,864 @@ async function principal(): Promise<void> {
         }
       };
       for (const d of producao) varrer(d);
-      ok(`M29 zero chamador de producao da porta nova (${alcanca.join(", ") || "nenhum"})`,
-        alcanca.length === 0);
+      // ── A tripwire AVANCOU de fase no D5-C3-I1 ────────────────────
+      //
+      // Ate o I0 a porta nao tinha chamador nenhum, e a prova era a
+      // ausencia. O I1 criou o executor Resume, que e o UNICO consumidor
+      // autorizado dela. Apagar o assert trocaria uma prova por um
+      // silencio; o que ele mede agora e que a lista de chamadores tem
+      // EXATAMENTE um nome, e que e esse.
+      const AUTORIZADOS_PORTA = ["lib/agentes/retomada/executar-retomada.ts"];
+      ok(`M29 a porta nova tem exatamente o chamador autorizado (${alcanca.join(", ") || "nenhum"})`,
+        alcanca.length === AUTORIZADOS_PORTA.length &&
+        [...alcanca].sort().every((r, i) => r === [...AUTORIZADOS_PORTA].sort()[i]));
+      ok("M29a CONTROLE NEGATIVO: um segundo chamador reprova",
+        !(["lib/agentes/retomada/executar-retomada.ts", "lib/agentes/intruso.ts"].length ===
+          AUTORIZADOS_PORTA.length));
+      ok("M29b CONTROLE NEGATIVO: chamador NENHUM tambem reprova",
+        !([].length === AUTORIZADOS_PORTA.length));
+    }
+  }
+
+  // ─── N. RESUME-D5-C3-I1: o executor DORMENTE da lane de retomada ───
+
+  secao("N. RESUME-D5-C3-I1: o executor dormente da lane de retomada");
+  {
+    const EXEC_N = ler("lib/agentes/retomada/executar-retomada.ts");
+    const CODIGO_N = semComentarios(EXEC_N);
+    const modN = await import("../lib/agentes/retomada/executar-retomada");
+    const executarRetomada = modN.executarRetomada;
+    const INTERVALO_N = modN.INTERVALO_HEARTBEAT_RETOMADA_MS;
+
+    const APROV = "33333333-3333-4333-8333-333333333333";
+    const ARGS_APROVADOS = { dataInicio: "2026-08-01", dataFim: "2026-08-07", marketplace: null };
+
+    const linhaAprov = (over: Record<string, unknown> = {}): Resposta => ({
+      data: {
+        id: APROV,
+        funcao_id: "vendas.consultar",
+        revisao_funcao: "1",
+        acesso: "leitura",
+        conexao_plataforma: null,
+        conexao_recurso: null,
+        conexao_loja_id: null,
+        argumentos: ARGS_APROVADOS,
+        agente_id: AGENTE,
+        tarefa_id: TAREFA,
+        ...over,
+      },
+    });
+    const linhaTar = (over: Record<string, unknown> = {}): Resposta => ({
+      data: {
+        id: TAREFA, user_id: USER, agente_id: AGENTE, tipo: "consultar_vendas",
+        status: "aguardando_aprovacao", tentativas: 2, max_tentativas: 3, entrada: {},
+        ...over,
+      },
+    });
+    const abertura = (nivel: unknown = "aprovacao"): Resposta => ({ data: { nivel_no_momento: nivel } });
+    const tentativasN = (n: unknown = 2): Resposta => ({ data: { tentativas: n } });
+    const vendas: Resposta = { data: [{ id: 1, item_subtotal: 10, faturamento: 10, marketplace: "shopee" }] };
+    const linhaFinal: Resposta = { data: { id: TAREFA, user_id: USER, status: "concluido", tentativas: 2 } };
+
+    /** O caminho feliz inteiro, do pre-read ao terminalizador. */
+    const cenarioFeliz = (): void => {
+      roteiro(linhaAprov(), linhaTar(), abertura(), tentativasN(), vendas, gravou);
+      roteiroRpc({ data: "consumida" }, linhaFinal);
+    };
+
+    const rpcDe = (nome: string) => chamadasRpc.find((c) => c.nome === nome);
+    const desfechoGravado = () =>
+      chamadas.find((c) => c.escrita && c.tabela === "agente_funcao_chamadas");
+
+    // ── N0. ANCORA ────────────────────────────────────────────────────
+    ok("N0  ANCORA: o executor existe e o fonte foi lido",
+      typeof executarRetomada === "function" && CODIGO_N.length > 2000);
+
+    // ── N1..N8. A LANE NORMAL NAO ENTRA AQUI ──────────────────────────
+    for (const mod of ["@/lib/agentes/executar-tarefa", "@/lib/agentes/capability-worker",
+                       "@/lib/agentes/handlers/registry", "@/lib/agentes/handlers/consultar-vendas",
+                       "@/lib/estudio-anuncios/supabase-servidor"]) {
+      ok(`N1  nao importa \`${mod}\``, !CODIGO_N.includes(mod));
+    }
+    for (const sim of ["executarTarefa", "INTERVALO_HEARTBEAT_MS", "executarFuncao(",
+                       "retomarAprovacao", "consumirAprovacaoEAbrir", "criarAprovacao",
+                       "registrarAbertura", "registrarDesfechoDeExecucao",
+                       "registrarDesfechoSemExecucao", "concluirTarefa(", "falharTarefa(",
+                       "aguardarAprovacaoTarefa", "registrarProgresso", "lerTarefaParaExecucao",
+                       "reivindicarProximaTarefa", "recuperarRetomadaStale", "resolverHandler"]) {
+      ok(`N2  nao cita \`${sim}\``, !CODIGO_N.includes(sim));
+    }
+    for (const rpc of ["aprovacao_consumir_e_abrir", "concluir_tarefa", "falhar_tarefa",
+                       "aguardar_aprovacao_tarefa", "claim_next_agente_tarefa"]) {
+      ok(`N3  nao cita a RPC \`${rpc}\``, !CODIGO_N.includes(rpc));
+    }
+    ok("N4  CONTROLE: um import proibido seria detectado",
+      "import x from \"@/lib/agentes/executar-tarefa\";".includes("@/lib/agentes/executar-tarefa"));
+
+    // ── N5..N6. A constante local, por VALOR ──────────────────────────
+    ok("N5  INTERVALO_HEARTBEAT_RETOMADA_MS === 15000", INTERVALO_N === 15_000);
+    ok("N6  relacao 20x com o corte de orfa de 5 min",
+      INTERVALO_N * 20 === 300_000 && (5 * 60_000) / INTERVALO_N === 20);
+    ok("N7  a constante e declarada LOCALMENTE, nao importada",
+      /const INTERVALO_HEARTBEAT_RETOMADA_MS = 15_000/.test(CODIGO_N));
+
+    // ── N8..N11. HIGIENE DE ERRO: texto cru nao e lido ────────────────
+    for (const campo of [".message", ".details", ".hint", ".stack", ".cause",
+                         "envelope.error", ".error.code"]) {
+      ok(`N8  o executor nunca le \`${campo}\``, !CODIGO_N.includes(campo));
+    }
+    ok("N9  CONTROLE: uma leitura de message seria detectada",
+      "err.message.slice(0, 300)".includes(".message"));
+    ok("N10 as mensagens persistidas sao literais fixos",
+      /const MSG_PAUSA = "/.test(CODIGO_N) && /const MSG_INTERNA = "/.test(CODIGO_N) &&
+      /const MSG_FUNCAO_ERRO = "/.test(CODIGO_N));
+    ok("N11 a etapa de auditoria passa por membership, nao por regex",
+      /ETAPAS_AUDITORIA as readonly string\[\]\)\.includes\(valor\)/.test(CODIGO_N) &&
+      !/\[a-z0-9_\]\{1,40\}/.test(CODIGO_N));
+
+    // ── N12..N22. CAMINHO FELIZ ───────────────────────────────────────
+    cenarioFeliz();
+    const rFeliz = await executarRetomada(USER, APROV);
+    const inicioRpc = rpcDe("retomar_aprovacao_iniciar");
+    const concluiRpc = rpcDe("retomada_concluir_tarefa");
+    const R_USADO = inicioRpc?.parametros?.p_request_id;
+
+    ok("N12 o desfecho e `concluida`", rFeliz.tipo === "concluida");
+    ok("N13 a RPC de inicio foi chamada exatamente uma vez",
+      chamadasRpc.filter((c) => c.nome === "retomar_aprovacao_iniciar").length === 1);
+    ok("N14 com o dono e a aprovacao recebidos",
+      inicioRpc?.parametros?.p_user_id === USER &&
+      inicioRpc?.parametros?.p_aprovacao_id === APROV);
+    ok("N15 T-TYPE-1: o tipo enviado e o da LINHA da tarefa",
+      inicioRpc?.parametros?.p_tipo_tarefa_esperado === "consultar_vendas");
+    ok("N16 a funcao esperada vem do CONTRATO",
+      inicioRpc?.parametros?.p_funcao_id_esperada === "vendas.consultar");
+    ok("N17 a revisao enviada e a do catalogo",
+      inicioRpc?.parametros?.p_revisao_atual === "1");
+    ok("N18 R tem forma de uuid e nao e o id da aprovacao",
+      typeof R_USADO === "string" &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(R_USADO) &&
+      R_USADO !== APROV);
+    ok("N19 a Funcao rodou e gravou o desfecho com o MESMO R",
+      desfechoGravado()?.linha?.request_id === R_USADO &&
+      desfechoGravado()?.linha?.fase === "desfecho");
+    ok("N20 F2: a conclusao usa a RPC DEDICADA, exatamente uma vez",
+      chamadasRpc.filter((c) => c.nome === "retomada_concluir_tarefa").length === 1);
+    ok("N21 e ela carrega tarefa, dono, N e R",
+      concluiRpc?.parametros?.p_tarefa_id === TAREFA &&
+      concluiRpc?.parametros?.p_user_id === USER &&
+      concluiRpc?.parametros?.p_tentativa_esperada === 2 &&
+      concluiRpc?.parametros?.p_retomada_request_id === R_USADO);
+    ok("N22 nenhum terminalizador generico e nenhuma falha dedicada",
+      !chamadasRpc.some((c) => c.nome === "concluir_tarefa" || c.nome === "falhar_tarefa" ||
+                               c.nome === "retomada_falhar_tarefa"));
+    ok("N23 o resultado de negocio chegou ao terminalizador",
+      typeof concluiRpc?.parametros?.p_resultado === "object" &&
+      concluiRpc?.parametros?.p_resultado !== null &&
+      "resumo" in (concluiRpc?.parametros?.p_resultado as Record<string, unknown>));
+
+    // ── N24..N26. F1: a fonte dos argumentos ──────────────────────────
+    ok("N24 F1: os argumentos executados sao os APROVADOS",
+      JSON.stringify(desfechoGravado()?.linha?.funcao_id) === JSON.stringify("vendas.consultar") &&
+      /argumentos: ap\.argumentos/.test(CODIGO_N));
+    ok("N25 F1: prepararEntrada recebe ap.argumentos, e so",
+      /prepararEntrada\(ap\.argumentos\)/.test(CODIGO_N));
+    ok("N26 F1: a entrada da TAREFA nunca e usada",
+      !/tarefa\.linha\.entrada/.test(CODIGO_N) && !/contexto\.entrada/.test(CODIGO_N) &&
+      !/\.entrada\b/.test(CODIGO_N));
+
+    // ── N27..N31. ORDEM DOS EFEITOS, por posicao de origem ────────────
+    {
+      const pos = {
+        preRead: CODIGO_N.indexOf("await lerAprovacaoParaRetomada("),
+        tipo: CODIGO_N.indexOf("await lerTarefaDoDono("),
+        prepara: CODIGO_N.indexOf("contrato.prepararEntrada("),
+        uuid: CODIGO_N.indexOf("randomUUID()"),
+        start: CODIGO_N.indexOf("await iniciarRetomadaAprovacao("),
+        abertura: CODIGO_N.indexOf("await lerNivelDaAberturaDeRetomada("),
+        lerN: CODIGO_N.indexOf("await lerTentativaDaRetomada("),
+        timer: CODIGO_N.indexOf("setInterval("),
+        funcao: CODIGO_N.indexOf("await executarFuncaoAprovada("),
+        limpa: CODIGO_N.indexOf("clearInterval("),
+        conclui: CODIGO_N.indexOf("await concluirTarefaRetomada("),
+        falha: CODIGO_N.indexOf("await falharTarefaRetomada("),
+      };
+      // ANCORA primeiro: `indexOf` devolve -1 quando o alvo some, e -1
+      // e menor que qualquer indice — sem esta linha, apagar um ponto
+      // faria as comparacoes passarem por vacuidade. E o bug do L57.
+      ok("N27 ANCORA: todos os pontos do fluxo existem no fonte",
+        Object.values(pos).every((p) => p > 0));
+      ok("N28 pre-read -> tipo -> preparar -> R -> start, nesta ordem",
+        pos.preRead < pos.tipo && pos.tipo < pos.prepara &&
+        pos.prepara < pos.uuid && pos.uuid < pos.start);
+      ok("N29 start -> abertura -> N -> heartbeat, nesta ordem",
+        pos.start < pos.abertura && pos.abertura < pos.lerN && pos.lerN < pos.timer);
+      ok("N30 o heartbeat comeca ANTES da Funcao",
+        pos.timer < pos.funcao);
+      ok("N31 clearInterval vem ANTES dos dois terminalizadores",
+        pos.limpa < pos.conclui && pos.limpa < pos.falha);
+      ok("N32 o timer e desamarrado do event loop",
+        /unref\?\.\(\)/.test(CODIGO_N));
+      ok("N33 ha guarda de batida em voo",
+        /baticaoEmVoo/.test(CODIGO_N) && /if \(baticaoEmVoo\) return;/.test(CODIGO_N));
+      ok("N33a o tick recebe tarefa, dono, N e o R DESTE ciclo",
+        /registrarHeartbeatRetomada\(tarefaId, userId, tentativas, requestId\)/.test(CODIGO_N));
+      ok("N33b CONTROLE NEGATIVO: outro R ou outro N no tick seria detectado",
+        !/registrarHeartbeatRetomada\(tarefaId, userId, tentativas, aprovacaoId\)/.test(CODIGO_N) &&
+        !/registrarHeartbeatRetomada\(tarefaId, userId, 0, requestId\)/.test(CODIGO_N));
+      ok("N34 clearInterval acontece em finally",
+        /finally \{\n\s*clearInterval\(timerHeartbeat\);/.test(CODIGO_N));
+    }
+
+    // ── N35..N38. T-TYPE: o tipo vem da LINHA, nunca inferido ─────────
+    ok("N35 T-TYPE-4: o tipo nunca e derivado de funcaoId",
+      /const tipoTarefa = tarefa\.linha\.tipo/.test(CODIGO_N) &&
+      !/tipoPorFuncao|tipoDe\(|inferirTipo/.test(CODIGO_N));
+
+    roteiro(linhaAprov(), linhaTar({ tipo: "conversa" }));
+    roteiroRpc();
+    const rTipo = await executarRetomada(USER, APROV);
+    ok("N36 T-TYPE-2: tipo sem contrato recusa com motivo fechado",
+      rTipo.tipo === "sem_inicio" &&
+      (rTipo as { motivo?: unknown }).motivo === "contrato_desconhecido");
+    ok("N37 T-TYPE-2: e nenhuma RPC e chamada",
+      chamadasRpc.length === 0 && !desfechoGravado());
+
+    roteiro(linhaAprov(), linhaTar());
+    roteiroRpc({ data: "tarefa_incompativel" });
+    const rStale = await executarRetomada(USER, APROV);
+    ok("N38 T-TYPE-3: a AUTORIDADE e o start — tipo stale vira recusa",
+      rStale.tipo === "sem_inicio" &&
+      (rStale as { motivo?: unknown }).motivo === "tarefa_incompativel");
+    ok("N39 T-TYPE-3: Funcao 0 e terminalizador 0",
+      !desfechoGravado() && chamadasRpc.length === 1);
+
+    // ── N40..N43. START: os 16 codigos, e so `consumida` segue ────────
+    {
+      const CODIGOS_16 = ["entrada_invalida", "aprovacao_inexistente", "agente_indisponivel",
+        "tarefa_indisponivel", "aprovacao_pendente", "ja_consumida", "ja_rejeitada",
+        "ja_cancelada", "expirada", "aprovacao_desatualizada", "escrita_nao_suportada",
+        "permissao_ausente", "permissao_bloqueada", "conexao_indisponivel",
+        "tarefa_incompativel", "funcao_incompativel"];
+      let recusas = 0;
+      let execucoes = 0;
+      for (const codigo of CODIGOS_16) {
+        roteiro(linhaAprov(), linhaTar());
+        roteiroRpc({ data: codigo });
+        const rr = await executarRetomada(USER, APROV);
+        if (rr.tipo === "sem_inicio" && (rr as { motivo?: unknown }).motivo === codigo) recusas++;
+        if (desfechoGravado()) execucoes++;
+      }
+      ok(`N40 S2: os 16 codigos de recusa viram sem_inicio com o proprio motivo (${recusas}/16)`,
+        recusas === 16);
+      ok("N41 S2/S3: nenhum deles executa Funcao", execucoes === 0);
+    }
+
+    roteiro(linhaAprov(), linhaTar());
+    roteiroRpc({ data: null, error: { code: "08006" } });
+    const rAmbiguo = await executarRetomada(USER, APROV);
+    ok("N42 S4: transporte no start vira inicio_ambiguo",
+      rAmbiguo.tipo === "inicio_ambiguo" &&
+      (rAmbiguo as { motivo?: unknown }).motivo === "rpc_indisponivel");
+    ok("N43 S4: ambiguo NAO executa Funcao e NAO terminaliza",
+      !desfechoGravado() &&
+      !chamadasRpc.some((c) => c.nome.startsWith("retomada_")) &&
+      chamadasRpc.length === 1);
+
+    roteiro(linhaAprov(), linhaTar());
+    roteiroRpc({ data: "codigo_que_nao_existe" });
+    const rInvalido = await executarRetomada(USER, APROV);
+    ok("N44 S5: codigo fora do catalogo vira inicio_ambiguo",
+      rInvalido.tipo === "inicio_ambiguo" &&
+      (rInvalido as { motivo?: unknown }).motivo === "resposta_invalida");
+    ok("N45 S5: e tambem nao executa nem terminaliza",
+      !desfechoGravado() && chamadasRpc.length === 1);
+
+    roteiro(linhaAprov(), linhaTar());
+    roteiroRpc({ data: null, error: { code: "55000" } });
+    const r55 = await executarRetomada(USER, APROV);
+    ok("N46 55000 aborta a transacao — sem_inicio, nao ambiguo",
+      r55.tipo === "sem_inicio" &&
+      (r55 as { motivo?: unknown }).motivo === "rpc_fora_de_contrato");
+
+    roteiro(linhaAprov(), linhaTar());
+    roteiroRpc({ data: null, error: { code: "22023" } });
+    const r22 = await executarRetomada(USER, APROV);
+    ok("N47 22023 tambem e sem_inicio",
+      r22.tipo === "sem_inicio" &&
+      (r22 as { motivo?: unknown }).motivo === "rpc_entrada_invalida");
+
+    // ── N48..N55. CONTEXTO POS-START ──────────────────────────────────
+    roteiro(linhaAprov(), linhaTar(), { data: null });
+    roteiroRpc({ data: "consumida" });
+    const rSemAbertura = await executarRetomada(USER, APROV);
+    ok("N48 C2: abertura sem linha vira contexto_incompleto",
+      rSemAbertura.tipo === "contexto_incompleto" &&
+      (rSemAbertura as { motivo?: unknown }).motivo === "abertura_ilegivel");
+    ok("N49 C2: Funcao 0 e terminalizador 0",
+      !desfechoGravado() && chamadasRpc.length === 1);
+
+    roteiro(linhaAprov(), linhaTar(), { data: null, error: { code: "08006" } });
+    roteiroRpc({ data: "consumida" });
+    const rAberturaErro = await executarRetomada(USER, APROV);
+    ok("N50 C3: abertura indisponivel tambem para, fechado",
+      rAberturaErro.tipo === "contexto_incompleto" && !desfechoGravado());
+
+    roteiro(linhaAprov(), linhaTar(), abertura("valor_invalido"));
+    roteiroRpc({ data: "consumida" });
+    const rNivelMau = await executarRetomada(USER, APROV);
+    ok("N51 nivel fora do vocabulario NAO vira nivel plausivel",
+      rNivelMau.tipo === "contexto_incompleto" && !desfechoGravado());
+
+    roteiro(linhaAprov(), linhaTar(), abertura(), { data: null });
+    roteiroRpc({ data: "consumida" });
+    const rSemN = await executarRetomada(USER, APROV);
+    ok("N52 C5: N sem linha vira contexto_incompleto/tarefa_ilegivel",
+      rSemN.tipo === "contexto_incompleto" &&
+      (rSemN as { motivo?: unknown }).motivo === "tarefa_ilegivel");
+    ok("N53 C5: Funcao 0 e terminalizador 0",
+      !desfechoGravado() && chamadasRpc.length === 1);
+
+    // A leitura de N cerca por QUATRO colunas causais, e le a tentativa.
+    roteiro(linhaAprov(), linhaTar(), abertura(), tentativasN(7), vendas, gravou);
+    roteiroRpc({ data: "consumida" }, linhaFinal);
+    const rN7 = await executarRetomada(USER, APROV);
+    const leituraDeN = chamadas.filter((c) => c.tabela === "agente_tarefas" && !c.escrita).pop();
+    ok("N54 C6/C7: a leitura de N cerca por id, dono, status e R",
+      leituraDeN?.filtros?.id === TAREFA &&
+      leituraDeN?.filtros?.user_id === USER &&
+      leituraDeN?.filtros?.status === "rodando" &&
+      typeof leituraDeN?.filtros?.retomada_request_id === "string");
+    ok("N55 C8: o N usado no terminalizador e o N LIDO, nunca calculado",
+      rN7.tipo === "concluida" &&
+      rpcDe("retomada_concluir_tarefa")?.parametros?.p_tentativa_esperada === 7);
+
+    // ── N56..N62. E1/E2: higiene de erro, comportamental ──────────────
+    //
+    // O catalogo controlado e o unico jeito de alcancar as variantes de
+    // erro: `vendas.consultar` real nunca lanca e sempre produz codigo
+    // bem formado.
+    const funcaoControlada = (interpretar: (s: unknown) => unknown,
+                              acesso: "leitura" | "escrita" = "leitura"): void => {
+      catalogoControlado = {
+        "vendas.consultar": {
+          executor: async () => ({ linhas: [], truncado: false, erro: null }),
+          validarEntrada: () => ({ valida: true }),
+          interpretarSaida: interpretar,
+          acesso,
+          idempotente: true,
+          conexaoNecessaria: null,
+          revisao: "1",
+        },
+      };
+    };
+
+    const falhaRpc = () => rpcDe("retomada_falhar_tarefa")?.parametros ?? {};
+
+    // E1-a: codigo de ENTRADA -> entrada_invalida, mensagem FIXA.
+    funcaoControlada(() => ({ tipo: "erro", codigo: "janela_excedida", mensagem: "x", retryable: false }));
+    roteiro(linhaAprov(), linhaTar(), abertura(), tentativasN(), gravou);
+    roteiroRpc({ data: "consumida" }, { data: { id: TAREFA, user_id: USER, status: "erro", tentativas: 2 } });
+    const rEntrada = await executarRetomada(USER, APROV);
+    ok("N56 E1: codigo de entrada vira entrada_invalida",
+      rEntrada.tipo === "falhou" &&
+      (rEntrada as { erroTipo?: unknown }).erroTipo === "entrada_invalida" &&
+      falhaRpc().p_erro_tipo === "entrada_invalida");
+    ok("N57 E1: com mensagem FIXA, sem o codigo copiado",
+      falhaRpc().p_erro_mensagem === "retomada: entrada aprovada invalida");
+
+    // E2: o codigo da Funcao e string ABERTA. Um segredo nele nao pode
+    // alcancar a coluna persistida.
+    funcaoControlada(() => ({ tipo: "erro", codigo: "secret_token_123", mensagem: "SECRET_SHOULD_NOT_PERSIST", retryable: false }));
+    roteiro(linhaAprov(), linhaTar(), abertura(), tentativasN(), gravou);
+    roteiroRpc({ data: "consumida" }, { data: { id: TAREFA, user_id: USER, status: "erro", tentativas: 2 } });
+    const rSegredo = await executarRetomada(USER, APROV);
+    const msgSegredo = String(falhaRpc().p_erro_mensagem ?? "");
+    ok("N58 E2: erro comum da Funcao vira handler_falhou",
+      rSegredo.tipo === "falhou" &&
+      (rSegredo as { erroTipo?: unknown }).erroTipo === "handler_falhou");
+    ok("N59 E2: a mensagem persistida e o literal fixo",
+      msgSegredo === "retomada: funcao retornou erro");
+    ok("N60 E2: nem o codigo nem a mensagem da Funcao vazam",
+      !msgSegredo.includes("secret_token_123") &&
+      !msgSegredo.includes("SECRET_SHOULD_NOT_PERSIST") &&
+      !msgSegredo.includes("funcao_erro:"));
+
+    // E2-b: saida que quebra o contrato SOBRE um resultado de sucesso.
+    funcaoControlada(() => ({ tipo: "sucesso", data: { nada: "SECRET_SHOULD_NOT_PERSIST" } }));
+    roteiro(linhaAprov(), linhaTar(), abertura(), tentativasN(), gravou);
+    roteiroRpc({ data: "consumida" }, { data: { id: TAREFA, user_id: USER, status: "erro", tentativas: 2 } });
+    const rSaidaMa = await executarRetomada(USER, APROV);
+    const msgSaida = String(falhaRpc().p_erro_mensagem ?? "");
+    ok("N61 E2: mapper lancando sobre sucesso vira erro_interno",
+      rSaidaMa.tipo === "falhou" &&
+      (rSaidaMa as { erroTipo?: unknown }).erroTipo === "erro_interno" &&
+      msgSaida === "retomada: falha interna inesperada");
+    ok("N62 E2: e o segredo da saida nao alcanca a coluna",
+      !msgSaida.includes("SECRET_SHOULD_NOT_PERSIST") &&
+      !msgSaida.includes("saida_inesperada"));
+
+    // E1-b: falha_auditoria — o UNICO texto reconstruido.
+    funcaoControlada(() => ({ tipo: "erro", codigo: "erro_consulta_vendas", mensagem: "m", retryable: false }), "escrita");
+    roteiro(linhaAprov({ acesso: "escrita" }), linhaTar(), abertura(), tentativasN(), naoGravou);
+    roteiroRpc({ data: "consumida" }, { data: { id: TAREFA, user_id: USER, status: "erro", tentativas: 2 } });
+    const rAudit = await executarRetomada(USER, APROV);
+    ok("N63 E1: falha_auditoria vira handler_falhou com a etapa RECONSTRUIDA",
+      rAudit.tipo === "falhou" &&
+      (rAudit as { erroTipo?: unknown }).erroTipo === "handler_falhou" &&
+      falhaRpc().p_erro_mensagem === "falha_auditoria:desfecho");
+    catalogoControlado = null;
+
+    // ── N64..N69. M1: falha dedicada, inclusive em N == max ───────────
+    const cenarioFalha = (n: number, max: number): void => {
+      catalogoControlado = {
+        "vendas.consultar": {
+          executor: async () => ({ linhas: [], truncado: false, erro: "erro_consulta_vendas" }),
+          validarEntrada: () => ({ valida: true }),
+          interpretarSaida: () => ({ tipo: "erro", codigo: "erro_consulta_vendas", mensagem: "m", retryable: true }),
+          acesso: "leitura", idempotente: true, conexaoNecessaria: null, revisao: "1",
+        },
+      };
+      roteiro(linhaAprov(), linhaTar({ tentativas: n, max_tentativas: max }), abertura(), tentativasN(n), gravou);
+      roteiroRpc({ data: "consumida" }, { data: { id: TAREFA, user_id: USER, status: "erro", tentativas: n } });
+    };
+
+    cenarioFalha(1, 3);
+    const rMenor = await executarRetomada(USER, APROV);
+    ok("N64 M1: N < max falha pela RPC DEDICADA",
+      rMenor.tipo === "falhou" &&
+      chamadasRpc.filter((c) => c.nome === "retomada_falhar_tarefa").length === 1);
+    ok("N65 M1: e nunca pelo terminalizador generico",
+      !chamadasRpc.some((c) => c.nome === "falhar_tarefa" || c.nome === "concluir_tarefa" ||
+                               c.nome === "retomada_concluir_tarefa"));
+    ok("N66 M1: sem semantica de requeue — o N vai intacto",
+      falhaRpc().p_tentativa_esperada === 1);
+
+    cenarioFalha(3, 3);
+    const rMax = await executarRetomada(USER, APROV);
+    ok("N67 M1 HARD: N == max TAMBEM usa a RPC dedicada",
+      rMax.tipo === "falhou" &&
+      chamadasRpc.filter((c) => c.nome === "retomada_falhar_tarefa").length === 1 &&
+      !chamadasRpc.some((c) => c.nome === "falhar_tarefa"));
+    ok("N68 M1 HARD: com o mesmo N lido, dono e R",
+      falhaRpc().p_tentativa_esperada === 3 &&
+      falhaRpc().p_user_id === USER &&
+      falhaRpc().p_tarefa_id === TAREFA &&
+      typeof falhaRpc().p_retomada_request_id === "string");
+    catalogoControlado = null;
+
+    // ── N69..N72. Terminalizador dedicado que FALHA ───────────────────
+    roteiro(linhaAprov(), linhaTar(), abertura(), tentativasN(), vendas, gravou);
+    roteiroRpc({ data: "consumida" }, { data: null, error: { code: "55000" } });
+    const rConcMa = await executarRetomada(USER, APROV);
+    ok("N69 conclusao nao registrada devolve indisponivel",
+      rConcMa.tipo === "indisponivel" &&
+      (rConcMa as { motivo?: unknown }).motivo === "conclusao_nao_registrada");
+    ok("N70 sem fallback generico, sem retry de Funcao, sem retry de start",
+      !chamadasRpc.some((c) => c.nome === "concluir_tarefa" || c.nome === "falhar_tarefa" ||
+                               c.nome === "retomada_falhar_tarefa") &&
+      chamadasRpc.filter((c) => c.nome === "retomar_aprovacao_iniciar").length === 1 &&
+      chamadas.filter((c) => c.escrita && c.tabela === "agente_funcao_chamadas").length === 1);
+
+    catalogoControlado = {
+      "vendas.consultar": {
+        executor: async () => ({ linhas: [], truncado: false, erro: "erro_consulta_vendas" }),
+        validarEntrada: () => ({ valida: true }),
+        interpretarSaida: () => ({ tipo: "erro", codigo: "erro_consulta_vendas", mensagem: "m", retryable: true }),
+        acesso: "leitura", idempotente: true, conexaoNecessaria: null, revisao: "1",
+      },
+    };
+    roteiro(linhaAprov(), linhaTar(), abertura(), tentativasN(), gravou);
+    roteiroRpc({ data: "consumida" }, { data: null, error: { code: "55000" } });
+    const rFalhaMa = await executarRetomada(USER, APROV);
+    ok("N71 falha nao registrada devolve indisponivel",
+      rFalhaMa.tipo === "indisponivel" &&
+      (rFalhaMa as { motivo?: unknown }).motivo === "falha_nao_registrada");
+    ok("N72 e tambem sem fallback generico",
+      !chamadasRpc.some((c) => c.nome === "falhar_tarefa" || c.nome === "concluir_tarefa"));
+    catalogoControlado = null;
+
+    // ── N73..N76. PRE-START: nada e consumido ─────────────────────────
+    roteiro({ data: null });
+    roteiroRpc();
+    const rSemAprov = await executarRetomada(USER, APROV);
+    ok("N73 aprovacao inexistente recusa sem tocar em nada",
+      rSemAprov.tipo === "sem_inicio" &&
+      (rSemAprov as { motivo?: unknown }).motivo === "aprovacao_ilegivel" &&
+      chamadasRpc.length === 0);
+
+    roteiro(linhaAprov({ tarefa_id: null }));
+    roteiroRpc();
+    const rSemTarefa = await executarRetomada(USER, APROV);
+    ok("N74 aprovacao sem tarefa causal para antes do start",
+      rSemTarefa.tipo === "sem_inicio" &&
+      (rSemTarefa as { motivo?: unknown }).motivo === "tarefa_ausente" &&
+      chamadasRpc.length === 0);
+
+    roteiro(linhaAprov({ revisao_funcao: "9" }));
+    roteiroRpc();
+    const rRev = await executarRetomada(USER, APROV);
+    ok("N75 revisao divergente recusa com motivo local fechado",
+      rRev.tipo === "sem_inicio" &&
+      (rRev as { motivo?: unknown }).motivo === "local_revisao_divergente" &&
+      chamadasRpc.length === 0);
+
+    roteiro(linhaAprov({ argumentos: { dataInicio: "2026-08-01", extra: 1 } }));
+    roteiroRpc();
+    const rArgs = await executarRetomada(USER, APROV);
+    ok("N76 argumento que o contrato recusa para ANTES de gastar a aprovacao",
+      rArgs.tipo === "sem_inicio" && chamadasRpc.length === 0 && !desfechoGravado());
+
+    // ── N77..N79. F4 e PAUSA, estruturais ─────────────────────────────
+    ok("N77 F4: a lane de retomada nao alcanca o consumo generico",
+      !CODIGO_N.includes("retomarAprovacao") &&
+      !CODIGO_N.includes("consumirAprovacaoEAbrir") &&
+      !CODIGO_N.includes("aprovacao_consumir_e_abrir"));
+    ok("N78 PAUSA: a pausa e o PRIMEIRO ramo do classificador",
+      CODIGO_N.indexOf("err instanceof PausaPorAprovacao") > 0 &&
+      CODIGO_N.indexOf("err instanceof PausaPorAprovacao") <
+        CODIGO_N.indexOf("switch (resultado.tipo)"));
+    ok("N79 PAUSA: nao cria segunda aprovacao nem repausa a tarefa",
+      !CODIGO_N.includes("criarAprovacao") && !CODIGO_N.includes("aguardarAprovacaoTarefa") &&
+      /mensagem: MSG_PAUSA/.test(CODIGO_N));
+
+    // ── N81..N92. F1 — EQUIVALENCIA REAL entre os dois caminhos ───────
+    //
+    // O achado D5-C3-I1-A0-F1 e sobre PROVENIENCIA: o caminho automatico
+    // alimenta `prepararEntrada` com a entrada da TAREFA, e a retomada a
+    // alimenta com `aprovacao.argumentos`. Para `consultar_vendas` as
+    // duas formas coincidem hoje — e "coincidem" precisa ser MEDIDO, nao
+    // afirmado.
+    //
+    // ── Por que duas ROTAS, e nao duas chamadas ao mapper ────────────
+    //
+    // Chamar `mapearResultadoConsultarVendas` duas vezes aqui provaria
+    // apenas que a funcao e deterministica. O que interessa e outra
+    // coisa: que o HANDLER automatico e o EXECUTOR de retomada, partindo
+    // dos mesmos argumentos aprovados e do mesmo desfecho de Funcao,
+    // entregam o mesmo payload comercial. Por isso um lado roda
+    // `criarHandlerConsultarVendas` (que passa por `executarFuncao`,
+    // guard, permissao e abertura) e o outro roda `executarRetomada`
+    // (que passa por pre-read, start, read-backs e a boundary estreita).
+    //
+    // ── Por que catalogo controlado ─────────────────────────────────
+    //
+    // Para que os dois recebam o MESMO desfecho de Funcao com dados
+    // NAO-TRIVIAIS: dois marketplaces distintos, valores diferentes e
+    // `truncado: true` — que a Funcao real so produziria com mais de
+    // PAGE_SIZE linhas por pagina. O mesmo catalogo serve aos dois
+    // lados, entao ele nao pode enviesar a comparacao.
+    {
+      const { criarHandlerConsultarVendas } =
+        await import("../lib/agentes/handlers/consultar-vendas");
+
+      /** Igualdade estrutural por VALOR. `in`, `typeof` e truthy nao
+       *  provam equivalencia — e foi exatamente disso que o R1 reclamou. */
+      const deepIgual = (a: unknown, b: unknown): boolean => {
+        if (a === b) return true;
+        if (typeof a !== typeof b) return false;
+        if (a === null || b === null) return false;
+        if (Array.isArray(a) !== Array.isArray(b)) return false;
+        if (typeof a !== "object") return false;
+        const ka = Object.keys(a as object).sort();
+        const kb = Object.keys(b as object).sort();
+        if (ka.length !== kb.length || ka.some((k, i) => k !== kb[i])) return false;
+        return ka.every((k) =>
+          deepIgual((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]));
+      };
+
+      // ── FIXTURES CANONICAS, e por que elas sao imutaveis ───────
+      //
+      // Na primeira versao desta prova os dois caminhos recebiam a MESMA
+      // referencia de argumentos, e a Funcao controlada devolvia a MESMA
+      // referencia de saida nas duas chamadas. A igualdade final podia,
+      // em tese, vir de uma mutacao feita pela primeira rota e lida pela
+      // segunda — equivalencia mascarada, nao equivalencia provada.
+      //
+      // Agora ha uma BASE congelada e clones independentes por rota. A
+      // base nunca chega a producao: ela e apenas a origem dos clones.
+      // Como o modulo roda em modo estrito, uma escrita in-place na base
+      // LANCARIA em vez de passar despercebida.
+
+      /** Congela recursivamente. TEST-ONLY — nao e exportado e nenhum
+       *  modulo de producao o importa. */
+      const congelarProfundo = <T>(valor: T): T => {
+        if (valor === null || typeof valor !== "object") return valor;
+        for (const chave of Object.keys(valor as object)) {
+          congelarProfundo((valor as Record<string, unknown>)[chave]);
+        }
+        return Object.freeze(valor);
+      };
+
+      /** Clone estrutural para o shape destas fixtures: objetos simples,
+       *  arrays, string, number, boolean e null. Escrito a mao em vez de
+       *  `structuredClone` para nao depender do runtime da suite. */
+      const clonarProfundo = <T>(valor: T): T => {
+        if (valor === null || typeof valor !== "object") return valor;
+        if (Array.isArray(valor)) {
+          return valor.map((item) => clonarProfundo(item)) as unknown as T;
+        }
+        const saida: Record<string, unknown> = {};
+        for (const chave of Object.keys(valor as object)) {
+          saida[chave] = clonarProfundo((valor as Record<string, unknown>)[chave]);
+        }
+        return saida as unknown as T;
+      };
+
+      // UMA entrada aprovada concreta. Os dois caminhos recebem CLONES
+      // dela; nenhum recebe a base. Nao ha segundo literal parecido.
+      const ARGS_F1_BASE = congelarProfundo({
+        dataInicio: "2026-08-01",
+        dataFim: "2026-08-07",
+        marketplace: null,
+      });
+
+      // `Shopee` e `ML` sao os nomes EXATOS que `bucketDe` reconhece;
+      // qualquer outro cai em `outros`. Duas linhas do MESMO `order_id`
+      // provam que `pedidos` conta identidade logica, e nao linhas.
+      const SAIDA_F1_BASE = congelarProfundo({
+        linhas: [
+          { id: 1, marketplace: "ML", order_id: "A-1", sku: "SKU-A", qtd: 2, item_subtotal: 150.25, faturamento: 150.25 },
+          { id: 2, marketplace: "ML", order_id: "A-1", sku: "SKU-B", qtd: 1, item_subtotal: 0, faturamento: 99.9 },
+          { id: 3, marketplace: "Shopee", order_id: "B-1", sku: "SKU-C", qtd: 3, item_subtotal: 42.1, faturamento: 500 },
+          { id: 4, marketplace: "nao_previsto", order_id: "C-1", sku: "SKU-D", qtd: 1, item_subtotal: 7.77, faturamento: 7.77 },
+        ],
+        truncado: true,
+        erro: null,
+      });
+
+      const autoArgs = clonarProfundo(ARGS_F1_BASE);
+      const resumeArgs = clonarProfundo(ARGS_F1_BASE);
+
+      /** As instancias REALMENTE devolvidas pela Funcao, uma por rota. */
+      const saidasExecutadasF1: Array<typeof SAIDA_F1_BASE> = [];
+
+      let vezesExecutorF1 = 0;
+      catalogoControlado = {
+        "vendas.consultar": {
+          executor: async () => {
+            vezesExecutorF1++;
+            // INSTANCIA NOVA a cada chamada: sem cache, sem reuso.
+            const saida = clonarProfundo(SAIDA_F1_BASE);
+            saidasExecutadasF1.push(saida);
+            return saida;
+          },
+          validarEntrada: () => ({ valida: true }),
+          // Espelha o ramo de sucesso do interpretador real: devolve o
+          // proprio objeto como `data`. Identico para os dois lados.
+          interpretarSaida: (saida: unknown) => ({ tipo: "sucesso", data: saida }),
+          acesso: "leitura",
+          idempotente: true,
+          conexaoNecessaria: null,
+          revisao: "1",
+        },
+      };
+
+      // ── ROTA 1: o caminho AUTOMATICO, pelo handler real ────────────
+      // ── CHECKPOINT PRE ── antes de qualquer rota ─────────────
+      ok("N99  F1-args-independent: os dois clones sao IGUAIS por valor",
+        deepIgual(autoArgs, ARGS_F1_BASE) && deepIgual(resumeArgs, ARGS_F1_BASE) &&
+        deepIgual(autoArgs, resumeArgs));
+      ok("N100 F1-args-independent: e sao REFERENCIAS distintas entre si e da base",
+        (autoArgs as object) !== (resumeArgs as object) &&
+        (autoArgs as object) !== (ARGS_F1_BASE as object) &&
+        (resumeArgs as object) !== (ARGS_F1_BASE as object));
+      ok("N101 F1-fixtures congeladas: escrita in-place na base LANCA",
+        (() => {
+          try {
+            (ARGS_F1_BASE as unknown as Record<string, unknown>).dataFim = "2099-01-01";
+            return false;
+          } catch {
+            return true;
+          }
+        })() &&
+        (() => {
+          try {
+            (SAIDA_F1_BASE as unknown as Record<string, unknown>).truncado = false;
+            return false;
+          } catch {
+            return true;
+          }
+        })());
+      ok("N102 F1-fixtures congeladas: a base continua com os valores canonicos",
+        deepIgual(ARGS_F1_BASE, {
+          dataInicio: "2026-08-01", dataFim: "2026-08-07", marketplace: null,
+        }) && SAIDA_F1_BASE.truncado === true && SAIDA_F1_BASE.linhas.length === 4);
+
+      roteiro(agenteOk, tarefaOk, permissao("automatico"), gravou, gravou);
+      roteiroRpc();
+      const handlerAuto = criarHandlerConsultarVendas(USER);
+      const payloadAuto = await handlerAuto(
+        {
+          tarefaId: TAREFA,
+          agenteId: AGENTE,
+          userId: USER,
+          tipo: "consultar_vendas",
+          entrada: autoArgs,
+          tentativa: 2,
+          maxTentativas: 3,
+        },
+        () => {}
+      );
+      const executouAuto = vezesExecutorF1;
+
+      // ── ROTA 2: o caminho RESUME, pelo executor dormente ───────────
+      // ── CHECKPOINT ENTRE AS ROTAS ───────────────────────
+      //
+      // E AQUI que a equivalencia deixa de poder ser mascarada: se a rota
+      // automatica tivesse mutado o clone dela, a base ou o clone ainda
+      // nao usado, um destes tres reprovaria ANTES de o Resume comecar.
+      ok("N103 F1-args-auto-unchanged-mid: o clone do automatico saiu intacto",
+        deepIgual(autoArgs, ARGS_F1_BASE));
+      ok("N104 F1-args-resume-pristine-mid: o clone do Resume ainda nao foi tocado",
+        deepIgual(resumeArgs, ARGS_F1_BASE));
+      ok("N105 F1-args-base-intact-mid: a fixture canonica nao mudou",
+        deepIgual(ARGS_F1_BASE, {
+          dataInicio: "2026-08-01", dataFim: "2026-08-07", marketplace: null,
+        }));
+      ok("N106 F1-function-instance-count-mid: a Funcao devolveu UMA instancia",
+        saidasExecutadasF1.length === 1);
+      ok("N107 F1-function-auto-unchanged: a instancia do automatico saiu intacta",
+        deepIgual(saidasExecutadasF1[0], SAIDA_F1_BASE));
+
+      roteiro(linhaAprov({ argumentos: resumeArgs }), linhaTar(), abertura(), tentativasN(), gravou);
+      roteiroRpc({ data: "consumida" }, linhaFinal);
+      const rF1 = await executarRetomada(USER, APROV);
+      const payloadResume = (rpcDe("retomada_concluir_tarefa")?.parametros?.p_resultado ?? null) as
+        Record<string, unknown> | null;
+      const executouResume = vezesExecutorF1 - executouAuto;
+      catalogoControlado = null;
+
+      const auto = payloadAuto as Record<string, unknown>;
+      const res = (payloadResume ?? {}) as Record<string, unknown>;
+
+      // ── ANCORAS: as duas rotas rodaram de verdade ──────────────────
+      ok("N81 ANCORA F1: as DUAS rotas executaram a Funcao, uma vez cada",
+        executouAuto === 1 && executouResume === 1);
+      ok("N82 ANCORA F1: a rota Resume concluiu e entregou payload ao terminalizador",
+        rF1.tipo === "concluida" && payloadResume !== null);
+      ok("N83 ANCORA F1: os dois payloads tem as MESMAS quatro chaves",
+        deepIgual(Object.keys(auto).sort(), Object.keys(res).sort()) &&
+        Object.keys(auto).sort().join(",") === "marketplaces,periodo,resumo,truncado");
+      ok("N84 ANCORA F1: os dois lados receberam os MESMOS valores aprovados",
+        deepIgual(autoArgs, resumeArgs) &&
+        deepIgual(autoArgs, { dataInicio: "2026-08-01", dataFim: "2026-08-07", marketplace: null }));
+
+      // ── CHECKPOINT FINAL ─────────────────────────────
+      ok("N108 F1-args-final: nenhuma rota deixou mutacao nos clones nem na base",
+        deepIgual(autoArgs, ARGS_F1_BASE) && deepIgual(resumeArgs, ARGS_F1_BASE) &&
+        deepIgual(ARGS_F1_BASE, {
+          dataInicio: "2026-08-01", dataFim: "2026-08-07", marketplace: null,
+        }));
+      ok("N109 F1-function-instance-count: DUAS instancias, uma por rota",
+        saidasExecutadasF1.length === 2);
+
+      // ── As duas saidas sao IGUAIS por valor e DISTINTAS por referencia
+      {
+        const sAuto = saidasExecutadasF1[0];
+        const sResume = saidasExecutadasF1[1];
+        ok("N110 F1-function-top-reference: objetos de topo distintos",
+          (sAuto as object) !== (sResume as object) &&
+          (sAuto as object) !== (SAIDA_F1_BASE as object) &&
+          (sResume as object) !== (SAIDA_F1_BASE as object));
+        ok("N111 F1-function-lines-reference: arrays `linhas` distintos",
+          (sAuto.linhas as object) !== (sResume.linhas as object) &&
+          (sAuto.linhas as object) !== (SAIDA_F1_BASE.linhas as object) &&
+          (sResume.linhas as object) !== (SAIDA_F1_BASE.linhas as object));
+        ok("N112 F1-function-row-reference: NENHUMA linha e compartilhada",
+          sAuto.linhas.length === 4 && sResume.linhas.length === 4 &&
+          sAuto.linhas.every((linha, i) =>
+            (linha as object) !== (sResume.linhas[i] as object) &&
+            (linha as object) !== (SAIDA_F1_BASE.linhas[i] as object)));
+        ok("N113 F1-function-resume-unchanged: as duas saidas sao iguais a base",
+          deepIgual(sAuto, SAIDA_F1_BASE) && deepIgual(sResume, SAIDA_F1_BASE) &&
+          deepIgual(sAuto, sResume));
+        ok("N114 CONTROLE: o comparador detectaria divergencia entre as saidas",
+          (() => {
+            const adulterada = clonarProfundo(SAIDA_F1_BASE);
+            adulterada.linhas[0].qtd = 999;
+            return !deepIgual(adulterada, SAIDA_F1_BASE);
+          })());
+      }
+
+      // ── OS QUATRO CAMPOS, por IGUALDADE DE VALOR ───────────────────
+      ok("N85 F1-periodo: igualdade de valor entre automatico e Resume",
+        deepIgual(res.periodo, auto.periodo));
+      ok("N86 F1-periodo: e ele ecoa os argumentos APROVADOS",
+        deepIgual(res.periodo, {
+          dataInicio: ARGS_F1_BASE.dataInicio,
+          dataFim: ARGS_F1_BASE.dataFim,
+          marketplace: ARGS_F1_BASE.marketplace,
+        }));
+      ok("N87 F1-resumo: igualdade de valor, objeto inteiro",
+        deepIgual(res.resumo, auto.resumo));
+      ok("N88 F1-resumo: e ele NAO e trivial (agregou os quatro pedidos)",
+        typeof auto.resumo === "object" && auto.resumo !== null &&
+        Object.keys(auto.resumo as object).length > 0 &&
+        JSON.stringify(auto.resumo) !== "{}");
+      ok("N89 F1-marketplaces: igualdade de valor, objeto inteiro",
+        deepIgual(res.marketplaces, auto.marketplaces));
+      ok("N90 F1-marketplaces: e ele NAO e trivial — os tres buckets, dois com movimento",
+        (() => {
+          const m = auto.marketplaces as Record<string, { pedidos?: unknown }>;
+          const nomes = Object.keys(m).sort().join(",");
+          const comMovimento = Object.values(m).filter((b) => Number(b?.pedidos ?? 0) > 0).length;
+          return nomes === "ML,Shopee,outros" && comMovimento >= 2;
+        })());
+      ok("N91 F1-truncado: igualdade de valor, e o valor NAO e o default",
+        res.truncado === auto.truncado && res.truncado === true);
+
+      // ── CONTROLE NEGATIVO: o comparador nao e vacuoso ──────────────
+      {
+        const clone = JSON.parse(JSON.stringify(auto)) as Record<string, unknown>;
+        clone.truncado = false;
+        const clonePeriodo = JSON.parse(JSON.stringify(auto)) as Record<string, unknown>;
+        (clonePeriodo.periodo as Record<string, unknown>).dataFim = "2026-08-08";
+        const cloneMkt = JSON.parse(JSON.stringify(auto)) as Record<string, unknown>;
+        const buckets = cloneMkt.marketplaces as Record<string, Record<string, unknown>>;
+        const primeiro = Object.keys(buckets)[0];
+        buckets[primeiro] = { ...buckets[primeiro], __intruso: 1 };
+        const cloneResumo = JSON.parse(JSON.stringify(auto)) as Record<string, unknown>;
+        (cloneResumo.resumo as Record<string, unknown>).__intruso = 1;
+
+        ok("N92 CONTROLE NEGATIVO: truncado alterado reprova o comparador",
+          !deepIgual(clone.truncado, auto.truncado));
+        ok("N93 CONTROLE NEGATIVO: periodo alterado reprova",
+          !deepIgual(clonePeriodo.periodo, auto.periodo));
+        ok("N94 CONTROLE NEGATIVO: marketplaces com chave extra reprova",
+          !deepIgual(cloneMkt.marketplaces, auto.marketplaces));
+        ok("N95 CONTROLE NEGATIVO: resumo com chave extra reprova",
+          !deepIgual(cloneResumo.resumo, auto.resumo));
+        ok("N96 CONTROLE POSITIVO: o comparador aceita clone intacto",
+          deepIgual(JSON.parse(JSON.stringify(auto)), auto));
+        ok("N97 CONTROLE: o comparador distingue tipos, nao so forma",
+          !deepIgual(1, "1") && !deepIgual([1], { 0: 1 }) && !deepIgual(null, {}));
+      }
+
+      // ── Ids de auditoria ficam FORA da equivalencia comercial ──────
+      ok("N98 F1: nenhum id de auditoria entra no payload comparado",
+        !("requestId" in auto) && !("request_id" in auto) &&
+        !("aprovacaoId" in auto) && !("tarefaId" in auto) &&
+        !("requestId" in res) && !("tarefaId" in res));
+    }
+
+    // ── N80..N82. DORMENCIA ───────────────────────────────────────────
+    {
+      const producaoR = ["lib/agentes", "app", "components"];
+      const alcancaR: string[] = [];
+      const varrerR = (dir: string): void => {
+        for (const e of readdirSync(join(RAIZ, dir), { withFileTypes: true })) {
+          const rel = `${dir}/${e.name}`;
+          if (e.isDirectory()) varrerR(rel);
+          else if (/\.tsx?$/.test(e.name) &&
+                   rel !== "lib/agentes/retomada/executar-retomada.ts" &&
+                   /\bexecutarRetomada\b/.test(semComentarios(ler(rel))))
+            alcancaR.push(rel);
+        }
+      };
+      for (const d of producaoR) varrerR(d);
+      ok(`N80 zero chamador de producao do executor Resume (${alcancaR.join(", ") || "nenhum"})`,
+        alcancaR.length === 0);
     }
   }
 
