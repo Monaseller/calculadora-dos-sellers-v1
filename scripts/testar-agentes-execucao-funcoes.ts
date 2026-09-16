@@ -64,6 +64,19 @@ interface Chamada {
    *  podem se misturar com `filtros` — `IS NULL` e `= NULL` sao coisas
    *  diferentes em SQL, e o teste precisa distinguir as duas. */
   filtrosIs: Record<string, unknown>;
+  /** `.select(...)` literal, para provar a FORMA da projecao. */
+  select?: string;
+  /** `.not(coluna, operador, valor)` — a negacao NAO e igualdade nem
+   *  `IS NULL`. `IS NOT NULL` so existe por aqui, entao sem este campo
+   *  qualquer assert sobre as cercas estruturais seria vacuo. */
+  nots: ReadonlyArray<{ coluna: string; operador: string; valor: unknown }>;
+  /** `.order(coluna, {ascending})` NA ORDEM DAS CHAMADAS. O driver
+   *  concatena as chaves de ordenacao na sequencia em que chegam, entao
+   *  a sequencia E a semantica: registrar um conjunto perderia a prova. */
+  orders: ReadonlyArray<{ coluna: string; ascendente: boolean }>;
+  /** Valor cru entregue a `.limit(...)`. Guardado como veio para que um
+   *  `NaN` que escapasse do normalizador fique visivel no assert. */
+  limite?: unknown;
 }
 
 interface Resposta {
@@ -105,18 +118,35 @@ function roteiroRpc(...rs: Resposta[]): void {
 }
 
 function construtor(tabela: string): Record<string, unknown> {
-  const c: Chamada = { tabela, filtros: {}, escrita: false, filtrosIs: {} };
+  const c: Chamada = {
+    tabela, filtros: {}, escrita: false, filtrosIs: {},
+    nots: [], orders: [],
+  };
   const resolver = (fn: (v: { data: unknown; error: unknown }) => void) => {
     chamadas.push(c);
     const r = respostas[consumidas++];
     fn({ data: r?.data ?? null, error: r?.error ?? null });
   };
   const b: Record<string, unknown> = {
-    select() { return b; },
+    select(colunas?: string) {
+      if (typeof colunas === "string") c.select = colunas;
+      return b;
+    },
     eq(coluna: string, valor: unknown) { c.filtros[coluna] = valor; return b; },
     in() { return b; },
-    order() { return b; },
-    limit() { return b; },
+    order(coluna: string, opcoes?: { ascending?: boolean }) {
+      (c.orders as { coluna: string; ascendente: boolean }[]).push({
+        coluna,
+        ascendente: opcoes?.ascending !== false,
+      });
+      return b;
+    },
+    limit(valor: unknown) { c.limite = valor; return b; },
+    not(coluna: string, operador: string, valor: unknown) {
+      (c.nots as { coluna: string; operador: string; valor: unknown }[])
+        .push({ coluna, operador, valor });
+      return b;
+    },
     gte() { return b; },
     lte() { return b; },
     gt() { return b; },
@@ -2072,17 +2102,26 @@ async function principal(): Promise<void> {
     // Conta sobre o codigo SEM comentarios: uma RPC citada em prosa nao
     // e uma RPC chamada.
     const rpcsNoModulo = [...PERSIST_CODIGO.matchAll(/\.rpc\(\s*"([a-z_]+)"/g)].map((m) => m[1]);
-    ok(`K1  exatamente quatro chamadas .rpc (${rpcsNoModulo.length})`,
-      rpcsNoModulo.length === 4);
-    ok("K2  e elas sao as quatro RPCs da retomada, uma vez cada",
+    // O A1-I1 acrescentou a DESCOBERTA de aprovacoes, que e a quinta e
+    // ultima RPC deste modulo. A contagem avancou nominalmente de 4 para
+    // 5; ela continua EXATA, nunca `>=`.
+    ok(`K1  exatamente cinco chamadas .rpc (${rpcsNoModulo.length})`,
+      rpcsNoModulo.length === 5);
+    ok("K2  e elas sao as cinco RPCs da retomada, uma vez cada",
       [...rpcsNoModulo].sort().join(",") === [
         "retomada_concluir_tarefa",
         "retomada_falhar_tarefa",
+        "retomada_listar_candidatas",
         "retomada_recuperar_tarefa_stale",
         "retomar_aprovacao_iniciar",
       ].join(","));
-    ok("K3  CONTROLE: uma quinta RPC seria detectada",
-      [...rpcsNoModulo, "aprovacao_criar"].length !== 4);
+    ok("K3  CONTROLE: uma sexta RPC seria detectada",
+      [...rpcsNoModulo, "aprovacao_criar"].length !== 5);
+    ok("K3a CONTROLE: a fase ANTERIOR, com quatro RPCs, agora reprova",
+      rpcsNoModulo.length !== 4);
+    ok("K3b a descoberta de retomadas travadas NAO usa RPC",
+      !rpcsNoModulo.includes("retomada_recuperar_tarefa_stale_listar") &&
+      rpcsNoModulo.filter((n) => n === "retomada_listar_candidatas").length === 1);
 
     // ── §28. Os terminalizadores GENERICOS nao aparecem ─────────────
     //
@@ -2397,7 +2436,7 @@ async function principal(): Promise<void> {
       !/setTimeout|setInterval|while\s*\(|for\s*\(\s*let\s+tentativa|\.catch\(/
         .test(PERSIST_CODIGO));
     ok("K67 nenhum wrapper chama outro wrapper",
-      !/(iniciarRetomadaAprovacao|falharTarefaRetomada|recuperarRetomadaStale|concluirTarefaRetomada)\s*\(/
+      !/(iniciarRetomadaAprovacao|falharTarefaRetomada|recuperarRetomadaStale|concluirTarefaRetomada|descobrirAprovacoesParaRetomada|descobrirCandidatasRetomadaStale)\s*\(/
         .test(PERSIST_CODIGO.replace(/export async function \w+/g, "")));
 
     // ── Heartbeat: o modulo GANHOU um tick, e nao um timer ──────────
@@ -2415,10 +2454,17 @@ async function principal(): Promise<void> {
     // `select` na mesma tabela. O assert avancou de "uma consulta so"
     // para "duas, e exatamente uma delas escreve" — a contagem de
     // `.update(` no K68a continua sendo quem prova a escrita unica.
-    ok("K69 a tabela e tocada por duas consultas, e so o heartbeat escreve",
-      (PERSIST_CODIGO.match(/\.from\(\s*"agente_tarefas"\s*\)/g) ?? []).length === 2 &&
+    // O A1-I1 acrescentou a descoberta de retomadas travadas, que e uma
+    // TERCEIRA consulta a mesma tabela — e um SELECT puro. Por isso a
+    // contagem de `.from` avanca de 2 para 3 enquanto a de `.update`
+    // continua EXATAMENTE 1: e ela quem prova que so o heartbeat escreve.
+    ok("K69 a tabela e tocada por tres consultas, e so o heartbeat escreve",
+      (PERSIST_CODIGO.match(/\.from\(\s*"agente_tarefas"\s*\)/g) ?? []).length === 3 &&
       /\.update\(\{\s*heartbeat_em:/.test(PERSIST_CODIGO) &&
       (PERSIST_CODIGO.match(/\.update\(/g) ?? []).length === 1);
+    ok("K69z HARD: a escrita unica NAO virou duas com a descoberta nova",
+      (PERSIST_CODIGO.match(/\.update\(/g) ?? []).length === 1 &&
+      (PERSIST_CODIGO.match(/\.insert\(|\.upsert\(|\.delete\(/g) ?? []).length === 0);
     ok("K69b a segunda consulta e leitura pura da tentativa",
       /\.select\(\s*"tentativas"\s*\)/.test(PERSIST_CODIGO) &&
       !/\.update\([^)]*tentativas/.test(PERSIST_CODIGO));
@@ -2600,9 +2646,22 @@ async function principal(): Promise<void> {
     // ── SEM RETRY, SEM TIMER ────────────────────────────────────────
     ok("L31 um tick = uma operacao: zero retry no corpo",
       !/setTimeout|setInterval|\bwhile\b|\.catch\(/.test(PERSIST_L_CODIGO));
+    // O recorte precisa TERMINAR no fim da funcao. Ate o A1-I1 o tick
+    // era o ultimo export do arquivo, entao `slice(i)` acertava por
+    // acidente; com as duas descobertas depois dele, o recorte aberto
+    // passaria a acusar o `.rpc` da descoberta de aprovacoes como se
+    // fosse do heartbeat. Fechar no `}` da coluna zero e o mesmo criterio
+    // que `corpoDe` ja usa na suite de execucao: torna o assert PRECISO,
+    // e o que sai do recorte ganha asserts proprios em N1/N2 abaixo.
     const corpoTick = (() => {
-      const i = PERSIST_L_CODIGO.indexOf("export async function registrarHeartbeatRetomada");
-      return i < 0 ? "" : PERSIST_L_CODIGO.slice(i);
+      const linhas = PERSIST_L_CODIGO.split("\n");
+      const i = linhas.findIndex((l) =>
+        l.startsWith("export async function registrarHeartbeatRetomada"));
+      if (i < 0) return "";
+      for (let j = i + 1; j < linhas.length; j++) {
+        if (linhas[j] === "}") return linhas.slice(i, j + 1).join("\n");
+      }
+      return "";
     })();
     ok("L32 o tick nao chama terminalizador, recuperacao nem RPC",
       corpoTick.length > 200 &&
@@ -2636,12 +2695,13 @@ async function principal(): Promise<void> {
         '.eq("id", tarefaId).eq("status", "rodando")'));
 
     // ── O RESTO DO MODULO CONTINUA INTACTO ──────────────────────────
-    ok("L41 os quatro wrappers de RPC continuam presentes",
+    ok("L41 os quatro wrappers de RPC continuam presentes, e os dois novos tambem",
       ["iniciarRetomadaAprovacao", "falharTarefaRetomada",
-       "recuperarRetomadaStale", "concluirTarefaRetomada"]
+       "recuperarRetomadaStale", "concluirTarefaRetomada",
+       "descobrirAprovacoesParaRetomada", "descobrirCandidatasRetomadaStale"]
         .every((n) => typeof (pr as Record<string, unknown>)[n] === "function"));
-    ok("L42 e continuam sendo quatro chamadas .rpc, nem uma a mais",
-      (PERSIST_L_CODIGO.match(/\.rpc\(/g) ?? []).length === 4);
+    ok("L42 e continuam sendo cinco chamadas .rpc, nem uma a mais",
+      (PERSIST_L_CODIGO.match(/\.rpc\(/g) ?? []).length === 5);
     ok("L43 o heartbeat nao virou wrapper de RPC",
       !/\.rpc\([^)]*heartbeat/i.test(PERSIST_L_CODIGO));
 
@@ -3797,6 +3857,368 @@ async function principal(): Promise<void> {
       for (const d of producaoR) varrerR(d);
       ok(`N80 zero chamador de producao do executor Resume (${alcancaR.join(", ") || "nenhum"})`,
         alcancaR.length === 0);
+    }
+  }
+
+
+  // ────────────────────────────────────────────────────────────────
+  // O. APPROVAL-DECISION-RESUME-D5-C3-I2-A1 — as duas DESCOBERTAS
+  //    dormentes
+  //
+  // O que esta secao prova nao e que elas encontram a candidata certa —
+  // isso e do banco, e o P0 ja provou o SQL. Ela prova o CONTRATO do
+  // adaptador: que uma fila vazia nunca se confunde com uma falha, que
+  // o veneno de registry sobrevive ate o chamador, que nenhum relogio
+  // local decide nada, e que uma linha deformada derruba a lista
+  // inteira em vez de encolhe-la em silencio.
+  // ────────────────────────────────────────────────────────────────
+  {
+    console.log("\nO. RESUME-D5-C3-I2-A1: descobertas dormentes");
+
+    const pd = await import("../lib/agentes/retomada/persistencia-retomada");
+    const { descobrirAprovacoesParaRetomada, descobrirCandidatasRetomadaStale } = pd;
+
+    const PD_FONTE = ler("lib/agentes/retomada/persistencia-retomada.ts");
+    const PD_CODIGO = semComentarios(PD_FONTE);
+
+    /** Corpo EXATO de um export, da assinatura ate o `}` da coluna 0.
+     *  Fatiar ate o fim do arquivo acusaria o vizinho — foi exatamente
+     *  isso que o recorte aberto do L32 fazia antes deste slice. */
+    const corpoExportado = (fonte: string, nome: string): string => {
+      const linhas = fonte.split("\n");
+      const i = linhas.findIndex((l) =>
+        l.startsWith(`export async function ${nome}`));
+      if (i < 0) return "";
+      for (let j = i + 1; j < linhas.length; j++) {
+        if (linhas[j] === "}") return linhas.slice(i, j + 1).join("\n");
+      }
+      return "";
+    };
+
+    const CORPO_APROV = corpoExportado(PD_CODIGO, "descobrirAprovacoesParaRetomada");
+    const CORPO_STALE = corpoExportado(PD_CODIGO, "descobrirCandidatasRetomadaStale");
+
+    const UUID_A = "11111111-2222-4333-8444-555555555555";
+    const UUID_B = "66666666-7777-4888-8999-aaaaaaaaaaaa";
+
+    ok("O0  ANCORA: os dois wrappers existem e os corpos foram isolados",
+      typeof descobrirAprovacoesParaRetomada === "function" &&
+      typeof descobrirCandidatasRetomadaStale === "function" &&
+      CORPO_APROV.length > 300 && CORPO_STALE.length > 300 &&
+      CORPO_APROV !== CORPO_STALE);
+    ok("O0a ANCORA: o recorte e MESMO fechado — um corpo nao contem o outro",
+      !CORPO_APROV.includes("descobrirCandidatasRetomadaStale") &&
+      !CORPO_STALE.includes("descobrirAprovacoesParaRetomada"));
+
+    // ── N1..N12. APPROVAL: uma RPC, e so ela ──────────────────────
+    roteiro();
+    roteiroRpc({ data: [], error: null });
+    const vazio = await descobrirAprovacoesParaRetomada();
+    ok("O1  fila vazia e SUCESSO, nao falha",
+      vazio.ok === true && vazio.ok && vazio.candidatas.length === 0);
+    ok("O2  e custou UMA rpc, com o nome exato, e ZERO consultas de tabela",
+      chamadasRpc.length === 1 && chamadasRpc[0]?.nome === "retomada_listar_candidatas" &&
+      chamadas.length === 0);
+
+    // ── O teto: o que chega a `p_limite` ──────────────────────────
+    {
+      const casos: ReadonlyArray<readonly [unknown, number]> = [
+        [undefined, 5], [null, 5], [Number.NaN, 5],
+        [Number.POSITIVE_INFINITY, 5], [Number.NEGATIVE_INFINITY, 5],
+        [0, 1], [-7, 1], [2.9, 2], [1, 1], [5, 5], [500, 5],
+      ];
+      const observados: number[] = [];
+      for (const [entrada, _esperado] of casos) {
+        roteiro();
+        roteiroRpc({ data: [], error: null });
+        await descobrirAprovacoesParaRetomada(entrada as number | undefined);
+        observados.push(chamadasRpc[0]?.parametros?.p_limite as number);
+      }
+      ok(`O3  p_limite normalizado em TODOS os ${casos.length} casos`,
+        observados.length === casos.length &&
+        casos.every(([, esperado], i) => observados[i] === esperado));
+      ok("O4  HARD: nenhum NaN, Infinity ou nao-inteiro alcanca p_limite",
+        observados.every((v) => Number.isInteger(v) && v >= 1 && v <= 5));
+      ok("O4a ANCORA: a matriz REALMENTE exercitou os extremos",
+        observados.includes(1) && observados.includes(5) && observados.includes(2));
+    }
+
+    // ── ERROR nunca vira EMPTY ────────────────────────────────────
+    roteiro();
+    roteiroRpc({ data: null, error: { code: "08006" } });
+    const transporte = await descobrirAprovacoesParaRetomada(3);
+    ok("O5  erro de transporte devolve FALHA, e nao fila vazia",
+      transporte.ok === false && !transporte.ok &&
+      transporte.falha === "rpc_indisponivel");
+    ok("O5a HARD: o resultado de erro NAO carrega `candidatas`",
+      !Object.prototype.hasOwnProperty.call(transporte, "candidatas"));
+
+    roteiro();
+    roteiroRpc({ data: null, error: { code: "55000" } });
+    const foraContrato = await descobrirAprovacoesParaRetomada();
+    ok("O6  55000 e classificado pelo vocabulario existente",
+      foraContrato.ok === false && !foraContrato.ok &&
+      foraContrato.falha === "rpc_fora_de_contrato");
+
+    roteiro();
+    roteiroRpc({ data: null, error: null });
+    const nulo = await descobrirAprovacoesParaRetomada();
+    ok("O7  `data: null` NAO vira [] — e resposta invalida",
+      nulo.ok === false && !nulo.ok && nulo.falha === "resposta_invalida");
+
+    // ── Linha deformada NO MEIO: fail-closed, nunca skip ──────────
+    roteiro();
+    roteiroRpc({
+      data: [
+        { user_id: "dono-1", aprovacao_id: UUID_A },
+        { user_id: "dono-2", aprovacao_id: "nao-e-uuid" },
+        { user_id: "dono-3", aprovacao_id: UUID_B },
+      ],
+      error: null,
+    });
+    const meioRuim = await descobrirAprovacoesParaRetomada();
+    ok("O8  HARD: UMA linha invalida no meio derruba a lista INTEIRA",
+      meioRuim.ok === false && !meioRuim.ok && meioRuim.falha === "resposta_invalida");
+    ok("O8a e as duas linhas validas NAO voltam parcialmente",
+      !Object.prototype.hasOwnProperty.call(meioRuim, "candidatas"));
+
+    roteiro();
+    roteiroRpc({ data: [{ user_id: "   ", aprovacao_id: UUID_A }], error: null });
+    const donoVazio = await descobrirAprovacoesParaRetomada();
+    ok("O9  dono so com espaco tambem falha fechado",
+      donoVazio.ok === false && !donoVazio.ok && donoVazio.falha === "resposta_invalida");
+
+    // ── Mapeamento e SOMENTE ele ──────────────────────────────────
+    roteiro();
+    roteiroRpc({
+      data: [
+        { user_id: "dono-1", aprovacao_id: UUID_A },
+        { user_id: "dono-2", aprovacao_id: UUID_B },
+      ],
+      error: null,
+    });
+    const boas = await descobrirAprovacoesParaRetomada(2);
+    ok("O10 duas candidatas validas atravessam intactas, na ordem da RPC",
+      boas.ok === true && boas.ok && boas.candidatas.length === 2 &&
+      boas.candidatas[0]?.userId === "dono-1" &&
+      boas.candidatas[0]?.aprovacaoId === UUID_A &&
+      boas.candidatas[1]?.aprovacaoId === UUID_B);
+    ok("O11 snake_case virou camelCase, com EXATAMENTE duas chaves",
+      boas.ok === true && boas.ok &&
+      boas.candidatas.every((c) =>
+        JSON.stringify(Object.keys(c).sort()) === JSON.stringify(["aprovacaoId", "userId"])));
+
+    // ── Veneno de registry SOBREVIVE ──────────────────────────────
+    //
+    // A RPC devolve so `user_id` e `aprovacao_id`, entao nao ha metadado
+    // de registry para inventar numa fixture. A prova util e ESTRUTURAL:
+    // depois da RPC o corpo nao pode reduzir a lista por criterio nenhum.
+    ok("O12 HARD: o corpo NAO filtra nada depois da RPC",
+      !/\.filter\(|\.find\(|\.some\(|\.slice\(/.test(CORPO_APROV));
+    ok("O12a e nao menciona nenhum criterio de registry",
+      !/revisao|acesso|conexao|argumentos|funcao_id|tipo\b|permissa|ativo|expira/i
+        .test(CORPO_APROV));
+    ok("O12b CONTROLE NEGATIVO: o detector de postfilter MORDE",
+      /\.filter\(|\.find\(|\.some\(|\.slice\(/.test(
+        'const uteis = candidatas.filter((c) => c.revisao === atual);'));
+    ok("O13 HARD: zero relogio local na descoberta de aprovacoes",
+      !/Date\.now|new Date|setMinutes|toISOString/.test(CORPO_APROV));
+    ok("O13a CONTROLE NEGATIVO: o detector de relogio MORDE",
+      /Date\.now|new Date/.test('const corte = new Date(Date.now() - 300000);'));
+    ok("O14 a descoberta de aprovacoes nao toca tabela nem escreve",
+      !/\.from\(/.test(CORPO_APROV) && !/\.update\(|\.insert\(|\.delete\(/.test(CORPO_APROV));
+
+    // ── N15..N30. STALE: a consulta, cercada e ordenada ───────────
+    roteiro({ data: [], error: null });
+    const staleVazio = await descobrirCandidatasRetomadaStale();
+    const q = chamadas[0];
+    ok("O15 fila vazia de travadas tambem e SUCESSO",
+      staleVazio.ok === true && staleVazio.ok && staleVazio.candidatas.length === 0);
+    ok("O16 UMA consulta, na tabela de tarefas, sem escrita e sem RPC",
+      chamadas.length === 1 && q?.tabela === "agente_tarefas" &&
+      q?.escrita === false && chamadasRpc.length === 0);
+    ok("O17 a projecao e exatamente a acordada",
+      q?.select === "id, user_id, tentativas, retomada_request_id, heartbeat_em");
+    ok("O18 cercada por status rodando",
+      q?.filtros?.status === "rodando" && Object.keys(q?.filtros ?? {}).length === 1);
+    {
+      const nots = q?.nots ?? [];
+      ok(`O19 as DUAS cercas de IS NOT NULL (${nots.length})`,
+        nots.length === 2 &&
+        nots.some((n) => n.coluna === "retomada_request_id" &&
+                         n.operador === "is" && n.valor === null) &&
+        nots.some((n) => n.coluna === "heartbeat_em" &&
+                         n.operador === "is" && n.valor === null));
+      ok("O19a IS NOT NULL nao e igualdade: nenhum dos dois entrou em .eq nem .is",
+        !Object.prototype.hasOwnProperty.call(q?.filtros ?? {}, "retomada_request_id") &&
+        !Object.prototype.hasOwnProperty.call(q?.filtrosIs ?? {}, "heartbeat_em"));
+    }
+    {
+      const orders = q?.orders ?? [];
+      ok(`O20 HARD: ordena por heartbeat_em e depois id, ambos ASC (${orders.length})`,
+        orders.length === 2 &&
+        orders[0]?.coluna === "heartbeat_em" && orders[0]?.ascendente === true &&
+        orders[1]?.coluna === "id" && orders[1]?.ascendente === true);
+      ok("O20a a SEQUENCIA importa: heartbeat_em nao pode vir depois de id",
+        orders.findIndex((o) => o.coluna === "heartbeat_em") <
+        orders.findIndex((o) => o.coluna === "id"));
+      ok("O20b ANCORA: o fake REALMENTE observa order — sem isso N20 seria vacuo",
+        orders.length > 0 && typeof orders[0]?.coluna === "string");
+    }
+    ok("O21 o teto chegou ao builder, dentro da faixa",
+      Number.isInteger(q?.limite) && (q?.limite as number) === 5);
+    ok("O22 HARD: zero predicado temporal na consulta",
+      !/\.lt\(|\.lte\(|\.gt\(|\.gte\(/.test(CORPO_STALE));
+    ok("O23 HARD: zero relogio local na descoberta de travadas",
+      !/Date\.now|new Date|setMinutes|toISOString|cutoff|corte/i.test(CORPO_STALE));
+    ok("O24 HARD: ela NAO chama a recuperacao nem qualquer RPC",
+      !/\.rpc\(/.test(CORPO_STALE) &&
+      !/recuperarRetomadaStale|retomada_recuperar_tarefa_stale/.test(CORPO_STALE));
+    ok("O25 e nao filtra por politica: agente, permissao, tipo ou aprovacao",
+      // Limites de palavra NAO sao enfeite: "nivel" casa DENTRO de
+      // "indisponivel", que e o proprio rotulo de falha deste modulo.
+      // Sem os limites, este assert acusaria a mensagem de erro como se
+      // fosse um filtro de politica — e foi exatamente o que aconteceu
+      // na primeira versao deste slice.
+      !/\bativo\b|\bpermissao\b|\bnivel\b|\bfuncao_id\b|\baprovacao\b|\bmax_tentativas\b/i
+        .test(CORPO_STALE));
+    ok("O25a CONTROLE NEGATIVO: o detector de filtro de politica MORDE",
+      /\bativo\b|\bnivel\b/i.test('.eq("nivel", "automatico").eq("ativo", true)'));
+    ok("O25b e fica QUIETO diante do rotulo de falha do proprio modulo",
+      !/\bnivel\b/i.test('return { ok: false, falha: "indisponivel" };'));
+
+    // ── O teto do stale, observado no builder ─────────────────────
+    {
+      const casos: ReadonlyArray<readonly [unknown, number]> = [
+        [undefined, 5], [Number.NaN, 5], [Number.POSITIVE_INFINITY, 5],
+        [0, 1], [-7, 1], [2.9, 2], [500, 5],
+      ];
+      const observados: unknown[] = [];
+      for (const [entrada] of casos) {
+        roteiro({ data: [], error: null });
+        await descobrirCandidatasRetomadaStale(entrada as number | undefined);
+        observados.push(chamadas[0]?.limite);
+      }
+      ok(`O26 o mesmo normalizador rege o .limit() do stale (${casos.length} casos)`,
+        casos.every(([, esperado], i) => observados[i] === esperado));
+      ok("O26a HARD: nenhum NaN alcanca o query builder",
+        observados.every((v) => Number.isInteger(v) && (v as number) >= 1 && (v as number) <= 5));
+    }
+
+    // ── EMPTY x ERROR no stale ────────────────────────────────────
+    roteiro({ data: null, error: { code: "PGRST301" } });
+    const staleErro = await descobrirCandidatasRetomadaStale();
+    ok("O27 erro de consulta devolve indisponivel, e nao fila vazia",
+      staleErro.ok === false && !staleErro.ok && staleErro.falha === "indisponivel");
+    // O TypeScript ja recusa comparar esta falha com os rotulos de RPC
+    // — a uniao do stale nao os contem. A prova util em runtime e outra:
+    // o valor pertence ao conjunto FECHADO de dois, e a declaracao do
+    // tipo nao menciona o vocabulario de SQLSTATE.
+    ok("O27a a falha pertence ao conjunto fechado de DOIS rotulos",
+      staleErro.ok === false && !staleErro.ok &&
+      ["indisponivel", "resposta_invalida"].includes(staleErro.falha));
+    ok("O27b e o tipo do stale NAO importa o vocabulario de SQLSTATE das RPCs",
+      /ResultadoDescobertaRetomadaStale[\s\S]{0,400}?indisponivel/.test(PD_CODIGO) &&
+      !/ResultadoDescobertaRetomadaStale[\s\S]{0,400}?rpc_(indisponivel|fora_de_contrato|entrada_invalida)/
+        .test(PD_CODIGO));
+
+    roteiro({ data: null, error: null });
+    const staleNulo = await descobrirCandidatasRetomadaStale();
+    ok("O28 `data: null` sem erro e resposta invalida",
+      staleNulo.ok === false && !staleNulo.ok && staleNulo.falha === "resposta_invalida");
+
+    // ── Mapeamento e compatibilidade com a recuperacao ────────────
+    const LINHA_OK = {
+      id: UUID_A, user_id: "dono-1", tentativas: 2,
+      retomada_request_id: "req-abc", heartbeat_em: "2026-09-16T12:00:00.000Z",
+    };
+    roteiro({ data: [LINHA_OK], error: null });
+    const staleBom = await descobrirCandidatasRetomadaStale();
+    ok("O29 a candidata tem EXATAMENTE os quatro campos da recuperacao",
+      staleBom.ok === true && staleBom.ok && staleBom.candidatas.length === 1 &&
+      JSON.stringify(Object.keys(staleBom.candidatas[0] ?? {}).sort()) ===
+        JSON.stringify(["retomadaRequestId", "tarefaId", "tentativa", "userId"]));
+    ok("O30 HARD: `heartbeat_em` foi lido para ordenar e NAO saiu do modulo",
+      staleBom.ok === true && staleBom.ok &&
+      !Object.prototype.hasOwnProperty.call(staleBom.candidatas[0] ?? {}, "heartbeatEm") &&
+      !Object.prototype.hasOwnProperty.call(staleBom.candidatas[0] ?? {}, "heartbeat_em"));
+    ok("O31 e os valores mapeados sao os da linha, sem transformacao",
+      staleBom.ok === true && staleBom.ok &&
+      staleBom.candidatas[0]?.tarefaId === UUID_A &&
+      staleBom.candidatas[0]?.userId === "dono-1" &&
+      staleBom.candidatas[0]?.tentativa === 2 &&
+      staleBom.candidatas[0]?.retomadaRequestId === "req-abc");
+    {
+      // Compatibilidade de TIPO com a recuperacao, sem chama-la: se a
+      // assinatura exigisse um quinto campo, isto nao compilaria.
+      const c = staleBom.ok ? staleBom.candidatas[0] : undefined;
+      const alimenta: readonly [string, string, number, string] | null =
+        c === undefined ? null : [c.tarefaId, c.userId, c.tentativa, c.retomadaRequestId];
+      ok("O32 os quatro campos alimentam a recuperacao sem quinto argumento",
+        alimenta !== null && alimenta.length === 4 &&
+        typeof alimenta[0] === "string" && typeof alimenta[2] === "number");
+      ok("O32a e a recuperacao NAO foi chamada por este teste",
+        chamadasRpc.length === 0);
+    }
+
+    // ── Linhas deformadas no stale: fail-closed em cada campo ─────
+    {
+      const deformadas: ReadonlyArray<readonly [string, Record<string, unknown>]> = [
+        ["id nao-uuid", { ...LINHA_OK, id: "abc" }],
+        ["dono vazio", { ...LINHA_OK, user_id: "  " }],
+        ["tentativa nao-inteira", { ...LINHA_OK, tentativas: 1.5 }],
+        ["tentativa textual", { ...LINHA_OK, tentativas: "2" }],
+        ["marcador vazio", { ...LINHA_OK, retomada_request_id: "" }],
+        ["batimento nulo apesar do filtro", { ...LINHA_OK, heartbeat_em: null }],
+      ];
+      let todasFecharam = true;
+      for (const [, linha] of deformadas) {
+        roteiro({ data: [LINHA_OK, linha], error: null });
+        const r = await descobrirCandidatasRetomadaStale();
+        if (r.ok !== false || r.falha !== "resposta_invalida") todasFecharam = false;
+      }
+      ok(`O33 HARD: as ${deformadas.length} deformacoes derrubam a lista inteira`,
+        deformadas.length === 6 && todasFecharam);
+      ok("O33a ANCORA: a linha BOA sozinha continua passando",
+        await (async () => {
+          roteiro({ data: [LINHA_OK], error: null });
+          const r = await descobrirCandidatasRetomadaStale();
+          return r.ok === true && r.candidatas.length === 1;
+        })());
+    }
+
+    // ── N34..N38. Higiene e dormencia ─────────────────────────────
+    ok("O34 nenhum dos dois le campo cru do erro do driver",
+      !/\.message\b|\.details\b|\.hint\b|JSON\.stringify\(\s*error/
+        .test(CORPO_APROV + CORPO_STALE));
+    ok("O35 todo console.error dos dois corpos e literal fixa",
+      [...(CORPO_APROV + CORPO_STALE).matchAll(/console\.error\(([^)]*)\)/g)]
+        .every((m) => /^"[^"`$]*"$/.test(m[1].trim())));
+    ok("O36 nenhum dos dois cria timer, retry ou recursao",
+      !/setTimeout|setInterval|\bwhile\b|\.catch\(/.test(CORPO_APROV + CORPO_STALE));
+    ok("O37 um wrapper nao chama o outro, nem os wrappers antigos",
+      !/descobrirCandidatasRetomadaStale\(/.test(CORPO_APROV) &&
+      !/descobrirAprovacoesParaRetomada\(/.test(CORPO_STALE) &&
+      !/iniciarRetomadaAprovacao\(|concluirTarefaRetomada\(|falharTarefaRetomada\(/
+        .test(CORPO_APROV + CORPO_STALE));
+    ok("O38 o cancelamento tecnico NAO ganhou wrapper neste slice",
+      !/retomada_cancelar_aprovacao_incompativel/.test(PD_CODIGO));
+    {
+      const producaoN = ["lib/agentes", "app", "components"];
+      const alcancaN: string[] = [];
+      const varrerN = (dir: string): void => {
+        for (const e of readdirSync(join(RAIZ, dir), { withFileTypes: true })) {
+          const rel = `${dir}/${e.name}`;
+          if (e.isDirectory()) varrerN(rel);
+          else if (/\.tsx?$/.test(e.name) && rel !== "lib/agentes/retomada/persistencia-retomada.ts" &&
+                   /descobrirAprovacoesParaRetomada|descobrirCandidatasRetomadaStale/
+                     .test(readFileSync(join(RAIZ, rel), "utf8")))
+            alcancaN.push(rel);
+        }
+      };
+      for (const d of producaoN) varrerN(d);
+      ok(`O39 as duas descobertas nascem DORMENTES: zero chamador (${alcancaN.join(", ") || "nenhum"})`,
+        alcancaN.length === 0);
     }
   }
 

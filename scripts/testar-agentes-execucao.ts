@@ -4138,23 +4138,108 @@ async function main() {
         !/sqlerrm|sqlstate\s+into|pg_exception/i.test(CORPO_CANCEL));
     }
 
-    // ── W40. DORMENCIA ──────────────────────────────────────────────
+    // ── W40. DORMENCIA, agora CIENTE DO ADAPTADOR ───────────────────
+    //
+    // Ate o A1 nenhuma das duas RPCs podia ser citada por arquivo de
+    // producao: nao existia adaptador, entao qualquer mencao SERIA um
+    // chamador, e `zero arquivo` era a forma certa de dizer isso.
+    //
+    // O A1 criou, por desenho aprovado, UM wrapper dormente para a RPC
+    // de leitura. A propriedade protegida nao mudou — as duas seguem sem
+    // orquestrador —, mas a prova precisou ficar mais precisa em vez de
+    // mais frouxa: UM path exato para UMA RPC exata, e nada alem disso.
+    //
+    // O que continua proibido, e agora explicitamente: um SEGUNDO
+    // arquivo tocando a RPC de leitura, e QUALQUER arquivo tocando a de
+    // cancelamento, que ainda nao tem adaptador nenhum.
     {
+      /** Literal INDEPENDENTE. Nao sai da varredura: se saisse, o teste
+       *  estaria comparando o resultado consigo mesmo. */
+      const ADAPTADOR_AUTORIZADO_W = "lib/agentes/retomada/persistencia-retomada.ts";
+      const RPC_LEITURA_W = "retomada_listar_candidatas";
+      const RPC_CANCEL_W = "retomada_cancelar_aprovacao_incompativel";
+
+      /** O veredito e uma funcao PURA sobre conjuntos de paths, separada
+       *  da varredura de disco de proposito: e isso que permite executa-la
+       *  contra cenarios sinteticos sem escrever arquivo nenhum no
+       *  repositorio. Um detector que nunca foi visto reprovando nao
+       *  prova coisa alguma. */
+      const dormenteW = (
+        arquivosLeitura: readonly string[],
+        arquivosCancel: readonly string[]
+      ): boolean =>
+        arquivosCancel.length === 0 &&
+        arquivosLeitura.length === 1 &&
+        arquivosLeitura[0] === ADAPTADOR_AUTORIZADO_W;
+
       const producaoW = ["lib/agentes", "app", "components"];
-      const alcancaW: string[] = [];
+      const comLeituraW: string[] = [];
+      const comCancelW: string[] = [];
+      let varridosW = 0;
       const varrerW = (dir: string): void => {
         for (const e of readdirSync(join(RAIZ, dir), { withFileTypes: true })) {
-          const rel = `${dir}/${e.name}`;
-          if (e.isDirectory()) varrerW(rel);
-          else if (/\.tsx?$/.test(e.name) &&
-                   /retomada_listar_candidatas|retomada_cancelar_aprovacao_incompativel/
-                     .test(readFileSync(join(RAIZ, rel), "utf8")))
-            alcancaW.push(rel);
+          // Path relativo canonico, com separador normalizado: no Windows
+          // a comparacao com o literal falharia por causa da barra.
+          const rel = `${dir}/${e.name}`.replace(/\\/g, "/");
+          if (e.isDirectory()) {
+            varrerW(rel);
+            continue;
+          }
+          if (!/\.tsx?$/.test(e.name)) continue;
+          varridosW++;
+          const fonte = readFileSync(join(RAIZ, rel), "utf8");
+          if (fonte.includes(RPC_LEITURA_W)) comLeituraW.push(rel);
+          if (fonte.includes(RPC_CANCEL_W)) comCancelW.push(rel);
         }
       };
       for (const d of producaoW) varrerW(d);
-      ok(`W40 as duas RPCs nascem DORMENTES: zero chamador (${alcancaW.join(", ") || "nenhum"})`,
-        alcancaW.length === 0);
+
+      ok(`W40 ANCORA: a varredura de producao rodou de verdade (${varridosW} arquivos)`,
+        varridosW > 50);
+      ok(`W40a a RPC de leitura aparece SO no adaptador aprovado (${comLeituraW.join(", ") || "nenhum"})`,
+        comLeituraW.length === 1 && comLeituraW[0] === ADAPTADOR_AUTORIZADO_W);
+      ok(`W40b a RPC de cancelamento nao tem adaptador nem chamador (${comCancelW.join(", ") || "nenhum"})`,
+        comCancelW.length === 0);
+      ok("W40c veredito de dormencia sobre o estado REAL do repositorio",
+        dormenteW(comLeituraW, comCancelW));
+
+      // ── CONTROLES: o veredito precisa MORDER ──────────────────────
+      ok("W40d CONTROLE POSITIVO: o cenario permitido e aceito",
+        dormenteW([ADAPTADOR_AUTORIZADO_W], []));
+      ok("W40e CONTROLE NEGATIVO: um SEGUNDO arquivo com a RPC de leitura reprova",
+        !dormenteW(
+          [ADAPTADOR_AUTORIZADO_W, "lib/agentes/retomada/executar-retomada.ts"], []));
+      ok("W40f CONTROLE NEGATIVO: a RPC de leitura fora do adaptador reprova",
+        !dormenteW(["app/api/internal/agentes/worker/route.ts"], []));
+      ok("W40g CONTROLE NEGATIVO: QUALQUER ocorrencia da RPC de cancelamento reprova",
+        !dormenteW([ADAPTADOR_AUTORIZADO_W], ["lib/agentes/retomada/executar-retomada.ts"]) &&
+        !dormenteW([ADAPTADOR_AUTORIZADO_W], [ADAPTADOR_AUTORIZADO_W]));
+      ok("W40h CONTROLE NEGATIVO: basename igual em OUTRO diretorio reprova",
+        !dormenteW(["lib/agentes/persistencia-retomada.ts"], []) &&
+        !dormenteW(["lib/outro/retomada/persistencia-retomada.ts"], []));
+      ok("W40i CONTROLE NEGATIVO: nenhum arquivo com a RPC de leitura tambem reprova",
+        !dormenteW([], []));
+
+      // ── A intencao original, dita diretamente ─────────────────────
+      //
+      // Os dois arquivos que um orquestrador habitaria sao nomeados aqui
+      // em vez de deduzidos da varredura: se amanha um deles passar a
+      // citar qualquer das duas RPCs, este assert cai sozinho, sem
+      // depender de o conjunto acima mudar de tamanho.
+      {
+        const ORQUESTRADORES_W = [
+          "lib/agentes/retomada/executar-retomada.ts",
+          "app/api/internal/agentes/worker/route.ts",
+        ];
+        const sujosW = ORQUESTRADORES_W.filter((rel) => {
+          const fonte = readFileSync(join(RAIZ, rel), "utf8");
+          return fonte.includes(RPC_LEITURA_W) || fonte.includes(RPC_CANCEL_W);
+        });
+        ok("W40j ANCORA: os dois candidatos a orquestrador existem e foram lidos",
+          ORQUESTRADORES_W.every((rel) => existsSync(join(RAIZ, rel))));
+        ok(`W40k executor e worker seguem sem citar as duas RPCs (${sujosW.join(", ") || "nenhum"})`,
+          sujosW.length === 0);
+      }
     }
   }
 

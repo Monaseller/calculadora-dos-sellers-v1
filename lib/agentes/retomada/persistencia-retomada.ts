@@ -516,3 +516,278 @@ export async function registrarHeartbeatRetomada(
   }
   return data.length > 0 ? "renovado" : "sem_correspondencia";
 }
+
+// ─── 7. Normalizacao compartilhada das DUAS descobertas ───────────────
+
+/**
+ * O teto das descobertas. Cinco, e nao mais, pelo mesmo motivo da RPC:
+ * uma rodada de worker tem dois slots de retomada, e uma janela um pouco
+ * maior que os slots basta para o orquestrador escolher. Pedir centenas
+ * so aumentaria a chance de trabalhar sobre linhas que mudaram no meio.
+ */
+const LIMITE_DESCOBERTA_MAX = 5;
+
+/**
+ * Converte QUALQUER entrada num inteiro de 1 a 5.
+ *
+ * ── A ordem dos testes nao e estilo ─────────────────────────────────
+ *
+ * `Number.isFinite` vem ANTES de `Math.trunc`. A forma tentadora
+ *
+ *   Math.min(Math.max(1, Math.trunc(valor)), 5)
+ *
+ * devolve `NaN` para `NaN`, porque `Math.trunc(NaN)` e `NaN` e as
+ * comparacoes de `min`/`max` com `NaN` sao todas falsas. Esse `NaN`
+ * chegaria a `.limit()`, que o serializa como a string "NaN" na URL — e
+ * o erro so apareceria no servidor, longe daqui.
+ *
+ * ── Por que nao-finito vira 5, e nao 1 ──────────────────────────────
+ *
+ * Ausencia de limite significa "me de a pagina padrao", nao "me de o
+ * minimo". A propria RPC ja decidiu isso com `coalesce(p_limite, 5)`;
+ * divergir aqui criaria duas respostas diferentes para o mesmo caso.
+ */
+function normalizarLimiteDescoberta(limite: unknown): number {
+  const n = typeof limite === "number" ? limite : Number.NaN;
+  if (!Number.isFinite(n)) return LIMITE_DESCOBERTA_MAX;
+  const inteiro = Math.trunc(n);
+  if (inteiro < 1) return 1;
+  if (inteiro > LIMITE_DESCOBERTA_MAX) return LIMITE_DESCOBERTA_MAX;
+  return inteiro;
+}
+
+/**
+ * Forma canonica de UUID.
+ *
+ * Existe uma regex equivalente em `capability-worker.ts`, e ela NAO e
+ * exportada. Importa-la de la traria um simbolo da lane normal para
+ * dentro desta lane — exatamente o que os tripwires deste modulo
+ * proibem. Entre duplicar uma linha e criar uma dependencia que a suite
+ * recusa, a linha e o preco menor. Extrair um helper comum e mudanca de
+ * outro slice, porque tocaria path congelado.
+ */
+const FORMA_UUID_RETOMADA =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Texto que sobrevive ao `trim`. `""` e `"   "` nao sao identidade. */
+function textoIdentidade(valor: unknown): valor is string {
+  return typeof valor === "string" && valor.trim() !== "";
+}
+
+/**
+ * Inteiro utilizavel. `Number.isInteger` sozinho nao estreita `unknown`
+ * em TypeScript — ele devolve `boolean`, e nao um predicado de tipo —,
+ * entao a checagem de runtime fica aqui e o estreitamento vem junto.
+ */
+function inteiroUtil(valor: unknown): valor is number {
+  return typeof valor === "number" && Number.isInteger(valor);
+}
+
+// ─── 8. Descoberta de aprovacoes candidatas a retomada ────────────────
+
+/** Uma candidata. DUAS chaves, e nenhuma terceira. */
+export interface AprovacaoCandidataRetomada {
+  readonly userId: string;
+  readonly aprovacaoId: string;
+}
+
+/**
+ * Lista vazia e SUCESSO. Nao ha fila hoje — isso e um fato, nao uma
+ * falha, e o orquestrador pode seguir para a proxima opcao.
+ *
+ * Falha e outra coisa: o banco nao respondeu, ou respondeu fora do
+ * contrato. Tratar as duas como `[]` faria o orquestrador concluir
+ * "fila vazia" durante uma indisponibilidade e gastar o orcamento da
+ * rodada em outra coisa, enquanto retomadas aprovadas esperam. A uniao
+ * discriminada torna a confusao impossivel: quem quer a lista precisa
+ * passar por `ok === true`.
+ */
+export type ResultadoDescobertaAprovacoes =
+  | { readonly ok: true; readonly candidatas: readonly AprovacaoCandidataRetomada[] }
+  | { readonly ok: false; readonly falha: FalhaPersistenciaRetomada };
+
+/**
+ * A fila de aprovacoes que PODEM ser retomadas agora.
+ *
+ * ── Uma RPC, e nenhuma composicao aqui ──────────────────────────────
+ *
+ * Toda a elegibilidade de ESTADO DE BANCO — aprovacao aprovada com
+ * tarefa, tarefa causal esperando com ponteiro certo e sem marcador,
+ * tentativa dentro do limite, agente ativo, permissao atual — ja foi
+ * resolvida dentro de `retomada_listar_candidatas`, ANTES do LIMIT.
+ * Resolver qualquer parte disso aqui recriaria o bloqueio de cabeca de
+ * fila: linha inelegivel que ocupa vaga esconde para sempre a elegivel
+ * logo atras.
+ *
+ * ── O que este wrapper e PROIBIDO de filtrar ────────────────────────
+ *
+ * Revisao divergente, funcao removida, acesso incompativel, contrato de
+ * conexao e argumento que o validador atual recusa NAO sao estado de
+ * banco: sao decisoes do registry TypeScript. A RPC devolve essas linhas
+ * de proposito, e elas PRECISAM chegar ao chamador — e ele quem as
+ * reconhece e, depois, as reconcilia tecnicamente. Descarta-las aqui
+ * deixaria a fila limpa e a tabela suja para sempre.
+ *
+ * Por isso, depois da RPC, so acontecem duas coisas: validacao de forma
+ * e mapeamento. Nenhum filtro, nenhuma busca, nenhum relogio.
+ */
+export async function descobrirAprovacoesParaRetomada(
+  limite?: number
+): Promise<ResultadoDescobertaAprovacoes> {
+  const { data, error } = await getSupabaseServidor().rpc("retomada_listar_candidatas", {
+    p_limite: normalizarLimiteDescoberta(limite),
+  });
+
+  if (error) {
+    console.error("[agentes-retomada] descoberta de aprovacoes para retomada falhou");
+    return { ok: false, falha: classificarErro(error) };
+  }
+
+  // `RETURNS TABLE` devolve array ate quando nao ha linha. `null` aqui
+  // nao e "fila vazia": e resposta fora do contrato declarado.
+  if (!Array.isArray(data)) {
+    console.error("[agentes-retomada] descoberta de aprovacoes devolveu formato inesperado");
+    return { ok: false, falha: "resposta_invalida" };
+  }
+
+  const candidatas: AprovacaoCandidataRetomada[] = [];
+  for (const bruta of data) {
+    if (typeof bruta !== "object" || bruta === null || Array.isArray(bruta)) {
+      console.error("[agentes-retomada] candidata de retomada fora do contrato");
+      return { ok: false, falha: "resposta_invalida" };
+    }
+    const r = bruta as Record<string, unknown>;
+    // FAIL CLOSED da LISTA INTEIRA, nunca pular a linha. Pular
+    // entregaria uma fila silenciosamente menor, e a que sumiu seria
+    // justamente a que ninguem investigaria.
+    if (!textoIdentidade(r.user_id)) {
+      console.error("[agentes-retomada] candidata de retomada sem dono utilizavel");
+      return { ok: false, falha: "resposta_invalida" };
+    }
+    if (typeof r.aprovacao_id !== "string" || !FORMA_UUID_RETOMADA.test(r.aprovacao_id)) {
+      console.error("[agentes-retomada] candidata de retomada com identificador invalido");
+      return { ok: false, falha: "resposta_invalida" };
+    }
+    candidatas.push({ userId: r.user_id, aprovacaoId: r.aprovacao_id });
+  }
+
+  return { ok: true, candidatas };
+}
+
+// ─── 9. Descoberta de retomadas possivelmente travadas ────────────────
+
+/**
+ * Os QUATRO campos que a RPC de recuperacao exige, e nada alem.
+ * `heartbeat_em` e lido para ordenar e fica no modulo: expo-lo
+ * convidaria alguem a compara-lo com o relogio local.
+ */
+export interface TarefaRetomadaStaleCandidata {
+  readonly tarefaId: string;
+  readonly userId: string;
+  readonly tentativa: number;
+  readonly retomadaRequestId: string;
+}
+
+/**
+ * Esta consulta e PostgREST simples, e nao RPC. Os rotulos de SQLSTATE
+ * (`rpc_entrada_invalida` para 22023, `rpc_fora_de_contrato` para 55000)
+ * descrevem contratos de funcao que aqui nao existem; oferece-los
+ * sugeriria desfechos impossiveis.
+ */
+export type ResultadoDescobertaRetomadaStale =
+  | { readonly ok: true; readonly candidatas: readonly TarefaRetomadaStaleCandidata[] }
+  | { readonly ok: false; readonly falha: "indisponivel" | "resposta_invalida" };
+
+/**
+ * Encontra retomadas em curso que PODEM estar travadas.
+ *
+ * ── Ela nao decide o que esta travado, e isso e o ponto ─────────────
+ *
+ * Quem decide e a RPC de recuperacao, que calcula o corte de 5 minutos
+ * DENTRO da transacao em que le e escreve, com o relogio do banco. Um
+ * corte calculado aqui viajaria pela rede e chegaria velho: bastaria a
+ * rodada demorar para a funcao encerrar uma tarefa que acabou de voltar
+ * a respirar. Por isso nao ha `Date`, nem corte temporal nesta consulta
+ * — so as tres cercas estruturais.
+ *
+ * ── Por que a ordem basta, e nenhum cursor e preciso ────────────────
+ *
+ * `heartbeat_em ASC` e o que torna o prefixo seguro. Se a candidata na
+ * posicao k ainda NAO esta travada pelo relogio do banco, toda candidata
+ * depois dela tem batimento igual ou mais recente e tambem nao esta. Um
+ * prefixo fresco nao pode esconder atras de si uma tarefa mais parada —
+ * as mais antigas estao sempre na frente. `id` desempata para que duas
+ * leituras do mesmo instante nao alternem a ordem.
+ *
+ * ── O que ela NAO faz ───────────────────────────────────────────────
+ *
+ * Nao chama a recuperacao, nao executa Funcao, nao encerra tarefa, nao
+ * abre Tool Call e nao gera marcador. Ela encontra, e devolve.
+ */
+export async function descobrirCandidatasRetomadaStale(
+  limite?: number
+): Promise<ResultadoDescobertaRetomadaStale> {
+  const { data, error } = await getSupabaseServidor()
+    .from("agente_tarefas")
+    .select("id, user_id, tentativas, retomada_request_id, heartbeat_em")
+    .eq("status", "rodando")
+    .not("retomada_request_id", "is", null)
+    .not("heartbeat_em", "is", null)
+    .order("heartbeat_em", { ascending: true })
+    .order("id", { ascending: true })
+    .limit(normalizarLimiteDescoberta(limite));
+
+  if (error) {
+    console.error("[agentes-retomada] descoberta de retomadas travadas falhou");
+    return { ok: false, falha: "indisponivel" };
+  }
+
+  if (!Array.isArray(data)) {
+    console.error("[agentes-retomada] descoberta de retomadas travadas devolveu formato inesperado");
+    return { ok: false, falha: "resposta_invalida" };
+  }
+
+  const candidatas: TarefaRetomadaStaleCandidata[] = [];
+  for (const bruta of data) {
+    if (typeof bruta !== "object" || bruta === null || Array.isArray(bruta)) {
+      console.error("[agentes-retomada] retomada travada fora do contrato");
+      return { ok: false, falha: "resposta_invalida" };
+    }
+    const r = bruta as Record<string, unknown>;
+    if (typeof r.id !== "string" || !FORMA_UUID_RETOMADA.test(r.id)) {
+      console.error("[agentes-retomada] retomada travada com identificador invalido");
+      return { ok: false, falha: "resposta_invalida" };
+    }
+    if (!textoIdentidade(r.user_id)) {
+      console.error("[agentes-retomada] retomada travada sem dono utilizavel");
+      return { ok: false, falha: "resposta_invalida" };
+    }
+    // `Number.isInteger` e a cerca, e nao `>= 0`: a coluna e `integer not
+    // null` sem CHECK de faixa, entao exigir nao-negativo aqui inventaria
+    // uma regra que o schema nao tem. Um valor absurdo viraria cerca na
+    // RPC de recuperacao e simplesmente nao casaria linha nenhuma.
+    if (!inteiroUtil(r.tentativas)) {
+      console.error("[agentes-retomada] retomada travada com tentativa invalida");
+      return { ok: false, falha: "resposta_invalida" };
+    }
+    if (!textoIdentidade(r.retomada_request_id)) {
+      console.error("[agentes-retomada] retomada travada sem marcador utilizavel");
+      return { ok: false, falha: "resposta_invalida" };
+    }
+    // A consulta exigiu `heartbeat_em` nao-nulo. Uma linha que chega sem
+    // ele contradiz o proprio filtro, entao a resposta esta fora do
+    // contrato. E so um teste de presenca: nada aqui interpreta a data.
+    if (r.heartbeat_em === null || r.heartbeat_em === undefined) {
+      console.error("[agentes-retomada] retomada travada sem batimento apesar do filtro");
+      return { ok: false, falha: "resposta_invalida" };
+    }
+    candidatas.push({
+      tarefaId: r.id,
+      userId: r.user_id,
+      tentativa: r.tentativas,
+      retomadaRequestId: r.retomada_request_id,
+    });
+  }
+
+  return { ok: true, candidatas };
+}
