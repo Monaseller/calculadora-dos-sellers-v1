@@ -3578,15 +3578,102 @@ async function main() {
     ok("V20 e a lane de retomada nunca aceita marcador NULL",
       !/\.is\(\s*"retomada_request_id"/.test(CORPO_TICK));
 
-    // ── F3 CONGELADO — a ENTRADA continua sem cerca, de proposito ───
+    // ── F3 — a CERCA DE ENTRADA da lane normal ──────────────────────
     //
-    // D5-C2-I2-A0-F3 permanece OPEN: este slice fecha o BATIMENTO, nao a
-    // entrada. Estes dois asserts existem para que fechar F3 mais tarde
-    // seja uma mudanca VISIVEL, e nao um efeito colateral silencioso.
-    ok("V21 F3 ABERTO: COLUNAS_TAREFA ainda nao projeta o marcador",
-      !/COLUNAS_TAREFA[\s\S]{0,400}?retomada_request_id/.test(CODIGO_WORKER_V));
-    ok("V22 F3 ABERTO: executar-tarefa ainda nao conhece o marcador",
+    // Ate o I2 estes dois asserts registravam F3 como ABERTO: a entrada
+    // normal nao conhecia o marcador. O D5-C2-I2-F3 fechou isso pelo
+    // LOADER, e nao pelo executor — entao eles avancaram de fase, de
+    // "ainda nao conhece" para "continua sem conhecer, E ISSO E O
+    // DESENHO", com a cerca provada onde ela realmente vive.
+    //
+    // V21 tambem foi CORRIGIDO: ele procurava `COLUNAS_TAREFA` seguido
+    // do marcador dentro de 400 caracteres, e passou a casar o USO
+    // (`select(COLUNAS_TAREFA)` seguido do novo filtro) em vez da
+    // DEFINICAO. Media proximidade, nao projecao. Agora le a definicao.
+    const DEF_COLUNAS = (CODIGO_WORKER_V.match(/const COLUNAS_TAREFA[\s\S]*?;/) ?? [""])[0];
+    const CORPO_LEITURA = corpoDe(CODIGO_WORKER_V, "lerTarefaParaExecucao");
+
+    ok("V21 ANCORA: a definicao de COLUNAS_TAREFA foi isolada",
+      DEF_COLUNAS.length > 100 && DEF_COLUNAS.includes("heartbeat_em"));
+    ok("V21a o marcador NAO e projetado — a cerca filtra, nao seleciona",
+      !DEF_COLUNAS.includes("retomada_request_id"));
+    ok("V21b CONTROLE: projetar o marcador seria detectado",
+      /retomada_request_id/.test('const COLUNAS_TAREFA = "id, retomada_request_id";'));
+    ok("V22 executar-tarefa continua sem conhecer o marcador — POR DESENHO",
       !/retomada_request_id/.test(codigo("lib/agentes/executar-tarefa.ts")));
+
+    // ── A cerca, DENTRO do corpo do loader ──────────────────────────
+    ok("V23 ANCORA: o corpo de lerTarefaParaExecucao foi isolado",
+      CORPO_LEITURA.length > 150 && CORPO_LEITURA.includes("agente_tarefas"));
+    ok("V24 o loader cerca por marcador IS NULL",
+      /\.is\(\s*"retomada_request_id"\s*,\s*null\s*\)/.test(CORPO_LEITURA));
+    ok("V25 e a cerca esta na MESMA cadeia do id e do maybeSingle",
+      /\.select\(\s*COLUNAS_TAREFA\s*\)[\s\S]*?\.eq\(\s*"id"\s*,\s*tarefaId\s*\)[\s\S]*?\.is\(\s*"retomada_request_id"\s*,\s*null\s*\)[\s\S]*?\.maybeSingle\(\)\s*;/
+        .test(CORPO_LEITURA));
+    ok("V26 usa .is, NUNCA igualdade — `= NULL` nao e verdadeiro em SQL",
+      !/\.eq\(\s*"retomada_request_id"/.test(CORPO_LEITURA));
+    ok("V27 CONTROLE: `.eq(marker, null)` nao satisfaz o predicado de V24",
+      !/\.is\(\s*"retomada_request_id"\s*,\s*null\s*\)/
+        .test('.eq("retomada_request_id", null)'));
+    ok("V28 CONTROLE: a cerca em OUTRA funcao do arquivo nao contaria",
+      corpoDe('export function outra() {\n  .is("retomada_request_id", null);\n}\n',
+        "lerTarefaParaExecucao") === "");
+
+    // ── O contrato do loader NAO mudou ──────────────────────────────
+    ok("V29 assinatura e retorno intactos",
+      /export async function lerTarefaParaExecucao\( tarefaId: string \): Promise<ResultadoTarefaInterna>/
+        .test(CORPO_LEITURA.replace(/\s+/g, " ")));
+    const umFrom = (CORPO_LEITURA.match(/\.from\(/g) ?? []).length === 1;
+    const umMaybe = (CORPO_LEITURA.match(/\.maybeSingle\(/g) ?? []).length === 1;
+    const semSingle = !/\.single\(/.test(CORPO_LEITURA);
+    ok("V30 uma unica leitura, com maybeSingle e sem single",
+      umFrom && umMaybe && semSingle);
+    ok("V31 higiene de erro preservada: log fixo, sem erro cru",
+      /erro_consulta_tarefa/.test(CORPO_LEITURA) &&
+      !/\.message\b|\.details\b|\.hint\b|JSON\.stringify/.test(CORPO_LEITURA));
+
+    // ── ORDEM DOS EFEITOS: a recusa vem ANTES de tudo ───────────────
+    //
+    // A cerca so vale se a tarefa filtrada morrer na guarda que ja
+    // existe, e ANTES de qualquer efeito. Isto mede posicao real no
+    // fonte do executor, nao intencao.
+    const EXEC = codigo("lib/agentes/executar-tarefa.ts");
+    const pos = (re: RegExp) => EXEC.search(re);
+    const pLeitura = pos(/await lerTarefaParaExecucao\(/);
+    const pRecusa = pos(/if \(!tarefa\)/);
+    const pContexto = pos(/const contexto: ContextoTarefa/);
+    const pTimer = pos(/setInterval\(/);
+    const pHandler = pos(/await handler\(/);
+    const pFalhar = pos(/await falharTarefa\(/);
+    const pConcluir = pos(/await concluirTarefa\(/);
+
+    ok("V32 ANCORA: os sete pontos do ciclo foram localizados",
+      [pLeitura, pRecusa, pContexto, pTimer, pHandler, pFalhar, pConcluir]
+        .every((p) => p > 0));
+    ok("V33 a leitura acontece antes da recusa",
+      pLeitura < pRecusa);
+    ok("V34 a recusa acontece antes do ContextoTarefa",
+      pRecusa < pContexto);
+    ok("V35 antes do heartbeat",
+      pRecusa < pTimer);
+    ok("V36 antes do handler — logo antes da Funcao",
+      pRecusa < pHandler);
+    ok("V37 antes dos terminalizadores genericos",
+      pRecusa < pFalhar && pRecusa < pConcluir);
+    ok("V38 a recusa RETORNA, nao segue o fluxo",
+      /if \(!tarefa\) \{\s*return \{ status: 404/.test(EXEC));
+    ok("V39 e recusar NAO e falhar: nenhum terminalizador entre a recusa e o contexto",
+      !/falharTarefa|concluirTarefa|aguardarAprovacaoTarefa/
+        .test(EXEC.slice(pRecusa, pContexto)));
+
+    // ── A rota interna depende do loader, e isso e INTENCIONAL ──────
+    ok("V40 a rota interna nao tem cerca de lane propria",
+      !/retomada/.test(codigo("app/api/internal/agentes/executar/route.ts")));
+    ok("V41 e ela chega ao ciclo somente por executarTarefa",
+      /await executarTarefa\(/.test(codigo("app/api/internal/agentes/executar/route.ts")));
+    ok("V42 que por sua vez so le tarefa pelo loader cercado",
+      (EXEC.match(/lerTarefaParaExecucao\(/g) ?? []).length === 1 &&
+      !/\.from\(\s*"agente_tarefas"\s*\)/.test(EXEC));
   }
 
   const total = passou + falhou;

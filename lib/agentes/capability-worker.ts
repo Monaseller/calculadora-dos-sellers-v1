@@ -88,6 +88,29 @@ export async function lerTarefaParaExecucao(
     .from("agente_tarefas")
     .select(COLUNAS_TAREFA)
     .eq("id", tarefaId)
+    // APPROVAL-DECISION-RESUME-D5-C2-I2-F3: a CERCA DE ENTRADA da lane
+    // normal. O claim ja recusa tarefa retomada, mas ele nao e o unico
+    // caminho ate aqui: `app/api/internal/agentes/executar` recebe um
+    // `tarefa_id` e chama `executarTarefa` direto, sem passar por ele.
+    // O segredo daquela rota prova QUEM chama, nunca a QUAL lane a
+    // tarefa pertence.
+    //
+    // Esta leitura e o unico ponto por onde uma tarefa entra em
+    // execucao — e onde `ContextoTarefa` nasce e o handler e resolvido.
+    // Cercar AQUI fecha todos os chamadores de uma vez, os de hoje e os
+    // futuros, em vez de repetir a guarda em cada porta.
+    //
+    // Filtra, mas NAO projeta: o marcador fica fora de `COLUNAS_TAREFA`
+    // e de `LinhaTarefa`, e a lane normal continua sem saber que ele
+    // existe. `.is(..., null)` e obrigatorio — `= NULL` nunca e
+    // verdadeiro em SQL e a cerca viraria um filtro que recusa tudo.
+    //
+    // Com `maybeSingle`, a tarefa retomada some da leitura: `data` vem
+    // null com `error` null, e `executarTarefa` para na guarda que ja
+    // existe (`!tarefa` -> 404), ANTES de contexto, heartbeat, handler,
+    // Funcao ou terminalizador. Recusar a lane errada nao e falhar a
+    // tarefa: ela continua sendo da lane de retomada.
+    .is("retomada_request_id", null)
     .maybeSingle();
 
   if (error) {

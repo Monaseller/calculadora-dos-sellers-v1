@@ -2632,11 +2632,87 @@ async function principal(): Promise<void> {
         alcanca.length === 0);
     }
 
-    // ── F3 CONGELADO: este slice NAO toca a entrada ─────────────────
-    ok("L45 COLUNAS_TAREFA continua sem projetar o marcador (F3 aberto)",
-      !/COLUNAS_TAREFA[\s\S]{0,400}?retomada_request_id/.test(WORKER_L_CODIGO));
-    ok("L46 executar-tarefa continua sem conhecer o marcador (F3 aberto)",
+    // ── F3: a CERCA DE ENTRADA, provada COMPORTAMENTALMENTE ─────────
+    //
+    // Estes dois asserts registravam F3 como aberto. O D5-C2-I2-F3
+    // fechou a entrada pelo LOADER, e eles avancaram de fase. L45
+    // tambem foi CORRIGIDO: procurava `COLUNAS_TAREFA` seguido do
+    // marcador em 400 caracteres e passou a casar o USO
+    // (`select(COLUNAS_TAREFA)` seguido do filtro novo) em vez da
+    // DEFINICAO — media proximidade, nao projecao.
+    const DEF_COLUNAS_L = (WORKER_L_CODIGO.match(/const COLUNAS_TAREFA[\s\S]*?;/) ?? [""])[0];
+    ok("L45 o marcador NAO e projetado — a cerca filtra, nao seleciona",
+      DEF_COLUNAS_L.length > 100 && !DEF_COLUNAS_L.includes("retomada_request_id"));
+    ok("L45a CONTROLE: projetar o marcador seria detectado",
+      'const COLUNAS_TAREFA = "id, retomada_request_id";'.includes("retomada_request_id"));
+    ok("L46 executar-tarefa continua sem conhecer o marcador — POR DESENHO",
       !/retomada_request_id/.test(semComentarios(ler("lib/agentes/executar-tarefa.ts"))));
+
+    // O duplo registra os filtros REAIS que a query construiu, entao
+    // aqui a cerca nao e lida no fonte: ela e exercitada.
+    const { lerTarefaParaExecucao } = cw;
+
+    roteiro({ data: { id: "t-normal", agente_id: "a", user_id: "u", tipo: "x",
+      entrada: {}, status: "rodando", progresso: 0, resultado: null,
+      erro_tipo: null, erro_mensagem: null, tentativas: 1, max_tentativas: 3,
+      criado_em: "2026-09-16T00:00:00Z", iniciado_em: null, concluido_em: null,
+      heartbeat_em: null } });
+    const lidaNormal = await lerTarefaParaExecucao("t-normal");
+    const qNormal = chamadas[0];
+    ok("L47 a leitura normal continua entregando a tarefa da lane normal",
+      lidaNormal.erro === null && lidaNormal.linha?.id === "t-normal");
+    ok("L48 e a query cerca por id",
+      qNormal?.tabela === "agente_tarefas" && qNormal?.filtros?.id === "t-normal");
+    ok("L49 E TAMBEM por marcador IS NULL — a cerca de entrada",
+      Object.prototype.hasOwnProperty.call(qNormal?.filtrosIs ?? {}, "retomada_request_id") &&
+      qNormal?.filtrosIs?.retomada_request_id === null);
+    ok("L50 IS NULL nao e igualdade: o marcador NAO entrou em .eq",
+      !Object.prototype.hasOwnProperty.call(qNormal?.filtros ?? {}, "retomada_request_id"));
+    ok("L51 a leitura nao escreve nada",
+      qNormal?.escrita === false && chamadasRpc.length === 0);
+
+    // Tarefa de retomada: o banco a filtra, e `maybeSingle` devolve
+    // `data: null` com `error: null`. E EXATAMENTE esse o cenario.
+    roteiro({ data: null, error: null });
+    const lidaRetomada = await lerTarefaParaExecucao("t-retomada");
+    ok("L52 tarefa filtrada pela cerca some da lane normal",
+      lidaRetomada.linha === null);
+    ok("L53 e NAO vira erro — some, nao falha",
+      lidaRetomada.erro === null);
+    ok("L54 nenhuma RPC foi chamada na recusa",
+      chamadasRpc.length === 0);
+    ok("L55 e nenhuma escrita aconteceu",
+      chamadas.every((c) => c.escrita === false));
+    ok("L56 a cerca viajou tambem nesta leitura",
+      chamadas[0]?.filtrosIs?.retomada_request_id === null);
+
+    // ── A recusa acontece ANTES de qualquer efeito ──────────────────
+    const EXEC_L = semComentarios(ler("lib/agentes/executar-tarefa.ts"));
+    const posL = (re: RegExp) => EXEC_L.search(re);
+    // ANCORA antes da ordem: `search` devolve -1 quando o alvo some, e
+    // -1 e menor que qualquer indice — sem esta linha, APAGAR a guarda
+    // faria o assert de ordem passar vazio. Medido, nao suposto: foi o
+    // que o mutante "recusa depois do handler" revelou.
+    const pontosL = [/if \(!tarefa\)/, /const contexto: ContextoTarefa/, /setInterval\(/,
+      /await handler\(/, /await falharTarefa\(/, /await concluirTarefa\(/].map(posL);
+    ok("L57 ANCORA: os seis pontos do ciclo existem no fonte",
+      pontosL.every((p) => p > 0));
+    ok("L57a a recusa `!tarefa` precede contexto, timer, handler e terminalizadores",
+      pontosL.every((p) => p > 0) &&
+      posL(/if \(!tarefa\)/) < posL(/const contexto: ContextoTarefa/) &&
+      posL(/if \(!tarefa\)/) < posL(/setInterval\(/) &&
+      posL(/if \(!tarefa\)/) < posL(/await handler\(/) &&
+      posL(/if \(!tarefa\)/) < posL(/await falharTarefa\(/) &&
+      posL(/if \(!tarefa\)/) < posL(/await concluirTarefa\(/));
+    ok("L58 e recusar NAO chama terminalizador generico",
+      !/falharTarefa|concluirTarefa|aguardarAprovacaoTarefa/
+        .test(EXEC_L.slice(posL(/if \(!tarefa\)/), posL(/const contexto: ContextoTarefa/))));
+    ok("L59 o executor le tarefa SO pelo loader cercado",
+      (EXEC_L.match(/lerTarefaParaExecucao\(/g) ?? []).length === 1 &&
+      !/\.from\(\s*"agente_tarefas"\s*\)/.test(EXEC_L));
+    ok("L60 a rota interna depende do loader, sem cerca propria — INTENCIONAL",
+      !/retomada/.test(semComentarios(ler("app/api/internal/agentes/executar/route.ts"))) &&
+      /await executarTarefa\(/.test(semComentarios(ler("app/api/internal/agentes/executar/route.ts"))));
   }
 
   console.log(`\n══ ${passou} PASS / ${falhou} FAIL ══\n`);
