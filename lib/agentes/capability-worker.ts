@@ -133,7 +133,20 @@ export async function registrarProgresso(
     .from("agente_tarefas")
     .update({ progresso: valor, heartbeat_em: new Date().toISOString() })
     .eq("id", tarefaId)
-    .eq("status", "rodando");
+    .eq("status", "rodando")
+    // APPROVAL-DECISION-RESUME-D5-C2-I2: a LANE. `status = 'rodando'`
+    // nao distingue execucao normal de retomada, e a retomada PRESERVA
+    // a tentativa — entao, sem esta linha, um batimento da lane normal
+    // renovaria `heartbeat_em` de uma tarefa retomada e adiaria para
+    // sempre a recuperacao de `retomada_recuperar_tarefa_stale`, que so
+    // age depois de 5 minutos sem batida. A cerca protege a UPDATE
+    // INTEIRA de proposito: `progresso` e `heartbeat_em` sao a MESMA
+    // escrita, e separa-las abriria uma janela entre as duas.
+    //
+    // Para toda tarefa da lane normal o marcador e NULL, entao isto
+    // preserva o comportamento atual byte a byte — a cerca so passa a
+    // valer quando a retomada tiver quem a inicie.
+    .is("retomada_request_id", null);
 
   if (error) {
     // Heartbeat perdido nao derruba a execucao: o handler continua e a

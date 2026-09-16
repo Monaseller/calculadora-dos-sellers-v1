@@ -56,6 +56,14 @@ interface Chamada {
   filtros: Record<string, unknown>;
   escrita: boolean;
   linha?: Record<string, unknown>;
+  /** Payload de `.update(...)`. Campo PROPRIO, separado de `linha`: os
+   *  asserts de auditoria ja leem `linha` para `insert`, e reaproveitar
+   *  o mesmo campo mudaria o que eles enxergam. */
+  payload?: Record<string, unknown>;
+  /** Filtros `.is(coluna, valor)`, que nao sao igualdade e por isso nao
+   *  podem se misturar com `filtros` — `IS NULL` e `= NULL` sao coisas
+   *  diferentes em SQL, e o teste precisa distinguir as duas. */
+  filtrosIs: Record<string, unknown>;
 }
 
 interface Resposta {
@@ -97,7 +105,7 @@ function roteiroRpc(...rs: Resposta[]): void {
 }
 
 function construtor(tabela: string): Record<string, unknown> {
-  const c: Chamada = { tabela, filtros: {}, escrita: false };
+  const c: Chamada = { tabela, filtros: {}, escrita: false, filtrosIs: {} };
   const resolver = (fn: (v: { data: unknown; error: unknown }) => void) => {
     chamadas.push(c);
     const r = respostas[consumidas++];
@@ -114,7 +122,8 @@ function construtor(tabela: string): Record<string, unknown> {
     gt() { return b; },
     lt() { return b; },
     insert(linha: Record<string, unknown>) { c.escrita = true; c.linha = linha; return b; },
-    update() { c.escrita = true; return b; },
+    is(coluna: string, valor: unknown) { c.filtrosIs[coluna] = valor; return b; },
+    update(payload: Record<string, unknown>) { c.escrita = true; c.payload = payload; return b; },
     upsert() { c.escrita = true; return b; },
     delete() { c.escrita = true; return b; },
     maybeSingle() {
@@ -2094,8 +2103,17 @@ async function principal(): Promise<void> {
       /from\s+"@\/lib\/agentes\/normalizar-linha"/.test(PERSIST_CODIGO));
     ok("K10 nao define normalizarLinha localmente",
       !/(function|const)\s+normalizarLinha/.test(PERSIST_CODIGO));
+    // O que caracteriza uma COPIA do normalizador e a semantica dele:
+    // devolver `data[0]` de um array, ou `data ?? null`. Procurar apenas
+    // `Array.isArray` era largo demais — o heartbeat usa a mesma funcao
+    // para CONTAR linhas afetadas, que e outra coisa. O matcher foi
+    // estreitado para o comportamento, nao para a ferramenta.
     ok("K11 nem recopia o CORPO dele",
-      !/Array\.isArray\(\s*data\s*\)/.test(PERSIST_CODIGO));
+      !/data\s*\[\s*0\s*\]/.test(PERSIST_CODIGO) &&
+      !/data\s*\?\?\s*null/.test(PERSIST_CODIGO));
+    ok("K11a CONTROLE: uma copia real do normalizador seria detectada",
+      /data\s*\[\s*0\s*\]/.test("if (Array.isArray(data)) return data.length > 0 ? data[0] : null;") &&
+      /data\s*\?\?\s*null/.test("return data ?? null;"));
 
     // ── §30. Os 17 codigos de INICIO, escritos aqui ─────────────────
     //
@@ -2372,11 +2390,22 @@ async function principal(): Promise<void> {
       !/(iniciarRetomadaAprovacao|falharTarefaRetomada|recuperarRetomadaStale|concluirTarefaRetomada)\s*\(/
         .test(PERSIST_CODIGO.replace(/export async function \w+/g, "")));
 
-    // ── §37. Zero heartbeat neste slice ─────────────────────────────
-    ok("K68 o modulo nao mantem heartbeat nem progresso",
-      !/heartbeat|setInterval|INTERVALO/i.test(PERSIST_CODIGO));
-    ok("K69 e nao escreve na tabela por fora de RPC",
-      !/\.from\(|\.update\(|\.insert\(|\.upsert\(|\.delete\(/.test(PERSIST_CODIGO));
+    // ── Heartbeat: o modulo GANHOU um tick, e nao um timer ──────────
+    //
+    // Ate o C2-I1 estes dois exigiam ausencia total de heartbeat e de
+    // escrita direta. O D5-C2-I2 acrescentou, por desenho aprovado, UM
+    // tick de prova de vida que e um UPDATE direto — RPC seria cerimonia
+    // para uma escrita sem transicao de estado. Entao os asserts
+    // avancaram de "nao existe" para "existe exatamente um, e so isso".
+    ok("K68 o modulo nao cria timer nem tarefa de fundo",
+      !/setInterval|setTimeout/.test(PERSIST_CODIGO));
+    ok("K68a e o heartbeat e UM TICK, uma escrita por chamada",
+      (PERSIST_CODIGO.match(/\.update\(/g) ?? []).length === 1);
+    ok("K69 a unica escrita direta e o heartbeat, e ela so toca heartbeat_em",
+      (PERSIST_CODIGO.match(/\.from\(\s*"agente_tarefas"\s*\)/g) ?? []).length === 1 &&
+      /\.update\(\{\s*heartbeat_em:/.test(PERSIST_CODIGO));
+    ok("K69a nenhuma insercao, exclusao ou upsert em lugar nenhum",
+      !/\.insert\(|\.upsert\(|\.delete\(/.test(PERSIST_CODIGO));
 
     // ── §26. DORMENCIA: zero chamador de producao ───────────────────
     {
@@ -2412,6 +2441,202 @@ async function principal(): Promise<void> {
       !/persistencia-retomada|retomada\//.test(semComentarios(ler("lib/agentes/capability-worker.ts"))));
     ok("K74 o executor de Funcoes tambem nao",
       !/persistencia-retomada/.test(EXECUTOR_CODIGO));
+  }
+
+  // ─── L. RESUME-D5-C2-I2: heartbeats disjuntos, lane a lane ─────────
+
+  secao("L. RESUME-D5-C2-I2: heartbeats disjuntos, lane a lane");
+  {
+    const PERSIST_L = ler("lib/agentes/retomada/persistencia-retomada.ts");
+    const PERSIST_L_CODIGO = semComentarios(PERSIST_L);
+    const WORKER_L = ler("lib/agentes/capability-worker.ts");
+    const WORKER_L_CODIGO = semComentarios(WORKER_L);
+
+    const pr = await import("../lib/agentes/retomada/persistencia-retomada");
+    const cw = await import("../lib/agentes/capability-worker");
+    const { registrarHeartbeatRetomada } = pr;
+    const { registrarProgresso } = cw;
+
+    ok("L0  ANCORA: as duas lanes foram carregadas",
+      typeof registrarHeartbeatRetomada === "function" &&
+      typeof registrarProgresso === "function");
+
+    // ── LANE NORMAL: a cerca de marcador NULL, comportamental ───────
+    roteiro({ data: null, error: null });
+    const normalOk = await registrarProgresso("tarefa-normal", 42);
+    const chamadaNormal = chamadas[0];
+    ok("L1  a lane normal continua devolvendo o MESMO contrato",
+      normalOk.erro === null);
+    ok("L2  uma unica escrita, na tabela de tarefas",
+      chamadas.length === 1 && chamadaNormal?.tabela === "agente_tarefas" &&
+      chamadaNormal?.escrita === true);
+    ok("L3  cercada por id e status, como antes",
+      chamadaNormal?.filtros?.id === "tarefa-normal" &&
+      chamadaNormal?.filtros?.status === "rodando");
+    ok("L4  e AGORA tambem por marcador IS NULL",
+      Object.prototype.hasOwnProperty.call(chamadaNormal?.filtrosIs ?? {}, "retomada_request_id") &&
+      chamadaNormal?.filtrosIs?.retomada_request_id === null);
+    ok("L5  IS NULL nao e igualdade: o marcador NAO entrou em .eq",
+      !Object.prototype.hasOwnProperty.call(chamadaNormal?.filtros ?? {}, "retomada_request_id"));
+    ok("L6  o payload continua sendo progresso + heartbeat, sem campo novo",
+      JSON.stringify(Object.keys(chamadaNormal?.payload ?? {}).sort()) ===
+      JSON.stringify(["heartbeat_em", "progresso"]) &&
+      chamadaNormal?.payload?.progresso === 42);
+    ok("L7  a cerca protege a UPDATE INTEIRA — uma escrita, nao duas",
+      chamadas.filter((c) => c.escrita).length === 1);
+    ok("L8  a lane normal NAO passou a ler retorno (zero-row segue opaco)",
+      !/\.eq\("status",\s*"rodando"\)[\s\S]{0,400}?\.select\(/.test(WORKER_L_CODIGO));
+
+    // ── LANE RESUME: o tick, e as cinco cercas ──────────────────────
+    roteiro({ data: [{ id: "tarefa-retomada" }], error: null });
+    const tick = await registrarHeartbeatRetomada("tarefa-retomada", "user-1", 3, "req-9");
+    const chamadaTick = chamadas[0];
+    ok("L9  linha correspondente devolve `renovado`", tick === "renovado");
+    ok("L10 uma unica escrita, na tabela de tarefas",
+      chamadas.length === 1 && chamadaTick?.tabela === "agente_tarefas" &&
+      chamadaTick?.escrita === true);
+    // As CINCO cercas, por NOME e por VALOR — contar `.eq` nao provaria
+    // nada: cinco filtros errados tambem somam cinco.
+    ok("L11 cerca 1/5 — id",
+      chamadaTick?.filtros?.id === "tarefa-retomada");
+    ok("L12 cerca 2/5 — user_id",
+      chamadaTick?.filtros?.user_id === "user-1");
+    ok("L13 cerca 3/5 — status rodando",
+      chamadaTick?.filtros?.status === "rodando");
+    ok("L14 cerca 4/5 — tentativa esperada",
+      chamadaTick?.filtros?.tentativas === 3);
+    ok("L15 cerca 5/5 — marcador de retomada",
+      chamadaTick?.filtros?.retomada_request_id === "req-9");
+    ok("L16 sao EXATAMENTE cinco cercas de igualdade, nem uma sexta",
+      JSON.stringify(Object.keys(chamadaTick?.filtros ?? {}).sort()) ===
+      JSON.stringify(["id", "retomada_request_id", "status", "tentativas", "user_id"]));
+    ok("L17 e nenhum filtro IS na lane de retomada",
+      Object.keys(chamadaTick?.filtrosIs ?? {}).length === 0);
+    ok("L18 o payload e SO heartbeat_em",
+      JSON.stringify(Object.keys(chamadaTick?.payload ?? {})) ===
+      JSON.stringify(["heartbeat_em"]));
+    ok("L19 e nenhum campo causal viaja no SET",
+      ["progresso", "status", "resultado", "erro_tipo", "erro_mensagem", "concluido_em",
+       "iniciado_em", "tentativas", "user_id", "retomada_request_id"]
+        .every((campo) => !(campo in (chamadaTick?.payload ?? {}))));
+    ok("L20 user_id e CERCA, nunca payload — o tick nao troca dono",
+      chamadaTick?.filtros?.user_id === "user-1" &&
+      !("user_id" in (chamadaTick?.payload ?? {})));
+
+    // ── ZERO-ROW: observacional, e nunca terminal ───────────────────
+    roteiro({ data: [], error: null });
+    const zero = await registrarHeartbeatRetomada("tarefa-retomada", "user-1", 3, "req-9");
+    ok("L21 zero linhas devolve `sem_correspondencia`", zero === "sem_correspondencia");
+    ok("L22 e NAO e tratado como erro", zero !== "indisponivel");
+    ok("L23 zero-row NAO terminaliza: nenhuma RPC foi chamada",
+      chamadasRpc.length === 0);
+    ok("L24 e nenhuma segunda escrita aconteceu",
+      chamadas.filter((c) => c.escrita).length === 1);
+
+    // ── ERRO DE BANCO: indisponivel, e nunca terminal ───────────────
+    for (const erro of [{ code: "08006" }, { code: "22023" }, { code: "55000" },
+                        { message: "sem code" }]) {
+      roteiro({ data: null, error: erro });
+      const r = await registrarHeartbeatRetomada("tarefa-retomada", "user-1", 3, "req-9");
+      ok(`L25 erro ${JSON.stringify(erro).slice(0, 24)} devolve indisponivel`,
+        r === "indisponivel");
+      ok("L26 e nao dispara terminalizador nem recuperacao",
+        chamadasRpc.length === 0);
+    }
+
+    // ── FORMATO INESPERADO: fail closed ─────────────────────────────
+    for (const [nome, forma] of [["null", null], ["objeto", { id: "x" }],
+                                 ["string", "ok"], ["numero", 1]] as Array<[string, unknown]>) {
+      roteiro({ data: forma, error: null });
+      const r = await registrarHeartbeatRetomada("tarefa-retomada", "user-1", 3, "req-9");
+      ok(`L27 data ${nome} (nao-array) falha fechado como indisponivel`,
+        r === "indisponivel");
+    }
+
+    // ── ENTRADA NAO E REESCRITA ─────────────────────────────────────
+    roteiro({ data: [], error: null });
+    await registrarHeartbeatRetomada("tarefa-retomada", " user-1 ", 3, "  req-9  ");
+    ok("L28 o marcador NAO e aparado — identidade causal preservada",
+      chamadas[0]?.filtros?.retomada_request_id === "  req-9  ");
+    ok("L29 nem o dono",
+      chamadas[0]?.filtros?.user_id === " user-1 ");
+    roteiro({ data: [], error: null });
+    const vazio = await registrarHeartbeatRetomada("tarefa-retomada", "user-1", 3, "");
+    ok("L30 marcador em branco nao casa, e vira sem_correspondencia — nao erro",
+      vazio === "sem_correspondencia" && chamadas.length === 1);
+
+    // ── SEM RETRY, SEM TIMER ────────────────────────────────────────
+    ok("L31 um tick = uma operacao: zero retry no corpo",
+      !/setTimeout|setInterval|\bwhile\b|\.catch\(/.test(PERSIST_L_CODIGO));
+    const corpoTick = (() => {
+      const i = PERSIST_L_CODIGO.indexOf("export async function registrarHeartbeatRetomada");
+      return i < 0 ? "" : PERSIST_L_CODIGO.slice(i);
+    })();
+    ok("L32 o tick nao chama terminalizador, recuperacao nem RPC",
+      corpoTick.length > 200 &&
+      !/\.rpc\(/.test(corpoTick) &&
+      !/falharTarefaRetomada|concluirTarefaRetomada|recuperarRetomadaStale/.test(corpoTick) &&
+      !/\bfalharTarefa\b|\bconcluirTarefa\b|\bregistrarProgresso\b/.test(corpoTick));
+    ok("L33 nem usa .single(), porque zero linhas e desfecho NORMAL",
+      !/\.single\(/.test(PERSIST_L_CODIGO));
+    ok("L34 usa select para poder CONTAR a linha afetada",
+      /\.select\(\s*"id"\s*\)/.test(corpoTick));
+    ok("L35 higiene de erro preservada no tick",
+      !/\.message\b|\.details\b|\.hint\b|JSON\.stringify|\bthrow\b/.test(corpoTick));
+
+    // ── DISJUNCAO BILATERAL, provada sobre os dois fontes ───────────
+    //
+    // Nao e comentario: extrai o predicado de marcador de cada lane e
+    // confirma que um exige NULL e o outro exige igualdade. Nenhuma
+    // linha satisfaz os dois quando R e nao-nulo.
+    const normalExigeNull =
+      /\.is\(\s*"retomada_request_id"\s*,\s*null\s*\)/.test(WORKER_L_CODIGO);
+    const resumeExigeIgualdade =
+      /\.eq\(\s*"retomada_request_id"\s*,\s*retomadaRequestId\s*\)/.test(corpoTick);
+    ok("L36 a lane normal exige marcador IS NULL", normalExigeNull);
+    ok("L37 a lane de retomada exige marcador IGUAL a R", resumeExigeIgualdade);
+    ok("L38 DISJUNCAO: nenhuma tarefa com R nao-nulo satisfaz as duas",
+      normalExigeNull && resumeExigeIgualdade);
+    ok("L39 e a lane normal NAO usa igualdade de marcador (isso a ligaria a R)",
+      !/\.eq\(\s*"retomada_request_id"/.test(WORKER_L_CODIGO));
+    ok("L40 CONTROLE: sem a cerca, a lane normal alcancaria R nao-nulo",
+      !/\.is\(\s*"retomada_request_id"\s*,\s*null\s*\)/.test(
+        '.eq("id", tarefaId).eq("status", "rodando")'));
+
+    // ── O RESTO DO MODULO CONTINUA INTACTO ──────────────────────────
+    ok("L41 os quatro wrappers de RPC continuam presentes",
+      ["iniciarRetomadaAprovacao", "falharTarefaRetomada",
+       "recuperarRetomadaStale", "concluirTarefaRetomada"]
+        .every((n) => typeof (pr as Record<string, unknown>)[n] === "function"));
+    ok("L42 e continuam sendo quatro chamadas .rpc, nem uma a mais",
+      (PERSIST_L_CODIGO.match(/\.rpc\(/g) ?? []).length === 4);
+    ok("L43 o heartbeat nao virou wrapper de RPC",
+      !/\.rpc\([^)]*heartbeat/i.test(PERSIST_L_CODIGO));
+
+    // ── DORMENCIA do tick ───────────────────────────────────────────
+    {
+      const producao = ["lib/agentes", "app", "components"];
+      const alcanca: string[] = [];
+      const varrer = (dir: string): void => {
+        for (const e of readdirSync(join(RAIZ, dir), { withFileTypes: true })) {
+          const rel = `${dir}/${e.name}`;
+          if (e.isDirectory()) varrer(rel);
+          else if (/\.tsx?$/.test(e.name) &&
+                   rel !== "lib/agentes/retomada/persistencia-retomada.ts" &&
+                   /\bregistrarHeartbeatRetomada\b/.test(semComentarios(ler(rel))))
+            alcanca.push(rel);
+        }
+      };
+      for (const d of producao) varrer(d);
+      ok(`L44 zero chamador de producao do tick (${alcanca.join(", ") || "nenhum"})`,
+        alcanca.length === 0);
+    }
+
+    // ── F3 CONGELADO: este slice NAO toca a entrada ─────────────────
+    ok("L45 COLUNAS_TAREFA continua sem projetar o marcador (F3 aberto)",
+      !/COLUNAS_TAREFA[\s\S]{0,400}?retomada_request_id/.test(WORKER_L_CODIGO));
+    ok("L46 executar-tarefa continua sem conhecer o marcador (F3 aberto)",
+      !/retomada_request_id/.test(semComentarios(ler("lib/agentes/executar-tarefa.ts"))));
   }
 
   console.log(`\n══ ${passou} PASS / ${falhou} FAIL ══\n`);

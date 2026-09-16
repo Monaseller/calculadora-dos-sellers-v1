@@ -357,3 +357,91 @@ export async function concluirTarefaRetomada(
   }
   return { ok: true, linha };
 }
+
+// ─── 5. Prova de vida da retomada ─────────────────────────────────────
+
+/**
+ * O desfecho de UM tick de heartbeat. Tres estados, e nenhum deles e
+ * causal: heartbeat e sinal de vida, nunca terminalizador.
+ *
+ * `sem_correspondencia` NAO e erro. Ele significa que as cercas deixaram
+ * de casar — a tarefa terminalizou, a tentativa mudou, o marcador mudou,
+ * o dono nao bate, ou ela saiu de `rodando`. Qualquer uma dessas e uma
+ * MUDANCA DE CICLO, e quem descobre isso por um batimento nao tem
+ * contexto para decidir nada a respeito.
+ */
+export type ResultadoHeartbeatRetomada =
+  /** A linha cercada existia e `heartbeat_em` foi renovado. */
+  | "renovado"
+  /** Nenhuma linha casou as cinco cercas. Observacional, nunca fatal. */
+  | "sem_correspondencia"
+  /** Erro de transporte/driver, ou resposta fora do formato esperado. */
+  | "indisponivel";
+
+/**
+ * UM TICK de prova de vida da tarefa em retomada.
+ *
+ * ── Por que a lane de retomada precisa do seu proprio batimento ─────
+ *
+ * `registrarProgresso` cerca por `(id, status)` e, desde o D5-C2-I2,
+ * tambem exige marcador NULL — ou seja, ela nao alcanca mais uma tarefa
+ * retomada, de proposito. As duas lanes ficam disjuntas por construcao:
+ * uma exige marcador NULL, a outra exige igualdade com um request nao
+ * vazio, e nenhuma linha satisfaz as duas.
+ *
+ * ── Um TICK, e nao um timer ─────────────────────────────────────────
+ *
+ * Esta funcao faz UMA escrita e volta. Ela nao cria `setInterval`, nao
+ * agenda nada e nao tem retry: o proximo tick E a proxima tentativa, e
+ * quem o agenda e a camada de orquestracao — o mesmo desenho da lane
+ * normal, onde o timer vive em `executar-tarefa.ts` e a capability so
+ * oferece a escrita. Persistence que agenda a si mesma viraria um
+ * processo de fundo escondido dentro de um adaptador.
+ *
+ * ── So `heartbeat_em` ───────────────────────────────────────────────
+ *
+ * Nenhum outro campo entra no SET. `progresso` nao: a lane de retomada
+ * nao alimenta barra, e o CHECK `agente_tarefas_concluido_completo`
+ * torna o valor final assunto do terminalizador. Status, resultado e
+ * erro pertencem a quem termina o ciclo, nunca a quem prova que ele
+ * ainda esta vivo.
+ *
+ * ── As cinco cercas viajam no WHERE, nunca no SET ───────────────────
+ *
+ * `user_id` e CERCA, nao dado: como ele so aparece no filtro, este
+ * batimento nao tem como trocar o dono de uma tarefa. O mesmo vale para
+ * a tentativa e para o marcador.
+ */
+export async function registrarHeartbeatRetomada(
+  tarefaId: string,
+  userId: string,
+  tentativaEsperada: number,
+  retomadaRequestId: string
+): Promise<ResultadoHeartbeatRetomada> {
+  // `select("id")` NAO e enfeite: sem ele, zero linhas e uma linha
+  // voltam iguais, e o chamador nao conseguiria distinguir "renovei" de
+  // "o ciclo mudou". `.single()` esta fora de questao — ele ERRA em zero
+  // linhas, e aqui zero linhas e desfecho normal.
+  const { data, error } = await getSupabaseServidor()
+    .from("agente_tarefas")
+    .update({ heartbeat_em: new Date().toISOString() })
+    .eq("id", tarefaId)
+    .eq("user_id", userId)
+    .eq("status", "rodando")
+    .eq("tentativas", tentativaEsperada)
+    .eq("retomada_request_id", retomadaRequestId)
+    .select("id");
+
+  if (error) {
+    // Erro de banco NAO terminaliza. Se as batidas realmente pararem, a
+    // rede ja existe: depois de 5 minutos a recuperacao pode observar.
+    console.error("[agentes-retomada] heartbeat de retomada falhou");
+    return "indisponivel";
+  }
+  // FAIL CLOSED: sem erro mas com formato inesperado nao vira sucesso.
+  if (!Array.isArray(data)) {
+    console.error("[agentes-retomada] heartbeat de retomada devolveu formato inesperado");
+    return "indisponivel";
+  }
+  return data.length > 0 ? "renovado" : "sem_correspondencia";
+}

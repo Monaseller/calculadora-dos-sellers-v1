@@ -3464,6 +3464,131 @@ async function main() {
       vereditoRetomada(["persistencia-retomada.ts"]));
   }
 
+  // ────────────────────────────────────────────────────────────────
+  // V. APPROVAL-DECISION-RESUME-D5-C2-I2 — a LANE do batimento
+  //
+  // `status = 'rodando'` nao distingue execucao normal de retomada, e a
+  // retomada PRESERVA a tentativa. Sem uma cerca de marcador, o
+  // batimento da lane normal renovaria `heartbeat_em` de uma tarefa
+  // retomada e adiaria para sempre a recuperacao — que so age apos 5
+  // minutos sem batida. Esta secao prova a cerca DENTRO do corpo de
+  // `registrarProgresso`, nao em qualquer lugar do arquivo.
+  // ────────────────────────────────────────────────────────────────
+  {
+    const CODIGO_WORKER_V = codigo("lib/agentes/capability-worker.ts");
+    const CODIGO_PERSIST_V = codigo("lib/agentes/retomada/persistencia-retomada.ts");
+
+    /** Corpo EXATO de uma funcao exportada: da assinatura ate o `}` na
+     *  coluna 0. Recortar ate o proximo `export` pegaria o vizinho. */
+    const corpoDe = (fonte: string, nome: string): string => {
+      const linhas = fonte.split("\n");
+      const ini = linhas.findIndex((l) =>
+        new RegExp(`^export (async )?function ${nome}\\b`).test(l));
+      if (ini < 0) return "";
+      for (let j = ini + 1; j < linhas.length; j++) {
+        if (linhas[j] === "}") return linhas.slice(ini, j + 1).join("\n");
+      }
+      return "";
+    };
+
+    const CORPO_PROGRESSO = corpoDe(CODIGO_WORKER_V, "registrarProgresso");
+    const CORPO_TICK = corpoDe(CODIGO_PERSIST_V, "registrarHeartbeatRetomada");
+
+    ok("V0  ANCORA: o corpo de registrarProgresso foi isolado",
+      CORPO_PROGRESSO.length > 200 && CORPO_PROGRESSO.includes("agente_tarefas"));
+
+    // ── A cerca, DENTRO do corpo ────────────────────────────────────
+    ok("V1  registrarProgresso cerca por marcador IS NULL",
+      /\.is\(\s*"retomada_request_id"\s*,\s*null\s*\)/.test(CORPO_PROGRESSO));
+    ok("V2  e a cerca esta na MESMA cadeia do update de progresso+heartbeat",
+      /\.update\(\{[^}]*progresso[^}]*heartbeat_em[^}]*\}\)[\s\S]*?\.is\(\s*"retomada_request_id"\s*,\s*null\s*\)/
+        .test(CORPO_PROGRESSO));
+    ok("V3  as cercas antigas continuam: id e status",
+      /\.eq\(\s*"id"\s*,\s*tarefaId\s*\)/.test(CORPO_PROGRESSO) &&
+      /\.eq\(\s*"status"\s*,\s*"rodando"\s*\)/.test(CORPO_PROGRESSO));
+    ok("V4  UMA escrita apenas — a cerca protege a UPDATE inteira",
+      (CORPO_PROGRESSO.match(/\.update\(/g) ?? []).length === 1 &&
+      (CORPO_PROGRESSO.match(/\.from\(/g) ?? []).length === 1);
+    ok("V5  o payload nao mudou: progresso + heartbeat_em",
+      /\.update\(\{\s*progresso:\s*valor,\s*heartbeat_em:/.test(CORPO_PROGRESSO));
+    ok("V6  a lane normal NAO passou a ler retorno",
+      !/\.select\(|\.single\(|\.maybeSingle\(/.test(CORPO_PROGRESSO));
+    ok("V7  assinatura e contrato de retorno intactos",
+      /export async function registrarProgresso\(\s*tarefaId: string,\s*progresso: number\s*\): Promise<\{ erro: string \| null \}>/
+        .test(CODIGO_WORKER_V.replace(/\n/g, " ").replace(/\s+/g, " ")
+          .replace(/export async function registrarProgresso\( /, "export async function registrarProgresso(")));
+    ok("V8  higiene de erro preservada: nada de erro cru",
+      !/\.message\b|\.details\b|\.hint\b|JSON\.stringify/.test(CORPO_PROGRESSO));
+
+    // ── CONTROLES NEGATIVOS: o predicado precisa MORDER ─────────────
+    const SEM_CERCA =
+      'export async function registrarProgresso(\n' +
+      '  const { error } = await getSupabaseServidor()\n' +
+      '    .from("agente_tarefas")\n' +
+      '    .update({ progresso: valor, heartbeat_em: agora })\n' +
+      '    .eq("id", tarefaId)\n' +
+      '    .eq("status", "rodando");\n}';
+    ok("V9  CONTROLE: sem a cerca, V1 reprovaria",
+      !/\.is\(\s*"retomada_request_id"\s*,\s*null\s*\)/.test(SEM_CERCA));
+    ok("V10 CONTROLE: cercar por IGUALDADE em vez de IS NULL reprovaria",
+      !/\.is\(\s*"retomada_request_id"\s*,\s*null\s*\)/
+        .test('.eq("retomada_request_id", null)'));
+    ok("V11 CONTROLE: a cerca em OUTRA funcao do arquivo nao contaria",
+      corpoDe('export function outra() {\n  .is("retomada_request_id", null);\n}\n',
+        "registrarProgresso") === "");
+
+    // ── A LANE DE RETOMADA: o tick, e as cinco cercas ───────────────
+    ok("V12 ANCORA: o corpo do tick foi isolado",
+      CORPO_TICK.length > 200);
+    for (const [ordem, cerca] of [
+      ["1/5 id", '\\.eq\\(\\s*"id"\\s*,\\s*tarefaId\\s*\\)'],
+      ["2/5 user_id", '\\.eq\\(\\s*"user_id"\\s*,\\s*userId\\s*\\)'],
+      ["3/5 status", '\\.eq\\(\\s*"status"\\s*,\\s*"rodando"\\s*\\)'],
+      ["4/5 tentativas", '\\.eq\\(\\s*"tentativas"\\s*,\\s*tentativaEsperada\\s*\\)'],
+      ["5/5 marcador", '\\.eq\\(\\s*"retomada_request_id"\\s*,\\s*retomadaRequestId\\s*\\)'],
+    ] as Array<[string, string]>) {
+      ok(`V13 o tick de retomada tem a cerca ${ordem}`,
+        new RegExp(cerca).test(CORPO_TICK));
+    }
+    ok("V14 exatamente cinco cercas de igualdade, nem uma sexta",
+      (CORPO_TICK.match(/\.eq\(/g) ?? []).length === 5);
+    ok("V15 o tick escreve SO heartbeat_em",
+      /\.update\(\{\s*heartbeat_em:\s*new Date\(\)\.toISOString\(\)\s*\}\)/.test(CORPO_TICK) &&
+      !/progresso|status:|resultado:|erro_tipo:|erro_mensagem:/.test(CORPO_TICK));
+    ok("V16 o tick NAO cria timer nem agenda nada",
+      !/setInterval|setTimeout/.test(CORPO_TICK));
+    ok("V17 o tick NAO chama terminalizador, recuperacao nem RPC",
+      !/\.rpc\(/.test(CORPO_TICK) &&
+      !/falharTarefaRetomada|concluirTarefaRetomada|recuperarRetomadaStale/.test(CORPO_TICK) &&
+      !/\bfalharTarefa\b|\bconcluirTarefa\b|\bregistrarProgresso\b/.test(CORPO_TICK));
+
+    // ── DISJUNCAO BILATERAL ─────────────────────────────────────────
+    //
+    // Uma lane exige NULL, a outra exige igualdade com um request nao
+    // vazio. Nenhuma linha satisfaz as duas — a separacao e estrutural,
+    // nao convencao.
+    const normalExigeNull =
+      /\.is\(\s*"retomada_request_id"\s*,\s*null\s*\)/.test(CORPO_PROGRESSO);
+    const resumeExigeIgual =
+      /\.eq\(\s*"retomada_request_id"\s*,\s*retomadaRequestId\s*\)/.test(CORPO_TICK);
+    ok("V18 DISJUNCAO: normal exige NULL, retomada exige igualdade",
+      normalExigeNull && resumeExigeIgual);
+    ok("V19 a lane normal nunca compara marcador por igualdade",
+      !/\.eq\(\s*"retomada_request_id"/.test(CORPO_PROGRESSO));
+    ok("V20 e a lane de retomada nunca aceita marcador NULL",
+      !/\.is\(\s*"retomada_request_id"/.test(CORPO_TICK));
+
+    // ── F3 CONGELADO — a ENTRADA continua sem cerca, de proposito ───
+    //
+    // D5-C2-I2-A0-F3 permanece OPEN: este slice fecha o BATIMENTO, nao a
+    // entrada. Estes dois asserts existem para que fechar F3 mais tarde
+    // seja uma mudanca VISIVEL, e nao um efeito colateral silencioso.
+    ok("V21 F3 ABERTO: COLUNAS_TAREFA ainda nao projeta o marcador",
+      !/COLUNAS_TAREFA[\s\S]{0,400}?retomada_request_id/.test(CODIGO_WORKER_V));
+    ok("V22 F3 ABERTO: executar-tarefa ainda nao conhece o marcador",
+      !/retomada_request_id/.test(codigo("lib/agentes/executar-tarefa.ts")));
+  }
+
   const total = passou + falhou;
   console.log(`\n${"=".repeat(58)}`);
   console.log(`AGENTES-FASE1C — execucao:  ${passou}/${total} passaram`);
