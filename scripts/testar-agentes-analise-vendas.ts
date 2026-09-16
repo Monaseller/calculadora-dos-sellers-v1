@@ -1327,12 +1327,51 @@ const ARQUIVOS_RESUME_D5_C1: readonly string[] = [
  * desde a FUNCTION-RUNTIME-P0, e a origem de cada liberacao precisa
  * continuar legivel.
  *
- * `lib/agentes/retomada/persistencia-retomada.ts` NAO entra: ele nao
- * existe neste slice, e declarar caminho inexistente abriria a porta
- * antes da revisao que deve guarda-la.
+ * `lib/agentes/retomada/persistencia-retomada.ts` NAO entra AQUI: ele
+ * chegou no slice seguinte e tem lista propria, logo abaixo. Cada
+ * liberacao guarda a origem que a autorizou.
  */
 const ARQUIVOS_RESUME_D5_C2_I0: readonly string[] = [
   "lib/agentes/normalizar-linha.ts",
+];
+
+/**
+ * APPROVAL-DECISION-RESUME-D5-C2-I1 — a persistence da lane de retomada.
+ *
+ * UM caminho, e so um. O modulo adapta as quatro RPCs do D5 para
+ * contratos TypeScript e nasce DORMENTE: compila, e nao tem chamador de
+ * producao.
+ *
+ * A liberacao e NOMINAL, nunca da pasta. `lib/agentes/retomada/` vai
+ * receber mais modulos nos slices seguintes — orquestrador, lane de
+ * heartbeat — e cada um deve passar pela revisao que o autoriza.
+ *
+ * ── O colapso do porcelain, de novo ─────────────────────────────────
+ *
+ * `lib/agentes/retomada/` nasce inteiramente untracked, e o
+ * `git status --porcelain` COLAPSA diretorio assim numa unica linha.
+ * MEDIDO nesta arvore, nao suposto:
+ *
+ *     ?? lib/agentes/retomada/
+ *
+ * E o mesmo buraco que `ARQUIVOS_1EA` documentou para `lib/agentes/ia/`
+ * e `ARQUIVOS_FUNCTION_RUNTIME_V1B1` para a pasta do dispatcher. Aceitar
+ * a forma colapsada sozinha abriria a pasta inteira.
+ *
+ * Entao vale o MESMO par: a forma colapsada entra aqui, e o conteudo do
+ * diretorio e verificado SEPARADAMENTE, por enumeracao real de disco, em
+ * G11z10. Quem remover um tem de remover o outro, ou o guarda fica cego
+ * sem que nenhum teste reclame. A forma expandida tambem entra, porque o
+ * colapso e transitorio: no `git add` os arquivos passam a aparecer um a
+ * um.
+ */
+const ARQUIVOS_RETOMADA_D5_C2_I1: readonly string[] = [
+  "persistencia-retomada.ts",
+];
+
+const ARQUIVOS_RESUME_D5_C2_I1: readonly string[] = [
+  "lib/agentes/retomada/",
+  ...ARQUIVOS_RETOMADA_D5_C2_I1.map((nome) => `lib/agentes/retomada/${nome}`),
 ];
 
 /** Uniao EXPLICITA. Qualquer caminho fora dela reprova o G11. */
@@ -1368,6 +1407,7 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_FUNCTION_RUNTIME_V1B1,
   ...ARQUIVOS_RESUME_D5_C1,
   ...ARQUIVOS_RESUME_D5_C2_I0,
+  ...ARQUIVOS_RESUME_D5_C2_I1,
 ];
 
 /**
@@ -2428,15 +2468,45 @@ async function main() {
     ok("G11f22 aceita o normalizador, untracked e staged",
        soAutorizadosNoEscopo("?? lib/agentes/normalizar-linha.ts\n") &&
        soAutorizadosNoEscopo("A  lib/agentes/normalizar-linha.ts\n"));
-    // CONTROLES NEGATIVOS: a liberacao e de UM arquivo, nao da pasta —
-    // e o modulo de persistence da retomada ainda NAO pode passar,
-    // porque ele nao existe e nao foi revisado.
+    // CONTROLES NEGATIVOS: a liberacao e de UM arquivo, nao da pasta.
     ok("G11f23 CONTROLE NEGATIVO: um sibling neutro nao declarado reprova",
        !soAutorizadosNoEscopo("?? lib/agentes/normalizar-coluna.ts\n"));
-    ok("G11f24 CONTROLE NEGATIVO: a persistence da retomada ainda reprova",
-       !soAutorizadosNoEscopo("?? lib/agentes/retomada/persistencia-retomada.ts\n"));
+    ok("G11f24 a lista do I0 NAO e quem autoriza a persistence da retomada",
+       !ARQUIVOS_RESUME_D5_C2_I0.includes("lib/agentes/retomada/persistencia-retomada.ts"));
     ok("G11f25 CONTROLE NEGATIVO: sufixo igual em outra pasta reprova",
        !soAutorizadosNoEscopo("?? outra/pasta/normalizar-linha.ts\n"));
+    // ── APPROVAL-DECISION-RESUME-D5-C2-I1 ──────────────────────────
+    ok("G11f26 a pasta da retomada declara exatamente 1 modulo",
+       ARQUIVOS_RETOMADA_D5_C2_I1.length === 1);
+    ok("G11f27 e ele e exatamente a persistence da retomada",
+       ARQUIVOS_RETOMADA_D5_C2_I1[0] === "persistencia-retomada.ts" &&
+       ARQUIVOS_RESUME_D5_C2_I1.includes("lib/agentes/retomada/persistencia-retomada.ts"));
+    ok("G11f28 a uniao tem SO a forma colapsada e a expandida, sem glob",
+       ARQUIVOS_RESUME_D5_C2_I1.length === 2 &&
+       ARQUIVOS_RESUME_D5_C2_I1.every((p) => !p.includes("*")) &&
+       ARQUIVOS_RESUME_D5_C2_I1.filter((p) => p.endsWith("/")).length === 1);
+    ok("G11f29 entra na uniao que o G11 consulta",
+       ARQUIVOS_ESPERADOS.includes("lib/agentes/retomada/persistencia-retomada.ts"));
+    ok("G11f30 aceita a persistence, untracked e staged",
+       soAutorizadosNoEscopo("?? lib/agentes/retomada/persistencia-retomada.ts\n") &&
+       soAutorizadosNoEscopo("A  lib/agentes/retomada/persistencia-retomada.ts\n"));
+    // A pasta `lib/agentes/retomada/` vai crescer. Estes tres controles
+    // existem para que o proximo modulo dela — orquestrador, lane de
+    // heartbeat — precise da SUA propria revisao, em vez de entrar de
+    // carona na liberacao deste.
+    ok("G11f31 CONTROLE NEGATIVO: um sibling nao declarado na MESMA pasta reprova",
+       !soAutorizadosNoEscopo("?? lib/agentes/retomada/orquestrador-retomada.ts\n"));
+    ok("G11f32 CONTROLE NEGATIVO: a lane de heartbeat da retomada ainda reprova",
+       !soAutorizadosNoEscopo("?? lib/agentes/retomada/heartbeat-retomada.ts\n"));
+    ok("G11f33 CONTROLE NEGATIVO: mesmo basename em outra pasta reprova",
+       !soAutorizadosNoEscopo("?? lib/agentes/persistencia-retomada.ts\n") &&
+       !soAutorizadosNoEscopo("?? outra/pasta/persistencia-retomada.ts\n"));
+    ok("G11f34 CONTROLE NEGATIVO: autorizado + intruso na pasta reprova",
+       !soAutorizadosNoEscopo(
+         "?? lib/agentes/retomada/persistencia-retomada.ts\n" +
+         "?? lib/agentes/retomada/worker-retomada.ts\n"));
+    ok("G11f35 as duas listas de Resume sao DISJUNTAS",
+       ARQUIVOS_RESUME_D5_C2_I0.every((p) => !ARQUIVOS_RESUME_D5_C2_I1.includes(p)));
     ok("G11g CONTROLE NEGATIVO: migration nova no escopo reprova", !soAutorizadosNoEscopo("?? supabase/migrations/99999999_falsa.sql\n"));
     ok("G11h CONTROLE NEGATIVO: autorizados + intruso reprova", !soAutorizadosNoEscopo(" M lib/agentes/handlers/registry.ts\n M lib/agentes/tipos-execucao.ts\n"));
     ok("G11i CONTROLE NEGATIVO: sufixo parecido em outra pasta reprova", !soAutorizadosNoEscopo("?? outra/pasta/registry.ts\n"));
@@ -2489,6 +2559,31 @@ async function main() {
        soAutorizadosNoEscopo("?? app/api/internal/agentes/worker/\n"));
     ok("G11z9 CONTROLE NEGATIVO: arquivo expandido NAO declarado na pasta reprova",
        !soAutorizadosNoEscopo("?? app/api/internal/agentes/worker/_intruso.ts\n"));
+
+    // ── G11z10..G11z14 — o MESMO par, para lib/agentes/retomada/ ───
+    //
+    // Pasta nova da D5-C2-I1, hoje inteiramente untracked: o porcelain a
+    // colapsa exatamente como colapsava `ia/` e a do dispatcher. Como a
+    // forma colapsada e aceita pelo oraculo git, sem estes asserts um
+    // segundo modulo la dentro — o orquestrador, a lane de heartbeat —
+    // entraria de carona na revisao deste. Ver o docblock de
+    // `ARQUIVOS_RESUME_D5_C2_I1`.
+    const soAutorizadosNaRetomada = (nomes: readonly string[]): boolean =>
+      mesmoConjuntoDeNomes(nomes, ARQUIVOS_RETOMADA_D5_C2_I1);
+
+    const conteudoRetomada = readdirSync(join(RAIZ, "lib", "agentes", "retomada")).sort();
+
+    ok("G11z10 lib/agentes/retomada contem exatamente o modulo declarado (D5-C2-I1)",
+       soAutorizadosNaRetomada(conteudoRetomada));
+    ok("G11z11 ANCORA: o diretorio foi mesmo lido e nao veio vazio",
+       conteudoRetomada.length === ARQUIVOS_RETOMADA_D5_C2_I1.length &&
+       conteudoRetomada.length > 0);
+    ok("G11z12 CONTROLE NEGATIVO: um segundo modulo na pasta reprova",
+       !soAutorizadosNaRetomada([...ARQUIVOS_RETOMADA_D5_C2_I1, "orquestrador-retomada.ts"]));
+    ok("G11z13 CONTROLE NEGATIVO: mesma quantidade, nome trocado, reprova",
+       !soAutorizadosNaRetomada(["heartbeat-retomada.ts"]));
+    ok("G11z14 a forma COLAPSADA da pasta e aceita pelo oraculo git (par de G11z10)",
+       soAutorizadosNoEscopo("?? lib/agentes/retomada/\n"));
 
     // ── G11x..G11z2 — o MESMO par, para lib/agentes/permissoes/ ────
     // Pasta nova da SKILL-1D.d.2, hoje inteiramente untracked: o

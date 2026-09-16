@@ -3415,8 +3415,53 @@ async function main() {
                        "retomada_recuperar_tarefa_stale", "retomada_concluir_tarefa"]) {
       ok(`T13 o modulo neutro nao cita a RPC \`${rpc}\``, !CODIGO_NEUTRO.includes(rpc));
     }
-    ok("T14 `lib/agentes/retomada/` continua inexistente neste slice",
-      !existsSync(join(RAIZ, "lib/agentes/retomada")));
+    // ── T14 — a FASE do fluxo D5, medida no disco ─────────────────────
+    //
+    // Ate o I0 esta tripwire exigia a AUSENCIA de `lib/agentes/retomada/`:
+    // a pasta nao podia existir antes da revisao que a autorizasse. O I1
+    // criou o modulo de persistence, e entao ela AVANCOU de fase em vez
+    // de ser apagada — remover o assert trocaria uma prova por um
+    // silencio, e a pasta passaria a crescer sem que nada reclamasse.
+    //
+    // O que ela mede agora: a pasta existe, tem exatamente o modulo
+    // revisado, e nenhum sibling entrou de carona.
+    //
+    // O predicado e de LISTA, nao de disco, pelo mesmo motivo dos
+    // controles do G11: assim os cenarios negativos alimentam inventario
+    // sintetico sem criar arquivo nenhum na arvore. A leitura real
+    // acontece uma vez, e `null` representa a pasta ausente.
+    const RETOMADA_ESPERADO = ["persistencia-retomada.ts"];
+    const vereditoRetomada = (conteudo: readonly string[] | null): boolean => {
+      if (conteudo === null) return false;
+      const a = [...conteudo].sort();
+      const b = [...RETOMADA_ESPERADO].sort();
+      return a.length === b.length && a.every((nome, i) => nome === b[i]);
+    };
+
+    const DIR_RETOMADA = join(RAIZ, "lib/agentes/retomada");
+    const conteudoRetomada = existsSync(DIR_RETOMADA)
+      ? readdirSync(DIR_RETOMADA).sort()
+      : null;
+
+    ok("T14 `lib/agentes/retomada/` existe e tem so o modulo autorizado do I1",
+      vereditoRetomada(conteudoRetomada));
+    ok("T14a ANCORA: a pasta foi mesmo lida e o modulo esta no disco",
+      conteudoRetomada !== null && conteudoRetomada.length === 1 &&
+      existsSync(join(DIR_RETOMADA, "persistencia-retomada.ts")));
+    ok("T14b CONTROLE NEGATIVO: pasta AUSENTE reprova",
+      !vereditoRetomada(null));
+    ok("T14c CONTROLE NEGATIVO: pasta VAZIA, sem o modulo esperado, reprova",
+      !vereditoRetomada([]));
+    ok("T14d CONTROLE NEGATIVO: um sibling a mais reprova",
+      !vereditoRetomada(["persistencia-retomada.ts", "orquestrador-retomada.ts"]) &&
+      !vereditoRetomada(["persistencia-retomada.ts", "heartbeat-retomada.ts"]));
+    ok("T14e CONTROLE NEGATIVO: nome PARECIDO nao passa por igualdade exata",
+      !vereditoRetomada(["persistencia-retomada.tsx"]) &&
+      !vereditoRetomada(["persistencia-retomada.ts.bak"]) &&
+      !vereditoRetomada(["persistencia_retomada.ts"]) &&
+      !vereditoRetomada(["Persistencia-Retomada.ts"]));
+    ok("T14f CONTROLE POSITIVO: somente o modulo esperado passa",
+      vereditoRetomada(["persistencia-retomada.ts"]));
   }
 
   const total = passou + falhou;

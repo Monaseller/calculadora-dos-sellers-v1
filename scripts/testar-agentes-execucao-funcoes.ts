@@ -2025,6 +2025,395 @@ async function principal(): Promise<void> {
     }
   }
 
+  // ─── K. RESUME-D5-C2-I1: persistence da retomada, dormente ─────────
+
+  secao("K. RESUME-D5-C2-I1: persistence da retomada, dormente");
+  {
+    const PERSIST = "lib/agentes/retomada/persistencia-retomada.ts";
+    const PERSIST_FONTE = ler(PERSIST);
+    const PERSIST_CODIGO = semComentarios(PERSIST_FONTE);
+
+    const p = await import("../lib/agentes/retomada/persistencia-retomada");
+    const {
+      iniciarRetomadaAprovacao,
+      falharTarefaRetomada,
+      recuperarRetomadaStale,
+      concluirTarefaRetomada,
+      ehCodigoRetomadaInicio,
+      ehCodigoRetomadaRecuperacao,
+      codigosRetomadaInicio,
+      codigosRetomadaRecuperacao,
+    } = p;
+
+    ok("K0  ANCORA: o modulo foi lido e carregado",
+      PERSIST_CODIGO.length > 1000 && typeof iniciarRetomadaAprovacao === "function");
+
+    // ── §29. As QUATRO RPCs, e nenhuma quinta ───────────────────────
+    //
+    // Conta sobre o codigo SEM comentarios: uma RPC citada em prosa nao
+    // e uma RPC chamada.
+    const rpcsNoModulo = [...PERSIST_CODIGO.matchAll(/\.rpc\(\s*"([a-z_]+)"/g)].map((m) => m[1]);
+    ok(`K1  exatamente quatro chamadas .rpc (${rpcsNoModulo.length})`,
+      rpcsNoModulo.length === 4);
+    ok("K2  e elas sao as quatro RPCs da retomada, uma vez cada",
+      [...rpcsNoModulo].sort().join(",") === [
+        "retomada_concluir_tarefa",
+        "retomada_falhar_tarefa",
+        "retomada_recuperar_tarefa_stale",
+        "retomar_aprovacao_iniciar",
+      ].join(","));
+    ok("K3  CONTROLE: uma quinta RPC seria detectada",
+      [...rpcsNoModulo, "aprovacao_criar"].length !== 4);
+
+    // ── §28. Os terminalizadores GENERICOS nao aparecem ─────────────
+    //
+    // CUIDADO deliberado: `retomada_falhar_tarefa` CONTEM
+    // `falhar_tarefa` como substring, e `falharTarefaRetomada` contem
+    // `falharTarefa`. Um matcher ingenuo acusaria o modulo correto. O
+    // `\b` resolve porque `_` conta como caractere de palavra — e K7
+    // prova que o cuidado nao e decorativo.
+    const generico = (nome: string) => new RegExp(`\\b${nome}\\b`).test(PERSIST_CODIGO);
+    ok("K4  nao chama as RPCs genericas de tarefa",
+      !generico("falhar_tarefa") && !generico("concluir_tarefa") &&
+      !generico("aguardar_aprovacao_tarefa"));
+    ok("K5  nao importa nem chama os wrappers genericos",
+      !generico("falharTarefa") && !generico("concluirTarefa") &&
+      !generico("registrarProgresso") && !generico("aguardarAprovacaoTarefa"));
+    ok("K6  nao importa capability-worker",
+      !/capability-worker/.test(PERSIST_CODIGO));
+    ok("K7  CONTROLE: o matcher ingenuo por substring acusaria o modulo CORRETO",
+      PERSIST_CODIGO.includes("falhar_tarefa") &&
+      PERSIST_CODIGO.includes("concluir_tarefa") &&
+      !generico("falhar_tarefa") && !generico("concluir_tarefa"));
+    ok("K8  CONTROLE: o matcher com \\b acusaria a RPC generica de verdade",
+      /\bfalhar_tarefa\b/.test('await x.rpc("falhar_tarefa", {})') &&
+      /\bconcluir_tarefa\b/.test('await x.rpc("concluir_tarefa", {})'));
+
+    // ── §36. O normalizador e REUSADO, nunca recopiado ──────────────
+    ok("K9  importa o normalizador neutro compartilhado",
+      /from\s+"@\/lib\/agentes\/normalizar-linha"/.test(PERSIST_CODIGO));
+    ok("K10 nao define normalizarLinha localmente",
+      !/(function|const)\s+normalizarLinha/.test(PERSIST_CODIGO));
+    ok("K11 nem recopia o CORPO dele",
+      !/Array\.isArray\(\s*data\s*\)/.test(PERSIST_CODIGO));
+
+    // ── §30. Os 17 codigos de INICIO, escritos aqui ─────────────────
+    //
+    // Esta lista NAO deriva da constante de producao: ela foi digitada
+    // a partir da migration. Se a de producao mudar sozinha, o conjunto
+    // deixa de bater e esta suite fica vermelha.
+    const INICIO_ESPERADO = [
+      "agente_indisponivel", "aprovacao_desatualizada", "aprovacao_inexistente",
+      "aprovacao_pendente", "conexao_indisponivel", "consumida", "entrada_invalida",
+      "escrita_nao_suportada", "expirada", "funcao_incompativel", "ja_cancelada",
+      "ja_consumida", "ja_rejeitada", "permissao_ausente", "permissao_bloqueada",
+      "tarefa_incompativel", "tarefa_indisponivel",
+    ];
+    ok("K12 sao 17 codigos de inicio", INICIO_ESPERADO.length === 17);
+    ok("K13 o catalogo de producao tem o MESMO conjunto, sem sobra nem falta",
+      [...codigosRetomadaInicio()].sort().join(",") === [...INICIO_ESPERADO].sort().join(","));
+    ok("K14 todos os 17 sao aceitos pelo guard",
+      INICIO_ESPERADO.every((c) => ehCodigoRetomadaInicio(c)));
+    ok("K15 e desconhecido/null/numero/objeto sao recusados",
+      !ehCodigoRetomadaInicio("consumido") && !ehCodigoRetomadaInicio(null) &&
+      !ehCodigoRetomadaInicio(undefined) && !ehCodigoRetomadaInicio(1) &&
+      !ehCodigoRetomadaInicio({}) && !ehCodigoRetomadaInicio("") &&
+      !ehCodigoRetomadaInicio("toString"));
+
+    // ── §31. Os 5 codigos de RECUPERACAO, escritos aqui ─────────────
+    const RECUP_ESPERADO = [
+      "causal_incompativel", "entrada_invalida", "execucao_incerta",
+      "execucao_ja_ocorrida_resultado_indisponivel", "nao_stale",
+    ];
+    ok("K16 sao 5 codigos de recuperacao", RECUP_ESPERADO.length === 5);
+    ok("K17 o catalogo de producao tem o MESMO conjunto",
+      [...codigosRetomadaRecuperacao()].sort().join(",") === [...RECUP_ESPERADO].sort().join(","));
+    ok("K18 todos os 5 sao aceitos pelo guard",
+      RECUP_ESPERADO.every((c) => ehCodigoRetomadaRecuperacao(c)));
+    ok("K19 e desconhecido/null sao recusados",
+      !ehCodigoRetomadaRecuperacao("stale") && !ehCodigoRetomadaRecuperacao(null) &&
+      !ehCodigoRetomadaRecuperacao(undefined) && !ehCodigoRetomadaRecuperacao(""));
+    ok("K20 os dois catalogos sao DISJUNTOS, exceto entrada_invalida",
+      codigosRetomadaInicio().filter((c) =>
+        (codigosRetomadaRecuperacao() as readonly string[]).includes(c)
+      ).join(",") === "entrada_invalida");
+
+    // ── INICIO: comportamento real, contra o duplo ──────────────────
+    roteiro();
+    roteiroRpc({ data: "consumida" });
+    const inicioOk = await iniciarRetomadaAprovacao(
+      USER, APROVACAO, "req-1", "7", "consultar_vendas", "vendas.consultar");
+    ok("K21 inicio bem-sucedido devolve ok + codigo de dominio",
+      inicioOk.ok === true && inicioOk.ok && inicioOk.codigo === "consumida");
+    ok("K22 chamou UMA RPC, e e a do inicio de retomada",
+      chamadasRpc.length === 1 && chamadasRpc[0]?.nome === "retomar_aprovacao_iniciar");
+    ok("K23 com os SEIS parametros exatos da migration",
+      JSON.stringify(Object.keys(chamadasRpc[0]?.parametros ?? {}).sort()) ===
+      JSON.stringify(["p_aprovacao_id", "p_funcao_id_esperada", "p_request_id",
+        "p_revisao_atual", "p_tipo_tarefa_esperado", "p_user_id"]));
+    ok("K24 e os valores viajam sem transformacao",
+      chamadasRpc[0]?.parametros?.p_user_id === USER &&
+      chamadasRpc[0]?.parametros?.p_aprovacao_id === APROVACAO &&
+      chamadasRpc[0]?.parametros?.p_request_id === "req-1" &&
+      chamadasRpc[0]?.parametros?.p_revisao_atual === "7" &&
+      chamadasRpc[0]?.parametros?.p_tipo_tarefa_esperado === "consultar_vendas" &&
+      chamadasRpc[0]?.parametros?.p_funcao_id_esperada === "vendas.consultar");
+
+    roteiro();
+    roteiroRpc({ data: "  consumida  " });
+    const inicioEspaco = await iniciarRetomadaAprovacao(
+      USER, APROVACAO, " req-1 ", "7", "consultar_vendas", "vendas.consultar");
+    ok("K25 o request id NAO e aparado pelo wrapper",
+      chamadasRpc[0]?.parametros?.p_request_id === " req-1 ");
+    ok("K26 e um codigo com espacos NAO e normalizado para caber — falha fechado",
+      inicioEspaco.ok === false && !inicioEspaco.ok &&
+      inicioEspaco.falha === "resposta_invalida");
+
+    roteiro();
+    roteiroRpc({ data: "codigo_inventado" });
+    const inicioDesconhecido = await iniciarRetomadaAprovacao(
+      USER, APROVACAO, "req-1", "7", "consultar_vendas", "vendas.consultar");
+    ok("K27 codigo fora do catalogo NAO vira codigo por cast",
+      inicioDesconhecido.ok === false && !inicioDesconhecido.ok &&
+      inicioDesconhecido.falha === "resposta_invalida");
+
+    roteiro();
+    roteiroRpc({ data: null });
+    const inicioNulo = await iniciarRetomadaAprovacao(
+      USER, APROVACAO, "req-1", "7", "consultar_vendas", "vendas.consultar");
+    ok("K28 data null falha fechado",
+      inicioNulo.ok === false && !inicioNulo.ok && inicioNulo.falha === "resposta_invalida");
+
+    // ── §33. SQLSTATE: os tres ramos, exercitados ───────────────────
+    const falhaDeErro = async (erro: Record<string, unknown>): Promise<string> => {
+      roteiro();
+      roteiroRpc({ data: null, error: erro });
+      const r = await iniciarRetomadaAprovacao(
+        USER, APROVACAO, "req-1", "7", "consultar_vendas", "vendas.consultar");
+      return r.ok ? "NAO_FALHOU" : r.falha;
+    };
+    ok("K29 22023 vira rpc_entrada_invalida",
+      (await falhaDeErro({ code: "22023" })) === "rpc_entrada_invalida");
+    ok("K30 55000 vira rpc_fora_de_contrato",
+      (await falhaDeErro({ code: "55000" })) === "rpc_fora_de_contrato");
+    ok("K31 outro code vira rpc_indisponivel",
+      (await falhaDeErro({ code: "08006" })) === "rpc_indisponivel");
+    ok("K32 code AUSENTE tambem vira rpc_indisponivel",
+      (await falhaDeErro({ message: "boom" })) === "rpc_indisponivel");
+    // A comparacao e por STRING. Um driver que entregasse o SQLSTATE
+    // como numero nao pode ser lido como entrada invalida por acidente:
+    // classificar errado aqui mandaria o chamador tratar uma falha de
+    // transporte como recusa definitiva do banco.
+    ok("K33 SQLSTATE NUMERICO nao e confundido com o codigo textual",
+      (await falhaDeErro({ code: 22023 })) === "rpc_indisponivel" &&
+      (await falhaDeErro({ code: 55000 })) === "rpc_indisponivel");
+    ok("K34 CONTROLE: os quatro rotulos de falha sao distintos",
+      new Set(["rpc_entrada_invalida", "rpc_fora_de_contrato",
+        "rpc_indisponivel", "resposta_invalida"]).size === 4);
+
+    // ── FALHA: RPC propria, mensagem limitada, linha validada ───────
+    const linhaTarefa = (partes: Record<string, unknown> = {}) => ({
+      id: TAREFA, agente_id: AGENTE, user_id: USER, tipo: "consultar_vendas",
+      entrada: {}, status: "erro", progresso: 0, resultado: null,
+      erro_tipo: "x", erro_mensagem: "y", tentativas: 1, max_tentativas: 3,
+      criado_em: "2026-09-16T00:00:00Z", iniciado_em: null, concluido_em: null,
+      heartbeat_em: null, ...partes,
+    });
+
+    roteiro();
+    roteiroRpc({ data: linhaTarefa() });
+    const falhouOk = await falharTarefaRetomada(
+      TAREFA, USER, "erro_execucao", "m".repeat(900), 1, "req-1");
+    ok("K35 falha devolve a linha validada",
+      falhouOk.ok === true && falhouOk.ok && falhouOk.linha.id === TAREFA);
+    ok("K36 chamou UMA RPC, e e a da retomada — nunca a generica",
+      chamadasRpc.length === 1 &&
+      chamadasRpc[0]?.nome === "retomada_falhar_tarefa");
+    ok("K37 com os SEIS parametros exatos",
+      JSON.stringify(Object.keys(chamadasRpc[0]?.parametros ?? {}).sort()) ===
+      JSON.stringify(["p_erro_mensagem", "p_erro_tipo", "p_retomada_request_id",
+        "p_tarefa_id", "p_tentativa_esperada", "p_user_id"]));
+    ok("K38 a mensagem chega ao banco cortada em EXATAMENTE 300",
+      (chamadasRpc[0]?.parametros?.p_erro_mensagem as string).length === 300);
+    ok("K39 CONTROLE: o limite e 300, nao 500 nem o tamanho original",
+      (chamadasRpc[0]?.parametros?.p_erro_mensagem as string).length !== 500 &&
+      (chamadasRpc[0]?.parametros?.p_erro_mensagem as string).length !== 900);
+
+    roteiro();
+    roteiroRpc({ data: [linhaTarefa()] });
+    const falhouArray = await falharTarefaRetomada(TAREFA, USER, "e", "m", 1, "req-1");
+    ok("K40 linha composta em ARRAY e normalizada pelo helper compartilhado",
+      falhouArray.ok === true && falhouArray.ok && falhouArray.linha.id === TAREFA);
+
+    roteiro();
+    roteiroRpc({ data: [] });
+    const falhouVazio = await falharTarefaRetomada(TAREFA, USER, "e", "m", 1, "req-1");
+    ok("K41 array VAZIO nunca conta como sucesso",
+      falhouVazio.ok === false && !falhouVazio.ok &&
+      falhouVazio.falha === "resposta_invalida");
+
+    roteiro();
+    roteiroRpc({ data: { id: TAREFA } });
+    const falhouParcial = await falharTarefaRetomada(TAREFA, USER, "e", "m", 1, "req-1");
+    ok("K42 linha SEM os campos minimos falha fechado",
+      falhouParcial.ok === false && !falhouParcial.ok &&
+      falhouParcial.falha === "resposta_invalida");
+
+    roteiro();
+    roteiroRpc({ data: null, error: { code: "55000" } });
+    const falhouCerca = await falharTarefaRetomada(TAREFA, USER, "e", "m", 9, "req-errado");
+    ok("K43 cerca que nao casa vira rpc_fora_de_contrato, sem linha",
+      falhouCerca.ok === false && !falhouCerca.ok &&
+      falhouCerca.falha === "rpc_fora_de_contrato");
+
+    // ── RECUPERACAO: observacional, uma RPC, codigo validado ────────
+    roteiro();
+    roteiroRpc({ data: "nao_stale" });
+    const recupOk = await recuperarRetomadaStale(TAREFA, USER, 1, "req-1");
+    ok("K44 recuperacao devolve o codigo de dominio",
+      recupOk.ok === true && recupOk.ok && recupOk.codigo === "nao_stale");
+    ok("K45 chamou UMA RPC, e e a de recuperacao",
+      chamadasRpc.length === 1 &&
+      chamadasRpc[0]?.nome === "retomada_recuperar_tarefa_stale");
+    ok("K46 com os QUATRO parametros exatos",
+      JSON.stringify(Object.keys(chamadasRpc[0]?.parametros ?? {}).sort()) ===
+      JSON.stringify(["p_retomada_request_id", "p_tarefa_id",
+        "p_tentativa_esperada", "p_user_id"]));
+    ok("K47 o corte de 5 minutos NAO viaja do TypeScript",
+      !/5\s*\*\s*60|300000|minutes/.test(PERSIST_CODIGO));
+
+    for (const codigo of RECUP_ESPERADO) {
+      roteiro();
+      roteiroRpc({ data: codigo });
+      const r = await recuperarRetomadaStale(TAREFA, USER, 1, "req-1");
+      ok(`K48 recuperacao aceita o codigo real "${codigo}"`,
+        r.ok === true && r.ok && r.codigo === codigo && chamadasRpc.length === 1);
+    }
+
+    roteiro();
+    roteiroRpc({ data: "recuperada" });
+    const recupDesconhecido = await recuperarRetomadaStale(TAREFA, USER, 1, "req-1");
+    ok("K49 codigo fora do catalogo de recuperacao falha fechado",
+      recupDesconhecido.ok === false && !recupDesconhecido.ok &&
+      recupDesconhecido.falha === "resposta_invalida");
+
+    // ── SUCESSO: a RPC propria, jamais a generica ───────────────────
+    roteiro();
+    roteiroRpc({ data: linhaTarefa({ status: "concluido", progresso: 100 }) });
+    const concluiuOk = await concluirTarefaRetomada(
+      TAREFA, USER, { total: 1 }, 1, "req-1");
+    ok("K50 sucesso devolve a linha validada",
+      concluiuOk.ok === true && concluiuOk.ok && concluiuOk.linha.status === "concluido");
+    ok("K51 chamou UMA RPC, e e a de conclusao de RETOMADA",
+      chamadasRpc.length === 1 &&
+      chamadasRpc[0]?.nome === "retomada_concluir_tarefa");
+    ok("K52 e NAO o terminalizador generico de sucesso",
+      chamadasRpc.every((c) => c.nome !== "concluir_tarefa"));
+    ok("K53 com os CINCO parametros exatos",
+      JSON.stringify(Object.keys(chamadasRpc[0]?.parametros ?? {}).sort()) ===
+      JSON.stringify(["p_resultado", "p_retomada_request_id", "p_tarefa_id",
+        "p_tentativa_esperada", "p_user_id"]));
+    ok("K54 o marcador causal viaja em toda escrita terminal",
+      chamadasRpc[0]?.parametros?.p_retomada_request_id === "req-1");
+    ok("K55 o wrapper NAO forca progresso — isso e do banco",
+      !/progresso/.test(PERSIST_CODIGO));
+
+    roteiro();
+    roteiroRpc({ data: [] });
+    const concluiuVazio = await concluirTarefaRetomada(TAREFA, USER, {}, 1, "req-1");
+    ok("K56 conclusao com retorno vazio NUNCA e sucesso",
+      concluiuVazio.ok === false && !concluiuVazio.ok &&
+      concluiuVazio.falha === "resposta_invalida");
+
+    roteiro();
+    roteiroRpc({ data: null, error: { code: "22023" } });
+    const concluiuInvalido = await concluirTarefaRetomada(TAREFA, USER, {}, 1, "");
+    ok("K57 entrada recusada pelo banco vira rpc_entrada_invalida",
+      concluiuInvalido.ok === false && !concluiuInvalido.ok &&
+      concluiuInvalido.falha === "rpc_entrada_invalida");
+
+    // ── §35. ROTEAMENTO: cada desfecho na sua lane ──────────────────
+    //
+    // Varredura sobre TODAS as chamadas que os cenarios acima
+    // produziram nao serviria: `roteiro()` limpa o canal. A prova e
+    // por cenario, e aqui ela e consolidada no fonte.
+    const linhaDoWrapper = (nome: string): string => {
+      const i = PERSIST_CODIGO.indexOf(`export async function ${nome}`);
+      return i < 0 ? "" : PERSIST_CODIGO.slice(i, i + 1400);
+    };
+    ok("K58 concluirTarefaRetomada so alcanca retomada_concluir_tarefa",
+      /\.rpc\(\s*"retomada_concluir_tarefa"/.test(linhaDoWrapper("concluirTarefaRetomada")) &&
+      !/\bconcluir_tarefa\b/.test(linhaDoWrapper("concluirTarefaRetomada")));
+    ok("K59 falharTarefaRetomada so alcanca retomada_falhar_tarefa",
+      /\.rpc\(\s*"retomada_falhar_tarefa"/.test(linhaDoWrapper("falharTarefaRetomada")) &&
+      !/\bfalhar_tarefa\b/.test(linhaDoWrapper("falharTarefaRetomada")));
+
+    // ── §32. Higiene de erro ────────────────────────────────────────
+    ok("K60 zero leitura de message/details/hint do erro",
+      !/error\.message|error\.details|error\.hint|\.message\b/.test(PERSIST_CODIGO));
+    ok("K61 zero serializacao ou log do erro bruto",
+      !/JSON\.stringify\(\s*err|console\.(error|log|warn)\([^")]*err/.test(PERSIST_CODIGO));
+    ok("K62 zero throw de erro do driver",
+      !/throw\s+err|throw\s+error/.test(PERSIST_CODIGO));
+    ok("K63 so `code` e inspecionado do erro",
+      /"code"\s+in\s+erro/.test(PERSIST_CODIGO));
+    ok("K64 todo console.error usa mensagem FIXA, sem interpolacao",
+      [...PERSIST_CODIGO.matchAll(/console\.error\(([^)]*)\)/g)]
+        .every((m) => /^"[^"`$]*"$/.test(m[1].trim())));
+    ok("K65 sem cast cego nem supressao de tipo",
+      !/as any|@ts-ignore|@ts-expect-error|eslint-disable|Record<string,\s*any>/
+        .test(PERSIST_CODIGO));
+
+    // ── §34. Zero retry ─────────────────────────────────────────────
+    ok("K66 sem loop, backoff, timer ou recursao de retry",
+      !/setTimeout|setInterval|while\s*\(|for\s*\(\s*let\s+tentativa|\.catch\(/
+        .test(PERSIST_CODIGO));
+    ok("K67 nenhum wrapper chama outro wrapper",
+      !/(iniciarRetomadaAprovacao|falharTarefaRetomada|recuperarRetomadaStale|concluirTarefaRetomada)\s*\(/
+        .test(PERSIST_CODIGO.replace(/export async function \w+/g, "")));
+
+    // ── §37. Zero heartbeat neste slice ─────────────────────────────
+    ok("K68 o modulo nao mantem heartbeat nem progresso",
+      !/heartbeat|setInterval|INTERVALO/i.test(PERSIST_CODIGO));
+    ok("K69 e nao escreve na tabela por fora de RPC",
+      !/\.from\(|\.update\(|\.insert\(|\.upsert\(|\.delete\(/.test(PERSIST_CODIGO));
+
+    // ── §26. DORMENCIA: zero chamador de producao ───────────────────
+    {
+      const NOMES = ["iniciarRetomadaAprovacao", "falharTarefaRetomada",
+        "recuperarRetomadaStale", "concluirTarefaRetomada"];
+      const producao = ["lib/agentes", "app", "components"];
+      const importadores: string[] = [];
+      const mencionam: string[] = [];
+      const varrer = (dir: string): void => {
+        for (const e of readdirSync(join(RAIZ, dir), { withFileTypes: true })) {
+          const rel = `${dir}/${e.name}`;
+          if (e.isDirectory()) varrer(rel);
+          else if (/\.tsx?$/.test(e.name) && rel !== PERSIST) {
+            const codigo = semComentarios(ler(rel));
+            if (/(?:from|import\()\s*"[^"]*persistencia-retomada"/.test(codigo))
+              importadores.push(rel);
+            if (NOMES.some((n) => new RegExp(`\\b${n}\\b`).test(codigo)))
+              mencionam.push(rel);
+          }
+        }
+      };
+      for (const d of producao) varrer(d);
+      ok(`K70 zero import de producao ao modulo (${importadores.join(", ") || "nenhum"})`,
+        importadores.length === 0);
+      ok(`K71 zero mencao de producao aos quatro wrappers (${mencionam.join(", ") || "nenhuma"})`,
+        mencionam.length === 0);
+      ok("K72 D5_ACTIVE = NO: nenhum caminho de producao produz marcador",
+        importadores.length === 0 && mencionam.length === 0);
+    }
+
+    // ── O worker e o executor continuam intocados por este slice ────
+    ok("K73 capability-worker nao conhece a lane de retomada",
+      !/persistencia-retomada|retomada\//.test(semComentarios(ler("lib/agentes/capability-worker.ts"))));
+    ok("K74 o executor de Funcoes tambem nao",
+      !/persistencia-retomada/.test(EXECUTOR_CODIGO));
+  }
+
   console.log(`\n══ ${passou} PASS / ${falhou} FAIL ══\n`);
   process.exit(falhou === 0 ? 0 : 1);
 }
