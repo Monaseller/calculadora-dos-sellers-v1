@@ -49,6 +49,7 @@
  */
 import "server-only";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
+import { normalizarLinha } from "@/lib/agentes/normalizar-linha";
 import type { LinhaTarefa } from "@/lib/agentes/tipos";
 
 /** Mesma projecao fechada da capability de usuario. Nunca `*`. */
@@ -281,16 +282,11 @@ export async function aguardarAprovacaoTarefa(
   return { linha: (normalizarLinha(data) as LinhaTarefa | null) ?? null, erro: null };
 }
 
-/**
- * As RPCs devolvem `RETURNS public.agente_tarefas`. O PostgREST entrega
- * isso ora como objeto, ora como array de um elemento, dependendo da
- * versao — normalizar aqui evita que cada chamador descubra isso
- * sozinho, em producao.
- */
-function normalizarLinha(data: unknown): unknown {
-  if (Array.isArray(data)) return data.length > 0 ? data[0] : null;
-  return data ?? null;
-}
+// `normalizarLinha` saiu daqui para `lib/agentes/normalizar-linha.ts`,
+// sem alteracao de comportamento: a lane de retomada precisa da MESMA
+// normalizacao de linha composta, e duas copias teriam de concordar
+// para sempre. Este modulo continua sendo o unico consumidor de
+// producao dela hoje — o import a traz de volta sem reexporta-la.
 
 // ─── O claim, para o dispatcher de sistema ────────────────────────────
 

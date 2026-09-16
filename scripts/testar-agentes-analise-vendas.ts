@@ -1315,6 +1315,26 @@ const ARQUIVOS_RESUME_D5_C1: readonly string[] = [
   "lib/agentes/resume-contratos.ts",
 ];
 
+/**
+ * APPROVAL-DECISION-RESUME-D5-C2-I0 — o normalizador de linha composta.
+ *
+ * UM caminho, e so um. `normalizarLinha` nasceu privado em
+ * `capability-worker.ts` e precisou sair de la para que a lane de
+ * retomada usasse a MESMA implementacao, em vez de uma copia que teria
+ * de concordar para sempre. O modulo e neutro: nao importa nada.
+ *
+ * `capability-worker.ts` NAO e repetido aqui: ele ja esta autorizado
+ * desde a FUNCTION-RUNTIME-P0, e a origem de cada liberacao precisa
+ * continuar legivel.
+ *
+ * `lib/agentes/retomada/persistencia-retomada.ts` NAO entra: ele nao
+ * existe neste slice, e declarar caminho inexistente abriria a porta
+ * antes da revisao que deve guarda-la.
+ */
+const ARQUIVOS_RESUME_D5_C2_I0: readonly string[] = [
+  "lib/agentes/normalizar-linha.ts",
+];
+
 /** Uniao EXPLICITA. Qualquer caminho fora dela reprova o G11. */
 const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_1DD,
@@ -1347,6 +1367,7 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_FUNCTION_RUNTIME_V1A,
   ...ARQUIVOS_FUNCTION_RUNTIME_V1B1,
   ...ARQUIVOS_RESUME_D5_C1,
+  ...ARQUIVOS_RESUME_D5_C2_I0,
 ];
 
 /**
@@ -2394,6 +2415,28 @@ async function main() {
     ok("G11f17 CONTROLE NEGATIVO: autorizado + intruso reprova",
        !soAutorizadosNoEscopo(
          "?? lib/agentes/resume-contratos.ts\n?? lib/agentes/resume-worker.ts\n"));
+    // ── APPROVAL-DECISION-RESUME-D5-C2-I0 ──────────────────────────
+    ok("G11f18 a lista D5-C2-I0 tem exatamente 1 caminho",
+       ARQUIVOS_RESUME_D5_C2_I0.length === 1);
+    ok("G11f19 e e exatamente o normalizador neutro",
+       ARQUIVOS_RESUME_D5_C2_I0[0] === "lib/agentes/normalizar-linha.ts");
+    ok("G11f20 nao e diretorio, prefixo nem glob",
+       ARQUIVOS_RESUME_D5_C2_I0.every((p) =>
+         p.endsWith(".ts") && !p.endsWith("/") && !p.includes("*")));
+    ok("G11f21 entra na uniao que o G11 consulta",
+       ARQUIVOS_ESPERADOS.includes("lib/agentes/normalizar-linha.ts"));
+    ok("G11f22 aceita o normalizador, untracked e staged",
+       soAutorizadosNoEscopo("?? lib/agentes/normalizar-linha.ts\n") &&
+       soAutorizadosNoEscopo("A  lib/agentes/normalizar-linha.ts\n"));
+    // CONTROLES NEGATIVOS: a liberacao e de UM arquivo, nao da pasta —
+    // e o modulo de persistence da retomada ainda NAO pode passar,
+    // porque ele nao existe e nao foi revisado.
+    ok("G11f23 CONTROLE NEGATIVO: um sibling neutro nao declarado reprova",
+       !soAutorizadosNoEscopo("?? lib/agentes/normalizar-coluna.ts\n"));
+    ok("G11f24 CONTROLE NEGATIVO: a persistence da retomada ainda reprova",
+       !soAutorizadosNoEscopo("?? lib/agentes/retomada/persistencia-retomada.ts\n"));
+    ok("G11f25 CONTROLE NEGATIVO: sufixo igual em outra pasta reprova",
+       !soAutorizadosNoEscopo("?? outra/pasta/normalizar-linha.ts\n"));
     ok("G11g CONTROLE NEGATIVO: migration nova no escopo reprova", !soAutorizadosNoEscopo("?? supabase/migrations/99999999_falsa.sql\n"));
     ok("G11h CONTROLE NEGATIVO: autorizados + intruso reprova", !soAutorizadosNoEscopo(" M lib/agentes/handlers/registry.ts\n M lib/agentes/tipos-execucao.ts\n"));
     ok("G11i CONTROLE NEGATIVO: sufixo parecido em outra pasta reprova", !soAutorizadosNoEscopo("?? outra/pasta/registry.ts\n"));

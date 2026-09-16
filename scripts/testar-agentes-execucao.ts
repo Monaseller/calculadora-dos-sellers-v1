@@ -26,7 +26,7 @@
 import "./_server-only-inerte";
 import "./_env-inerte";
 import { createHash } from "crypto";
-import { readFileSync, readdirSync, statSync } from "fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "fs";
 import { join } from "path";
 
 import {
@@ -1852,17 +1852,28 @@ async function main() {
     // ela tem de existir e tem de vir ANTES.
     const NOME_D5 = "20261005_agente_retomada_aprovacao.sql";
 
-    ok("U14 a D4 existe e continua precedendo a ultima migration",
+    // E deixou de ser a D5 quando o terminalizador de sucesso da lane de
+    // retomada (D5-C2) foi commitado em `5e04c45`. O padrao se repete a
+    // cada migration nova, e a resposta continua a mesma: nao afrouxar,
+    // e sim mover o congelamento para o nome exato da ULTIMA, mantendo a
+    // cadeia historica — D3 antes de D4, D4 antes de D5, D5 antes desta.
+    const NOME_D5C2 = "20261006_retomada_concluir_tarefa.sql";
+
+    ok("U14 a D4 existe e continua precedendo a D5",
       migsD4.includes(NOME_D4) && migsD4.indexOf(NOME_D4) < migsD4.indexOf(NOME_D5));
-    ok("U14a a D5 existe com o nome EXATO e e a ultima do disco",
-      migsD4.includes(NOME_D5) && migsD4[migsD4.length - 1] === NOME_D5);
+    ok("U14a a D5 existe com o nome EXATO e precede a ultima",
+      migsD4.includes(NOME_D5) && migsD4.indexOf(NOME_D5) < migsD4.indexOf(NOME_D5C2));
+    ok("U14a2 a D5-C2 existe com o nome EXATO e e a ultima do disco",
+      migsD4.includes(NOME_D5C2) && migsD4[migsD4.length - 1] === NOME_D5C2);
     ok("U14b CONTROLE: uma migration posterior inesperada reprovaria",
-      [...migsD4, "20261006_migration_nao_declarada.sql"].sort().at(-1) !== NOME_D5);
-    // O prefixo `20261005` identifica UM arquivo so, e o guard congela o
-    // nome inteiro: se alguem acrescentasse outra migration com o mesmo
+      [...migsD4, "20261007_migration_nao_declarada.sql"].sort().at(-1) !== NOME_D5C2);
+    // O prefixo identifica UM arquivo so, e o guard congela o nome
+    // inteiro: se alguem acrescentasse outra migration com o mesmo
     // carimbo, o congelamento por prefixo deixaria de discriminar.
     ok("U14c CONTROLE: o carimbo 20261005 pertence a UMA migration, e e a exata",
       migsD4.filter((m) => m.startsWith("20261005")).join(",") === NOME_D5);
+    ok("U14c2 CONTROLE: o carimbo 20261006 pertence a UMA migration, e e a exata",
+      migsD4.filter((m) => m.startsWith("20261006")).join(",") === NOME_D5C2);
     ok("U15 e a D4 vem depois da limpeza do D3",
       migsD4.indexOf("20261003_remover_aguardar_aprovacao_tarefa_2args.sql") <
       migsD4.indexOf(NOME_D4));
@@ -3319,6 +3330,93 @@ async function main() {
     ok("S3-L CONTROLE NEGATIVO: uma segunda execucao no laco reprova",
       !execucaoInalcancavelComFilaVazia(
         codigo(ROTA_W).replace(GUARDA_NULL, `${EXEC_CALL}"x"); ${GUARDA_NULL}`)));
+  }
+
+  // ── T. D5-C2-I0: normalizarLinha extraido para modulo neutro ──────
+  //
+  // O helper nasceu privado em `capability-worker.ts`. A lane de
+  // retomada precisa da MESMA normalizacao — `retomada_falhar_tarefa` e
+  // `retomada_concluir_tarefa` tambem sao `RETURNS agente_tarefas` — e
+  // duas copias teriam de concordar para sempre. Esta secao prova que a
+  // mudanca foi de LUGAR, nao de COMPORTAMENTO, e que a fonte continua
+  // unica.
+  {
+    const NEUTRO = "lib/agentes/normalizar-linha.ts";
+    const WORKER = "lib/agentes/capability-worker.ts";
+    const CODIGO_NEUTRO = codigo(NEUTRO);
+    const CODIGO_WORKER = codigo(WORKER);
+    const { normalizarLinha } = await import("../lib/agentes/normalizar-linha");
+
+    ok("T0  ANCORA: as duas fontes foram lidas",
+      CODIGO_NEUTRO.length > 50 && CODIGO_WORKER.length > 2000);
+
+    // ── A MATRIZ. Os esperados sao escritos a mao, um a um, e NAO
+    //    derivados da implementacao — um teste que reimplementasse a
+    //    funcao para conferi-la nao provaria nada.
+    const marcador = Symbol("ausente");
+    const CASOS: ReadonlyArray<readonly [string, unknown, unknown]> = [
+      ["array vazio", [], null],
+      ["array de um", [{ id: "a" }], { id: "a" }],
+      ["array de dois devolve o PRIMEIRO", [{ id: "a" }, { id: "b" }], { id: "a" }],
+      ["null", null, null],
+      ["undefined", undefined, null],
+      ["objeto", { x: 1 }, { x: 1 }],
+      ["string", "abc", "abc"],
+      ["zero NAO vira null", 0, 0],
+      ["false NAO vira null", false, false],
+    ];
+    for (const [rotulo, entrada, esperado] of CASOS) {
+      const obtido = normalizarLinha(entrada);
+      ok(`T1  ${rotulo}`, JSON.stringify(obtido ?? marcador) === JSON.stringify(esperado ?? marcador));
+    }
+    // CONTROLE: o oraculo sabe dizer NAO. Sem isto, um `normalizarLinha`
+    // que devolvesse sempre `null` passaria em metade da matriz sem que
+    // nada acusasse a outra metade como acidente.
+    ok("T2  CONTROLE: a matriz reprovaria um helper que sempre devolve null",
+      CASOS.some(([, entrada, esperado]) =>
+        esperado !== null && ((): boolean => { void entrada; return true; })()));
+    ok("T3  identidade referencial preservada em objeto",
+      ((): boolean => { const o = { x: 1 }; return normalizarLinha(o) === o; })());
+    ok("T4  identidade referencial do primeiro item do array",
+      ((): boolean => { const o = { x: 1 }; return normalizarLinha([o, { y: 2 }]) === o; })());
+
+    // ── FONTE UNICA. Conta DEFINICAO, nunca mencao: o import e o
+    //    comentario que explica a mudanca citam o nome e nao podem
+    //    contar como segunda implementacao.
+    const DEFINICAO = /(?:^|\n)\s*(?:export\s+)?function\s+normalizarLinha\s*\(/g;
+    ok("T5  o modulo neutro define o helper, e o exporta",
+      conta(CODIGO_NEUTRO, DEFINICAO) === 1 &&
+      /export function normalizarLinha\(data: unknown\): unknown/.test(CODIGO_NEUTRO));
+    ok("T6  capability-worker NAO define mais uma copia",
+      conta(CODIGO_WORKER, DEFINICAO) === 0);
+    ok("T7  capability-worker importa o helper neutro",
+      /import \{ normalizarLinha \} from "@\/lib\/agentes\/normalizar-linha";/.test(CODIGO_WORKER));
+    ok("T8  e NAO reexporta o helper — a API publica dele nao cresceu",
+      !/export \{[^}]*normalizarLinha/.test(CODIGO_WORKER) &&
+      !/export .*function normalizarLinha/.test(CODIGO_WORKER));
+    ok("T9  os quatro callers originais continuam no worker",
+      conta(CODIGO_WORKER, /normalizarLinha\(data\)/g) === 4);
+    ok("T10 CONTROLE: o detector de DEFINICAO nao confunde import com definicao",
+      conta('import { normalizarLinha } from "x";', DEFINICAO) === 0 &&
+      conta("export function normalizarLinha(data: unknown): unknown {", DEFINICAO) === 1);
+
+    // ── NEUTRALIDADE. O modulo nao pode arrastar dependencia nenhuma,
+    //    senao deixa de poder ser importado dos dois lados.
+    ok("T11 o modulo neutro nao importa nada",
+      !/^import\s/m.test(CODIGO_NEUTRO));
+    for (const proibido of ["supabase", "server-only", "agente_tarefas", "executarFuncao",
+                            "resume-contratos", "capability-worker", "console."]) {
+      ok(`T12 o modulo neutro nao alcanca \`${proibido}\``,
+        !CODIGO_NEUTRO.includes(proibido));
+    }
+
+    // ── ESTE SLICE NAO IMPLEMENTA RETOMADA ────────────────────────────
+    for (const rpc of ["retomar_aprovacao_iniciar", "retomada_falhar_tarefa",
+                       "retomada_recuperar_tarefa_stale", "retomada_concluir_tarefa"]) {
+      ok(`T13 o modulo neutro nao cita a RPC \`${rpc}\``, !CODIGO_NEUTRO.includes(rpc));
+    }
+    ok("T14 `lib/agentes/retomada/` continua inexistente neste slice",
+      !existsSync(join(RAIZ, "lib/agentes/retomada")));
   }
 
   const total = passou + falhou;
