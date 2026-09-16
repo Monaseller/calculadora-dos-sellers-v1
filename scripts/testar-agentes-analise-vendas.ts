@@ -924,6 +924,19 @@ const MIGRATIONS_DO_APPROVAL_DECISION_D4: readonly string[] = [
 ];
 
 /**
+ * APPROVAL-DECISION-RESUME-D5-C3-I2-P0 — a migration aditiva que cria as
+ * duas RPCs da fila de retomada: discovery read-only e cancelamento
+ * tecnico. Lista PROPRIA, declarada nome a nome, para que o guarda de
+ * inventario nao possa ser ampliado por engano junto com o D4.
+ */
+const MIGRATIONS_DO_RESUME_D5_C3_I2: readonly string[] = [
+  "20261007_retomada_fila_e_reconciliacao.sql",
+];
+const ARQUIVOS_RESUME_D5_C3_I2: readonly string[] = [
+  ...MIGRATIONS_DO_RESUME_D5_C3_I2.map((nome) => `supabase/migrations/${nome}`),
+];
+
+/**
  * Inventario acumulado de `lib/agentes/ia/`, por frente.
  *
  * O guarda de disco (G11l) compara contra ESTA uniao, nunca contra uma
@@ -1447,6 +1460,7 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_RESUME_D5_C2_I0,
   ...ARQUIVOS_RESUME_D5_C2_I1,
   ...ARQUIVOS_RESUME_D5_C3_I1,
+  ...ARQUIVOS_RESUME_D5_C3_I2,
 ];
 
 /**
@@ -2574,6 +2588,23 @@ async function main() {
     ok("G11f44 CONTROLE NEGATIVO: mesmo basename em outra pasta reprova",
        !soAutorizadosNoEscopo("?? lib/agentes/executar-retomada.ts\n") &&
        !soAutorizadosNoEscopo("?? outra/pasta/executar-retomada.ts\n"));
+    // ── APPROVAL-DECISION-RESUME-D5-C3-I2-P0 ───────────────
+    ok("G11f45 a migration do P0 esta declarada nome a nome",
+       MIGRATIONS_DO_RESUME_D5_C3_I2.length === 1 &&
+       MIGRATIONS_DO_RESUME_D5_C3_I2[0] === "20261007_retomada_fila_e_reconciliacao.sql" &&
+       MIGRATIONS_DO_RESUME_D5_C3_I2.every((m) => !m.includes("*")));
+    ok("G11f46 e entra na uniao que o G11 consulta",
+       ARQUIVOS_ESPERADOS.includes("supabase/migrations/20261007_retomada_fila_e_reconciliacao.sql"));
+    ok("G11f47 aceita a migration do P0, untracked e staged",
+       soAutorizadosNoEscopo("?? supabase/migrations/20261007_retomada_fila_e_reconciliacao.sql\n") &&
+       soAutorizadosNoEscopo("A  supabase/migrations/20261007_retomada_fila_e_reconciliacao.sql\n"));
+    ok("G11f48 CONTROLE NEGATIVO: uma SEGUNDA migration no mesmo slice reprova",
+       !soAutorizadosNoEscopo("?? supabase/migrations/20261008_outra_qualquer.sql\n"));
+    ok("G11f49 CONTROLE NEGATIVO: mesmo basename fora de migrations reprova",
+       !soAutorizadosNoEscopo("?? lib/agentes/20261007_retomada_fila_e_reconciliacao.sql\n"));
+    ok("G11f50 a lista do P0 e DISJUNTA das listas de codigo do C3",
+       MIGRATIONS_DO_RESUME_D5_C3_I2.every((m) =>
+         !ARQUIVOS_RESUME_D5_C3_I1.includes(m) && !ARQUIVOS_RESUME_D5_C2_I1.includes(m)));
     ok("G11g CONTROLE NEGATIVO: migration nova no escopo reprova", !soAutorizadosNoEscopo("?? supabase/migrations/99999999_falsa.sql\n"));
     ok("G11h CONTROLE NEGATIVO: autorizados + intruso reprova", !soAutorizadosNoEscopo(" M lib/agentes/handlers/registry.ts\n M lib/agentes/tipos-execucao.ts\n"));
     ok("G11i CONTROLE NEGATIVO: sufixo parecido em outra pasta reprova", !soAutorizadosNoEscopo("?? outra/pasta/registry.ts\n"));
@@ -2802,12 +2833,19 @@ async function main() {
       MIGRATIONS_DO_TASK_FENCING_B0_CLEANUP.includes(m) ||
       MIGRATIONS_DO_APPROVAL_RESUME_D1.includes(m) ||
       MIGRATIONS_DO_APPROVAL_PAUSE_D3_CLEANUP.includes(m) ||
-      MIGRATIONS_DO_APPROVAL_DECISION_D4.includes(m);
+      MIGRATIONS_DO_APPROVAL_DECISION_D4.includes(m) ||
+      MIGRATIONS_DO_RESUME_D5_C3_I2.includes(m);
 
     ok(`G12b nenhuma migration nao declarada no disco (${novasNoDisco.join(", ") || "nenhuma"})`,
        novasNoDisco.every(declarada));
     ok("G12b1 CONTROLE NEGATIVO: uma migration nao declarada reprovaria",
        !["99999999_intrusa.sql"].every(declarada));
+    ok("G12b3 a migration do P0 e aceita pelo predicado, nome a nome",
+       declarada("20261007_retomada_fila_e_reconciliacao.sql") &&
+       !declarada("20261007_retomada_fila_e_reconciliacao.sql.bak") &&
+       !declarada("20261008_retomada_fila_e_reconciliacao.sql"));
+    ok("G12b4 e ela esta no disco, onde o guarda a espera",
+       disco.includes("20261007_retomada_fila_e_reconciliacao.sql"));
     ok("G12b2 a migration da 1E-e declara que NAO foi aplicada",
        readFileSync(join(RAIZ, "supabase", "migrations", "20260919_agentes_ia_chamadas.sql"), "utf8")
          .includes("NAO APLICADA AINDA"));

@@ -1859,14 +1859,25 @@ async function main() {
     // cadeia historica — D3 antes de D4, D4 antes de D5, D5 antes desta.
     const NOME_D5C2 = "20261006_retomada_concluir_tarefa.sql";
 
+    // E deixou de ser a D5-C2 quando a fila e a reconciliacao tecnica da
+    // retomada (D5-C3-I2-P0) entraram no disco. Terceira vez que o guard
+    // avanca, e pelo mesmo motivo das duas anteriores: congelar QUAL e a
+    // ultima e mais forte do que aceitar qualquer uma, e a cadeia
+    // historica inteira — D3, D4, D5, D5-C2, esta — continua provada.
+    const NOME_D5C3P0 = "20261007_retomada_fila_e_reconciliacao.sql";
+
     ok("U14 a D4 existe e continua precedendo a D5",
       migsD4.includes(NOME_D4) && migsD4.indexOf(NOME_D4) < migsD4.indexOf(NOME_D5));
-    ok("U14a a D5 existe com o nome EXATO e precede a ultima",
+    ok("U14a a D5 existe com o nome EXATO e precede a D5-C2",
       migsD4.includes(NOME_D5) && migsD4.indexOf(NOME_D5) < migsD4.indexOf(NOME_D5C2));
-    ok("U14a2 a D5-C2 existe com o nome EXATO e e a ultima do disco",
-      migsD4.includes(NOME_D5C2) && migsD4[migsD4.length - 1] === NOME_D5C2);
+    ok("U14a2 a D5-C2 existe com o nome EXATO e precede a ultima",
+      migsD4.includes(NOME_D5C2) && migsD4.indexOf(NOME_D5C2) < migsD4.indexOf(NOME_D5C3P0));
+    ok("U14a3 a D5-C3-P0 existe com o nome EXATO e e a ultima do disco",
+      migsD4.includes(NOME_D5C3P0) && migsD4[migsD4.length - 1] === NOME_D5C3P0);
     ok("U14b CONTROLE: uma migration posterior inesperada reprovaria",
-      [...migsD4, "20261007_migration_nao_declarada.sql"].sort().at(-1) !== NOME_D5C2);
+      [...migsD4, "20261008_migration_nao_declarada.sql"].sort().at(-1) !== NOME_D5C3P0);
+    ok("U14b2 CONTROLE: a fase ANTERIOR, com a D5-C2 no fim, agora reprova",
+      migsD4[migsD4.length - 1] !== NOME_D5C2);
     // O prefixo identifica UM arquivo so, e o guard congela o nome
     // inteiro: se alguem acrescentasse outra migration com o mesmo
     // carimbo, o congelamento por prefixo deixaria de discriminar.
@@ -1874,6 +1885,8 @@ async function main() {
       migsD4.filter((m) => m.startsWith("20261005")).join(",") === NOME_D5);
     ok("U14c2 CONTROLE: o carimbo 20261006 pertence a UMA migration, e e a exata",
       migsD4.filter((m) => m.startsWith("20261006")).join(",") === NOME_D5C2);
+    ok("U14c3 CONTROLE: o carimbo 20261007 pertence a UMA migration, e e a exata",
+      migsD4.filter((m) => m.startsWith("20261007")).join(",") === NOME_D5C3P0);
     ok("U15 e a D4 vem depois da limpeza do D3",
       migsD4.indexOf("20261003_remover_aguardar_aprovacao_tarefa_2args.sql") <
       migsD4.indexOf(NOME_D4));
@@ -3731,6 +3744,418 @@ async function main() {
     ok("V42 que por sua vez so le tarefa pelo loader cercado",
       (EXEC.match(/lerTarefaParaExecucao\(/g) ?? []).length === 1 &&
       !/\.from\(\s*"agente_tarefas"\s*\)/.test(EXEC));
+  }
+
+  // ────────────────────────────────────────────────────────────────
+  // W. APPROVAL-DECISION-RESUME-D5-C3-I2-P0 — a migration da fila e da
+  //    reconciliacao tecnica
+  //
+  // Duas funcoes ADITIVAS e dormentes. O que esta secao prova nao e que
+  // elas funcionam — isso e do banco —, e sim que a FORMA delas e a
+  // acordada: a fila filtra so estado reversivel e NAO esconde
+  // incompatibilidade de registry, e o cancelamento tecnico grava um
+  // ator que nao e o dono.
+  // ────────────────────────────────────────────────────────────────
+  {
+    console.log("\nW. RESUME-D5-C3-I2-P0: fila de candidatas e reconciliacao tecnica");
+
+    const NOME_P0 = "20261007_retomada_fila_e_reconciliacao.sql";
+    const CAMINHO_P0 = join(RAIZ, "supabase", "migrations", NOME_P0);
+    const SQL_P0 = readFileSync(CAMINHO_P0, "utf8");
+
+    /** Fonte sem comentarios `--`. Os docblocks desta migration CITAM de
+     *  proposito o que ela nao faz (`aprovacao_decidir`, `for update`,
+     *  `expira_em`), e contar documentacao como violacao puniria a
+     *  explicacao — o mesmo criterio do J20/T15e. */
+    const CODIGO_P0 = SQL_P0.replace(/--.*$/gm, "");
+
+    /** Os corpos `$$...$$`, na ordem em que aparecem. */
+    const corposP0 = [...CODIGO_P0.matchAll(/\$\$([\s\S]*?)\$\$/g)].map((m) => m[1]);
+    /** O que sobra FORA dos corpos: e ali que DML de topo apareceria. */
+    const TOPO_P0 = CODIGO_P0.replace(/\$\$[\s\S]*?\$\$/g, " ");
+
+    const CORPO_FILA = corposP0.find((c) => c.includes("return query")) ?? "";
+    const CORPO_CANCEL = corposP0.find((c) => c.includes("v_ator_tecnico")) ?? "";
+
+    ok("W0  ANCORA: a migration existe e tem os dois corpos de funcao",
+      existsSync(CAMINHO_P0) && corposP0.length === 2 &&
+      CORPO_FILA.length > 200 && CORPO_CANCEL.length > 400);
+    ok("W0a ANCORA: remover comentarios encolheu o arquivo, e o codigo sobrou",
+      CODIGO_P0.length < SQL_P0.length && CODIGO_P0.length > 1000);
+
+    // ── W1..W3. Inventario de objetos ───────────────────────────────
+    ok("W1  cria EXATAMENTE duas funcoes",
+      (CODIGO_P0.match(/create function/g) ?? []).length === 2);
+    ok("W1a e sao exatamente estas duas",
+      /create function public\.retomada_listar_candidatas\(/.test(CODIGO_P0) &&
+      /create function public\.retomada_cancelar_aprovacao_incompativel\(/.test(CODIGO_P0));
+    // ── W1b. FAIL-CLOSED NA COLISAO DE MESMA IDENTIDADE ──────────
+    //
+    // As duas funcoes sao NOVAS. `create or replace` substituiria em
+    // silencio uma homonima que ja existisse no remoto — e o historico
+    // local/remoto deste projeto tem divergencia conhecida.
+    //
+    // O ALCANCE EXATO, para nao prometer mais do que o PostgreSQL faz:
+    // `create function` sem `or replace` aborta quando ja existe funcao
+    // de MESMA IDENTIDADE — mesmo nome E mesma lista de tipos de
+    // argumento. Uma homonima de assinatura DIFERENTE nao derruba o
+    // apply: o PostgreSQL a criaria ao lado, como overload.
+    //
+    // Por isso esta e a SEGUNDA barreira, nunca substituto do preflight:
+    // antes do apply, o gate de DB continua obrigado a provar por
+    // pg_proc/pg_namespace que nao existe NENHUMA funcao com esses dois
+    // `proname` no schema public, em overload algum.
+    ok("W1b HARD: objetos novos usam CREATE FUNCTION e falham em colisao de mesma identidade",
+      (CODIGO_P0.match(/create function/g) ?? []).length === 2 &&
+      (CODIGO_P0.match(/create or replace function/g) ?? []).length === 0 &&
+      !/create\s+or\s+replace/i.test(CODIGO_P0));
+    ok("W1c CONTROLE NEGATIVO: um OR REPLACE real seria detectado",
+      (("create or replace function public.retomada_listar_candidatas(")
+        .match(/create or replace function/g) ?? []).length === 1);
+    ok("W2  nenhum outro objeto de schema",
+      !/create\s+table|create\s+index|create\s+view|create\s+trigger|create\s+rule|alter\s+table|add\s+constraint|drop\s+function/i
+        .test(CODIGO_P0));
+    ok("W3  as duas tem COMMENT ON FUNCTION",
+      (CODIGO_P0.match(/comment on function/g) ?? []).length === 2);
+
+    // ── W4. D4 INTOCADO ─────────────────────────────────────────────
+    //
+    // A prova e sobre CODIGO, nao sobre texto: o docblock explica por que
+    // `aprovacao_decidir` NAO e reutilizada, e essa explicacao e o que se
+    // quer preservar. O que nao pode existir e create/replace ou drop.
+    ok("W4  a migration nao recria nem derruba `aprovacao_decidir`",
+      !/(create( or replace)? function|drop function)\s+public\.aprovacao_decidir/i.test(CODIGO_P0));
+    // ── W4c..W4f. NENHUMA FUNCAO CONGELADA E RECRIADA NEM DERRUBADA
+    //
+    // O detector usa `String.raw` de proposito. Num template literal
+    // comum, `\s` colapsa para o caractere `s` e `\.` para `.`: o padrao
+    // passaria a exigir o texto "functions+public", que nao existe em SQL
+    // nenhum, e o assert ficaria verde para sempre — inclusive se a
+    // migration recriasse `aprovacao_decidir`. Por isso W4d/W4e EXECUTAM
+    // o detector contra violacoes sinteticas ANTES de qualquer conclusao:
+    // um detector so vale depois de ser visto disparando.
+    {
+      const CONGELADAS_P0 = [
+        "aprovacao_decidir",
+        "retomar_aprovacao_iniciar",
+        "aprovacao_consumir_abrir_e_retomar",
+        "retomada_concluir_tarefa",
+        "retomada_falhar_tarefa",
+        "retomada_recuperar_tarefa_stale",
+      ];
+      const detectorCongeladaP0 = (nome: string): RegExp =>
+        new RegExp(
+          String.raw`(create\s+function|create\s+or\s+replace\s+function|drop\s+function)\s+public\.${nome}\b`,
+          "i");
+
+      ok("W4d ANCORA: o detector DISPARA contra CREATE OR REPLACE sintetico",
+        CONGELADAS_P0.length === 6 &&
+        CONGELADAS_P0.every((f) =>
+          detectorCongeladaP0(f).test(`create or replace function public.${f}(p_x text)`)));
+      ok("W4e ANCORA: e tambem contra CREATE FUNCTION e DROP FUNCTION sinteticos",
+        CONGELADAS_P0.every((f) =>
+          detectorCongeladaP0(f).test(`create function public.${f}(p_x text)`) &&
+          detectorCongeladaP0(f).test(`drop function public.${f}(text);`)));
+      ok("W4f ANCORA: e fica QUIETO diante de fonte que so cria as duas RPCs novas",
+        CONGELADAS_P0.every((f) => !detectorCongeladaP0(f).test(
+          "create function public.retomada_listar_candidatas(p_limite integer default 5) " +
+          "create function public.retomada_cancelar_aprovacao_incompativel(p_user_id text)")));
+      ok(`W4c NENHUMA das ${CONGELADAS_P0.length} funcoes congeladas aparece em CREATE/DROP`,
+        CONGELADAS_P0.every((f) => !detectorCongeladaP0(f).test(CODIGO_P0)));
+    }
+    ok("W4a CONTROLE: a mencao em comentario NAO conta como alteracao",
+      SQL_P0.includes("aprovacao_decidir") &&
+      !CODIGO_P0.includes("create or replace function public.aprovacao_decidir"));
+    ok("W4b CONTROLE NEGATIVO: um CREATE OR REPLACE real seria detectado",
+      /(create or replace function|drop function)\s+public\.aprovacao_decidir/i
+        .test("create or replace function public.aprovacao_decidir("));
+
+    // ── W5. ZERO DML DE TOPO ────────────────────────────────────────
+    //
+    // Aplicar esta migration nao pode mudar uma linha de dado. O DML
+    // DENTRO dos corpos e o contrato das funcoes; o que se mede aqui e
+    // o residuo fora deles.
+    ok("W5  zero INSERT/UPDATE/DELETE de topo",
+      !/\binsert\b/i.test(TOPO_P0) && !/\bupdate\b/i.test(TOPO_P0) &&
+      !/\bdelete\b/i.test(TOPO_P0));
+    ok("W5a ANCORA: o residuo de topo existe e contem os CREATE/ACL",
+      TOPO_P0.includes("create function") && TOPO_P0.includes("grant execute"));
+    ok("W5b ANCORA: os corpos REALMENTE tem DML, e ele nao foi contado",
+      /\bupdate\b/i.test(CORPO_CANCEL));
+
+    // ── W6..W7. Seguranca e ACL ─────────────────────────────────────
+    ok("W6  as duas sao SECURITY INVOKER com search_path fixo",
+      (CODIGO_P0.match(/security invoker/g) ?? []).length === 2 &&
+      (CODIGO_P0.match(/set search_path = public/g) ?? []).length === 2);
+    ok("W6a zero SECURITY DEFINER",
+      !/security definer/i.test(CODIGO_P0));
+    for (const assinatura of [
+      "public.retomada_listar_candidatas(integer)",
+      "public.retomada_cancelar_aprovacao_incompativel(text, uuid)",
+    ]) {
+      const alvo = assinatura.replace(/[.()]/g, (c) => `\\${c}`);
+      ok(`W7  ACL completa de \`${assinatura}\``,
+        new RegExp(`revoke all on function ${alvo} from public;`).test(CODIGO_P0) &&
+        new RegExp(`revoke all on function ${alvo} from anon;`).test(CODIGO_P0) &&
+        new RegExp(`revoke all on function ${alvo} from authenticated;`).test(CODIGO_P0) &&
+        new RegExp(`revoke all on function ${alvo} from service_role;`).test(CODIGO_P0) &&
+        new RegExp(`grant execute on function ${alvo} to service_role;`).test(CODIGO_P0));
+    }
+    ok("W7a o REVOKE de service_role vem ANTES do GRANT (bug SEC1)",
+      CODIGO_P0.indexOf("revoke all on function public.retomada_listar_candidatas(integer) from service_role;") <
+        CODIGO_P0.indexOf("grant execute on function public.retomada_listar_candidatas(integer) to service_role;"));
+    ok("W7b nenhum GRANT a anon ou authenticated",
+      !/grant[^;]*to\s+(anon|authenticated)/i.test(CODIGO_P0));
+
+    // ── W8..W15. A FILA ─────────────────────────────────────────────
+    ok("W8  assinatura e retorno da fila",
+      /create function public\.retomada_listar_candidatas\(\s*p_limite integer default 5\s*\)/
+        .test(CODIGO_P0) &&
+      /returns table \(\s*user_id text,\s*aprovacao_id uuid\s*\)/.test(CODIGO_P0));
+    ok("W9  filtros de Approval: aprovada e com tarefa",
+      /a\.estado\s*=\s*'aprovada'/.test(CORPO_FILA) &&
+      /a\.tarefa_id is not null/.test(CORPO_FILA));
+    {
+      const cercas = [
+        /t\.id\s*=\s*a\.tarefa_id/,
+        /t\.user_id\s*=\s*a\.user_id/,
+        /t\.agente_id\s*=\s*a\.agente_id/,
+        /t\.status\s*=\s*'aguardando_aprovacao'/,
+        /t\.aprovacao_aguardada_id\s*=\s*a\.id/,
+        /t\.retomada_request_id is null/,
+        /t\.tentativas\s*<=\s*t\.max_tentativas/,
+      ];
+      ok(`W10 as SETE cercas causais da tarefa (${cercas.filter((r) => r.test(CORPO_FILA)).length}/7)`,
+        cercas.every((r) => r.test(CORPO_FILA)));
+    }
+    ok("W11 agente do mesmo dono e ATIVO",
+      /ag\.id\s*=\s*a\.agente_id/.test(CORPO_FILA) &&
+      /ag\.user_id\s*=\s*a\.user_id/.test(CORPO_FILA) &&
+      /ag\.ativo/.test(CORPO_FILA));
+    ok("W12 permissao atual em aprovacao/automatico",
+      /p\.agente_id\s*=\s*a\.agente_id/.test(CORPO_FILA) &&
+      /p\.funcao_id\s*=\s*a\.funcao_id/.test(CORPO_FILA) &&
+      /p\.nivel in \('aprovacao', 'automatico'\)/.test(CORPO_FILA));
+    ok("W13 ordem: decidido_em e depois id, ambos ASC",
+      /order by a\.decidido_em asc, a\.id asc/.test(CORPO_FILA));
+    ok("W14 o teto de 5 vive no SQL, e o caller nao o amplia",
+      /limit least\(greatest\(coalesce\(p_limite, 5\), 1\), 5\)/.test(CORPO_FILA));
+    ok("W14a CONTROLE NEGATIVO: um LIMIT direto do parametro reprova",
+      !/limit\s+p_limite\b/.test(CORPO_FILA));
+    ok("W15 a fila e read-only: sem lock, sem reserva, sem escrita",
+      !/for update|skip locked/i.test(CORPO_FILA) &&
+      !/\binsert\b|\bupdate\b|\bdelete\b|\bupsert\b/i.test(CORPO_FILA));
+    ok("W15a e sem DISTINCT: os joins ja sao 1:1 por constraint",
+      !/\bdistinct\b/i.test(CORPO_FILA));
+
+    // ── W16..W17. O QUE A FILA NAO PODE ESCONDER ────────────────────
+    //
+    // Este par e o coracao do slice. Filtrar TTL ou registry aqui
+    // deixaria a fila limpa e a tabela suja: as linhas sumiriam da
+    // consulta sem NUNCA serem expiradas nem reconciliadas.
+    ok("W16 a fila NAO filtra TTL — quem materializa expiracao e a RPC",
+      !/expira_em/.test(CORPO_FILA));
+    ok("W17 a fila NAO filtra nada do registry TypeScript",
+      !/\brevisao_funcao\b/.test(CORPO_FILA) &&
+      !/a\.acesso\b/.test(CORPO_FILA) &&
+      !/conexao_plataforma|conexao_recurso|conexao_loja_id/.test(CORPO_FILA) &&
+      !/\bargumentos\b/.test(CORPO_FILA) &&
+      !/t\.tipo\b/.test(CORPO_FILA) &&
+      !/a\.funcao_id\s*=\s*'/.test(CORPO_FILA));
+    ok("W17a zero literal de catalogo na migration inteira",
+      !/vendas\.consultar|consultar_vendas/.test(CODIGO_P0));
+
+    // ── W18..W30. A RECONCILIACAO TECNICA ───────────────────────────
+    ok("W18 assinatura e retorno do cancelamento tecnico",
+      /create function public\.retomada_cancelar_aprovacao_incompativel\(\s*p_user_id text,\s*p_aprovacao_id uuid\s*\)/
+        .test(CODIGO_P0) &&
+      /\)\s*returns text/.test(CODIGO_P0));
+    ok("W19 o ator tecnico e CONSTANTE da funcao, nao parametro",
+      /v_ator_tecnico constant text := 'sistema:reconciliador-retomada'/.test(CORPO_CANCEL) &&
+      !/p_ator|p_cancelado_por/.test(CODIGO_P0));
+    ok("W20 `cancelado_por` recebe o ator tecnico",
+      /cancelado_por\s*=\s*v_ator_tecnico/.test(CORPO_CANCEL));
+    ok("W21 HARD: `cancelado_por` NUNCA recebe o dono",
+      !/cancelado_por\s*=\s*p_user_id/.test(CORPO_CANCEL) &&
+      !/cancelado_por\s*=\s*ap\.user_id/.test(CORPO_CANCEL));
+    ok("W21a CONTROLE NEGATIVO: a atribuicao do dono seria detectada",
+      /cancelado_por\s*=\s*p_user_id/.test("set cancelado_por = p_user_id,"));
+    ok("W22 `p_user_id` e cerca de posse na leitura da aprovacao",
+      /a\.id = p_aprovacao_id and a\.user_id = p_user_id/.test(CORPO_CANCEL));
+    {
+      const pTtl = CORPO_CANCEL.indexOf("set estado = 'expirada'");
+      const pLock = CORPO_CANCEL.indexOf("for update;");
+      const pLockTarefa = CORPO_CANCEL.indexOf("for update of t;");
+      const pTarefa = CORPO_CANCEL.indexOf("from public.agente_tarefas t");
+      const pCancel = CORPO_CANCEL.indexOf("set estado        = 'cancelada'");
+      ok("W23 ANCORA: os cinco pontos do fluxo existem",
+        [pTtl, pLock, pTarefa, pLockTarefa, pCancel].every((i) => i > 0));
+      ok("W24 TTL PRIMEIRO: a expiracao e materializada antes do lock",
+        pTtl < pLock);
+      ok("W25 ordem de lock: aprovacao ANTES da tarefa",
+        pLock < pLockTarefa);
+      ok("W26 a tarefa e lida depois da aprovacao, e o cancelamento por ultimo",
+        pLock < pTarefa && pTarefa < pCancel);
+    }
+    ok("W27 estados ja resolvidos saem ANTES de olhar a tarefa",
+      ["ja_cancelada", "ja_consumida", "ja_rejeitada", "expirada", "aprovacao_pendente"]
+        .every((c) => CORPO_CANCEL.indexOf(`return '${c}'`) > 0 &&
+                      CORPO_CANCEL.indexOf(`return '${c}'`) <
+                        CORPO_CANCEL.indexOf("from public.agente_tarefas t")));
+    ok("W28 o UPDATE final da aprovacao recerca `estado = 'aprovada'`",
+      /and estado = 'aprovada'/.test(CORPO_CANCEL));
+
+    // ── W28a..W28f. GUARD LOCAL DE ESTADO (FIX1) ─────────────────
+    //
+    // Antes do FIX1 a inalcancabilidade de um estado inesperado vinha do
+    // `NOT NULL` + CHECK da TABELA, em outro arquivo. Funcionava hoje e
+    // falharia amanha: uma migration futura que acrescentasse um setimo
+    // estado ao CHECK o faria cair no cancelamento por OMISSAO, porque
+    // nenhum dos cinco `if` casaria. O guard traz o fail-closed para
+    // dentro da funcao, onde ele pode ser lido junto com o que protege.
+    {
+      const CONHECIDOS_P0 = ["ja_cancelada", "ja_consumida", "ja_rejeitada",
+        "expirada", "aprovacao_pendente"];
+      const pUltimoConhecido = Math.max(
+        ...CONHECIDOS_P0.map((c) => CORPO_CANCEL.indexOf(`return '${c}'`)));
+      const pGuard = CORPO_CANCEL.indexOf("if ap.estado <> 'aprovada' then");
+      const pTarefaSel = CORPO_CANCEL.indexOf("from public.agente_tarefas t");
+      const pTarefaLock = CORPO_CANCEL.indexOf("for update of t;");
+
+      // O detector de guard INVALIDO e uma negacao, e negacao so vale
+      // depois de vermos o detector disparar. Ele e declarado aqui, usado
+      // em W28f e submetido as fixtures sinteticas em W28h/W28i.
+      const detectorGuardReturnP0 = /if ap\.estado <> 'aprovada' then\s*return/;
+      const GUARD_COM_RETURN_P0 =
+        "  if ap.estado <> 'aprovada' then\n    return 'estado_desconhecido';\n  end if;";
+      const GUARD_COM_RAISE_P0 =
+        "  if ap.estado <> 'aprovada' then\n    raise exception 'x'\n"
+        + "      using errcode = '55000';\n  end if;";
+
+      ok(`W28a ANCORA: os CINCO estados conhecidos retornam, cada um uma vez`,
+        CONHECIDOS_P0.every((c) =>
+          (CORPO_CANCEL.match(new RegExp(`return '${c}'`, "g")) ?? []).length === 1));
+      ok("W28b ANCORA: guard, SELECT e lock da tarefa existem no corpo",
+        pGuard > 0 && pTarefaSel > 0 && pTarefaLock > 0 && pUltimoConhecido > 0);
+      ok("W28c HARD: existe guard explicito exigindo `aprovada` para continuar",
+        /if ap\.estado <> 'aprovada' then/.test(CORPO_CANCEL));
+      ok("W28d o guard vem DEPOIS de todos os cinco retornos conhecidos",
+        pGuard > pUltimoConhecido);
+      ok("W28e o guard vem ANTES do SELECT e do lock da tarefa",
+        pGuard < pTarefaSel && pGuard < pTarefaLock);
+      ok("W28f o guard FALHA — nao devolve codigo novo nem cai na tarefa",
+        /if ap\.estado <> 'aprovada' then\s*raise exception\s*'[^']*'\s*using errcode = '55000';\s*end if;/
+          .test(CORPO_CANCEL) &&
+        !detectorGuardReturnP0.test(CORPO_CANCEL));
+      ok("W28g o guard NAO interpola valor dinamico na mensagem",
+        /raise exception\s*'retomada_cancelar_aprovacao_incompativel: estado de aprovacao fora do dominio conhecido'/
+          .test(CORPO_CANCEL));
+      ok("W28h CONTROLE NEGATIVO: um guard que so RETORNASSE E detectado",
+        detectorGuardReturnP0.test(GUARD_COM_RETURN_P0));
+      ok("W28i e o MESMO detector fica quieto diante do guard correto",
+        !detectorGuardReturnP0.test(GUARD_COM_RAISE_P0));
+      ok("W28j a fixture do guard correto satisfaz a exigencia POSITIVA de W28f",
+        /if ap\.estado <> 'aprovada' then\s*raise exception\s*'[^']*'\s*using errcode = '55000';\s*end if;/.test(GUARD_COM_RAISE_P0) &&
+        !/if ap\.estado <> 'aprovada' then\s*raise exception\s*'[^']*'\s*using errcode = '55000';\s*end if;/.test(GUARD_COM_RETURN_P0));
+    }
+    {
+      const cercas = [
+        /t\.id\s*=\s*ap\.tarefa_id/,
+        /t\.user_id\s*=\s*ap\.user_id/,
+        /t\.agente_id\s*=\s*ap\.agente_id/,
+        /t\.status\s*=\s*'aguardando_aprovacao'/,
+        /t\.aprovacao_aguardada_id\s*=\s*ap\.id/,
+        /t\.retomada_request_id is null/,
+      ];
+      ok(`W29 as SEIS cercas causais da tarefa (${cercas.filter((r) => r.test(CORPO_CANCEL)).length}/6)`,
+        cercas.every((r) => r.test(CORPO_CANCEL)));
+      ok("W29a e NAO exige folga de tentativa: a tarefa ja esta parada",
+        !/t\.tentativas\s*<=\s*t\.max_tentativas/.test(CORPO_CANCEL));
+    }
+    ok("W30 causalidade divergente devolve tarefa_incompativel SEM escrever",
+      CORPO_CANCEL.indexOf("return 'tarefa_incompativel'") <
+        CORPO_CANCEL.indexOf("set status                 = 'cancelado'"));
+
+    // ── W31..W35. O QUE AS ESCRITAS TOCAM, E O QUE NAO ──────────────
+    ok("W31 a tarefa e encerrada com os sete campos do D4",
+      /set status                 = 'cancelado'/.test(CORPO_CANCEL) &&
+      /aprovacao_aguardada_id = null/.test(CORPO_CANCEL) &&
+      /heartbeat_em           = null/.test(CORPO_CANCEL) &&
+      /concluido_em           = now\(\)/.test(CORPO_CANCEL) &&
+      /resultado              = null/.test(CORPO_CANCEL) &&
+      /erro_tipo              = null/.test(CORPO_CANCEL) &&
+      /erro_mensagem          = null/.test(CORPO_CANCEL));
+    ok("W32 HARD: `tentativas` e `progresso` ficam FORA de todo SET",
+      !/\btentativas\s*=/.test(CORPO_CANCEL) && !/\bprogresso\s*=/.test(CORPO_CANCEL));
+    ok("W33 HARD: `decidido_por`/`decidido_em` nao sao tocados",
+      !/decidido_por\s*=/.test(CORPO_CANCEL) && !/decidido_em\s*=/.test(CORPO_CANCEL));
+    ok("W34 `motivo_recusa` nao e escrito — o CHECK so o admite em rejeitada",
+      !/motivo_recusa\s*=/.test(CORPO_CANCEL));
+    ok("W35 snapshot e identidade da aprovacao intocados",
+      !/argumentos\s*=|argumentos_hash\s*=|fingerprint\s*=|revisao_funcao\s*=|request_id_consumo\s*=/
+        .test(CORPO_CANCEL));
+
+    // ── W36..W39. Tool Call, atomicidade e vocabulario ──────────────
+    ok("W36 a migration inteira NAO menciona a tabela de Tool Call",
+      !/agente_funcao_chamadas/.test(SQL_P0));
+    ok("W37 as duas escritas exigem exatamente uma linha, sob lock",
+      (CORPO_CANCEL.match(/get diagnostics v_afetadas = row_count/g) ?? []).length === 2 &&
+      (CORPO_CANCEL.match(/v_afetadas <> 1/g) ?? []).length === 2);
+    // ── W38. Todo RAISE e violacao de invariante ─────────────────
+    //
+    // A CONTAGEM nao e congelada — o guard de estado do FIX1 acrescentou
+    // um terceiro RAISE. O que se prova e a correspondencia 1:1 com o
+    // errcode e que os motivos sao os TRES permitidos.
+    {
+      const raises = [...CORPO_CANCEL.matchAll(/raise exception\s+'([^']*)'/g)]
+        .map((m) => m[1]);
+      const comErrcode = (CORPO_CANCEL.match(/using errcode = '55000'/g) ?? []).length;
+      const totalErrcode = (CORPO_CANCEL.match(/using errcode/g) ?? []).length;
+      const MOTIVOS_P0 = [
+        "estado de aprovacao fora do dominio conhecido",
+        "encerrar tarefa % afetou % linhas sob lock",
+        "cancelar % afetou % linhas sob lock",
+      ];
+      ok(`W38 ANCORA: a funcao tem RAISE, e cada um tem errcode (${raises.length})`,
+        raises.length >= 3 && raises.length === totalErrcode);
+      ok("W38a violacao de invariante usa SOMENTE 55000",
+        comErrcode === totalErrcode && totalErrcode === raises.length);
+      ok("W38b os motivos sao exatamente os TRES permitidos",
+        raises.length === MOTIVOS_P0.length &&
+        MOTIVOS_P0.every((mot) => raises.some((r) => r.includes(mot))) &&
+        raises.every((r) => MOTIVOS_P0.some((mot) => r.includes(mot))));
+      ok("W38c CONTROLE NEGATIVO: um motivo estranho reprovaria",
+        !MOTIVOS_P0.some((mot) => "motivo inventado".includes(mot)));
+    }
+    {
+      const CODIGOS_P0 = ["cancelada", "expirada", "ja_cancelada", "ja_consumida",
+        "ja_rejeitada", "aprovacao_pendente", "tarefa_incompativel", "aprovacao_inexistente"];
+      const devolvidos = [...CORPO_CANCEL.matchAll(/return '([a-z_]+)'/g)].map((m) => m[1]);
+      const unicos = [...new Set(devolvidos)].sort();
+      ok(`W39 o vocabulario de retorno e fechado em 8 (${unicos.length})`,
+        unicos.length === 8 && unicos.every((c) => CODIGOS_P0.includes(c)));
+      ok("W39a e nenhum erro cru do driver escapa como codigo",
+        !/sqlerrm|sqlstate\s+into|pg_exception/i.test(CORPO_CANCEL));
+    }
+
+    // ── W40. DORMENCIA ──────────────────────────────────────────────
+    {
+      const producaoW = ["lib/agentes", "app", "components"];
+      const alcancaW: string[] = [];
+      const varrerW = (dir: string): void => {
+        for (const e of readdirSync(join(RAIZ, dir), { withFileTypes: true })) {
+          const rel = `${dir}/${e.name}`;
+          if (e.isDirectory()) varrerW(rel);
+          else if (/\.tsx?$/.test(e.name) &&
+                   /retomada_listar_candidatas|retomada_cancelar_aprovacao_incompativel/
+                     .test(readFileSync(join(RAIZ, rel), "utf8")))
+            alcancaW.push(rel);
+        }
+      };
+      for (const d of producaoW) varrerW(d);
+      ok(`W40 as duas RPCs nascem DORMENTES: zero chamador (${alcancaW.join(", ") || "nenhum"})`,
+        alcancaW.length === 0);
+    }
   }
 
   const total = passou + falhou;
