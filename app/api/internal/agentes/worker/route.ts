@@ -67,6 +67,7 @@ import { NextResponse } from "next/server";
 
 import { reivindicarProximaTarefa } from "@/lib/agentes/capability-worker";
 import { executarTarefa } from "@/lib/agentes/executar-tarefa";
+import { executarSlotRetomada } from "@/lib/agentes/retomada/executar-retomada";
 
 /** Mesmo teto do worker do Estudio, ja aceito e operando neste projeto
  *  (plano Pro). `vercel.json` repete o valor — os dois tem de casar. */
@@ -103,6 +104,22 @@ const FOLGA_MINIMA_MS = 90_000;
  */
 const MAX_TASKS_PER_RUN = 5;
 
+/**
+ * O teto de TURNOS, e por que ele e derivado.
+ *
+ * `processados` conta trabalho DURAVEL, e existe turno que nao produz
+ * nenhum: a fila de retomada pode ter candidatas que todas recusam
+ * abrir, e a lane normal pode vir vazia. Sem um segundo teto, uma
+ * rodada em que as duas lanes alternam sem produzir nada rodaria ate o
+ * orcamento acabar — girando, nao trabalhando.
+ *
+ * Duas voltas completas por vaga e o suficiente: cada vaga de trabalho
+ * tem direito a uma tentativa de cada lane. Derivado de
+ * `MAX_TASKS_PER_RUN` de proposito — um literal `10` seria uma segunda
+ * fonte que envelheceria sozinha se a primeira mudasse.
+ */
+const MAX_TURNOS_PER_RUN = 2 * MAX_TASKS_PER_RUN;
+
 function responder(corpo: unknown, status: number): NextResponse {
   return NextResponse.json(corpo, {
     status,
@@ -125,87 +142,164 @@ export async function GET(request: Request) {
   }
 
   const inicio = Date.now();
+
+  /**
+   * A UNICA fonte de orcamento da rodada.
+   *
+   * A inequacao existe uma vez so, e por dois motivos. O primeiro e
+   * obvio: duas copias divergem. O segundo e o que importa — esta mesma
+   * funcao e passada ao slot de retomada, que a repassa ao executor e a
+   * consulta no ultimo instante antes de gastar uma aprovacao. Se o
+   * `while` perguntasse por uma formula e o slot por outra, o worker
+   * estaria prometendo uma folga que o executor nao teria.
+   *
+   * E uma FUNCAO, e nao um numero, porque a resposta muda com o tempo:
+   * quem pergunta quer saber se ha folga AGORA, nao quanto havia quando
+   * a rodada comecou.
+   */
+  const podeIniciarNovoTrabalho = () =>
+    Date.now() - inicio < ORCAMENTO_MS - FOLGA_MINIMA_MS;
+
   let processados = 0;
+  let turnos = 0;
+  /** A rodada abre pela RETOMADA. Uma tarefa em `rodando` com marcador
+   *  ocupa vaga e nao anda; comecar por trabalho novo seria preferir a
+   *  fila cheia a fila travada. */
+  let proximaLane: "retomada" | "normal" = "retomada";
+  /** Quantas lanes consecutivas responderam TRUE EMPTY. Com alternancia
+   *  estrita, duas seguidas provam que as duas filas estao vazias. */
+  let emptyStreak = 0;
 
   try {
-    // ── O laco, limitado por TEMPO e por QUANTIDADE ─────────────────
+    // ── O laco, limitado por TRABALHO, por TURNOS e por TEMPO ────────
     //
-    // As duas condicoes valem juntas, e sao avaliadas ANTES de cada
-    // claim — nunca depois. Reivindicar uma tarefa que nao ha tempo de
-    // comecar seria pior que nao reivindicar: ela sairia da fila para
-    // ficar presa em `rodando`.
+    // Os tres valem juntos. `processados` limita trabalho durável;
+    // `turnos` impede a rodada de girar sem produzir; o orcamento impede
+    // que ela comece algo que nao ha tempo de terminar. As tres sao
+    // avaliadas ANTES de cada turno — nunca depois.
     while (
       processados < MAX_TASKS_PER_RUN &&
-      Date.now() - inicio < ORCAMENTO_MS - FOLGA_MINIMA_MS
+      turnos < MAX_TURNOS_PER_RUN &&
+      podeIniciarNovoTrabalho()
     ) {
-      const { tarefa, erro: erroClaim } = await reivindicarProximaTarefa();
+      // PRIMEIRA instrucao do corpo, sem ramo e sem `await` antes dela.
+      // Um turno que sai por qualquer caminho ja foi contado — e e isso
+      // que torna o teto de turnos uma garantia de terminacao, e nao uma
+      // intencao.
+      turnos += 1;
 
-      if (erroClaim) {
-        // Falha do claim: nao ha tarefa reivindicada e nada a executar.
-        // Parar — insistir no mesmo erro dentro da mesma invocacao nao
-        // muda o resultado, e a proxima rodada do cron tenta de novo.
-        return responder({ ok: false, processados, erro: "dispatcher_falhou" }, 500);
+      if (proximaLane === "retomada") {
+        // ── LANE RETOMADA ─────────────────────────────────────────
+        //
+        // O slot recebe a MESMA referencia que o `while` consulta. Um
+        // `() => podeIniciarNovoTrabalho()` aqui pareceria inofensivo e
+        // criaria uma segunda funcao com a mesma aritmetica — que e
+        // exatamente o que o D0 existe para nao ter.
+        const r = await executarSlotRetomada(podeIniciarNovoTrabalho);
+
+        // Trabalho DURAVEL consome uma vaga, e a decisao olha SO o grau
+        // de progresso. `ok:false` com progresso `possivel` consumiu
+        // vaga tanto quanto um sucesso: a RPC pode ter commitado, e
+        // contar zero faria a rodada repetir trabalho que talvez exista.
+        if (r.progressoDuravel !== "nenhum") {
+          processados += 1;
+        }
+
+        // TRUE EMPTY da retomada e um unico desfecho. `sem_progresso`
+        // NAO e vazio: havia candidatas, elas foram examinadas, e
+        // nenhuma produziu trabalho — confundir os dois encerraria a
+        // rodada com a fila normal ainda cheia.
+        const vazioResume =
+          r.ok === true && r.desfecho === "fila_vazia";
+        emptyStreak = vazioResume ? emptyStreak + 1 : 0;
+
+        proximaLane = "normal";
+
+        // BREAK EXPLICITO. `Date.now()` e relogio de parede, nao
+        // monotonico: confiar na proxima avaliacao do `while` seria
+        // apostar que o relogio nao andou para tras. O slot ja disse que
+        // nao ha folga; a rodada acaba aqui.
+        if (r.ok === true && r.encerrarPorOrcamento) break;
+
+        if (emptyStreak >= 2) break;
+      } else {
+        // ── LANE NORMAL — semantica historica preservada ───────────
+        const { tarefa, erro: erroClaim } = await reivindicarProximaTarefa();
+
+        if (erroClaim) {
+          // Falha do claim: nao ha tarefa reivindicada e nada a executar.
+          // Parar — insistir no mesmo erro dentro da mesma invocacao nao
+          // muda o resultado, e a proxima rodada do cron tenta de novo.
+          return responder({ ok: false, processados, erro: "dispatcher_falhou" }, 500);
+        }
+
+        proximaLane = "retomada";
+
+        if (tarefa === null) {
+          // Fila vazia: encerramento NORMAL, sem execucao e sem retry.
+          emptyStreak += 1;
+          if (emptyStreak >= 2) break;
+        } else {
+          emptyStreak = 0;
+
+          const { status, corpo } = await executarTarefa(tarefa.tarefaId);
+
+          // ── OS QUATRO DESFECHOS, e o que cada um decide ─────────
+          //
+          // `executarTarefa` devolve 200 sempre que a tarefa chegou a um
+          // desfecho REGISTRADO no banco. Sao tres, e eles NAO se
+          // comportam igual:
+          //
+          //   A. 200, `ok: true`,  `concluido`            -> conta, CONTINUA
+          //   B. 200, `ok: true`,  `aguardando_aprovacao` -> conta, CONTINUA
+          //   C. 200, `ok: false`  (falha ja gravada)     -> conta, ENCERRA
+          //   D. 404 / 409 / 500                          -> falha OPERACIONAL
+          //
+          // A e B drenam a fila: a tarefa saiu dela. A pausada some do
+          // predicado do claim por conta propria — o dispatcher nao
+          // aprova, nao rejeita, nao consome e nao retoma.
+          if (status !== 200) {
+            // D. 404 (tarefa sumiu), 409 (nao estava em `rodando`) ou 500
+            // (infra): o executor nao levou a tarefa a desfecho nenhum. A
+            // tentativa NAO conta, e a rodada para sem reivindicar outra.
+            return responder({ ok: false, processados, erro: "dispatcher_falhou" }, 500);
+          }
+
+          // Chegou a um desfecho registrado. Vale para A, B e C —
+          // inclusive C, onde a falha do handler ja esta gravada.
+          processados += 1;
+
+          // ── C: a rodada acaba AQUI (V1B1-I1-M1) ───────────────
+          //
+          // `falhar_tarefa` devolve a tarefa para `pendente` enquanto
+          // `tentativas < max_tentativas`, e o claim entrega sempre a
+          // elegivel MAIS ANTIGA. Continuando o laco, a mesma tarefa
+          // voltava a ser a mais antiga e era reivindicada de novo na
+          // MESMA invocacao:
+          //
+          //     claim tentativa 1 -> falha -> pendente
+          //     claim tentativa 2 -> falha -> pendente
+          //     claim tentativa 3 -> falha -> erro      (tudo em segundos)
+          //
+          // Tres tentativas numa rajada de segundos, ocupando tres das
+          // cinco vagas da rodada. A correcao NAO e reconhecer a tarefa
+          // repetida: quando desse para reconhece-la, ela ja teria sido
+          // reivindicada e `tentativas` ja teria incrementado. E encerrar
+          // a rodada. O proximo cron, ~1 minuto depois, tenta de novo se
+          // ela voltou a `pendente`, ou segue para a proxima se ela
+          // terminou em `erro`.
+          //
+          // A garantia e NO SAME-RUN RETRY, nunca "60 s exatos entre
+          // tentativas": backlog e atraso do agendador mexem no
+          // intervalo, nao na propriedade.
+          //
+          // E isto NAO e falha do dispatcher: o handler falhou, o banco
+          // registrou a consequencia, a tentativa foi contada. A rodada
+          // termina com sucesso operacional. Virar 500 encheria o log de
+          // alarme falso e esconderia D, que e o unico erro de verdade.
+          if (corpo.ok === false) break;
+        }
       }
-
-      // Fila vazia: encerramento NORMAL, sem execucao e sem retry.
-      if (tarefa === null) break;
-
-      const { status, corpo } = await executarTarefa(tarefa.tarefaId);
-
-      // ── OS QUATRO DESFECHOS, e o que cada um decide ─────────────
-      //
-      // `executarTarefa` devolve 200 sempre que a tarefa chegou a um
-      // desfecho REGISTRADO no banco. Sao tres, e eles NAO se comportam
-      // igual:
-      //
-      //   A. 200, `ok: true`,  `concluido`            -> conta, CONTINUA
-      //   B. 200, `ok: true`,  `aguardando_aprovacao` -> conta, CONTINUA
-      //   C. 200, `ok: false`  (falha ja gravada)     -> conta, ENCERRA
-      //   D. 404 / 409 / 500                          -> falha OPERACIONAL
-      //
-      // A e B drenam a fila: a tarefa saiu dela. A pausada some do
-      // predicado do claim por conta propria — o dispatcher nao aprova,
-      // nao rejeita, nao consome e nao retoma.
-      if (status !== 200) {
-        // D. 404 (tarefa sumiu), 409 (nao estava em `rodando`) ou 500
-        // (infra): o executor nao levou a tarefa a desfecho nenhum. A
-        // tentativa NAO conta, e a rodada para sem reivindicar outra.
-        return responder({ ok: false, processados, erro: "dispatcher_falhou" }, 500);
-      }
-
-      // Chegou a um desfecho registrado. Vale para A, B e C — inclusive
-      // C, onde a falha do handler ja esta gravada no banco.
-      processados += 1;
-
-      // ── C: a rodada acaba AQUI (V1B1-I1-M1) ─────────────────────
-      //
-      // `falhar_tarefa` devolve a tarefa para `pendente` enquanto
-      // `tentativas < max_tentativas`, e o claim entrega sempre a
-      // elegivel MAIS ANTIGA. Continuando o laco, a mesma tarefa
-      // voltava a ser a mais antiga e era reivindicada de novo na MESMA
-      // invocacao:
-      //
-      //     claim tentativa 1 -> falha -> pendente
-      //     claim tentativa 2 -> falha -> pendente
-      //     claim tentativa 3 -> falha -> erro      (tudo em segundos)
-      //
-      // Tres tentativas numa rajada de segundos, ocupando tres das
-      // cinco vagas da rodada. A correcao NAO e reconhecer a tarefa
-      // repetida: quando desse para reconhece-la, ela ja teria sido
-      // reivindicada e `tentativas` ja teria incrementado. E encerrar a
-      // rodada. O proximo cron, ~1 minuto depois, tenta de novo se ela
-      // voltou a `pendente`, ou segue para a proxima se ela terminou em
-      // `erro`.
-      //
-      // A garantia e NO SAME-RUN RETRY, nunca "60 s exatos entre
-      // tentativas": backlog e atraso do agendador mexem no intervalo,
-      // nao na propriedade.
-      //
-      // E isto NAO e falha do dispatcher: o handler falhou, o banco
-      // registrou a consequencia, a tentativa foi contada. A rodada
-      // termina com sucesso operacional. Virar 500 encheria o log de
-      // alarme falso e esconderia D, que e o unico erro de verdade.
-      if (corpo.ok === false) break;
     }
 
     return responder({ ok: true, processados, duracaoMs: Date.now() - inicio }, 200);

@@ -2704,17 +2704,70 @@ async function main() {
     ok(`B1-H a janela util do laco e positiva e vale 150000 ms (${janela})`,
       janela === 150_000 && orcamento !== null && orcamento < 300_000);
 
-    // ── I. As DUAS condicoes, juntas ───────────────────────────────
+    // ── I. As TRES condicoes, juntas, e a fonte unica do orcamento ──
     //
-    // `&&`, nunca `||`: com `||` um dos tetos sozinho ja bastaria para
-    // seguir, e o outro viraria decoracao.
+    // Ate o D0 a inequacao vivia dentro do `while`, e o assert olhava o
+    // texto dela ali. O D0 a moveu para uma callback — nao por estilo:
+    // a MESMA funcao e passada ao slot de retomada, que a repassa ao
+    // executor e a consulta no ultimo instante antes de gastar uma
+    // aprovacao. Duas copias da mesma aritmetica seriam duas promessas
+    // que podem divergir.
+    //
+    // Entao o assert mudou de alvo, nao de exigencia: continua provando
+    // que quantidade e tempo valem JUNTOS, e passa a provar tambem que a
+    // inequacao existe uma vez so e que quem a consulta e a mesma
+    // funcao em todos os pontos.
     const mWhile = codWorker.match(/while \(([\s\S]*?)\) \{/);
     const condicao = mWhile ? mWhile[1] : "";
-    ok("B1-I o laco exige quantidade E tempo simultaneamente",
+    const mPredicado = codWorker.match(
+      /const podeIniciarNovoTrabalho = \(\) =>\s*([\s\S]*?);/);
+    const corpoPredicado = mPredicado ? mPredicado[1].replace(/\s+/g, " ").trim() : "";
+
+    ok("B1-I o laco exige trabalho, turnos E tempo simultaneamente",
       /processados < MAX_TASKS_PER_RUN/.test(condicao) &&
-      /Date\.now\(\) - inicio < ORCAMENTO_MS - FOLGA_MINIMA_MS/.test(condicao) &&
+      /turnos < MAX_TURNOS_PER_RUN/.test(condicao) &&
+      /podeIniciarNovoTrabalho\(\)/.test(condicao) &&
       /&&/.test(condicao) &&
       !/\|\|/.test(condicao));
+    ok(`B1-I1 a inequacao de orcamento existe UMA vez, e e a historica (${corpoPredicado})`,
+      corpoPredicado === "Date.now() - inicio < ORCAMENTO_MS - FOLGA_MINIMA_MS" &&
+      conta(codWorker, /Date\.now\(\) - inicio < ORCAMENTO_MS - FOLGA_MINIMA_MS/g) === 1);
+    ok("B1-I2 a callback tem UMA definicao e a cushion tem UMA fonte",
+      conta(codWorker, /const podeIniciarNovoTrabalho = /g) === 1 &&
+      conta(codWorker, /const FOLGA_MINIMA_MS = /g) === 1 &&
+      conta(codWorker, /const ORCAMENTO_MS = /g) === 1);
+    ok("B1-I3 o while e o slot consultam a MESMA funcao, sem embrulho",
+      conta(codWorker, /podeIniciarNovoTrabalho\(\)/g) === 1 &&
+      /executarSlotRetomada\(podeIniciarNovoTrabalho\)/.test(codWorker) &&
+      !/\(\s*\)\s*=>\s*podeIniciarNovoTrabalho\(/.test(codWorker) &&
+      !/podeIniciarNovoTrabalho\.bind/.test(codWorker));
+    ok("B1-I4 CONTROLE: uma segunda inequacao equivalente seria detectada",
+      conta(codWorker + "\nDate.now() - inicio < ORCAMENTO_MS - FOLGA_MINIMA_MS;",
+        /Date\.now\(\) - inicio < ORCAMENTO_MS - FOLGA_MINIMA_MS/g) !== 1);
+    ok("B1-I5 CONTROLE: um embrulho em arrow seria detectado",
+      /\(\s*\)\s*=>\s*podeIniciarNovoTrabalho\(/
+        .test("await executarSlotRetomada(() => podeIniciarNovoTrabalho());"));
+    ok("B1-I6 o teto de turnos e DERIVADO do teto de trabalho",
+      /const MAX_TURNOS_PER_RUN = 2 \* MAX_TASKS_PER_RUN;/.test(codWorker) &&
+      conta(codWorker, /MAX_TURNOS_PER_RUN/g) === 2);
+
+    // ── I7. `turnos += 1` e a PRIMEIRA instrucao do corpo ───────────
+    //
+    // Um turno que sai por qualquer caminho ja foi contado: e isso que
+    // transforma o teto de turnos em garantia de terminacao. Se houvesse
+    // um `await` ou um ramo antes do incremento, existiria caminho que
+    // consome tempo sem consumir turno.
+    {
+      const iAbreLaco = codWorker.indexOf(") {", codWorker.indexOf("while ("));
+      const inicioCorpo = codWorker.slice(iAbreLaco + 3);
+      const primeira = inicioCorpo.split("\n").map((l) => l.trim())
+        .find((l) => l.length > 0);
+      ok(`B1-I7 \`turnos += 1;\` e a PRIMEIRA instrucao do corpo (${JSON.stringify(primeira)})`,
+        primeira === "turnos += 1;");
+      ok("B1-I8 e ela acontece uma vez so, incondicionalmente",
+        conta(codWorker, /turnos \+= 1;/g) === 1 &&
+        !/if\s*\([^)]*\)\s*turnos \+= 1;/.test(codWorker));
+    }
 
     // ── J. Avaliadas ANTES de cada claim ───────────────────────────
     //
@@ -2763,9 +2816,24 @@ async function main() {
     //
     // Incrementar antes tornaria `processados` uma contagem de CLAIMS, e
     // o teto viraria teto de tentativas, nao de execucoes.
-    ok("B1-N `processados` incrementa DEPOIS da execucao bem-sucedida",
-      codWorker.indexOf("processados += 1;") > iExec &&
-      conta(codWorker, /processados \+= 1;/g) === 1);
+    // O D0 criou um SEGUNDO site legitimo: o turno de retomada tambem
+    // consome uma vaga quando deixa trabalho duravel. Contar sites nao
+    // basta mais — o que importa e o PAPEL de cada um. Por isso o assert
+    // passou a localizar cada incremento no seu ramo e a provar a
+    // condicao que o governa, em vez de exigir cardinalidade 1.
+    ok("B1-N ha exatamente DOIS incrementos, um por lane",
+      conta(codWorker, /processados \+= 1;/g) === 2);
+    ok("B1-N1 o incremento da lane NORMAL continua vindo depois da execucao",
+      codWorker.lastIndexOf("processados += 1;") > iExec);
+    ok("B1-N2 o incremento da lane RETOMADA e governado SO pelo grau de progresso",
+      /if \(r\.progressoDuravel !== "nenhum"\) \{\s*processados \+= 1;\s*\}/
+        .test(codWorker.replace(/\s+/g, " ").replace(/\{ /g, "{").replace(/ \}/g, "}")) ||
+      /r\.progressoDuravel !== "nenhum"[\s\S]{0,60}?processados \+= 1;/.test(codWorker));
+    ok("B1-N3 o incremento de retomada NAO olha ok, desfecho nem falha",
+      !/r\.ok[\s\S]{0,40}?processados \+= 1;/.test(codWorker) &&
+      !/r\.desfecho[\s\S]{0,40}?processados \+= 1;/.test(codWorker));
+    ok("B1-N4 nao existe TERCEIRO site de incremento",
+      conta(codWorker, /processados \+\+|processados = processados \+|processados \+= [^1]/g) === 0);
 
     // ── O. O wrapper do claim so deixa sair o id ───────────────────
     //
@@ -2898,6 +2966,47 @@ async function main() {
     const INCREMENTO = "processados += 1;";
     const RAMO_D = "if (status !== 200) {";
 
+    /**
+     * O ramo NORMAL, recortado do corpo do laco.
+     *
+     * Depois do D0 o corpo tem duas lanes, e varios asserts historicos
+     * falavam do fluxo normal usando "o primeiro X do corpo" como
+     * atalho. Esse atalho passou a apontar para a retomada. Recortar o
+     * ramo certo devolve a eles o alvo original — sem afrouxar nada, e
+     * sem deixar a retomada contaminar a medicao.
+     */
+    const ramoNormal = (texto: string): string => {
+      const corpo = corpoDoLaco(texto);
+      const iElse = corpo.indexOf("} else {");
+      if (iElse < 0) return "";
+      let nivel = 0;
+      for (let k = iElse + 7; k < corpo.length; k++) {
+        if (corpo[k] === "{") nivel += 1;
+        else if (corpo[k] === "}") {
+          nivel -= 1;
+          if (nivel === 0) return corpo.slice(iElse + 7, k + 1);
+        }
+      }
+      return "";
+    };
+
+    /** O ramo RETOMADA, pelo mesmo criterio. */
+    const ramoRetomada = (texto: string): string => {
+      const corpo = corpoDoLaco(texto);
+      const marca = 'if (proximaLane === "retomada") {';
+      const i = corpo.indexOf(marca);
+      if (i < 0) return "";
+      let nivel = 0;
+      for (let k = i + marca.length - 1; k < corpo.length; k++) {
+        if (corpo[k] === "{") nivel += 1;
+        else if (corpo[k] === "}") {
+          nivel -= 1;
+          if (nivel === 0) return corpo.slice(i, k + 1);
+        }
+      }
+      return "";
+    };
+
     const laco = corpoDoLaco(codW);
 
     // ── ANCORA: o recorte e real, e e MENOR que o arquivo ──────────
@@ -2969,10 +3078,19 @@ async function main() {
     // rodar depois dela. Mesmo que alguem trocasse o `break` por algo
     // que caisse fora, nao sobraria corpo para executar.
     {
-      const iGuarda = laco.indexOf(GUARDA_C);
-      const resto = laco.slice(iGuarda + GUARDA_C.length).trim();
-      ok(`S2-G a guarda de falha de negocio e a ULTIMA instrucao do laco (resto=${JSON.stringify(resto)})`,
-        iGuarda > 0 && resto === "}");
+      // ANTES: a guarda era a ultima instrucao do corpo, porque o corpo
+      // era a lane normal inteira. DEPOIS: ela e a ultima instrucao do
+      // RAMO normal, e o que se prova continua sendo o mesmo fato — que
+      // nada roda depois dela nesse ramo, entao `corpo.ok === false`
+      // encerra a rodada e nao ha caminho de volta ao topo.
+      const normalG = ramoNormal(codW);
+      const iGuarda = normalG.indexOf(GUARDA_C);
+      const resto = normalG.slice(iGuarda + GUARDA_C.length).trim();
+      ok(`S2-G a guarda de falha de negocio e a ULTIMA instrucao do ramo normal (resto=${JSON.stringify(resto)})`,
+        iGuarda > 0 && /^\}*$/.test(resto.replace(/\s/g, "")));
+      ok("S2-G1 e a consequencia dela e `break`, nao `continue` nem resposta",
+        /if \(corpo\.ok === false\) break;/.test(normalG) &&
+        !/\bcontinue\b/.test(codW));
     }
 
     // ── A TENTATIVA CONTA, a falha operacional NAO ─────────────────
@@ -2982,12 +3100,26 @@ async function main() {
     // C vem DEPOIS dele (houve desfecho registrado, conta).
     {
       const iD = laco.indexOf(RAMO_D);
-      const iInc = laco.indexOf(INCREMENTO);
-      const iC = laco.indexOf(GUARDA_C);
-      ok("S2-H a ordem e: falha operacional -> incremento -> guarda de negocio",
-        iD > 0 && iInc > iD && iC > iInc);
-      ok("S2-I o incremento acontece UMA vez e so no caminho de desfecho registrado",
-        conta(laco, /processados \+= 1;/g) === 1);
+      // ESCOPADO AO RAMO NORMAL. Antes do D0, "o primeiro
+      // `processados += 1;` do corpo" era o da lane normal porque nao
+      // havia outra lane. Agora o primeiro e o da retomada, e medir no
+      // corpo inteiro apontaria para o ramo errado — o assert passaria a
+      // falar de outra coisa sem ninguem notar.
+      const normal = ramoNormal(codW);
+      const iIncN = normal.indexOf(INCREMENTO);
+      const iDN = normal.indexOf(RAMO_D);
+      const iCN = normal.indexOf(GUARDA_C);
+      ok("S2-H ANCORA: o ramo normal foi recortado e contem claim, execucao e guarda",
+        normal.length > 200 && normal.includes(CLAIM) &&
+        normal.includes("await executarTarefa(") && iCN > 0);
+      ok("S2-H a ordem no ramo NORMAL e: falha operacional -> incremento -> guarda",
+        iDN > 0 && iIncN > iDN && iCN > iIncN);
+      ok("S2-I o ramo normal incrementa UMA vez, e so no caminho de desfecho registrado",
+        conta(normal, /processados \+= 1;/g) === 1);
+      ok("S2-I1 o ramo da RETOMADA tambem incrementa uma vez so",
+        conta(ramoRetomada(codW), /processados \+= 1;/g) === 1);
+      ok("S2-I2 CONTROLE: medir no corpo inteiro daria 2 — por isso o recorte existe",
+        conta(laco, /processados \+= 1;/g) === 2);
     }
 
     // ── C NAO e 500 ────────────────────────────────────────────────
@@ -2997,12 +3129,18 @@ async function main() {
     // nao pode haver resposta nenhuma — a rodada termina pelo caminho
     // de sucesso, fora do laco.
     {
-      const iInc = laco.indexOf(INCREMENTO);
-      const caudaDoLaco = laco.slice(iInc);
-      ok("S2-J ANCORA: a cauda do laco foi recortada e contem a guarda",
-        caudaDoLaco.includes(GUARDA_C) && caudaDoLaco.length > 20);
-      ok("S2-K falha de NEGOCIO nao vira 500: nao ha resposta apos o incremento",
-        !/responder\(/.test(caudaDoLaco));
+      // Tambem escopado: a cauda medida e a do RAMO NORMAL, a partir do
+      // incremento DELE. Cortar a partir do primeiro incremento do corpo
+      // arrastaria o ramo normal inteiro para dentro da "cauda" da
+      // retomada, e os `responder(..., 500)` legitimos do claim e do
+      // status apareceriam como se viessem depois do incremento.
+      const normalJ = ramoNormal(codW);
+      const caudaNormal = normalJ.slice(normalJ.indexOf(INCREMENTO));
+      ok("S2-J ANCORA: a cauda do ramo normal foi recortada e contem a guarda",
+        caudaNormal.includes(GUARDA_C) && caudaNormal.length > 20 &&
+        caudaNormal.length < normalJ.length);
+      ok("S2-K falha de NEGOCIO nao vira 500: nao ha resposta apos o incremento normal",
+        !/responder\(/.test(caudaNormal));
       // E a resposta de sucesso vive FORA do laco — e por isso vale
       // igualmente para A, B e C.
       const foraDoLaco = codW.slice(codW.indexOf(laco) + laco.length);
@@ -3023,9 +3161,31 @@ async function main() {
 
     // Exatamente DOIS `break` no corpo: fila vazia e falha de negocio.
     // Um terceiro seria um encerramento que ninguem revisou.
-    ok(`S2-O o corpo do laco tem exatamente dois encerramentos (${conta(laco, /break;/g)})`,
-      conta(laco, /break;/g) === 2 &&
-      /if \(tarefa === null\) break;/.test(laco));
+    // ── S2-O. Os QUATRO encerramentos, um a um ─────────────────────
+    //
+    // Contar `break` nunca foi a prova — a prova e que cada encerramento
+    // tem razao conhecida. Com duas lanes sao quatro razoes, e um quinto
+    // `break` seria um caminho de saida que ninguem revisou.
+    {
+      const retomadaO = ramoRetomada(codW);
+      const normalO = ramoNormal(codW);
+      const semEspaco = (t: string) => t.replace(/\s+/g, " ");
+      ok("S2-O1 RETOMADA: encerra quando duas lanes seguidas vieram vazias",
+        /if \(emptyStreak >= 2\) break;/.test(semEspaco(retomadaO)));
+      ok("S2-O2 RETOMADA: encerra por orcamento, com break EXPLICITO",
+        /if \(r\.ok === true && r\.encerrarPorOrcamento\) break;/.test(semEspaco(retomadaO)));
+      ok("S2-O3 NORMAL: encerra quando duas lanes seguidas vieram vazias",
+        /if \(emptyStreak >= 2\) break;/.test(semEspaco(normalO)));
+      ok("S2-O4 NORMAL: encerra na falha de negocio ja gravada",
+        /if \(corpo\.ok === false\) break;/.test(semEspaco(normalO)));
+      ok(`S2-O o corpo tem exatamente QUATRO encerramentos, e nenhum quinto (${conta(laco, /break;/g)})`,
+        conta(laco, /break;/g) === 4 &&
+        conta(retomadaO, /break;/g) === 2 &&
+        conta(normalO, /break;/g) === 2);
+      ok("S2-O5 o orcamento e consultado DEPOIS de contabilizar o progresso",
+        semEspaco(retomadaO).indexOf("processados += 1;") <
+        semEspaco(retomadaO).indexOf("r.encerrarPorOrcamento"));
+    }
 
     // ── Os limites do I1 continuam intactos ────────────────────────
     //
@@ -3292,7 +3452,12 @@ async function main() {
     // Nao basta o `break` existir. A propriedade e de ORDEM: entre o
     // claim e a guarda de `null` nao pode haver execucao nenhuma, ou
     // uma fila vazia chamaria `executarTarefa` com o que sobrou.
-    const GUARDA_NULL = "if (tarefa === null) break;";
+    // A guarda de fila vazia mudou de FORMA no D0 — antes era um `break`
+    // direto, agora a lane normal precisa contabilizar o streak antes de
+    // decidir encerrar. A PROPRIEDADE nao mudou: com a fila vazia,
+    // `executarTarefa` continua inalcancavel, porque a execucao vive no
+    // `else` da mesma guarda.
+    const GUARDA_NULL = "if (tarefa === null) {";
     const CLAIM_CALL = "await reivindicarProximaTarefa()";
     const EXEC_CALL = "await executarTarefa(";
 
@@ -3326,11 +3491,46 @@ async function main() {
 
       // claim -> guarda -> execucao, e NADA de executar entre o claim e
       // a guarda (garantido pela ordem mais a unicidade acima).
-      return iClaim < iGuarda && iGuarda < iExec;
+      if (!(iClaim < iGuarda && iGuarda < iExec)) return false;
+
+      // E a execucao esta no ramo `else` da guarda: com `tarefa === null`
+      // o fluxo entra no ramo do streak e nunca alcanca a chamada. Sem
+      // esta checagem, um `executarTarefa` solto DEPOIS do if fecharia a
+      // ordem textual e ainda assim rodaria com a fila vazia.
+      const depoisDaGuarda = corpo.slice(iGuarda);
+      const iElse = depoisDaGuarda.indexOf("} else {");
+      return iElse >= 0 && depoisDaGuarda.indexOf(EXEC_CALL) > iElse;
     };
 
     ok("S3-L com a fila vazia, `executarTarefa` nao e alcancavel",
       execucaoInalcancavelComFilaVazia(codigo(ROTA_W)));
+    // Fixture SINTETICA, e nao mutacao do arquivo real: o worker tem DOIS
+    // `} else {` (o da lane e o da fila vazia), e mutar "o primeiro" acerta
+    // o errado. A fixture isola exatamente o defeito que importa — a
+    // execucao fora do ramo protegido pela guarda.
+    const FIXTURE_SEM_ELSE = [
+      "while (x) {",
+      "  const { tarefa } = await reivindicarProximaTarefa();",
+      "  if (tarefa === null) {",
+      "    emptyStreak += 1;",
+      "  }",
+      "  const { status, corpo } = await executarTarefa(tarefa.tarefaId);",
+      "}",
+    ].join("\n");
+    const FIXTURE_COM_ELSE = [
+      "while (x) {",
+      "  const { tarefa } = await reivindicarProximaTarefa();",
+      "  if (tarefa === null) {",
+      "    emptyStreak += 1;",
+      "  } else {",
+      "    const { status, corpo } = await executarTarefa(tarefa.tarefaId);",
+      "  }",
+      "}",
+    ].join("\n");
+    ok("S3-L1 CONTROLE NEGATIVO: execucao FORA do else da guarda reprova",
+      !execucaoInalcancavelComFilaVazia(FIXTURE_SEM_ELSE));
+    ok("S3-L2 CONTROLE POSITIVO: a mesma fixture COM else e aceita",
+      execucaoInalcancavelComFilaVazia(FIXTURE_COM_ELSE));
 
     ok("S3-L CONTROLE NEGATIVO: executar ANTES da guarda de null reprova",
       !execucaoInalcancavelComFilaVazia(
@@ -4266,6 +4466,302 @@ async function main() {
         ok(`W40k executor e worker seguem sem citar as duas RPCs (${sujosW.join(", ") || "nenhum"})`,
           sujosW.length === 0);
       }
+    }
+  }
+
+  // ────────────────────────────────────────────────────────────────
+  // X. APPROVAL-DECISION-RESUME-D5-C3-I2-D0 — a ATIVACAO do worker
+  //
+  // O seam executavel foi tentado no F1 e RECUSADO pelo Next 14: exportar
+  // a funcao do laco de um `route.ts` quebra a checagem de tipos gerada.
+  // Entao a orquestracao continua provada por ESTRUTURA — e, para as
+  // propriedades dinamicas (alternancia, contagem, streak, tetos), por um
+  // SIMULADOR que executa a mesma maquina de estados declarada na fonte.
+  //
+  // O simulador nao substitui a fonte: cada regra que ele implementa tem,
+  // ao lado, um assert estrutural provando que a fonte contem aquela
+  // regra. Um simulador que divergisse do worker seria pior que nenhum.
+  // ────────────────────────────────────────────────────────────────
+  console.log("\nX. RESUME-D5-C3-I2-D0 — ativacao Worker -> Resume Slot");
+  {
+    const ROTA_X = "app/api/internal/agentes/worker/route.ts";
+    const codX = codigo(ROTA_X);
+
+    // ── X0..X6. A FONTE contem a maquina de estados ─────────────────
+    ok("X0  ANCORA: a rota foi lida e tem o laco de duas lanes",
+      codX.length > 900 && /proximaLane/.test(codX) && /executarSlotRetomada/.test(codX));
+    ok("X1  a primeira lane da rodada e RETOMADA",
+      /let proximaLane: "retomada" \| "normal" = "retomada";/.test(codX));
+    ok("X2  o estado de controle e o minimo declarado",
+      /let processados = 0;/.test(codX) && /let turnos = 0;/.test(codX) &&
+      /let emptyStreak = 0;/.test(codX));
+    ok("X3  cada lane cede a vez para a outra, e so para a outra",
+      /proximaLane = "normal";/.test(codX) && /proximaLane = "retomada";/.test(codX) &&
+      conta(codX, /proximaLane = "normal";/g) === 1 &&
+      conta(codX, /proximaLane = "retomada";/g) === 1);
+    ok("X4  TRUE EMPTY da retomada e SO `fila_vazia`",
+      /r\.ok === true && r\.desfecho === "fila_vazia"/.test(codX) &&
+      !/progressoDuravel === "nenhum"[\s\S]{0,60}?emptyStreak \+= 1/.test(codX));
+    ok("X5  qualquer resultado nao-vazio ZERA o streak",
+      /emptyStreak = vazioResume \? emptyStreak \+ 1 : 0;/.test(codX));
+    ok("X6  duas lanes vazias seguidas encerram a rodada",
+      conta(codX, /if \(emptyStreak >= 2\) break;/g) === 2);
+
+    // ── O SIMULADOR ────────────────────────────────────────────────
+    //
+    // Reproduz literalmente o corpo do laco da fonte. Cada `roteiro` diz
+    // o que cada lane responde no seu turno.
+    interface ResumoRodada {
+      readonly turnos: number;
+      readonly processados: number;
+      readonly emptyStreak: number;
+      readonly trace: string;
+      readonly lanesResume: number;
+      readonly lanesNormal: number;
+    }
+    type RespostaResume = {
+      ok: boolean;
+      desfecho?: string;
+      progressoDuravel: "nenhum" | "possivel" | "confirmado";
+      encerrarPorOrcamento?: boolean;
+    };
+    type RespostaNormal =
+      | { tipo: "vazia" }
+      | { tipo: "tarefa"; corpoOk: boolean }
+      | { tipo: "erro" };
+
+    const MAX_T = 5;
+    const MAX_TU = 2 * MAX_T;
+
+    const rodada = (
+      resume: (n: number) => RespostaResume,
+      normal: (n: number) => RespostaNormal,
+      orcamentoOk: () => boolean = () => true
+    ): ResumoRodada => {
+      let processados = 0;
+      let turnos = 0;
+      let proximaLane: "retomada" | "normal" = "retomada";
+      let emptyStreak = 0;
+      let lanesResume = 0;
+      let lanesNormal = 0;
+      const trace: string[] = [];
+
+      while (processados < MAX_T && turnos < MAX_TU && orcamentoOk()) {
+        turnos += 1;
+        if (proximaLane === "retomada") {
+          lanesResume += 1;
+          trace.push("R");
+          const r = resume(lanesResume);
+          if (r.progressoDuravel !== "nenhum") processados += 1;
+          const vazio = r.ok === true && r.desfecho === "fila_vazia";
+          emptyStreak = vazio ? emptyStreak + 1 : 0;
+          proximaLane = "normal";
+          if (r.ok === true && r.encerrarPorOrcamento === true) break;
+          if (emptyStreak >= 2) break;
+        } else {
+          lanesNormal += 1;
+          trace.push("N");
+          const t = normal(lanesNormal);
+          if (t.tipo === "erro") break;
+          proximaLane = "retomada";
+          if (t.tipo === "vazia") {
+            emptyStreak += 1;
+            if (emptyStreak >= 2) break;
+          } else {
+            emptyStreak = 0;
+            processados += 1;
+            if (!t.corpoOk) break;
+          }
+        }
+      }
+      return { turnos, processados, emptyStreak, trace: trace.join(""), lanesResume, lanesNormal };
+    };
+
+    const SEM_PROG: RespostaResume = { ok: true, desfecho: "sem_progresso", progressoDuravel: "nenhum" };
+    const VAZIO_R: RespostaResume = { ok: true, desfecho: "fila_vazia", progressoDuravel: "nenhum" };
+    const TAREFA_OK: RespostaNormal = { tipo: "tarefa", corpoOk: true };
+    const VAZIO_N: RespostaNormal = { tipo: "vazia" };
+
+    // ── X7..X9. ALTERNANCIA ESTRITA ────────────────────────────────
+    {
+      const r = rodada(() => SEM_PROG, () => TAREFA_OK);
+      ok(`X7  o trace alterna R,N,R,N... sem repetir lane (${r.trace})`,
+        /^(RN)+R?$/.test(r.trace) && r.trace.startsWith("R") && r.trace.length >= 6);
+      ok("X7a CONTROLE: um trace com lane repetida seria detectado",
+        !/^(RN)+R?$/.test("RRNR") && !/^(RN)+R?$/.test("RNNR"));
+      ok("X8  as duas lanes recebem turnos de verdade",
+        r.lanesResume > 0 && r.lanesNormal > 0 &&
+        Math.abs(r.lanesResume - r.lanesNormal) <= 1);
+      ok("X9  a lane normal NAO passa fome: recebe metade dos turnos",
+        r.lanesNormal >= Math.floor(r.turnos / 2));
+    }
+
+    // ── X10..X12. TRUE EMPTY e NO-SPIN ─────────────────────────────
+    {
+      const vazioTotal = rodada(() => VAZIO_R, () => VAZIO_N);
+      ok(`X10 duas lanes vazias encerram em 2 turnos (${vazioTotal.trace})`,
+        vazioTotal.turnos === 2 && vazioTotal.processados === 0 &&
+        vazioTotal.emptyStreak === 2 && vazioTotal.trace === "RN");
+
+      const semSpin = rodada(() => SEM_PROG, () => VAZIO_N);
+      ok(`X11 NO-SPIN: sem_progresso reseta o streak, e o teto de turnos encerra (${semSpin.turnos})`,
+        semSpin.turnos === 10 && semSpin.processados === 0);
+      ok("X11a e nao existe 11o turno",
+        semSpin.turnos === MAX_TU && semSpin.turnos < 11);
+      ok("X12 `sem_progresso` NAO e vazio: nao encerra por streak",
+        semSpin.emptyStreak < 2);
+    }
+
+    // ── X13..X18. CONTAGEM DE PROGRESSO ────────────────────────────
+    {
+      const umTurnoResume = (r: RespostaResume) =>
+        rodada((n) => (n === 1 ? r : VAZIO_R), () => VAZIO_N).processados;
+      const TABELA: ReadonlyArray<readonly [string, RespostaResume, number]> = [
+        ["ok:true possivel", { ok: true, desfecho: "reconciliado", progressoDuravel: "possivel" }, 1],
+        ["ok:true confirmado", { ok: true, desfecho: "recuperacao_duravel", progressoDuravel: "confirmado" }, 1],
+        ["ok:true nenhum", SEM_PROG, 0],
+        ["ok:false possivel", { ok: false, progressoDuravel: "possivel" }, 1],
+        ["ok:false confirmado", { ok: false, progressoDuravel: "confirmado" }, 1],
+        ["ok:false nenhum", { ok: false, progressoDuravel: "nenhum" }, 0],
+      ];
+      let i = 12;
+      for (const [rotulo, resp, esperado] of TABELA) {
+        i += 1;
+        ok(`X${i} ${rotulo} consome ${esperado} vaga(s)`, umTurnoResume(resp) === esperado);
+      }
+      ok("X19 HARD: a contagem olha SO o grau, nunca `ok` nem `desfecho`",
+        umTurnoResume({ ok: false, progressoDuravel: "possivel" }) ===
+        umTurnoResume({ ok: true, desfecho: "reconciliado", progressoDuravel: "possivel" }));
+    }
+
+    // ── X20..X22. TETO GLOBAL de trabalho ──────────────────────────
+    {
+      const mix = rodada(
+        () => ({ ok: true, desfecho: "reconciliado", progressoDuravel: "confirmado" }),
+        () => TAREFA_OK
+      );
+      ok(`X20 Resume e Normal dividem o MESMO teto de 5 (${mix.processados}/${mix.turnos})`,
+        mix.processados === 5 && mix.turnos === 5);
+      ok("X20a e nao existe sexto trabalho duravel",
+        mix.processados === MAX_T);
+
+      const soResume = rodada(
+        () => ({ ok: true, desfecho: "reconciliado", progressoDuravel: "possivel" }),
+        () => VAZIO_N
+      );
+      ok(`X21 cinco progressos Resume esgotam o teto (${soResume.processados})`,
+        soResume.processados === 5);
+
+      const soNormal = rodada(() => SEM_PROG, () => TAREFA_OK);
+      ok(`X22 cinco Tasks normais esgotam o teto (${soNormal.processados})`,
+        soNormal.processados === 5 && soNormal.turnos === 10);
+    }
+
+    // ── X23..X26. ORCAMENTO ────────────────────────────────────────
+    {
+      const comBudget = (r: RespostaResume) =>
+        rodada((n) => (n === 1 ? r : VAZIO_R), () => TAREFA_OK);
+      const semProg = comBudget({ ok: true, desfecho: "orcamento_insuficiente", progressoDuravel: "nenhum", encerrarPorOrcamento: true });
+      ok(`X23 budget sem progresso: +0 e break antes da lane normal (${semProg.trace})`,
+        semProg.processados === 0 && semProg.turnos === 1 &&
+        semProg.trace === "R" && semProg.lanesNormal === 0);
+      const comPossivel = comBudget({ ok: true, desfecho: "reconciliado", progressoDuravel: "possivel", encerrarPorOrcamento: true });
+      ok("X24 budget com `possivel`: +1 e break",
+        comPossivel.processados === 1 && comPossivel.lanesNormal === 0);
+      const comConfirmado = comBudget({ ok: true, desfecho: "recuperacao_duravel", progressoDuravel: "confirmado", encerrarPorOrcamento: true });
+      ok("X25 budget com `confirmado`: +1 e break",
+        comConfirmado.processados === 1 && comConfirmado.lanesNormal === 0);
+      ok("X26 HARD: o progresso e contabilizado ANTES do break de orcamento",
+        comPossivel.processados === 1 && comConfirmado.processados === 1);
+    }
+
+    // ── X27..X28. ORCAMENTO NEGADO ANTES DO LACO ───────────────────
+    {
+      const nunca = rodada(() => VAZIO_R, () => VAZIO_N, () => false);
+      ok("X27 orcamento negado na entrada: zero turno, zero lane, zero trabalho",
+        nunca.turnos === 0 && nunca.processados === 0 &&
+        nunca.lanesResume === 0 && nunca.lanesNormal === 0);
+      ok("X28 CONTROLE: com orcamento liberado o mesmo roteiro roda",
+        rodada(() => VAZIO_R, () => VAZIO_N, () => true).turnos === 2);
+    }
+
+    // ── X29..X31. RESILIENCIA A ERRO DO SLOT ───────────────────────
+    {
+      const erroSemProg = rodada(
+        (n) => (n === 1 ? { ok: false, progressoDuravel: "nenhum" } : VAZIO_R),
+        () => TAREFA_OK
+      );
+      ok(`X29 slot com ok:false NAO derruba a lane normal (${erroSemProg.trace})`,
+        erroSemProg.lanesNormal >= 1 && erroSemProg.trace.startsWith("RN"));
+      ok("X29a e nao consome vaga quando nao houve progresso",
+        rodada((n) => (n === 1 ? { ok: false, progressoDuravel: "nenhum" } : VAZIO_R),
+          () => VAZIO_N).processados === 0);
+      const erroComProg = rodada(
+        (n) => (n === 1 ? { ok: false, progressoDuravel: "possivel" } : VAZIO_R),
+        () => TAREFA_OK
+      );
+      ok("X30 slot com ok:false + `possivel` consome vaga e a rodada segue",
+        erroComProg.processados >= 1 && erroComProg.lanesNormal >= 1);
+      ok("X31 o erro do slot tambem ZERA o streak de vazios",
+        erroSemProg.emptyStreak === 0 || erroSemProg.turnos > 2);
+    }
+
+    // ── X32..X34. TETOS INDEPENDENTES ──────────────────────────────
+    {
+      const porTurnos = rodada(() => SEM_PROG, () => VAZIO_N);
+      ok("X32 o teto de TURNOS encerra com trabalho abaixo do teto",
+        porTurnos.turnos === MAX_TU && porTurnos.processados < MAX_T);
+      const porTrabalho = rodada(
+        () => ({ ok: true, desfecho: "reconciliado", progressoDuravel: "confirmado" }),
+        () => TAREFA_OK
+      );
+      ok("X33 o teto de TRABALHO encerra com turnos abaixo do teto",
+        porTrabalho.processados === MAX_T && porTrabalho.turnos < MAX_TU);
+      ok("X34 nenhum off-by-one: os limites sao 5 e 10, e sao atingidos exatamente",
+        porTrabalho.processados === 5 && porTurnos.turnos === 10);
+    }
+
+    // ── X35. A NORMAL preserva a semantica historica ────────────────
+    {
+      const falhaNegocio = rodada(
+        () => SEM_PROG,
+        (n) => (n === 1 ? { tipo: "tarefa", corpoOk: false } : TAREFA_OK)
+      );
+      ok(`X35 falha de negocio na Task conta e encerra a rodada (${falhaNegocio.trace})`,
+        falhaNegocio.processados === 1 && falhaNegocio.trace === "RN");
+      const erroClaim = rodada(() => SEM_PROG, (n) => (n === 1 ? { tipo: "erro" } : VAZIO_N));
+      ok("X36 erro de claim encerra a rodada sem contar trabalho",
+        erroClaim.processados === 0 && erroClaim.trace === "RN");
+    }
+
+    // ── X37. O SIMULADOR corresponde a FONTE ───────────────────────
+    //
+    // Cada regra simulada acima tem de existir no worker. Sem esta
+    // ancora o simulador poderia descrever uma maquina que ninguem
+    // implementou — e passaria com folga.
+    {
+      const semEspaco = codX.replace(/\s+/g, " ");
+      ok("X37 a fonte tem as MESMAS cinco regras que o simulador executa",
+        /turnos \+= 1;/.test(semEspaco) &&
+        /if \(r\.progressoDuravel !== "nenhum"\) \{ processados \+= 1; \}/.test(semEspaco) &&
+        /emptyStreak = vazioResume \? emptyStreak \+ 1 : 0;/.test(semEspaco) &&
+        /if \(r\.ok === true && r\.encerrarPorOrcamento\) break;/.test(semEspaco) &&
+        /if \(emptyStreak >= 2\) break;/.test(semEspaco));
+      ok("X37a e os tetos do simulador sao os da fonte",
+        /const MAX_TASKS_PER_RUN = 5;/.test(codX) &&
+        /const MAX_TURNOS_PER_RUN = 2 \* MAX_TASKS_PER_RUN;/.test(codX) &&
+        MAX_T === 5 && MAX_TU === 10);
+      // Escopado aos CORPOS de resposta, e nao ao arquivo: `proximaLane:`
+      // tambem aparece na anotacao de tipo da variavel de controle, e uma
+      // busca global acusaria o estado interno como se fosse payload.
+      const corposX = [...codX.matchAll(/responder\((\{[^}]*\})/g)].map((m) => m[1]);
+      const chavesX = corposX.flatMap((c) => [...c.matchAll(/(\w+):/g)].map((m) => m[1]));
+      ok(`X37b ANCORA: ha respostas a inspecionar (${corposX.length})`, corposX.length >= 4);
+      ok(`X37c a resposta HTTP nao ganhou campo nenhum (${[...new Set(chavesX)].join(", ")})`,
+        /responder\(\{ ok: true, processados, duracaoMs: Date\.now\(\) - inicio \}, 200\)/.test(codX) &&
+        chavesX.every((k) => ["ok", "processados", "erro", "duracaoMs"].includes(k)) &&
+        !chavesX.includes("turnos") && !chavesX.includes("proximaLane") &&
+        !chavesX.includes("emptyStreak"));
     }
   }
 

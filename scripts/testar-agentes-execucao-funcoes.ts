@@ -2606,10 +2606,16 @@ async function principal(): Promise<void> {
       // FALHA quando alguem passa a chama-lo: ele simplesmente deixa de
       // proteger, em silencio. Por isso os SETE nomes exportados estao
       // aqui, e nao so os que existiam quando o assert nasceu.
+      // O D0 acrescentou `executarSlotRetomada`. Ele nao e wrapper de
+      // RPC como os outros sete — e a porta de entrada da lane — mas e
+      // exatamente por isso que precisa estar aqui: sem ele, um segundo
+      // arquivo de producao poderia passar a chamar o slot e este
+      // inventario continuaria verde, sem enxergar nada. Era o achado
+      // D0-A0-F2.
       const NOMES = ["iniciarRetomadaAprovacao", "falharTarefaRetomada",
         "recuperarRetomadaStale", "concluirTarefaRetomada",
         "descobrirAprovacoesParaRetomada", "descobrirCandidatasRetomadaStale",
-        "cancelarAprovacaoRetomadaIncompativel"];
+        "cancelarAprovacaoRetomadaIncompativel", "executarSlotRetomada"];
       const producao = ["lib/agentes", "app", "components"];
       const importadores: string[] = [];
       const mencionam: string[] = [];
@@ -2627,24 +2633,65 @@ async function principal(): Promise<void> {
         }
       };
       for (const d of producao) varrer(d);
-      // ── FASE D5-C3-I1 ─────────────────────────────────────────────
+      // ── FASE D5-C3-I2-D0: a ativacao existe na FONTE ──────────────
       //
-      // O executor Resume e o unico consumidor autorizado dos wrappers.
-      // D5_ACTIVE continua NO por um motivo diferente do de antes: nao
-      // porque ninguem os alcanca, mas porque quem os alcanca nao tem,
-      // ele proprio, chamador de producao — e isso e provado em N80.
+      // Ate o B2 o inventario tinha um consumidor so, e esse fato valia
+      // como prova de dormencia. O D0 ligou o worker ao slot, entao o
+      // esperado passa a ser DOIS arquivos — e essa e a mudanca que o
+      // assert precisa descrever, em vez de continuar exigindo um.
+      //
+      // K70 nao se move: quem importa o ADAPTADOR de persistencia
+      // continua sendo so o executor. O worker importa o slot, que e
+      // outro modulo — e essa distincao e justamente o que impede o
+      // dispatcher de alcancar RPC de retomada por conta propria.
       const CONSUMIDOR = "lib/agentes/retomada/executar-retomada.ts";
-      ok(`K70 o modulo so e importado pelo executor Resume (${importadores.join(", ") || "nenhum"})`,
+      const ROTA_WORKER_K = "app/api/internal/agentes/worker/route.ts";
+      ok(`K70 o adaptador so e importado pelo executor Resume (${importadores.join(", ") || "nenhum"})`,
         importadores.length === 1 && importadores[0] === CONSUMIDOR);
-      ok(`K71 e so ele menciona os wrappers (${mencionam.join(", ") || "nenhuma"})`,
-        mencionam.length === 1 && mencionam[0] === CONSUMIDOR);
-      ok("K72 D5_ACTIVE = NO: o unico consumidor e dormente",
-        importadores.length === 1 && mencionam.length === 1 &&
-        importadores[0] === CONSUMIDOR && mencionam[0] === CONSUMIDOR);
-      ok("K72a CONTROLE NEGATIVO: um segundo consumidor reprova",
-        !([CONSUMIDOR, "app/api/internal/agentes/worker/route.ts"].length === 1));
+      ok(`K71 os simbolos Resume vivem em exatamente DOIS arquivos (${mencionam.join(", ") || "nenhuma"})`,
+        mencionam.length === 2 &&
+        new Set(mencionam).size === 2 &&
+        mencionam.includes(CONSUMIDOR) &&
+        mencionam.includes(ROTA_WORKER_K));
+
+      // ── K72. TOPOLOGIA NA FONTE ≠ ESTADO DE DEPLOYMENT ────────────
+      //
+      // O assert antigo se chamava "D5_ACTIVE = NO" e provava isso
+      // contando consumidores. Era conveniente e errado de principio: um
+      // teste de fonte nao sabe o que esta em producao. Ele podia dizer
+      // NO com honestidade enquanto nao havia fiacao nenhuma; nao pode
+      // dizer YES agora, porque a fiacao existir no repositorio nao
+      // significa que algum deployment a esteja servindo.
+      //
+      // O que ele passa a afirmar e exatamente o que consegue observar:
+      // a fiacao de ativacao ESTA PRESENTE NA FONTE, com esta forma. O
+      // estado real de D5_ACTIVE continua governado pelo ciclo de vida
+      // — worktree e commit local seguem NO, push sem prova fica
+      // PENDING_DEPLOYMENT_PROOF, e so o primeiro deployment READY
+      // torna YES.
+      {
+        const fonteWorkerK = semComentarios(ler(ROTA_WORKER_K));
+        const pSlotK = papeisDoSimbolo(fonteWorkerK, "executarSlotRetomada");
+        ok(`K72 ACTIVATION_WIRING_PRESENT_IN_SOURCE: worker importa e chama o slot (${JSON.stringify(pSlotK)})`,
+          pSlotK.definicoes === 0 && pSlotK.importacoes === 1 &&
+          pSlotK.invocacoes === 1 && pSlotK.semPapel === 0);
+        ok("K72z e este assert NAO afirma estado de deployment",
+          !/D5_ACTIVE\s*=\s*(YES|SIM)/.test(
+            "K72 ACTIVATION_WIRING_PRESENT_IN_SOURCE: worker importa e chama o slot"));
+        ok("K72c o worker alcanca o SLOT, e nenhum interno da lane",
+          !/executarRetomada\b/.test(fonteWorkerK) &&
+          !/persistencia-retomada/.test(fonteWorkerK) &&
+          !/descobrirCandidatasRetomadaStale|recuperarRetomadaStale/.test(fonteWorkerK) &&
+          !/descobrirAprovacoesParaRetomada|cancelarAprovacaoRetomadaIncompativel/.test(fonteWorkerK) &&
+          !/iniciarRetomadaAprovacao/.test(fonteWorkerK));
+        ok("K72d nem os nomes crus das RPCs de retomada",
+          !/retomada_listar_candidatas|retomada_cancelar_aprovacao_incompativel|retomar_aprovacao_iniciar/
+            .test(ler(ROTA_WORKER_K)));
+      }
+      ok("K72a CONTROLE NEGATIVO: um TERCEIRO consumidor reprova",
+        !([CONSUMIDOR, ROTA_WORKER_K, "lib/agentes/intruso.ts"].length === 2));
       ok("K72b CONTROLE NEGATIVO: consumidor com outro nome reprova",
-        !(["lib/agentes/executar-tarefa.ts"][0] === CONSUMIDOR));
+        !(["lib/agentes/executar-tarefa.ts", ROTA_WORKER_K].includes(CONSUMIDOR)));
     }
 
     // ── O worker e o executor continuam intocados por este slice ────
@@ -4058,14 +4105,62 @@ async function principal(): Promise<void> {
             return p.total === 2 && p.definicoes === 1 && p.invocacoes === 1 && p.semPapel === 0;
           })());
 
-        // ── O SLOT nasce DORMENTE, e isso se prova a parte ────────────
+        // ── O SLOT foi ATIVADO, e a topologia disso e exata ───────────
+        //
+        // Ate o B2 este assert exigia zero chamador, e era a forma certa
+        // de dizer "dormente". O D0 criou o consumidor previsto pelo
+        // desenho — entao o assert nao podia continuar exigindo zero nem
+        // virar `>= 1`, que aceitaria qualquer chamador.
+        //
+        // O que substitui e um inventario nominal fechado: o slot e
+        // definido uma vez no dono, importado uma vez pelo worker,
+        // invocado uma vez la, e nao aparece em mais lugar nenhum. O
+        // campo `semPapel` e quem fecha as formas que uma lista de
+        // padroes deixaria passar — alias, callback, re-export.
+        const ROTA_WORKER_N = "app/api/internal/agentes/worker/route.ts";
         const pSlot = arquivosDeProducao()
           .map((rel) => ({ rel, p: papeisDoSimbolo(semComentarios(ler(rel)), "executarSlotRetomada") }))
           .filter((x) => x.p.total > 0);
-        ok(`N80f o slot tem 1 definicao e ZERO chamador de producao (${pSlot.map((x) => x.rel).join(", ")})`,
-          pSlot.length === 1 && pSlot[0].rel === DONO_R &&
-          pSlot[0].p.definicoes === 1 && pSlot[0].p.invocacoes === 0 &&
-          pSlot[0].p.importacoes === 0 && pSlot[0].p.semPapel === 0);
+        const noDonoS = pSlot.find((x) => x.rel === DONO_R)?.p;
+        const noWorkerS = pSlot.find((x) => x.rel === ROTA_WORKER_N)?.p;
+        ok(`N80f o slot vive em exatamente DOIS arquivos de producao (${pSlot.map((x) => x.rel).join(", ")})`,
+          pSlot.length === 2 && noDonoS !== undefined && noWorkerS !== undefined);
+        ok(`N80f1 no dono: 1 definicao, 0 import, 0 invocacao, 0 sem papel (${JSON.stringify(noDonoS)})`,
+          noDonoS !== undefined && noDonoS.definicoes === 1 &&
+          noDonoS.importacoes === 0 && noDonoS.invocacoes === 0 && noDonoS.semPapel === 0);
+        ok(`N80f2 no worker: 0 definicao, 1 import, 1 invocacao, 0 sem papel (${JSON.stringify(noWorkerS)})`,
+          noWorkerS !== undefined && noWorkerS.definicoes === 0 &&
+          noWorkerS.importacoes === 1 && noWorkerS.invocacoes === 1 &&
+          noWorkerS.semPapel === 0);
+        ok("N80f3 GLOBAL: 1 definicao, 1 import, 1 invocacao, 0 sem papel",
+          pSlot.reduce((a, x) => a + x.p.definicoes, 0) === 1 &&
+          pSlot.reduce((a, x) => a + x.p.importacoes, 0) === 1 &&
+          pSlot.reduce((a, x) => a + x.p.invocacoes, 0) === 1 &&
+          pSlot.reduce((a, x) => a + x.p.semPapel, 0) === 0);
+
+        // ── CONTROLES: as formas proibidas do slot ────────────────────
+        const pSlotDe = (src: string) => papeisDoSimbolo(src, "executarSlotRetomada");
+        const IMP_SLOT =
+          'import { executarSlotRetomada } from "@/lib/agentes/retomada/executar-retomada";\n';
+        ok("N80f4 CONTROLE POSITIVO: import + uma invocacao fecha a conta",
+          (() => {
+            const p = pSlotDe(IMP_SLOT + "await executarSlotRetomada(g);");
+            return p.total === 2 && p.importacoes === 1 && p.invocacoes === 1 && p.semPapel === 0;
+          })());
+        ok("N80f5 CONTROLE NEGATIVO: ALIAS do slot deixa ocorrencia sem papel",
+          pSlotDe(IMP_SLOT + "const f = executarSlotRetomada;\nawait f(g);").semPapel === 1);
+        ok("N80f6 CONTROLE NEGATIVO: slot passado como CALLBACK deixa resto",
+          pSlotDe(IMP_SLOT + "registrar(executarSlotRetomada);").semPapel === 1);
+        ok("N80f7 CONTROLE NEGATIVO: RE-EXPORT deixa resto",
+          pSlotDe(IMP_SLOT + "export { executarSlotRetomada };").semPapel === 1);
+        ok("N80f8 CONTROLE NEGATIVO: DESTRUCTURING deixa resto",
+          pSlotDe("const { executarSlotRetomada } = mod;\nawait executarSlotRetomada(g);")
+            .semPapel === 1);
+        ok("N80f9 CONTROLE NEGATIVO: SEGUNDA invocacao e contada",
+          pSlotDe(IMP_SLOT + "await executarSlotRetomada(g);\nawait executarSlotRetomada(g);")
+            .invocacoes === 2);
+        ok("N80fa CONTROLE NEGATIVO: um TERCEIRO arquivo de producao reprova",
+          !([DONO_R, ROTA_WORKER_N, "lib/agentes/intruso.ts"].length === 2));
       }
 
       // ── N80g. FIX3-N1: producao nao forja guarda sempre-verdadeira ──
