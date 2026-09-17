@@ -90,21 +90,29 @@ export interface AprovacaoUI {
 // ── Elegibilidade ─────────────────────────────────────────────────────
 
 /**
- * O fluxo de decisao ainda nao existe: nao ha tabela de aprovacoes, nem
- * transicao que retome a tarefa, nem registro de quem decidiu.
+ * ── A flag de dormencia foi REMOVIDA, nao promovida ─────────────────
  *
- * Esta constante e a fonte UNICA desse fato para a interface. Quando o
- * backend existir, ela vira `true` num lugar so — e nao ha um segundo
- * lugar dizendo o contrario.
+ * Ate o A3 existia aqui uma constante global de dormencia, e ela era
+ * honesta: nao havia rota de decisao, entao nenhuma solicitacao podia ser
+ * decidida e um motivo dedicado explicava isso na tela.
+ *
+ * O A3 criou a rota. A constante poderia virar `true` — e seria pior: uma
+ * constante que so pode ter um valor e ruido que alguem tera de ler e
+ * descartar todo ano. O motivo morto saiu junto.
+ *
+ * ── E este contrato continua sendo o do MOCK ────────────────────────
+ *
+ * `conexao_invalida` fica, e `elegibilidade()` continua tipada para
+ * `AprovacaoUI`, que tem `conexao.estado`. A FILA REAL nao usa nenhum dos
+ * dois: `AprovacaoRealUI.conexao` publica `plataforma` e `recurso`, que
+ * descrevem o REQUISITO de conexao, nao o estado da conta. Aplicar esta
+ * elegibilidade la exigiria inventar um estado que a rota nao le — e numa
+ * tela de autorizacao inventar e o pior defeito possivel.
  */
-export const FLUXO_APROVACAO_CONECTADO = false;
-
-export const MOTIVOS_INELEGIVEL = ["fluxo_nao_conectado", "conexao_invalida"] as const;
+export const MOTIVOS_INELEGIVEL = ["conexao_invalida"] as const;
 export type MotivoInelegivel = (typeof MOTIVOS_INELEGIVEL)[number];
 
 export const EXPLICACAO_INELEGIVEL: Record<MotivoInelegivel, string> = {
-  fluxo_nao_conectado:
-    "Disponível quando o fluxo de aprovação estiver conectado. Aprovar e recusar ainda não registram decisão em lugar nenhum.",
   conexao_invalida:
     "Reconecte a conta antes de aprovar esta ação — a autorização da conexão não está válida.",
 };
@@ -116,7 +124,7 @@ export function conexaoValida(conexao: ConexaoDaAprovacao | null): boolean {
 }
 
 export interface Elegibilidade {
-  /** `true` só quando NENHUM motivo impede. Hoje nunca é `true`. */
+  /** `true` quando NENHUM motivo impede. Deixou de ser inalcancavel no A3. */
   podeDecidir: boolean;
   motivos: readonly MotivoInelegivel[];
 }
@@ -124,14 +132,15 @@ export interface Elegibilidade {
 /**
  * Acumula TODOS os motivos, em vez de devolver o primeiro.
  *
- * Uma solicitacao pode estar bloqueada por duas razoes ao mesmo tempo, e
- * mostrar so uma faria o usuario reconectar a conta para descobrir que
- * ainda assim nao da para aprovar. Dizer as duas de uma vez custa o
- * mesmo e evita a segunda frustracao.
+ * Hoje ha um motivo so, e o acumulo parece exagero. Ele fica: a forma de
+ * lista e o que permite acrescentar um segundo impedimento sem que a
+ * assinatura e os consumidores mudem, e trocar por `string | null` agora
+ * seria desfazer para refazer depois.
+ *
+ * Contrato MOCK. Quem consome e a superficie que tem `conexao.estado`.
  */
 export function elegibilidade(aprovacao: Pick<AprovacaoUI, "conexao">): Elegibilidade {
   const motivos: MotivoInelegivel[] = [];
-  if (!FLUXO_APROVACAO_CONECTADO) motivos.push("fluxo_nao_conectado");
   if (!conexaoValida(aprovacao.conexao)) motivos.push("conexao_invalida");
   return { podeDecidir: motivos.length === 0, motivos };
 }

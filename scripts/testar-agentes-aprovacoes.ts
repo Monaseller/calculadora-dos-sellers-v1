@@ -897,12 +897,38 @@ secao("O. Nada no runtime consome a fundacao ainda");
   // Um segundo consumidor continua reprovando, e o desaparecimento do
   // autorizado tambem.
   const EXECUTOR_FUNCOES = "lib/agentes/execucao-funcoes/executar.ts";
-  const CONSUMIDORES_AUTORIZADOS = [EXECUTOR_FUNCOES];
+  // APPROVAL-DECISION-A3: o segundo consumidor, e o ultimo previsto. A
+  // rota de decisao chama `decidirAprovacao`; o executor chama consumo e
+  // retomada. Conjunto NOMINAL — um terceiro arquivo reprova, e o
+  // desaparecimento de qualquer um dos dois tambem.
+  const DECISION_ROUTE = "app/api/aprovacoes/[aprovacaoId]/decidir/route.ts";
+  const CONSUMIDORES_AUTORIZADOS = [EXECUTOR_FUNCOES, DECISION_ROUTE];
 
   const consumidores = outros.filter((f) =>
     /criarAprovacao|decidirAprovacao|consumirAprovacaoEAbrir/.test(semComentariosTs(ler(f))));
   ok(`O1  os consumidores de producao sao exatamente os declarados (${consumidores.join(", ") || "nenhum"})`,
     conjuntosIguais(consumidores, CONSUMIDORES_AUTORIZADOS));
+  // ── A3: a topologia rota -> wrapper, contada nominalmente ────────
+  {
+    const fonteRota = semComentariosTs(ler(DECISION_ROUTE));
+    const nOcc = (t: string, re: RegExp) => (t.match(re) ?? []).length;
+    ok("O1d a rota importa `decidirAprovacao` exatamente uma vez",
+      nOcc(fonteRota, /import \{ decidirAprovacao \}/g) === 1);
+    ok("O1e e a chama exatamente uma vez",
+      nOcc(fonteRota, /(?<![.\w])decidirAprovacao\(/g) === 1);
+    ok("O1f a rota NAO alcanca o banco por conta propria",
+      !/getSupabaseServidor|\.rpc\(|aprovacao_decidir/.test(fonteRota));
+    ok("O1g e NAO alcanca Resume, Worker, Funcao nem Tool Call",
+      !/executarRetomada|executarSlotRetomada|iniciarRetomadaAprovacao/.test(fonteRota) &&
+      !/aprovacao_consumir_e_abrir|consumirAprovacaoEAbrir/.test(fonteRota) &&
+      !/reivindicarProximaTarefa|executarTarefa|executarFuncao/.test(fonteRota) &&
+      !/internal\/agentes\/worker/.test(fonteRota));
+    ok("O1h o transporte do cliente NAO usa o simbolo do servidor",
+      !/decidirAprovacao/.test(semComentariosTs(ler("lib/ia/agentes-http.ts"))) &&
+      /registrarDecisaoAprovacao/.test(ler("lib/ia/agentes-http.ts")));
+    ok("O1i CONTROLE: a sonda de chamada acha uma chamada de verdade",
+      nOcc("await decidirAprovacao({ userId });", /(?<![.\w])decidirAprovacao\(/g) === 1);
+  }
   ok("O1a CONTROLE: um segundo consumidor reprovaria",
     !conjuntosIguais([EXECUTOR_FUNCOES, "app/api/x/route.ts"], CONSUMIDORES_AUTORIZADOS));
   ok("O1b CONTROLE: o autorizado sumir tambem reprovaria",
@@ -3007,11 +3033,22 @@ secao("W. D4 — decisao + reject/cancel lifecycle");
   // `onClick` ("Sem `onClick`, sem estado local, sem toast"), e uma busca
   // ingenua casaria com a propria explicacao, reprovando pelo motivo errado.
   const cardCodigo = semComentariosTs(cardAprov);
-  ok("W38 os botoes continuam desabilitados, sem onClick e sem fetch",
-    /cds-ia-ap-recusar" disabled/.test(cardCodigo.replace(/\s+/g, " ")) &&
-    !/onClick/.test(cardCodigo) && !/fetch\(/.test(cardCodigo));
-  ok("W38b ANCORA: o arquivo MENCIONA onClick em comentario, e isso nao reprova",
-    /onClick/.test(cardAprov) && !/onClick/.test(cardCodigo));
+  // W38 avancou no A3: os botoes decidem. O que ele protege agora e a
+  // FORMA da ligacao — condicional, nunca fixa; handler no card, rede fora
+  // dele; e a elegibilidade do mock longe da fila real.
+  ok("W38 os botoes decidem, com disable condicional e sem rede no card",
+    /onClick=\{\(\) => onAprovar\(aprovacao\)\}/.test(cardCodigo) &&
+    /onClick=\{\(\) => onRecusar\(aprovacao\)\}/.test(cardCodigo) &&
+    (cardCodigo.match(/disabled=\{enviando\}/g) ?? []).length === 2 &&
+    !/disabled\s*(\/?>|\s[a-zA-Z-])/.test(cardCodigo) &&
+    !/fetch\(/.test(cardCodigo) && !/registrarDecisaoAprovacao/.test(cardCodigo));
+  ok("W38a e o in-flight e anunciado nos dois controles",
+    (cardCodigo.match(/aria-busy=\{enviando\}/g) ?? []).length === 2);
+  ok("W38b CONTROLE: a sonda de `disabled` fixo acha o atributo fixo",
+    /disabled\s*(\/?>|\s[a-zA-Z-])/.test('<button type="button" disabled>Aprovar</button>'));
+  ok("W38c a elegibilidade do MOCK nao governa a fila real",
+    !/elegibilidade\(/.test(cardCodigo) && !/conexaoValida\(/.test(cardCodigo) &&
+    !/as (unknown as )?ConexaoDaAprovacao/.test(cardCodigo));
 
   // ── W39 — O D4 NAO FAZ O TRABALHO DO D5 NEM DO D7 ─────────────
   ok("W39 nem resume, nem scanner, nem execucao de Funcao",

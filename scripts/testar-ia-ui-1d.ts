@@ -18,7 +18,6 @@ import { join } from "node:path";
 
 import {
   EXPLICACAO_INELEGIVEL,
-  FLUXO_APROVACAO_CONECTADO,
   MOTIVOS_INELEGIVEL,
   conexaoValida,
   desdeQuando,
@@ -158,12 +157,26 @@ secao("B. Contrato: acao, motivo, risco e conexao SEPARADOS");
 secao("C. Elegibilidade e botoes");
 
 {
-  ok("C1  o fluxo esta declarado como NAO conectado", FLUXO_APROVACAO_CONECTADO === false);
-  ok("C2  2 motivos de inelegibilidade", MOTIVOS_INELEGIVEL.length === 2);
+  // ── A DORMENCIA GLOBAL ACABOU ─────────────────────────────────────
+  //
+  // Ate o A3 este bloco provava que NADA podia ser decidido, e a prova era
+  // uma constante global lida daqui. A rota de decisao existe agora, entao
+  // o assert nao podia continuar exigindo `false` nem virar `true`: a
+  // constante saiu do contrato, e o que se prova e a AUSENCIA dela e do
+  // motivo que ela alimentava. Procurar no TEXTO, e nao no valor, e o que
+  // impede alguem de reintroduzi-la com outro valor.
+  ok("C1  a constante global de dormencia sumiu do contrato",
+    !/FLUXO_APROVACAO_CONECTADO/.test(CONTRATO) &&
+    !/fluxo_nao_conectado/.test(CONTRATO));
+  ok("C1a CONTROLE NEGATIVO: a sonda acha a constante quando ela existe",
+    /FLUXO_APROVACAO_CONECTADO/.test("export const FLUXO_APROVACAO_CONECTADO = true;"));
+  ok("C2  resta UM motivo de inelegibilidade", MOTIVOS_INELEGIVEL.length === 1);
+  ok("C2a e ele e `conexao_invalida`", MOTIVOS_INELEGIVEL[0] === "conexao_invalida");
   ok("C3  todo motivo tem explicacao util",
     MOTIVOS_INELEGIVEL.every((m) => EXPLICACAO_INELEGIVEL[m].length > 30));
-  ok("C4  a explicacao do fluxo diz 'quando estiver conectado'",
-    /quando o fluxo de aprovação estiver conectado/i.test(EXPLICACAO_INELEGIVEL.fluxo_nao_conectado));
+  ok("C4  a explicacao do fluxo morto NAO esta mais no dicionario",
+    !Object.prototype.hasOwnProperty.call(EXPLICACAO_INELEGIVEL, "fluxo_nao_conectado") &&
+    Object.keys(EXPLICACAO_INELEGIVEL).length === 1);
   ok("C5  a explicacao de conexao manda reconectar",
     /reconecte a conta/i.test(EXPLICACAO_INELEGIVEL.conexao_invalida));
 
@@ -173,27 +186,61 @@ secao("C. Elegibilidade e botoes");
   ok("C7  conexao expirada NAO e valida", conexaoValida(expirada) === false);
   ok("C8  acao sem conexao nao e bloqueada por isso", conexaoValida(null) === true);
 
-  ok("C9  hoje NENHUMA solicitacao pode ser decidida",
-    MOCK_APROVACOES.every((a) => elegibilidade(a).podeDecidir === false));
-  ok("C10 os motivos ACUMULAM (conexao invalida soma ao fluxo)",
-    elegibilidade({ conexao: expirada }).motivos.length === 2 &&
-    elegibilidade({ conexao: conectada }).motivos.length === 1);
-  ok("C11 o motivo global vem primeiro",
-    elegibilidade({ conexao: expirada }).motivos[0] === "fluxo_nao_conectado");
+  // ── A elegibilidade continua real, e continua sendo do MOCK ───────
+  //
+  // `elegibilidade()` le `conexao.estado`, que so existe em `AprovacaoUI`.
+  // Estes asserts exercitam essa superficie, com os fixtures do mock. A
+  // fila REAL nao entra aqui — ela nem pode, e E1/E2 provam isso.
+  ok("C9  o que nao tem impedimento PODE ser decidido",
+    MOCK_APROVACOES.filter((a) => a.conexao === null || a.conexao.estado === "conectada")
+      .every((a) => elegibilidade(a).podeDecidir === true));
+  ok("C9a e o que tem conexao invalida NAO pode",
+    MOCK_APROVACOES.filter((a) => a.conexao !== null && a.conexao.estado !== "conectada")
+      .every((a) => elegibilidade(a).podeDecidir === false));
+  ok("C9b ANCORA: o mock cobre os dois lados",
+    MOCK_APROVACOES.some((a) => elegibilidade(a).podeDecidir === true) &&
+    MOCK_APROVACOES.some((a) => elegibilidade(a).podeDecidir === false));
+  ok("C10 conexao valida nao acumula motivo, invalida acumula um",
+    elegibilidade({ conexao: conectada }).motivos.length === 0 &&
+    elegibilidade({ conexao: expirada }).motivos.length === 1);
+  ok("C11 e o motivo restante e nominal",
+    elegibilidade({ conexao: expirada }).motivos[0] === "conexao_invalida");
 
-  // Os botoes existem, sao <button> reais, e estao desabilitados.
+  // ── Os botoes decidem, e o disable deixou de ser fixo ─────────────
   ok("C12 Aprovar e Recusar existem como <button>",
     /<button[\s\S]{0,200}Recusar/.test(CARD) && /<button[\s\S]{0,200}Aprovar/.test(CARD));
-  ok("C13 ambos tem `disabled`", (CARD.match(/disabled/g) ?? []).length >= 2);
-  ok("C14 ZERO onClick/onSubmit no card", !/onClick|onSubmit|onChange/.test(codigo(CARD)));
-  ok("C15 controle negativo: a sonda acha um onClick",
-    /onClick/.test("<button onClick={aprovar}>Aprovar</button>"));
-  ok("C16 ZERO estado local de decisao no card",
-    !/useState|useReducer|toast/.test(codigo(CARD)));
-  ok("C17 o motivo da indisponibilidade aparece em TEXTO",
-    /EXPLICACAO_INELEGIVEL/.test(CARD));
-  ok("C18 nao ha aria-live para acao que nao acontece",
-    !/aria-live/.test(CARD) && !/aria-busy/.test(CARD));
+  // C13 antes so contava `disabled`, e passaria igual com `disabled={x}`.
+  // Agora separa as duas formas: zero atributo FIXO, dois condicionais.
+  // A sonda de atributo FIXO exige `disabled` seguido de `>`, `/>` ou de
+  // outro atributo. O seletor CSS `:disabled {` nao casa — depois dele vem
+  // `{`, que nao e letra — e por isso o bloco de estilo do card nao
+  // reprova por parecer o que nao e.
+  ok("C13 zero `disabled` fixo no JSX, e dois condicionais por `enviando`",
+    !/disabled\s*(\/?>|\s[a-zA-Z-])/.test(codigo(CARD)) &&
+    (codigo(CARD).match(/disabled=\{enviando\}/g) ?? []).length === 2);
+  ok("C13a CONTROLE NEGATIVO: a sonda acha o atributo fixo",
+    /disabled\s*(\/?>|\s[a-zA-Z-])/.test('<button type="button" disabled>Aprovar</button>'));
+  ok("C14 o card tem os DOIS handlers de decisao",
+    /onClick=\{\(\) => onRecusar\(aprovacao\)\}/.test(codigo(CARD)) &&
+    /onClick=\{\(\) => onAprovar\(aprovacao\)\}/.test(codigo(CARD)));
+  ok("C15 e nao alcanca a rede por conta propria",
+    !/fetch\(/.test(codigo(CARD)) && !/registrarDecisaoAprovacao/.test(codigo(CARD)));
+  // C16 nao mudou de exigencia, mudou de MOTIVO: antes o card nao tinha
+  // estado porque nao havia decisao; agora nao tem porque a fila e a dona.
+  ok("C16 ZERO estado de decisao no card — quem guarda e a fila",
+    !/useState|useReducer|toast/.test(codigo(CARD)) &&
+    /enviando: boolean/.test(codigo(CARD)));
+  ok("C16a e a fila guarda POR APROVACAO, nao um booleano global",
+    /emVooRef = useRef<Set<string>>/.test(codigo(FILA)) &&
+    /useState<ReadonlySet<string>>/.test(codigo(FILA)));
+  // C17: o card real deixou de renderizar explicacao de impedimento. Ela
+  // pertence ao contrato mock, e continua la — o que sumiu e o consumo.
+  ok("C17 o card real NAO renderiza explicacao de inelegibilidade",
+    !/EXPLICACAO_INELEGIVEL/.test(CARD) &&
+    /EXPLICACAO_INELEGIVEL/.test(CONTRATO));
+  ok("C18 a acao agora acontece, e e anunciada de forma acessivel",
+    (CARD.match(/aria-busy=\{enviando\}/g) ?? []).length === 2 &&
+    /aria-live="polite"/.test(FILA));
   ok("C19 confirmacao secundaria esta preparada, nao usada",
     /export function exigeConfirmacao/.test(CONTRATO) &&
     !/exigeConfirmacao/.test(codigo(CARD)) && !/exigeConfirmacao/.test(codigo(FILA)));
@@ -305,8 +352,15 @@ secao("F. Mocks e cenarios");
   // sobre a afirmacao correta.
   ok("F5  o card real NAO se apresenta como cenario ficticio",
     !/Cenário futuro/.test(CARD) && !/simulad/i.test(CARD));
-  ok("F5a mas continua dizendo, em texto, que a decisao nao esta disponivel",
-    /EXPLICACAO_INELEGIVEL/.test(CARD));
+  // F5a exigia que o card DISSESSE que a decisao nao estava disponivel.
+  // Ela esta, desde o A3. O que precisa continuar valendo e o que o assert
+  // protegia de verdade: o card nao pode prometer nada alem do que a
+  // decisao faz. Por isso a exigencia vira o par oposto — o texto de
+  // impedimento sumiu, e os rotulos de acao sao os reais.
+  ok("F5a o card oferece a decisao em vez de explicar por que nao pode",
+    !/EXPLICACAO_INELEGIVEL/.test(CARD) &&
+    /Aprovar/.test(CARD) && /Recusar/.test(CARD) &&
+    /onAprovar/.test(codigo(CARD)) && /onRecusar/.test(codigo(CARD)));
   ok("F5b e nao afirma nenhum desfecho que nao aconteceu",
     !/\bAprovado\b|\bRecusado\b|\bRejeitado\b/.test(CARD));
   ok("F6  cobre risco baixo, medio e alto",

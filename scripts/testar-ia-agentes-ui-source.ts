@@ -142,10 +142,10 @@ secao("B. O que a UI NAO manda");
   // "o unico cabecalho enviado e o do corpo JSON": as duas contagens
   // sao comparadas ENTRE SI, entao um `headers:` que nao seja aquele
   // cabecalho reprova, e o veto a credencial no cabecalho nao mudou.
-  ok("B3c os UNICOS cabecalhos sao os cinco Content-Type do corpo JSON",
-    (CODIGO_TRANSPORTE.match(/headers\s*:/g) ?? []).length === 5 &&
+  ok("B3c os UNICOS cabecalhos sao os seis Content-Type do corpo JSON",
+    (CODIGO_TRANSPORTE.match(/headers\s*:/g) ?? []).length === 6 &&
       (CODIGO_TRANSPORTE.match(/headers: \{ "Content-Type": "application\/json" \}/g) ?? [])
-        .length === 5 &&
+        .length === 6 &&
       !/"X-|Cookie|Api-Key|Idempotency-Key/i.test(CODIGO_TRANSPORTE));
   ok("B4  `credentials` omitido — o cookie same-origin ja viaja sozinho",
     !/credentials/.test(CODIGO_TRANSPORTE));
@@ -252,6 +252,9 @@ secao("B. O que a UI NAO manda");
     criarConsultaVendasDoAgente: "POST",
     atualizarAgenteViaApi: "PATCH",
     definirPermissaoDeFuncao: "PATCH",
+    // APPROVAL-DECISION-A3: a decisao humana. POST porque REGISTRA uma
+    // decisao — e so isso: quem retoma a tarefa e o worker, depois.
+    registrarDecisaoAprovacao: "POST",
   };
   const ESCRITAS_AUTORIZADAS = Object.keys(VERBOS_AUTORIZADOS);
   const verboDaFuncao = (nome: string): string | null =>
@@ -269,7 +272,7 @@ secao("B. O que a UI NAO manda");
     JSON.stringify(Object.keys(mapa).sort().map((n) => `${n}=${mapa[n]}`));
   const paresReais = JSON.stringify(escritasReais.map((n) => `${n}=${verboDaFuncao(n)}`));
 
-  ok("B5b as escritas publicadas sao EXATAMENTE as tres nominais",
+  ok("B5b as escritas publicadas sao EXATAMENTE as seis nominais",
     JSON.stringify(escritasReais) === esperadas, escritasReais.join(", ") || "nenhuma");
   ok("B5b0 cada escrita usa EXATAMENTE o verbo autorizado para ela",
     paresReais === pares(VERBOS_AUTORIZADOS),
@@ -279,9 +282,9 @@ secao("B. O que a UI NAO manda");
       (f) =>
         verboDaFuncao(f) === VERBOS_AUTORIZADOS[f] &&
         /body: JSON\.stringify/.test(corpoDaFuncao(f))));
-  ok("B5b2 o transporte tem exatamente cinco method e cinco body",
-    (CODIGO_TRANSPORTE.match(/method\s*:/g) ?? []).length === 5 &&
-      (CODIGO_TRANSPORTE.match(/body\s*:/g) ?? []).length === 5);
+  ok("B5b2 o transporte tem exatamente seis method e seis body",
+    (CODIGO_TRANSPORTE.match(/method\s*:/g) ?? []).length === 6 &&
+      (CODIGO_TRANSPORTE.match(/body\s*:/g) ?? []).length === 6);
   ok("B5b3 a escrita de conversa vai para a rota de conversa, com corpo so de mensagem",
     /ROTA_SUFIXO_CONVERSA/.test(CODIGO_TRANSPORTE) &&
       /body: JSON\.stringify\(\{ mensagem \}\)/.test(corpoDaFuncao("enviarMensagemAoAgente")));
@@ -322,7 +325,7 @@ secao("B. O que a UI NAO manda");
       atualizarAgenteViaApi: "POST",
     }) !== pares(VERBOS_AUTORIZADOS));
   ok("B5b8 ANCORA: a varredura enxergou funcoes de verdade",
-    escritasReais.length === 5 && corpoDaFuncao("criarAgenteViaApi").length > 50);
+    escritasReais.length === 6 && corpoDaFuncao("criarAgenteViaApi").length > 50);
   // ── A escrita de permissao, nominalmente ─────────────────────────
   // O caminho e montado por um helper compartilhado com a LEITURA —
   // como `caminhoDaConversa` ja faz —, entao a sonda mede o helper no
@@ -381,8 +384,9 @@ secao("B. O que a UI NAO manda");
   // SUBSTITUIR e APAGAR continuam fora: PUT reabriria por omissao os
   // campos que cada corpo fecha, e nao ha o que apagar (negar e
   // `bloqueado`, que GRAVA linha).
-  ok("B7b tres criacoes por POST, duas alteracoes por PATCH — e nada alem",
-    (CODIGO_TRANSPORTE.match(/method:\s*"POST"/g) ?? []).length === 3 &&
+  ok("B7b quatro POST, duas alteracoes por PATCH — e nada alem",
+    (CODIGO_TRANSPORTE.match(/method:\s*"POST"/g) ?? []).length === 4 &&
+      /export async function registrarDecisaoAprovacao\(/.test(CODIGO_TRANSPORTE) &&
       (CODIGO_TRANSPORTE.match(/method:\s*"PATCH"/g) ?? []).length === 2 &&
       /export async function criarAgenteViaApi\(/.test(CODIGO_TRANSPORTE) &&
       /export async function enviarMensagemAoAgente\(/.test(CODIGO_TRANSPORTE) &&
@@ -1225,34 +1229,316 @@ async function principal(): Promise<void> {
 
     /** A trava e SINCRONA: `fase === "carregando"` so vira verdade num
      *  render, e dois cliques no mesmo frame atravessam essa janela. */
-    const travaSincrona = (t: string): boolean => {
-      const iGuarda = t.indexOf("if (emCursoRef.current) return;");
-      const iTrava = t.indexOf("emCursoRef.current = true;");
-      const iAwait = t.indexOf("await listarAprovacoesPendentes");
-      return iGuarda >= 0 && iTrava >= 0 && iAwait >= 0 && iGuarda < iTrava && iTrava < iAwait;
+    /** A guarda de recarga e SINCRONA e, desde o A3-R1-FIX1, COALESCENTE.
+     *
+     *  Ate aqui era `if (emCursoRef.current) return;` — bastava contra
+     *  duplo clique e nao bastava contra reconciliacao: o chamador
+     *  concorrente saia seco e a leitura de que ele precisava nunca
+     *  acontecia. Agora ele marca pendencia e RECEBE a promise do lider.
+     *
+     *  A sonda mede DENTRO do corpo de `carregar`, porque `carregarUmaVez`
+     *  aparece antes no arquivo e o seu `await` tornaria uma comparacao de
+     *  indices no texto inteiro sem sentido. */
+    const corpoDeCarregar = (t: string): string => {
+      const i = t.indexOf("const carregar = useCallback(");
+      return i < 0 ? "" : t.slice(i, t.indexOf("const lider = (async () => {", i));
     };
-    ok("P14 duplo clique e barrado ANTES do await, por ref", travaSincrona(FILA));
-    ok("P14 CONTROLE NEGATIVO: sem o early-return, reprova",
-      !travaSincrona(FILA.replace("if (emCursoRef.current) return;", "")));
-    ok("P14 CONTROLE NEGATIVO: travar DEPOIS do await reprova",
-      !travaSincrona(
-        FILA.replace("emCursoRef.current = true;", "")
-          .replace("const resposta = await listarAprovacoesPendentes();",
-            "const resposta = await listarAprovacoesPendentes();\n    emCursoRef.current = true;")));
+    const travaSincrona = (t: string): boolean => {
+      const c = corpoDeCarregar(t);
+      const iGuarda = c.indexOf("if (carregamentoAtualRef.current !== null) {");
+      const iMarca = c.indexOf("recarregarPendenteRef.current = true;");
+      const iRetorna = c.indexOf("return carregamentoAtualRef.current;");
+      return c.length > 0 && iGuarda >= 0 && iMarca >= 0 && iRetorna >= 0 &&
+        iGuarda < iMarca && iMarca < iRetorna &&
+        // nada de `await` antes da guarda: `carregar` nem e async.
+        !/await/.test(c.slice(0, iGuarda));
+    };
+    ok("P14 o chamador concorrente marca pendencia e AGUARDA o lider", travaSincrona(FILA));
+    ok("P14 CONTROLE NEGATIVO: sem a guarda de carga em curso, reprova",
+      !travaSincrona(FILA.replace("if (carregamentoAtualRef.current !== null) {", "")));
+    ok("P14 CONTROLE NEGATIVO: sem marcar pendencia, reprova",
+      !travaSincrona(FILA.replace("recarregarPendenteRef.current = true;", "")));
+    ok("P14 CONTROLE NEGATIVO: chamador concorrente que NAO devolve o lider reprova",
+      !travaSincrona(FILA.replace("return carregamentoAtualRef.current;", "return;")));
+    ok("P14a a saida seca do chamador concorrente NAO existe mais",
+      !/emCursoRef/.test(FILA));
+    // ── P14b..P14i — A RECONCILIACAO POS-DECISAO, NA FONTE ────────
+    //
+    // A3-R1-F1. Os asserts acima provam que o chamador concorrente nao sai
+    // seco. Estes provam o resto do contrato: que existe drain, que a
+    // pendencia e limpa ANTES de cada leitura, que o lider e liberado no
+    // fim e que o desmonte interrompe a volta extra.
+    {
+      const CORPO_LIDER = FILA.slice(
+        FILA.indexOf("const lider = (async () => {"),
+        FILA.indexOf("carregamentoAtualRef.current = lider;"));
+
+      ok("P14b existe um mecanismo de recarga PENDENTE",
+        /recarregarPendenteRef = useRef\(false\)/.test(FILA));
+      ok("P14c e um ref com a operacao em curso, tipado como promise",
+        /carregamentoAtualRef = useRef<Promise<void> \| null>\(null\)/.test(FILA));
+      ok("P14d o lider DRENA enquanto houver pendencia",
+        /do \{/.test(CORPO_LIDER) &&
+        /\} while \(recarregarPendenteRef\.current && vivo\.current\);/.test(CORPO_LIDER));
+      ok("P14e a pendencia e limpa ANTES da leitura, nunca depois",
+        CORPO_LIDER.indexOf("recarregarPendenteRef.current = false;") <
+          CORPO_LIDER.indexOf("await carregarUmaVez();"));
+      ok("P14f o lider e liberado no fim, mesmo em excecao",
+        /finally \{/.test(CORPO_LIDER) &&
+        /carregamentoAtualRef\.current = null;/.test(CORPO_LIDER));
+      ok("P14g o desmonte interrompe a volta extra",
+        /&& vivo\.current\);/.test(CORPO_LIDER));
+      ok("P14h a decisao AGUARDA a recarga, nao dispara e esquece",
+        (FILA.match(/await carregar\(\);/g) ?? []).length >= 3);
+      ok("P14i e a recarga continua sem timer, intervalo ou retry",
+        !/setInterval|setTimeout|requestAnimationFrame/.test(FILA));
+    }
+
+    // ── P14j..P14q — HARNESS: a coordenacao, executada ────────────
+    //
+    // Os asserts acima leem a fonte. Estes EXECUTAM um modelo da mesma
+    // coordenacao e contam leituras de verdade. O modelo e parametrizavel
+    // justamente para que os mutantes M1..M5 sejam expressos como opcoes,
+    // e nao como texto editado — nenhum mutante toca o working tree.
+    //
+    // Os numeros esperados sao literais, escritos a partir do contrato:
+    // uma chamada = uma leitura; uma decisao durante a leitura = duas;
+    // uma terceira durante a trailing = tres.
+    {
+      type Opcoes = {
+        marcaPendente?: boolean;
+        devolveLider?: boolean;
+        drena?: boolean;
+        limpaLider?: boolean;
+        limpaAntesDaLeitura?: boolean;
+      };
+
+      /** Uma leitura controlavel: resolve quando o teste mandar. */
+      const criarLeitura = () => {
+        const soltar: Array<() => void> = [];
+        let inicios = 0;
+        const carga = () =>
+          new Promise<void>((resolve) => {
+            inicios += 1;
+            soltar.push(resolve);
+          });
+        return {
+          carga,
+          get inicios() { return inicios; },
+          /** Solta a leitura mais antiga ainda pendente. */
+          async soltarUma() {
+            const r = soltar.shift();
+            if (r) r();
+            await Promise.resolve();
+            await Promise.resolve();
+            await Promise.resolve();
+          },
+        };
+      };
+
+      const coordenar = (carga: () => Promise<void>, o: Opcoes = {}) => {
+        const op = {
+          marcaPendente: true,
+          devolveLider: true,
+          drena: true,
+          limpaLider: true,
+          limpaAntesDaLeitura: true,
+          ...o,
+        };
+        let atual: Promise<void> | null = null;
+        let pendente = false;
+        let vivo = true;
+        const carregar = (): Promise<void> => {
+          if (atual !== null) {
+            if (op.marcaPendente) pendente = true;
+            return op.devolveLider ? atual : Promise.resolve();
+          }
+          const lider = (async () => {
+            try {
+              do {
+                if (op.limpaAntesDaLeitura) pendente = false;
+                await carga();
+                if (!op.limpaAntesDaLeitura) pendente = false;
+              } while (op.drena && pendente && vivo);
+            } finally {
+              if (op.limpaLider) { atual = null; pendente = false; }
+            }
+          })();
+          atual = lider;
+          return lider;
+        };
+        return { carregar, desmontar: () => { vivo = false; } };
+      };
+
+      /** Roda um cenario e devolve quantas leituras comecaram e se a
+       *  promise do chamador concorrente ja tinha resolvido. */
+      const cenario = async (o: Opcoes = {}) => {
+        const l = criarLeitura();
+        const c = coordenar(l.carga, o);
+
+        const pA = c.carregar();            // leitura A comeca
+        let bResolveu = false;
+        const pB = c.carregar();            // decisao B durante A
+        void pB.then(() => { bResolveu = true; });
+
+        await l.soltarUma();                // A termina
+        const aposA = { inicios: l.inicios, bResolveu };
+
+        let cResolveu = false;
+        const pC = c.carregar();            // decisao C durante a trailing
+        void pC.then(() => { cResolveu = true; });
+
+        await l.soltarUma();                // trailing termina
+        const aposTrailing = { inicios: l.inicios, cResolveu };
+
+        await l.soltarUma();                // terceira termina
+        await Promise.all([pA, pB, pC]).catch(() => undefined);
+        return { aposA, aposTrailing, total: l.inicios, bResolveu, cResolveu };
+      };
+
+      // CASE 1 — uma chamada, uma leitura.
+      {
+        const l = criarLeitura();
+        const c = coordenar(l.carga);
+        const p = c.carregar();
+        ok("P14j CASE1 uma chamada inicia exatamente UMA leitura", l.inicios === 1);
+        await l.soltarUma();
+        await p;
+        ok("P14j1 e ela termina sem leitura extra", l.inicios === 1);
+      }
+
+      // CASE 2 — B durante A: duas leituras, e B so resolve na segunda.
+      {
+        const r = await cenario();
+        ok("P14k CASE2 B durante A provoca uma SEGUNDA leitura",
+          r.aposA.inicios === 2);
+        ok("P14k1 e B NAO resolveu antes dessa segunda leitura comecar",
+          r.aposA.bResolveu === false);
+      }
+
+      // CASE 3 — C durante a trailing: terceira leitura, e C espera por ela.
+      {
+        const r = await cenario();
+        ok("P14l CASE3 C durante a trailing provoca uma TERCEIRA leitura",
+          r.aposTrailing.inicios === 3);
+        ok("P14l1 e C NAO resolveu antes dela comecar",
+          r.aposTrailing.cResolveu === false);
+        ok("P14l2 ao fim, B e C resolveram", r.bResolveu === true && r.cResolveu === true);
+        ok("P14l3 e o total foi 3 leituras, nao uma por chamada", r.total === 3);
+      }
+
+      // CASE 4 — varias chamadas na mesma janela coalescem numa so volta.
+      {
+        const l = criarLeitura();
+        const c = coordenar(l.carga);
+        const p0 = c.carregar();
+        const extras = [c.carregar(), c.carregar(), c.carregar(), c.carregar()];
+        ok("P14m CASE4 quatro chamadas concorrentes nao abrem quatro leituras",
+          l.inicios === 1);
+        await l.soltarUma();
+        ok("P14m1 e todas coalescem numa UNICA volta extra", l.inicios === 2);
+        await l.soltarUma();
+        await Promise.all([p0, ...extras]);
+        ok("P14m2 total de leituras = 2", l.inicios === 2);
+      }
+
+      // CASE 5 — depois do lider terminar, uma nova chamada funciona.
+      {
+        const l = criarLeitura();
+        const c = coordenar(l.carga);
+        const p1 = c.carregar();
+        await l.soltarUma();
+        await p1;
+        const p2 = c.carregar();
+        ok("P14n CASE5 apos o lider terminar, nova chamada inicia leitura",
+          l.inicios === 2);
+        await l.soltarUma();
+        await p2;
+      }
+
+      // CASE 6 — desmonte antes da trailing nao dispara rede extra.
+      {
+        const l = criarLeitura();
+        const c = coordenar(l.carga);
+        const p1 = c.carregar();
+        const p2 = c.carregar();
+        c.desmontar();
+        await l.soltarUma();
+        await Promise.all([p1, p2]);
+        ok("P14o CASE6 desmonte antes da trailing nao inicia leitura extra",
+          l.inicios === 1);
+      }
+
+      // ── M1..M5 — os mutantes, como opcoes do modelo ──────────────
+      //
+      // Cada um remove uma peca do contrato e precisa quebrar pelo menos
+      // um dos invariantes acima. Se algum mutante passasse, o teste
+      // estaria descrevendo a implementacao em vez de exigi-la.
+      const m1 = await cenario({ marcaPendente: false });
+      ok("P14p M1 sem marcar pendencia, a segunda leitura nao acontece",
+        m1.aposA.inicios !== 2);
+
+      const m2 = await cenario({ devolveLider: false });
+      ok("P14p1 M2 sem devolver a promise do lider, B resolve cedo demais",
+        m2.aposA.bResolveu === true);
+
+      const m3 = await cenario({ drena: false });
+      ok("P14p2 M3 sem o drain, nao ha segunda leitura",
+        m3.aposA.inicios !== 2);
+
+      const m5 = await cenario({ limpaAntesDaLeitura: false });
+      ok("P14p3 M5 limpando a pendencia DEPOIS da leitura, o pedido concorrente se perde",
+        m5.total !== 3);
+
+      {
+        // M4 — sem liberar o lider, a proxima chamada devolve a promise
+        // velha e a fila nunca mais recarrega.
+        const l = criarLeitura();
+        const c = coordenar(l.carga, { limpaLider: false });
+        const p1 = c.carregar();
+        await l.soltarUma();
+        await p1;
+        c.carregar();
+        ok("P14q M4 sem liberar o lider, uma nova chamada nao inicia leitura",
+          l.inicios === 1);
+      }
+
+      ok("P14q1 ANCORA: o modelo integro passa em todos os invariantes",
+        (await cenario()).total === 3);
+    }
 
     // ── P15 — resposta velha nao sobrescreve a nova ───────────────
     ok("P15 ha contador de geracao e guarda de desmontagem",
       /geracao\.current/.test(FILA) && /vivo\.current/.test(FILA) &&
       /minha !== geracao\.current/.test(FILA));
 
-    // ── P16..P19 — NADA decide ────────────────────────────────────
-    ok("P16 FLUXO_APROVACAO_CONECTADO continua false",
-      /export const FLUXO_APROVACAO_CONECTADO = false;/.test(APROV));
-    ok("P17 os dois botoes existem e estao disabled",
+    // ── P16..P19 — A DECISAO EXISTE, E A FRONTEIRA CONTINUA ───────
+    //
+    // Ate o A3 este bloco se chamava "NADA decide" e provava dormencia. A
+    // rota existe agora; o que os asserts passam a proteger e a FRONTEIRA:
+    // a decisao mora no servidor, a elegibilidade do mock nao governa a
+    // fila real, e o card continua sem rede.
+    ok("P16 a dormencia global sumiu do contrato",
+      !/FLUXO_APROVACAO_CONECTADO/.test(APROV) && !/fluxo_nao_conectado/.test(APROV));
+    ok("P16a e a elegibilidade do MOCK nao vazou para a fila real",
+      !/elegibilidade\(/.test(CARD) && !/elegibilidade\(/.test(FILA) &&
+      !/conexaoValida\(/.test(CARD) && !/conexaoValida\(/.test(FILA));
+    ok("P16b nem por cast: a ponte de tipo esta ausente nos dois",
+      !/as (unknown as )?ConexaoDaAprovacao\b/.test(CARD) &&
+      !/as (unknown as )?ConexaoDaAprovacao\b/.test(FILA));
+    ok("P16c mas o contrato mock PRESERVOU `conexao_invalida`",
+      /"conexao_invalida"/.test(APROV) && /export function elegibilidade\(/.test(APROV));
+    ok("P17 os dois botoes existem, sem `disabled` fixo e com condicional",
       /Recusar/.test(CARD) && /Aprovar/.test(CARD) &&
-      (CARD.match(/disabled/g) ?? []).length >= 2);
-    ok("P18 o card nao tem handler nenhum",
-      !/onClick|onSubmit|onChange/.test(CARD));
+      !/disabled\s*(\/?>|\s[a-zA-Z-])/.test(CARD) &&
+      (CARD.match(/disabled=\{enviando\}/g) ?? []).length === 2);
+    ok("P17a CONTROLE NEGATIVO: a sonda acha o `disabled` fixo",
+      /disabled\s*(\/?>|\s[a-zA-Z-])/.test('<button type="button" disabled>Aprovar</button>'));
+    ok("P18 o card tem os handlers de decisao — e nenhuma rede",
+      /onClick=/.test(CARD) && /onAprovar/.test(CARD) && /onRecusar/.test(CARD) &&
+      !/fetch\(/.test(CARD) && !/registrarDecisaoAprovacao/.test(CARD));
+    ok("P18a e quem fala com a rota e a FILA, pelo transporte",
+      /registrarDecisaoAprovacao\(/.test(FILA) && !/fetch\(/.test(FILA));
     ok("P19 nem transporte, nem fila, nem card sabem decidir ou retomar",
       [FILA, CARD, codigo(ler(TRANSPORTE))].every((f) =>
         !/decidirAprovacao|retomarAprovacao|consumirAprovacaoEAbrir|aprovacao_decidir/.test(f)));

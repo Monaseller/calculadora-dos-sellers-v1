@@ -23,17 +23,31 @@
  * e despejado na tela: um `JSON.stringify` aqui transformaria a falta de
  * um renderer em vazamento de forma interna.
  *
- * ── Botoes existem, desabilitados, e dizem por que ──────────────────
+ * ── Os botoes decidem, e o card nao sabe como ───────────────────────
  *
- * Sem `onClick`, sem estado local, sem toast. Continua valendo o que
- * valia na era mock, e agora por um motivo mais concreto: aprovar
- * deixaria a Approval `aprovada` e a tarefa parada em
- * `aguardando_aprovacao` para sempre, porque nada ainda a consome.
+ * Ate o A3 os dois tinham `disabled` literal e nenhum handler, porque
+ * aprovar deixaria a Approval `aprovada` e a tarefa parada em
+ * `aguardando_aprovacao` para sempre. A lane Resume existe em producao
+ * desde o D0: a decisao passou a ter efeito, e os botoes foram ligados.
+ *
+ * O card continua SEM rede e SEM estado. Ele recebe `onAprovar`,
+ * `onRecusar` e `enviando` da fila, e nao sabe que existe uma rota. Um
+ * `fetch` aqui daria a cada card da lista o seu proprio cliente HTTP e o
+ * seu proprio tratamento de erro, e a fila — que e quem recarrega —
+ * perderia o controle do que aconteceu.
+ *
+ * ── E a elegibilidade do mock NAO entra aqui ────────────────────────
+ *
+ * `elegibilidade()` le `conexao.estado`, que existe em `AprovacaoUI` (o
+ * contrato mock) e NAO existe em `AprovacaoRealUI`: a fila real publica
+ * `plataforma` e `recurso`, que descrevem o REQUISITO de conexao, nao o
+ * estado da conta. Chamar aquela funcao aqui — com cast ou sem — seria
+ * afirmar sobre a conta do dono algo que esta tela nao tem como saber.
+ * O unico impedimento observavel e a propria decisao em voo.
  */
 import { CORES_ESTADO, CROMO, ESPACO, FONTE, RAIO } from "@/lib/ia/design";
 import { ROTULO_ACESSO } from "@/lib/ia/conceitos";
 import {
-  EXPLICACAO_INELEGIVEL,
   SEM_DETALHES,
   desdeQuando,
   detalhesDaSolicitacao,
@@ -59,9 +73,17 @@ function momento(iso: string): string {
 export default function CardAprovacao({
   aprovacao,
   agoraMs,
+  enviando,
+  onAprovar,
+  onRecusar,
 }: {
   aprovacao: AprovacaoRealUI;
   agoraMs: number;
+  /** Decisao em voo DESTE card. E por card, nao por fila: uma aprovacao
+   *  lenta nao pode congelar as outras da lista. */
+  enviando: boolean;
+  onAprovar: (aprovacao: AprovacaoRealUI) => void;
+  onRecusar: (aprovacao: AprovacaoRealUI) => void;
 }) {
   const detalhes = detalhesDaSolicitacao(aprovacao);
   const expirada = expirouLocalmente(aprovacao, agoraMs);
@@ -129,17 +151,25 @@ export default function CardAprovacao({
 
       <footer className="cds-ia-ap-rodape">
         <div className="cds-ia-ap-acoes">
-          <button type="button" className="cds-ia-ap-btn cds-ia-ap-recusar" disabled>
-            Recusar
+          <button
+            type="button"
+            className="cds-ia-ap-btn cds-ia-ap-recusar"
+            disabled={enviando}
+            aria-busy={enviando}
+            onClick={() => onRecusar(aprovacao)}
+          >
+            {enviando ? "Enviando…" : "Recusar"}
           </button>
-          <button type="button" className="cds-ia-ap-btn cds-ia-ap-aprovar" disabled>
-            Aprovar
+          <button
+            type="button"
+            className="cds-ia-ap-btn cds-ia-ap-aprovar"
+            disabled={enviando}
+            aria-busy={enviando}
+            onClick={() => onAprovar(aprovacao)}
+          >
+            {enviando ? "Enviando…" : "Aprovar"}
           </button>
         </div>
-
-        <ul className="cds-ia-ap-motivos">
-          <li>{EXPLICACAO_INELEGIVEL.fluxo_nao_conectado}</li>
-        </ul>
       </footer>
     </article>
   );
@@ -210,9 +240,4 @@ const css = `
   .cds-ia-ap-aprovar { border-color: rgba(0,217,126,.3); color: ${CORES_ESTADO.concluido}; }
   .cds-ia-ap-recusar { border-color: rgba(240,106,106,.3); color: ${CORES_ESTADO.erro}; }
 
-  .cds-ia-ap-motivos {
-    margin: ${ESPACO.md}px 0 0; padding-left: 18px;
-    font-size: 12px; color: ${CROMO.textoFraco};
-  }
-  .cds-ia-ap-motivos li { margin-bottom: 4px; }
 `;

@@ -1238,3 +1238,80 @@ export async function listarAprovacoesPendentes(
 
   return { estado: "ok", aprovacoes };
 }
+
+// ── APPROVAL-DECISION-A3: registrar a decisao humana ─────────────────
+//
+// ── Por que NAO se chama `decidirAprovacao` ─────────────────────────
+//
+// Esse nome pertence ao wrapper de servidor, em
+// `lib/agentes/aprovacoes/persistencia.ts`, e `testar-agentes-aprovacoes`
+// usa o TOKEN `decidirAprovacao` para contar consumidores de producao da
+// fundacao Approval, varrendo `lib/` e `app/` inteiros. Um helper de
+// cliente com o mesmo nome apareceria nessa contagem como um segundo
+// consumidor — e a contagem estaria certa sobre o texto e errada sobre o
+// mundo: este arquivo nao alcanca o banco, ele fala HTTP. Nomes
+// diferentes para conceitos diferentes mantem a sonda afiada.
+
+export type DecisaoDeAprovacao = "aprovar" | "rejeitar";
+
+export type RespostaDecisaoAprovacao =
+  | { estado: "ok"; decisao: DecisaoDeAprovacao; estadoFinal: "aprovada" | "rejeitada" }
+  | { estado: "nao_autenticado" }
+  | { estado: "nao_encontrada" }
+  | { estado: "indisponivel" }
+  | { estado: "entrada_invalida" }
+  | { estado: "falha" };
+
+const caminhoDaDecisao = (aprovacaoId: string): string =>
+  `${ROTA_APROVACOES}/${encodeURIComponent(aprovacaoId)}/decidir`;
+
+/**
+ * Registra UMA decisao humana sobre UMA aprovacao.
+ *
+ * O corpo tem uma chave e so. A aprovacao viaja na URL e o dono viaja no
+ * cookie same-origin — nenhum id causal (`userId`, `agenteId`, `tarefaId`,
+ * `funcaoId`, `revisao`, `conexao`) e montado aqui, porque o servidor nao
+ * leria nenhum deles e manda-los ensinaria o proximo leitor que sao
+ * necessarios.
+ *
+ * `indisponivel` cobre o 409: a aprovacao ja foi decidida de outro jeito,
+ * consumida, cancelada ou expirou. Nao e falha de transporte e nao e
+ * sucesso — quem chama deve recarregar a fila em vez de reafirmar o que
+ * tentou.
+ *
+ * Rede que lanca vira `falha`, nunca excecao para o componente.
+ */
+export async function registrarDecisaoAprovacao(
+  aprovacaoId: string,
+  decisao: DecisaoDeAprovacao,
+  signal?: AbortSignal
+): Promise<RespostaDecisaoAprovacao> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(caminhoDaDecisao(aprovacaoId), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ decisao }),
+      signal,
+    });
+  } catch {
+    return { estado: "falha" };
+  }
+
+  if (resposta.status === 401) return { estado: "nao_autenticado" };
+  if (resposta.status === 404) return { estado: "nao_encontrada" };
+  if (resposta.status === 409) return { estado: "indisponivel" };
+  if (resposta.status === 400) return { estado: "entrada_invalida" };
+
+  const corpo = await corpoDe(resposta);
+  if (!resposta.ok || !ehObjeto(corpo) || corpo.ok !== true) return { estado: "falha" };
+
+  // Shape divergente e FALHA. Um `200` sem estado reconhecivel seria um
+  // sucesso que a tela nao sabe descrever, e descreve-lo mesmo assim
+  // significaria inventar o que foi gravado.
+  const estadoFinal = corpo.estado;
+  if (estadoFinal !== "aprovada" && estadoFinal !== "rejeitada") return { estado: "falha" };
+  if (corpo.decisao !== decisao) return { estado: "falha" };
+
+  return { estado: "ok", decisao, estadoFinal };
+}

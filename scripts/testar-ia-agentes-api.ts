@@ -265,9 +265,22 @@ function construtor(tabela: string): unknown {
 }
 
 let rpcs = 0;
+/** Resposta programavel da RPC. O DEFAULT e o de sempre — `{ data: null,
+ *  error: null }` —, entao todas as secoes anteriores, que so contam
+ *  `rpcs`, continuam vendo exatamente o que viam. Quem precisa de um
+ *  codigo especifico a define e a devolve ao default em seguida. */
+let respostaRpc: { data: unknown; error: unknown } = { data: null, error: null };
+const RPC_PADRAO: { data: unknown; error: unknown } = { data: null, error: null };
+/** O que a ultima chamada recebeu, para provar que a rota passou o
+ *  `p_user_id` da SESSAO e nao um id vindo do cliente. */
+let ultimaRpc: { nome: string; args: Record<string, unknown> } | null = null;
 const clienteFake = {
   from: (t: string) => construtor(t),
-  rpc: () => { rpcs++; return Promise.resolve({ data: null, error: null }); },
+  rpc: (nome?: string, args?: Record<string, unknown>) => {
+    rpcs++;
+    ultimaRpc = { nome: nome ?? "", args: args ?? {} };
+    return Promise.resolve(respostaRpc);
+  },
 };
 
 const requireOriginal = (Module as unknown as { prototype: { require: (id: string) => unknown } }).prototype.require;
@@ -2197,6 +2210,242 @@ async function principal(): Promise<void> {
     ok("W32 a resposta e no-store e dinamica",
       /"Cache-Control": "no-store"/.test(AP) &&
       /export const dynamic = "force-dynamic"/.test(AP));
+  }
+
+  // ── X. POST /api/aprovacoes/[id]/decidir — a decisao humana ──────
+  //
+  // APPROVAL-DECISION-A3. A rota REAL roda, e com ela o wrapper REAL de
+  // `decidirAprovacao`: o que e simulado e so a RESPOSTA da RPC, que e
+  // exatamente a fronteira que esta suite nao atravessa.
+  //
+  // A tabela de traducao e o coracao da secao. Cada codigo que o D4 sabe
+  // devolver tem um status, e dois deles dependem TAMBEM do que foi
+  // pedido: `ja_aprovada` e sucesso idempotente para quem repetiu
+  // "aprovar" e conflito para quem tentou "rejeitar". Os expected sao
+  // literais, escritos a mao — deriva-los do switch da rota provaria
+  // apenas que a rota concorda consigo mesma.
+  secao("X. POST /api/aprovacoes/[id]/decidir — decisao, e nada alem");
+  {
+    const decidirRota = await import("../app/api/aprovacoes/[aprovacaoId]/decidir/route");
+    const AP_ID = "77777777-7777-4777-8777-777777777777";
+
+    const pedir = (
+      corpo: unknown,
+      opts: { cookie?: string; id?: string; cru?: string } = {}
+    ) =>
+      decidirRota.POST(
+        new Request(`http://localhost/api/aprovacoes/${opts.id ?? AP_ID}/decidir`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(opts.cookie ? { cookie: opts.cookie } : {}),
+          },
+          body: opts.cru !== undefined ? opts.cru : JSON.stringify(corpo),
+        }),
+        { params: { aprovacaoId: opts.id ?? AP_ID } }
+      );
+
+    /** Roda uma decisao com a RPC programada para devolver `codigo`. */
+    const comCodigo = async (
+      codigo: string,
+      decisao: "aprovar" | "rejeitar"
+    ): Promise<{ status: number; corpo: Record<string, unknown> }> => {
+      respostaRpc = { data: codigo, error: null };
+      const r = await pedir({ decisao }, { cookie: COOKIE_A });
+      respostaRpc = RPC_PADRAO;
+      return { status: r.status, corpo: (await r.json()) as Record<string, unknown> };
+    };
+
+    // ── X1..X3 — sessao ───────────────────────────────────────────
+    {
+      const rpcsAntes = rpcs;
+      const r = await pedir({ decisao: "aprovar" });
+      const c = (await r.json()) as Record<string, unknown>;
+      ok("X1  sem cookie e 401", r.status === 401);
+      ok("X1a e o corpo nao vaza motivo", c.ok === false && c.erro === "Não autenticado.");
+      ok("X2  401 nao chega a tocar a RPC", rpcs === rpcsAntes);
+    }
+    ok("X3  cookie invalido tambem e 401",
+      (await pedir({ decisao: "aprovar" }, { cookie: "cds_session=lixo" })).status === 401);
+
+    // ── X4..X10 — o corpo, fechado por INCLUSAO ───────────────────
+    const ENTRADA = "Entrada inválida.";
+    const corpo400 = async (cru: string, rotulo: string) => {
+      const rpcsAntes = rpcs;
+      const r = await pedir(undefined, { cookie: COOKIE_A, cru });
+      const c = (await r.json()) as Record<string, unknown>;
+      ok(rotulo, r.status === 400 && c.erro === ENTRADA && rpcs === rpcsAntes);
+    };
+    await corpo400("{", "X4  JSON malformado e 400, sem tocar a RPC");
+    await corpo400("null", "X5  `null` e 400");
+    await corpo400('["aprovar"]', "X6  array e 400 — decisao por posicao nao existe");
+    await corpo400('"aprovar"', "X7  primitivo e 400");
+    await corpo400('{"decisao":"aprovar","userId":"outro"}', "X8  chave a mais e 400");
+    await corpo400('{"acao":"aprovar"}', "X9  chave errada e 400");
+    await corpo400('{"decisao":"talvez"}', "X10 enum invalido e 400");
+    await corpo400('{"decisao":"cancelar"}', "X10a `cancelar` NAO e decisao humana");
+    await corpo400('{"decisao":123}', "X10b decisao nao-string e 400");
+    await corpo400("{}", "X10c corpo vazio e 400");
+
+    // ── X11 — o id vem do segmento, e e validado ──────────────────
+    {
+      const rpcsAntes = rpcs;
+      const r = await pedir({ decisao: "aprovar" }, { cookie: COOKIE_A, id: "nao-e-uuid" });
+      ok("X11 aprovacaoId fora de UUID e 400, sem tocar a RPC",
+        r.status === 400 && rpcs === rpcsAntes);
+    }
+
+    // ── X12..X13 — sucesso ────────────────────────────────────────
+    {
+      const r = await comCodigo("aprovada", "aprovar");
+      ok("X12 aprovar + `aprovada` e 200",
+        r.status === 200 && r.corpo.ok === true &&
+        r.corpo.decisao === "aprovar" && r.corpo.estado === "aprovada");
+    }
+    {
+      const r = await comCodigo("rejeitada", "rejeitar");
+      ok("X13 rejeitar + `rejeitada` e 200",
+        r.status === 200 && r.corpo.ok === true &&
+        r.corpo.decisao === "rejeitar" && r.corpo.estado === "rejeitada");
+    }
+
+    // ── X14 — a identidade e a da SESSAO ──────────────────────────
+    {
+      respostaRpc = { data: "aprovada", error: null };
+      await pedir({ decisao: "aprovar" }, { cookie: COOKIE_A });
+      respostaRpc = RPC_PADRAO;
+      const args = (ultimaRpc?.args ?? {}) as Record<string, unknown>;
+      ok("X14 a RPC recebe o dono da SESSAO, o id do segmento e a decisao",
+        ultimaRpc?.nome === "aprovacao_decidir" &&
+        args.p_user_id === USER_A &&
+        args.p_aprovacao_id === AP_ID &&
+        args.p_decisao === "aprovar");
+      ok("X14a e nenhum id causal extra viaja para a RPC",
+        Object.keys(args).sort().join(",") === "p_aprovacao_id,p_decisao,p_motivo,p_user_id");
+    }
+
+    // ── X15..X18 — idempotente vs conflito ────────────────────────
+    {
+      const r = await comCodigo("ja_aprovada", "aprovar");
+      ok("X15 `ja_aprovada` + aprovar e 200 IDEMPOTENTE",
+        r.status === 200 && r.corpo.ok === true && r.corpo.estado === "aprovada");
+    }
+    {
+      const r = await comCodigo("ja_aprovada", "rejeitar");
+      ok("X16 `ja_aprovada` + rejeitar e 409 — decisao CONTRARIA nao passa",
+        r.status === 409 && r.corpo.ok === false);
+    }
+    {
+      const r = await comCodigo("ja_rejeitada", "rejeitar");
+      ok("X17 `ja_rejeitada` + rejeitar e 200 IDEMPOTENTE",
+        r.status === 200 && r.corpo.ok === true && r.corpo.estado === "rejeitada");
+    }
+    {
+      const r = await comCodigo("ja_rejeitada", "aprovar");
+      ok("X18 `ja_rejeitada` + aprovar e 409",
+        r.status === 409 && r.corpo.ok === false);
+    }
+
+    // ── X19..X23 — terminais ──────────────────────────────────────
+    const INDISPONIVEL = "A aprovação não está mais disponível para essa decisão.";
+    {
+      const TERMINAIS = ["ja_cancelada", "ja_consumida", "expirada", "tarefa_incompativel", "cancelada"];
+      let i = 19;
+      for (const codigo of TERMINAIS) {
+        const r = await comCodigo(codigo, "aprovar");
+        ok(`X${i} \`${codigo}\` e 409 com mensagem publica`,
+          r.status === 409 && r.corpo.ok === false && r.corpo.erro === INDISPONIVEL);
+        i += 1;
+      }
+    }
+
+    // ── X24 — 404 indistinguivel ──────────────────────────────────
+    {
+      const r = await comCodigo("aprovacao_inexistente", "aprovar");
+      ok("X24 `aprovacao_inexistente` e 404",
+        r.status === 404 && r.corpo.ok === false &&
+        r.corpo.erro === "Aprovação não encontrada.");
+      ok("X24a e a mensagem NAO revela dono, existencia nem estado",
+        !/dono|owner|outro|pertence|existe/i.test(String(r.corpo.erro)));
+    }
+
+    // ── X25..X26 — defesa em profundidade ─────────────────────────
+    {
+      let i = 25;
+      for (const codigo of ["entrada_invalida", "decisao_invalida"]) {
+        const r = await comCodigo(codigo, "aprovar");
+        ok(`X${i} \`${codigo}\` vindo do D4 e 400`,
+          r.status === 400 && r.corpo.erro === ENTRADA);
+        i += 1;
+      }
+    }
+
+    // ── X27..X29 — falha fecha ────────────────────────────────────
+    {
+      const r = await comCodigo("falha_persistencia", "aprovar");
+      ok("X27 `falha_persistencia` e 503, nunca 200",
+        r.status === 503 && r.corpo.ok === false &&
+        r.corpo.erro === "Não foi possível registrar a decisão.");
+    }
+    {
+      // Erro de transporte: o wrapper o traduz para `falha_persistencia`, e
+      // o SQLSTATE 55000 das invariantes da RPC chega por aqui.
+      respostaRpc = {
+        data: null,
+        error: {
+          code: "55000",
+          message: "aprovacao_decidir: aprovar X afetou 2 linhas sob lock",
+          details: "detalhe interno",
+          hint: "dica interna",
+        },
+      };
+      const r = await pedir({ decisao: "aprovar" }, { cookie: COOKIE_A });
+      respostaRpc = RPC_PADRAO;
+      const c = (await r.json()) as Record<string, unknown>;
+      ok("X28 erro cru do banco vira 503 e NAO atravessa", r.status === 503);
+      ok("X28a nem SQLSTATE, nem message, nem details, nem hint na resposta",
+        !/55000|afetou|sob lock|detalhe interno|dica interna/i.test(JSON.stringify(c)));
+    }
+    {
+      const r = await comCodigo("um_codigo_que_nao_existe", "aprovar");
+      ok("X29 codigo nao inventariado cai no 503, nunca em sucesso",
+        r.status === 503 && r.corpo.ok !== true);
+    }
+
+    // ── X30..X31 — forma e privacidade da resposta ────────────────
+    {
+      const r = await comCodigo("aprovada", "aprovar");
+      ok("X30 o 200 tem EXATAMENTE ok/decisao/estado",
+        Object.keys(r.corpo).sort().join(",") === "decisao,estado,ok");
+      ok("X30a e nao carrega id, tarefa, agente nem argumentos",
+        !/tarefaId|agenteId|funcaoId|user_id|argumentos|conexao/i.test(JSON.stringify(r.corpo)));
+    }
+    {
+      respostaRpc = { data: "aprovada", error: null };
+      const r = await pedir({ decisao: "aprovar" }, { cookie: COOKIE_A });
+      respostaRpc = RPC_PADRAO;
+      ok("X31 a resposta e no-store", r.headers.get("Cache-Control") === "no-store");
+    }
+
+    // ── X32..X36 — a FONTE: uma chamada, e nenhuma retomada ───────
+    const DEC = semComentarios(ler("app/api/aprovacoes/[aprovacaoId]/decidir/route.ts"));
+    ok("X32 a rota chama `decidirAprovacao` exatamente uma vez",
+      (DEC.match(/(?<![.\w])decidirAprovacao\(/g) ?? []).length === 1 &&
+      (DEC.match(/import \{ decidirAprovacao \}/g) ?? []).length === 1);
+    ok("X33 e nao abre banco por conta propria",
+      !/getSupabaseServidor|\.rpc\(|\.from\(|aprovacao_decidir/.test(DEC));
+    ok("X34 ZERO Resume, Worker, Funcao ou Tool Call",
+      !/executarRetomada|executarSlotRetomada|iniciarRetomadaAprovacao/.test(DEC) &&
+      !/aprovacao_consumir_e_abrir|consumirAprovacaoEAbrir/.test(DEC) &&
+      !/reivindicarProximaTarefa|executarTarefa|executarFuncao/.test(DEC) &&
+      !/internal\/agentes\/worker/.test(DEC));
+    ok("X35 so existe POST — nem GET, nem PATCH, nem PUT, nem DELETE",
+      /export async function POST\(/.test(DEC) &&
+      !/export async function (GET|PATCH|PUT|DELETE)\(/.test(DEC));
+    ok("X36 a identidade vem SO de auth.uid",
+      /auth\.uid/.test(DEC) && !/searchParams|headers\.get\("x-user/.test(DEC));
+    ok("X36a e a rota e dinamica",
+      /export const dynamic = "force-dynamic"/.test(DEC));
   }
 
   console.log(`\n══ ${passou} PASS / ${falhou} FAIL ══\n`);
