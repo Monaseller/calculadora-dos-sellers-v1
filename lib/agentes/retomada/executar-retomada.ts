@@ -92,10 +92,14 @@ import {
 } from "@/lib/agentes/execucao-funcoes/executar";
 import { FUNCOES, funcaoExiste } from "@/lib/agentes/funcoes/registry";
 import {
+  cancelarAprovacaoRetomadaIncompativel,
   concluirTarefaRetomada,
+  descobrirAprovacoesParaRetomada,
+  descobrirCandidatasRetomadaStale,
   falharTarefaRetomada,
   iniciarRetomadaAprovacao,
   lerTentativaDaRetomada,
+  recuperarRetomadaStale,
   registrarHeartbeatRetomada,
   type CodigoRetomadaInicio,
 } from "@/lib/agentes/retomada/persistencia-retomada";
@@ -157,7 +161,17 @@ export type ResultadoRetomada =
   | {
       readonly tipo: "indisponivel";
       readonly motivo: "conclusao_nao_registrada" | "falha_nao_registrada";
-    };
+    }
+  /**
+   * A guarda de orcamento recusou ABRIR a Tool Call.
+   *
+   * E uma variante de TOPO, e nao um `MotivoSemInicio`, por uma razao
+   * de significado: todo motivo de `sem_inicio` descreve algo que o
+   * BANCO ou uma prova local respondeu. Aqui ninguem respondeu nada —
+   * a RPC de inicio nem chegou a ser chamada. Colapsar os dois faria
+   * o slot confundir "a fila recusou" com "nao havia tempo".
+   */
+  | { readonly tipo: "orcamento_insuficiente" };
 
 // ─── Mensagens persistidas — TODAS fixas ──────────────────────────────
 //
@@ -266,10 +280,23 @@ export const INTERVALO_HEARTBEAT_RETOMADA_MS = 15_000;
  * tarefa, nem tentativa, nem Funcao, nem definicao — tudo isso e
  * consequencia, e aceitar qualquer um deles de quem chama seria deixar
  * o chamador descrever o proprio fencing.
+ *
+ * ── Por que a guarda de orcamento e OBRIGATORIA ─────────────────────
+ *
+ * `podeIniciarRetomada` nao tem default, e isso e deliberado. Um
+ * `= () => true` faria toda chamada futura que esquecesse o argumento
+ * COMPILAR e abrir a Tool Call sem folga nenhuma — o modo de falha
+ * mais caro desta lane, porque a aprovacao ja foi gasta quando o tempo
+ * acaba. Sem default, esquecer nao compila.
+ *
+ * A guarda e uma funcao, e nao um numero, porque este arquivo nao tem
+ * relogio: quem sabe quanto resta e o worker, e ele responde no
+ * instante em que a pergunta e feita. Aqui so se pergunta.
  */
 export async function executarRetomada(
   userId: string,
-  aprovacaoId: string
+  aprovacaoId: string,
+  podeIniciarRetomada: () => boolean
 ): Promise<ResultadoRetomada> {
   // ── 1. Pre-read da Approval ────────────────────────────────────────
   //
@@ -347,6 +374,22 @@ export async function executarRetomada(
   // `agente_tarefas.retomada_request_id`. Nao ha Tool Call UUID: a
   // identidade E o R.
   const requestId = randomUUID();
+
+  // ══ ULTIMO PONTO DE ABORTO SEGURO ═══════════════════════════════════
+  //
+  // Daqui para tras NADA mutou: as duas leituras acima sao `select`
+  // puros e `randomUUID` nao sai do processo. A proxima linha e a que
+  // GASTA a aprovacao e abre a Tool Call, e depois dela nao existe mais
+  // desistir — so terminalizar.
+  //
+  // Por isso a guarda e consultada AQUI, e nao no topo da funcao: no
+  // topo ela responderia sobre um instante que ja passou, e as oito
+  // idas ao banco entre um ponto e outro cabem inteiras dentro da
+  // diferenca. Perguntar no ultimo instante possivel e o que transforma
+  // a resposta em garantia para todo o pipeline pos-abertura.
+  if (!podeIniciarRetomada()) {
+    return { tipo: "orcamento_insuficiente" };
+  }
 
   const inicio = await iniciarRetomadaAprovacao(
     userId,
@@ -639,4 +682,416 @@ async function terminalizarFalha(
     return { tipo: "indisponivel", motivo: "falha_nao_registrada" };
   }
   return { tipo: "falhou", erroTipo };
+}
+
+// ─── O SLOT DE RETOMADA ───────────────────────────────────────────────
+//
+// ╔══════════════════════════════════════════════════════════════════╗
+// ║  DORMENTE. Compila, e nao tem chamador de producao.              ║
+// ╚══════════════════════════════════════════════════════════════════╝
+//
+// O executor acima retoma UMA aprovacao. O slot decide QUAL, e o que
+// fazer com as que nao dao para retomar. Ele e a unidade que uma rodada
+// de worker vai gastar — por isso tudo aqui e limitado por constante, e
+// nao por condicao de parada.
+
+/**
+ * Quanto trabalho DURAVEL este slot deixou no banco.
+ *
+ * Ternario, e nao booleano, porque existe um terceiro estado honesto: a
+ * RPC pode ter commitado sem que a resposta chegue. Colapsar `possivel`
+ * em `nenhum` faria o worker repetir trabalho ja feito; colapsar em
+ * `confirmado` faria contar trabalho que talvez nao exista. Os dois
+ * erros sao piores que carregar a duvida.
+ */
+export type ProgressoDuravelRetomada = "nenhum" | "possivel" | "confirmado";
+
+/** A ordem semantica, e a unica fonte dela. */
+const ESCALA_PROGRESSO = ["nenhum", "possivel", "confirmado"] as const;
+
+/**
+ * Eleva por MAXIMO, nunca por atribuicao.
+ *
+ * Toda atualizacao de progresso do slot passa por aqui. E a forma de
+ * tornar a monotonicidade uma propriedade do CODIGO e nao da disciplina
+ * de quem escreve: nao existe caminho em que `confirmado` volte a
+ * `possivel` ou a `nenhum`, porque nao existe atribuicao direta.
+ */
+function elevarProgresso(
+  atual: ProgressoDuravelRetomada,
+  novo: ProgressoDuravelRetomada
+): ProgressoDuravelRetomada {
+  return ESCALA_PROGRESSO.indexOf(novo) > ESCALA_PROGRESSO.indexOf(atual) ? novo : atual;
+}
+
+/**
+ * As 11 falhas do slot. Nenhuma carrega erro de driver.
+ *
+ * Elas descrevem ONDE o slot parou, nunca o que o Postgres disse: o
+ * adaptador ja reduziu tudo a quatro rotulos e nenhum texto cru
+ * atravessa esta camada.
+ */
+export type FalhaSlotRetomada =
+  /** A descoberta de retomadas travadas nao respondeu. */
+  | "descoberta_stale_indisponivel"
+  /** A recuperacao abortou a transacao: 22023, 55000 ou entrada recusada. */
+  | "recuperacao_fora_de_contrato"
+  /** A recuperacao pode ter commitado sem responder. */
+  | "recuperacao_indisponivel"
+  /** A descoberta de aprovacoes candidatas nao respondeu. */
+  | "descoberta_aprovacoes_indisponivel"
+  /** O cancelamento tecnico abortou a transacao: nada commitou. */
+  | "cancelamento_fora_de_contrato"
+  /** O cancelamento tecnico pode ter commitado sem responder. */
+  | "cancelamento_indisponivel"
+  /** A abertura da Tool Call ficou ambigua. */
+  | "inicio_ambiguo"
+  /** Pos-abertura: um read-back causal nao pode ser lido. */
+  | "contexto_incompleto"
+  /** Pos-execucao: o desfecho da tarefa nao pode ser registrado. */
+  | "desfecho_nao_registrado"
+  /** Indisponibilidade de conexao — transitoria, nao reconciliavel. */
+  | "motivo_transitorio"
+  /** Motivo terminal, ilegivel ou fora do dominio conhecido. */
+  | "motivo_fora_do_dominio";
+
+/**
+ * O desfecho de UMA rodada de slot.
+ *
+ * `encerrarPorOrcamento` vive SO no ramo de sucesso, e isso nao e
+ * esquecimento: a guarda de orcamento retorna do executor antes de
+ * qualquer operacao seguinte, entao o slot encerra com `ok:true` no
+ * mesmo instante. Nao ha caminho em que uma falha seja observada DEPOIS
+ * de a guarda ter recusado — os dois eventos sao mutuamente exclusivos
+ * no tempo, e um campo opcional so esconderia isso.
+ */
+export type ResultadoSlotRetomada =
+  | {
+      readonly ok: true;
+      readonly desfecho:
+        | "retomada_concluida"
+        | "retomada_falhou"
+        | "recuperacao_duravel"
+        | "reconciliado"
+        | "sem_progresso"
+        | "orcamento_insuficiente"
+        | "fila_vazia";
+      readonly progressoDuravel: ProgressoDuravelRetomada;
+      readonly encerrarPorOrcamento: boolean;
+    }
+  | {
+      readonly ok: false;
+      readonly falha: FalhaSlotRetomada;
+      readonly progressoDuravel: ProgressoDuravelRetomada;
+    };
+
+// ─── Os limites, todos constantes ─────────────────────────────────────
+//
+// Nenhum deles e condicao de parada calculada: sao tetos. Um `while`
+// com condicao e o que permitiria a rodada nao terminar, e a lane de
+// retomada nao tem onde absorver isso.
+
+/** Uma candidata travada por rodada. A fila esta ordenada por batimento
+ *  mais antigo primeiro, entao a primeira e sempre a mais parada. */
+const LIMITE_DESCOBERTA_STALE = 1;
+/** Uma recuperacao por rodada, e so. A segunda seria trabalho novo. */
+const MAX_RECUPERACOES_POR_SLOT = 1;
+/** Cinco aprovacoes examinadas por rodada. */
+const LIMITE_DESCOBERTA_APROVACOES = 5;
+
+/**
+ * Os 9 motivos que descrevem INCOMPATIBILIDADE PERMANENTE entre a
+ * aprovacao e a tarefa dona dela.
+ *
+ * So estes autorizam o cancelamento tecnico, e o criterio e estreito: o
+ * mundo teria de voltar atras para que a retomada passasse a funcionar
+ * — o catalogo mudou, a revisao mudou, o acesso mudou, os argumentos
+ * nao servem mais. Nada disso se resolve esperando.
+ */
+const MOTIVOS_RECONCILIAVEIS: ReadonlySet<string> = new Set([
+  "contrato_desconhecido",
+  "local_funcao_desconhecida",
+  "funcao_incompativel",
+  "local_revisao_divergente",
+  "aprovacao_desatualizada",
+  "local_acesso_divergente",
+  "escrita_nao_suportada",
+  "local_conexao_divergente",
+  "local_argumentos_invalidos",
+]);
+
+/**
+ * Os 12 motivos que NUNCA podem virar cancelamento.
+ *
+ * Duas familias moram aqui. Uns sao reversiveis — permissao revogada,
+ * agente fora do ar, aprovacao ainda pendente: amanha funcionam.
+ * Outros sao terminais ja resolvidos por outra mao — `ja_consumida`,
+ * `ja_cancelada`, `expirada`: cancelar seria escrever por cima de uma
+ * decisao que ja existe. Nos dois casos o slot observa e segue.
+ */
+const MOTIVOS_SEM_CANCELAMENTO: ReadonlySet<string> = new Set([
+  "aprovacao_inexistente",
+  "agente_indisponivel",
+  "tarefa_indisponivel",
+  "aprovacao_pendente",
+  "ja_consumida",
+  "ja_rejeitada",
+  "ja_cancelada",
+  "expirada",
+  "permissao_ausente",
+  "permissao_bloqueada",
+  "tarefa_incompativel",
+  "tarefa_ausente",
+]);
+
+/**
+ * Os 2 motivos de conexao indisponivel.
+ *
+ * Fora de `MOTIVOS_RECONCILIAVEIS` de proposito: uma conexao fora do ar
+ * volta, e cancelar por causa dela destruiria uma aprovacao legitima.
+ * Encerram a rodada porque a indisponibilidade tende a ser global — a
+ * proxima candidata bateria na mesma parede.
+ *
+ * Hoje sao INALCANCAVEIS: o unico contrato Resume tem
+ * `conexaoNecessaria: null`. Existem para que o segundo contrato nao
+ * nasca sem politica.
+ */
+const MOTIVOS_TRANSITORIOS: ReadonlySet<string> = new Set([
+  "conexao_indisponivel",
+  "local_conexao_indisponivel",
+]);
+
+/**
+ * Retoma ate uma aprovacao, e reconcilia o que encontrar no caminho.
+ *
+ * ── O que ele recebe, e por que so isso ─────────────────────────────
+ *
+ * `podeIniciarRetomada` e a UNICA dependencia de quem chama. Nao ha
+ * deadline, nem instante de inicio, nem orcamento: este arquivo nao
+ * tem relogio, e o slot repassa a MESMA referencia ao executor, sem
+ * embrulhar. Um `() => podeIniciarRetomada()` no meio pareceria
+ * inofensivo e romperia a identidade que a suite verifica.
+ *
+ * ── A ordem, e por que ela e essa ───────────────────────────────────
+ *
+ * Primeiro o que ja esta em curso e travou, depois o que espera na
+ * fila. Retomada travada e uma tarefa em `rodando` com marcador: ela
+ * ocupa lugar e nao anda. Deixar para depois seria preferir comecar
+ * trabalho novo a destravar o antigo.
+ */
+export async function executarSlotRetomada(
+  podeIniciarRetomada: () => boolean
+): Promise<ResultadoSlotRetomada> {
+  let progressoDuravel: ProgressoDuravelRetomada = "nenhum";
+  let houveRecuperacaoDuravel = false;
+  let houveReconciliacao = false;
+
+  /** O desfecho de manutencao, quando nenhuma retomada completou. A
+   *  precedencia e a mesma em todos os pontos de saida, entao ela mora
+   *  em um lugar so. */
+  const desfechoDeManutencao = (
+    semTrabalho: "sem_progresso" | "fila_vazia"
+  ): "reconciliado" | "recuperacao_duravel" | "sem_progresso" | "fila_vazia" => {
+    if (houveReconciliacao) return "reconciliado";
+    if (houveRecuperacaoDuravel) return "recuperacao_duravel";
+    return semTrabalho;
+  };
+
+  // ── 1. Retomadas travadas, no maximo uma ───────────────────────────
+  const travadas = await descobrirCandidatasRetomadaStale(LIMITE_DESCOBERTA_STALE);
+  if (!travadas.ok) {
+    // ERRO NAO E FILA VAZIA. Seguir para a fila de aprovacoes aqui
+    // trataria "nao consegui olhar" como "nao ha nada", e a rodada
+    // comecaria trabalho novo sobre um banco que acabou de recusar uma
+    // leitura.
+    return { ok: false, falha: "descoberta_stale_indisponivel", progressoDuravel };
+  }
+
+  if (travadas.candidatas.length > 0) {
+    const travada = travadas.candidatas[0];
+    const recuperacao = await recuperarRetomadaStale(
+      travada.tarefaId,
+      travada.userId,
+      travada.tentativa,
+      travada.retomadaRequestId
+    );
+
+    if (!recuperacao.ok) {
+      if (
+        recuperacao.falha === "rpc_indisponivel" ||
+        recuperacao.falha === "resposta_invalida"
+      ) {
+        // A RPC de recuperacao MUTA. Sem resposta util, nao se sabe se
+        // ela commitou — e o worker precisa dessa duvida para nao
+        // contar a rodada como estéril.
+        progressoDuravel = elevarProgresso(progressoDuravel, "possivel");
+        return { ok: false, falha: "recuperacao_indisponivel", progressoDuravel };
+      }
+      // 22023 e 55000 abortam a transacao inteira: nada commitou.
+      return { ok: false, falha: "recuperacao_fora_de_contrato", progressoDuravel };
+    }
+
+    if (
+      recuperacao.codigo === "execucao_incerta" ||
+      recuperacao.codigo === "execucao_ja_ocorrida_resultado_indisponivel"
+    ) {
+      // Os dois terminalizaram a tarefa travada. O trabalho ficou no
+      // banco, e ficou por conta DESTA rodada.
+      progressoDuravel = elevarProgresso(progressoDuravel, "confirmado");
+      houveRecuperacaoDuravel = true;
+    }
+    // `entrada_invalida`, `nao_stale` e `causal_incompativel` nao
+    // escreveram nada. Nenhuma segunda candidata e buscada: o teto e um,
+    // e a fila esta ordenada pelo batimento mais antigo — se a primeira
+    // nao estava travada pelo relogio do BANCO, nenhuma atras dela esta.
+  }
+
+  // ── 2. Aprovacoes candidatas, no maximo cinco ──────────────────────
+  const fila = await descobrirAprovacoesParaRetomada(LIMITE_DESCOBERTA_APROVACOES);
+  if (!fila.ok) {
+    // FALHA TARDIA NAO APAGA PROGRESSO: se a recuperacao acima gravou,
+    // isso continua verdade mesmo que a fila nao responda.
+    return { ok: false, falha: "descoberta_aprovacoes_indisponivel", progressoDuravel };
+  }
+
+  if (fila.candidatas.length === 0) {
+    return {
+      ok: true,
+      desfecho: desfechoDeManutencao("fila_vazia"),
+      progressoDuravel,
+      encerrarPorOrcamento: false,
+    };
+  }
+
+  // ── 3. Caminhada limitada pelas candidatas, na ordem recebida ──────
+  //
+  // `for…of` sobre uma lista que ja veio limitada pelo banco: nao ha
+  // condicao de parada para calcular errado, nao ha cursor, nao ha
+  // segunda descoberta. O teto e o tamanho da lista.
+  for (const candidata of fila.candidatas) {
+    const resultado = await executarRetomada(
+      candidata.userId,
+      candidata.aprovacaoId,
+      podeIniciarRetomada
+    );
+
+    // ── 3a. A Tool Call abriu e o ciclo terminou ────────────────────
+    if (resultado.tipo === "concluida") {
+      progressoDuravel = elevarProgresso(progressoDuravel, "confirmado");
+      return {
+        ok: true,
+        desfecho: "retomada_concluida",
+        progressoDuravel,
+        encerrarPorOrcamento: false,
+      };
+    }
+    if (resultado.tipo === "falhou") {
+      // Falha da TAREFA e desfecho registrado, nao falha do slot: a
+      // tentativa foi consumida e o banco sabe disso.
+      progressoDuravel = elevarProgresso(progressoDuravel, "confirmado");
+      return {
+        ok: true,
+        desfecho: "retomada_falhou",
+        progressoDuravel,
+        encerrarPorOrcamento: false,
+      };
+    }
+    if (resultado.tipo === "contexto_incompleto") {
+      progressoDuravel = elevarProgresso(progressoDuravel, "confirmado");
+      return { ok: false, falha: "contexto_incompleto", progressoDuravel };
+    }
+    if (resultado.tipo === "indisponivel") {
+      progressoDuravel = elevarProgresso(progressoDuravel, "confirmado");
+      return { ok: false, falha: "desfecho_nao_registrado", progressoDuravel };
+    }
+
+    // ── 3b. A abertura ficou ambigua ────────────────────────────────
+    if (resultado.tipo === "inicio_ambiguo") {
+      // Pode haver uma Tool Call aberta que ninguem vai fechar nesta
+      // rodada. Tentar a proxima candidata arriscaria uma SEGUNDA
+      // abertura sobre um banco em estado desconhecido, e a recuperacao
+      // de travadas existe exatamente para observar isso depois.
+      progressoDuravel = elevarProgresso(progressoDuravel, "possivel");
+      return { ok: false, falha: "inicio_ambiguo", progressoDuravel };
+    }
+
+    // ── 3c. A guarda recusou abrir ──────────────────────────────────
+    if (resultado.tipo === "orcamento_insuficiente") {
+      // Nada mutou nesta candidata. O que ja tinha sido feito antes
+      // continua valendo, e e ele que nomeia o desfecho.
+      return {
+        ok: true,
+        desfecho: houveReconciliacao
+          ? "reconciliado"
+          : houveRecuperacaoDuravel
+            ? "recuperacao_duravel"
+            : "orcamento_insuficiente",
+        progressoDuravel,
+        encerrarPorOrcamento: true,
+      };
+    }
+
+    // ── 3d. Nao abriu, e a aprovacao continua la ────────────────────
+    const motivo: string = resultado.motivo;
+
+    if (MOTIVOS_SEM_CANCELAMENTO.has(motivo)) {
+      // Reversivel ou ja resolvido por outra mao. Observa e segue.
+      continue;
+    }
+
+    if (MOTIVOS_TRANSITORIOS.has(motivo)) {
+      return { ok: false, falha: "motivo_transitorio", progressoDuravel };
+    }
+
+    if (!MOTIVOS_RECONCILIAVEIS.has(motivo)) {
+      // FAIL-CLOSED, e nao `continue`. Um motivo que nao esta em
+      // nenhum dos tres conjuntos e um motivo sem politica — inclusive
+      // um que ainda nao existe. Seguir a caminhada seria decidir por
+      // omissao o que este gate existe para decidir por escrito.
+      return { ok: false, falha: "motivo_fora_do_dominio", progressoDuravel };
+    }
+
+    // ── 3e. Incompatibilidade permanente: reconciliar ───────────────
+    const cancelamento = await cancelarAprovacaoRetomadaIncompativel(
+      candidata.userId,
+      candidata.aprovacaoId
+    );
+
+    if (!cancelamento.ok) {
+      if (
+        cancelamento.falha === "rpc_indisponivel" ||
+        cancelamento.falha === "resposta_invalida"
+      ) {
+        progressoDuravel = elevarProgresso(progressoDuravel, "possivel");
+        return { ok: false, falha: "cancelamento_indisponivel", progressoDuravel };
+      }
+      return { ok: false, falha: "cancelamento_fora_de_contrato", progressoDuravel };
+    }
+
+    if (cancelamento.codigo === "cancelada") {
+      progressoDuravel = elevarProgresso(progressoDuravel, "confirmado");
+      houveReconciliacao = true;
+    } else if (cancelamento.codigo === "expirada") {
+      // AMBIGUO POR CONSTRUCAO: a RPC expira por TTL antes de decidir, e
+      // devolve o mesmo codigo tanto quando ela propria acabou de
+      // escrever quanto quando a linha ja estava expirada. Sem forma de
+      // separar os dois, `possivel` e a unica leitura honesta.
+      progressoDuravel = elevarProgresso(progressoDuravel, "possivel");
+      houveReconciliacao = true;
+    }
+    // Os outros seis codigos sao observacao de estado terminal ou de
+    // corrida: ninguem escreveu nada NESTA chamada. Segue a caminhada.
+  }
+
+  // ── 4. A lista acabou sem completar retomada nenhuma ───────────────
+  //
+  // `sem_progresso` e nao `fila_vazia`: havia trabalho para olhar, e ele
+  // foi olhado. A distincao importa para o worker, que trata fila vazia
+  // como motivo para parar a rodada.
+  return {
+    ok: true,
+    desfecho: desfechoDeManutencao("sem_progresso"),
+    progressoDuravel,
+    encerrarPorOrcamento: false,
+  };
 }

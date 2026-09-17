@@ -44,6 +44,114 @@ const ler = (rel: string) => readFileSync(join(RAIZ, rel), "utf8");
 const semComentarios = (t: string) =>
   t.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
 
+// ─── Contabilidade de simbolo — fecha o achado B1-R1-N2 ───────────────
+//
+// O detector antigo perguntava "existe `NOME(` fora da definicao?". A
+// pergunta parece a certa e nao e: um alias
+//
+//   const f = cancelarAprovacaoRetomadaIncompativel;
+//   await f(u, a);
+//
+// escapa inteiro, porque a linha que cria o alias nao tem parentese
+// nenhum depois do nome. Uma lista de padroes proibidos tambem nao
+// resolve — ela so cobre as formas que alguem lembrou de escrever.
+//
+// O criterio aqui e uma IDENTIDADE CONTABIL: toda ocorrencia do nome
+// precisa caber em exatamente um de tres papeis legitimos — definicao,
+// especificador de import, invocacao direta. Se a soma dos tres nao
+// bate com o total de ocorrencias, existe uma quarta forma no arquivo,
+// e o assert cai sem precisar saber qual e. Alias, callback, re-export
+// e destructuring caem todos pelo mesmo buraco, inclusive os que ainda
+// nao foram inventados.
+
+interface PapeisDoSimbolo {
+  readonly total: number;
+  readonly definicoes: number;
+  readonly importacoes: number;
+  readonly invocacoes: number;
+  /** `total - definicoes - importacoes - invocacoes`. Zero e a unica
+   *  contagem aceitavel: qualquer resto e uma ocorrencia sem papel. */
+  readonly semPapel: number;
+}
+
+/**
+ * Conta os papeis de um identificador em UM fonte, ja sem comentarios.
+ *
+ * A ordem das substituicoes importa: cada papel reconhecido e apagado
+ * antes do proximo ser procurado, para que a mesma ocorrencia nunca
+ * seja contada duas vezes.
+ */
+function papeisDoSimbolo(fonteSemComentarios: string, nome: string): PapeisDoSimbolo {
+  const todas = new RegExp(`\\b${nome}\\b`, "g");
+  const total = (fonteSemComentarios.match(todas) ?? []).length;
+
+  let resto = fonteSemComentarios;
+
+  // 1. Definicao: `export async function NOME`, `export function NOME`,
+  //    `async function NOME` ou `function NOME`.
+  const defs = new RegExp(`(?:export\\s+)?(?:async\\s+)?function\\s+${nome}\\b`, "g");
+  const definicoes = (resto.match(defs) ?? []).length;
+  resto = resto.replace(defs, "@DEF@");
+
+  // 2. Especificador de import: o nome dentro de um bloco
+  //    `import { ... } from "..."`. Recorta o bloco inteiro e conta as
+  //    ocorrencias do nome dentro dele.
+  let importacoes = 0;
+  resto = resto.replace(/import\s*\{[\s\S]*?\}\s*from\s*"[^"]*";?/g, (bloco) => {
+    const dentro = (bloco.match(new RegExp(`\\b${nome}\\b`, "g")) ?? []).length;
+    importacoes += dentro;
+    return "@IMP@";
+  });
+
+  // 3. Invocacao direta: `NOME(`, com ou sem qualificador antes.
+  const chamadas = new RegExp(`\\b${nome}\\s*\\(`, "g");
+  const invocacoes = (resto.match(chamadas) ?? []).length;
+  resto = resto.replace(chamadas, "@CALL@");
+
+  const semPapel = (resto.match(new RegExp(`\\b${nome}\\b`, "g")) ?? []).length;
+  return { total, definicoes, importacoes, invocacoes, semPapel };
+}
+
+/**
+ * Corpo EXATO de um export, da assinatura ate o `}` da coluna 0.
+ *
+ * Mesmo recorte fechado das secoes O e P, agora no topo porque quatro
+ * blocos diferentes precisam dele. Fatiar ate o fim do arquivo acusaria
+ * o vizinho — foi esse o bug do recorte aberto do L32.
+ */
+function corpoDeExportado(fonte: string, nome: string): string {
+  const linhas = fonte.split("\n");
+  const i = linhas.findIndex((l) => l.startsWith(`export async function ${nome}`));
+  if (i < 0) return "";
+  for (let j = i + 1; j < linhas.length; j++) {
+    if (linhas[j] === "}") return linhas.slice(i, j + 1).join("\n");
+  }
+  return "";
+}
+
+/** As raizes de producao. `middleware.ts` entra aqui — ele e codigo de
+ *  producao de verdade e ficava fora de toda varredura (B1-R1-N3). */
+const RAIZES_PRODUCAO = ["lib", "app", "components"];
+const ARQUIVOS_PRODUCAO_SOLTOS = ["middleware.ts"];
+
+/** Todos os `.ts`/`.tsx` de producao, com barra normalizada. */
+function arquivosDeProducao(): string[] {
+  const achados: string[] = [];
+  const varrer = (dir: string): void => {
+    for (const e of readdirSync(join(RAIZ, dir), { withFileTypes: true })) {
+      const rel = `${dir}/${e.name}`.replace(/\\/g, "/");
+      if (e.isDirectory()) {
+        varrer(rel);
+        continue;
+      }
+      if (/\.tsx?$/.test(e.name) && !/\.d\.ts$/.test(e.name)) achados.push(rel);
+    }
+  };
+  for (const d of RAIZES_PRODUCAO) varrer(d);
+  for (const f of ARQUIVOS_PRODUCAO_SOLTOS) achados.push(f);
+  return achados;
+}
+
 const EXECUTOR = ler("lib/agentes/execucao-funcoes/executar.ts");
 const EXECUTOR_CODIGO = semComentarios(EXECUTOR);
 const REGISTRY = ler("lib/agentes/funcoes/registry.ts");
@@ -3104,13 +3212,40 @@ async function principal(): Promise<void> {
                        "@/lib/estudio-anuncios/supabase-servidor"]) {
       ok(`N1  nao importa \`${mod}\``, !CODIGO_N.includes(mod));
     }
+    // ── N2, avancado no B2-I1 — achado B2-A0-F1 ────────────────────────
+    //
+    // `recuperarRetomadaStale` saiu desta lista, e SO ele. Ate o B1 o
+    // executor nao tinha por que citar a recuperacao; o slot tem — e
+    // manter a proibicao obrigaria a implementar a recuperacao fora do
+    // dono dela, que e o oposto do que o B2-A0 congelou.
+    //
+    // Apagar a linha e deixar um buraco. O que substitui e mais forte
+    // que a proibicao: N2a exige que o simbolo entre pelo import do
+    // adaptador esperado e seja invocado EXATAMENTE uma vez, dentro do
+    // corpo do slot — nenhuma ocorrencia solta, nenhum alias, nenhuma
+    // segunda chamada. Os outros 16 simbolos continuam proibidos.
     for (const sim of ["executarTarefa", "INTERVALO_HEARTBEAT_MS", "executarFuncao(",
                        "retomarAprovacao", "consumirAprovacaoEAbrir", "criarAprovacao",
                        "registrarAbertura", "registrarDesfechoDeExecucao",
                        "registrarDesfechoSemExecucao", "concluirTarefa(", "falharTarefa(",
                        "aguardarAprovacaoTarefa", "registrarProgresso", "lerTarefaParaExecucao",
-                       "reivindicarProximaTarefa", "recuperarRetomadaStale", "resolverHandler"]) {
+                       "reivindicarProximaTarefa", "resolverHandler"]) {
       ok(`N2  nao cita \`${sim}\``, !CODIGO_N.includes(sim));
+    }
+    ok("N2z ANCORA: a lista negativa continua com os 16 simbolos da lane normal",
+      !CODIGO_N.includes("executarTarefa") && !CODIGO_N.includes("resolverHandler"));
+    {
+      const papeisRec = papeisDoSimbolo(CODIGO_N, "recuperarRetomadaStale");
+      const corpoSlotN = corpoDeExportado(CODIGO_N, "executarSlotRetomada");
+      ok(`N2a a recuperacao entra por import e e invocada UMA vez (${JSON.stringify(papeisRec)})`,
+        papeisRec.definicoes === 0 && papeisRec.importacoes === 1 &&
+        papeisRec.invocacoes === 1 && papeisRec.semPapel === 0);
+      ok("N2b e essa unica invocacao esta DENTRO do slot",
+        corpoSlotN.length > 500 &&
+        (corpoSlotN.match(/\brecuperarRetomadaStale\s*\(/g) ?? []).length === 1);
+      ok("N2c CONTROLE: um alias da recuperacao seria detectado",
+        papeisDoSimbolo("const f = recuperarRetomadaStale; await f(a);",
+          "recuperarRetomadaStale").semPapel === 1);
     }
     for (const rpc of ["aprovacao_consumir_e_abrir", "concluir_tarefa", "falhar_tarefa",
                        "aguardar_aprovacao_tarefa", "claim_next_agente_tarefa"]) {
@@ -3142,7 +3277,7 @@ async function principal(): Promise<void> {
 
     // ── N12..N22. CAMINHO FELIZ ───────────────────────────────────────
     cenarioFeliz();
-    const rFeliz = await executarRetomada(USER, APROV);
+    const rFeliz = await executarRetomada(USER, APROV, () => true);
     const inicioRpc = rpcDe("retomar_aprovacao_iniciar");
     const concluiRpc = rpcDe("retomada_concluir_tarefa");
     const R_USADO = inicioRpc?.parametros?.p_request_id;
@@ -3241,7 +3376,7 @@ async function principal(): Promise<void> {
 
     roteiro(linhaAprov(), linhaTar({ tipo: "conversa" }));
     roteiroRpc();
-    const rTipo = await executarRetomada(USER, APROV);
+    const rTipo = await executarRetomada(USER, APROV, () => true);
     ok("N36 T-TYPE-2: tipo sem contrato recusa com motivo fechado",
       rTipo.tipo === "sem_inicio" &&
       (rTipo as { motivo?: unknown }).motivo === "contrato_desconhecido");
@@ -3250,7 +3385,7 @@ async function principal(): Promise<void> {
 
     roteiro(linhaAprov(), linhaTar());
     roteiroRpc({ data: "tarefa_incompativel" });
-    const rStale = await executarRetomada(USER, APROV);
+    const rStale = await executarRetomada(USER, APROV, () => true);
     ok("N38 T-TYPE-3: a AUTORIDADE e o start — tipo stale vira recusa",
       rStale.tipo === "sem_inicio" &&
       (rStale as { motivo?: unknown }).motivo === "tarefa_incompativel");
@@ -3269,7 +3404,7 @@ async function principal(): Promise<void> {
       for (const codigo of CODIGOS_16) {
         roteiro(linhaAprov(), linhaTar());
         roteiroRpc({ data: codigo });
-        const rr = await executarRetomada(USER, APROV);
+        const rr = await executarRetomada(USER, APROV, () => true);
         if (rr.tipo === "sem_inicio" && (rr as { motivo?: unknown }).motivo === codigo) recusas++;
         if (desfechoGravado()) execucoes++;
       }
@@ -3280,7 +3415,7 @@ async function principal(): Promise<void> {
 
     roteiro(linhaAprov(), linhaTar());
     roteiroRpc({ data: null, error: { code: "08006" } });
-    const rAmbiguo = await executarRetomada(USER, APROV);
+    const rAmbiguo = await executarRetomada(USER, APROV, () => true);
     ok("N42 S4: transporte no start vira inicio_ambiguo",
       rAmbiguo.tipo === "inicio_ambiguo" &&
       (rAmbiguo as { motivo?: unknown }).motivo === "rpc_indisponivel");
@@ -3291,7 +3426,7 @@ async function principal(): Promise<void> {
 
     roteiro(linhaAprov(), linhaTar());
     roteiroRpc({ data: "codigo_que_nao_existe" });
-    const rInvalido = await executarRetomada(USER, APROV);
+    const rInvalido = await executarRetomada(USER, APROV, () => true);
     ok("N44 S5: codigo fora do catalogo vira inicio_ambiguo",
       rInvalido.tipo === "inicio_ambiguo" &&
       (rInvalido as { motivo?: unknown }).motivo === "resposta_invalida");
@@ -3300,14 +3435,14 @@ async function principal(): Promise<void> {
 
     roteiro(linhaAprov(), linhaTar());
     roteiroRpc({ data: null, error: { code: "55000" } });
-    const r55 = await executarRetomada(USER, APROV);
+    const r55 = await executarRetomada(USER, APROV, () => true);
     ok("N46 55000 aborta a transacao — sem_inicio, nao ambiguo",
       r55.tipo === "sem_inicio" &&
       (r55 as { motivo?: unknown }).motivo === "rpc_fora_de_contrato");
 
     roteiro(linhaAprov(), linhaTar());
     roteiroRpc({ data: null, error: { code: "22023" } });
-    const r22 = await executarRetomada(USER, APROV);
+    const r22 = await executarRetomada(USER, APROV, () => true);
     ok("N47 22023 tambem e sem_inicio",
       r22.tipo === "sem_inicio" &&
       (r22 as { motivo?: unknown }).motivo === "rpc_entrada_invalida");
@@ -3315,7 +3450,7 @@ async function principal(): Promise<void> {
     // ── N48..N55. CONTEXTO POS-START ──────────────────────────────────
     roteiro(linhaAprov(), linhaTar(), { data: null });
     roteiroRpc({ data: "consumida" });
-    const rSemAbertura = await executarRetomada(USER, APROV);
+    const rSemAbertura = await executarRetomada(USER, APROV, () => true);
     ok("N48 C2: abertura sem linha vira contexto_incompleto",
       rSemAbertura.tipo === "contexto_incompleto" &&
       (rSemAbertura as { motivo?: unknown }).motivo === "abertura_ilegivel");
@@ -3324,19 +3459,19 @@ async function principal(): Promise<void> {
 
     roteiro(linhaAprov(), linhaTar(), { data: null, error: { code: "08006" } });
     roteiroRpc({ data: "consumida" });
-    const rAberturaErro = await executarRetomada(USER, APROV);
+    const rAberturaErro = await executarRetomada(USER, APROV, () => true);
     ok("N50 C3: abertura indisponivel tambem para, fechado",
       rAberturaErro.tipo === "contexto_incompleto" && !desfechoGravado());
 
     roteiro(linhaAprov(), linhaTar(), abertura("valor_invalido"));
     roteiroRpc({ data: "consumida" });
-    const rNivelMau = await executarRetomada(USER, APROV);
+    const rNivelMau = await executarRetomada(USER, APROV, () => true);
     ok("N51 nivel fora do vocabulario NAO vira nivel plausivel",
       rNivelMau.tipo === "contexto_incompleto" && !desfechoGravado());
 
     roteiro(linhaAprov(), linhaTar(), abertura(), { data: null });
     roteiroRpc({ data: "consumida" });
-    const rSemN = await executarRetomada(USER, APROV);
+    const rSemN = await executarRetomada(USER, APROV, () => true);
     ok("N52 C5: N sem linha vira contexto_incompleto/tarefa_ilegivel",
       rSemN.tipo === "contexto_incompleto" &&
       (rSemN as { motivo?: unknown }).motivo === "tarefa_ilegivel");
@@ -3346,7 +3481,7 @@ async function principal(): Promise<void> {
     // A leitura de N cerca por QUATRO colunas causais, e le a tentativa.
     roteiro(linhaAprov(), linhaTar(), abertura(), tentativasN(7), vendas, gravou);
     roteiroRpc({ data: "consumida" }, linhaFinal);
-    const rN7 = await executarRetomada(USER, APROV);
+    const rN7 = await executarRetomada(USER, APROV, () => true);
     const leituraDeN = chamadas.filter((c) => c.tabela === "agente_tarefas" && !c.escrita).pop();
     ok("N54 C6/C7: a leitura de N cerca por id, dono, status e R",
       leituraDeN?.filtros?.id === TAREFA &&
@@ -3383,7 +3518,7 @@ async function principal(): Promise<void> {
     funcaoControlada(() => ({ tipo: "erro", codigo: "janela_excedida", mensagem: "x", retryable: false }));
     roteiro(linhaAprov(), linhaTar(), abertura(), tentativasN(), gravou);
     roteiroRpc({ data: "consumida" }, { data: { id: TAREFA, user_id: USER, status: "erro", tentativas: 2 } });
-    const rEntrada = await executarRetomada(USER, APROV);
+    const rEntrada = await executarRetomada(USER, APROV, () => true);
     ok("N56 E1: codigo de entrada vira entrada_invalida",
       rEntrada.tipo === "falhou" &&
       (rEntrada as { erroTipo?: unknown }).erroTipo === "entrada_invalida" &&
@@ -3396,7 +3531,7 @@ async function principal(): Promise<void> {
     funcaoControlada(() => ({ tipo: "erro", codigo: "secret_token_123", mensagem: "SECRET_SHOULD_NOT_PERSIST", retryable: false }));
     roteiro(linhaAprov(), linhaTar(), abertura(), tentativasN(), gravou);
     roteiroRpc({ data: "consumida" }, { data: { id: TAREFA, user_id: USER, status: "erro", tentativas: 2 } });
-    const rSegredo = await executarRetomada(USER, APROV);
+    const rSegredo = await executarRetomada(USER, APROV, () => true);
     const msgSegredo = String(falhaRpc().p_erro_mensagem ?? "");
     ok("N58 E2: erro comum da Funcao vira handler_falhou",
       rSegredo.tipo === "falhou" &&
@@ -3412,7 +3547,7 @@ async function principal(): Promise<void> {
     funcaoControlada(() => ({ tipo: "sucesso", data: { nada: "SECRET_SHOULD_NOT_PERSIST" } }));
     roteiro(linhaAprov(), linhaTar(), abertura(), tentativasN(), gravou);
     roteiroRpc({ data: "consumida" }, { data: { id: TAREFA, user_id: USER, status: "erro", tentativas: 2 } });
-    const rSaidaMa = await executarRetomada(USER, APROV);
+    const rSaidaMa = await executarRetomada(USER, APROV, () => true);
     const msgSaida = String(falhaRpc().p_erro_mensagem ?? "");
     ok("N61 E2: mapper lancando sobre sucesso vira erro_interno",
       rSaidaMa.tipo === "falhou" &&
@@ -3426,7 +3561,7 @@ async function principal(): Promise<void> {
     funcaoControlada(() => ({ tipo: "erro", codigo: "erro_consulta_vendas", mensagem: "m", retryable: false }), "escrita");
     roteiro(linhaAprov({ acesso: "escrita" }), linhaTar(), abertura(), tentativasN(), naoGravou);
     roteiroRpc({ data: "consumida" }, { data: { id: TAREFA, user_id: USER, status: "erro", tentativas: 2 } });
-    const rAudit = await executarRetomada(USER, APROV);
+    const rAudit = await executarRetomada(USER, APROV, () => true);
     ok("N63 E1: falha_auditoria vira handler_falhou com a etapa RECONSTRUIDA",
       rAudit.tipo === "falhou" &&
       (rAudit as { erroTipo?: unknown }).erroTipo === "handler_falhou" &&
@@ -3448,7 +3583,7 @@ async function principal(): Promise<void> {
     };
 
     cenarioFalha(1, 3);
-    const rMenor = await executarRetomada(USER, APROV);
+    const rMenor = await executarRetomada(USER, APROV, () => true);
     ok("N64 M1: N < max falha pela RPC DEDICADA",
       rMenor.tipo === "falhou" &&
       chamadasRpc.filter((c) => c.nome === "retomada_falhar_tarefa").length === 1);
@@ -3459,7 +3594,7 @@ async function principal(): Promise<void> {
       falhaRpc().p_tentativa_esperada === 1);
 
     cenarioFalha(3, 3);
-    const rMax = await executarRetomada(USER, APROV);
+    const rMax = await executarRetomada(USER, APROV, () => true);
     ok("N67 M1 HARD: N == max TAMBEM usa a RPC dedicada",
       rMax.tipo === "falhou" &&
       chamadasRpc.filter((c) => c.nome === "retomada_falhar_tarefa").length === 1 &&
@@ -3474,7 +3609,7 @@ async function principal(): Promise<void> {
     // ── N69..N72. Terminalizador dedicado que FALHA ───────────────────
     roteiro(linhaAprov(), linhaTar(), abertura(), tentativasN(), vendas, gravou);
     roteiroRpc({ data: "consumida" }, { data: null, error: { code: "55000" } });
-    const rConcMa = await executarRetomada(USER, APROV);
+    const rConcMa = await executarRetomada(USER, APROV, () => true);
     ok("N69 conclusao nao registrada devolve indisponivel",
       rConcMa.tipo === "indisponivel" &&
       (rConcMa as { motivo?: unknown }).motivo === "conclusao_nao_registrada");
@@ -3494,7 +3629,7 @@ async function principal(): Promise<void> {
     };
     roteiro(linhaAprov(), linhaTar(), abertura(), tentativasN(), gravou);
     roteiroRpc({ data: "consumida" }, { data: null, error: { code: "55000" } });
-    const rFalhaMa = await executarRetomada(USER, APROV);
+    const rFalhaMa = await executarRetomada(USER, APROV, () => true);
     ok("N71 falha nao registrada devolve indisponivel",
       rFalhaMa.tipo === "indisponivel" &&
       (rFalhaMa as { motivo?: unknown }).motivo === "falha_nao_registrada");
@@ -3505,7 +3640,7 @@ async function principal(): Promise<void> {
     // ── N73..N76. PRE-START: nada e consumido ─────────────────────────
     roteiro({ data: null });
     roteiroRpc();
-    const rSemAprov = await executarRetomada(USER, APROV);
+    const rSemAprov = await executarRetomada(USER, APROV, () => true);
     ok("N73 aprovacao inexistente recusa sem tocar em nada",
       rSemAprov.tipo === "sem_inicio" &&
       (rSemAprov as { motivo?: unknown }).motivo === "aprovacao_ilegivel" &&
@@ -3513,7 +3648,7 @@ async function principal(): Promise<void> {
 
     roteiro(linhaAprov({ tarefa_id: null }));
     roteiroRpc();
-    const rSemTarefa = await executarRetomada(USER, APROV);
+    const rSemTarefa = await executarRetomada(USER, APROV, () => true);
     ok("N74 aprovacao sem tarefa causal para antes do start",
       rSemTarefa.tipo === "sem_inicio" &&
       (rSemTarefa as { motivo?: unknown }).motivo === "tarefa_ausente" &&
@@ -3521,7 +3656,7 @@ async function principal(): Promise<void> {
 
     roteiro(linhaAprov({ revisao_funcao: "9" }));
     roteiroRpc();
-    const rRev = await executarRetomada(USER, APROV);
+    const rRev = await executarRetomada(USER, APROV, () => true);
     ok("N75 revisao divergente recusa com motivo local fechado",
       rRev.tipo === "sem_inicio" &&
       (rRev as { motivo?: unknown }).motivo === "local_revisao_divergente" &&
@@ -3529,7 +3664,7 @@ async function principal(): Promise<void> {
 
     roteiro(linhaAprov({ argumentos: { dataInicio: "2026-08-01", extra: 1 } }));
     roteiroRpc();
-    const rArgs = await executarRetomada(USER, APROV);
+    const rArgs = await executarRetomada(USER, APROV, () => true);
     ok("N76 argumento que o contrato recusa para ANTES de gastar a aprovacao",
       rArgs.tipo === "sem_inicio" && chamadasRpc.length === 0 && !desfechoGravado());
 
@@ -3747,7 +3882,7 @@ async function principal(): Promise<void> {
 
       roteiro(linhaAprov({ argumentos: resumeArgs }), linhaTar(), abertura(), tentativasN(), gravou);
       roteiroRpc({ data: "consumida" }, linhaFinal);
-      const rF1 = await executarRetomada(USER, APROV);
+      const rF1 = await executarRetomada(USER, APROV, () => true);
       const payloadResume = (rpcDe("retomada_concluir_tarefa")?.parametros?.p_resultado ?? null) as
         Record<string, unknown> | null;
       const executouResume = vezesExecutorF1 - executouAuto;
@@ -3881,8 +4016,80 @@ async function principal(): Promise<void> {
         }
       };
       for (const d of producaoR) varrerR(d);
-      ok(`N80 zero chamador de producao do executor Resume (${alcancaR.join(", ") || "nenhum"})`,
+      ok(`N80 zero chamador de producao do executor Resume FORA do proprio arquivo (${alcancaR.join(", ") || "nenhum"})`,
         alcancaR.length === 0);
+
+      // ── N80a..N80f, acrescentados no B2-I1 — achado B2-A0-F2 ────────
+      //
+      // N80 exclui `executar-retomada.ts` da varredura, e ate o B1 isso
+      // estava certo: o unico lugar onde o nome podia aparecer era a
+      // propria definicao. O B2 pos o slot DENTRO desse arquivo — ou
+      // seja, o chamador que N80 existe para vigiar mudou-se para a
+      // zona cega dele. N80 continuaria verde para sempre.
+      //
+      // O que fecha o buraco e a contabilidade intra-arquivo: uma
+      // definicao, uma invocacao, e a invocacao dentro do slot.
+      {
+        const DONO_R = "lib/agentes/retomada/executar-retomada.ts";
+        const FONTE_R = semComentarios(ler(DONO_R));
+        const pR = papeisDoSimbolo(FONTE_R, "executarRetomada");
+        const CORPO_SLOT_R = corpoDeExportado(FONTE_R, "executarSlotRetomada");
+
+        ok(`N80a dentro do dono: 1 definicao, 1 invocacao, 0 import, 0 sem papel (${JSON.stringify(pR)})`,
+          pR.definicoes === 1 && pR.invocacoes === 1 &&
+          pR.importacoes === 0 && pR.semPapel === 0);
+        ok("N80b e a unica invocacao esta DENTRO do slot",
+          CORPO_SLOT_R.length > 1000 &&
+          (CORPO_SLOT_R.match(/\bexecutarRetomada\s*\(/g) ?? []).length === 1);
+        ok("N80c CONTROLE: um alias do executor no proprio arquivo seria detectado",
+          papeisDoSimbolo(
+            "export async function executarRetomada(a) {}\nconst g = executarRetomada;",
+            "executarRetomada").semPapel === 1);
+        ok("N80d CONTROLE: uma SEGUNDA invocacao seria contada",
+          papeisDoSimbolo(
+            "export async function executarRetomada(a) {}\n" +
+            "await executarRetomada(1);\nawait executarRetomada(2);",
+            "executarRetomada").invocacoes === 2);
+        ok("N80e CONTROLE POSITIVO: definicao + uma invocacao fecha a conta",
+          (() => {
+            const p = papeisDoSimbolo(
+              "export async function executarRetomada(a) {}\nawait executarRetomada(1);",
+              "executarRetomada");
+            return p.total === 2 && p.definicoes === 1 && p.invocacoes === 1 && p.semPapel === 0;
+          })());
+
+        // ── O SLOT nasce DORMENTE, e isso se prova a parte ────────────
+        const pSlot = arquivosDeProducao()
+          .map((rel) => ({ rel, p: papeisDoSimbolo(semComentarios(ler(rel)), "executarSlotRetomada") }))
+          .filter((x) => x.p.total > 0);
+        ok(`N80f o slot tem 1 definicao e ZERO chamador de producao (${pSlot.map((x) => x.rel).join(", ")})`,
+          pSlot.length === 1 && pSlot[0].rel === DONO_R &&
+          pSlot[0].p.definicoes === 1 && pSlot[0].p.invocacoes === 0 &&
+          pSlot[0].p.importacoes === 0 && pSlot[0].p.semPapel === 0);
+      }
+
+      // ── N80g. FIX3-N1: producao nao forja guarda sempre-verdadeira ──
+      //
+      // O detector e ESCOPADO ao contrato da guarda: ele procura um
+      // literal trivial na posicao de `podeIniciarRetomada`, e nao
+      // qualquer `() => true` do repositorio — uma regex global
+      // reprovaria codigo futuro sem relacao nenhuma com Resume.
+      {
+        const guardaForjada = (src: string): boolean =>
+          /(?:executarRetomada|executarSlotRetomada)\s*\([^)]*\(\s*\)\s*=>\s*(?:true|1|!0)/
+            .test(src.replace(/\s+/g, " "));
+        const forjadores = arquivosDeProducao()
+          .filter((rel) => guardaForjada(semComentarios(ler(rel))));
+        ok(`N80g producao NAO fornece guarda sempre-verdadeira (${forjadores.join(", ") || "nenhum"})`,
+          forjadores.length === 0);
+        ok("N80h CONTROLE: a forma forjada seria detectada nas duas funcoes",
+          guardaForjada("await executarRetomada(u, a, () => true);") &&
+          guardaForjada("await executarSlotRetomada(() => true);") &&
+          guardaForjada("await executarRetomada(\n u,\n a,\n () => true\n);"));
+        ok("N80i CONTROLE: repassar a callback recebida NAO e forjar",
+          !guardaForjada("await executarRetomada(u, a, podeIniciarRetomada);") &&
+          !guardaForjada("const x = () => true;"));
+      }
     }
   }
 
@@ -4253,22 +4460,67 @@ async function principal(): Promise<void> {
       ok("O38c o wrapper de cancelamento chama UMA rpc e NENHUMA tabela",
         (corpo38.match(/\.rpc\(/g) ?? []).length === 1 && !/\.from\(/.test(corpo38));
     }
+    // ── O39, avancado no B2-I1 ─────────────────────────────────────
+    //
+    // Ate o B1 as duas descobertas nao tinham chamador nenhum, e "zero"
+    // era a forma certa de dizer isso. O B2 deu a elas o consumidor que
+    // o desenho previa, entao o assert nao podia continuar exigindo
+    // zero — nem virar "existe alguem", que e frouxo demais.
+    //
+    // O que substitui e um INVENTARIO NOMINAL por contabilidade: cada
+    // descoberta entra por import no dono do slot, e invocada
+    // exatamente uma vez, dentro do corpo do slot, e nao aparece em
+    // nenhum outro arquivo de producao.
     {
-      const producaoN = ["lib/agentes", "app", "components"];
-      const alcancaN: string[] = [];
-      const varrerN = (dir: string): void => {
-        for (const e of readdirSync(join(RAIZ, dir), { withFileTypes: true })) {
-          const rel = `${dir}/${e.name}`;
-          if (e.isDirectory()) varrerN(rel);
-          else if (/\.tsx?$/.test(e.name) && rel !== "lib/agentes/retomada/persistencia-retomada.ts" &&
-                   /descobrirAprovacoesParaRetomada|descobrirCandidatasRetomadaStale/
-                     .test(readFileSync(join(RAIZ, rel), "utf8")))
-            alcancaN.push(rel);
-        }
-      };
-      for (const d of producaoN) varrerN(d);
-      ok(`O39 as duas descobertas nascem DORMENTES: zero chamador (${alcancaN.join(", ") || "nenhum"})`,
-        alcancaN.length === 0);
+      const DONO_SLOT = "lib/agentes/retomada/executar-retomada.ts";
+      const ADAPTADOR_O = "lib/agentes/retomada/persistencia-retomada.ts";
+      const DESCOBERTAS = [
+        "descobrirAprovacoesParaRetomada",
+        "descobrirCandidatasRetomadaStale",
+      ] as const;
+
+      const FONTE_SLOT_O = semComentarios(ler(DONO_SLOT));
+      const CORPO_SLOT_O = corpoDeExportado(FONTE_SLOT_O, "executarSlotRetomada");
+      const producaoO = arquivosDeProducao();
+
+      ok(`O39 ANCORA: a varredura de producao rodou de verdade (${producaoO.length} arquivos)`,
+        producaoO.length > 50 && producaoO.includes(DONO_SLOT) &&
+        producaoO.includes("middleware.ts"));
+      ok("O39a ANCORA: o corpo do slot foi isolado e nao invadiu o vizinho",
+        CORPO_SLOT_O.length > 1000 &&
+        !CORPO_SLOT_O.includes("export async function executarRetomada"));
+
+      for (const nome of DESCOBERTAS) {
+        const forasteiros = producaoO.filter(
+          (rel) => rel !== ADAPTADOR_O && rel !== DONO_SLOT &&
+            new RegExp(`\\b${nome}\\b`).test(semComentarios(ler(rel))));
+        const papeisDono = papeisDoSimbolo(FONTE_SLOT_O, nome);
+        const noCorpo = (CORPO_SLOT_O.match(new RegExp(`\\b${nome}\\s*\\(`, "g")) ?? []).length;
+
+        ok(`O39b \`${nome}\` nao aparece em nenhum outro arquivo de producao (${forasteiros.join(", ") || "nenhum"})`,
+          forasteiros.length === 0);
+        ok(`O39c \`${nome}\`: import 1, invocacao 1, definicao 0, sem papel 0 (${JSON.stringify(papeisDono)})`,
+          papeisDono.definicoes === 0 && papeisDono.importacoes === 1 &&
+          papeisDono.invocacoes === 1 && papeisDono.semPapel === 0);
+        ok(`O39d e a unica invocacao de \`${nome}\` esta DENTRO do slot`, noCorpo === 1);
+      }
+
+      ok("O39e CONTROLE: um alias de descoberta seria detectado",
+        papeisDoSimbolo("const g = descobrirAprovacoesParaRetomada;",
+          "descobrirAprovacoesParaRetomada").semPapel === 1);
+      ok("O39f CONTROLE: uma SEGUNDA invocacao seria detectada",
+        papeisDoSimbolo(
+          'import { descobrirAprovacoesParaRetomada } from "x";\n' +
+          "await descobrirAprovacoesParaRetomada(5);\nawait descobrirAprovacoesParaRetomada(5);",
+          "descobrirAprovacoesParaRetomada").invocacoes === 2);
+      ok("O39g CONTROLE POSITIVO: import + uma invocacao fecha a conta",
+        (() => {
+          const p = papeisDoSimbolo(
+            'import { descobrirCandidatasRetomadaStale } from "y";\n' +
+            "await descobrirCandidatasRetomadaStale(1);",
+            "descobrirCandidatasRetomadaStale");
+          return p.total === 2 && p.importacoes === 1 && p.invocacoes === 1 && p.semPapel === 0;
+        })());
     }
   }
 
@@ -4609,55 +4861,752 @@ async function principal(): Promise<void> {
         !/\.trim\(\)/.test(CORPO_CANCEL));
     }
 
-    // ── P32..P36. DORMENCIA DIRETA: zero chamador de producao ───────
+    // ── P32..P36. CALLER DISCIPLINE, por contabilidade ──────────────
     //
-    // Achado B1-A0-F1 fechado por inteiro: nao basta o nome entrar na
-    // lista generica do K71 — este bloco pergunta a pergunta ESTREITA
-    // ("quem INVOCA este wrapper?") e distingue definicao de invocacao,
-    // que e justamente o que uma varredura por nome cru nao faz.
+    // Fecha o achado B1-R1-N2. Ate o B1 o wrapper nao tinha chamador e
+    // um detector de `NOME(` bastava. O B2 deu a ele o unico chamador
+    // previsto — e a partir daqui a pergunta certa nao e mais "existe
+    // uma chamada?", e sim "existe alguma ocorrencia que NAO seja a
+    // definicao, o import ou a chamada autorizada?".
+    //
+    // `papeisDoSimbolo` responde isso por identidade contabil, e nao
+    // por lista de padroes proibidos: alias, callback, re-export e
+    // destructuring caem todos no mesmo resto, junto com as formas que
+    // ninguem ainda escreveu.
     {
-      /** PURO: recebe fonte, devolve se ela INVOCA o wrapper. A
-       *  definicao e neutralizada antes da busca, senao o proprio
-       *  adaptador se acusaria e o assert nasceria impossivel. */
-      const invocaCancelP = (fonte: string): boolean =>
-        /\bcancelarAprovacaoRetomadaIncompativel\s*\(/.test(
-          fonte.replace(
-            /export\s+async\s+function\s+cancelarAprovacaoRetomadaIncompativel/g,
-            "DEFINICAO_NEUTRALIZADA"));
+      const NOME_CANCEL = "cancelarAprovacaoRetomadaIncompativel";
+      const ADAPTADOR_P = "lib/agentes/retomada/persistencia-retomada.ts";
+      const DONO_SLOT_P = "lib/agentes/retomada/executar-retomada.ts";
 
-      const producaoRaizP = ["lib", "app", "components"];
-      const chamadoresP: string[] = [];
-      let varridosP = 0;
-      const varrerP = (dir: string): void => {
-        for (const e of readdirSync(join(RAIZ, dir), { withFileTypes: true })) {
-          const rel = `${dir}/${e.name}`.replace(/\\/g, "/");
-          if (e.isDirectory()) {
-            varrerP(rel);
-            continue;
-          }
-          if (!/\.tsx?$/.test(e.name)) continue;
-          varridosP += 1;
-          if (invocaCancelP(semComentarios(readFileSync(join(RAIZ, rel), "utf8"))))
-            chamadoresP.push(rel);
-        }
+      const producaoP2 = arquivosDeProducao();
+      const porArquivo = producaoP2
+        .map((rel) => ({ rel, p: papeisDoSimbolo(semComentarios(ler(rel)), NOME_CANCEL) }))
+        .filter((x) => x.p.total > 0);
+
+      ok(`P32 ANCORA: a varredura de producao rodou de verdade (${producaoP2.length} arquivos)`,
+        producaoP2.length > 50 && producaoP2.includes("middleware.ts"));
+      ok(`P32a o simbolo aparece em exatamente DOIS arquivos de producao (${porArquivo.map((x) => x.rel).join(", ")})`,
+        porArquivo.length === 2 &&
+        porArquivo.some((x) => x.rel === ADAPTADOR_P) &&
+        porArquivo.some((x) => x.rel === DONO_SLOT_P));
+
+      const noAdaptador = porArquivo.find((x) => x.rel === ADAPTADOR_P)?.p;
+      const noDono = porArquivo.find((x) => x.rel === DONO_SLOT_P)?.p;
+
+      ok(`P33 no adaptador: 1 definicao, 0 import, 0 invocacao, 0 sem papel (${JSON.stringify(noAdaptador)})`,
+        noAdaptador !== undefined && noAdaptador.definicoes === 1 &&
+        noAdaptador.importacoes === 0 && noAdaptador.invocacoes === 0 &&
+        noAdaptador.semPapel === 0);
+      ok(`P33a no dono do slot: 0 definicao, 1 import, 1 invocacao, 0 sem papel (${JSON.stringify(noDono)})`,
+        noDono !== undefined && noDono.definicoes === 0 &&
+        noDono.importacoes === 1 && noDono.invocacoes === 1 && noDono.semPapel === 0);
+      ok("P33b GLOBAL: 1 definicao, 1 import, 1 invocacao em toda a producao",
+        porArquivo.reduce((s, x) => s + x.p.definicoes, 0) === 1 &&
+        porArquivo.reduce((s, x) => s + x.p.importacoes, 0) === 1 &&
+        porArquivo.reduce((s, x) => s + x.p.invocacoes, 0) === 1 &&
+        porArquivo.reduce((s, x) => s + x.p.semPapel, 0) === 0);
+
+      // ── A invocacao mora no SLOT, nao em qualquer lugar do arquivo ──
+      const FONTE_DONO_P = semComentarios(ler(DONO_SLOT_P));
+      const CORPO_SLOT_P = corpoDeExportado(FONTE_DONO_P, "executarSlotRetomada");
+      const CORPO_EXEC_P = corpoDeExportado(FONTE_DONO_P, "executarRetomada");
+      ok("P34 a unica invocacao esta DENTRO de executarSlotRetomada",
+        CORPO_SLOT_P.length > 1000 &&
+        (CORPO_SLOT_P.match(new RegExp(`\\b${NOME_CANCEL}\\s*\\(`, "g")) ?? []).length === 1);
+      ok("P34a e o executor de UMA retomada NAO cancela nada",
+        CORPO_EXEC_P.length > 1000 && !CORPO_EXEC_P.includes(NOME_CANCEL));
+
+      // ── CONTROLES: o criterio precisa MORDER ────────────────────────
+      const papeisDe = (src: string) => papeisDoSimbolo(src, NOME_CANCEL);
+      const IMPORT_OK =
+        `import { ${NOME_CANCEL} } from "@/lib/agentes/retomada/persistencia-retomada";\n`;
+
+      ok("P35 CONTROLE POSITIVO: import + uma invocacao fecha a conta",
+        (() => {
+          const p = papeisDe(IMPORT_OK + `await ${NOME_CANCEL}(u, a);`);
+          return p.total === 2 && p.importacoes === 1 && p.invocacoes === 1 && p.semPapel === 0;
+        })());
+      ok("P35a CONTROLE NEGATIVO: ALIAS deixa uma ocorrencia sem papel",
+        papeisDe(IMPORT_OK + `const f = ${NOME_CANCEL};\nawait f(u, a);`).semPapel === 1);
+      ok("P35b CONTROLE NEGATIVO: CALLBACK passado adiante deixa resto",
+        papeisDe(IMPORT_OK + `registrar(${NOME_CANCEL});`).semPapel === 1);
+      ok("P35c CONTROLE NEGATIVO: RE-EXPORT deixa resto",
+        papeisDe(IMPORT_OK + `export { ${NOME_CANCEL} };`).semPapel === 1);
+      ok("P35d CONTROLE NEGATIVO: DESTRUCTURING deixa resto",
+        papeisDe(`const { ${NOME_CANCEL} } = pb;\nawait ${NOME_CANCEL}(u, a);`).semPapel === 1);
+      ok("P35e CONTROLE NEGATIVO: SEGUNDA invocacao e contada",
+        papeisDe(IMPORT_OK + `await ${NOME_CANCEL}(u, a);\nawait ${NOME_CANCEL}(x, y);`)
+          .invocacoes === 2);
+      ok("P35f CONTROLE NEGATIVO: uma mencao solta tambem deixa resto",
+        papeisDe(`if (nome === "${NOME_CANCEL}") {}`.replace(/"/g, "")).semPapel === 1);
+
+      // ── O worker continua fora de tudo isso ─────────────────────────
+      ok("P36 worker e capability-worker seguem sem qualquer ocorrencia",
+        papeisDe(semComentarios(ler("app/api/internal/agentes/worker/route.ts"))).total === 0 &&
+        papeisDe(semComentarios(ler("lib/agentes/capability-worker.ts"))).total === 0);
+    }
+  }
+
+  // ────────────────────────────────────────────────────────────────
+  // Q. APPROVAL-DECISION-RESUME-D5-C3-I2-B2 — o SLOT dormente
+  //
+  // O que esta secao NAO prova: que retomar e a decisao certa. Isso e
+  // do worker, que ainda nao existe nesta lane.
+  //
+  // O que ela prova e o CONTRATO do slot, e ele tem uma forma incomum:
+  // quase todo assert aqui e sobre o que o slot NAO fez. Nao buscou uma
+  // segunda candidata travada, nao redescobriu a fila, nao cancelou uma
+  // aprovacao reversivel, nao abriu uma segunda Tool Call, nao apagou
+  // progresso ao falhar depois. Cada um desses "nao" e uma forma de
+  // perder trabalho de um usuario real, e nenhum deles aparece no
+  // resultado — so na contagem de chamadas que o duplo registra.
+  // ────────────────────────────────────────────────────────────────
+  {
+    console.log("\nQ. RESUME-D5-C3-I2-B2: o slot dormente");
+
+    const mq = await import("../lib/agentes/retomada/executar-retomada");
+    const { executarSlotRetomada } = mq;
+
+    const Q_FONTE = semComentarios(ler("lib/agentes/retomada/executar-retomada.ts"));
+    const Q_CORPO = corpoDeExportado(Q_FONTE, "executarSlotRetomada");
+
+    const U1 = "dono-1";
+    const A1 = "aaaaaaaa-1111-4111-8111-111111111111";
+    const A2 = "aaaaaaaa-2222-4222-8222-222222222222";
+    const T1 = "11111111-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+
+    /** Guarda permissiva PADRAO dos cenarios. Literal explicito: e
+     *  teste, e o N80g prova que producao nao faz isso. */
+    const SEMPRE = () => true;
+
+    /** Linha de candidata travada, como o `select` do adaptador devolve. */
+    const linhaStale = (over: Record<string, unknown> = {}) => ({
+      id: T1, user_id: U1, tentativas: 3,
+      retomada_request_id: "req-travado", heartbeat_em: "2026-09-16T00:00:00Z",
+      ...over,
+    });
+
+    /** Uma rodada completa: `roteiro` alimenta o canal de TABELA (a
+     *  descoberta de travadas e um `select`), `roteiroRpc` alimenta o
+     *  canal de RPC, na ordem em que o slot as consome. */
+    const cenario = (tabela: Resposta[], rpcs: Resposta[]) => {
+      roteiro(...tabela);
+      roteiroRpc(...rpcs);
+    };
+
+    /** Fila de aprovacoes, na forma que a RPC de descoberta devolve. */
+    const filaRpc = (...pares: ReadonlyArray<readonly [string, string]>): Resposta => ({
+      data: pares.map(([user_id, aprovacao_id]) => ({ user_id, aprovacao_id })),
+    });
+
+    const STALE_VAZIO: Resposta = { data: [] };
+
+    ok("Q0  ANCORA: o slot existe e o corpo foi isolado",
+      typeof executarSlotRetomada === "function" && Q_CORPO.length > 1000);
+    ok("Q0a ANCORA: o corpo do slot nao invadiu o executor vizinho",
+      !Q_CORPO.includes("export async function executarRetomada") &&
+      !Q_CORPO.includes("lerAprovacaoParaRetomada"));
+
+    // ── Q1. HIGIENE ESTRUTURAL do slot ──────────────────────────────
+    ok("Q1  o slot nao tem relogio proprio",
+      !/Date\.now|new Date|ORCAMENTO_MS|FOLGA_MINIMA_MS/.test(Q_CORPO));
+    ok("Q1a o slot nao alcanca o banco direto",
+      !/getSupabaseServidor|createClient|\.from\(|\.rpc\(|\.update\(|\.insert\(|\.upsert\(|\.delete\(/
+        .test(Q_CORPO));
+    ok("Q1b o slot nao cita nome cru de RPC, nem o arquivo inteiro",
+      !/retomada_listar_candidatas|retomada_cancelar_aprovacao_incompativel/
+        .test(ler("lib/agentes/retomada/executar-retomada.ts")));
+    ok("Q1c o slot nao cria timer, retry nem catch ad hoc",
+      !/setTimeout|setInterval|\.catch\(|\bwhile\b/.test(Q_CORPO));
+    ok("Q1d o slot nao usa cast cego",
+      !/as any|@ts-ignore|@ts-expect-error/.test(Q_CORPO));
+    ok("Q1e HARD: a callback e repassada CRUA, sem embrulho",
+      /executarRetomada\([\s\S]{0,120}?podeIniciarRetomada\s*\)/.test(Q_CORPO) &&
+      !/\(\s*\)\s*=>\s*podeIniciarRetomada\s*\(/.test(Q_CORPO) &&
+      !/podeIniciarRetomada\.bind/.test(Q_CORPO));
+    ok("Q1f a caminhada e por `for…of` sobre lista limitada, nao por condicao",
+      /for \(const candidata of fila\.candidatas\)/.test(Q_CORPO));
+
+    // ── Q2. PROGRESSO: monotonicidade ───────────────────────────────
+    //
+    // O helper e privado, entao a prova e sobre a ESCALA que ele usa e
+    // sobre o comportamento observavel. A escala literal aqui e
+    // independente da de producao.
+    {
+      const ESCALA_Q = ["nenhum", "possivel", "confirmado"] as const;
+      const elevarQ = (a: string, b: string) =>
+        (ESCALA_Q as readonly string[]).indexOf(b) > (ESCALA_Q as readonly string[]).indexOf(a) ? b : a;
+      ok("Q2  a escala tem exatamente tres degraus, nesta ordem",
+        ESCALA_Q.length === 3 && ESCALA_Q[0] === "nenhum" &&
+        ESCALA_Q[1] === "possivel" && ESCALA_Q[2] === "confirmado");
+      ok("Q2a elevar nunca decresce, nos seis pares",
+        elevarQ("confirmado", "possivel") === "confirmado" &&
+        elevarQ("confirmado", "nenhum") === "confirmado" &&
+        elevarQ("possivel", "nenhum") === "possivel" &&
+        elevarQ("nenhum", "possivel") === "possivel" &&
+        elevarQ("possivel", "confirmado") === "confirmado" &&
+        elevarQ("nenhum", "confirmado") === "confirmado");
+      ok("Q2b CONTROLE: uma atribuicao direta REGREDIRIA — por isso nao existe",
+        "possivel" !== elevarQ("confirmado", "possivel"));
+      ok("Q2c a producao usa o helper, e nao atribuicao solta de progresso",
+        /elevarProgresso\(progressoDuravel,/.test(Q_CORPO) &&
+        !/progressoDuravel = "(?:nenhum|possivel|confirmado)"/.test(
+          Q_CORPO.replace(/let progressoDuravel[^;]*;/, "")));
+    }
+
+    // ── Q3..Q6. DESCOBERTA DE TRAVADAS ──────────────────────────────
+    cenario([{ data: null, error: { code: "08006" } }], []);
+    const qStaleErro = await executarSlotRetomada(SEMPRE);
+    ok("Q3  descoberta de travadas com ERRO e falha, nunca fila vazia",
+      qStaleErro.ok === false && !qStaleErro.ok &&
+      qStaleErro.falha === "descoberta_stale_indisponivel" &&
+      qStaleErro.progressoDuravel === "nenhum");
+    ok("Q3a HARD: com esse erro a fila de aprovacoes NAO chegou a ser consultada",
+      chamadasRpc.length === 0);
+
+    cenario([STALE_VAZIO], [{ data: [] }]);
+    const qVazio = await executarSlotRetomada(SEMPRE);
+    ok("Q4  travadas VAZIO segue para a fila, e fila vazia e `fila_vazia`",
+      qVazio.ok === true && qVazio.ok && qVazio.desfecho === "fila_vazia" &&
+      qVazio.progressoDuravel === "nenhum" && qVazio.encerrarPorOrcamento === false);
+    ok("Q4a e custou UMA descoberta de travadas e UMA de aprovacoes",
+      chamadas.length === 1 && chamadasRpc.length === 1 &&
+      chamadasRpc[0]?.nome === "retomada_listar_candidatas");
+    ok("Q4b o teto das duas descobertas chegou ao banco: 1 e 5",
+      chamadas[0]?.limite === 1 && chamadasRpc[0]?.parametros?.p_limite === 5);
+
+    // ── Q5..Q8. RECUPERACAO ─────────────────────────────────────────
+    cenario([{ data: [linhaStale()] }],
+      [{ data: "execucao_incerta" }, { data: [] }]);
+    const qRec = await executarSlotRetomada(SEMPRE);
+    ok("Q5  recuperacao duravel + fila vazia = `recuperacao_duravel`, nao `fila_vazia`",
+      qRec.ok === true && qRec.ok && qRec.desfecho === "recuperacao_duravel" &&
+      qRec.progressoDuravel === "confirmado");
+    ok("Q5a a recuperacao foi chamada UMA vez, com os quatro campos da candidata",
+      chamadasRpc.filter((c) => c.nome === "retomada_recuperar_tarefa_stale").length === 1 &&
+      chamadasRpc[0]?.parametros?.p_tarefa_id === T1 &&
+      chamadasRpc[0]?.parametros?.p_tentativa_esperada === 3);
+    ok("Q5b HARD: NENHUMA segunda descoberta de travadas",
+      chamadas.length === 1);
+
+    cenario([{ data: [linhaStale()] }], [{ data: "nao_stale" }, { data: [] }]);
+    const qNaoStale = await executarSlotRetomada(SEMPRE);
+    ok("Q6  `nao_stale` nao gera progresso e nao busca segunda candidata",
+      qNaoStale.ok === true && qNaoStale.ok &&
+      qNaoStale.desfecho === "fila_vazia" && qNaoStale.progressoDuravel === "nenhum" &&
+      chamadasRpc.filter((c) => c.nome === "retomada_recuperar_tarefa_stale").length === 1 &&
+      chamadas.length === 1);
+
+    cenario([{ data: [linhaStale()] }], [{ data: null, error: { code: "08006" } }]);
+    const qRecAmbiguo = await executarSlotRetomada(SEMPRE);
+    ok("Q7  recuperacao com erro AMBIGUO eleva a `possivel` e falha fechado",
+      qRecAmbiguo.ok === false && !qRecAmbiguo.ok &&
+      qRecAmbiguo.falha === "recuperacao_indisponivel" &&
+      qRecAmbiguo.progressoDuravel === "possivel");
+    ok("Q7a HARD: depois desse erro a fila NAO foi consultada",
+      chamadasRpc.filter((c) => c.nome === "retomada_listar_candidatas").length === 0);
+
+    cenario([{ data: [linhaStale()] }], [{ data: null, error: { code: "55000" } }]);
+    const qRec55 = await executarSlotRetomada(SEMPRE);
+    ok("Q8  55000 aborta a transacao: falha SEM elevar progresso",
+      qRec55.ok === false && !qRec55.ok &&
+      qRec55.falha === "recuperacao_fora_de_contrato" &&
+      qRec55.progressoDuravel === "nenhum");
+
+    // ── Q9..Q10. FILA DE APROVACOES ─────────────────────────────────
+    cenario([STALE_VAZIO], [{ data: null, error: { code: "08006" } }]);
+    const qFilaErro = await executarSlotRetomada(SEMPRE);
+    ok("Q9  fila com ERRO e falha, com progresso preservado",
+      qFilaErro.ok === false && !qFilaErro.ok &&
+      qFilaErro.falha === "descoberta_aprovacoes_indisponivel" &&
+      qFilaErro.progressoDuravel === "nenhum");
+
+    cenario([{ data: [linhaStale()] }],
+      [{ data: "execucao_incerta" }, { data: null, error: { code: "08006" } }]);
+    const qTardia = await executarSlotRetomada(SEMPRE);
+    ok("Q10 FALHA TARDIA NAO APAGA PROGRESSO: falha da fila mantem `confirmado`",
+      qTardia.ok === false && !qTardia.ok &&
+      qTardia.falha === "descoberta_aprovacoes_indisponivel" &&
+      qTardia.progressoDuravel === "confirmado");
+  }
+
+  // ────────────────────────────────────────────────────────────────
+  // Q11..Q40. O SLOT: caminhada, classificacao e reconciliacao
+  // ────────────────────────────────────────────────────────────────
+  {
+    const mq2 = await import("../lib/agentes/retomada/executar-retomada");
+    const { executarSlotRetomada } = mq2;
+
+    const Q2_FONTE = semComentarios(ler("lib/agentes/retomada/executar-retomada.ts"));
+    const Q2_CORPO = corpoDeExportado(Q2_FONTE, "executarSlotRetomada");
+
+    const QU = "dono-q";
+    const QA = (n: number) => `aaaaaaaa-${n}${n}${n}${n}-4111-8111-111111111111`;
+    const QT = "22222222-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const QAG = "33333333-cccc-4ccc-8ccc-cccccccccccc";
+
+    const SEMPRE2 = () => true;
+    const STALE_VAZIO2: Resposta = { data: [] };
+
+    /** Linha de aprovacao no formato que o pre-read consome. */
+    const qAprov = (aprovacaoId: string): Resposta => ({
+      data: {
+        id: aprovacaoId, funcao_id: "vendas.consultar", revisao_funcao: "1",
+        acesso: "leitura", conexao_plataforma: null, conexao_recurso: null,
+        conexao_loja_id: null,
+        argumentos: { dataInicio: "2026-08-01", dataFim: "2026-08-07", marketplace: null },
+        agente_id: QAG, tarefa_id: QT,
+      },
+    });
+    const qTarefa = (): Resposta => ({
+      data: {
+        id: QT, user_id: QU, agente_id: QAG, tipo: "consultar_vendas",
+        status: "aguardando_aprovacao", tentativas: 2, max_tentativas: 3, entrada: {},
+      },
+    });
+
+    /** Monta a rodada: fila com N candidatas, cada uma parando ANTES da
+     *  abertura com o codigo de recusa dado pela RPC de inicio. */
+    const rodadaSemInicio = (codigos: readonly string[], rpcsExtras: Resposta[] = []): void => {
+      const tabela: Resposta[] = [STALE_VAZIO2];
+      for (let i = 0; i < codigos.length; i++) tabela.push(qAprov(QA(i + 1)), qTarefa());
+      const rpcs: Resposta[] = [
+        { data: codigos.map((_, i) => ({ user_id: QU, aprovacao_id: QA(i + 1) })) },
+      ];
+      for (const c of codigos) rpcs.push({ data: c });
+      roteiro(...tabela);
+      roteiroRpc(...rpcs, ...rpcsExtras);
+    };
+
+    const nomesRpc = () => chamadasRpc.map((c) => c.nome);
+    const inicios = () => nomesRpc().filter((n) => n === "retomar_aprovacao_iniciar").length;
+    const cancels = () =>
+      nomesRpc().filter((n) => n === "retomada_cancelar_aprovacao_incompativel").length;
+    const filas = () => nomesRpc().filter((n) => n === "retomada_listar_candidatas").length;
+
+    // ── Q11..Q13. A GUARDA DE ORCAMENTO ─────────────────────────────
+    {
+      let chamadasGuarda = 0;
+      let inicioNoMomentoDaGuarda = -1;
+      let tabelaNoMomentoDaGuarda = -1;
+      const sonda = () => {
+        chamadasGuarda += 1;
+        inicioNoMomentoDaGuarda = inicios();
+        tabelaNoMomentoDaGuarda = chamadas.length;
+        return false;
       };
-      for (const d of producaoRaizP) varrerP(d);
 
-      ok(`P32 ANCORA: a varredura de producao rodou de verdade (${varridosP} arquivos)`,
-        varridosP > 50);
-      ok(`P33 o wrapper nasce DORMENTE: zero chamador de producao (${chamadoresP.join(", ") || "nenhum"})`,
-        chamadoresP.length === 0);
-      ok("P34 CONTROLE NEGATIVO: um chamador no executor OU no worker seria detectado",
-        invocaCancelP("const r = await cancelarAprovacaoRetomadaIncompativel(u, a);") &&
-        invocaCancelP("void cancelarAprovacaoRetomadaIncompativel(dono, ap)") &&
-        invocaCancelP("  return cancelarAprovacaoRetomadaIncompativel(\n    u,\n    a\n  );"));
-      ok("P35 CONTROLE POSITIVO: a DEFINICAO sozinha nao conta como chamador",
-        !invocaCancelP(
-          "export async function cancelarAprovacaoRetomadaIncompativel(\n  userId: string,\n) {}") &&
-        !invocaCancelP("export { cancelarAprovacaoRetomadaIncompativel };"));
-      ok("P36 o executor Resume e o worker seguem sem invocar o cancelamento",
-        !invocaCancelP(ler("lib/agentes/retomada/executar-retomada.ts")) &&
-        !invocaCancelP(ler("app/api/internal/agentes/worker/route.ts")));
+      rodadaSemInicio([]);
+      roteiro(STALE_VAZIO2, qAprov(QA(1)), qTarefa());
+      roteiroRpc({ data: [{ user_id: QU, aprovacao_id: QA(1) }] });
+      const qOrc = await executarSlotRetomada(sonda);
+
+      ok("Q11 guarda FALSE encerra o slot com `orcamento_insuficiente`",
+        qOrc.ok === true && qOrc.ok && qOrc.desfecho === "orcamento_insuficiente" &&
+        qOrc.progressoDuravel === "nenhum" && qOrc.encerrarPorOrcamento === true);
+      ok("Q11a HARD: com guarda false, ZERO RPC de abertura",
+        inicios() === 0);
+      ok("Q11b a guarda foi consultada exatamente uma vez",
+        chamadasGuarda === 1);
+      ok("Q12 ORDEM: quando a guarda e perguntada, as DUAS pre-leituras ja ocorreram",
+        tabelaNoMomentoDaGuarda === 3);
+      ok("Q12a ORDEM: e nenhuma abertura tinha acontecido ainda",
+        inicioNoMomentoDaGuarda === 0);
+      ok("Q12b ANCORA: a sonda mediu de verdade, nao ficou em -1",
+        tabelaNoMomentoDaGuarda > 0 && inicioNoMomentoDaGuarda === 0);
+    }
+
+    // ── Q13. IDENTIDADE DA CALLBACK ─────────────────────────────────
+    //
+    // A prova e ESTRUTURAL, e o teste diz isso em voz alta: o corpo do
+    // slot passa `podeIniciarRetomada` cru, sem `() =>`, sem `.bind`.
+    // Um embrulho encaminharia a chamada e seria indistinguivel em
+    // runtime — por isso o criterio e sobre a forma, com controle
+    // negativo sobre as duas formas de embrulho.
+    {
+      const repassaCru = (src: string): boolean =>
+        /executarRetomada\([^)]*,\s*podeIniciarRetomada\s*\)/.test(src.replace(/\s+/g, " ")) &&
+        !/\(\s*\)\s*=>\s*podeIniciarRetomada\s*\(/.test(src) &&
+        !/podeIniciarRetomada\.bind/.test(src);
+      ok("Q13 o slot repassa a MESMA referencia ao executor",
+        repassaCru(Q2_CORPO));
+      ok("Q13a CONTROLE: um embrulho em arrow seria detectado",
+        !repassaCru("await executarRetomada(u, a, () => podeIniciarRetomada());"));
+      ok("Q13b CONTROLE: um `.bind` tambem seria detectado",
+        !repassaCru("await executarRetomada(u, a, podeIniciarRetomada.bind(null));"));
+      ok("Q13c CONTROLE POSITIVO: a forma crua passa",
+        repassaCru("await executarRetomada(c.userId, c.aprovacaoId, podeIniciarRetomada);"));
+    }
+
+    // ── Q14. A PARTICAO DOS 28 MOTIVOS ──────────────────────────────
+    //
+    // Literais INDEPENDENTES, transcritos do tipo `MotivoSemInicio`. Nao
+    // saem de nenhum array de producao: derivar o esperado da producao
+    // faria o teste concordar com qualquer particao.
+    {
+      const TODOS_28 = [
+        "entrada_invalida", "aprovacao_inexistente", "agente_indisponivel",
+        "tarefa_indisponivel", "aprovacao_pendente", "ja_consumida", "ja_rejeitada",
+        "ja_cancelada", "expirada", "aprovacao_desatualizada", "escrita_nao_suportada",
+        "permissao_ausente", "permissao_bloqueada", "conexao_indisponivel",
+        "tarefa_incompativel", "funcao_incompativel",
+        "contrato_desconhecido", "tarefa_ausente", "tipo_ilegivel", "aprovacao_ilegivel",
+        "local_funcao_desconhecida", "local_revisao_divergente", "local_acesso_divergente",
+        "local_conexao_divergente", "local_conexao_indisponivel",
+        "local_argumentos_invalidos", "rpc_entrada_invalida", "rpc_fora_de_contrato",
+      ] as const;
+      const PERMANENTES_9 = [
+        "contrato_desconhecido", "local_funcao_desconhecida", "funcao_incompativel",
+        "local_revisao_divergente", "aprovacao_desatualizada", "local_acesso_divergente",
+        "escrita_nao_suportada", "local_conexao_divergente", "local_argumentos_invalidos",
+      ] as const;
+      const REVERSIVEIS_12 = [
+        "aprovacao_inexistente", "agente_indisponivel", "tarefa_indisponivel",
+        "aprovacao_pendente", "ja_consumida", "ja_rejeitada", "ja_cancelada", "expirada",
+        "permissao_ausente", "permissao_bloqueada", "tarefa_incompativel", "tarefa_ausente",
+      ] as const;
+      const TRANSITORIOS_2 = ["conexao_indisponivel", "local_conexao_indisponivel"] as const;
+      const TERMINAIS_5 = [
+        "entrada_invalida", "tipo_ilegivel", "aprovacao_ilegivel",
+        "rpc_entrada_invalida", "rpc_fora_de_contrato",
+      ] as const;
+
+      const uniao = [...PERMANENTES_9, ...REVERSIVEIS_12, ...TRANSITORIOS_2, ...TERMINAIS_5];
+
+      ok("Q14 os 28 motivos sao 28, sem repetido",
+        TODOS_28.length === 28 && new Set(TODOS_28).size === 28);
+      ok("Q14a as quatro classes somam 28: 9 + 12 + 2 + 5",
+        PERMANENTES_9.length === 9 && REVERSIVEIS_12.length === 12 &&
+        TRANSITORIOS_2.length === 2 && TERMINAIS_5.length === 5 &&
+        uniao.length === 28);
+      ok("Q14b as classes sao DISJUNTAS entre si",
+        new Set(uniao).size === 28);
+      ok("Q14c e COBREM os 28: nenhum motivo fica sem politica",
+        TODOS_28.every((m) => uniao.includes(m)));
+      ok("Q14d CONTROLE: retirar um motivo de uma classe quebra a cobertura",
+        !TODOS_28.every((m) =>
+          [...PERMANENTES_9.slice(1), ...REVERSIVEIS_12, ...TRANSITORIOS_2, ...TERMINAIS_5]
+            .includes(m)));
+      ok("Q14e CONTROLE: um motivo em DUAS classes quebra a disjuncao",
+        new Set([...uniao, "expirada"]).size !== 29);
+      // ANCORA contra a producao: os 16 codigos da RPC de inicio (menos
+      // `consumida`) tem de estar entre os 28 transcritos. Se a RPC
+      // ganhar um codigo, ele chega ao tipo sozinho — e este assert cai,
+      // avisando que falta politica para ele.
+      const pq = await import("../lib/agentes/retomada/persistencia-retomada");
+      const daRpc = pq.codigosRetomadaInicio().filter((c) => c !== "consumida");
+      ok(`Q14f ANCORA: os ${daRpc.length} codigos da RPC de inicio estao entre os 28`,
+        daRpc.length === 16 &&
+        daRpc.every((c) => (TODOS_28 as readonly string[]).includes(c)));
+    }
+
+    // ── Q15..Q17. REVERSIVEIS: caminha, nunca cancela ───────────────
+    {
+      const REVERSIVEIS_RPC = [
+        "aprovacao_inexistente", "agente_indisponivel", "tarefa_indisponivel",
+        "aprovacao_pendente", "ja_consumida",
+      ] as const;
+      rodadaSemInicio(REVERSIVEIS_RPC);
+      const qRev = await executarSlotRetomada(SEMPRE2);
+      ok("Q15 cinco candidatas reversiveis: caminhada completa, `sem_progresso`",
+        qRev.ok === true && qRev.ok && qRev.desfecho === "sem_progresso" &&
+        qRev.progressoDuravel === "nenhum" && qRev.encerrarPorOrcamento === false);
+      ok("Q15a cinco aberturas tentadas, e ZERO cancelamento",
+        inicios() === 5 && cancels() === 0);
+      ok("Q15b HARD: UMA descoberta de fila, sem redescoberta nem paginacao",
+        filas() === 1);
+      ok("Q15c HARD: `sem_progresso` e nao `fila_vazia` — havia trabalho para olhar",
+        qRev.ok && qRev.desfecho !== "fila_vazia");
+    }
+
+    // ── Q18..Q20. PERMANENTES: reconcilia ───────────────────────────
+    {
+      rodadaSemInicio(["funcao_incompativel"], [{ data: "cancelada" }]);
+      const qPerm = await executarSlotRetomada(SEMPRE2);
+      ok("Q16 motivo permanente dispara o cancelamento tecnico",
+        cancels() === 1 && inicios() === 1);
+      ok("Q16a e o desfecho vira `reconciliado` com progresso `confirmado`",
+        qPerm.ok === true && qPerm.ok && qPerm.desfecho === "reconciliado" &&
+        qPerm.progressoDuravel === "confirmado");
+      ok("Q16b o cancelamento recebeu SO dono e aprovacao",
+        JSON.stringify(Object.keys(
+          chamadasRpc.find((c) => c.nome === "retomada_cancelar_aprovacao_incompativel")
+            ?.parametros ?? {}).sort()) ===
+        JSON.stringify(["p_aprovacao_id", "p_user_id"]));
+
+      rodadaSemInicio(["aprovacao_desatualizada"], [{ data: "expirada" }]);
+      const qExp = await executarSlotRetomada(SEMPRE2);
+      ok("Q17 `expirada` no cancelamento e AMBIGUO: progresso `possivel`, nunca confirmado",
+        qExp.ok === true && qExp.ok && qExp.desfecho === "reconciliado" &&
+        qExp.progressoDuravel === "possivel");
+
+      // Observacao terminal NAO e reconciliacao. `ja_cancelada` diz que
+      // alguem ja resolveu aquela aprovacao — esta rodada nao escreveu
+      // nada, entao ela nao pode reivindicar o desfecho `reconciliado`.
+      // A distincao importa: `reconciliado` sinaliza trabalho durável ao
+      // worker, e contar observacao como trabalho inflaria a rodada.
+      rodadaSemInicio(["escrita_nao_suportada"], [{ data: "ja_cancelada" }]);
+      const qJa = await executarSlotRetomada(SEMPRE2);
+      ok("Q18 observacao terminal no cancelamento NAO cria progresso NEM reconciliacao",
+        qJa.ok === true && qJa.ok && qJa.desfecho === "sem_progresso" &&
+        qJa.progressoDuravel === "nenhum");
+      ok("Q18a CONTROLE: o cancelamento REALMENTE foi tentado nesse cenario",
+        cancels() === 1 && inicios() === 1);
+    }
+
+    // ── Q19. CANCELAMENTO: os oito codigos ──────────────────────────
+    {
+      const ESPERADO_CANCEL: ReadonlyArray<readonly [string, string]> = [
+        ["cancelada", "confirmado"],
+        ["expirada", "possivel"],
+        ["ja_cancelada", "nenhum"],
+        ["ja_consumida", "nenhum"],
+        ["ja_rejeitada", "nenhum"],
+        ["aprovacao_pendente", "nenhum"],
+        ["tarefa_incompativel", "nenhum"],
+        ["aprovacao_inexistente", "nenhum"],
+      ];
+      const observados: string[] = [];
+      for (const [codigo] of ESPERADO_CANCEL) {
+        rodadaSemInicio(["funcao_incompativel"], [{ data: codigo }]);
+        const r = await executarSlotRetomada(SEMPRE2);
+        observados.push(r.progressoDuravel);
+      }
+      ok("Q19 os OITO codigos de cancelamento mapeiam exatamente o esperado",
+        observados.length === 8 &&
+        ESPERADO_CANCEL.every(([, esperado], i) => observados[i] === esperado));
+      ok("Q19a ANCORA: os tres graus apareceram de verdade",
+        observados.includes("confirmado") && observados.includes("possivel") &&
+        observados.includes("nenhum"));
+      ok("Q19b CONTROLE: `expirada` NAO e confirmado nem nenhum",
+        observados[1] !== "confirmado" && observados[1] !== "nenhum");
+    }
+
+    // ── Q20. CANCELAMENTO: os quatro erros ──────────────────────────
+    {
+      const ERROS_CANCEL: ReadonlyArray<readonly [string, string, string]> = [
+        ["22023", "cancelamento_fora_de_contrato", "nenhum"],
+        ["55000", "cancelamento_fora_de_contrato", "nenhum"],
+        ["08006", "cancelamento_indisponivel", "possivel"],
+      ];
+      for (const [code, falha, progresso] of ERROS_CANCEL) {
+        rodadaSemInicio(["funcao_incompativel"], [{ data: null, error: { code } }]);
+        const r = await executarSlotRetomada(SEMPRE2);
+        ok(`Q20.${code} vira ${falha} com progresso ${progresso}`,
+          r.ok === false && !r.ok && r.falha === falha && r.progressoDuravel === progresso);
+      }
+      rodadaSemInicio(["funcao_incompativel"], [{ data: "codigo_inventado" }]);
+      const qRespMa = await executarSlotRetomada(SEMPRE2);
+      ok("Q20a resposta fora do catalogo tambem eleva a `possivel` e falha fechado",
+        qRespMa.ok === false && !qRespMa.ok &&
+        qRespMa.falha === "cancelamento_indisponivel" &&
+        qRespMa.progressoDuravel === "possivel");
+    }
+
+    // ── Q21..Q22. TRANSITORIO e TERMINAL ────────────────────────────
+    {
+      rodadaSemInicio(["conexao_indisponivel", "ja_consumida"]);
+      const qTr = await executarSlotRetomada(SEMPRE2);
+      ok("Q21 motivo transitorio encerra a rodada, sem cancelar",
+        qTr.ok === false && !qTr.ok && qTr.falha === "motivo_transitorio" &&
+        qTr.progressoDuravel === "nenhum" && cancels() === 0);
+      ok("Q21a HARD: a segunda candidata NAO foi tentada",
+        inicios() === 1);
+
+      rodadaSemInicio(["entrada_invalida", "ja_consumida"]);
+      const qTerm = await executarSlotRetomada(SEMPRE2);
+      ok("Q22 motivo terminal e fail-closed, sem cancelar e sem continuar",
+        qTerm.ok === false && !qTerm.ok && qTerm.falha === "motivo_fora_do_dominio" &&
+        cancels() === 0 && inicios() === 1);
+      ok("Q22a HARD: nenhum `default continue` — o corpo nao tem continue fora do ramo reversivel",
+        (Q2_CORPO.match(/\bcontinue\b/g) ?? []).length === 1);
+    }
+
+    // ── Q23..Q26. POS-ABERTURA: a caminhada PARA ────────────────────
+    {
+      // `inicio_ambiguo`: a RPC de abertura nao respondeu.
+      roteiro(STALE_VAZIO2, qAprov(QA(1)), qTarefa(), qAprov(QA(2)), qTarefa());
+      roteiroRpc(
+        { data: [{ user_id: QU, aprovacao_id: QA(1) }, { user_id: QU, aprovacao_id: QA(2) }] },
+        { data: null, error: { code: "08006" } });
+      const qAmb = await executarSlotRetomada(SEMPRE2);
+      ok("Q23 `inicio_ambiguo` eleva a `possivel` e encerra a caminhada",
+        qAmb.ok === false && !qAmb.ok && qAmb.falha === "inicio_ambiguo" &&
+        qAmb.progressoDuravel === "possivel");
+      ok("Q23a HARD: uma so abertura, zero cancelamento, zero segunda candidata",
+        inicios() === 1 && cancels() === 0 && filas() === 1);
+
+      // `contexto_incompleto`: abriu, mas o read-back da abertura falhou.
+      roteiro(STALE_VAZIO2, qAprov(QA(1)), qTarefa(), { data: null },
+        qAprov(QA(2)), qTarefa());
+      roteiroRpc(
+        { data: [{ user_id: QU, aprovacao_id: QA(1) }, { user_id: QU, aprovacao_id: QA(2) }] },
+        { data: "consumida" });
+      const qCtx = await executarSlotRetomada(SEMPRE2);
+      ok("Q24 `contexto_incompleto` e pos-abertura: progresso `confirmado` e fail-closed",
+        qCtx.ok === false && !qCtx.ok && qCtx.falha === "contexto_incompleto" &&
+        qCtx.progressoDuravel === "confirmado");
+      ok("Q24a HARD: a caminhada parou — uma abertura so",
+        inicios() === 1 && cancels() === 0);
+    }
+
+    // ── Q27..Q29. ORCAMENTO COM PROGRESSO ANTERIOR ──────────────────
+    {
+      // Recuperacao duravel, depois a guarda recusa a primeira candidata.
+      roteiro({ data: [{ id: QT, user_id: QU, tentativas: 3,
+        retomada_request_id: "req-x", heartbeat_em: "2026-09-16T00:00:00Z" }] },
+        qAprov(QA(1)), qTarefa());
+      roteiroRpc({ data: "execucao_incerta" },
+        { data: [{ user_id: QU, aprovacao_id: QA(1) }] });
+      const qBudRec = await executarSlotRetomada(() => false);
+      ok("Q27 guarda false APOS recuperacao preserva `recuperacao_duravel`",
+        qBudRec.ok === true && qBudRec.ok && qBudRec.desfecho === "recuperacao_duravel" &&
+        qBudRec.progressoDuravel === "confirmado" &&
+        qBudRec.encerrarPorOrcamento === true);
+      ok("Q27a HARD: zero abertura nesse caminho", inicios() === 0);
+
+      // Reconciliacao na 1a candidata, guarda recusa a 2a.
+      let n = 0;
+      const guardaUmaVez = () => {
+        n += 1;
+        return n === 1;
+      };
+      roteiro(STALE_VAZIO2, qAprov(QA(1)), qTarefa(), qAprov(QA(2)), qTarefa());
+      roteiroRpc(
+        { data: [{ user_id: QU, aprovacao_id: QA(1) }, { user_id: QU, aprovacao_id: QA(2) }] },
+        { data: "funcao_incompativel" },
+        { data: "cancelada" });
+      const qBudRec2 = await executarSlotRetomada(guardaUmaVez);
+      ok("Q28 guarda false APOS reconciliacao preserva `reconciliado`",
+        qBudRec2.ok === true && qBudRec2.ok && qBudRec2.desfecho === "reconciliado" &&
+        qBudRec2.progressoDuravel === "confirmado" &&
+        qBudRec2.encerrarPorOrcamento === true);
+      ok("Q28a a guarda foi perguntada duas vezes e a segunda recusou",
+        n === 2 && inicios() === 1 && cancels() === 1);
+      ok("Q29 PRECEDENCIA: reconciliado vence recuperacao_duravel",
+        qBudRec2.ok && qBudRec2.desfecho === "reconciliado");
+    }
+
+    // ── Q30. FALHA TARDIA APOS RECONCILIACAO ────────────────────────
+    {
+      roteiro(STALE_VAZIO2, qAprov(QA(1)), qTarefa(), qAprov(QA(2)), qTarefa());
+      roteiroRpc(
+        { data: [{ user_id: QU, aprovacao_id: QA(1) }, { user_id: QU, aprovacao_id: QA(2) }] },
+        { data: "funcao_incompativel" },
+        { data: "expirada" },
+        { data: "entrada_invalida" });
+      const qTardia2 = await executarSlotRetomada(SEMPRE2);
+      ok("Q30 falha tardia apos cancelamento `expirada` preserva `possivel`",
+        qTardia2.ok === false && !qTardia2.ok &&
+        qTardia2.falha === "motivo_fora_do_dominio" &&
+        qTardia2.progressoDuravel === "possivel");
+      ok("Q30a ANCORA: houve reconciliacao antes da falha",
+        cancels() === 1 && inicios() === 2);
+    }
+
+    // ── Q31. COMPOSICAO: `expirada` + caminhada + budget — B2-I1-F1 ──
+    //
+    // Q19b ja prova a CLASSIFICACAO isolada (`expirada` vira `possivel`)
+    // e Q28 prova budget depois de uma reconciliacao CONFIRMADA. Nenhum
+    // dos dois cobre a composicao que importa: reconciliar com um codigo
+    // AMBIGUO e, na candidata seguinte, bater no orcamento.
+    //
+    // O mutante que isso existe para matar e estreito e plausivel: ao
+    // montar o resultado do ramo de budget, alguem escrever
+    //
+    //   if (houveReconciliacao) progressoDuravel = "confirmado";
+    //
+    // Nada nos testes anteriores cairia — Q28 ja chega la com
+    // `confirmado` de verdade, e Q19b nunca passa pelo ramo de budget.
+    // So um cenario que atravesse os dois separa as duas coisas.
+    {
+      let perguntas = 0;
+      const guardaSoNaPrimeira = () => {
+        perguntas += 1;
+        return perguntas === 1;
+      };
+
+      roteiro(STALE_VAZIO2, qAprov(QA(1)), qTarefa(), qAprov(QA(2)), qTarefa());
+      roteiroRpc(
+        { data: [{ user_id: QU, aprovacao_id: QA(1) }, { user_id: QU, aprovacao_id: QA(2) }] },
+        { data: "funcao_incompativel" },
+        { data: "expirada" });
+      const qComposto = await executarSlotRetomada(guardaSoNaPrimeira);
+
+      /** Esperado LITERAL e independente: escrito a mao, nunca derivado
+       *  do retorno nem de constante de producao. */
+      const ESPERADO_COMPOSTO = {
+        ok: true,
+        desfecho: "reconciliado",
+        progressoDuravel: "possivel",
+        encerrarPorOrcamento: true,
+      } as const;
+
+      /** Criterio unico, aplicado ao real E aos mutantes. */
+      const bateComEsperado = (r: Record<string, unknown>): boolean =>
+        r.ok === ESPERADO_COMPOSTO.ok &&
+        r.desfecho === ESPERADO_COMPOSTO.desfecho &&
+        r.progressoDuravel === ESPERADO_COMPOSTO.progressoDuravel &&
+        r.encerrarPorOrcamento === ESPERADO_COMPOSTO.encerrarPorOrcamento;
+
+      ok("Q31 ANCORA: a candidata A foi reconciliada com `expirada`",
+        cancels() === 1 &&
+        chamadasRpc.some((c) =>
+          c.nome === "retomada_cancelar_aprovacao_incompativel" &&
+          c.parametros?.p_aprovacao_id === QA(1)));
+      ok("Q31a ANCORA: a candidata B FOI alcancada — a guarda foi perguntada duas vezes",
+        perguntas === 2);
+      ok("Q31b HARD: a candidata B nao abriu Tool Call — so a A chamou o start",
+        inicios() === 1 &&
+        chamadasRpc.filter((c) =>
+          c.nome === "retomar_aprovacao_iniciar" &&
+          c.parametros?.p_aprovacao_id === QA(2)).length === 0);
+      ok("Q31c HARD: uma descoberta so, e nenhuma terceira candidata",
+        filas() === 1 && perguntas === 2);
+      ok("Q31d o resultado composto e reconciliado/possivel/encerrar:true",
+        bateComEsperado(qComposto as unknown as Record<string, unknown>));
+
+      // ── CONTROLES: o criterio precisa MORDER nos quatro mutantes ───
+      ok("Q31e MUTANTE A: `expirada` classificado como confirmado seria reprovado",
+        !bateComEsperado({ ...ESPERADO_COMPOSTO, progressoDuravel: "confirmado" }));
+      ok("Q31f MUTANTE B: budget forcando confirmado seria reprovado",
+        !bateComEsperado({
+          ok: true, desfecho: "reconciliado",
+          progressoDuravel: "confirmado", encerrarPorOrcamento: true,
+        }));
+      ok("Q31g MUTANTE C: budget zerando o progresso seria reprovado",
+        !bateComEsperado({ ...ESPERADO_COMPOSTO, progressoDuravel: "nenhum" }));
+      ok("Q31h MUTANTE D: perder `encerrarPorOrcamento` seria reprovado",
+        !bateComEsperado({ ...ESPERADO_COMPOSTO, encerrarPorOrcamento: false }));
+      ok("Q31i MUTANTE E: trocar o desfecho por orcamento_insuficiente seria reprovado",
+        !bateComEsperado({ ...ESPERADO_COMPOSTO, desfecho: "orcamento_insuficiente" }));
+      ok("Q31j CONTROLE POSITIVO: o proprio esperado passa no criterio",
+        bateComEsperado({ ...ESPERADO_COMPOSTO }));
+    }
+
+    // ── Q32. LF-B: `cancelada` + falha posterior preserva confirmado ──
+    //
+    // LF-A (Q10) e LF-C (Q30) ja existiam; esta era a lacuna. A diferenca
+    // em relacao ao Q30 e o GRAU preservado: la a reconciliacao foi
+    // ambigua e o que sobrevive e `possivel`; aqui ela foi confirmada, e
+    // um erro posterior nao pode rebaixar isso para `possivel` nem zerar.
+    {
+      roteiro(STALE_VAZIO2, qAprov(QA(1)), qTarefa(), qAprov(QA(2)), qTarefa());
+      roteiroRpc(
+        { data: [{ user_id: QU, aprovacao_id: QA(1) }, { user_id: QU, aprovacao_id: QA(2) }] },
+        { data: "funcao_incompativel" },
+        { data: "cancelada" },
+        { data: "conexao_indisponivel" });
+      const qLfB = await executarSlotRetomada(SEMPRE2);
+
+      ok("Q32 LF-B: cancelamento CONFIRMADO seguido de falha preserva `confirmado`",
+        qLfB.ok === false && !qLfB.ok &&
+        qLfB.falha === "motivo_transitorio" &&
+        qLfB.progressoDuravel === "confirmado");
+      ok("Q32a ANCORA: houve mesmo um cancelamento confirmado antes da falha",
+        cancels() === 1 && inicios() === 2);
+      ok("Q32b CONTROLE: o grau nao foi rebaixado a `possivel` nem zerado",
+        qLfB.progressoDuravel !== "possivel" && qLfB.progressoDuravel !== "nenhum");
     }
   }
 
