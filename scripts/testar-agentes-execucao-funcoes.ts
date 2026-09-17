@@ -82,6 +82,13 @@ interface Chamada {
 interface Resposta {
   data?: unknown;
   error?: Record<string, unknown> | null;
+  /** Entrega `data` EXATAMENTE como veio, sem o `?? null` do canal
+   *  normal. Existe por um motivo estreito: sem ele e impossivel provar
+   *  que um wrapper trata `undefined` — o coalesce do fake colapsaria o
+   *  caso em `null` antes de a producao ver qualquer coisa, e o assert
+   *  estaria medindo o duplo, nao o codigo. Aditivo: um roteiro que nao
+   *  pede `bruto` passa pelo mesmo caminho de sempre. */
+  bruto?: boolean;
 }
 
 /** Uma chamada de RPC. O nome e os parametros ficam registrados porque
@@ -172,7 +179,10 @@ const clienteFake = {
   rpc: (nome: string, parametros: Record<string, unknown>) => {
     chamadasRpc.push({ nome, parametros: parametros ?? {} });
     const r = respostasRpc[consumidasRpc++];
-    return Promise.resolve({ data: r?.data ?? null, error: r?.error ?? null });
+    return Promise.resolve({
+      data: r?.bruto === true ? r.data : (r?.data ?? null),
+      error: r?.error ?? null,
+    });
   },
 };
 
@@ -2102,23 +2112,28 @@ async function principal(): Promise<void> {
     // Conta sobre o codigo SEM comentarios: uma RPC citada em prosa nao
     // e uma RPC chamada.
     const rpcsNoModulo = [...PERSIST_CODIGO.matchAll(/\.rpc\(\s*"([a-z_]+)"/g)].map((m) => m[1]);
-    // O A1-I1 acrescentou a DESCOBERTA de aprovacoes, que e a quinta e
-    // ultima RPC deste modulo. A contagem avancou nominalmente de 4 para
-    // 5; ela continua EXATA, nunca `>=`.
-    ok(`K1  exatamente cinco chamadas .rpc (${rpcsNoModulo.length})`,
-      rpcsNoModulo.length === 5);
-    ok("K2  e elas sao as cinco RPCs da retomada, uma vez cada",
+    // O A1-I1 acrescentou a DESCOBERTA de aprovacoes, e o B1-I1 o
+    // CANCELAMENTO tecnico: a contagem avancou nominalmente 4 -> 5 -> 6.
+    // Ela continua EXATA, nunca `>=` — um `>=` deixaria de ver a setima.
+    ok(`K1  exatamente seis chamadas .rpc (${rpcsNoModulo.length})`,
+      rpcsNoModulo.length === 6);
+    ok("K2  e elas sao as seis RPCs da retomada, uma vez cada",
       [...rpcsNoModulo].sort().join(",") === [
+        "retomada_cancelar_aprovacao_incompativel",
         "retomada_concluir_tarefa",
         "retomada_falhar_tarefa",
         "retomada_listar_candidatas",
         "retomada_recuperar_tarefa_stale",
         "retomar_aprovacao_iniciar",
       ].join(","));
-    ok("K3  CONTROLE: uma sexta RPC seria detectada",
-      [...rpcsNoModulo, "aprovacao_criar"].length !== 5);
-    ok("K3a CONTROLE: a fase ANTERIOR, com quatro RPCs, agora reprova",
-      rpcsNoModulo.length !== 4);
+    // Os dois controles avancam JUNTO com a fase. Se K3 continuasse
+    // comparando contra 5 ele viraria vacuo — verdadeiro por aritmetica,
+    // impossivel de reprovar — e um controle que nao pode cair nao e
+    // controle nenhum.
+    ok("K3  CONTROLE: uma SETIMA RPC seria detectada",
+      [...rpcsNoModulo, "aprovacao_criar"].length !== 6);
+    ok("K3a CONTROLE: a fase ANTERIOR, com cinco RPCs, agora reprova",
+      rpcsNoModulo.length !== 5);
     ok("K3b a descoberta de retomadas travadas NAO usa RPC",
       !rpcsNoModulo.includes("retomada_recuperar_tarefa_stale_listar") &&
       rpcsNoModulo.filter((n) => n === "retomada_listar_candidatas").length === 1);
@@ -2436,7 +2451,7 @@ async function principal(): Promise<void> {
       !/setTimeout|setInterval|while\s*\(|for\s*\(\s*let\s+tentativa|\.catch\(/
         .test(PERSIST_CODIGO));
     ok("K67 nenhum wrapper chama outro wrapper",
-      !/(iniciarRetomadaAprovacao|falharTarefaRetomada|recuperarRetomadaStale|concluirTarefaRetomada|descobrirAprovacoesParaRetomada|descobrirCandidatasRetomadaStale)\s*\(/
+      !/(iniciarRetomadaAprovacao|falharTarefaRetomada|recuperarRetomadaStale|concluirTarefaRetomada|descobrirAprovacoesParaRetomada|descobrirCandidatasRetomadaStale|cancelarAprovacaoRetomadaIncompativel)\s*\(/
         .test(PERSIST_CODIGO.replace(/export async function \w+/g, "")));
 
     // ── Heartbeat: o modulo GANHOU um tick, e nao um timer ──────────
@@ -2475,8 +2490,18 @@ async function principal(): Promise<void> {
 
     // ── §26. DORMENCIA: zero chamador de producao ───────────────────
     {
+      // ── Achado B1-A0-F1, fechado aqui ─────────────────────────────
+      //
+      // Esta lista alimenta `mencionam`. Ela ficou parada nos quatro
+      // terminalizadores originais enquanto o modulo ganhou tres
+      // wrappers novos — e um assert que nao conhece o nome novo nao
+      // FALHA quando alguem passa a chama-lo: ele simplesmente deixa de
+      // proteger, em silencio. Por isso os SETE nomes exportados estao
+      // aqui, e nao so os que existiam quando o assert nasceu.
       const NOMES = ["iniciarRetomadaAprovacao", "falharTarefaRetomada",
-        "recuperarRetomadaStale", "concluirTarefaRetomada"];
+        "recuperarRetomadaStale", "concluirTarefaRetomada",
+        "descobrirAprovacoesParaRetomada", "descobrirCandidatasRetomadaStale",
+        "cancelarAprovacaoRetomadaIncompativel"];
       const producao = ["lib/agentes", "app", "components"];
       const importadores: string[] = [];
       const mencionam: string[] = [];
@@ -2695,13 +2720,14 @@ async function principal(): Promise<void> {
         '.eq("id", tarefaId).eq("status", "rodando")'));
 
     // ── O RESTO DO MODULO CONTINUA INTACTO ──────────────────────────
-    ok("L41 os quatro wrappers de RPC continuam presentes, e os dois novos tambem",
+    ok("L41 os SETE wrappers de RPC estao presentes, incluindo o cancelamento",
       ["iniciarRetomadaAprovacao", "falharTarefaRetomada",
        "recuperarRetomadaStale", "concluirTarefaRetomada",
-       "descobrirAprovacoesParaRetomada", "descobrirCandidatasRetomadaStale"]
+       "descobrirAprovacoesParaRetomada", "descobrirCandidatasRetomadaStale",
+       "cancelarAprovacaoRetomadaIncompativel"]
         .every((n) => typeof (pr as Record<string, unknown>)[n] === "function"));
-    ok("L42 e continuam sendo cinco chamadas .rpc, nem uma a mais",
-      (PERSIST_L_CODIGO.match(/\.rpc\(/g) ?? []).length === 5);
+    ok("L42 e continuam sendo SEIS chamadas .rpc, nem uma a mais",
+      (PERSIST_L_CODIGO.match(/\.rpc\(/g) ?? []).length === 6);
     ok("L43 o heartbeat nao virou wrapper de RPC",
       !/\.rpc\([^)]*heartbeat/i.test(PERSIST_L_CODIGO));
 
@@ -4201,8 +4227,32 @@ async function principal(): Promise<void> {
       !/descobrirAprovacoesParaRetomada\(/.test(CORPO_STALE) &&
       !/iniciarRetomadaAprovacao\(|concluirTarefaRetomada\(|falharTarefaRetomada\(/
         .test(CORPO_APROV + CORPO_STALE));
-    ok("O38 o cancelamento tecnico NAO ganhou wrapper neste slice",
-      !/retomada_cancelar_aprovacao_incompativel/.test(PD_CODIGO));
+    // ── O38, avancado no B1-I1 ─────────────────────────────────────
+    //
+    // Ate aqui o assert dizia "a RPC de cancelamento nao aparece". O B1
+    // deu a ela um adaptador, entao a forma antiga so podia ser apagada
+    // ou invertida — e "a string existe" seria uma inversao FRACA, que
+    // um comentario solto ja satisfaria. A protecao que a substitui e
+    // mais estreita que a original em tres eixos ao mesmo tempo: a
+    // citacao e UNICA, esta DENTRO do wrapper, e o wrapper nao tem
+    // chamador de producao (provado no bloco P32..P36).
+    {
+      const RPC38 = /retomada_cancelar_aprovacao_incompativel/g;
+      const citacoes38 = (PD_CODIGO.match(RPC38) ?? []).length;
+      const corpo38 = corpoExportado(PD_CODIGO, "cancelarAprovacaoRetomadaIncompativel");
+      const foraDoCorpo38 =
+        (PD_CODIGO.replace(corpo38, "").match(RPC38) ?? []).length;
+      ok(`O38  a RPC de cancelamento e citada UMA vez no modulo (${citacoes38})`,
+        citacoes38 === 1);
+      ok("O38a e essa unica citacao esta DENTRO do wrapper, nao solta no arquivo",
+        corpo38.length > 200 && (corpo38.match(RPC38) ?? []).length === 1 &&
+        foraDoCorpo38 === 0);
+      ok("O38b CONTROLE: uma citacao a mais, fora do wrapper, seria detectada",
+        ((PD_CODIGO + " retomada_cancelar_aprovacao_incompativel")
+          .match(RPC38) ?? []).length !== 1);
+      ok("O38c o wrapper de cancelamento chama UMA rpc e NENHUMA tabela",
+        (corpo38.match(/\.rpc\(/g) ?? []).length === 1 && !/\.from\(/.test(corpo38));
+    }
     {
       const producaoN = ["lib/agentes", "app", "components"];
       const alcancaN: string[] = [];
@@ -4221,6 +4271,396 @@ async function principal(): Promise<void> {
         alcancaN.length === 0);
     }
   }
+
+  // ────────────────────────────────────────────────────────────────
+  // P. APPROVAL-DECISION-RESUME-D5-C3-I2-B1 — o CANCELAMENTO tecnico
+  //    dormente
+  //
+  // O que esta secao NAO prova: que cancelar e a decisao certa para uma
+  // aprovacao qualquer. Isso e do slot de reconciliacao, que ainda nao
+  // existe, e do SQL, que o P0 ja fechou.
+  //
+  // O que ela prova e o CONTRATO do adaptador, e ele tem uma forma
+  // incomum: o ator do cancelamento NAO pode viajar do TypeScript. A
+  // funcao no banco carrega o ator como constante do proprio corpo, e
+  // nao existe parametro por onde propor outro. Um wrapper que aceitasse
+  // um terceiro argumento — ator, motivo, tarefa — estaria oferecendo
+  // uma capacidade que o banco recusa, e a unica forma de provar que ele
+  // nao a oferece e olhar as CHAVES que chegam ao duplo.
+  // ────────────────────────────────────────────────────────────────
+  {
+    console.log("\nP. RESUME-D5-C3-I2-B1: cancelamento tecnico dormente");
+
+    const pb = await import("../lib/agentes/retomada/persistencia-retomada");
+    const {
+      cancelarAprovacaoRetomadaIncompativel,
+      ehCodigoCancelamentoRetomada,
+      codigosCancelamentoRetomada,
+    } = pb;
+
+    const PB_FONTE = ler("lib/agentes/retomada/persistencia-retomada.ts");
+    const PB_CODIGO = semComentarios(PB_FONTE);
+
+    /** Mesmo recorte fechado da secao O: da assinatura ate o `}` da
+     *  coluna 0. Fatiar ate o fim do arquivo acusaria o vizinho. */
+    const corpoP = (fonte: string, nome: string): string => {
+      const linhas = fonte.split("\n");
+      const i = linhas.findIndex((l) =>
+        l.startsWith(`export async function ${nome}`));
+      if (i < 0) return "";
+      for (let j = i + 1; j < linhas.length; j++) {
+        if (linhas[j] === "}") return linhas.slice(i, j + 1).join("\n");
+      }
+      return "";
+    };
+
+    const CORPO_CANCEL = corpoP(PB_CODIGO, "cancelarAprovacaoRetomadaIncompativel");
+
+    const USER_P = "dono-cancelamento";
+    const APROV_P = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    const RPC_CANCEL_P = "retomada_cancelar_aprovacao_incompativel";
+
+    /** Literal INDEPENDENTE, transcrito da migration. NAO sai de
+     *  `codigosCancelamentoRetomada()`: derivar o esperado da producao
+     *  seria comparar o catalogo consigo mesmo, e um catalogo assim
+     *  "passa" com qualquer conteudo. */
+    const ESPERADOS_P = [
+      "aprovacao_inexistente",
+      "ja_cancelada",
+      "ja_consumida",
+      "ja_rejeitada",
+      "expirada",
+      "aprovacao_pendente",
+      "tarefa_incompativel",
+      "cancelada",
+    ] as const;
+
+    ok("P0  ANCORA: wrapper, guard e leitor existem, e o corpo foi isolado",
+      typeof cancelarAprovacaoRetomadaIncompativel === "function" &&
+      typeof ehCodigoCancelamentoRetomada === "function" &&
+      typeof codigosCancelamentoRetomada === "function" &&
+      CORPO_CANCEL.length > 200);
+    ok("P0a ANCORA: o recorte e fechado — o corpo nao invadiu o vizinho",
+      !CORPO_CANCEL.includes("descobrirCandidatasRetomadaStale") &&
+      !CORPO_CANCEL.includes("export async function descobrir"));
+
+    // ── P1. DOMINIO: conjunto e cardinalidade, nunca so a ordem ─────
+    //
+    // Comparar por `join(",")` amarraria o teste a ORDEM da lista de
+    // producao, que e deliberadamente a do fluxo da RPC e pode ser
+    // reordenada sem mudar nada. O criterio certo e conjunto + tamanho
+    // + ausencia de repetido.
+    {
+      const igualPorConjuntoP = (a: readonly string[], b: readonly string[]): boolean =>
+        a.length === b.length &&
+        new Set(a).size === a.length &&
+        new Set(b).size === b.length &&
+        a.every((x) => b.includes(x));
+
+      const producaoP = codigosCancelamentoRetomada();
+
+      ok(`P1  o dominio publicado e EXATAMENTE os oito da migration (${producaoP.length})`,
+        igualPorConjuntoP(producaoP, ESPERADOS_P));
+      ok("P1a e a cardinalidade e oito, contada a parte",
+        producaoP.length === 8 && ESPERADOS_P.length === 8);
+      ok("P1b CONTROLE NEGATIVO: um catalogo com SETE codigos reprova",
+        !igualPorConjuntoP(ESPERADOS_P.slice(0, 7), ESPERADOS_P));
+      ok("P1c CONTROLE NEGATIVO: um catalogo com NOVE codigos reprova",
+        !igualPorConjuntoP([...ESPERADOS_P, "codigo_nono"], ESPERADOS_P));
+      ok("P1d CONTROLE NEGATIVO: oito codigos com UM trocado tambem reprova",
+        !igualPorConjuntoP(
+          [...ESPERADOS_P.slice(0, 7), "cancelada_pelo_usuario"], ESPERADOS_P));
+      ok("P1e CONTROLE NEGATIVO: oito com um REPETIDO reprova",
+        !igualPorConjuntoP(
+          [...ESPERADOS_P.slice(0, 7), ESPERADOS_P[0]], ESPERADOS_P));
+      ok("P1f o guard aceita os oito e recusa um vizinho plausivel",
+        ESPERADOS_P.every((c) => ehCodigoCancelamentoRetomada(c)) &&
+        !ehCodigoCancelamentoRetomada("cancelado") &&
+        !ehCodigoCancelamentoRetomada("ja_expirada"));
+      ok("P1g o leitor devolve a MESMA referencia congelada, nao uma copia mutavel",
+        codigosCancelamentoRetomada() === producaoP);
+    }
+
+    // ── P2..P9. SUCESSO: um cenario REAL por codigo ─────────────────
+    {
+      const vistosP: string[] = [];
+      let indiceP = 1;
+      for (const codigo of ESPERADOS_P) {
+        indiceP += 1;
+        roteiro();
+        roteiroRpc({ data: codigo, error: null });
+        const r = await cancelarAprovacaoRetomadaIncompativel(USER_P, APROV_P);
+        ok(`P${indiceP}  "${codigo}" volta como ok:true, em UMA rpc e zero consultas`,
+          r.ok === true && r.ok && r.codigo === codigo &&
+          chamadasRpc.length === 1 && chamadasRpc[0]?.nome === RPC_CANCEL_P &&
+          chamadas.length === 0);
+        if (r.ok) vistosP.push(r.codigo);
+      }
+      ok("P10 ANCORA: os OITO codigos foram mesmo exercitados, um cada",
+        vistosP.length === 8 && new Set(vistosP).size === 8 &&
+        ESPERADOS_P.every((c) => vistosP.includes(c)));
+    }
+
+    // ── P11..P15. RESPOSTA FORA DO CONTRATO: fail-closed ────────────
+    //
+    // `undefined` merece um canal proprio: o coalesce do duplo o
+    // colapsaria em `null`, e o assert estaria medindo o fake em vez da
+    // producao. O canal `bruto` entrega o valor como veio — e o P11a
+    // prova que ele faz isso de verdade, senao este bloco inteiro seria
+    // um teste de `null` com cinco nomes diferentes.
+    {
+      roteiro();
+      roteiroRpc({ data: undefined, bruto: true });
+      const sonda = await clienteFake.rpc("sonda-do-canal-bruto", {});
+      ok("P11a ANCORA: o canal bruto entrega `undefined` DE VERDADE",
+        sonda.data === undefined);
+
+      const invalidosP: ReadonlyArray<readonly [string, Resposta]> = [
+        ["string fora do catalogo", { data: "codigo_inventado", error: null }],
+        ["null", { data: null, error: null }],
+        ["undefined", { data: undefined, error: null, bruto: true }],
+        ["objeto", { data: {}, error: null }],
+        ["numero", { data: 123, error: null }],
+      ];
+      const falhasP: string[] = [];
+      let indiceP = 10;
+      for (const [rotulo, resposta] of invalidosP) {
+        indiceP += 1;
+        roteiro();
+        roteiroRpc(resposta);
+        const r = await cancelarAprovacaoRetomadaIncompativel(USER_P, APROV_P);
+        ok(`P${indiceP} ${rotulo} e resposta_invalida, e custou UMA rpc`,
+          r.ok === false && !r.ok && r.falha === "resposta_invalida" &&
+          chamadasRpc.length === 1 && chamadas.length === 0);
+        if (!r.ok) falhasP.push(r.falha);
+      }
+      ok("P16 HARD: os cinco falharam com o MESMO rotulo fail-closed",
+        falhasP.length === 5 &&
+        falhasP.every((f) => f === "resposta_invalida"));
+    }
+
+    // ── P17..P19. ERRO DE RPC: vocabulario reaproveitado ────────────
+    {
+      const errosP: ReadonlyArray<readonly [string, string]> = [
+        ["22023", "rpc_entrada_invalida"],
+        ["55000", "rpc_fora_de_contrato"],
+        ["08006", "rpc_indisponivel"],
+      ];
+      let indiceP = 16;
+      const observadosP: string[] = [];
+      for (const [code, esperado] of errosP) {
+        indiceP += 1;
+        roteiro();
+        roteiroRpc({ data: null, error: { code } });
+        const r = await cancelarAprovacaoRetomadaIncompativel(USER_P, APROV_P);
+        ok(`P${indiceP} SQLSTATE ${code} vira ${esperado}, em UMA rpc`,
+          r.ok === false && !r.ok && r.falha === esperado &&
+          chamadasRpc.length === 1);
+        if (!r.ok) observadosP.push(r.falha);
+      }
+      ok("P20 ANCORA: os tres rotulos observados sao DISTINTOS entre si",
+        new Set(observadosP).size === 3);
+
+      // ── CONTROLE: a forma conceitual "erro virou sucesso" ─────────
+      //
+      // O criterio e uma funcao pura aplicada aos DOIS lados: ao
+      // resultado real e a um mutante escrito a mao. Construir o
+      // esperado a partir do proprio retorno tornaria o assert
+      // verdadeiro por definicao.
+      const ehFalhaP = (r: { ok: boolean; falha?: unknown }): boolean =>
+        r.ok === false && typeof r.falha === "string" && r.falha !== "";
+
+      roteiro();
+      roteiroRpc({ data: null, error: { code: "08006" } });
+      const realP = await cancelarAprovacaoRetomadaIncompativel(USER_P, APROV_P);
+      ok("P21 CONTROLE: o mutante `erro -> ok:true` e REPROVADO pelo mesmo criterio",
+        ehFalhaP(realP) &&
+        !ehFalhaP({ ok: true }) &&
+        !ehFalhaP({ ok: false }) &&
+        !ehFalhaP({ ok: false, falha: "" }));
+      ok("P22 HARD: erro NUNCA devolve `codigo`",
+        !Object.prototype.hasOwnProperty.call(realP, "codigo"));
+
+      // ── P22a..P22e. ERRO DOMINA DATA VALIDA — achado B1-R1-F1 ──────
+      //
+      // As tres fixtures acima usam `data: null`, e isso deixa um
+      // mutante VIVO: um wrapper que validasse `data` ANTES de `error`
+      // passaria nas tres, porque `null` reprova no guard de catalogo e
+      // o fluxo cai no ramo de erro assim mesmo, com o rotulo certo.
+      //
+      // So uma resposta com os DOIS campos uteis ao mesmo tempo separa
+      // o codigo correto desse mutante — e e por isso que a ancora
+      // P22a existe: se a `data` da fixture nao fosse um codigo
+      // realmente aceito pelo guard, o cenario passaria pelo motivo
+      // errado (`resposta_invalida`) e nao provaria precedencia nenhuma.
+      {
+        const DATA_VALIDA_P = "cancelada";
+        const ERRO_JUNTO_P = { code: "08006" };
+
+        ok("P22a ANCORA: a data da fixture e um codigo VALIDO do catalogo",
+          ehCodigoCancelamentoRetomada(DATA_VALIDA_P));
+
+        // ANCORA de canal: os dois campos chegam na MESMA resposta.
+        // A comparacao e por IDENTIDADE do objeto de erro — o fake
+        // repassa a referencia —, entao nao ha como confundir com um
+        // erro roteirizado noutro cenario.
+        roteiro();
+        roteiroRpc({ data: DATA_VALIDA_P, error: ERRO_JUNTO_P });
+        const sondaP = await clienteFake.rpc("sonda-erro-com-data-valida", {});
+        ok("P22b ANCORA: o fake entrega data VALIDA e error NAO-NULO na mesma resposta",
+          sondaP.data === DATA_VALIDA_P && sondaP.error === ERRO_JUNTO_P);
+
+        // O CASO REAL: mesmo canal, mesma funcao de producao.
+        roteiro();
+        roteiroRpc({ data: DATA_VALIDA_P, error: ERRO_JUNTO_P });
+        const dominaP = await cancelarAprovacaoRetomadaIncompativel(USER_P, APROV_P);
+        ok("P22c erro NAO-NULO vence data VALIDA: o retorno e rpc_indisponivel",
+          dominaP.ok === false && !dominaP.ok &&
+          dominaP.falha === "rpc_indisponivel" &&
+          !Object.prototype.hasOwnProperty.call(dominaP, "codigo"));
+
+        // A entrada consumida e observada DEPOIS da chamada: prova que
+        // foi ESTA resposta — a dupla — que o wrapper leu, e nao alguma
+        // outra roteirizada por engano ou uma segunda invocacao.
+        ok("P22d a UNICA rpc do wrapper consumiu exatamente essa resposta dupla",
+          chamadasRpc.length === 1 && consumidasRpc === 1 &&
+          respostasRpc.length === 1 &&
+          respostasRpc[0]?.data === DATA_VALIDA_P &&
+          respostasRpc[0]?.error === ERRO_JUNTO_P);
+
+        // NAO-VACUIDADE pelo MESMO criterio do P21, sem duplicar
+        // mecanismo: o resultado real passa, e a forma que o mutante
+        // produziria neste cenario — sucesso — e reprovada.
+        ok("P22e CONTROLE: neste cenario o mutante que devolvesse ok:true seria reprovado",
+          ehFalhaP(dominaP) && !ehFalhaP({ ok: true }));
+      }
+    }
+
+    // ── P23..P26. O ATOR NAO PODE VIAJAR DAQUI ──────────────────────
+    {
+      /** Criterio PURO sobre as chaves que chegaram ao banco. Aplicado
+       *  ao observado E a fixtures sinteticas: um detector que nunca foi
+       *  visto reprovando nao prova nada. */
+      const chavesOkP = (ks: readonly string[]): boolean =>
+        ks.length === 2 &&
+        [...ks].sort().join(",") === "p_aprovacao_id,p_user_id";
+
+      roteiro();
+      roteiroRpc({ data: "cancelada", error: null });
+      await cancelarAprovacaoRetomadaIncompativel(USER_P, APROV_P);
+      const chavesP = Object.keys(chamadasRpc[0]?.parametros ?? {});
+
+      ok(`P23 a RPC recebe EXATAMENTE duas chaves (${[...chavesP].sort().join(", ")})`,
+        chavesOkP(chavesP));
+      ok("P24 e os dois valores sao os argumentos, sem aparo nem substituicao",
+        chamadasRpc[0]?.nome === RPC_CANCEL_P &&
+        chamadasRpc[0]?.parametros?.p_user_id === USER_P &&
+        chamadasRpc[0]?.parametros?.p_aprovacao_id === APROV_P);
+      ok("P25 CONTROLE NEGATIVO: uma TERCEIRA chave de ator seria detectada",
+        !chavesOkP(["p_user_id", "p_aprovacao_id", "p_actor"]) &&
+        !chavesOkP(["p_user_id", "p_aprovacao_id", "p_cancelado_por"]) &&
+        !chavesOkP(["p_user_id"]) &&
+        !chavesOkP(["p_user_id", "p_tarefa_id"]));
+
+      /** Detector ESTRUTURAL, tambem exercitado contra fixture. */
+      const propoeAtorP = (fonte: string): boolean =>
+        /\b(p_actor|p_ator|p_cancelado_por|p_decidido_por|actor|canceladoPor|decididoPor|motivo|reason)\b/
+          .test(fonte);
+
+      ok("P26 nem a assinatura nem o corpo propoem ator, motivo ou tarefa",
+        !propoeAtorP(CORPO_CANCEL) &&
+        propoeAtorP('rpc("x", { p_user_id: u, p_aprovacao_id: a, p_actor: "eu" })') &&
+        propoeAtorP("canceladoPor: quemMandou"));
+      ok("P26a a assinatura tem DOIS parametros, e os dois sao identidade",
+        /export async function cancelarAprovacaoRetomadaIncompativel\( userId: string, aprovacaoId: string \)/
+          .test(CORPO_CANCEL.replace(/\s+/g, " ")));
+    }
+
+    // ── P27..P31. HIGIENE do corpo ──────────────────────────────────
+    {
+      ok("P27 o corpo nao le campo cru do erro do driver",
+        !/\.message\b|\.details\b|\.hint\b|\.stack\b|JSON\.stringify\(\s*error/
+          .test(CORPO_CANCEL));
+      ok("P28 todo console.error do corpo e literal fixa, sem interpolacao",
+        [...CORPO_CANCEL.matchAll(/console\.error\(([^)]*)\)/g)]
+          .every((m) => /^"[^"`$]*"$/.test(m[1].trim())) &&
+        !/console\.error\(\s*(error|data|userId|aprovacaoId)\b/.test(CORPO_CANCEL));
+      ok("P29 zero retry: sem loop, timer, backoff ou catch ad hoc",
+        !/setTimeout|setInterval|\bwhile\b|\bfor\s*\(|\.catch\(/.test(CORPO_CANCEL));
+      ok("P30 UMA rpc no corpo, e ZERO acesso a tabela",
+        (CORPO_CANCEL.match(/\.rpc\(/g) ?? []).length === 1 &&
+        !/\.from\(/.test(CORPO_CANCEL));
+      ok("P30a e a unica rpc do corpo e a de cancelamento, nomeada por literal",
+        (CORPO_CANCEL.match(new RegExp(RPC_CANCEL_P, "g")) ?? []).length === 1);
+      // ── B1 NAO classifica progresso ────────────────────────────────
+      //
+      // `expirada` e genuinamente ambiguo sobre ter havido mutacao NESTA
+      // chamada: o TTL pode ter disparado agora, ou a linha ja podia
+      // estar expirada. Decidir isso aqui criaria uma segunda fonte de
+      // verdade sobre progresso duravel, que e do slot.
+      ok("P31 o corpo NAO classifica progresso — devolve o codigo cru",
+        !/progresso|duravel|confirmado|possivel|nenhum\b/.test(CORPO_CANCEL) &&
+        !/expirada/.test(CORPO_CANCEL));
+      ok("P31a sem cast cego nem supressao de tipo no corpo",
+        !/as any|@ts-ignore|@ts-expect-error|as unknown as/.test(CORPO_CANCEL));
+      ok("P31b sem guarda local de entrada: o banco continua a fonte de verdade",
+        !/if\s*\(\s*!?\s*userId/.test(CORPO_CANCEL) &&
+        !/if\s*\(\s*!?\s*aprovacaoId/.test(CORPO_CANCEL) &&
+        !/\.trim\(\)/.test(CORPO_CANCEL));
+    }
+
+    // ── P32..P36. DORMENCIA DIRETA: zero chamador de producao ───────
+    //
+    // Achado B1-A0-F1 fechado por inteiro: nao basta o nome entrar na
+    // lista generica do K71 — este bloco pergunta a pergunta ESTREITA
+    // ("quem INVOCA este wrapper?") e distingue definicao de invocacao,
+    // que e justamente o que uma varredura por nome cru nao faz.
+    {
+      /** PURO: recebe fonte, devolve se ela INVOCA o wrapper. A
+       *  definicao e neutralizada antes da busca, senao o proprio
+       *  adaptador se acusaria e o assert nasceria impossivel. */
+      const invocaCancelP = (fonte: string): boolean =>
+        /\bcancelarAprovacaoRetomadaIncompativel\s*\(/.test(
+          fonte.replace(
+            /export\s+async\s+function\s+cancelarAprovacaoRetomadaIncompativel/g,
+            "DEFINICAO_NEUTRALIZADA"));
+
+      const producaoRaizP = ["lib", "app", "components"];
+      const chamadoresP: string[] = [];
+      let varridosP = 0;
+      const varrerP = (dir: string): void => {
+        for (const e of readdirSync(join(RAIZ, dir), { withFileTypes: true })) {
+          const rel = `${dir}/${e.name}`.replace(/\\/g, "/");
+          if (e.isDirectory()) {
+            varrerP(rel);
+            continue;
+          }
+          if (!/\.tsx?$/.test(e.name)) continue;
+          varridosP += 1;
+          if (invocaCancelP(semComentarios(readFileSync(join(RAIZ, rel), "utf8"))))
+            chamadoresP.push(rel);
+        }
+      };
+      for (const d of producaoRaizP) varrerP(d);
+
+      ok(`P32 ANCORA: a varredura de producao rodou de verdade (${varridosP} arquivos)`,
+        varridosP > 50);
+      ok(`P33 o wrapper nasce DORMENTE: zero chamador de producao (${chamadoresP.join(", ") || "nenhum"})`,
+        chamadoresP.length === 0);
+      ok("P34 CONTROLE NEGATIVO: um chamador no executor OU no worker seria detectado",
+        invocaCancelP("const r = await cancelarAprovacaoRetomadaIncompativel(u, a);") &&
+        invocaCancelP("void cancelarAprovacaoRetomadaIncompativel(dono, ap)") &&
+        invocaCancelP("  return cancelarAprovacaoRetomadaIncompativel(\n    u,\n    a\n  );"));
+      ok("P35 CONTROLE POSITIVO: a DEFINICAO sozinha nao conta como chamador",
+        !invocaCancelP(
+          "export async function cancelarAprovacaoRetomadaIncompativel(\n  userId: string,\n) {}") &&
+        !invocaCancelP("export { cancelarAprovacaoRetomadaIncompativel };"));
+      ok("P36 o executor Resume e o worker seguem sem invocar o cancelamento",
+        !invocaCancelP(ler("lib/agentes/retomada/executar-retomada.ts")) &&
+        !invocaCancelP(ler("app/api/internal/agentes/worker/route.ts")));
+    }
+  }
+
 
   console.log(`\n══ ${passou} PASS / ${falhou} FAIL ══\n`);
   process.exit(falhou === 0 ? 0 : 1);

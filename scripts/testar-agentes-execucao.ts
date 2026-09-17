@@ -4138,20 +4138,23 @@ async function main() {
         !/sqlerrm|sqlstate\s+into|pg_exception/i.test(CORPO_CANCEL));
     }
 
-    // ── W40. DORMENCIA, agora CIENTE DO ADAPTADOR ───────────────────
+    // ── W40. DORMENCIA, agora CIENTE DOS DOIS ADAPTADORES ───────────
     //
     // Ate o A1 nenhuma das duas RPCs podia ser citada por arquivo de
     // producao: nao existia adaptador, entao qualquer mencao SERIA um
     // chamador, e `zero arquivo` era a forma certa de dizer isso.
     //
     // O A1 criou, por desenho aprovado, UM wrapper dormente para a RPC
-    // de leitura. A propriedade protegida nao mudou — as duas seguem sem
-    // orquestrador —, mas a prova precisou ficar mais precisa em vez de
-    // mais frouxa: UM path exato para UMA RPC exata, e nada alem disso.
+    // de leitura; o B1 criou o par dela para a RPC de cancelamento. A
+    // propriedade protegida nao mudou — as duas seguem sem orquestrador
+    // —, mas a prova precisou ficar mais precisa em vez de mais frouxa.
     //
-    // O que continua proibido, e agora explicitamente: um SEGUNDO
-    // arquivo tocando a RPC de leitura, e QUALQUER arquivo tocando a de
-    // cancelamento, que ainda nao tem adaptador nenhum.
+    // A mudanca de forma importa e e deliberada: o veredito deixou de
+    // ser um TETO ("no maximo estes arquivos") e virou um INVENTARIO
+    // NOMINAL ("exatamente este arquivo, para CADA uma das duas"). A
+    // diferenca aparece no W40n: conjunto de cancelamento VAZIO agora
+    // REPROVA, porque a partir do B1 o adaptador e obrigatorio — se ele
+    // sumir, alguem apagou o wrapper, e isso tambem e uma regressao.
     {
       /** Literal INDEPENDENTE. Nao sai da varredura: se saisse, o teste
        *  estaria comparando o resultado consigo mesmo. */
@@ -4163,14 +4166,19 @@ async function main() {
        *  da varredura de disco de proposito: e isso que permite executa-la
        *  contra cenarios sinteticos sem escrever arquivo nenhum no
        *  repositorio. Um detector que nunca foi visto reprovando nao
-       *  prova coisa alguma. */
+       *  prova coisa alguma.
+       *
+       *  Os dois conjuntos passam pelo MESMO criterio, e ele e igualdade
+       *  com o singleton autorizado — nao `length <= 1`, nao `includes`,
+       *  nao basename. */
+      const soONoAdaptadorW = (arquivos: readonly string[]): boolean =>
+        arquivos.length === 1 && arquivos[0] === ADAPTADOR_AUTORIZADO_W;
+
       const dormenteW = (
         arquivosLeitura: readonly string[],
         arquivosCancel: readonly string[]
       ): boolean =>
-        arquivosCancel.length === 0 &&
-        arquivosLeitura.length === 1 &&
-        arquivosLeitura[0] === ADAPTADOR_AUTORIZADO_W;
+        soONoAdaptadorW(arquivosLeitura) && soONoAdaptadorW(arquivosCancel);
 
       const producaoW = ["lib/agentes", "app", "components"];
       const comLeituraW: string[] = [];
@@ -4197,28 +4205,46 @@ async function main() {
       ok(`W40 ANCORA: a varredura de producao rodou de verdade (${varridosW} arquivos)`,
         varridosW > 50);
       ok(`W40a a RPC de leitura aparece SO no adaptador aprovado (${comLeituraW.join(", ") || "nenhum"})`,
-        comLeituraW.length === 1 && comLeituraW[0] === ADAPTADOR_AUTORIZADO_W);
-      ok(`W40b a RPC de cancelamento nao tem adaptador nem chamador (${comCancelW.join(", ") || "nenhum"})`,
-        comCancelW.length === 0);
+        soONoAdaptadorW(comLeituraW));
+      ok(`W40b a RPC de cancelamento tambem, e em NENHUM outro lugar (${comCancelW.join(", ") || "nenhum"})`,
+        soONoAdaptadorW(comCancelW));
       ok("W40c veredito de dormencia sobre o estado REAL do repositorio",
         dormenteW(comLeituraW, comCancelW));
+      ok("W40c1 ANCORA: as duas RPCs pousaram no MESMO arquivo, e ele e o autorizado",
+        comLeituraW.length === 1 && comCancelW.length === 1 &&
+        comLeituraW[0] === comCancelW[0] &&
+        comCancelW[0] === ADAPTADOR_AUTORIZADO_W);
 
       // ── CONTROLES: o veredito precisa MORDER ──────────────────────
-      ok("W40d CONTROLE POSITIVO: o cenario permitido e aceito",
-        dormenteW([ADAPTADOR_AUTORIZADO_W], []));
+      ok("W40d CONTROLE POSITIVO: o unico cenario permitido e aceito",
+        dormenteW([ADAPTADOR_AUTORIZADO_W], [ADAPTADOR_AUTORIZADO_W]));
       ok("W40e CONTROLE NEGATIVO: um SEGUNDO arquivo com a RPC de leitura reprova",
         !dormenteW(
-          [ADAPTADOR_AUTORIZADO_W, "lib/agentes/retomada/executar-retomada.ts"], []));
+          [ADAPTADOR_AUTORIZADO_W, "lib/agentes/retomada/executar-retomada.ts"],
+          [ADAPTADOR_AUTORIZADO_W]));
       ok("W40f CONTROLE NEGATIVO: a RPC de leitura fora do adaptador reprova",
-        !dormenteW(["app/api/internal/agentes/worker/route.ts"], []));
-      ok("W40g CONTROLE NEGATIVO: QUALQUER ocorrencia da RPC de cancelamento reprova",
-        !dormenteW([ADAPTADOR_AUTORIZADO_W], ["lib/agentes/retomada/executar-retomada.ts"]) &&
-        !dormenteW([ADAPTADOR_AUTORIZADO_W], [ADAPTADOR_AUTORIZADO_W]));
-      ok("W40h CONTROLE NEGATIVO: basename igual em OUTRO diretorio reprova",
-        !dormenteW(["lib/agentes/persistencia-retomada.ts"], []) &&
-        !dormenteW(["lib/outro/retomada/persistencia-retomada.ts"], []));
-      ok("W40i CONTROLE NEGATIVO: nenhum arquivo com a RPC de leitura tambem reprova",
-        !dormenteW([], []));
+        !dormenteW(["app/api/internal/agentes/worker/route.ts"], [ADAPTADOR_AUTORIZADO_W]));
+      ok("W40g CONTROLE NEGATIVO: a RPC de cancelamento no EXECUTOR reprova",
+        !dormenteW([ADAPTADOR_AUTORIZADO_W], ["lib/agentes/retomada/executar-retomada.ts"]));
+      ok("W40g1 CONTROLE NEGATIVO: a RPC de cancelamento no WORKER reprova",
+        !dormenteW([ADAPTADOR_AUTORIZADO_W], ["app/api/internal/agentes/worker/route.ts"]));
+      ok("W40g2 CONTROLE NEGATIVO: adaptador MAIS um segundo arquivo no cancelamento reprova",
+        !dormenteW(
+          [ADAPTADOR_AUTORIZADO_W],
+          [ADAPTADOR_AUTORIZADO_W, "lib/agentes/retomada/executar-retomada.ts"]));
+      ok("W40h CONTROLE NEGATIVO: basename igual em OUTRO diretorio reprova, nos DOIS conjuntos",
+        !dormenteW(["lib/agentes/persistencia-retomada.ts"], [ADAPTADOR_AUTORIZADO_W]) &&
+        !dormenteW(["lib/outro/retomada/persistencia-retomada.ts"], [ADAPTADOR_AUTORIZADO_W]) &&
+        !dormenteW([ADAPTADOR_AUTORIZADO_W], ["lib/agentes/persistencia-retomada.ts"]) &&
+        !dormenteW([ADAPTADOR_AUTORIZADO_W], ["lib/outro/retomada/persistencia-retomada.ts"]));
+      ok("W40h1 CONTROLE NEGATIVO: prefixo de diretorio nao basta — o path e comparado inteiro",
+        !dormenteW([ADAPTADOR_AUTORIZADO_W], ["lib/agentes/retomada"]) &&
+        !dormenteW([ADAPTADOR_AUTORIZADO_W],
+          ["lib/agentes/retomada/persistencia-retomada.test.ts"]));
+      ok("W40i CONTROLE NEGATIVO: conjunto de leitura VAZIO reprova",
+        !dormenteW([], [ADAPTADOR_AUTORIZADO_W]));
+      ok("W40n CONTROLE NEGATIVO: conjunto de cancelamento VAZIO tambem reprova",
+        !dormenteW([ADAPTADOR_AUTORIZADO_W], []) && !dormenteW([], []));
 
       // ── A intencao original, dita diretamente ─────────────────────
       //

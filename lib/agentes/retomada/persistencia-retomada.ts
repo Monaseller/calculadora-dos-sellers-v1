@@ -791,3 +791,90 @@ export async function descobrirCandidatasRetomadaStale(
 
   return { ok: true, candidatas };
 }
+
+// ─── Codigos de dominio: CANCELAMENTO tecnico de aprovacao ────────────
+
+/**
+ * Os 8 codigos da RPC de cancelamento tecnico. A lista segue o ponto do
+ * fluxo em que cada um aparece, nao a ordem alfabetica — mesma convencao
+ * dos dois dominios acima.
+ *
+ * O bloco aparece aqui, e nao junto dos outros dois, porque este slice
+ * foi escrito como acrescimo puro: nenhuma linha anterior do arquivo
+ * mudou, e a prova de escopo do slice e exatamente essa.
+ */
+const CODIGOS_CANCELAMENTO = [
+  "aprovacao_inexistente",
+  "ja_cancelada",
+  "ja_consumida",
+  "ja_rejeitada",
+  "expirada",
+  "aprovacao_pendente",
+  "tarefa_incompativel",
+  "cancelada",
+] as const;
+
+export type CodigoCancelamentoRetomada = (typeof CODIGOS_CANCELAMENTO)[number];
+
+const SET_CODIGOS_CANCELAMENTO: ReadonlySet<string> = new Set(CODIGOS_CANCELAMENTO);
+
+/** Type guard de RUNTIME. Sem ele, um cast cegaria a resposta. */
+export function ehCodigoCancelamentoRetomada(
+  valor: unknown
+): valor is CodigoCancelamentoRetomada {
+  return typeof valor === "string" && SET_CODIGOS_CANCELAMENTO.has(valor);
+}
+
+/** Leitura somente, para diagnostico e teste. Nunca mutavel. */
+export function codigosCancelamentoRetomada(): readonly CodigoCancelamentoRetomada[] {
+  return CODIGOS_CANCELAMENTO;
+}
+
+// ─── 10. Cancelamento tecnico de aprovacao incompativel ───────────────
+
+/**
+ * Cancela uma aprovacao que a reconciliacao julgou incompativel com a
+ * tarefa dona dela.
+ *
+ * ── Por que sao apenas DOIS argumentos ──────────────────────────────
+ *
+ * O ator do cancelamento nao viaja daqui. Ele e uma constante do corpo
+ * da funcao no banco, e nao existe parametro por onde o TypeScript
+ * pudesse propor outro: cancelamento tecnico se identifica como tecnico
+ * por construcao, nunca por afirmacao do chamador. Um terceiro
+ * argumento aqui — ator, motivo, tarefa ou agente — so poderia ser
+ * ignorado ou forjar identidade, e as duas saidas sao piores que nao
+ * existir.
+ *
+ * ── O que este wrapper NAO faz ──────────────────────────────────────
+ *
+ * Ele devolve o codigo CRU. Nao decide se houve progresso duravel, nao
+ * interpreta `expirada` — que e genuinamente ambiguo sobre ter havido
+ * mutacao nesta chamada — e nao escolhe quem cancelar. Essas decisoes
+ * pertencem ao slot de reconciliacao, que ainda nao existe.
+ */
+export async function cancelarAprovacaoRetomadaIncompativel(
+  userId: string,
+  aprovacaoId: string
+): Promise<ResultadoCodigoRetomada<CodigoCancelamentoRetomada>> {
+  const { data, error } = await getSupabaseServidor().rpc(
+    "retomada_cancelar_aprovacao_incompativel",
+    {
+      p_user_id: userId,
+      p_aprovacao_id: aprovacaoId,
+    }
+  );
+
+  if (error) {
+    console.error("[agentes-retomada] RPC de cancelamento tecnico falhou");
+    return { ok: false, falha: classificarErro(error) };
+  }
+  // FAIL CLOSED: uma resposta fora do catalogo nao vira codigo por cast.
+  // Quem chamar nao recebe permissao para concluir que a aprovacao foi
+  // resolvida de forma alguma.
+  if (!ehCodigoCancelamentoRetomada(data)) {
+    console.error("[agentes-retomada] cancelamento tecnico devolveu codigo fora do contrato");
+    return { ok: false, falha: "resposta_invalida" };
+  }
+  return { ok: true, codigo: data };
+}
