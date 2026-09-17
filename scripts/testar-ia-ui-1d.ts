@@ -424,7 +424,14 @@ secao("G. Zero backend e zero segredo");
     // par — incluir um terceiro termo reprovaria contrato correto.
     ["identificador de dono", /\buser_id\b|\bloja_id\b/],
     ["viewport em JS", /window\.innerWidth|addEventListener\("resize"|matchMedia/],
-    ["resultado bruto", /\bresultado\b\s*:|\.resultado\b/],
+    // A SKILL-1D.ui-consumer-C trouxe `resultado` para dentro da area: o
+    // transporte carrega o campo tipado e a tela de Consultar Vendas o
+    // renderiza. A sonda nao afrouxa — vira igualdade nominal, como a de
+    // rede logo acima. Terceiro arquivo com `resultado` reprova; sumico de
+    // um dos dois autorizados tambem. E o que os autorizados podem fazer
+    // com o campo esta congelado nas ancoras Gr1..Gr8 abaixo.
+    ["resultado bruto", /\bresultado\b\s*:|\.resultado\b/,
+      ["lib/ia/agentes-http.ts", "components/ia/agente/ExecutarConsultaVendas.tsx"]],
   ];
 
   const isca = [
@@ -470,6 +477,195 @@ secao("G. Zero backend e zero segredo");
     ok(`G  ${permitidos.length === 0 ? "zero" : "so o autorizado tem"} ${nome}`,
       sujos.length === 0 && sumidos.length === 0,
       [...sujos, ...sumidos.map((a) => `${a} (sumiu)`)].join(", "));
+  }
+
+  // ── Gr1..Gr8 — O QUE OS DOIS AUTORIZADOS PODEM FAZER ──────────────
+  //
+  // Allowlist nominal sozinha e um cheque em branco: os dois arquivos
+  // poderiam despejar o resultado cru do agente na tela. Estas ancoras
+  // congelam a CONTAGEM e a FORMA de cada ocorrencia. Sem elas, o G
+  // passaria a permitir exatamente o que foi criado para impedir.
+  {
+    const HTTP = codigo(ler("lib/ia/agentes-http.ts"));
+    const EXEC = codigo(ler("components/ia/agente/ExecutarConsultaVendas.tsx"));
+    const campo = (t: string) => (t.match(/\bresultado\s*:/g) ?? []).length;
+    const acesso = (t: string) => (t.match(/\.resultado\b/g) ?? []).length;
+
+    ok("Gr1 transporte: exatamente 2 campos `resultado:` e nenhum acesso cru",
+      campo(HTTP) === 2 && acesso(HTTP) === 0, `campo=${campo(HTTP)} acesso=${acesso(HTTP)}`);
+    ok("Gr2 tela: exatamente 1 campo `resultado:` e 2 acessos",
+      campo(EXEC) === 1 && acesso(EXEC) === 2, `campo=${campo(EXEC)} acesso=${acesso(EXEC)}`);
+
+    // FORMA, nao so contagem.
+    ok("Gr3 o campo do transporte e TIPADO pela UI, nunca unknown/any",
+      /resultado: ResultadoConsultaVendasUI \| null;/.test(HTTP) &&
+      !/resultado\s*:\s*(?:unknown|any|Record<)/.test(HTTP));
+    ok("Gr4 e ele passa por um normalizador, nao e repasse do bruto",
+      /resultado: resultado === null \? null : resultadoDaResposta\(resultado\)/.test(HTTP));
+    ok("Gr5 a tela so LE o campo: testa nulo e entrega ao componente",
+      /tarefa\.resultado === null/.test(EXEC) && /<Resultado dados={tarefa\.resultado}/.test(EXEC));
+    ok("Gr6 e nunca despeja o objeto cru na tela",
+      !/JSON\.stringify\([^)]*resultado/.test(EXEC) &&
+      !/dangerouslySetInnerHTML/.test(EXEC));
+
+    // ── Gr6a/Gr6b — O TERCEIRO SHAPE DA TELA: O ESTADO INICIAL ─────
+    //
+    // Das tres ocorrencias de `resultado` na tela, duas sao leituras
+    // (null-check e render) e ja estao presas por Gr5. A terceira e a
+    // ESCRITA: o objeto que inaugura o estado da tarefa. Ela nao tinha
+    // guard nenhum — e era por ali que o bruto entrava sem mover um
+    // unico match da sonda G. Allowlist e contagem continuariam verdes.
+    //
+    // O recorte e nominal: o literal passado a `setTarefa` cuja primeira
+    // chave e `id: r.tarefaId`. Isso o distingue das outras chamadas de
+    // `setTarefa` da tela, de comentario, de fixture e de qualquer outro
+    // objeto do arquivo.
+    const ESTADO_INICIAL = /setTarefa\(\{\s*id: r\.tarefaId,[\s\S]*?\n\s*\}\);/;
+    const mEstado = EXEC.match(ESTADO_INICIAL);
+    ok("Gr6a o estado inicial da tarefa foi localizado, e e unico",
+      mEstado !== null &&
+      (EXEC.match(new RegExp(ESTADO_INICIAL.source, "g")) ?? []).length === 1);
+
+    const estadoInicial = mEstado![0];
+    const valorInicial = /resultado:\s*([^,\n]+),/.exec(estadoInicial);
+    ok("Gr6b G_INITIAL_RESULT_SHAPE = NULL: a tela nasce sem resultado",
+      valorInicial !== null && valorInicial[1].trim() === "null",
+      valorInicial === null ? "ausente" : valorInicial[1].trim());
+
+    // ── Os mutantes do proprio G ────────────────────────────────────
+    //
+    // Strings em memoria: nenhum arquivo e tocado.
+    const sonda = sondas.find(([n]) => n === "resultado bruto")![1];
+    const permitidos = sondas.find(([n]) => n === "resultado bruto")![2]!;
+    ok("Gr7 M1: a allowlist tem 2 caminhos NOMINAIS, sem curinga nem pasta",
+      permitidos.length === 2 &&
+      permitidos.every((a) => /\.tsx?$/.test(a) && !/[*?]/.test(a)));
+    ok("Gr7a M2: um terceiro arquivo com `resultado` seria marcado",
+      sonda.test("const x = { resultado: dados };") &&
+      !permitidos.includes("components/ia/agente/Outro.tsx"));
+    ok("Gr7b M3: prefixo de pasta NAO autoriza — a checagem e includes exato",
+      !permitidos.includes("components/ia/agente/") &&
+      !permitidos.some((a) => a.endsWith("/")));
+    ok("Gr8 M4: transporte com campo `unknown` reprovaria Gr3",
+      /resultado\s*:\s*(?:unknown|any|Record<)/.test("  resultado: unknown;"));
+    ok("Gr8a M5: repasse sem normalizador reprovaria Gr4",
+      !/resultado: resultado === null \? null : resultadoDaResposta\(resultado\)/.test(
+        "    resultado: resultado,"));
+    // ── Gr8b — M6, O MUTANTE QUE NAO MOVE A CONTAGEM ───────────────
+    //
+    // A primeira versao deste mutante despejava `JSON.stringify` na
+    // tela. Ele reprovava, mas pelo motivo errado: acrescentava um
+    // `.resultado`, levando a tela de 1/2 para 1/3 e derrubando tambem
+    // a cardinalidade. Um mutante assim nao prova que o guard SEMANTICO
+    // funciona — so prova que contar ainda funciona.
+    //
+    // O M6 correto troca o estado inicial por um bypass com cast. A
+    // sonda G continua marcando os mesmos 2 arquivos, a distribuicao
+    // segue 2+0 e 1+2, o total segue 5 — e so o shape reprova.
+    {
+      const m6 = EXEC.replace(
+        "resultado: null,",
+        "resultado: payloadBruto as ResultadoConsultaVendasUI,");
+      ok("Gr8b M6 ANCORA: a mutacao e efetiva", m6 !== EXEC);
+
+      // (a) cardinalidade: intacta nos dois eixos, e no total.
+      const totalIntegro = campo(HTTP) + acesso(HTTP) + campo(EXEC) + acesso(EXEC);
+      const totalMutante = campo(HTTP) + acesso(HTTP) + campo(m6) + acesso(m6);
+      ok("Gr8b1 M6 OCCURRENCE_COUNTS_UNCHANGED: a tela segue 1 campo / 2 acessos",
+        campo(m6) === 1 && acesso(m6) === 2,
+        `campo=${campo(m6)} acesso=${acesso(m6)}`);
+      ok("Gr8b2 M6 o total continua sendo 5, identico ao integro",
+        totalMutante === 5 && totalMutante === totalIntegro);
+
+      // (b) allowlist: o arquivo continua sendo marcado, e continua sendo
+      //     um dos dois autorizados. Nada muda no eixo de caminhos.
+      ok("Gr8b3 M6 PATH_COUNTS_UNCHANGED: o arquivo segue marcado e autorizado",
+        sonda.test(m6) && permitidos.length === 2 &&
+        permitidos.includes("components/ia/agente/ExecutarConsultaVendas.tsx"));
+
+      // (c) e os demais shapes tambem continuam passando: o mutante nao
+      //     mexeu no null-check, no render nem no transporte.
+      const mEstado6 = m6.match(ESTADO_INICIAL);
+      ok("Gr8b4 M6 os outros asserts NAO sao a causa da reprovacao",
+        /tarefa\.resultado === null/.test(m6) &&
+        /<Resultado dados={tarefa\.resultado}/.test(m6) &&
+        !/JSON\.stringify\([^)]*resultado/.test(m6) &&
+        mEstado6 !== null);
+
+      // (d) o unico assert que cai e o shape do estado inicial.
+      const valor6 = /resultado:\s*([^,\n]+),/.exec(mEstado6![0]);
+      ok("Gr8b5 M6_FAILURE_REASON = SEMANTIC_SHAPE_ONLY",
+        valor6 !== null && valor6[1].trim() !== "null",
+        valor6 === null ? "ausente" : valor6[1].trim());
+    }
+
+    // ── Gr8c — O SEGUNDO MUTANTE SEMANTICO, NO TRANSPORTE ──────────
+    //
+    // Simetrico ao M6, do outro lado da fronteira: trocar o normalizador
+    // por um cast mantem `resultado:` em 2 e `.resultado` em 0, e so Gr4
+    // reprova. Nao substitui o M6 obrigatorio — cobre o outro arquivo.
+    {
+      const m7 = HTTP.replace(
+        "resultado: resultado === null ? null : resultadoDaResposta(resultado),",
+        "resultado: resultado as ResultadoConsultaVendasUI,");
+      ok("Gr8c M7 ANCORA: a mutacao e efetiva", m7 !== HTTP);
+      ok("Gr8c1 M7 cardinalidade do transporte intacta: 2 campos / 0 acessos",
+        campo(m7) === 2 && acesso(m7) === 0, `campo=${campo(m7)} acesso=${acesso(m7)}`);
+      ok("Gr8c2 M7 reprova SO o assert do normalizador",
+        !/resultado: resultado === null \? null : resultadoDaResposta\(resultado\)/.test(m7) &&
+        /resultado: ResultadoConsultaVendasUI \| null;/.test(m7));
+    }
+
+    // ── Gr9 — O CONTRATO TOTAL, E O QUE ELE PROIBE ─────────────────
+    //
+    // Cinco ocorrencias legitimas na area inteira: 2+0 no transporte,
+    // 1+2 na tela. O total e literal de proposito — derivar da soma dos
+    // dois arquivos faria o assert comparar a medida consigo mesma.
+    ok("Gr9 a area tem EXATAMENTE 5 ocorrencias legitimas de `resultado`",
+      campo(HTTP) + acesso(HTTP) + campo(EXEC) + acesso(EXEC) === 5);
+
+    // Os mutantes de CONTAGEM: uma ocorrencia a mais em qualquer um dos
+    // dois autorizados precisa reprovar, mesmo estando em arquivo
+    // permitido. Allowlist nominal autoriza o ARQUIVO, nunca o volume.
+    ok("Gr9a M2: terceira ocorrencia no transporte reprova Gr1",
+      campo(HTTP + "\n  resultado: outro;") !== 2);
+    ok("Gr9b M3: quarta ocorrencia na tela reprova Gr2",
+      acesso(EXEC + "\n  const y = t.resultado;") !== 2);
+
+    // Os mutantes de ALLOWLIST. O laco das sondas ja compara nos DOIS
+    // sentidos; aqui a mecanica e exercitada com listas em memoria, sem
+    // tocar a sonda real.
+    {
+      const marcados = ARQUIVOS_AREA.filter((a) => sonda.test(codigo(ler(a))));
+      const sujos = (perm: readonly string[]) =>
+        marcados.filter((a) => !perm.includes(a));
+      const sumidos = (perm: readonly string[]) =>
+        perm.filter((a) => !marcados.includes(a));
+
+      ok("Gr9c ANCORA: os marcados sao exatamente os 2 autorizados",
+        marcados.length === 2 && sujos(permitidos).length === 0 &&
+        sumidos(permitidos).length === 0, marcados.join(", "));
+      ok("Gr9d M4: remover um path legitimo da allowlist reprova via sujos",
+        sujos(["lib/ia/agentes-http.ts"]).length === 1);
+      ok("Gr9e M5: path indevido na allowlist reprova via sumidos",
+        sumidos([...permitidos, "components/ia/agente/Inexistente.tsx"]).length === 1);
+    }
+
+    // ── Gr10 — A FRONTEIRA DE VALIDACAO ───────────────────────────
+    //
+    // O que torna as duas ocorrencias do transporte aceitaveis nao e a
+    // allowlist: e `resultadoDaResposta`, que recebe `unknown` e so
+    // devolve o DTO se CADA campo passar. Sem este assert, trocar o
+    // normalizador por um cast manteria contagem, allowlist e shape —
+    // e o bruto chegaria a tela com o G verde.
+    ok("Gr10 o normalizador recebe `unknown`, nao o tipo ja pronto",
+      /function resultadoDaResposta\(bruto: unknown\): ResultadoConsultaVendasUI \| null/.test(HTTP));
+    ok("Gr10a e ele REPROVA devolvendo null, em vez de adaptar",
+      (HTTP.slice(HTTP.indexOf("function resultadoDaResposta"))
+        .match(/return null;/g) ?? []).length >= 6);
+    ok("Gr10b M6: um cast no lugar do normalizador reprovaria Gr4 e Gr10",
+      !/resultado: resultado === null \? null : resultadoDaResposta\(resultado\)/.test(
+        "    resultado: resultado as ResultadoConsultaVendasUI,"));
   }
 }
 

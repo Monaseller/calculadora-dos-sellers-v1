@@ -982,8 +982,201 @@ secao("P. O consumo entrega contexto, e nao autoridade");
   ok("P5  a definicao e resolvida ANTES da RPC de consumo",
     PERS.indexOf("const definicao: DefinicaoFuncao = FUNCOES[funcaoId]") <
       PERS.indexOf("cliente.rpc(RPC_CONSUMIR"));
-  ok("P6  o alvo de conexao do contexto vem do CATALOGO ja conferido",
-    /plataforma: platEsperada/.test(CONSUMO) && /recurso: recEsperado/.test(CONSUMO));
+  // ── P6 — O ALVO DE CONEXAO VEM DO CATALOGO ───────────────────────
+  //
+  // Esta sonda ficou VERMELHA sobre codigo correto: ela procurava
+  // `platEsperada` dentro de `consumirAprovacaoEAbrir`, mas o simbolo
+  // nunca morou ali. A prova local migrou para
+  // `lerAprovacaoParaRetomada`, que as duas lanes compartilham — o
+  // consumo recebe a struct JA validada e so a repassa.
+  //
+  // Reescrita para a arquitetura de hoje: a regra e a mesma, o lugar
+  // mudou. Cada pedaco e checado na funcao que realmente o contem, com
+  // fatia propria, para que a sonda nao volte a olhar para o lado errado.
+  // ── O RECORTE, E POR QUE ELE PRECISA SER POR CHAVES ──────────────
+  //
+  // A primeira versao recortava `lerAprovacaoParaRetomada` ate o
+  // `indexOf` da funcao seguinte, e `consumirAprovacaoEAbrir` ate o FIM
+  // DO ARQUIVO. Os dois funcionavam por acidente de posicao: bastava
+  // alguem inserir uma funcao no meio, ou acrescentar qualquer coisa
+  // depois do consumo, para o recorte passar a medir o vizinho.
+  //
+  // Agora o corpo e delimitado por balanceamento de chaves. As chaves
+  // dentro de string nao contam: a contagem roda sobre uma copia
+  // mascarada de MESMO COMPRIMENTO, entao os indices continuam valendo
+  // para fatiar o texto original.
+  const mascararTextos = (t: string): string =>
+    t.replace(/(["'`])(?:\\.|(?!\1)[\s\S])*?\1/g,
+      (m) => m[0] + " ".repeat(Math.max(0, m.length - 2)) + m[m.length - 1]);
+
+  const corpoDaFuncao = (fonte: string, assinatura: string): string => {
+    const inicio = fonte.indexOf(assinatura);
+    if (inicio === -1) return "";
+    const mascarado = mascararTextos(fonte);
+    const abre = mascarado.indexOf("{", inicio);
+    if (abre === -1) return "";
+    let nivel = 0;
+    for (let k = abre; k < mascarado.length; k += 1) {
+      const c = mascarado[k];
+      if (c === "{") nivel += 1;
+      else if (c === "}") {
+        nivel -= 1;
+        if (nivel === 0) return fonte.slice(inicio, k + 1);
+      }
+    }
+    return "";
+  };
+
+  const LER_RETOMADA = corpoDaFuncao(PERS, "export async function lerAprovacaoParaRetomada");
+  const CONSUMIR = corpoDaFuncao(PERS, "export async function consumirAprovacaoEAbrir");
+
+  // O recorte precisa se provar ANTES de ser usado como evidencia.
+  const recorteValido = (fatia: string, assinatura: string): boolean =>
+    fatia.length > 0 && fatia.length < PERS.length &&
+    fatia.startsWith(assinatura) && fatia.endsWith("\n}") &&
+    (mascararTextos(fatia).match(/\{/g) ?? []).length ===
+      (mascararTextos(fatia).match(/\}/g) ?? []).length &&
+    (fatia.match(/export async function /g) ?? []).length === 1;
+
+  ok("P6  RECORTE: o corpo da leitura de retomada e integro e isolado",
+    recorteValido(LER_RETOMADA, "export async function lerAprovacaoParaRetomada"),
+    `${LER_RETOMADA.length} chars`);
+  ok("P6r RECORTE: o corpo do consumo e integro e isolado, sem depender do EOF",
+    recorteValido(CONSUMIR, "export async function consumirAprovacaoEAbrir"),
+    `${CONSUMIR.length} chars`);
+  ok("P6r1 e os dois recortes nao se sobrepoem",
+    !LER_RETOMADA.includes("export async function consumirAprovacaoEAbrir") &&
+    !CONSUMIR.includes("export async function lerAprovacaoParaRetomada"));
+  ok("P6r2 CONTROLE: uma assinatura inexistente devolve recorte vazio",
+    corpoDaFuncao(PERS, "export async function funcaoQueNaoExiste") === "");
+
+  const alvoDoCatalogo = (t: string): boolean =>
+    /const requisito = definicao\.conexaoNecessaria;/.test(t) &&
+    /const platEsperada = requisito === null \? null : requisito\.plataforma;/.test(t) &&
+    /const recEsperado = requisito === null \? null : requisito\.recurso;/.test(t);
+  const comparaExplicito = (t: string): boolean =>
+    /if \(ap\.conexao_plataforma !== platEsperada \|\| ap\.conexao_recurso !== recEsperado\)/.test(t);
+  const rejeitaDivergencia = (t: string): boolean =>
+    /codigo: "aprovacao_desatualizada", detalhe: "conexao_divergente"/.test(t);
+  const contextoDoCatalogo = (t: string): boolean =>
+    /plataforma: platEsperada,/.test(t) && /recurso: recEsperado,/.test(t) &&
+    !/plataforma: ap\.conexao_plataforma/.test(t);
+
+  ok("P6  ANCORA: a fatia da leitura de retomada nao esta vazia",
+    LER_RETOMADA.length > 0 && LER_RETOMADA.length < PERS.length);
+  ok("P6a o alvo esperado vem do CATALOGO, nunca da linha do banco",
+    alvoDoCatalogo(LER_RETOMADA));
+  ok("P6b a linha congelada e comparada EXPLICITAMENTE com esse alvo",
+    comparaExplicito(LER_RETOMADA));
+  ok("P6c divergencia REPROVA a aprovacao, nao vira no-op silencioso",
+    rejeitaDivergencia(LER_RETOMADA));
+  ok("P6d e o contexto devolvido carrega o alvo do catalogo, nao a coluna crua",
+    contextoDoCatalogo(LER_RETOMADA));
+
+  // ── P6o — A ORDEM, QUE E METADE DO INVARIANTE ────────────────────
+  //
+  // Os asserts acima provam que os tokens existem. Existir nao basta:
+  // se a comparacao acontecesse DEPOIS do `ok: true`, ou se o alvo
+  // esperado fosse montado depois de ja ter sido usado, cada regex
+  // continuaria casando e a funcao estaria errada. Ordem e contrato.
+  const idx = (t: string): number => LER_RETOMADA.indexOf(t);
+  const iFuncoes = idx("FUNCOES[funcaoId]");
+  const iRequisito = idx("const requisito = definicao.conexaoNecessaria;");
+  const iPlat = idx("const platEsperada = requisito === null");
+  const iRec = idx("const recEsperado = requisito === null");
+  const iCompara = idx("if (ap.conexao_plataforma !== platEsperada");
+  const iRejeita = idx('detalhe: "conexao_divergente"');
+  const iOk = idx("ok: true");
+
+  ok("P6o CADEIA: catalogo -> requisito -> plataforma -> recurso, nesta ordem",
+    iFuncoes !== -1 && iFuncoes < iRequisito && iRequisito < iPlat && iPlat < iRec,
+    `${iFuncoes} < ${iRequisito} < ${iPlat} < ${iRec}`);
+  ok("P6o1 o alvo esperado e construido ANTES da comparacao",
+    iRec !== -1 && iRec < iCompara, `${iRec} < ${iCompara}`);
+  ok("P6o2 a comparacao vem ANTES da rejeicao que ela dispara",
+    iCompara !== -1 && iCompara < iRejeita, `${iCompara} < ${iRejeita}`);
+  ok("P6o3 e a rejeicao vem ANTES de qualquer caminho de sucesso",
+    iRejeita !== -1 && iOk !== -1 && iRejeita < iOk, `${iRejeita} < ${iOk}`);
+  ok("P6e o consumo NAO rele a coluna crua: recebe a struct ja validada",
+    /const ap = pre\.aprovacao;/.test(CONSUMIR) &&
+    !/conexao_plataforma|conexao_recurso/.test(CONSUMIR) &&
+    /plataforma: ap\.plataforma,/.test(CONSUMIR) && /recurso: ap\.recurso,/.test(CONSUMIR));
+
+  // ── Os mutantes de P6 ────────────────────────────────────────────
+  //
+  // Strings em memoria; `persistencia.ts` nao e tocado. Cada um desliga
+  // uma peca e precisa reprovar exatamente o oraculo correspondente.
+  {
+    const m1 = LER_RETOMADA.replace(
+      "const requisito = definicao.conexaoNecessaria;",
+      "const requisito = ap.conexao_plataforma;");
+    ok("P6m1 requisito vindo da LINHA reprova o oraculo do catalogo",
+      m1 !== LER_RETOMADA && !alvoDoCatalogo(m1));
+
+    const m2 = LER_RETOMADA.replace(
+      "if (ap.conexao_plataforma !== platEsperada || ap.conexao_recurso !== recEsperado)",
+      "if (false)");
+    ok("P6m2 sem a comparacao explicita, P6b reprova",
+      m2 !== LER_RETOMADA && !comparaExplicito(m2));
+
+    const m3 = LER_RETOMADA.replace(
+      "ap.conexao_plataforma !== platEsperada",
+      "ap.conexao_plataforma === platEsperada");
+    ok("P6m3 comparacao invertida tambem reprova P6b",
+      m3 !== LER_RETOMADA && !comparaExplicito(m3));
+
+    const m4 = LER_RETOMADA
+      .replace("plataforma: platEsperada,", "plataforma: ap.conexao_plataforma,")
+      .replace("recurso: recEsperado,", "recurso: ap.conexao_recurso,");
+    ok("P6m4 contexto montado com a coluna crua reprova P6d",
+      m4 !== LER_RETOMADA && !contextoDoCatalogo(m4));
+
+    const m5 = LER_RETOMADA.replace(
+      'codigo: "aprovacao_desatualizada", detalhe: "conexao_divergente"',
+      'codigo: "ok", detalhe: "seguiu_assim_mesmo"');
+    ok("P6m5 divergencia silenciada reprova P6c",
+      m5 !== LER_RETOMADA && !rejeitaDivergencia(m5));
+
+    // ── P6m6 — O MUTANTE QUE FALTAVA: O CONSUMO RELENDO O CRU ──────
+    //
+    // P6e era so positivo: afirmava que o consumo nao toca as colunas
+    // cruas, sem nunca provar que a sonda notaria se ele tocasse. Um
+    // assert assim envelhece calado. Aqui o consumo e reescrito em
+    // memoria para voltar a ler `conexao_plataforma` da linha, e a
+    // sonda precisa reprovar.
+    const consumoSemCru = (t: string): boolean =>
+      /const ap = pre\.aprovacao;/.test(t) &&
+      !/conexao_plataforma|conexao_recurso/.test(t) &&
+      /plataforma: ap\.plataforma,/.test(t) && /recurso: ap\.recurso,/.test(t);
+
+    ok("P6m6 ANCORA: o consumo integro passa na sonda de bypass",
+      consumoSemCru(CONSUMIR));
+
+    const cru1 = CONSUMIR.replace("plataforma: ap.plataforma,", "plataforma: ap.conexao_plataforma,");
+    ok("P6m6a consumo relendo `conexao_plataforma` reprova P6e",
+      cru1 !== CONSUMIR && !consumoSemCru(cru1));
+
+    const cru2 = CONSUMIR.replace("recurso: ap.recurso,", "recurso: ap.conexao_recurso,");
+    ok("P6m6b consumo relendo `conexao_recurso` reprova P6e",
+      cru2 !== CONSUMIR && !consumoSemCru(cru2));
+
+    const semStruct = CONSUMIR.replace("const ap = pre.aprovacao;", "const ap = linhaCrua;");
+    ok("P6m6c consumo que abandona a struct validada reprova P6e",
+      semStruct !== CONSUMIR && !consumoSemCru(semStruct));
+
+    // ── O MAPA CONGELADO DOS MUTANTES ──────────────────────────────
+    //
+    // Os IDs locais nasceram antes do vocabulario canonico. Congelando
+    // a correspondencia aqui para que ninguem precise reconstrui-la:
+    //
+    //   M1 remove a comparacao persisted-vs-expected .......... P6m2
+    //   M2 remove a rejeicao de divergencia ................... P6m5
+    //   M3 contexto devolvido usa o alvo persistido ........... P6m4
+    //   M4 alvo esperado deixa de vir do catalogo ............. P6m1
+    //   M5 consume rele o campo cru persistido ................ P6m6
+    //
+    //   (P6m3, comparacao invertida, e cobertura adicional.)
+  }
 
   // ── O nivel: lido, nunca reconstruido ────────────────────────────
   ok("P7  existe uma leitura dedicada da abertura",

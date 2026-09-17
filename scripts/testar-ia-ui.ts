@@ -216,6 +216,14 @@ const ARQUIVOS_UI_PERMISSOES: readonly string[] = [
   "components/ia/agente/FuncoesAgente.tsx",
 ];
 
+/** AGENT-VERTICAL-SLICE (`c35d7a8 feat(agentes): add sales function ui`):
+ *  a tela que EXECUTA uma consulta de vendas e mostra o resultado. Ela
+ *  ficou de fora deste inventario quando nasceu — foi a divida que
+ *  manteve A1/A2 vermelhos. Entra NOMINALMENTE, como todas as outras. */
+const ARQUIVOS_UI_EXECUCAO: readonly string[] = [
+  "components/ia/agente/ExecutarConsultaVendas.tsx",
+];
+
 const ARQUIVOS_UI: readonly string[] = [
   ...ARQUIVOS_UI_1B,
   ...ARQUIVOS_UI_1CA,
@@ -228,6 +236,7 @@ const ARQUIVOS_UI: readonly string[] = [
   ...ARQUIVOS_UI_CHAT,
   ...ARQUIVOS_UI_EDICAO,
   ...ARQUIVOS_UI_PERMISSOES,
+  ...ARQUIVOS_UI_EXECUCAO,
 ];
 
 /**
@@ -272,7 +281,12 @@ secao("A. Inventario e rotas");
   // EDITAR-AGENTE-V1 (`EditarAgente.tsx`), quando a area passou a poder
   // ALTERAR um agente, e nao so criar; 50 na PERMISSOES-FUNCTION-V1-B
   // (`FuncoesAgente.tsx`), quando a aba Funcoes ganhou tela real.
-  ok("A2  50 arquivos, nem um a mais", noDisco.length === 50, String(noDisco.length));
+  // ...e 51 quando a AGENT-VERTICAL-SLICE foi finalmente CONTABILIZADA:
+  // `ExecutarConsultaVendas.tsx` existia em disco desde `c35d7a8` sem
+  // linha no inventario, e era exatamente isso que A1 e A2 estavam
+  // denunciando. O numero segue literal — derivar de `ARQUIVOS_UI.length`
+  // faria o assert comparar a lista consigo mesma.
+  ok("A2  51 arquivos, nem um a mais", noDisco.length === 51, String(noDisco.length));
 
   // ── A1b..A1e — o inventario e NOMINAL, nao uma contagem ───────────
   //
@@ -294,7 +308,7 @@ secao("A. Inventario e rotas");
     renomeado.length === declarado.length &&
     JSON.stringify(renomeado) !== JSON.stringify(declarado));
   ok("A1e e a contagem sozinha NAO distinguiria a troca",
-    renomeado.length === 50);
+    renomeado.length === 51);
 
   // ── A1f/A1g — EDITAR-AGENTE-V1 ────────────────────────────────────
   //
@@ -307,7 +321,7 @@ secao("A. Inventario e rotas");
   ok("A1f ANCORA: EditarAgente esta no inventario declarado",
     declarado.includes("components/ia/agente/EditarAgente.tsx"));
   ok("A1g CONTROLE NEGATIVO: a tela de edicao AUSENTE reprova",
-    JSON.stringify(semEdicao) !== JSON.stringify(declarado) && semEdicao.length === 49);
+    JSON.stringify(semEdicao) !== JSON.stringify(declarado) && semEdicao.length === 50);
 
   // ── A1h/A1i — PERMISSOES-FUNCTION-V1-B ────────────────────────────
   //
@@ -319,7 +333,19 @@ secao("A. Inventario e rotas");
   ok("A1h ANCORA: FuncoesAgente esta no inventario declarado",
     declarado.includes("components/ia/agente/FuncoesAgente.tsx"));
   ok("A1i CONTROLE NEGATIVO: a tela de funcoes AUSENTE reprova",
-    JSON.stringify(semFuncoes) !== JSON.stringify(declarado) && semFuncoes.length === 49);
+    JSON.stringify(semFuncoes) !== JSON.stringify(declarado) && semFuncoes.length === 50);
+
+  // ── A1j/A1k — a divida que fechou ─────────────────────────────────
+  //
+  // Os mesmos dois lados das anteriores, para que o arquivo recem
+  // contabilizado nao possa sumir junto com a sua linha.
+  const semExecucao = declarado.filter(
+    (a) => a !== "components/ia/agente/ExecutarConsultaVendas.tsx");
+
+  ok("A1j ANCORA: ExecutarConsultaVendas esta no inventario declarado",
+    declarado.includes("components/ia/agente/ExecutarConsultaVendas.tsx"));
+  ok("A1k CONTROLE NEGATIVO: a tela de execucao AUSENTE reprova",
+    JSON.stringify(semExecucao) !== JSON.stringify(declarado) && semExecucao.length === 50);
 }
 
 const ROTAS = [
@@ -467,21 +493,338 @@ secao("D. Vocabulario do backend nao vaza para a UI");
 {
   // A regra: nenhum componente conhece "ocupado" ou "idle". So
   // `lib/ia/estados.ts` traduz.
-  const proibidos = [/\bocupado\b/, /\bidle\b/, /\bdesativado\b/];
+  //
+  // Duas armadilhas opostas, e o detector precisa escapar das duas.
+  //
+  // A primeira: em portugues o adjetivo humano colide com o valor do
+  // enum. A tela de execucao diz "Este agente esta desativado." — uma
+  // FRASE, num ramo que testa `r.estado === "agente_inativo"`, o
+  // vocabulario do TRANSPORTE. Uma sonda de palavra reprovava essa
+  // frase e empurrava a UI a falar pior para nao ser acusada.
+  //
+  // A segunda: fugir da primeira exigindo aspas em volta do token
+  // deixava passar tudo que nao e literal — `STATUS.ocupado`,
+  // `const { ocupado } = ESTADOS`, `import { idle } from ...`,
+  // `estado === ocupado`. Vocabulario estrutural, sem aspas nenhuma.
+  //
+  // A distincao real nao e "tem aspas": e ONDE o token vive. Prosa vive
+  // DENTRO de um literal cujo conteudo e uma frase. Vocabulario e ou o
+  // literal INTEIRO, ou um identificador nu no codigo. Entao apaga-se
+  // todo literal que nao seja exatamente um token, preserva-se como
+  // marcador o que for, e procura-se no codigo que sobra.
+  const TOKENS = ["ocupado", "idle", "desativado"] as const;
+  const MARCA = (tok: string): string => `\u00abTOK:${tok}\u00bb`;
+  const ehToken = (s: string): boolean =>
+    (TOKENS as readonly string[]).includes(s.trim());
+  const comoLiteral = (conteudo: string): string =>
+    ehToken(conteudo) ? ` ${MARCA(conteudo.trim())} ` : ' "" ';
+
+  // ── O SCANNER, E POR QUE UM REGEX NAO BASTA ──────────────────────
+  //
+  // A primeira versao apagava literais com um regex so. Funcionava para
+  // aspas simples e duplas, onde nao existe codigo dentro do literal.
+  // Para template literal, apagava o literal INTEIRO — inclusive o que
+  // esta dentro de `${...}`, que e codigo executavel. `${STATUS.ocupado}`
+  // passava batido, e numa tela .tsx template interpolado e a forma mais
+  // comum de montar className e rotulo: a perda nao era de canto, era do
+  // meio do caminho.
+  //
+  // Entao o texto do template e prosa (apagado), e cada interpolacao e
+  // codigo (processado pelas MESMAS regras, recursivamente). Assim
+  // `${cond ? "agente ocupado" : "ok"}` segue seguro — a palavra esta
+  // numa string dentro da expressao — enquanto `${cond ? STATUS.ocupado
+  // : outro}` reprova, porque ali o token e identificador.
+  type ParteDeTemplate = { tipo: "texto" | "codigo"; v: string };
+
+  /** Le uma string de aspas simples/duplas a partir de `i`. */
+  const lerAspas = (fonte: string, i: number): { fim: number; cru: string; conteudo: string } => {
+    const asp = fonte[i];
+    let j = i + 1;
+    let cru = asp;
+    let conteudo = "";
+    while (j < fonte.length) {
+      const c = fonte[j];
+      if (c === "\\") {
+        cru += c + (fonte[j + 1] ?? "");
+        conteudo += fonte[j + 1] ?? "";
+        j += 2;
+        continue;
+      }
+      if (c === asp) { cru += c; j += 1; break; }
+      cru += c;
+      conteudo += c;
+      j += 1;
+    }
+    return { fim: j, cru, conteudo };
+  };
+
+  /** Le um template a partir de `i`, separando texto de interpolacao.
+   *  A profundidade de chaves e respeitada: o `}` de um objeto literal
+   *  dentro da expressao nao fecha a interpolacao. Strings e templates
+   *  aninhados sao copiados crus, para o passo recursivo trata-los. */
+  const lerTemplate = (fonte: string, i: number): { fim: number; cru: string; partes: ParteDeTemplate[] } => {
+    let j = i + 1;
+    let texto = "";
+    let cru = "`";
+    const partes: ParteDeTemplate[] = [];
+    while (j < fonte.length) {
+      const c = fonte[j];
+      // Escape: `\${` nao abre interpolacao, e `\`` nao fecha o template.
+      if (c === "\\") {
+        texto += c + (fonte[j + 1] ?? "");
+        cru += c + (fonte[j + 1] ?? "");
+        j += 2;
+        continue;
+      }
+      if (c === "`") { cru += c; j += 1; break; }
+      if (c === "$" && fonte[j + 1] === "{") {
+        partes.push({ tipo: "texto", v: texto });
+        texto = "";
+        cru += "${";
+        let prof = 1;
+        let k = j + 2;
+        let codigo = "";
+        while (k < fonte.length && prof > 0) {
+          const d = fonte[k];
+          if (d === '"' || d === "'") {
+            const r = lerAspas(fonte, k);
+            codigo += r.cru; cru += r.cru; k = r.fim;
+            continue;
+          }
+          if (d === "`") {
+            const r = lerTemplate(fonte, k);
+            codigo += r.cru; cru += r.cru; k = r.fim;
+            continue;
+          }
+          if (d === "{") { prof += 1; codigo += d; cru += d; k += 1; continue; }
+          if (d === "}") {
+            prof -= 1; k += 1; cru += d;
+            if (prof === 0) break;
+            codigo += d;
+            continue;
+          }
+          codigo += d; cru += d; k += 1;
+        }
+        partes.push({ tipo: "codigo", v: codigo });
+        j = k;
+        continue;
+      }
+      texto += c;
+      cru += c;
+      j += 1;
+    }
+    partes.push({ tipo: "texto", v: texto });
+    return { fim: j, cru, partes };
+  };
+
+  /** Apaga a prosa e preserva o vocabulario. */
+  const semProsa = (fonte: string): string => {
+    let saida = "";
+    let i = 0;
+    while (i < fonte.length) {
+      const c = fonte[i];
+      if (c === '"' || c === "'") {
+        const r = lerAspas(fonte, i);
+        saida += comoLiteral(r.conteudo);
+        i = r.fim;
+        continue;
+      }
+      if (c === "`") {
+        const r = lerTemplate(fonte, i);
+        const textos = r.partes.filter((p) => p.tipo === "texto").map((p) => p.v).join("");
+        const codigos = r.partes.filter((p) => p.tipo === "codigo");
+        // Template sem interpolacao cujo conteudo E o token: vocabulario.
+        if (codigos.length === 0 && ehToken(textos)) {
+          saida += ` ${MARCA(textos.trim())} `;
+        } else {
+          saida += ' "" ';
+          for (const p of codigos) saida += ` ${semProsa(p.v)} `;
+        }
+        i = r.fim;
+        continue;
+      }
+      saida += c;
+      i += 1;
+    }
+    return saida;
+  };
+
+  /** Um unico predicado para os tres tokens — paridade por construcao. */
+  const vazaVocabulario = (tok: string, fonte: string): boolean =>
+    new RegExp(`${MARCA(tok)}|\\b${tok}\\b`).test(semProsa(fonte));
   let vazamentos = 0;
   for (const arq of [...COMPONENTES, ...PASTA_MOCKS, "lib/ia/design.ts", "lib/ia/contratos.ts"]) {
     const fonte = codigo(ler(arq));
-    for (const p of proibidos) {
-      if (p.test(fonte)) {
+    for (const tok of TOKENS) {
+      if (vazaVocabulario(tok, fonte)) {
         vazamentos++;
-        console.log(`        vazou ${p} em ${arq}`);
+        console.log(`        vazou ${tok} em ${arq}`);
       }
     }
   }
   ok("D1  zero vazamento de 'ocupado'/'idle'/'desativado' fora de estados.ts", vazamentos === 0);
 
+  // ── D1a..D1o — a matriz dos dois lados ───────────────────────────
+  //
+  // Sem estes, trocar o detector por um que nao acha nada tambem daria
+  // D1 verde. Cada forma REAL de vazamento precisa continuar sendo
+  // pega; a prosa em portugues precisa continuar passando. Os expected
+  // sao literais, escritos a partir do invariante, nunca medidos.
+  {
+    const prosa = (t: string, frase: string) => !vazaVocabulario(t, frase);
+    const pega = (t: string, src: string) => vazaVocabulario(t, src);
+
+    // Os dois lados originais, preservados.
+    ok("D1a prosa em portugues NAO dispara",
+      prosa("desativado", 'setAviso("Este agente está desativado.");'));
+    ok("D1b literal EXATO dispara",
+      pega("ocupado", 'const x = "ocupado";'));
+    ok("D1c comparacao com o token dispara",
+      pega("ocupado", 'if (a.status === "ocupado") return;'));
+    ok("D1d chave de objeto dispara",
+      pega("ocupado", 'const R = { ocupado: "trabalhando" };'));
+    ok("D1e literal em aspas simples tambem dispara",
+      pega("desativado", "const x = 'desativado';"));
+
+    // ── A matriz estrutural (DEBT-R1-F3) ───────────────────────────
+    //
+    // Estas formas a versao anterior deixava passar: nenhuma delas tem
+    // o token entre aspas, e todas sao vocabulario do backend.
+    ok("D1g acesso a propriedade dispara",
+      pega("ocupado", "const rotulo = STATUS.ocupado;"));
+    ok("D1h destructuring dispara",
+      pega("ocupado", "const { ocupado } = ESTADOS;"));
+    ok("D1i import nomeado dispara",
+      pega("idle", 'import { idle } from "@/lib/agentes/tipos";'));
+    ok("D1j comparacao com identificador NU dispara",
+      pega("ocupado", "if (estado === ocupado) return;"));
+    ok("D1k valor de case dispara",
+      pega("ocupado", 'case "ocupado":'));
+    ok("D1l uniao de tipos dispara",
+      pega("idle", 'type E = "idle" | "ocupado";'));
+    ok("D1m chave de status dispara",
+      pega("idle", 'status: "idle"'));
+
+    // ── Paridade: os tres tokens, nos dois lados ───────────────────
+    //
+    // Nao adianta blindar `desativado` e afrouxar os outros dois. O
+    // predicado e um so, mas isso precisa ser exercitado, nao suposto.
+    ok("D1n PARIDADE prosa: nenhum dos tres acusa frase humana",
+      prosa("desativado", '"Este agente está desativado."') &&
+      prosa("ocupado", '"O agente está ocupado agora."') &&
+      prosa("idle", '"Modo idle explicado ao usuário."'));
+    ok("D1n1 PARIDADE estrutural: os tres sao pegos como identificador nu",
+      TOKENS.every((t) => pega(t, `const r = ESTADOS.${t};`)));
+    ok("D1n2 PARIDADE literal: os tres sao pegos como literal exato",
+      TOKENS.every((t) => pega(t, `if (e === "${t}") return;`)));
+    ok("D1n3 e sao exatamente tres tokens distintos",
+      TOKENS.length === 3 && new Set(TOKENS).size === 3);
+
+    // ── Os mutantes do proprio detector ────────────────────────────
+    ok("D1o M1: sem apagar a prosa, a frase humana voltaria a ser acusada",
+      /\bdesativado\b/.test('setAviso("Este agente está desativado.");'));
+    ok("D1o1 M2: exigir aspas em volta do token deixaria passar o nu",
+      !/(["'`])ocupado\1/.test("const rotulo = STATUS.ocupado;"));
+    ok("D1o2 M3: um detector que nunca acha nada reprova a matriz",
+      TOKENS.some((t) => pega(t, `const r = ESTADOS.${t};`)));
+
+    // ── D1t..D1z — TEMPLATE LITERAL: TEXTO E PROSA, ${} E CODIGO ───
+    //
+    // Estas seis variantes escapavam da versao anterior, que apagava o
+    // template inteiro. Numa tela .tsx elas nao sao exoticas: montar
+    // className ou rotulo a partir de um status e o uso tipico de
+    // interpolacao, e era exatamente por ali que o vocabulario do
+    // backend entrava sem ninguem notar.
+    //
+    // As expressoes ficam em `const` para que o proprio arquivo de
+    // teste nao contenha a forma proibida solta — o que faria a sonda
+    // acusar a si mesma se um dia esta suite entrasse na area varrida.
+    const CR = String.fromCharCode(96);
+    const tpl = (dentro: string): string => CR + dentro + CR;
+
+    ok("D1t1 `${STATUS.ocupado}` e vocabulario, nao prosa",
+      pega("ocupado", tpl("${STATUS.ocupado}")));
+    ok("D1t2 texto + interpolacao estrutural tambem reprova",
+      pega("ocupado", tpl("Estado: ${STATUS.ocupado}")));
+    ok("D1t3 identificador nu dentro da interpolacao reprova",
+      pega("ocupado", tpl("${e === ocupado ? 'a' : 'b'}")));
+    ok("D1t4 index por literal exato dentro da interpolacao reprova",
+      pega("idle", tpl('${MAPA["idle"]}')));
+    ok("D1t5 acesso a propriedade dentro da interpolacao reprova",
+      pega("desativado", tpl("${obj.desativado}")));
+    ok("D1t6 className montado a partir do status reprova",
+      pega("ocupado", tpl("badge ${estado === ocupado ? 'on' : 'off'}")));
+
+    // ── O outro lado: template que e so prosa continua passando ────
+    ok("D1u1 prosa em template NAO dispara",
+      prosa("desativado", tpl("Agente esta desativado")));
+    ok("D1u2 idem para ocupado",
+      prosa("ocupado", tpl("O agente esta ocupado agora")));
+    ok("D1u3 idem para idle",
+      prosa("idle", tpl("Modo idle explicado")));
+    ok("D1u4 interpolacao sem vocabulario nao contamina o resto",
+      prosa("ocupado", tpl("Estado: ${mensagem}")));
+    ok("D1u5 a palavra DENTRO de uma string da interpolacao e prosa",
+      prosa("ocupado", tpl('${cond ? "agente ocupado" : "disponivel"}')));
+    ok("D1u6 interpolacao ESCAPADA e texto, nao expressao",
+      prosa("ocupado", tpl("\\${STATUS.ocupado}")));
+
+    // ── Formas estruturais dentro da interpolacao ──────────────────
+    ok("D1v1 comparacao com literal exato dentro da interpolacao",
+      pega("desativado", tpl('${estado === "desativado"}')));
+    ok("D1v2 idem para idle",
+      pega("idle", tpl('${status === "idle"}')));
+    ok("D1v3 acesso a propriedade dentro da interpolacao",
+      pega("ocupado", tpl("${MAPA.ocupado}")));
+    ok("D1v4 objeto literal dentro da interpolacao",
+      pega("desativado", tpl("${{ desativado: true }}")));
+    ok("D1v5 identificador nu em comparacao dentro da interpolacao",
+      pega("ocupado", tpl("${estado === ocupado}")));
+
+    // ── Template dentro de template ────────────────────────────────
+    ok("D1w1 template ANINHADO com vocabulario reprova",
+      pega("ocupado", tpl("outer ${cond ? " + tpl("inner ${STATUS.ocupado}") + ' : "ok"}')));
+    ok("D1w2 e o equivalente em prosa continua passando",
+      prosa("ocupado", tpl("outer ${cond ? " + tpl("agente ocupado") + ' : "ok"}')));
+
+    // ── Profundidade de chaves ─────────────────────────────────────
+    //
+    // O `}` do objeto interno nao pode fechar a interpolacao cedo; se
+    // fechasse, o resto da expressao viraria texto e o vocabulario
+    // sumiria.
+    ok("D1x1 o `}` de um objeto interno NAO fecha a interpolacao",
+      pega("ocupado", tpl("${cond ? { ocupado: true } : outro}")));
+    ok("D1x2 e o texto APOS a interpolacao continua sendo prosa",
+      prosa("ocupado", tpl("${cond ? { a: 1 } : b} texto ocupado aqui")));
+
+    // ── Paridade dos tres tokens no eixo de template ───────────────
+    ok("D1y PARIDADE: os tres sao pegos dentro de interpolacao",
+      TOKENS.every((t) => pega(t, tpl("${STATUS." + t + "}"))));
+    ok("D1y1 PARIDADE: e nos tres a prosa em template segue segura",
+      TOKENS.every((t) => prosa(t, tpl("frase com " + t + " no meio"))));
+
+    // ── O mutante do scanner ───────────────────────────────────────
+    //
+    // Se o template voltasse a ser apagado inteiro, D1t1 reprovaria.
+    // Este control fixa o motivo: o buraco era a interpolacao, nao a
+    // deteccao do token.
+    ok("D1z M4: apagar o template inteiro faria o vocabulario sumir",
+      !/\bocupado\b/.test(tpl("${STATUS.ocupado}").replace(/`[\s\S]*`/, '""')));
+    ok("D1z1 e o token continua la quando so o TEXTO e apagado",
+      /\bocupado\b/.test("${STATUS.ocupado}"));
+
+    // ANCORA: a ocorrencia real que motivou a correcao continua sendo
+    // prosa — e o ramo que a produz decide pelo vocabulario do
+    // TRANSPORTE, nao pelo status do backend.
+    const EXEC = codigo(ler("components/ia/agente/ExecutarConsultaVendas.tsx"));
+    ok("D1f ANCORA: a tela de execucao decide por `agente_inativo`, nao pelo status",
+      /r\.estado === "agente_inativo"/.test(EXEC) &&
+      /setAviso\("Este agente está desativado\."\)/.test(EXEC) &&
+      !vazaVocabulario("desativado", EXEC));
+  }
+
   ok("D2  controle negativo: a sonda acusa o proprio estados.ts",
-    [/\bocupado\b/, /\bidle\b/].every((p) => p.test(codigo(ler("lib/ia/estados.ts")))));
+    TOKENS.every((t) => vazaVocabulario(t, codigo(ler("lib/ia/estados.ts")))));
 
   ok("D3  estados.ts e o unico a importar lib/agentes",
     ARQUIVOS_UI.filter((a) => /from "@\/lib\/agentes/.test(ler(a))).join() === "lib/ia/estados.ts");

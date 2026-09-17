@@ -2322,8 +2322,76 @@ async function principal(): Promise<void> {
     };
     ok("L5  o total continua exigindo ticketMedio e skusDistintos",
       resumoExigeOsSeis(TR));
+    // ── A MUTACAO DO TOTAL, E ONDE ELA PRECISA CAIR ───────────────
+    //
+    // Esta sonda ficou VERMELHA sobre codigo correto por meses. A agulha
+    // antiga era `'  "ticketMedio",\n'` — LF puro — e nao casava com o
+    // arquivo: o `replace` nao mutava nada, o oraculo seguia verdadeiro e
+    // o controle negativo reprovava a si mesmo.
+    //
+    // A primeira correcao deixou a agulha EOL-safe, mas contava o alvo no
+    // ARQUIVO INTEIRO. Isso prova que existe UM "ticketMedio" em algum
+    // lugar, nao que ele esta na lista que o oraculo le. Agora a regiao
+    // vem primeiro: recorta-se a declaracao de CAMPOS_RESUMO, e e DENTRO
+    // dela que o alvo e contado e a mutacao aplicada.
+    const DECL_RESUMO = /const CAMPOS_RESUMO = \[[\s\S]*?\] as const;/;
+    const mResumo = TR.match(DECL_RESUMO);
+    ok("L5  ANCORA 0: a declaracao de CAMPOS_RESUMO foi localizada",
+      mResumo !== null);
+    ok("L5  ANCORA 0a: e ela aparece UMA unica vez no transporte",
+      (TR.match(new RegExp(DECL_RESUMO.source, "g")) ?? []).length === 1);
+
+    const declResumo = mResumo![0];
+    const ALVO_TICKET = /[ \t]*"ticketMedio",\r?\n/;
+    const dentroDoBloco = (declResumo.match(/[ \t]*"ticketMedio",\r?\n/g) ?? []).length;
+    ok("L5  ANCORA A: o alvo aparece 1x DENTRO de CAMPOS_RESUMO",
+      dentroDoBloco === 1, `dentro=${dentroDoBloco}`);
+
+    // A mutacao troca o BLOCO inteiro pelo bloco sem o campo. Assim o
+    // texto mutado difere do original exatamente por uma linha da lista
+    // que o oraculo le — e por nada mais.
+    const declSemTicket = declResumo.replace(ALVO_TICKET, "");
+    const semTicketMedio = TR.replace(declResumo, declSemTicket);
+    ok("L5  ANCORA B: a mutacao alterou mesmo o texto analisado",
+      semTicketMedio !== TR && semTicketMedio.length < TR.length);
+    ok("L5  ANCORA B1: e alterou DENTRO do bloco, nao em outro ponto",
+      declSemTicket !== declResumo &&
+      TR.length - semTicketMedio.length === declResumo.length - declSemTicket.length);
     ok("L5  CONTROLE NEGATIVO: afrouxar o total reprova",
-      !resumoExigeOsSeis(TR.replace('  "ticketMedio",\n', "")));
+      !resumoExigeOsSeis(semTicketMedio));
+
+    // ── Os controles do proprio controle ──────────────────────────
+    //
+    // Cada mutante desliga uma peca e precisa quebrar o par
+    // ancora+oraculo. Sao strings em memoria: nada toca o working tree.
+    {
+      const CRLF = '  "linhas",\r\n  "ticketMedio",\r\n  "skusDistintos",\r\n';
+      const soLF = /[ \t]*"ticketMedio",\n/;
+      ok("L5  M1: agulha LF-only NAO muta um alvo CRLF",
+        CRLF.replace(soLF, "") === CRLF);
+      ok("L5  M2: e a ancora de efetividade acusa esse no-op",
+        !(CRLF.replace(soLF, "") !== CRLF));
+      ok("L5  M3: um oraculo que nao exige ticketMedio aceitaria o mutante",
+        /skusDistintos/.test(semTicketMedio) && !/ticketMedio/.test(
+          /const CAMPOS_RESUMO = \[([\s\S]*?)\] as const;/.exec(semTicketMedio)![1]));
+      ok("L5  M4: sem a ancora de alvo, uma agulha que nao casa passaria batido",
+        (CRLF.match(soLF) ?? []).length === 0);
+
+      // M5 — O CONTROLE DE FORA DO BLOCO.
+      //
+      // Um `"ticketMedio",` que exista FORA de CAMPOS_RESUMO nao pode
+      // satisfazer a ancora de alvo. Uma contagem global diria 1 e
+      // seguiria em frente mutando a linha errada; a contagem escopada
+      // diz 0 e reprova. E a diferenca entre F4 aberto e F4 fechado.
+      const sintetico =
+        'const OUTRA_LISTA = [\n  "ticketMedio",\n];\n' +
+        'const CAMPOS_RESUMO = [\n  "linhas",\n  "skusDistintos",\n] as const;';
+      const blocoSintetico = sintetico.match(DECL_RESUMO)![0];
+      ok("L5  M5: token FORA do bloco nao satisfaz a ancora escopada",
+        (blocoSintetico.match(/[ \t]*"ticketMedio",\r?\n/g) ?? []).length === 0);
+      ok("L5  M5a: e a contagem GLOBAL diria 1 — por isso ela nao serve",
+        (sintetico.match(/[ \t]*"ticketMedio",\r?\n/g) ?? []).length === 1);
+    }
 
     // ── As duas listas sao DIFERENTES, e por construcao ───────────
     ok("L6  resumo e balde nao compartilham a mesma lista de campos",
