@@ -941,8 +941,12 @@ secao("F. Mocks centralizados e ficticios");
   // nominal, e a igualdade nos dois sentidos continua intacta: se a
   // fila voltar a exibir o aviso, `aMais` a pega; se uma das duas
   // restantes parar de exibi-lo, `sumiram` a pega.
+  // M1-I1-V2: `app/(app)/ia/page.tsx` SAIU desta lista. O palco deixou
+  // de simular — ele le os agentes reais do dono e o snapshot
+  // operacional deles —, e o aviso morre junto com a simulacao que o
+  // justificava. A igualdade nos dois sentidos continua: se o selo
+  // voltar aquela tela, `aMais` o pega.
   const SUPERFICIES_QUE_AVISAM: readonly string[] = [
-    "app/(app)/ia/page.tsx",                        // Escritorio: MOCK_AGENTES/MOCK_TAREFAS
     "components/ia/atividade/Timeline.tsx",         // feed: MOCK_ATIVIDADES
   ];
   const exibem = ARQUIVOS_UI.filter((a) => !ehMock(a) && /MOCK_AVISO/.test(codigo(ler(a))));
@@ -963,6 +967,12 @@ secao("F. Mocks centralizados e ficticios");
     "components/ia/agente/PaginaAgente.tsx",
     "components/ia/agente/VisaoGeral.tsx",
     "components/ia/office/PainelAgente.tsx",
+    // M1-I1-V2: o palco e a rota dele entraram na lista no dia em que
+    // passaram a ler dado real. Entrar aqui NAO e formalidade — e o que
+    // faz `F3g` cobrar deles a mesma ausencia de mock que cobra das
+    // outras cinco.
+    "components/ia/office/Escritorio.tsx",
+    "app/(app)/ia/page.tsx",
   ];
   ok("F3c as telas de agente, que leem dado real, nao exibem o aviso",
     SUPERFICIES_DE_AGENTE.every((a) => !/MOCK_AVISO/.test(codigo(ler(a)))));
@@ -1057,12 +1067,30 @@ secao("F. Mocks centralizados e ficticios");
   // mock nenhum — e o assert seguinte cobra exatamente isso, para que a
   // saida daqui nao vire uma vaga silenciosa.
   //
-  // O escritorio CONTINUA simulado e continua cobrado aqui.
-  ok("F14 as telas que ainda usam mock ancoram na montagem, nao no relogio corrente",
-    ["components/ia/office/Escritorio.tsx"].every((arq) => {
-      const fonte = codigo(ler(arq));
-      return /MOCK_TAREFAS\(ancoraMs\)/.test(fonte) && !/MOCK_TAREFAS\(agoraMs\)/.test(fonte);
-    }));
+  // ── F14 reconciliado na M1-I1-V2 ─────────────────────────────────
+  //
+  // ANTES: "as telas que ainda usam mock ancoram na montagem" — e a
+  // unica tela restante era o Escritorio. Ele migrou, e com ele foi
+  // embora a `ancoraMs` que este assert vigiava: nao ha mais mock a
+  // reancorar, entao nao ha mais o bug que ele impedia.
+  //
+  // O guarda nao virou vaga: virou a prova de que a migracao aconteceu
+  // de verdade, com controle negativo. E a metade que continua valendo
+  // — o feed AINDA simula — segue cobrada logo abaixo.
+  {
+    const palco = codigo(ler("components/ia/office/Escritorio.tsx"));
+    ok("F14 o Escritorio nao consome mais agente nem tarefa simulada",
+      !/MOCK_/.test(palco) && !/lib\/ia\/mocks/.test(palco));
+    ok("F14a e le a fonte real pelo transporte, sem rede propria",
+      /listarAgentesDoEscritorio\(/.test(palco) && !/\bfetch\s*\(/.test(palco));
+    ok("F14c MOCK_REGRESSION_DETECTED: a sonda acusaria o mock de volta",
+      /MOCK_/.test('const agentes = MOCK_AGENTES;') &&
+      /lib\/ia\/mocks/.test('import { MOCK_TAREFAS } from "@/lib/ia/mocks";'));
+    ok("F14d a rota do palco tambem parou de afirmar simulacao",
+      !/MOCK_/.test(codigo(ler("app/(app)/ia/page.tsx"))));
+    ok("F14e os mocks CONTINUAM existindo — nada foi varrido por tabela",
+      PASTA_MOCKS.length > 0 && /MOCK_AGENTES/.test(codigo(ler("components/ia/atividade/Timeline.tsx"))));
+  }
 
   ok("F14b a lista de agentes NAO voltou a usar dado simulado",
     ["app/(app)/ia/agentes/page.tsx", "components/ia/agente/PaginaAgente.tsx"].every(
@@ -1394,6 +1422,263 @@ secao("L. Propagacao do resultado ate a UI (E3-R1)");
       /if \(emVooRef\.current\.has\(id\)\) return;/.test(FILA) &&
       /emVooRef\.current\.add\(id\)/.test(FILA));
   }
+}
+
+secao("M. O Escritorio real (M1-I1-V2)");
+
+{
+  const PALCO = codigo(ler("components/ia/office/Escritorio.tsx"));
+  const ESTACAO = codigo(ler("components/ia/office/Estacao.tsx"));
+  const PAINEL = codigo(ler("components/ia/office/PainelAgente.tsx"));
+  const ROTA_PALCO = codigo(ler("app/(app)/ia/page.tsx"));
+  const LISTA = codigo(ler("app/(app)/ia/agentes/page.tsx"));
+
+  // ── M1..M4 — a fonte e real, e e UMA so ──────────────────────────
+  ok("M1  o palco pede o snapshot ao transporte publicado",
+    /listarAgentesDoEscritorio\(controlador\.signal\)/.test(PALCO));
+  ok("M2  e nao abre rede por conta propria",
+    !/\bfetch\s*\(|XMLHttpRequest|axios|WebSocket|EventSource/.test(PALCO));
+  ok("M3  zero mock no palco e na rota dele",
+    !/MOCK_/.test(PALCO) && !/MOCK_/.test(ROTA_PALCO));
+  ok("M4  e zero agente nomeado a dedo — o palco desenha o que o dono tem",
+    !/Teste Chat IA Real/i.test(PALCO) &&
+    !/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/.test(PALCO));
+
+  // ── M5..M10 — o refresh: um ciclo, agendado depois da resposta ───
+  ok("M5  o intervalo do refresh e 5000 ms, nomeado",
+    /const INTERVALO_REFRESH_MS = 5_000;/.test(PALCO));
+  ok("M6  NUNCA setInterval — o proximo ciclo nasce do anterior",
+    !/setInterval/.test(PALCO) && /setTimeout\(\(\) => void ciclo\(\), INTERVALO_REFRESH_MS\)/.test(PALCO));
+  ok("M6a CONTROLE: a sonda acusaria um setInterval de volta",
+    /setInterval/.test("const t = window.setInterval(ciclo, 5000);"));
+  ok("M7  o agendamento vem DEPOIS do await — sem dois ciclos em voo",
+    PALCO.indexOf("await listarAgentesDoEscritorio") <
+      PALCO.indexOf("setTimeout(() => void ciclo()"));
+  ok("M8  a desmontagem para o ciclo, limpa o timer e aborta a leitura",
+    /vivo = false;/.test(PALCO) && /window\.clearTimeout\(agendamento\)/.test(PALCO) &&
+    /controlador\.abort\(\)/.test(PALCO));
+  ok("M9  resposta atrasada nao escreve em componente morto",
+    /if \(!vivo\) return;/.test(PALCO));
+  ok("M10 e o ciclo so se reagenda enquanto vivo",
+    /if \(vivo\) agendamento = window\.setTimeout/.test(PALCO));
+
+  // ── M11..M14 — falha e vazio dizem a verdade, nunca mock ─────────
+  ok("M11 falha de refresh PRESERVA o ultimo retrato bom",
+    /setEstado\(\(anterior\) => \(anterior === "ok" \? "ok" : "falha"\)\);/.test(PALCO));
+  ok("M12 e a falha nao apaga os agentes ja carregados",
+    !/setAgentes\(\[\]\)/.test(PALCO));
+  ok("M13 sessao expirada e falha tem estados PROPRIOS, e nenhum vira lista vazia",
+    /estado === "nao_autenticado"/.test(PALCO) && /estado === "falha"/.test(PALCO) &&
+    /role="alert"/.test(PALCO));
+  ok("M14 zero agentes mostra estado vazio REAL, sem inventar ninguem",
+    /comAparencia\.length === 0/.test(PALCO) &&
+    /Você ainda não tem agentes/.test(ler("components/ia/office/Escritorio.tsx")));
+
+  // ── M15..M18 — a derivacao continua sendo do helper, no cliente ──
+  ok("M15 o palco deriva a aparencia com o helper de sempre",
+    /aparenciaDoAgente\(item\.agente, item\.sinais, agoraMs\)/.test(PALCO));
+  ok("M16 e nao recebe estado pronto do servidor",
+    !/estado(Visual)?:\s*(r|resposta)\./.test(PALCO) && !/"trabalhando"|"ocioso"/.test(PALCO));
+  // O vocabulario EXCLUSIVO do backend nao pode reaparecer no palco:
+  // quem traduz e `lib/ia/estados.ts`, uma vez so.
+  //
+  // A lista e CALCULADA — `STATUS_AGENTE_DERIVADO` menos
+  // `ESTADOS_VISUAIS` —, nunca digitada. `erro` e
+  // `aguardando_aprovacao` existem nos DOIS vocabularios, e uma sonda
+  // que os acusasse reprovaria a Estacao por usar o estado visual dela,
+  // que e o uso certo. Sonda que acusa o inocente e trocada.
+  const soDoBackend = STATUS_AGENTE_DERIVADO.filter(
+    (s) => !(ESTADOS_VISUAIS as readonly string[]).includes(s)
+  );
+  const SONDA_DERIVADO = new RegExp(`\\b(${soDoBackend.join("|")})\\b`);
+  ok("M17 ANCORA: sobraram exatamente os tres termos so-do-backend",
+    JSON.stringify([...soDoBackend].sort()) ===
+      JSON.stringify(["desativado", "idle", "ocupado"]), soDoBackend.join(","));
+  ok("M17a STATE_MACHINE_DUPLICATION = 0: eles nao aparecem no palco",
+    !SONDA_DERIVADO.test(PALCO) && !SONDA_DERIVADO.test(ESTACAO) && !SONDA_DERIVADO.test(PAINEL));
+  ok("M17b CONTROLE: a sonda acusaria a traducao reimplementada",
+    SONDA_DERIVADO.test('if (s === "ocupado") return "trabalhando";'));
+  ok("M17c CONTROLE: e NAO acusa o estado visual legitimo da estacao",
+    !SONDA_DERIVADO.test('aparencia.estado === "aguardando_aprovacao"'));
+  ok("M18 a zona continua sendo decidida por estaNaEstacao",
+    /estaNaEstacao\(a\.aparencia\)/.test(PALCO));
+
+  // ── M19..M24 — props estreitas: a Task nao chega aos componentes ─
+  ok("M19 a Estacao recebe `atividade`, nao `TarefaUI`",
+    /atividade: AtividadeAtualUI \| null;/.test(ESTACAO) && !/TarefaUI/.test(ESTACAO));
+  ok("M20 e nao deriva mais o titulo — recebe a frase pronta",
+    !/tituloDaTarefa/.test(ESTACAO) && /atividade\.titulo/.test(ESTACAO));
+  ok("M21 o Painel recebe `atividade`, nao a lista de tarefas",
+    /atividade: AtividadeAtualUI \| null;/.test(PAINEL) && !/TarefaUI/.test(PAINEL));
+  ok("M22 e nao escolhe mais a tarefa atual por conta propria",
+    !/tarefaAtual/.test(PAINEL) && !/tituloDaTarefa/.test(PAINEL));
+  ok("M23 nenhum dos dois importa a apresentacao de tarefas",
+    !/lib\/ia\/tarefas/.test(ESTACAO) && !/lib\/ia\/tarefas/.test(PAINEL));
+  ok("M23a CONTROLE: as sondas acusariam a Task de volta na prop",
+    /TarefaUI/.test("tarefa: TarefaUI | null;") && /tarefaAtual/.test("const a = tarefaAtual(t);"));
+  ok("M24 a lista de agentes so mudou o call-site, e assume `null`",
+    /atividade=\{null\}/.test(LISTA) && !/tarefas=\{/.test(LISTA));
+
+  // ── M25..M29 — as DUAS barras que ja existiam continuam ali ──────
+  ok("M25 a barra da estacao continua, agora com progresso real",
+    /role="progressbar"/.test(ESTACAO) && /aria-valuenow=\{progresso\}/.test(ESTACAO) &&
+    /const progresso = atividade\?\.progresso \?\? 0;/.test(ESTACAO));
+  ok("M26 e continua escondida em zero, como antes",
+    /\{progresso > 0 && \(/.test(ESTACAO));
+  ok("M27 a barra do painel continua, com o percentual escrito",
+    /role="progressbar"/.test(PAINEL) && /aria-valuenow=\{atividade\.progresso\}/.test(PAINEL) &&
+    /\{atividade\.progresso\}% —/.test(PAINEL));
+  ok("M28 NEW_PROGRESS_UI = NO: sao exatamente duas barras na area do palco",
+    (ESTACAO.match(/role="progressbar"/g) ?? []).length === 1 &&
+    (PAINEL.match(/role="progressbar"/g) ?? []).length === 1 &&
+    !/role="progressbar"/.test(PALCO));
+  const SONDA_PROGRESSO_FIXO = /progresso\s*[:=]\s*\d/;
+  ok("M29 FAKE_PROGRESS = NO: nenhum percentual constante foi plantado",
+    !SONDA_PROGRESSO_FIXO.test(ESTACAO + PAINEL + PALCO));
+  ok("M29a REAL_PROGRESS_GUARD: a sonda acusaria um valor fixo",
+    SONDA_PROGRESSO_FIXO.test("const progresso = 50;") &&
+    SONDA_PROGRESSO_FIXO.test("atividade={{ titulo: t, progresso: 100 }}"));
+  ok("M29b e NAO acusa o `?? 0` que esconde a barra vazia",
+    !SONDA_PROGRESSO_FIXO.test("const progresso = atividade?.progresso ?? 0;"));
+
+  // ── M30..M32 — o que NAO pode ter entrado junto ──────────────────
+  ok("M30 o titulo continua chegando ao leitor de tela pela estacao",
+    /atividade \? `, \$\{atividade\.titulo\}` : ""/.test(ESTACAO));
+  ok("M31 o clique continua indo para a pagina do agente, e so",
+    /\/ia\/agentes\/\$\{agente\.id\}/.test(PAINEL) &&
+    /onSelecionar=\{\(\) => setSelecionado\(agente\.id\)\}/.test(PALCO) &&
+    !/router\.push|window\.location/.test(PALCO));
+  ok("M32 COMMERCIAL_DATA_DEPENDENCY = 0 em todo o palco",
+    !/pedidos|faturamento|margem|receita|lucro|\bads\b|cds-engine/i.test(
+      PALCO + ESTACAO + PAINEL + ROTA_PALCO));
+}
+
+secao("N. O flash de concluido expira na hora certa (M1-I1V2-F2)");
+
+{
+  const PALCO = codigo(ler("components/ia/office/Escritorio.tsx"));
+
+  // ── N1..N8 — a estrutura: UM despertador local, e nenhuma rede ───
+  //
+  // O defeito que esta secao existe para impedir: com o relogio andando
+  // so no refresh de rede, `concluido` podia sobreviver ate 5 s alem da
+  // janela. A resposta certa nao e perguntar mais vezes — nada mudou no
+  // servidor, mudou o relogio.
+  const EFEITO_VISUAL =
+    PALCO.slice(PALCO.indexOf("const expira = proximaExpiracaoMs"),
+                PALCO.indexOf("}, [agentes, agoraMs]);") + 23);
+
+  ok("N1  ANCORA: o efeito do despertador foi recortado", EFEITO_VISUAL.length > 100);
+  ok("N2  a fronteira agendada e `concluido_em + JANELA_CONCLUIDO_MS`",
+    /const expira = fim \+ JANELA_CONCLUIDO_MS;/.test(PALCO));
+  ok("N3  CONCLUDED_WINDOW_SINGLE_SOURCE: a janela vem de estados.ts",
+    /import \{[\s\S]*?JANELA_CONCLUIDO_MS[\s\S]*?\} from "@\/lib\/ia\/estados";/.test(
+      ler("components/ia/office/Escritorio.tsx")) &&
+    !/\b8_?000\b/.test(PALCO));
+  ok("N3a CONTROLE: a sonda do literal acusaria a copia",
+    /\b8_?000\b/.test("const JANELA = 8000;"));
+  ok("N4  o despertador e one-shot — setTimeout, nunca setInterval",
+    /window\.setTimeout\(\(\) => setAgoraMs\(Date\.now\(\)\), expira - agoraMs\)/.test(PALCO) &&
+    !/setInterval/.test(PALCO));
+  ok("N5  VISUAL_TIMER_NETWORK_CALLS = 0: o efeito nao fala com o transporte",
+    !/listarAgentes|listarAgentesDoEscritorio|\bfetch\s*\(|AbortController/.test(EFEITO_VISUAL));
+  ok("N6  UNMOUNT_STOPS_VISUAL_TIMER + invalidacao: o cleanup cancela o anterior",
+    /return \(\) => window\.clearTimeout\(despertador\);/.test(EFEITO_VISUAL));
+  ok("N7  SNAPSHOT_CHANGE_INVALIDATES_OLD_TIMER: reage a retrato e a relogio",
+    /\}, \[agentes, agoraMs\]\);/.test(PALCO));
+  ok("N8  NO_VISUAL_TIMER_LEAK: sem flash vivo, nenhum timer nasce",
+    /if \(expira === null\) return;/.test(EFEITO_VISUAL) &&
+    /if \(expira <= agoraMs\) continue;/.test(PALCO));
+
+  // O laco de rede continua sendo UM, e continua em 5 s. O despertador
+  // e visual: ele nao pode ter virado um segundo polling.
+  ok("N9  NETWORK_REFRESH_LOOPS = 1: so o ciclo de 5 s busca dados",
+    (PALCO.match(/listarAgentesDoEscritorio\(/g) ?? []).length === 1 &&
+    /const INTERVALO_REFRESH_MS = 5_000;/.test(PALCO));
+  ok("N10 e nenhum outro intervalo de rede foi plantado",
+    !/1_?000\b|1_?500\b|2_?000\b|3_?000\b/.test(PALCO));
+
+  // ── N11..N16 — a fronteira EXATA, contra o helper real ───────────
+  //
+  // O oraculo e `aparenciaDoAgente`, nao um esperado escrito a mao: o
+  // contrato da janela e dele, e esta suite nao pode ter uma segunda
+  // opiniao sobre onde a fronteira fica.
+  const FIM = Date.parse("2026-09-18T12:00:00.000Z");
+  const sinalConcluido = [{ status: "concluido" as const, concluido_em: "2026-09-18T12:00:00.000Z" }];
+  const estadoEm = (ms: number) => aparenciaDoAgente({ ativo: true }, sinalConcluido, ms).estado;
+
+  ok("N11 T+1ms ainda e `concluido`", estadoEm(FIM + 1) === "concluido");
+  ok("N12 T+7999ms ainda e `concluido`",
+    estadoEm(FIM + JANELA_CONCLUIDO_MS - 1) === "concluido");
+  ok("N13 T+8000ms JA NAO e `concluido` — a janela e aberta no fim",
+    estadoEm(FIM + JANELA_CONCLUIDO_MS) !== "concluido");
+  ok("N14 T+8001ms tambem nao", estadoEm(FIM + JANELA_CONCLUIDO_MS + 1) !== "concluido");
+  ok("N15 COMPLETED_VISUAL_EXPIRY_EXACT: o palco acorda EXATAMENTE nessa fronteira",
+    /const expira = fim \+ JANELA_CONCLUIDO_MS;/.test(PALCO) &&
+    estadoEm(FIM + JANELA_CONCLUIDO_MS) !== "concluido");
+
+  // ── N16..N19 — o MUTANTE: sem despertador, o flash atrasa ────────
+  //
+  // Modela os DOIS mundos com o mesmo helper real. A unica diferenca e
+  // quem move o relogio: so a rede (mutante) ou a rede mais o
+  // despertador (correcao).
+  const POLL = 5_000;
+  const PRIMEIRO_POLL = FIM + 1_000; // a tarefa encerra logo apos uma leitura
+
+  /** O relogio que a tela teria, sem despertador, no instante `paredeMs`. */
+  const relogioSoDeRede = (paredeMs: number): number => {
+    let t = PRIMEIRO_POLL;
+    while (t + POLL <= paredeMs) t += POLL;
+    return t;
+  };
+  /** Com despertador: a fronteira tambem move o relogio. */
+  const relogioComDespertador = (paredeMs: number): number => {
+    const rede = relogioSoDeRede(paredeMs);
+    const fronteira = FIM + JANELA_CONCLUIDO_MS;
+    return fronteira <= paredeMs && fronteira > rede ? fronteira : rede;
+  };
+
+  const PAREDE = FIM + 9_000; // 1 s DEPOIS de a janela ter fechado
+  ok("N16 ANCORA: nesse instante a janela real ja fechou",
+    PAREDE - FIM > JANELA_CONCLUIDO_MS);
+  ok("N17 MUTANTE: so com rede, o relogio da tela esta parado antes da fronteira",
+    relogioSoDeRede(PAREDE) === FIM + 6_000 &&
+    relogioSoDeRede(PAREDE) < FIM + JANELA_CONCLUIDO_MS);
+  ok("N18 MUTATION_EFFECTIVE: sem despertador o flash SOBREVIVE a janela",
+    estadoEm(relogioSoDeRede(PAREDE)) === "concluido");
+  ok("N19 com o despertador, o mesmo instante ja nao mostra o flash",
+    relogioComDespertador(PAREDE) === FIM + JANELA_CONCLUIDO_MS &&
+    estadoEm(relogioComDespertador(PAREDE)) !== "concluido");
+  ok("N20 VISUAL_EXPIRY_REQUIRES_NETWORK = NO: a fronteira nao coincide com poll nenhum",
+    (FIM + JANELA_CONCLUIDO_MS - PRIMEIRO_POLL) % POLL !== 0);
+
+  // ── N21..N23 — a MAGNITUDE da janela, com expected LITERAL ───────
+  //
+  // Tudo acima mede a SEMANTICA da fronteira (aberta no fim) e o
+  // COMPORTAMENTO do despertador, e todos referenciam
+  // `JANELA_CONCLUIDO_MS`. Nenhum deles dizia QUANTO ela vale: trocar a
+  // constante para 800 ou 80_000 mantinha a secao inteira verde, e o
+  // flash duraria um decimo de segundo ou um minuto e meio sem que nada
+  // reclamasse.
+  //
+  // Este guarda fecha o buraco SEM criar um segundo dono de runtime. O
+  // `actual` continua vindo da constante — ela segue sendo a unica
+  // autoridade de execucao. O `expected` e um literal escrito AQUI, que
+  // representa o requisito de PRODUTO. E a mesma relacao que `C1` tem
+  // com `ESTADOS_VISUAIS`: o codigo decide como fazer, o teste afirma o
+  // que foi combinado. Sem esse expected externo, "combinado" nao existe
+  // — existe so "o que o codigo diz hoje".
+  const JANELA_COMBINADA_MS = 8_000; // requisito de produto, literal
+
+  /** O predicado do guarda, isolado para poder ser exercitado. */
+  const magnitudeConfere = (valorMs: number): boolean => valorMs === JANELA_COMBINADA_MS;
+
+  ok("N21 a janela do flash vale exatamente o combinado: 8.000 ms",
+    magnitudeConfere(JANELA_CONCLUIDO_MS), String(JANELA_CONCLUIDO_MS));
+  ok("N22 MUTANTE: os vizinhos imediatos reprovam — o guarda nao e vacuo",
+    !magnitudeConfere(7_999) && !magnitudeConfere(8_001) && magnitudeConfere(8_000));
+  ok("N23 e valores plausiveis porem errados tambem reprovam",
+    !magnitudeConfere(800) && !magnitudeConfere(5_000) && !magnitudeConfere(80_000));
 }
 
 

@@ -186,6 +186,10 @@ secao("B. O que a UI NAO manda");
     // deixaria o leitor novo invisivel, livre para ganhar `method` ou
     // `body` sem ninguem notar.
     "listarAprovacoesPendentes",
+    // M1-I1-V2: a SETIMA. Mesma rota de `listarAgentes`, PROJECAO
+    // diferente — esta devolve `sinais` e `atividade`, que a outra
+    // descarta. Duas leituras publicadas sobre uma chamada so.
+    "listarAgentesDoEscritorio",
   ];
   /** Toda funcao exportada SEM `method:` e uma leitura. */
   const leiturasReais = [...CODIGO_TRANSPORTE.matchAll(/export async function (\w+)\(/g)]
@@ -212,7 +216,7 @@ secao("B. O que a UI NAO manda");
       ["listarAgentes", "obterDiagnostico", "consultarConversaDoAgente", "outraLeitura"].sort()
     ) !== leiturasEsperadas);
   ok("B5a4 ANCORA: a varredura enxergou leitores de verdade",
-    leiturasReais.length === 6 && corpoDaFuncao("listarPermissoesDoAgente").length > 50);
+    leiturasReais.length === 7 && corpoDaFuncao("listarPermissoesDoAgente").length > 50);
   // A leitura de permissoes e leitura: nao define nada, nao cria linha e
   // nao executa Funcao.
   ok("B5a5 a leitura de permissoes repassa o sinal e nao escreve",
@@ -437,9 +441,24 @@ secao("C. As telas migradas nao voltam ao simulado");
   ok("C10 o container reinicia a leitura quando o agente muda",
     /\}, \[agenteId\]\)/.test(codigo(ler(CONTAINER))));
 
-  ok("C11 os mocks continuam existindo para as telas nao migradas",
-    /MOCK_AGENTES/.test(codigo(ler("components/ia/office/Escritorio.tsx"))) &&
+  // ── C11 reconciliado na M1-I1-V2 ────────────────────────────────
+  //
+  // ANTES: "os mocks continuam existindo para as telas nao migradas", e
+  // o Escritorio era a tela nao migrada. Ele migrou. O guarda nao foi
+  // apagado — virou a afirmacao oposta sobre o mesmo arquivo, mais a
+  // metade que continua valendo: o Feed AINDA simula, e os mocks nao
+  // podem ter sido varridos junto.
+  {
+    const palco = codigo(ler("components/ia/office/Escritorio.tsx"));
+    ok("C11 o Escritorio nao usa mais agente nem tarefa simulada",
+      !/MOCK_/.test(palco));
+    ok("C11a e le a fonte real, pelo transporte publicado",
+      /listarAgentesDoEscritorio\(/.test(palco) && !/\bfetch\s*\(/.test(palco));
+    ok("C11b os mocks CONTINUAM existindo para o feed, que ainda simula",
       /MOCK_AGENTES/.test(codigo(ler("components/ia/atividade/Timeline.tsx"))));
+    ok("C11c CONTROLE NEGATIVO: a sonda acusaria o mock de volta no palco",
+      /MOCK_/.test('import { MOCK_AGENTES } from "@/lib/ia/mocks";'));
+  }
   ok("C12 a rota de detalhe continua Server Component",
     !/^"use client"/m.test(ler(ROTA_DETALHE)));
   ok("C13 e nao faz rede por conta propria",
@@ -471,9 +490,13 @@ function responde(status: number, corpo: unknown): void {
   proxima = { status, corpo };
 }
 
+// M1-I1-V2: a rota passou a devolver os dois campos do snapshot em TODO
+// agente. A fixture os traz porque a resposta real os traz — omiti-los
+// aqui faria o parser reprovar e a suite mediria a fixture, nao a rota.
 const agente = (id: string, extra: Record<string, unknown> = {}) => ({
   id, nome: `Agente ${id}`, tipo: "mensagens", instrucoes: null,
-  ativo: true, criado_em: "2026-08-01T00:00:00.000Z", ...extra,
+  ativo: true, criado_em: "2026-08-01T00:00:00.000Z",
+  sinais: [], atividade: null, ...extra,
 });
 const item = (skillId: string, versao: string, estadoGeral = "PRONTO") =>
   ({ skillId, versao, diagnostico: { estadoGeral, pronto: estadoGeral === "PRONTO", bloqueios: [], limitacoes: [], funcoesUtilizaveis: [] } });

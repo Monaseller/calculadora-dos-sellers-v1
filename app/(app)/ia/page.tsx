@@ -6,41 +6,20 @@
  * porque abre drawer e le o relogio. Manter a rota como Server Component
  * evita marcar a arvore inteira como cliente so por causa do palco.
  *
- * ── O aviso de simulacao mora AQUI agora ────────────────────────────
+ * ── O aviso de simulacao SAIU daqui ─────────────────────────────────
  *
- * Ele era global, no shell de `/ia`. Deixou de ser: `/ia/agentes` e
- * `/ia/agentes/[id]` passaram a ler dado real, e um aviso de area
- * inteira virou mentira sobre elas.
+ * Ele era global, no shell de `/ia`. Virou desta tela quando `/ia/agentes`
+ * e `/ia/agentes/[id]` passaram a ler dado real, porque um aviso de area
+ * inteira tinha virado mentira sobre elas.
  *
- * Nesta tela ele continua VERDADEIRO e por isso continua existindo: o
- * palco desenha `MOCK_AGENTES` e `MOCK_TAREFAS`. Quem avisa e a tela
- * que simula, nunca o shell — assim o aviso morre junto com a
- * simulacao que o justifica, em vez de sobreviver a ela.
+ * Agora ele saiu tambem daqui, pelo mesmo motivo e pela regra que ele
+ * mesmo carregava: o aviso morre junto com a simulacao que o justifica.
+ * O palco le os agentes REAIS do dono e o snapshot operacional deles.
+ * Manter o selo seria a tela afirmando falso sobre si mesma — e aviso
+ * que mente para menos ensina a ignorar avisos.
  */
 import Escritorio from "@/components/ia/office/Escritorio";
-import { CROMO, ESPACO, FONTE } from "@/lib/ia/design";
-import { MOCK_AVISO } from "@/lib/ia/mocks";
 
 export default function PaginaEscritorio() {
-  return (
-    <>
-      <p style={{ margin: `0 0 ${ESPACO.lg}px` }}>
-        <span
-          style={{
-            display: "inline-block",
-            padding: "3px 10px",
-            borderRadius: 999,
-            border: `1px solid ${CROMO.acentoBorda}`,
-            background: CROMO.acentoFundo,
-            color: CROMO.acento,
-            font: `700 11px/1.6 ${FONTE.interface}`,
-          }}
-        >
-          {MOCK_AVISO}
-        </span>
-      </p>
-
-      <Escritorio />
-    </>
-  );
+  return <Escritorio />;
 }

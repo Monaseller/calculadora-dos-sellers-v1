@@ -191,7 +191,7 @@ export default function PaginaAgentes() {
         <PainelAgente
           agente={aberto.agente}
           aparencia={aberto.aparencia}
-          tarefas={NENHUMA_TAREFA}
+          atividade={null}
           onFechar={() => setSelecionado(null)}
         />
       )}

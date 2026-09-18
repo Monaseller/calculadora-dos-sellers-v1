@@ -517,7 +517,38 @@ async function main() {
   ok("H0  os dois arquivos da 1B existem (anti-vacuidade)", tip.length > 500 && cap.length > 1000);
   ok("H1  tipos.ts continua sem worker/claim (assert J2 da 1B)", !proibidos1B.test(tip));
   ok("H2  capability.ts continua sem worker/claim (assert J1 da 1B)", !proibidos1B.test(cap));
-  ok("H3  capability.ts continua com 7 operacoes", conta(cap, /export\s+async\s+function\s/g) === 7);
+  // ── H3 reconciliado na M1-I1-V2 ──────────────────────────────────
+  //
+  // Eram 7 operacoes. Sao 8: o Escritorio real precisou de UMA leitura
+  // em lote, e ela nasceu no unico modulo autorizado a falar com a
+  // tabela. Subir o numero e so isso — um numero — e nao diria QUAL
+  // operacao entrou; uma oitava com outro nome, ou uma das sete
+  // trocada por outra, manteria a contagem e passaria.
+  //
+  // Entao o guarda passou a cobrar o CONJUNTO: as sete de antes,
+  // nominais, mais a nova, nominal. Contagem e nomes, nunca `>=`.
+  const OPERACOES_CAP = [...cap.matchAll(/export\s+async\s+function\s+(\w+)/g)]
+    .map((m) => m[1])
+    .sort();
+  const OPERACOES_CAP_ESPERADAS = [
+    "atualizarAgenteDoDono",
+    "criarAgente",
+    "criarTarefa",
+    "lerAgenteDoDono",
+    "lerTarefaDoDono",
+    "listarAgentesDoDono",
+    "listarTarefasDoAgente",
+    "listarSinaisDeTarefasDoDono",
+  ].sort();
+  ok("H3  capability.ts tem exatamente 8 operacoes async",
+     conta(cap, /export\s+async\s+function\s/g) === 8 && OPERACOES_CAP.length === 8);
+  ok("H3a e o conjunto e NOMINAL — as 7 da 1B mais o leitor em lote",
+     JSON.stringify(OPERACOES_CAP) === JSON.stringify(OPERACOES_CAP_ESPERADAS));
+  ok("H3b CONTROLE: uma oitava operacao com nome inesperado reprovaria",
+     JSON.stringify([...OPERACOES_CAP.slice(0, 7), "listarOutraCoisa"].sort()) !==
+       JSON.stringify(OPERACOES_CAP_ESPERADAS));
+  ok("H3c CONTROLE: perder uma das sete tambem reprovaria",
+     JSON.stringify(OPERACOES_CAP.slice(1)) !== JSON.stringify(OPERACOES_CAP_ESPERADAS));
   ok("H4  tipos.ts continua sem server-only", !/import\s+"server-only"/.test(tip));
   ok("H5  a maquina de transicao da 1B segue valendo",
      transicaoTarefaPermitida("pendente", "rodando") &&

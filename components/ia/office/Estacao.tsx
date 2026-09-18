@@ -14,8 +14,8 @@
  */
 import { CORES_TIPO, FONTE, PALCO, RAIO, degrau } from "@/lib/ia/design";
 import { VOCABULARIO_ESTADO, type AparenciaAgente } from "@/lib/ia/estados";
-import { tituloDaTarefa } from "@/lib/ia/tarefas";
-import type { AgenteUI, TarefaUI } from "@/lib/ia/contratos";
+import type { AtividadeAtualUI } from "@/lib/ia/agentes-http";
+import type { AgenteUI } from "@/lib/ia/contratos";
 import BadgeEstado, { corDaAparencia } from "@/components/ia/BadgeEstado";
 
 /**
@@ -80,21 +80,30 @@ export function Personagem({
   );
 }
 
+/**
+ * A estacao recebe a ATIVIDADE ja resumida, nunca a tarefa.
+ *
+ * Ela exibia duas coisas de `TarefaUI` — o titulo e o progresso — e para
+ * obter a primeira chamava `tituloDaTarefa`, que le `entrada`. Exigir a
+ * linha inteira aqui obrigava a carregar `entrada` ate o browser para
+ * mostrar uma frase que o servidor ja sabe escrever. Duas propriedades
+ * bastam, e nada mais atravessa.
+ */
 export default function Estacao({
   agente,
   aparencia,
-  tarefa,
+  atividade,
   onSelecionar,
 }: {
   agente: AgenteUI;
   aparencia: AparenciaAgente;
-  tarefa: TarefaUI | null;
+  atividade: AtividadeAtualUI | null;
   onSelecionar: () => void;
 }) {
   const cor = corDaAparencia(aparencia);
   const trabalhando = aparencia.estado === "trabalhando";
   const alerta = aparencia.estado === "erro" || aparencia.estado === "aguardando_aprovacao";
-  const progresso = tarefa?.progresso ?? 0;
+  const progresso = atividade?.progresso ?? 0;
 
   return (
     <button
@@ -105,7 +114,7 @@ export default function Estacao({
       // mostra visualmente em tres pedacos separados (nome, estado,
       // tarefa) e que um leitor de tela leria fora de ordem.
       aria-label={`${agente.nome}, ${VOCABULARIO_ESTADO[aparencia.estado].rotulo}${
-        tarefa ? `, ${tituloDaTarefa(tarefa)}` : ""
+        atividade ? `, ${atividade.titulo}` : ""
       }. Abrir detalhes.`}
       style={{
         display: "flex",

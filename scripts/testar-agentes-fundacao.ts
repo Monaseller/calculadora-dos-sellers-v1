@@ -16,7 +16,7 @@
  *  2. COERENCIA tipos.ts <-> migration. Os dominios fechados existem em
  *     dois lugares; divergir nao da erro de tipo, da 23514 em runtime.
  *  3. INSPECAO DA CAPABILITY. server-only, ausencia de anon key,
- *     ausencia de `select("*")`, `user_id` nas 7 operacoes, ausencia de
+ *     ausencia de `select("*")`, `user_id` nas operacoes, ausencia de
  *     spread do input.
  *  4. FUNCOES PURAS executadas de verdade — `derivarStatusAgente` e a
  *     maquina de transicao.
@@ -51,6 +51,9 @@ import {
   filtrosAgentesDoDono,
   filtrosTarefaDoDono,
   filtrosTarefasDoAgente,
+  filtrosTarefasDoDono,
+  listarSinaisDeTarefasDoDono,
+  STATUS_DE_SINAL_ABERTO,
   criarAgente,
   listarAgentesDoDono,
   lerAgenteDoDono,
@@ -129,9 +132,13 @@ const OPERACOES_LEITURA = [
   "atualizarAgenteDoDono",
   "listarTarefasDoAgente",
   "lerTarefaDoDono",
+  // M1-I1-V2: a leitura EM LOTE que o Escritorio usa. Entra nesta lista
+  // e nao ao lado dela — as invariantes de dono valem para ela igual, e
+  // uma operacao que nasce fora da lista nasce fora da prova.
+  "listarSinaisDeTarefasDoDono",
 ];
 const OPERACOES_ESCRITA = ["criarAgente", "criarTarefa"];
-const AS_7_OPERACOES = [...OPERACOES_LEITURA, ...OPERACOES_ESCRITA];
+const AS_OPERACOES = [...OPERACOES_LEITURA, ...OPERACOES_ESCRITA];
 
 // ── Executor em memoria ───────────────────────────────────────────────
 // Reproduz `.eq()` encadeado: a linha so passa se TODOS os filtros
@@ -327,20 +334,20 @@ function main() {
      argsDeLog.every((a) => /^"[^"]*"$/.test(a.trim())));
   ok("D11 nenhum error.message vaza", !/error\.message/.test(cap));
 
-  // ═══ E. Capability — user_id nas 7 operacoes ═══════════════════════
-  console.log("E. Capability — user_id nas 7 operacoes");
+  // ═══ E. Capability — user_id nas operacoes ═══════════════════════
+  console.log("E. Capability — user_id nas operacoes");
 
   // Anti-vacuidade: as 7 precisam EXISTIR antes de se afirmar algo delas.
-  const corpos = new Map(AS_7_OPERACOES.map((n) => [n, corpoDaFuncao(cap, n)]));
-  ok("E0  as 7 operacoes foram localizadas na fonte",
-     AS_7_OPERACOES.every((n) => (corpos.get(n) ?? "").length > 80));
-  ok("E1  a capability exporta EXATAMENTE 7 operacoes async",
-     conta(cap, /export\s+async\s+function\s/g) === 7);
+  const corpos = new Map(AS_OPERACOES.map((n) => [n, corpoDaFuncao(cap, n)]));
+  ok("E0  as 8 operacoes foram localizadas na fonte",
+     AS_OPERACOES.every((n) => (corpos.get(n) ?? "").length > 80));
+  ok("E1  a capability exporta EXATAMENTE 8 operacoes async",
+     conta(cap, /export\s+async\s+function\s/g) === 8);
 
   for (const nome of OPERACOES_LEITURA) {
     const corpo = corpos.get(nome) ?? "";
     ok(`E2 ${nome}: usa construtor de filtro com user_id`,
-       /filtros(AgenteDoDono|AgentesDoDono|TarefaDoDono|TarefasDoAgente)\(/.test(corpo));
+       /filtros(AgenteDoDono|AgentesDoDono|TarefaDoDono|TarefasDoAgente|TarefasDoDono)\(/.test(corpo));
   }
   for (const nome of OPERACOES_ESCRITA) {
     const corpo = corpos.get(nome) ?? "";
@@ -358,12 +365,13 @@ function main() {
     filtrosAgentesDoDono: filtrosAgentesDoDono(USUARIO_A),
     filtrosTarefaDoDono: filtrosTarefaDoDono(TAREFA_A, USUARIO_A),
     filtrosTarefasDoAgente: filtrosTarefasDoAgente(AGENTE_A, USUARIO_A),
+    filtrosTarefasDoDono: filtrosTarefasDoDono(USUARIO_A),
   };
-  ok("E4a os 4 construtores produzem user_id (anti-vacuidade)",
-     Object.values(CONSTRUTORES).length === 4 &&
+  ok("E4a os 5 construtores produzem user_id (anti-vacuidade)",
+     Object.values(CONSTRUTORES).length === 5 &&
        Object.values(CONSTRUTORES).every((f) => "user_id" in f));
-  ok("E4b user_id chega a instrucao nas 7 operacoes",
-     AS_7_OPERACOES.every((n) => {
+  ok("E4b user_id chega a instrucao nas 8 operacoes",
+     AS_OPERACOES.every((n) => {
        const corpo = corpos.get(n) ?? "";
        if (/user_id:\s*String\(userId\)/.test(corpo)) return true;
        return Object.entries(CONSTRUTORES).some(
@@ -403,6 +411,71 @@ function main() {
   ok("E19 criarTarefa exige 3 argumentos", criarTarefa.length === 3);
   ok("E20 criarAgente exige 2 argumentos", criarAgente.length === 2);
   ok("E21 listarAgentesDoDono exige 1 argumento", listarAgentesDoDono.length === 1);
+
+  // ═══ M1-I1-V2 — a leitura EM LOTE que o Escritorio usa ═════════════
+  //
+  // O palco desenha todos os agentes do dono de uma vez. Uma consulta
+  // por agente seria N+1 por construcao. Os asserts abaixo cobram as
+  // quatro propriedades que fazem dessa leitura uma so: recorte por
+  // `.in(...)`, dono na propria instrucao, projecao explicita e conjunto
+  // LIMITADO — nada de historico inteiro de concluidas.
+  const SINAIS = corpoDaFuncao(cap, "listarSinaisDeTarefasDoDono");
+  ok("E22 o leitor em lote foi localizado na fonte (anti-vacuidade)", SINAIS.length > 200);
+  ok("E22a exige os dois argumentos", listarSinaisDeTarefasDoDono.length === 2);
+  ok("E23 recorta pelos ids ja do dono, com .in(...) — nunca um id por vez",
+     /\.in\("agente_id", \[\.\.\.agenteIds\]\)/.test(SINAIS));
+  ok("E24 o dono entra na propria instrucao", /filtrosTarefasDoDono\(userId\)/.test(SINAIS));
+  ok("E24a filtrosTarefasDoDono carrega user_id, e SO ele",
+     JSON.stringify(filtrosTarefasDoDono(USUARIO_A)) === JSON.stringify({ user_id: USUARIO_A }));
+  ok("E25 projecao explicita, e zero select(\"*\")",
+     /select\(COLUNAS_SINAL_TAREFA\)/.test(SINAIS) && !/select\(\s*["'`]\s*\*/.test(SINAIS));
+
+  const literalSinal = (cap.match(/const COLUNAS_SINAL_TAREFA =\s*([\s\S]*?);/) ?? ["", ""])[1];
+  const colunasSinal: string[] = literalSinal.match(/[a-z_]+/g) ?? [];
+  ok("E26 a projecao do sinal e exatamente a acordada",
+     JSON.stringify([...colunasSinal].sort()) ===
+       JSON.stringify(["agente_id", "concluido_em", "criado_em", "entrada", "id", "progresso",
+                       "status", "tipo"]));
+  ok("E27 e NAO traz resultado, erro, tentativas, heartbeat nem user_id",
+     ["resultado", "erro_tipo", "erro_mensagem", "tentativas", "max_tentativas", "heartbeat_em",
+      "user_id", "iniciado_em"].every((c) => !colunasSinal.includes(c)));
+
+  ok("E28 ordena por criado_em DESC", /\.order\("criado_em", \{ ascending: false \}\)/.test(SINAIS));
+  ok("E29 e desempata por id DESC — mesmo instante nao alterna sozinho",
+     /\.order\("id", \{ ascending: false \}\)/.test(SINAIS));
+  ok("E29a nessa ordem, criado_em primeiro",
+     SINAIS.indexOf('.order("criado_em"') < SINAIS.indexOf('.order("id"'));
+
+  const EXPR = (cap.match(/function expressaoDoConjuntoDeSinal[\s\S]*?\n\}/) ?? [""])[0];
+  ok("E30 a expressao de corte foi localizada (anti-vacuidade)", EXPR.length > 100);
+  ok("E31 o conjunto e LIMITADO: abertos OU concluido dentro da janela",
+     /status\.in\.\(\$\{STATUS_DE_SINAL_ABERTO\.join\(","\)\}\)/.test(EXPR) &&
+     /and\(status\.eq\.concluido,concluido_em\.gte\.\$\{corte\}\)/.test(EXPR));
+  ok("E32 a janela e IMPORTADA de estados.ts, nunca um literal segundo dono",
+     /import \{ JANELA_CONCLUIDO_MS \} from "@\/lib\/ia\/estados";/.test(capBruta) &&
+     /JANELA_CONCLUIDO_MS/.test(EXPR) && !/\b8_?000\b/.test(cap));
+  ok("E32a CONTROLE: a sonda do literal acusaria a copia",
+     /\b8_?000\b/.test("const JANELA = 8_000;") && /\b8_?000\b/.test("agoraMs - 8000"));
+  ok("E33 `erro` continua aberto e NAO ganhou expiracao propria",
+     STATUS_DE_SINAL_ABERTO.includes("erro") &&
+     /and\(status\.eq\.concluido,/.test(EXPR) && !/and\(status\.eq\.erro/.test(EXPR));
+  ok("E34 os abertos sao os 4 que derivarStatusAgente consulta antes de idle",
+     JSON.stringify([...STATUS_DE_SINAL_ABERTO].sort()) ===
+       JSON.stringify(["aguardando_aprovacao", "erro", "pendente", "rodando"]));
+  ok("E34a `cancelado` e `concluido` nao entram nos abertos",
+     !STATUS_DE_SINAL_ABERTO.includes("cancelado") &&
+     !STATUS_DE_SINAL_ABERTO.includes("concluido"));
+  ok("E34b e todos eles sao status REAIS do banco",
+     STATUS_DE_SINAL_ABERTO.every((valor: string) => ehStatusTarefa(valor)));
+
+  ok("E35 ids vazios (ou sem dono) saem ANTES de abrir o cliente — zero round-trips",
+     /if \(!userId \|\| agenteIds\.length === 0\) return \{ linhas: \[\], erro: null \};/.test(SINAIS) &&
+     SINAIS.indexOf("agenteIds.length === 0") < SINAIS.indexOf("getSupabaseServidor"));
+  ok("E36 uma consulta so: nenhum laco por agente dentro do leitor",
+     (SINAIS.match(/getSupabaseServidor\(\)/g) ?? []).length === 1 &&
+     !/\bfor\s*\(|\.forEach\(|\.map\(/.test(SINAIS));
+  ok("E36a CONTROLE: a sonda de N+1 acusaria um laco com consulta dentro",
+     /\bfor\s*\(/.test("for (const id of ids) { await ler(id); }"));
 
   // ═══ F. Isolamento cross-tenant (executor em memoria) ══════════════
   console.log("F. Isolamento cross-tenant");

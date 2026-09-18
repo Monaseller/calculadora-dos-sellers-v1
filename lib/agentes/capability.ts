@@ -47,6 +47,7 @@
  */
 import "server-only";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
+import { JANELA_CONCLUIDO_MS } from "@/lib/ia/estados";
 import {
   ehTipoAgente,
   type CamposAtualizacaoAgente,
@@ -68,6 +69,35 @@ const COLUNAS_AGENTE = "id, user_id, nome, tipo, instrucoes, ativo, criado_em, a
 const COLUNAS_TAREFA =
   "id, agente_id, user_id, tipo, entrada, status, progresso, resultado, erro_tipo, " +
   "erro_mensagem, tentativas, max_tentativas, criado_em, iniciado_em, concluido_em, heartbeat_em";
+
+/**
+ * A projecao do SINAL — o subconjunto que o Escritorio precisa, e nada
+ * alem.
+ *
+ * `resultado`, `erro_mensagem`, `erro_tipo`, `tentativas` e
+ * `heartbeat_em` ficam de FORA: nenhum deles participa de estado visual
+ * ou de titulo, e o que nao e lido daqui nao tem como vazar para a
+ * resposta HTTP depois. `entrada` entra porque `tituloDaTarefa` a le —
+ * e sai do servidor ja convertida em uma frase.
+ */
+const COLUNAS_SINAL_TAREFA =
+  "id, agente_id, status, concluido_em, criado_em, tipo, entrada, progresso";
+
+/**
+ * Os status que mantem o agente OCUPADO OU EM ALERTA — os quatro que
+ * `derivarStatusAgente` consulta antes de cair em `idle`.
+ *
+ * `erro` esta aqui e NAO tem recorte de tempo: no dominio ele nao e
+ * terminal (ver `TRANSICOES_TAREFA`), e inventar uma expiracao para ele
+ * mudaria silenciosamente o estado do agente na tela. `cancelado` nao
+ * esta: dele nao sai transicao, e ele nao colore nada.
+ */
+export const STATUS_DE_SINAL_ABERTO: readonly string[] = [
+  "pendente",
+  "rodando",
+  "aguardando_aprovacao",
+  "erro",
+];
 
 /** Violacao de FK. E o codigo que a FK composta devolve quando a tarefa
  *  aponta para um agente que nao existe OU que e de outro dono — o
@@ -104,6 +134,17 @@ export function filtrosTarefaDoDono(tarefaId: string, userId: string): Record<st
  */
 export function filtrosTarefasDoAgente(agenteId: string, userId: string): Record<string, unknown> {
   return { agente_id: agenteId, user_id: String(userId) };
+}
+
+/**
+ * Tarefas do DONO, sem fixar agente. Usado pela leitura em lote do
+ * Escritorio, que precisa de varios agentes em UMA consulta — o recorte
+ * por agente entra depois, como `.in(...)`, e nunca substitui este
+ * filtro: sem `user_id` na instrucao, uma lista de ids vazada devolveria
+ * as tarefas de outro dono.
+ */
+export function filtrosTarefasDoDono(userId: string): Record<string, unknown> {
+  return { user_id: String(userId) };
 }
 
 /** Aplica um mapa de filtros como `.eq()` encadeados. */
@@ -340,6 +381,84 @@ export async function listarTarefasDoAgente(
     return { linhas: [], erro: "erro_consulta_tarefa" };
   }
   return { linhas: (Array.isArray(data) ? data : []) as LinhaTarefa[], erro: null };
+}
+
+/**
+ * Uma linha de tarefa REDUZIDA ao que o Escritorio consegue usar.
+ *
+ * E um `Pick` de `LinhaTarefa`, nunca um tipo paralelo: no dia em que
+ * uma destas colunas mudar de forma, este alias muda junto, de graca.
+ */
+export type LinhaTarefaDeSinal = Pick<
+  LinhaTarefa,
+  "id" | "agente_id" | "status" | "concluido_em" | "criado_em" | "tipo" | "entrada" | "progresso"
+>;
+
+/**
+ * A expressao que LIMITA o conjunto devolvido.
+ *
+ * Em uma consulta so, porque sao duas condicoes unidas por OU e o
+ * PostgREST sabe expressar isso (`lib/marketplace/credenciais.ts` usa o
+ * mesmo recurso, pelo mesmo motivo):
+ *
+ *   status IN (abertos)  OR  (status = 'concluido' AND concluido_em >= corte)
+ *
+ * O corte vem de `JANELA_CONCLUIDO_MS`, IMPORTADA de `lib/ia/estados.ts`
+ * em vez de copiada. A janela tem um dono so; um `8000` escrito aqui
+ * seria um segundo dono silencioso, e os dois divergiriam na primeira
+ * mudanca. A decisao visual final continua sendo do cliente — o que
+ * acontece aqui e apenas parar de carregar o que ja nao pode importar.
+ */
+function expressaoDoConjuntoDeSinal(agoraMs: number): string {
+  const corte = new Date(agoraMs - JANELA_CONCLUIDO_MS).toISOString();
+  return (
+    `status.in.(${STATUS_DE_SINAL_ABERTO.join(",")}),` +
+    `and(status.eq.concluido,concluido_em.gte.${corte})`
+  );
+}
+
+/**
+ * Os sinais operacionais de VARIOS agentes do dono, em UMA leitura.
+ *
+ * ── Por que em lote, e nao um `listarTarefasDoAgente` por agente ────
+ *
+ * O Escritorio desenha todos os agentes do dono de uma vez. Uma consulta
+ * por agente seria N+1 por construcao — e N cresce com o sucesso do
+ * produto. A lista de ids entra como `.in(...)`, servida pelo indice
+ * `idx_agente_tarefas_agente (agente_id, criado_em DESC)` que ja existe;
+ * nenhuma migration foi necessaria.
+ *
+ * ── Ordenacao ──────────────────────────────────────────────────────
+ *
+ * `criado_em DESC` e, para o empate exato, `id DESC`. A ordem NAO
+ * implementa precedencia de status — quem decide qual e a tarefa atual
+ * continua sendo `tarefaAtual`, e duas regras de precedencia
+ * divergiriam. Isto aqui responde outra pergunta: DENTRO de um mesmo
+ * status, qual linha vem primeiro. Sem o desempate por `id`, duas
+ * tarefas criadas no mesmo instante alternariam sozinhas na tela.
+ *
+ * Lista de ids vazia devolve sem consultar — zero round-trips.
+ */
+export async function listarSinaisDeTarefasDoDono(
+  agenteIds: readonly string[],
+  userId: string
+): Promise<ResultadoLista<LinhaTarefaDeSinal>> {
+  if (!userId || agenteIds.length === 0) return { linhas: [], erro: null };
+
+  const { data, error } = await aplicarFiltros(
+    getSupabaseServidor().from("agente_tarefas").select(COLUNAS_SINAL_TAREFA),
+    filtrosTarefasDoDono(userId)
+  )
+    .in("agente_id", [...agenteIds])
+    .or(expressaoDoConjuntoDeSinal(Date.now()))
+    .order("criado_em", { ascending: false })
+    .order("id", { ascending: false });
+
+  if (error) {
+    console.error("[agentes] falha ao listar sinais de tarefas do dono");
+    return { linhas: [], erro: "erro_consulta_tarefa" };
+  }
+  return { linhas: (Array.isArray(data) ? data : []) as LinhaTarefaDeSinal[], erro: null };
 }
 
 /** UMA tarefa do dono, sem passar pelo agente. Par incoerente devolve `null`. */

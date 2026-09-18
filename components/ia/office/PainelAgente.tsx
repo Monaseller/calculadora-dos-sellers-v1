@@ -22,9 +22,10 @@
  *
  * Ele dizia, e a frase virou falsa: a identidade e o estado exibidos
  * aqui vem do agente REAL do dono, pela mesma leitura autenticada da
- * lista. O que sobrou de simulado neste drawer nao e dado nenhum — e a
- * ausencia de tarefas, que chega como lista vazia e ja se anuncia
- * sozinha ("Nenhuma tarefa em andamento").
+ * lista. Nao ha mais nada simulado neste drawer: a atividade tambem e
+ * real quando quem o abre e o Escritorio. A lista de agentes ainda o
+ * abre com `atividade={null}`, e a ausencia se anuncia sozinha
+ * ("Nenhuma tarefa em andamento") em vez de inventar uma.
  *
  * A frase de orientacao ficou: ela nao afirma nada sobre procedencia,
  * so diz onde mora o resto.
@@ -40,19 +41,28 @@ import { useEffect, useRef } from "react";
 import Link from "next/link";
 import { CROMO, ESPACO, FONTE, RAIO } from "@/lib/ia/design";
 import { VOCABULARIO_ESTADO, type AparenciaAgente } from "@/lib/ia/estados";
-import { tarefaAtual, tituloDaTarefa } from "@/lib/ia/tarefas";
-import type { AgenteUI, TarefaUI } from "@/lib/ia/contratos";
+import type { AtividadeAtualUI } from "@/lib/ia/agentes-http";
+import type { AgenteUI } from "@/lib/ia/contratos";
 import BadgeEstado, { corDaAparencia } from "@/components/ia/BadgeEstado";
 
+/**
+ * ── O drawer deixou de escolher a tarefa ────────────────────────────
+ *
+ * Ele recebia a lista inteira e chamava `tarefaAtual` por conta propria.
+ * Duas telas decidindo a mesma coisa em lugares diferentes e uma
+ * divergencia esperando acontecer — e, para decidir, ele precisava de
+ * `TarefaUI` completa, `entrada` inclusa. Agora quem tem os dados
+ * escolhe, e o drawer recebe a escolha ja feita.
+ */
 export default function PainelAgente({
   agente,
   aparencia,
-  tarefas,
+  atividade,
   onFechar,
 }: {
   agente: AgenteUI;
   aparencia: AparenciaAgente;
-  tarefas: readonly TarefaUI[];
+  atividade: AtividadeAtualUI | null;
   onFechar: () => void;
 }) {
   const fecharRef = useRef<HTMLButtonElement | null>(null);
@@ -80,7 +90,6 @@ export default function PainelAgente({
     };
   }, [onFechar]);
 
-  const atual = tarefaAtual(tarefas);
   const cor = corDaAparencia(aparencia);
 
   return (
@@ -154,15 +163,15 @@ export default function PainelAgente({
         </Campo>
 
         <Campo rotulo="TAREFA ATUAL">
-          {atual ? (
+          {atividade ? (
             <>
-              <p style={{ margin: 0 }}>{tituloDaTarefa(atual)}</p>
+              <p style={{ margin: 0 }}>{atividade.titulo}</p>
               <div
                 role="progressbar"
-                aria-valuenow={atual.progresso}
+                aria-valuenow={atividade.progresso}
                 aria-valuemin={0}
                 aria-valuemax={100}
-                aria-label={`Progresso: ${atual.progresso} por cento`}
+                aria-label={`Progresso: ${atividade.progresso} por cento`}
                 style={{
                   marginTop: ESPACO.sm,
                   height: 10,
@@ -171,10 +180,10 @@ export default function PainelAgente({
                   overflow: "hidden",
                 }}
               >
-                <div style={{ width: `${atual.progresso}%`, height: "100%", background: cor }} />
+                <div style={{ width: `${atividade.progresso}%`, height: "100%", background: cor }} />
               </div>
               <p style={{ margin: `${ESPACO.xs}px 0 0`, fontSize: 12, color: CROMO.textoFraco }}>
-                {atual.progresso}% — {VOCABULARIO_ESTADO[aparencia.estado].rotulo}
+                {atividade.progresso}% — {VOCABULARIO_ESTADO[aparencia.estado].rotulo}
               </p>
             </>
           ) : (

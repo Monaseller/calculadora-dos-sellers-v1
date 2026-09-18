@@ -24,61 +24,167 @@
  * relogio. Ler o relogio durante o SSR e de novo no cliente produziria
  * HTML diferente nos dois lados — erro de hidratacao. Entao o palco so
  * desenha depois da montagem, com um unico `Date.now()`.
+ *
+ * ── O palco deixou de ser simulado ──────────────────────────────────
+ *
+ * Ele desenhava `MOCK_AGENTES` e `MOCK_TAREFAS`. Agora le os agentes
+ * REAIS do dono e o snapshot operacional de cada um, pela mesma rota
+ * autenticada que a lista de agentes usa.
+ *
+ * O que chega NAO e tarefa: sao `sinais` (status + `concluido_em`) e a
+ * `atividade` ja resumida pelo servidor. A derivacao de estado continua
+ * inteira do lado do cliente, com `aparenciaDoAgente` — e assim o flash
+ * de concluido expira com o relogio de quem olha, sem depender de
+ * nenhuma resposta nova.
+ *
+ * ── O refresh nao e `setInterval` ───────────────────────────────────
+ *
+ * E `await` seguido de `setTimeout`: o proximo ciclo so e agendado
+ * quando o anterior TERMINA. Um intervalo fixo enfileira requisicoes
+ * quando a rede fica lenta, e a tela passa a aplicar respostas fora de
+ * ordem — o palco piscaria entre dois retratos diferentes.
  */
 import { useEffect, useMemo, useState } from "react";
 import { BREAKPOINT, CROMO, ESPACO, FONTE, PALCO, RAIO, degrau } from "@/lib/ia/design";
-import { JANELA_CONCLUIDO_MS, aparenciaDoAgente, estaNaEstacao, rotuloDe } from "@/lib/ia/estados";
-import { tarefaAtual } from "@/lib/ia/tarefas";
-import { MOCK_AGENTES, MOCK_TAREFAS } from "@/lib/ia/mocks";
-import type { AgenteUI, TarefaUI } from "@/lib/ia/contratos";
+import {
+  JANELA_CONCLUIDO_MS,
+  aparenciaDoAgente,
+  estaNaEstacao,
+  rotuloDe,
+} from "@/lib/ia/estados";
+import { listarAgentesDoEscritorio, type AgenteComSnapshotUI } from "@/lib/ia/agentes-http";
+import type { AgenteUI } from "@/lib/ia/contratos";
 import Estacao, { Personagem } from "@/components/ia/office/Estacao";
 import PainelAgente from "@/components/ia/office/PainelAgente";
 import BadgeEstado from "@/components/ia/BadgeEstado";
 
+/** De quanto em quanto tempo o palco volta a perguntar. */
+const INTERVALO_REFRESH_MS = 5_000;
+
+/**
+ * O instante em que o proximo flash de `concluido` deixa de valer.
+ *
+ * ── Por que este calculo existe ─────────────────────────────────────
+ *
+ * `concluido` e transitorio: `aparenciaDoAgente` compara `concluido_em`
+ * com o relogio a CADA render. Se nada provocar um render novo, o flash
+ * fica congelado na tela ate o proximo retrato chegar — e o retrato
+ * chega de 5 em 5 segundos. Uma tarefa encerrada logo apos uma leitura
+ * apagaria com ate 5 s de atraso sobre a janela real.
+ *
+ * A resposta NAO e perguntar mais vezes. Nada mudou no servidor: quem
+ * mudou foi o relogio, e relogio nao se busca pela rede. Entao o palco
+ * agenda um despertador LOCAL para o instante exato da fronteira.
+ *
+ * Devolve `null` quando nao ha nada a expirar — e e por isso que o
+ * despertador nao vira um `setInterval` disfarcado: sem flash vivo, nao
+ * ha timer nenhum.
+ */
+function proximaExpiracaoMs(
+  agentes: readonly AgenteComSnapshotUI[],
+  agoraMs: number
+): number | null {
+  let proxima: number | null = null;
+  for (const item of agentes) {
+    for (const sinal of item.sinais) {
+      if (sinal.status !== "concluido" || sinal.concluido_em === null) continue;
+      const fim = Date.parse(sinal.concluido_em);
+      if (Number.isNaN(fim)) continue;
+      // A MESMA fronteira de `concluiuRecentemente`: a janela e aberta
+      // no fim (`decorrido < JANELA`), entao em `fim + JANELA` o flash
+      // ja nao vale. A constante vem de `estados.ts`, dona unica.
+      const expira = fim + JANELA_CONCLUIDO_MS;
+      if (expira <= agoraMs) continue; // ja expirou: nada a agendar
+      if (proxima === null || expira < proxima) proxima = expira;
+    }
+  }
+  return proxima;
+}
+
+type EstadoDaLeitura = "carregando" | "ok" | "nao_autenticado" | "falha";
+
 export default function Escritorio() {
-  // DOIS relogios, e a diferenca importa:
-  //   `ancoraMs` — instante da montagem. Gera as tarefas UMA vez e nunca
-  //                mais muda. Sao os "dados", que no mundo real viriam do
-  //                banco e nao se reescrevem sozinhos.
-  //   `agoraMs`  — avanca. E o que faz o flash de conclusao expirar.
-  //
-  // Juntar os dois numa variavel so foi um bug real: as tarefas eram
-  // regeradas relativas ao novo instante, a tarefa encerrada continuava
-  // "ha 2 segundos" para sempre e o estado transitorio nunca terminava.
-  const [ancoraMs, setAncoraMs] = useState<number | null>(null);
+  // `agoraMs` avanca a cada leitura: e o que faz o flash de conclusao
+  // expirar. Ele nasce `null` para que o primeiro render seja igual nos
+  // dois lados da hidratacao — o relogio so e lido depois da montagem.
   const [agoraMs, setAgoraMs] = useState<number | null>(null);
   const [selecionado, setSelecionado] = useState<string | null>(null);
+  const [estado, setEstado] = useState<EstadoDaLeitura>("carregando");
+  // O ULTIMO retrato bom. Uma falha de refresh nao o apaga: a tela
+  // continua mostrando o que sabe, em vez de piscar para vazio por causa
+  // de um Wi-Fi que caiu por dois segundos.
+  const [agentes, setAgentes] = useState<readonly AgenteComSnapshotUI[]>([]);
 
   useEffect(() => {
-    const inicio = Date.now();
-    setAncoraMs(inicio);
-    setAgoraMs(inicio);
-    // Um unico reagendamento, logo depois do fim da janela: e o instante
-    // exato em que a tela precisa mudar sozinha. Um `setInterval` de 1s
-    // redesenharia o palco oito vezes para o mesmo resultado. A margem
-    // evita cair no limite exato da comparacao.
-    const t = window.setTimeout(() => setAgoraMs(Date.now()), JANELA_CONCLUIDO_MS + 250);
-    return () => window.clearTimeout(t);
+    // UMA unica linha de execucao. `vivo` fecha a porta do estado: uma
+    // resposta que chega depois da desmontagem nao tem mais onde
+    // escrever, e nao ha `setState` em componente morto.
+    let vivo = true;
+    let agendamento: number | null = null;
+    const controlador = new AbortController();
+
+    const ciclo = async () => {
+      const resposta = await listarAgentesDoEscritorio(controlador.signal);
+      if (!vivo) return;
+
+      if (resposta.estado === "ok") {
+        setAgentes(resposta.agentes);
+        setAgoraMs(Date.now());
+        setEstado("ok");
+      } else if (resposta.estado === "nao_autenticado") {
+        setEstado("nao_autenticado");
+      } else {
+        // Falha de refresh PRESERVA o retrato anterior; falha na
+        // primeira leitura nao tem retrato para preservar e assume o
+        // erro. Em nenhum dos dois casos a tela cai para dado simulado.
+        setEstado((anterior) => (anterior === "ok" ? "ok" : "falha"));
+      }
+
+      // Agendado SO agora, depois da resposta: nunca ha dois ciclos em
+      // voo, e uma falha nao acelera a proxima tentativa.
+      if (vivo) agendamento = window.setTimeout(() => void ciclo(), INTERVALO_REFRESH_MS);
+    };
+
+    void ciclo();
+
+    return () => {
+      vivo = false;
+      if (agendamento !== null) window.clearTimeout(agendamento);
+      controlador.abort();
+    };
   }, []);
 
-  const tarefas = useMemo<readonly TarefaUI[]>(
-    () => (ancoraMs === null ? [] : MOCK_TAREFAS(ancoraMs)),
-    [ancoraMs]
-  );
+  // ── O DESPERTADOR VISUAL ──────────────────────────────────────────
+  //
+  // Um so, one-shot, sem rede. Ele nao busca nada: apenas empurra o
+  // relogio local para a fronteira, o que faz `aparenciaDoAgente`
+  // recalcular e o flash apagar no instante certo.
+  //
+  // Reagendado sempre que o retrato ou o relogio mudam, e o `cleanup`
+  // cancela o anterior — entao nunca ha dois despertadores vivos, e um
+  // snapshot novo invalida o antigo. Quando ele dispara, `agoraMs`
+  // passa da fronteira que o motivou, aquele sinal deixa de contar e o
+  // proximo (se houver) e agendado. Sem flash vivo, `proximaExpiracaoMs`
+  // devolve `null` e nenhum timer nasce — e o ciclo termina sozinho.
+  useEffect(() => {
+    if (agoraMs === null) return;
+    const expira = proximaExpiracaoMs(agentes, agoraMs);
+    if (expira === null) return;
+    const despertador = window.setTimeout(() => setAgoraMs(Date.now()), expira - agoraMs);
+    return () => window.clearTimeout(despertador);
+  }, [agentes, agoraMs]);
 
   const comAparencia = useMemo(() => {
     if (agoraMs === null) return [];
-    return MOCK_AGENTES.map((agente) => {
-      const doAgente = tarefas.filter((t) => t.agente_id === agente.id);
-      const aparencia = aparenciaDoAgente(agente, doAgente, agoraMs);
-      // A tarefa que a estacao mostra e a que esta EM ANDAMENTO. Uma
-      // tarefa concluida ha 2s ainda pinta o flash, mas nao deve
-      // reaparecer como "tarefa atual" na mesa; uma que falhou tambem
-      // nao — falha e desfecho, nao trabalho. Ver `tarefaAtual`.
-      const atual = tarefaAtual(doAgente);
-      return { agente, aparencia, tarefa: atual };
-    });
-  }, [tarefas, agoraMs]);
+    return agentes.map((item) => ({
+      agente: item.agente,
+      // Os cinco estados e o flash transitorio continuam sendo derivados
+      // AQUI, pelo helper de sempre. O servidor nao manda estado pronto:
+      // manda os sinais de que ele e feito.
+      aparencia: aparenciaDoAgente(item.agente, item.sinais, agoraMs),
+      atividade: item.atividade,
+    }));
+  }, [agentes, agoraMs]);
 
   const naEstacao = comAparencia.filter((a) => estaNaEstacao(a.aparencia));
   const naCopa = comAparencia.filter((a) => !estaNaEstacao(a.aparencia));
@@ -108,8 +214,24 @@ export default function Escritorio() {
 
         {/* Piso */}
         <div style={estilos.piso}>
-          {agoraMs === null ? (
+          {estado === "carregando" ? (
             <p style={estilos.carregando}>Montando o escritório…</p>
+          ) : estado === "nao_autenticado" ? (
+            <p style={estilos.carregando} role="alert">
+              Sua sessão expirou. Entre novamente para ver o escritório.
+            </p>
+          ) : estado === "falha" ? (
+            // Falha na PRIMEIRA leitura. A tela assume que não conseguiu
+            // perguntar — nunca finge um escritório vazio, e nunca cai
+            // para dados simulados.
+            <p style={estilos.carregando} role="alert">
+              Não foi possível carregar o escritório agora. A tela tenta de novo sozinha.
+            </p>
+          ) : comAparencia.length === 0 ? (
+            <p style={estilos.carregando}>
+              Você ainda não tem agentes. Crie o primeiro na{" "}
+              <a href="/ia/agentes" style={{ color: CROMO.acento }}>lista de agentes</a>.
+            </p>
           ) : (
             <div className="cds-ia-zonas">
               <section aria-label="Estações de trabalho" style={{ minWidth: 0 }}>
@@ -118,12 +240,12 @@ export default function Escritorio() {
                   <p style={estilos.zonaVazia}>Nenhum agente trabalhando agora.</p>
                 ) : (
                   <div className="cds-ia-grade">
-                    {naEstacao.map(({ agente, aparencia, tarefa }) => (
+                    {naEstacao.map(({ agente, aparencia, atividade }) => (
                       <Estacao
                         key={agente.id}
                         agente={agente}
                         aparencia={aparencia}
-                        tarefa={tarefa}
+                        atividade={atividade}
                         onSelecionar={() => setSelecionado(agente.id)}
                       />
                     ))}
@@ -158,7 +280,7 @@ export default function Escritorio() {
         <PainelAgente
           agente={aberto.agente}
           aparencia={aberto.aparencia}
-          tarefas={tarefas.filter((t) => t.agente_id === aberto.agente.id)}
+          atividade={aberto.atividade}
           onFechar={() => setSelecionado(null)}
         />
       )}

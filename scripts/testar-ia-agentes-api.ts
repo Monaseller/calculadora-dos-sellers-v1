@@ -72,6 +72,68 @@ interface Operacao {
   ordens: { coluna: string; asc: boolean }[];
   limite: number | null;
   select: string;
+  /** M1-I1-V2: as expressoes `or=(...)` acumuladas, cru como a producao
+   *  as montou. Sao ANDadas entre si e com os `.eq()`, como no PostgREST. */
+  ors: string[];
+}
+
+// ─── Avaliador minimo de expressao PostgREST ──────────────────────────
+//
+// Sem ele, `.or()` seria `undefined` no duplo e a rota devolveria 500 —
+// falha honesta, mas inutil. Com um `or()` que apenas GUARDA a string e
+// nao filtra, seria pior: a suite provaria "o conjunto e limitado"
+// contra um filtro que nao filtra nada. Entao o duplo INTERPRETA a
+// expressao que a producao realmente montou, termo a termo.
+//
+// Formas suportadas — as que o PostgREST aceita e que este projeto usa:
+// `col.op.valor`, `col.in.(a,b,c)`, `and(...)` e `or(...)` aninhados.
+
+function separarTermos(expressao: string): string[] {
+  const termos: string[] = [];
+  let profundidade = 0;
+  let atual = "";
+  for (const ch of expressao) {
+    if (ch === "(") profundidade += 1;
+    if (ch === ")") profundidade -= 1;
+    if (ch === "," && profundidade === 0) {
+      termos.push(atual);
+      atual = "";
+      continue;
+    }
+    atual += ch;
+  }
+  if (atual.length > 0) termos.push(atual);
+  return termos;
+}
+
+function avaliarTermo(termo: string, linha: Record<string, unknown>): boolean {
+  if (termo.startsWith("and(") && termo.endsWith(")")) {
+    return separarTermos(termo.slice(4, -1)).every((t) => avaliarTermo(t, linha));
+  }
+  if (termo.startsWith("or(") && termo.endsWith(")")) {
+    return separarTermos(termo.slice(3, -1)).some((t) => avaliarTermo(t, linha));
+  }
+  const primeiro = termo.indexOf(".");
+  const segundo = termo.indexOf(".", primeiro + 1);
+  if (primeiro === -1 || segundo === -1) return false;
+  const coluna = termo.slice(0, primeiro);
+  const operador = termo.slice(primeiro + 1, segundo);
+  const valor = termo.slice(segundo + 1);
+  const conteudo = linha[coluna];
+
+  if (operador === "in") {
+    return valor.replace(/^\(|\)$/g, "").split(",").includes(String(conteudo));
+  }
+  // Tres valores, como no Postgres: NULL nunca satisfaz comparacao.
+  if (conteudo === null || conteudo === undefined) return operador === "is" && valor === "null";
+  if (operador === "is") return valor !== "null";
+  const atual = String(conteudo);
+  if (operador === "eq") return atual === valor;
+  if (operador === "gte") return atual >= valor;
+  if (operador === "gt") return atual > valor;
+  if (operador === "lte") return atual <= valor;
+  if (operador === "lt") return atual < valor;
+  return false;
 }
 
 /** A "tabela" `agentes` em memoria. */
@@ -93,6 +155,7 @@ function construtor(tabela: string): unknown {
     ordens: [],
     limite: null,
     select: "",
+    ors: [],
   };
   let pendente: Record<string, unknown> | null = null;
   /** O payload de um UPDATE. Separado de `pendente` porque INSERT cria
@@ -183,7 +246,10 @@ function construtor(tabela: string): unknown {
           return String(l[c]) > String((v as { __gt: unknown }).__gt);
         }
         return l[c] === v;
-      })
+      }) &&
+      // `or=(...)` e mais um AND em relacao aos `.eq()`, nunca um
+      // substituto deles: o recorte por dono continua valendo.
+      op.ors.every((expressao) => avaliarTermo(`or(${expressao})`, l))
     );
     // EDITAR-AGENTE-V1: `UPDATE ... WHERE ... RETURNING`, modelado com a
     // mesma economia do INSERT acima. Sem aplicar a alteracao, a rota
@@ -222,6 +288,10 @@ function construtor(tabela: string): unknown {
     // rota devolvia 500 — falha honesta, e foi assim que apareceu.
     in(coluna: string, valores: readonly unknown[]) {
       op.filtros[coluna] = { __in: [...valores] };
+      return b;
+    },
+    or(expressao: string) {
+      op.ors.push(expressao);
       return b;
     },
     order(coluna: string, opcoes?: { ascending?: boolean }) {
@@ -305,6 +375,17 @@ const USER_B = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb";
 
 const RE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CAMPOS_PUBLICOS = ["ativo", "criado_em", "id", "instrucoes", "nome", "tipo"];
+/**
+ * M1-I1-V2: o GET da LISTA ganhou dois campos, e so ele.
+ *
+ * `POST` e `PATCH` continuam devolvendo os seis — por isso sao duas
+ * constantes, e nao uma que cresceu. Um snapshot vazando para a resposta
+ * de criacao seria estado operacional afirmado sobre um agente que ainda
+ * nao tem tarefa nenhuma.
+ */
+const CAMPOS_PUBLICOS_COM_SNAPSHOT = [
+  "atividade", "ativo", "criado_em", "id", "instrucoes", "nome", "sinais", "tipo",
+];
 
 function requisicao(cookie: string | undefined, corpo?: string): Request {
   return new Request("http://localhost/api/agentes", {
@@ -324,6 +405,37 @@ const linhaAgente = (userId: string, nome: string, extra: Record<string, unknown
   ativo: true,
   criado_em: "2026-08-01T00:00:00.000Z",
   atualizado_em: "2026-08-01T00:00:00.000Z",
+  ...extra,
+});
+
+/**
+ * Uma linha de `agente_tarefas`, como o banco a devolveria.
+ *
+ * `__tabela` e obrigatorio aqui: sem ele a linha casaria tambem com a
+ * consulta de `agentes`, e o teste mediria um banco que nao existe.
+ */
+const linhaTarefa = (
+  userId: string,
+  agenteId: string,
+  extra: Record<string, unknown> = {}
+) => ({
+  __tabela: "agente_tarefas",
+  id: randomUUID(),
+  agente_id: agenteId,
+  user_id: userId,
+  tipo: "analise_vendas",
+  entrada: { dias: 7 },
+  status: "rodando",
+  progresso: 0,
+  resultado: null,
+  erro_tipo: null,
+  erro_mensagem: null,
+  tentativas: 0,
+  max_tentativas: 3,
+  criado_em: "2026-09-01T00:00:00.000Z",
+  iniciado_em: null,
+  concluido_em: null,
+  heartbeat_em: null,
   ...extra,
 });
 
@@ -438,8 +550,11 @@ async function principal(): Promise<void> {
   ok("D3  N agentes -> 200 com todos os do dono",
     rN.status === 200 && bN.agentes.length === 2,
     JSON.stringify(bN.agentes?.map((a: { nome: string }) => a.nome)));
-  ok("D4  TOTAL 1 leitura, zero escrita — a rota nao acrescenta consulta",
-    leituras() === 1 && escritas() === 0, `${leituras()}/${escritas()}`);
+  // M1-I1-V2: sao DUAS leituras agora — agentes e, uma unica vez, os
+  // sinais de TODOS eles. Duas e o teto, e o assert e por igualdade:
+  // uma terceira consulta reprova, e a segunda sumir tambem.
+  ok("D4  TOTAL 2 leituras, zero escrita — uma de agentes, UMA de sinais",
+    leituras() === 2 && escritas() === 0, `${leituras()}/${escritas()}`);
   ok("D5  a leitura foi escopada ao dono da sessao",
     operacoes[0]?.filtros.user_id === USER_A, JSON.stringify(operacoes[0]?.filtros));
   ok("D6  nenhum agente de B aparece",
@@ -449,12 +564,296 @@ async function principal(): Promise<void> {
   ok("D8  ordem preservada da capability, sem reordenar na rota",
     JSON.stringify(bN.agentes.map((a: { nome: string }) => a.nome)) ===
       JSON.stringify(["A-um", "A-dois-inativo"]));
-  ok("D9  shape publico: exatamente 6 campos",
-    bN.agentes.every((a: object) => JSON.stringify(Object.keys(a).sort()) === JSON.stringify(CAMPOS_PUBLICOS)),
+  ok("D9  shape publico: os 6 campos antigos MAIS os 2 do snapshot",
+    bN.agentes.every((a: object) =>
+      JSON.stringify(Object.keys(a).sort()) === JSON.stringify(CAMPOS_PUBLICOS_COM_SNAPSHOT)),
     JSON.stringify(Object.keys(bN.agentes[0] ?? {}).sort()));
+  ok("D9a os 6 antigos nao mudaram de nome, tipo nem semantica",
+    bN.agentes.every((a: Record<string, unknown>) =>
+      CAMPOS_PUBLICOS.every((c) => c in a)) &&
+    bN.agentes[0].id.length > 0 && typeof bN.agentes[0].ativo === "boolean" &&
+    typeof bN.agentes[0].nome === "string" && typeof bN.agentes[0].criado_em === "string");
+  ok("D9b sem tarefa, o snapshot e vazio e explicito — nunca ausente",
+    bN.agentes.every((a: Record<string, unknown>) =>
+      Array.isArray(a.sinais) && (a.sinais as unknown[]).length === 0 && a.atividade === null));
   ok("D10 user_id e atualizado_em NAO saem pela API",
     !/user_id|atualizado_em/.test(JSON.stringify(bN)));
   ok("D11 zero escrita em todo o GET", escritas() === 0 && rpcs === 0);
+  ok("D12 a leitura de sinais tambem foi escopada ao dono da sessao",
+    operacoes[1]?.tabela === "agente_tarefas" && operacoes[1]?.filtros.user_id === USER_A,
+    JSON.stringify(operacoes[1]?.filtros));
+  ok("D13 e recortada pelos ids dos agentes JA do dono",
+    JSON.stringify((operacoes[1]?.filtros.agente_id as { __in: string[] })?.__in) ===
+      JSON.stringify(bN.agentes.map((a: { id: string }) => a.id)));
+
+  // ── D14..D16 — zero agentes nao custa consulta de tarefa ──────────
+  linhas = []; limpar();
+  const rSemAgente = await get(COOKIE_A);
+  const bSemAgente = await rSemAgente.json();
+  ok("D14 sem agentes: UMA leitura so, a de agentes",
+    leituras() === 1 && operacoes.every((o) => o.tabela !== "agente_tarefas"),
+    `${leituras()}`);
+  ok("D15 e a resposta continua completa, com lista vazia",
+    bSemAgente.ok === true && bSemAgente.agentes.length === 0);
+  // ══ D17..D40 — M1-I1-V2: o SNAPSHOT OPERACIONAL ══════════════════
+  //
+  // A rota passou a responder duas perguntas novas por agente, e as duas
+  // sao derivadas: `sinais` (o minimo para o cliente derivar os cinco
+  // estados) e `atividade` (o que a estacao e a barra ja existentes
+  // mostram). O que NAO pode acontecer e a tarefa vazar junto.
+  secao("D'. GET — o snapshot operacional, derivado e sem Task crua");
+
+  const { aparenciaDoAgente } = await import("../lib/ia/estados");
+  const agora = Date.now();
+  const emIso = (deltaMs: number) => new Date(agora + deltaMs).toISOString();
+
+  {
+    const ag = linhaAgente(USER_A, "A-com-tarefa");
+    const alheio = linhaAgente(USER_B, "B-com-tarefa");
+    linhas = [
+      ag,
+      alheio,
+      linhaTarefa(USER_A, ag.id as string, {
+        status: "rodando", tipo: "analise_vendas", entrada: { dias: 7 },
+        progresso: 42, criado_em: "2026-09-10T00:00:00.000Z",
+      }),
+      linhaTarefa(USER_A, ag.id as string, {
+        status: "pendente", tipo: "tratar_imagens", entrada: { quantidade: 3 },
+        progresso: 0, criado_em: "2026-09-11T00:00:00.000Z",
+      }),
+      linhaTarefa(USER_B, alheio.id as string, {
+        status: "rodando", tipo: "analise_vendas", entrada: { dias: 99 }, progresso: 88,
+      }),
+    ];
+    limpar();
+    const r = await get(COOKIE_A);
+    const b = await r.json();
+    const meu = b.agentes.find((a: { nome: string }) => a.nome === "A-com-tarefa");
+
+    ok("D17 a atividade e a tarefa EM ANDAMENTO, escolhida pela precedencia",
+      meu.atividade !== null && meu.atividade.titulo === "Analisando vendas dos últimos 7 dias",
+      JSON.stringify(meu.atividade));
+    ok("D18 o titulo e derivado no SERVIDOR — a entrada nao atravessa",
+      !/"entrada"|"dias"|"quantidade"/.test(JSON.stringify(b)));
+    ok("D19 o progresso e o REAL da linha, nunca zero de conveniencia",
+      meu.atividade.progresso === 42);
+    ok("D20 a atividade tem exatamente dois campos",
+      JSON.stringify(Object.keys(meu.atividade).sort()) === JSON.stringify(["progresso", "titulo"]));
+    ok("D21 nenhum id de Task, resultado ou mensagem de erro sai pela rota",
+      !/"resultado"|"erro_tipo"|"erro_mensagem"|"tentativas"|"heartbeat_em"|"tarefa_id"/
+        .test(JSON.stringify(b)));
+    ok("D21a e nenhum id das tarefas aparece no corpo",
+      (linhas.filter((l) => l.__tabela === "agente_tarefas") as { id: string }[])
+        .every((t) => !JSON.stringify(b).includes(t.id)));
+    ok("D22 os sinais sao os dois status abertos, deduplicados",
+      JSON.stringify(meu.sinais.map((s: { status: string }) => s.status).sort()) ===
+        JSON.stringify(["pendente", "rodando"]),
+      JSON.stringify(meu.sinais));
+    ok("D23 cada sinal tem exatamente status + concluido_em",
+      meu.sinais.every((s: object) =>
+        JSON.stringify(Object.keys(s).sort()) === JSON.stringify(["concluido_em", "status"])));
+    ok("D24 a tarefa do OUTRO dono nao contaminou o snapshot",
+      !JSON.stringify(b).includes("99") && meu.atividade.progresso !== 88);
+    ok("D25 TOTAL 2 leituras mesmo com tarefas — sem N+1",
+      leituras() === 2 && escritas() === 0, `${leituras()}`);
+
+    // O progresso acompanha a linha: mudou no banco, muda na resposta.
+    (linhas[2] as { progresso: number }).progresso = 77;
+    limpar();
+    const b2 = await (await get(COOKIE_A)).json();
+    ok("D26 CONTROLE: progresso fixo reprovaria — 42 virou 77 na resposta",
+      b2.agentes.find((a: { nome: string }) => a.nome === "A-com-tarefa").atividade.progresso === 77);
+  }
+
+  // ── D27..D31 — precedencia e desempate deterministico ─────────────
+  {
+    const ag = linhaAgente(USER_A, "A-precedencia");
+    const espera = linhaTarefa(USER_A, ag.id as string, {
+      status: "aguardando_aprovacao", tipo: "responder_perguntas", entrada: { quantidade: 1 },
+      criado_em: "2026-09-20T00:00:00.000Z",
+    });
+    const fila = linhaTarefa(USER_A, ag.id as string, {
+      status: "pendente", tipo: "distribuir_fila", entrada: {},
+      criado_em: "2026-09-21T00:00:00.000Z",
+    });
+    linhas = [ag, espera, fila];
+    limpar();
+    const b = await (await get(COOKIE_A)).json();
+    ok("D27 aguardando_aprovacao vence pendente, mesmo sendo mais antiga",
+      b.agentes[0].atividade.titulo === "Respondendo 1 pergunta de compradores",
+      JSON.stringify(b.agentes[0].atividade));
+
+    const rodando = linhaTarefa(USER_A, ag.id as string, {
+      status: "rodando", tipo: "gerar_anuncios", entrada: { quantidade: 2 },
+      criado_em: "2026-09-19T00:00:00.000Z",
+    });
+    linhas = [ag, espera, fila, rodando];
+    limpar();
+    const b2 = await (await get(COOKIE_A)).json();
+    ok("D28 e rodando vence as duas — a precedencia e a do helper, nao a da consulta",
+      b2.agentes[0].atividade.titulo === "Gerando 2 anúncios");
+
+    // Mesmo status, criado_em diferente: a mais nova vence.
+    linhas = [
+      ag,
+      linhaTarefa(USER_A, ag.id as string, {
+        status: "rodando", tipo: "analise_vendas", entrada: { dias: 3 },
+        criado_em: "2026-09-01T00:00:00.000Z",
+      }),
+      linhaTarefa(USER_A, ag.id as string, {
+        status: "rodando", tipo: "analise_vendas", entrada: { dias: 5 },
+        criado_em: "2026-09-02T00:00:00.000Z",
+      }),
+    ];
+    limpar();
+    const b3 = await (await get(COOKIE_A)).json();
+    ok("D29 dentro do mesmo status, a mais NOVA vence",
+      b3.agentes[0].atividade.titulo === "Analisando vendas dos últimos 5 dias",
+      JSON.stringify(b3.agentes[0].atividade));
+
+    // Empate EXATO de criado_em: quem decide e o id, e sempre o mesmo.
+    const MENOR = "11111111-1111-4111-8111-111111111111";
+    const MAIOR = "99999999-9999-4999-8999-999999999999";
+    const empate = (id: string, dias: number) =>
+      linhaTarefa(USER_A, ag.id as string, {
+        id, status: "rodando", tipo: "analise_vendas", entrada: { dias },
+        criado_em: "2026-09-03T00:00:00.000Z",
+      });
+    linhas = [ag, empate(MENOR, 3), empate(MAIOR, 5)];
+    limpar();
+    const b4 = await (await get(COOKIE_A)).json();
+    linhas = [ag, empate(MAIOR, 5), empate(MENOR, 3)];
+    limpar();
+    const b5 = await (await get(COOKIE_A)).json();
+    ok("D30 empate exato de criado_em: id DESC decide, e decide sempre igual",
+      b4.agentes[0].atividade.titulo === "Analisando vendas dos últimos 5 dias" &&
+      b5.agentes[0].atividade.titulo === b4.agentes[0].atividade.titulo,
+      `${b4.agentes[0].atividade.titulo} | ${b5.agentes[0].atividade.titulo}`);
+    ok("D30a CONTROLE: a ordem das linhas no banco FOI de fato invertida",
+      (linhas[1] as { id: string }).id === MAIOR);
+
+    // Tipo desconhecido degrada legivel, sem despejar `entrada`.
+    linhas = [
+      ag,
+      linhaTarefa(USER_A, ag.id as string, {
+        status: "rodando", tipo: "tipo_ainda_nao_conhecido", entrada: { segredo: "x" },
+      }),
+    ];
+    limpar();
+    const b6 = await (await get(COOKIE_A)).json();
+    ok("D31 tipo desconhecido vira frase legivel, e `entrada` continua dentro",
+      b6.agentes[0].atividade.titulo === "Tipo ainda nao conhecido" &&
+      !/segredo/.test(JSON.stringify(b6)),
+      b6.agentes[0].atividade.titulo);
+  }
+
+  // ── D32..D36 — a janela de concluido, e o que NAO e carregado ─────
+  {
+    const ag = linhaAgente(USER_A, "A-janela");
+    const recente = linhaTarefa(USER_A, ag.id as string, {
+      status: "concluido", progresso: 100, concluido_em: emIso(-1_000),
+      criado_em: "2026-09-15T00:00:00.000Z",
+    });
+    const antiga = linhaTarefa(USER_A, ag.id as string, {
+      status: "concluido", progresso: 100, concluido_em: emIso(-60_000),
+      criado_em: "2026-09-14T00:00:00.000Z",
+    });
+    linhas = [ag, recente, antiga];
+    limpar();
+    const b = await (await get(COOKIE_A)).json();
+    ok("D32 a conclusao DENTRO da janela chega como sinal",
+      b.agentes[0].sinais.length === 1 &&
+      b.agentes[0].sinais[0].status === "concluido" &&
+      b.agentes[0].sinais[0].concluido_em === recente.concluido_em,
+      JSON.stringify(b.agentes[0].sinais));
+    ok("D33 a conclusao ANTIGA nao e carregada — o conjunto e limitado",
+      !JSON.stringify(b).includes(String(antiga.concluido_em)));
+    ok("D34 conclusao nao e atividade: o agente nao tem tarefa em andamento",
+      b.agentes[0].atividade === null);
+    ok("D35 o cliente e quem decide o flash, e com este sinal ele decide `concluido`",
+      aparenciaDoAgente({ ativo: true }, b.agentes[0].sinais, agora).estado === "concluido");
+    ok("D35a e, passada a janela, o MESMO sinal deixa de acender",
+      aparenciaDoAgente({ ativo: true }, b.agentes[0].sinais, agora + 9_000).estado === "ocioso");
+
+    // Cancelada nao e sinal de nada, e nao pode ser carregada.
+    linhas = [ag, linhaTarefa(USER_A, ag.id as string, {
+      status: "cancelado", concluido_em: emIso(-500),
+    })];
+    limpar();
+    const b2 = await (await get(COOKIE_A)).json();
+    ok("D36 tarefa cancelada nao vira sinal nem atividade",
+      b2.agentes[0].sinais.length === 0 && b2.agentes[0].atividade === null);
+  }
+
+  // ── D37..D40 — dedup: historico grande, snapshot pequeno ──────────
+  {
+    const ag = linhaAgente(USER_A, "A-historico");
+    const muitas: Record<string, unknown>[] = [];
+    for (let i = 0; i < 200; i += 1) {
+      const status = ["pendente", "rodando", "aguardando_aprovacao", "erro"][i % 4];
+      muitas.push(linhaTarefa(USER_A, ag.id as string, {
+        status,
+        tipo: "tratar_imagens",
+        entrada: { quantidade: i },
+        concluido_em: status === "erro" ? emIso(-500_000) : null,
+        criado_em: `2026-07-${String((i % 27) + 1).padStart(2, "0")}T00:00:00.000Z`,
+      }));
+    }
+    linhas = [ag, ...muitas];
+    limpar();
+    const b = await (await get(COOKIE_A)).json();
+    const sinais = b.agentes[0].sinais as { status: string; concluido_em: string | null }[];
+
+    ok("D37 200 linhas relevantes produzem no maximo 5 sinais", sinais.length <= 5,
+      String(sinais.length));
+    ok("D37a e sao os quatro status abertos, um de cada",
+      JSON.stringify(sinais.map((s) => s.status).sort()) ===
+        JSON.stringify(["aguardando_aprovacao", "erro", "pendente", "rodando"]));
+    ok("D38 ANCORA: o historico usado e realmente grande", muitas.length === 200);
+
+    // Equivalencia: deduplicar nao pode mudar o estado que o cliente
+    // deriva. O oraculo e o conjunto NAO deduplicado, nao o esperado
+    // escrito a mao.
+    const cru = muitas.map((t) => ({
+      status: t.status as never,
+      concluido_em: t.concluido_em as string | null,
+    }));
+    ok("D39 o estado derivado dos 5 sinais e o mesmo derivado das 200 linhas",
+      aparenciaDoAgente({ ativo: true }, sinais as never, agora).estado ===
+        aparenciaDoAgente({ ativo: true }, cru, agora).estado);
+    ok("D39a e, com o agente desligado, tambem",
+      aparenciaDoAgente({ ativo: false }, sinais as never, agora).foraDeOperacao ===
+        aparenciaDoAgente({ ativo: false }, cru, agora).foraDeOperacao);
+    ok("D40 e continua custando 2 leituras, nao 200", leituras() === 2, `${leituras()}`);
+
+    // ── O INSTRUMENTO nao pode ser um filtro que nao filtra ─────────
+    //
+    // Toda a prova de "conjunto limitado" depende de o duplo INTERPRETAR
+    // a expressao `or=(...)`. Um `or()` que so guardasse a string
+    // deixaria D33 verde sem que nada fosse filtrado. Os controles
+    // abaixo pegam a expressao que a PRODUCAO acabou de montar e
+    // mostram que ela discrimina.
+    const expressaoReal = operacoes[1]?.ors[0] ?? "";
+    ok("D40a ANCORA: a rota realmente mandou uma expressao de corte",
+      /status\.in\.\(pendente,rodando,aguardando_aprovacao,erro\)/.test(expressaoReal) &&
+      /and\(status\.eq\.concluido,concluido_em\.gte\./.test(expressaoReal),
+      expressaoReal);
+    const aplicar = (linha: Record<string, unknown>) =>
+      avaliarTermo(`or(${expressaoReal})`, linha);
+    ok("D40b o corte ACEITA aberta e conclusao recente",
+      aplicar({ status: "rodando", concluido_em: null }) &&
+      aplicar({ status: "erro", concluido_em: emIso(-900_000) }) &&
+      aplicar({ status: "concluido", concluido_em: emIso(-1_000) }));
+    ok("D40c e RECUSA conclusao antiga e status que nao interessa",
+      !aplicar({ status: "concluido", concluido_em: emIso(-60_000) }) &&
+      !aplicar({ status: "concluido", concluido_em: null }) &&
+      !aplicar({ status: "cancelado", concluido_em: emIso(-1_000) }));
+    ok("D40d CONTROLE do leak: a sonda de `entrada` acusaria o campo de volta",
+      /"entrada"|"dias"|"quantidade"/.test('{"id":"x","entrada":{"dias":7}}') &&
+      /"entrada"|"dias"|"quantidade"/.test('{"titulo":"x","quantidade":3}'));
+  }
+
+  linhas = [];
 
   // ── E. POST: autenticacao e corpo ──────────────────────────────────
 

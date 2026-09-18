@@ -37,8 +37,8 @@
  * porque uma tela que mostra "você não tem agentes" quando na verdade
  * não conseguiu perguntar é pior do que uma que assume o erro.
  */
-import { TIPOS_AGENTE_UI } from "@/lib/ia/contratos";
-import type { AgenteUI, TipoAgenteUI } from "@/lib/ia/contratos";
+import { STATUS_TAREFA_UI, TIPOS_AGENTE_UI } from "@/lib/ia/contratos";
+import type { AgenteUI, StatusTarefaUI, TipoAgenteUI } from "@/lib/ia/contratos";
 // O vocabulário canônico dos três níveis. Importado, nunca recopiado:
 // uma segunda lista aqui envelheceria em relação à original no dia em
 // que um quarto nível entrasse.
@@ -71,6 +71,45 @@ export interface DiagnosticoDeSkillUI {
 /** Lista de agentes do dono da sessão. */
 export type RespostaAgentes =
   | { estado: "ok"; agentes: readonly AgenteUI[] }
+  | { estado: "nao_autenticado" }
+  | { estado: "falha" };
+
+/**
+ * O SINAL operacional de um agente — o par mínimo que
+ * `aparenciaDoAgente` consome.
+ *
+ * Não é uma tarefa, e não deve virar uma: não há `id`, não há `entrada`,
+ * não há `resultado`. São duas colunas, e elas existem aqui porque a
+ * decisão visual (a janela de 8 s do flash de concluído) é do cliente,
+ * com o relógio do cliente. Mandar o estado já resolvido pelo servidor
+ * congelaria esse flash até o próximo refresh.
+ */
+export interface SinalOperacionalUI {
+  status: StatusTarefaUI;
+  concluido_em: string | null;
+}
+
+/**
+ * A atividade em andamento, já resumida pelo servidor.
+ *
+ * `titulo` chega pronto: quem o deriva é `tituloDaTarefa`, no servidor,
+ * a partir de `tipo` + `entrada`. A `entrada` nunca atravessa a rede.
+ */
+export interface AtividadeAtualUI {
+  titulo: string;
+  progresso: number;
+}
+
+/** Um agente do dono MAIS o snapshot operacional dele. */
+export interface AgenteComSnapshotUI {
+  agente: AgenteUI;
+  sinais: readonly SinalOperacionalUI[];
+  atividade: AtividadeAtualUI | null;
+}
+
+/** Agentes do dono com o snapshot que o Escritório desenha. */
+export type RespostaEscritorio =
+  | { estado: "ok"; agentes: readonly AgenteComSnapshotUI[] }
   | { estado: "nao_autenticado" }
   | { estado: "falha" };
 
@@ -217,6 +256,60 @@ function agenteDaResposta(bruto: unknown): AgenteUI | null {
   return { id, nome, tipo, instrucoes, ativo, criado_em };
 }
 
+const ehStatusDeTarefaUI = (v: unknown): v is StatusTarefaUI =>
+  typeof v === "string" && (STATUS_TAREFA_UI as readonly string[]).includes(v);
+
+/** Um sinal — dois campos, os dois obrigatórios, nenhum a mais aceito. */
+function sinalDaResposta(bruto: unknown): SinalOperacionalUI | null {
+  if (!ehObjeto(bruto)) return null;
+  const { status, concluido_em } = bruto;
+  if (!ehStatusDeTarefaUI(status)) return null;
+  if (concluido_em !== null && typeof concluido_em !== "string") return null;
+  return { status, concluido_em };
+}
+
+/**
+ * A atividade. `null` é resposta VÁLIDA — significa "nenhuma tarefa em
+ * andamento", que é diferente de "não consegui perguntar".
+ *
+ * `progresso` é validado contra a mesma faixa do `CHECK` do banco.
+ * Um número fora dela não vira `0` nem `100`: condena a resposta. Barra
+ * desenhada com valor que o banco não aceitaria é a tela afirmando algo
+ * que o servidor nunca disse.
+ */
+function atividadeDaResposta(bruto: unknown): AtividadeAtualUI | null | "invalida" {
+  if (bruto === null) return null;
+  if (!ehObjeto(bruto)) return "invalida";
+  const { titulo, progresso } = bruto;
+  if (typeof titulo !== "string" || titulo.length === 0) return "invalida";
+  if (typeof progresso !== "number" || !Number.isFinite(progresso)) return "invalida";
+  if (progresso < 0 || progresso > 100) return "invalida";
+  return { titulo, progresso };
+}
+
+/** Um agente MAIS o snapshot dele, campo a campo nos dois níveis. */
+function agenteComSnapshotDaResposta(bruto: unknown): AgenteComSnapshotUI | null {
+  const agente = agenteDaResposta(bruto);
+  if (agente === null || !ehObjeto(bruto)) return null;
+
+  if (!Array.isArray(bruto.sinais)) return null;
+  const sinais: SinalOperacionalUI[] = [];
+  for (const cru of bruto.sinais) {
+    const sinal = sinalDaResposta(cru);
+    if (sinal === null) return null;
+    sinais.push(sinal);
+  }
+
+  // Campo AUSENTE é resposta inválida, não "sem atividade". Aceitar a
+  // ausência como `null` transformaria um contrato quebrado em tela
+  // silenciosamente vazia — que é o modo de falha mais caro de achar.
+  if (!("atividade" in bruto)) return null;
+  const atividade = atividadeDaResposta(bruto.atividade);
+  if (atividade === "invalida") return null;
+
+  return { agente, sinais, atividade };
+}
+
 function itemDiagnosticoDaResposta(bruto: unknown): DiagnosticoDeSkillUI | null {
   if (!ehObjeto(bruto)) return null;
   const { skillId, versao, diagnostico } = bruto;
@@ -242,6 +335,35 @@ async function corpoDe(resposta: Response): Promise<unknown> {
  * inativos — a tela precisa enxergar o desligado para poder religá-lo.
  */
 export async function listarAgentes(signal?: AbortSignal): Promise<RespostaAgentes> {
+  const lida = await lerAgentes(signal);
+  if (lida.estado !== "ok") return lida;
+  // A projeção estreita: quem só quer identidade não passa a carregar
+  // estado operacional por acidente.
+  return { estado: "ok", agentes: lida.agentes.map((a) => a.agente) };
+}
+
+/**
+ * Os agentes do dono MAIS o snapshot operacional de cada um.
+ *
+ * Mesma rota, mesma chamada, mesmo corpo: o Escritório não tem endpoint
+ * próprio, porque não precisa de dado que a lista já não traga. O que
+ * muda é só a PROJEÇÃO — esta devolve `sinais` e `atividade`, que a
+ * outra descarta.
+ */
+export async function listarAgentesDoEscritorio(
+  signal?: AbortSignal
+): Promise<RespostaEscritorio> {
+  return lerAgentes(signal);
+}
+
+/**
+ * A leitura, uma vez só.
+ *
+ * Uma chamada, sem corpo e sem cabeçalho: o cookie same-origin é toda a
+ * credencial, e o servidor filtra pelo dono. A lista traz ativos e
+ * inativos — a tela precisa enxergar o desligado para poder religá-lo.
+ */
+async function lerAgentes(signal?: AbortSignal): Promise<RespostaEscritorio> {
   let resposta: Response;
   try {
     resposta = await fetch(ROTA_BASE, { signal });
@@ -258,9 +380,9 @@ export async function listarAgentes(signal?: AbortSignal): Promise<RespostaAgent
     return { estado: "falha" };
   }
 
-  const agentes: AgenteUI[] = [];
+  const agentes: AgenteComSnapshotUI[] = [];
   for (const bruto of corpo.agentes) {
-    const agente = agenteDaResposta(bruto);
+    const agente = agenteComSnapshotDaResposta(bruto);
     // Um item malformado condena a resposta inteira: meia lista
     // apresentada como lista completa é o modo de falha que este
     // retorno discriminado existe para impedir.

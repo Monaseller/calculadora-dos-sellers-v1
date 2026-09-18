@@ -1425,6 +1425,25 @@ const ARQUIVOS_RETOMADA_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_RETOMADA_D5_C3_I1,
 ];
 
+/**
+ * M1-I1-V2 — o Escritorio real.
+ *
+ * UM caminho, e o mesmo motivo das listas acima: a origem de cada
+ * liberacao precisa continuar legivel. O palco `/ia` passou a ler os
+ * agentes reais do dono, e para isso `capability.ts` ganhou UMA leitura
+ * em lote — `listarSinaisDeTarefasDoDono`, mais o construtor de filtro
+ * dela. Nada mais de `lib/agentes/` entra nesta frente; os outros sete
+ * production paths do slice vivem fora do `ESCOPO_AGENTES` e por isso
+ * nem chegam a este guarda.
+ *
+ * A extensao permitida NAO e "o arquivo virou livre": o G10' logo acima
+ * cobra, item a item, que tudo o que ja existia nele continua byte a
+ * byte igual ao HEAD.
+ */
+const ARQUIVOS_M1_I1V2: readonly string[] = [
+  "lib/agentes/capability.ts",
+];
+
 /** Uniao EXPLICITA. Qualquer caminho fora dela reprova o G11. */
 const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_1DD,
@@ -1461,6 +1480,7 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_RESUME_D5_C2_I1,
   ...ARQUIVOS_RESUME_D5_C3_I1,
   ...ARQUIVOS_RESUME_D5_C3_I2,
+  ...ARQUIVOS_M1_I1V2,
 ];
 
 /**
@@ -2124,11 +2144,117 @@ async function main() {
     "lib/agentes/tipos-execucao.ts",
     "lib/agentes/handlers/teste-fundacao.ts",
     "lib/agentes/handlers/analise-vendas.ts",
-    "lib/agentes/capability.ts",
     "app/api/internal/agentes/executar/route.ts",
   ];
   for (const rel of CONGELADOS) {
     ok(`G10 ${rel} identico ao HEAD`, gitVivo && gitLimpo(rel));
+  }
+
+  // ── G10' — `capability.ts` saiu do congelamento BYTE A BYTE ───────
+  //
+  // Ele estava em `CONGELADOS` porque nenhuma frente de analise_vendas
+  // tinha o que fazer ali. A M1-I1-V2 tem: o Escritorio passou a ler os
+  // agentes reais do dono, e isso exigiu UMA leitura em lote no unico
+  // modulo autorizado a falar com a tabela.
+  //
+  // Congelar bytes reprovaria a extensao inteira — inclusive a parte que
+  // o guarda nunca quis proteger. O que ele PROTEGIA era "nada daqui
+  // mudou", e isso continua cobrado, so que item a item:
+  //
+  //   G10a  nenhuma linha do HEAD foi REMOVIDA nem reescrita;
+  //   G10b  as 7 operacoes de antes tem corpo byte-identico ao HEAD;
+  //   G10c  os 4 construtores de filtro de antes, idem;
+  //   G10d  as duas projecoes de coluna, idem;
+  //   G10e  a extensao e NOMINAL — uma operacao e um construtor.
+  //
+  // Trocar "nada mudou" por "so isto mudou, e nominalmente" nao afrouxa
+  // nada: G10a sozinho ja e mais forte do que uma contagem, porque
+  // qualquer edicao DENTRO de uma funcao antiga aparece como linha
+  // deletada. E os controles negativos abaixo provam que ele acusa.
+  {
+    const CAP = "lib/agentes/capability.ts";
+    const capHead = git("show", `HEAD:${CAP}`);
+    const capAtual = fonte(CAP);
+
+    // `git diff --numstat` devolve "adicionadas\tremovidas\tcaminho".
+    // Zero removidas significa: o HEAD inteiro sobreviveu, em ordem, e
+    // tudo o que houve foram INSERCOES entre linhas intactas.
+    const numstat = git("diff", "--numstat", "HEAD", "--", CAP).trim();
+    const removidas = Number.parseInt(numstat.split(/\s+/)[1] ?? "-1", 10);
+    const adicionadas = Number.parseInt(numstat.split(/\s+/)[0] ?? "-1", 10);
+    ok("G10a ANCORA: o numstat do arquivo foi lido", numstat.length > 0 && removidas >= 0);
+    ok("G10a nenhuma linha do HEAD foi removida ou reescrita — so insercoes",
+       removidas === 0 && adicionadas > 0);
+
+    /**
+     * Corpo de uma funcao exportada, da assinatura ate a chave de
+     * fechamento NA COLUNA ZERO.
+     *
+     * Delimitar pelo PROXIMO `export` — como a suite da fundacao faz —
+     * nao serve aqui: o recorte arrastaria junto o docblock da funcao
+     * seguinte, e este slice e comparado byte a byte contra um arquivo
+     * onde codigo novo foi inserido ENTRE duas funcoes antigas. O corpo
+     * continuaria intacto e o assert reprovaria assim mesmo, medindo
+     * vizinhanca em vez de conteudo.
+     */
+    const corpoExportado = (texto: string, nome: string): string => {
+      const inicio = texto.search(new RegExp(`export\\s+(async\\s+)?function\\s+${nome}\\s*\\(`));
+      if (inicio === -1) return "";
+      const resto = texto.slice(inicio);
+      const fim = resto.indexOf("\n}\n");
+      return fim === -1 ? resto : resto.slice(0, fim + 3);
+    };
+
+    const OPERACOES_DE_ANTES = [
+      "criarAgente", "listarAgentesDoDono", "lerAgenteDoDono", "atualizarAgenteDoDono",
+      "criarTarefa", "listarTarefasDoAgente", "lerTarefaDoDono",
+    ];
+    const FILTROS_DE_ANTES = [
+      "filtrosAgenteDoDono", "filtrosAgentesDoDono", "filtrosTarefaDoDono",
+      "filtrosTarefasDoAgente",
+    ];
+
+    const corposHead = OPERACOES_DE_ANTES.map((n) => corpoExportado(capHead, n));
+    ok("G10b ANCORA: as 7 operacoes foram recortadas do HEAD",
+       corposHead.length === 7 && corposHead.every((c) => c.length > 80));
+    ok("G10b as 7 operacoes de antes continuam byte-identicas ao HEAD",
+       corposHead.every((c) => capAtual.includes(c)));
+
+    const filtrosHead = FILTROS_DE_ANTES.map((n) => corpoExportado(capHead, n));
+    ok("G10c ANCORA: os 4 construtores foram recortados do HEAD",
+       filtrosHead.length === 4 && filtrosHead.every((c) => c.length > 40));
+    ok("G10c os 4 construtores de filtro de antes continuam byte-identicos",
+       filtrosHead.every((c) => capAtual.includes(c)));
+
+    const projecoesHead = [...capHead.matchAll(/const COLUNAS_(?:AGENTE|TAREFA) =[\s\S]*?;/g)]
+      .map((m) => m[0]);
+    ok("G10d ANCORA: as duas projecoes foram recortadas do HEAD", projecoesHead.length === 2);
+    ok("G10d as projecoes de coluna de antes continuam byte-identicas",
+       projecoesHead.every((p) => capAtual.includes(p)));
+
+    const exportsAtuais = [...codigo(CAP).matchAll(/export\s+(?:async\s+)?function\s+(\w+)/g)]
+      .map((m) => m[1]).sort();
+    const exportsHead = [...capHead
+      .replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1")
+      .matchAll(/export\s+(?:async\s+)?function\s+(\w+)/g)].map((m) => m[1]).sort();
+    const novos = exportsAtuais.filter((n) => !exportsHead.includes(n));
+    const sumidos = exportsHead.filter((n) => !exportsAtuais.includes(n));
+    ok("G10e nenhum export do HEAD desapareceu", sumidos.length === 0);
+    ok("G10e2 a extensao e NOMINAL: exatamente estes dois nomes",
+       JSON.stringify(novos) ===
+         JSON.stringify(["filtrosTarefasDoDono", "listarSinaisDeTarefasDoDono"]));
+
+    // Controles negativos: o guarda novo TEM de acusar as duas formas de
+    // regressao que o congelamento antigo pegava.
+    const envenenado = capAtual.replace(
+      "export function filtrosAgentesDoDono(userId: string): Record<string, unknown> {",
+      "export function filtrosAgentesDoDono(userId: string): Record<string, never> {"
+    );
+    ok("G10f MUTANTE: mexer numa regiao pre-existente reprova",
+       envenenado !== capAtual && !filtrosHead.every((c) => envenenado.includes(c)));
+    ok("G10g MUTANTE: um export novo com nome inesperado reprova",
+       JSON.stringify([...novos, "listarQualquerCoisa"].sort()) !==
+         JSON.stringify(["filtrosTarefasDoDono", "listarSinaisDeTarefasDoDono"]));
   }
 
   // ── G10l..G10t: a fronteira dos TRES arquivos liberados no P0 ─────
@@ -2448,8 +2574,18 @@ async function main() {
     // controle negativo que aponta para arquivo autorizado nao
     // discrimina mais nada. Trocados por dois que CONTINUAM fora:
     // `capability.ts` (a capability de dominio) e a rota interna.
+    // M1-I1-V2: `capability.ts` passou a ser aceito NOMINALMENTE, entao
+    // deixou de servir como intruso — terceira vez que isso acontece
+    // nesta suite, sempre pelo mesmo motivo. O substituto e justamente o
+    // arquivo que alguem criaria em vez de estender a capability: um
+    // modulo novo em `lib/agentes/`, que continua fora da lista.
     ok("G11e CONTROLE NEGATIVO: um arquivo NAO autorizado do escopo reprova",
-       !soAutorizadosNoEscopo(" M lib/agentes/capability.ts\n"));
+       !soAutorizadosNoEscopo(" M lib/agentes/capability-escritorio.ts\n"));
+    ok("G11e2 e a capability, agora liberada, e aceita",
+       soAutorizadosNoEscopo(" M lib/agentes/capability.ts\n"));
+    ok("G11e3 a liberacao da M1-I1-V2 e de UM caminho exato, nunca da pasta",
+       ARQUIVOS_M1_I1V2.length === 1 &&
+       ARQUIVOS_M1_I1V2[0] === "lib/agentes/capability.ts");
     // A capability SAIU do congelamento na correcao de performance da
     // 1D-a, entao ela agora e aceita — e quem a protege sao G10a..G10j,
     // nao mais a igualdade byte a byte.
