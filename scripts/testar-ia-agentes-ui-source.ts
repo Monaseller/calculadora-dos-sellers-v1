@@ -2002,18 +2002,52 @@ async function principal(): Promise<void> {
       /setInterval/.test("timer = setInterval(f, 1500)"));
 
     /**
-     * A parada. `ehStatusTerminal` e do transporte e trata
-     * `aguardando_aprovacao` como terminal — e e exatamente o que esta
-     * tela precisa: a tarefa nao anda sem uma decisao que a interface
-     * ainda nao oferece.
+     * A parada — e por que ela deixou de ser a do transporte.
+     *
+     * `ehStatusTerminal` responde "a conversa parou de andar sozinha?".
+     * Para o chat, `aguardando_aprovacao` e um fim honesto. Esta sonda
+     * exigia esse mesmo helper AQUI, com a justificativa de que "a tarefa
+     * nao anda sem uma decisao que a interface ainda nao oferece".
+     *
+     * A interface passou a oferecer na APPROVAL-UI-API-A3: o humano decide
+     * na fila e o worker de producao retoma. A frase virou falsa, mas a
+     * sonda continuou cobrando o comportamento antigo — e foi ela que
+     * segurou a correcao depois que o PRIMEIRO E2E REAL terminou no backend
+     * e nunca apareceu na tela. O guard estava certo quando nasceu e ficou
+     * velho sem que nada o avisasse.
+     *
+     * Agora K9 prova a separacao que o E3-R1 tornou intencional: a TELA
+     * para pelo predicado LOCAL dela, enquanto o TRANSPORTE mantem o seu.
+     * Os dois contratos convivem de proposito, e a sonda existe para que
+     * ninguem volte a colapsar um no outro.
      */
-    const paraNosTerminais = (texto: string): boolean =>
-      /if \(ehStatusTerminal\(r\.tarefa\.status\)\) return;/.test(texto) &&
-      /ehStatusTerminal/.test(texto);
-    ok("K9  o acompanhamento para em todo estado terminal",
-      paraNosTerminais(EX));
-    ok("K9  CONTROLE NEGATIVO: remover a parada reprova",
-      !paraNosTerminais(EX.replace("if (ehStatusTerminal(r.tarefa.status)) return;", "")));
+    const PARADA_LOCAL =
+      /const STATUS_QUE_PARAM_O_ACOMPANHAMENTO: readonly StatusConversa\[\] = \[([\s\S]*?)\];/;
+    const usaPredicadoLocal = (texto: string): boolean =>
+      PARADA_LOCAL.test(texto) &&
+      /if \(paraDeAcompanhar\(r\.tarefa\.status\)\) return;/.test(texto);
+
+    ok("K9  a tela para pelo predicado LOCAL, nao pelo helper do transporte",
+      usaPredicadoLocal(EX) && !/ehStatusTerminal/.test(EX));
+
+    // Os estados sao lidos da lista nominal; os esperados sao literais,
+    // escritos a partir do contrato e nao da implementacao.
+    const listaParada = PARADA_LOCAL.exec(EX)?.[1] ?? "";
+    const paraEm = (estado: string): boolean => new RegExp(`"${estado}"`).test(listaParada);
+    ok("K9a para em concluido/erro/cancelado e CONTINUA em aguardando_aprovacao",
+      paraEm("concluido") && paraEm("erro") && paraEm("cancelado") &&
+      !paraEm("aguardando_aprovacao") && !paraEm("pendente") && !paraEm("rodando"));
+
+    // MUTANTE: a regressao exata que custou o E2E. Em memoria; o arquivo
+    // de producao nao e tocado.
+    ok("K9b MUTANTE: voltar a chamar ehStatusTerminal na tela reprova",
+      !usaPredicadoLocal(
+        EX.replace(
+          "if (paraDeAcompanhar(r.tarefa.status)) return;",
+          "if (ehStatusTerminal(r.tarefa.status)) return;"
+        )
+      ));
+
     ok("K9  e `aguardando_aprovacao` conta como terminal no transporte",
       /status !== "pendente" && status !== "rodando"/.test(CODIGO_TRANSPORTE));
 

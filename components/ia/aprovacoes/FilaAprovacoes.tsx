@@ -55,6 +55,7 @@
  * proxima recarga.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { CROMO, ESPACO, FONTE, RAIO } from "@/lib/ia/design";
 import {
   listarAprovacoesPendentes,
@@ -76,6 +77,27 @@ const MSG_SESSAO = "Sua sessão expirou. Entre novamente para ver a fila.";
 /** O sucesso NAO promete conclusao. A aprovacao foi gravada; a retomada
  *  acontece depois, por conta do worker, e pode falhar por motivos que
  *  esta tela nao conhece. Dizer "concluido" aqui seria inventar. */
+
+/**
+ * O caminho de volta para a execucao que acabou de ser liberada.
+ *
+ * Aprovar aqui e retomar la sao telas diferentes, e ate agora nada ligava
+ * uma a outra: o dono aprovava, lia "sera retomada automaticamente" e
+ * ficava sem saber ONDE olhar. Pior: o id da execucao so existe na URL da
+ * tela do agente, entao sair para esta fila ja o perdia. A tarefa
+ * terminava, o resultado era gravado, e nenhuma tela mostrava.
+ *
+ * O link nasce dos dados da Approval REALMENTE decidida — nunca de um id
+ * guardado antes, que poderia apontar para outra linha depois do refetch.
+ *
+ * Sem auto-redirect de proposito: a fila pode ter varias pendencias, e
+ * arrastar o dono para fora depois do primeiro clique tiraria dele a
+ * chance de decidir as demais.
+ */
+const ROTULO_VOLTAR = "Voltar para execução";
+
+const caminhoDaExecucao = (agenteId: string, tarefaId: string): string =>
+  `/ia/agentes/${encodeURIComponent(agenteId)}?aba=funcoes&tarefaVendas=${encodeURIComponent(tarefaId)}`;
 const MSG_APROVADA = "Aprovação registrada. A tarefa será retomada automaticamente.";
 const MSG_REJEITADA = "Rejeição registrada.";
 const MSG_INDISPONIVEL =
@@ -121,6 +143,9 @@ export default function FilaAprovacoes() {
   const [enviando, setEnviando] = useState<ReadonlySet<string>>(new Set());
   /** Uma frase de cada vez, anunciada por `aria-live`. */
   const [aviso, setAviso] = useState<string | null>(null);
+  /** Contexto da ultima aprovacao bem-sucedida. `null` enquanto nao
+   *  houver uma, e tambem quando a Approval nao tiver tarefa ligada. */
+  const [retorno, setRetorno] = useState<{ agenteId: string; tarefaId: string } | null>(null);
 
   /** UMA leitura. Nao sabe nada de concorrencia — quem coordena e
    *  `carregar`. A logica de fase, erro e geracao e a mesma de sempre. */
@@ -221,6 +246,14 @@ export default function FilaAprovacoes() {
       emVooRef.current.add(id);
       setEnviando(new Set(emVooRef.current));
       setAviso(null);
+      // O retorno pertence a decisao ANTERIOR, e morre junto com ela.
+      //
+      // Ele so era escrito no ramo de sucesso, entao uma segunda decisao
+      // que falhasse deixava o link da primeira na tela — ao lado da
+      // mensagem de erro, apontando para a tarefa errada. Limpar AQUI, e
+      // nao em cada ramo de falha, e o que garante que nenhum caminho
+      // futuro nasca com o contexto velho por esquecimento.
+      setRetorno(null);
 
       try {
         const r = await registrarDecisaoAprovacao(id, decisao);
@@ -228,6 +261,14 @@ export default function FilaAprovacoes() {
 
         if (r.estado === "ok") {
           setAviso(r.decisao === "aprovar" ? MSG_APROVADA : MSG_REJEITADA);
+          // So aprovacao oferece volta: recusar nao retoma nada. E sem
+          // `tarefaId` nao ha execucao para apontar — nenhum link e melhor
+          // que um link que erra a tarefa.
+          setRetorno(
+            r.decisao === "aprovar" && aprovacao.tarefaId !== null
+              ? { agenteId: aprovacao.agenteId, tarefaId: aprovacao.tarefaId }
+              : null
+          );
           await carregar();
           return;
         }
@@ -333,6 +374,17 @@ export default function FilaAprovacoes() {
           confirmacao de que a decisao foi gravada. */}
       <p className="cds-ia-fila-aviso" aria-live="polite">
         {aviso ?? ""}
+        {aviso !== null && retorno !== null && (
+          <>
+            {" "}
+            <Link
+              className="cds-ia-fila-voltar"
+              href={caminhoDaExecucao(retorno.agenteId, retorno.tarefaId)}
+            >
+              {ROTULO_VOLTAR}
+            </Link>
+          </>
+        )}
       </p>
 
       <ul className="cds-ia-fila-lista">
@@ -392,6 +444,12 @@ const css = `
   .cds-ia-fila-aviso {
     min-height: 1.6em; margin: 0 0 ${ESPACO.md}px;
     font: 12px/1.6 ${FONTE.interface}; color: ${CROMO.texto};
+  }
+  .cds-ia-fila-voltar {
+    color: ${CROMO.acento}; text-decoration: underline; font-weight: 600;
+  }
+  .cds-ia-fila-voltar:focus-visible {
+    outline: 2px solid ${CROMO.acento}; outline-offset: 2px; border-radius: 2px;
   }
   .cds-ia-fila-erro {
     margin: 0 0 ${ESPACO.md}px; padding: 12px 14px;

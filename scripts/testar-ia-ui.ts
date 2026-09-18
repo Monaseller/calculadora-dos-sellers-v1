@@ -1174,6 +1174,229 @@ secao("K. Impacto no existente");
       .some((a) => /components\/ia|lib\/ia/.test(ler(a))));
 }
 
+secao("L. Propagacao do resultado ate a UI (E3-R1)");
+
+{
+  const EXEC = codigo(ler("components/ia/agente/ExecutarConsultaVendas.tsx"));
+  const ABAS = codigo(ler("components/ia/agente/AbasAgente.tsx"));
+  const FILA = codigo(ler("components/ia/aprovacoes/FilaAprovacoes.tsx"));
+
+  // ── L1..L6 — F1: a espera por aprovacao NAO encerra o acompanhamento ──
+  //
+  // O primeiro E2E real de producao terminou no backend e nunca apareceu
+  // na tela. A causa: `ehStatusTerminal`, do transporte, responde "a
+  // conversa parou de andar sozinha?" e por isso conta
+  // `aguardando_aprovacao` como fim. Para o chat isso e verdade; para
+  // esta tela deixou de ser quando o A3 conectou a decisao humana — o
+  // humano aprova, o worker retoma, e a tarefa anda. A tela precisa
+  // continuar perguntando.
+  //
+  // O predicado e LOCAL de proposito: mexer no helper compartilhado
+  // mudaria o chat junto, que nao foi revisado para isso.
+  const PARADA = /const STATUS_QUE_PARAM_O_ACOMPANHAMENTO: readonly StatusConversa\[\] = \[([\s\S]*?)\];/;
+  const mParada = PARADA.exec(EXEC);
+  ok("L1  existe um predicado LOCAL de parada, com lista nominal",
+    mParada !== null && /const paraDeAcompanhar = /.test(EXEC));
+
+  const listaParada = mParada === null ? "" : mParada[1];
+  const paraEm = (s: string) => new RegExp(`"${s}"`).test(listaParada);
+
+  ok("L2  PARA em concluido, erro e cancelado",
+    paraEm("concluido") && paraEm("erro") && paraEm("cancelado"));
+  ok("L3  CONTINUA em pendente, rodando e aguardando_aprovacao",
+    !paraEm("pendente") && !paraEm("rodando") && !paraEm("aguardando_aprovacao"));
+  ok("L4  e o laco usa o predicado local, nao o do transporte",
+    /if \(paraDeAcompanhar\(r\.tarefa\.status\)\) return;/.test(EXEC) &&
+    !/ehStatusTerminal/.test(EXEC));
+
+  // O helper compartilhado segue intocado: outra tela depende dele.
+  ok("L5  o helper compartilhado NAO foi alterado",
+    /status !== "pendente" && status !== "rodando"/.test(
+      codigo(ler("lib/ia/agentes-http.ts"))));
+
+  // MUTANTE: se `aguardando_aprovacao` voltar para a lista de parada, o
+  // bug volta — e L3 precisa cair.
+  ok("L6  MUTANTE: reclassificar aguardando_aprovacao como terminal reprova L3",
+    /"aguardando_aprovacao"/.test('  "concluido",\n  "aguardando_aprovacao",\n'));
+
+  // O acompanhamento segue sendo leitura, com limpeza no desmonte.
+  ok("L7  o acompanhamento continua read-only e com cleanup",
+    /consultarConsultaVendasDoAgente\(/.test(EXEC) &&
+    /encerrarAcompanhamento/.test(EXEC) &&
+    !/setInterval/.test(EXEC));
+
+  // ── L8..L11 — F2: a aba preserva o id da execucao ────────────────────
+  //
+  // O href era remontado do zero como `?aba=<id>`, apagando
+  // `tarefaVendas`. Trocar de aba e voltar perdia a execucao inteira.
+  ok("L8  o href da aba carrega o sufixo, em vez de recriar a query",
+    /href=\{`\/ia\/agentes\/\$\{agenteId\}\?aba=\$\{aba\.id\}\$\{sufixo\}`\}/.test(ABAS));
+  ok("L9  o sufixo vem do parametro conhecido lido da URL",
+    /const PARAM_TAREFA_VENDAS = "tarefaVendas";/.test(ABAS) &&
+    /useSearchParams\(\)/.test(ABAS) &&
+    /parametros\?\.get\(PARAM_TAREFA_VENDAS\)/.test(ABAS));
+  ok("L10 so entra na URL se for UUID: nada e inventado",
+    /UUID_REGEX\.test\(tarefaVendas\)/.test(ABAS) &&
+    /: ""/.test(ABAS));
+  ok("L11 e a aba nao repassa a query inteira as cegas",
+    !/parametros\.toString\(\)/.test(ABAS));
+
+  // ── L12..L15 — F3: a fila devolve o caminho da execucao ──────────────
+  //
+  // Aprovar e retomar sao telas diferentes e nada ligava uma a outra.
+  ok("L12 o destino e montado a partir de agenteId + tarefaId",
+    /const caminhoDaExecucao = \(agenteId: string, tarefaId: string\): string =>/.test(FILA) &&
+    /\?aba=funcoes&tarefaVendas=/.test(FILA));
+  ok("L13 o contexto sai da Approval REALMENTE decidida",
+    /setRetorno\(/.test(FILA) &&
+    /aprovacao\.agenteId/.test(FILA) && /aprovacao\.tarefaId/.test(FILA));
+  ok("L14 sem tarefa ligada nao ha link: o retorno vira null",
+    /aprovacao\.tarefaId !== null/.test(FILA) && /: null/.test(FILA));
+  ok("L15 so aprovacao oferece volta, e nao ha auto-redirect",
+    /r\.decisao === "aprovar" && aprovacao\.tarefaId !== null/.test(FILA) &&
+    !/router\.push/.test(FILA) && !/redirect\(/.test(FILA));
+
+  // Os dois ids do piloto real NAO podem estar na producao.
+  ok("L16 nenhum id do E2E piloto vazou para o codigo de producao",
+    !/fab8b677|6376a9e4|5f38c22e/.test(EXEC + ABAS + FILA));
+
+  // ── L17..L26 — O RETORNO MORRE COM A DECISAO QUE O CRIOU ─────────────
+  //
+  // `retorno` so era escrito no ramo de sucesso. Uma segunda decisao que
+  // falhasse nao o tocava, e como a tela mostra o link quando
+  // `aviso !== null && retorno !== null`, a mensagem de erro de A2
+  // aparecia ao lado do link de A1 — apontando para a tarefa errada.
+  //
+  // A correcao limpa o contexto no INICIO de `decidir`, antes da
+  // requisicao: assim nenhum ramo futuro precisa lembrar de limpar.
+  //
+  // O modelo abaixo replica o fluxo real e e exercitado com as quatro
+  // categorias de falha que a fila conhece. Os expected sao literais.
+  {
+    ok("L17 o reset acontece ANTES da requisicao, junto do aviso",
+      /setAviso\(null\);[\s\S]{0,400}?setRetorno\(null\);[\s\S]{0,200}?try \{/.test(FILA));
+    ok("L17a e o unico outro `setRetorno` e o do ramo de sucesso",
+      (FILA.match(/setRetorno\(/g) ?? []).length === 2);
+
+    type Resposta = { estado: string; decisao?: string };
+    type Aprov = { id: string; agenteId: string; tarefaId: string | null };
+
+    /** Replica de `decidir` + da condicao de render da fila. */
+    const criarFila = (comReset: boolean) => {
+      let aviso: string | null = null;
+      let retorno: { agenteId: string; tarefaId: string } | null = null;
+      return {
+        estado: () => ({ aviso, retorno, mostraLink: aviso !== null && retorno !== null }),
+        decidir(ap: Aprov, decisao: string, r: Resposta) {
+          aviso = null;
+          if (comReset) retorno = null; // <- a correcao
+          if (r.estado === "ok") {
+            aviso = decisao === "aprovar" ? "aprovada" : "rejeitada";
+            retorno =
+              decisao === "aprovar" && ap.tarefaId !== null
+                ? { agenteId: ap.agenteId, tarefaId: ap.tarefaId }
+                : null;
+            return;
+          }
+          aviso = r.estado; // indisponivel | nao_encontrada | nao_autenticado | falha
+        },
+      };
+    };
+
+    const A1: Aprov = { id: "ap-1", agenteId: "ag-1", tarefaId: "t-1" };
+    const A2: Aprov = { id: "ap-2", agenteId: "ag-2", tarefaId: "t-2" };
+    const SEM_TAREFA: Aprov = { id: "ap-3", agenteId: "ag-3", tarefaId: null };
+    const FALHAS = ["indisponivel", "nao_encontrada", "nao_autenticado", "falha"] as const;
+
+    // F3-fail-1..4: sucesso e depois falha, nas quatro categorias.
+    for (const categoria of FALHAS) {
+      const f = criarFila(true);
+      f.decidir(A1, "aprovar", { estado: "ok" });
+      const apos1 = f.estado();
+      f.decidir(A2, "aprovar", { estado: categoria });
+      const apos2 = f.estado();
+      ok(`L18 sucesso em A1 e falha \`${categoria}\` em A2 nao deixa link velho`,
+        apos1.retorno?.tarefaId === "t-1" &&
+        apos2.retorno === null &&
+        apos2.mostraLink === false &&
+        apos2.aviso === categoria);
+    }
+
+    // F3-sequence: falha e depois sucesso continua criando o link certo.
+    {
+      const f = criarFila(true);
+      f.decidir(A1, "aprovar", { estado: "indisponivel" });
+      const apos1 = f.estado();
+      f.decidir(A2, "aprovar", { estado: "ok" });
+      const apos2 = f.estado();
+      ok("L19 falha em A1 e sucesso em A2 produz o link de A2, e so dele",
+        apos1.retorno === null &&
+        apos2.retorno?.agenteId === "ag-2" && apos2.retorno?.tarefaId === "t-2" &&
+        apos2.mostraLink === true);
+    }
+
+    // Binding entre duas aprovacoes bem-sucedidas.
+    {
+      const f = criarFila(true);
+      f.decidir(A1, "aprovar", { estado: "ok" });
+      f.decidir(A2, "aprovar", { estado: "ok" });
+      ok("L20 aprovar A2 depois de A1 liga a A2, nunca a A1",
+        f.estado().retorno?.tarefaId === "t-2");
+    }
+
+    // Recusa e aprovacao sem tarefa: nenhum link.
+    {
+      const f = criarFila(true);
+      f.decidir(A1, "aprovar", { estado: "ok" });
+      f.decidir(A2, "rejeitar", { estado: "ok" });
+      ok("L21 recusar apos aprovar zera o retorno", f.estado().retorno === null);
+
+      const g = criarFila(true);
+      g.decidir(SEM_TAREFA, "aprovar", { estado: "ok" });
+      ok("L22 aprovacao sem tarefa ligada nao cria link", g.estado().retorno === null);
+    }
+
+    // Durante o request: aviso e retorno ja zerados, nada na tela.
+    {
+      const f = criarFila(true);
+      f.decidir(A1, "aprovar", { estado: "ok" });
+      const durante = criarFila(true);
+      durante.decidir(A1, "aprovar", { estado: "ok" });
+      // um novo `decidir` limpa antes de qualquer resposta chegar
+      durante.decidir(A2, "aprovar", { estado: "pendente-simulado" });
+      ok("L23 durante a nova decisao nenhum link anterior fica visivel",
+        durante.estado().retorno === null);
+    }
+
+    // ── O MUTANTE: sem o reset, o bug volta ────────────────────────────
+    {
+      const m = criarFila(false); // <- correcao removida
+      m.decidir(A1, "aprovar", { estado: "ok" });
+      m.decidir(A2, "aprovar", { estado: "indisponivel" });
+      const e = m.estado();
+      ok("L24 MUTANTE: sem o reset, o link de A1 sobrevive a falha de A2",
+        e.retorno?.tarefaId === "t-1" && e.mostraLink === true);
+      ok("L24a e e exatamente a tarefa ERRADA para a decisao que acabou de falhar",
+        e.retorno?.tarefaId !== A2.tarefaId);
+      ok("L24b ANCORA: com o reset, esse mesmo cenario nao mostra link",
+        criarFila(true) !== null &&
+        (() => {
+          const c = criarFila(true);
+          c.decidir(A1, "aprovar", { estado: "ok" });
+          c.decidir(A2, "aprovar", { estado: "indisponivel" });
+          return c.estado().mostraLink === false;
+        })());
+    }
+
+    ok("L25 e o auto-redirect continua ausente",
+      !/router\.push/.test(FILA) && !/redirect\(/.test(FILA));
+    ok("L26 a trava de duplo clique por id segue intacta",
+      /if \(emVooRef\.current\.has\(id\)\) return;/.test(FILA) &&
+      /emVooRef\.current\.add\(id\)/.test(FILA));
+  }
+}
+
+
 // ═══════════════════════════════════════════════════════════════════════
 console.log(`\n══ CDS IA — UI-1B: fundacao visual:  ${passou}/${passou + falhou} passaram ══`);
 if (falhou > 0) {

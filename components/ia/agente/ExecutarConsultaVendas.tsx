@@ -42,7 +42,6 @@ import type { NivelAutonomia } from "@/lib/ia/conceitos";
 import {
   consultarConsultaVendasDoAgente,
   criarConsultaVendasDoAgente,
-  ehStatusTerminal,
   type MarketplaceConsultaVendas,
   type ResultadoConsultaVendasUI,
   type StatusConversa,
@@ -86,6 +85,33 @@ const FALHAS_TOLERADAS = 3;
 const PARAM_TAREFA = "tarefaVendas";
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Quando PARAR de perguntar pela tarefa — regra DESTA tela.
+ *
+ * `ehStatusTerminal`, do transporte, responde outra pergunta: "a conversa
+ * parou de andar sozinha?". Para o chat, `aguardando_aprovacao` e um fim
+ * de linha honesto. Aqui nao e, e a diferenca custou o primeiro E2E real:
+ * a tela via `aguardando_aprovacao`, encerrava o acompanhamento e nunca
+ * descobria que a tarefa tinha sido aprovada, retomada e concluida.
+ *
+ * O comentario que justificava reaproveitar o helper dizia que a decisao
+ * "ainda nao existe na interface". Existe desde a APPROVAL-UI-API-A3: o
+ * humano decide na fila e o worker retoma. Entao a espera por aprovacao
+ * voltou a ser um estado TRANSITORIO — alguem vai decidir, e a tarefa vai
+ * andar sem que esta tela peca nada.
+ *
+ * O helper compartilhado continua intocado de proposito: mudar a regra
+ * dele moveria o comportamento do chat junto, que nao foi revisado aqui.
+ */
+const STATUS_QUE_PARAM_O_ACOMPANHAMENTO: readonly StatusConversa[] = [
+  "concluido",
+  "erro",
+  "cancelado",
+];
+
+const paraDeAcompanhar = (status: StatusConversa): boolean =>
+  STATUS_QUE_PARAM_O_ACOMPANHAMENTO.includes(status);
 
 const ROTULO_STATUS: Record<StatusConversa, string> = {
   pendente: "Na fila",
@@ -260,7 +286,7 @@ export default function ExecutarConsultaVendas({
       // Terminal significa: nao adianta perguntar de novo. Isso inclui
       // `aguardando_aprovacao` — a tarefa nao anda ate alguem decidir, e
       // essa decisao ainda nao existe na interface.
-      if (ehStatusTerminal(r.tarefa.status)) return;
+      if (paraDeAcompanhar(r.tarefa.status)) return;
 
       timer.current = window.setTimeout(() => {
         if (minhaGeracao !== geracao.current) return;

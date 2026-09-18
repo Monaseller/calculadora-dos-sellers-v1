@@ -25,8 +25,28 @@
  * listener, sem menu "mais" em JavaScript.
  */
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { ABAS, type AbaId } from "@/lib/ia/abas";
 import { CROMO, ESPACO, FONTE, RAIO } from "@/lib/ia/design";
+
+/**
+ * O id da execucao de vendas viaja na URL — e so ali.
+ *
+ * `ExecutarConsultaVendas` grava `?tarefaVendas=<uuid>` para que um F5 nao
+ * perca a consulta em andamento: o estado volta do servidor por GET, e a
+ * URL guarda um identificador e nada mais, nunca o resultado.
+ *
+ * Este componente montava o href de cada aba do zero — `?aba=<id>` — e com
+ * isso APAGAVA esse parametro. Trocar de aba e voltar para Funcoes perdia
+ * a execucao, mesmo com a tarefa concluida e o resultado salvo. Foi um dos
+ * defeitos que impediram o primeiro E2E real de fechar.
+ *
+ * Preservamos UM parametro conhecido, nao a query inteira: repassar tudo
+ * cegamente carregaria lixo de campanha, parametros de outra tela e
+ * qualquer coisa que um dia alguem colar na barra de enderecos.
+ */
+const PARAM_TAREFA_VENDAS = "tarefaVendas";
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export default function AbasAgente({
   agenteId,
@@ -35,6 +55,14 @@ export default function AbasAgente({
   agenteId: string;
   ativa: AbaId;
 }) {
+  // Somente leitura da URL: nenhuma busca, nenhum id inventado.
+  const parametros = useSearchParams();
+  const tarefaVendas = parametros?.get(PARAM_TAREFA_VENDAS) ?? null;
+  const sufixo =
+    tarefaVendas !== null && UUID_REGEX.test(tarefaVendas)
+      ? `&${PARAM_TAREFA_VENDAS}=${encodeURIComponent(tarefaVendas)}`
+      : "";
+
   return (
     <>
       <style>{css}</style>
@@ -45,7 +73,7 @@ export default function AbasAgente({
             return (
               <li key={aba.id} className="cds-ia-aba-item">
                 <Link
-                  href={`/ia/agentes/${agenteId}?aba=${aba.id}`}
+                  href={`/ia/agentes/${agenteId}?aba=${aba.id}${sufixo}`}
                   aria-current={selecionada ? "page" : undefined}
                   className={selecionada ? "cds-ia-aba cds-ia-aba-ativa" : "cds-ia-aba"}
                 >
