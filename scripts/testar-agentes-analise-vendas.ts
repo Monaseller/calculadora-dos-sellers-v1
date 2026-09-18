@@ -2159,31 +2159,81 @@ async function main() {
   //
   // Congelar bytes reprovaria a extensao inteira — inclusive a parte que
   // o guarda nunca quis proteger. O que ele PROTEGIA era "nada daqui
-  // mudou", e isso continua cobrado, so que item a item:
+  // mudou", e isso continua cobrado, item a item.
   //
-  //   G10a  nenhuma linha do HEAD foi REMOVIDA nem reescrita;
-  //   G10b  as 7 operacoes de antes tem corpo byte-identico ao HEAD;
-  //   G10c  os 4 construtores de filtro de antes, idem;
-  //   G10d  as duas projecoes de coluna, idem;
-  //   G10e  a extensao e NOMINAL — uma operacao e um construtor.
+  // ── Por que a baseline e um SHA LITERAL, e nunca `HEAD` ───────────
   //
-  // Trocar "nada mudou" por "so isto mudou, e nominalmente" nao afrouxa
-  // nada: G10a sozinho ja e mais forte do que uma contagem, porque
-  // qualquer edicao DENTRO de uma funcao antiga aparece como linha
-  // deletada. E os controles negativos abaixo provam que ele acusa.
+  // A primeira versao deste guarda comparava contra `HEAD`. Funcionou
+  // enquanto a mudanca vivia so no worktree e quebrou no instante em que
+  // ela foi commitada: `HEAD` passou a CONTER a extensao, o diff virou
+  // vazio, `G10a` e `G10e2` reprovaram por falta de oraculo — e, pior,
+  // `G10b/c/d` passaram a comparar o arquivo consigo mesmo, verdes e
+  // vazios. Trocar por `HEAD^` so adiaria o mesmo defeito para o commit
+  // seguinte.
+  //
+  // Baseline de PRESERVACAO nao pode ser referencia movel. Esta e
+  // nominal: o commit imediatamente anterior ao slice. Ela envelhece bem
+  // porque a pergunta que responde tambem e historica — "o que existia
+  // antes da M1-I1-V2 continua intacto?" — e a resposta nao muda quando
+  // o repositorio anda para frente.
+  const BASELINE_M1_I1V2 = "6c0f9c99b289546b87472a46f8253664dd2e3982";
+
   {
     const CAP = "lib/agentes/capability.ts";
-    const capHead = git("show", `HEAD:${CAP}`);
+
+    /** `true` se o objeto existe no repositorio local. */
+    const commitExiste = (sha: string): boolean => {
+      try {
+        git("cat-file", "-e", `${sha}^{commit}`);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    /** `true` se `a` e ancestral de `b`. */
+    const ehAncestral = (a: string, b: string): boolean => {
+      try {
+        git("merge-base", "--is-ancestor", a, b);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    // A baseline precisa EXISTIR e ser ANCESTRAL do HEAD. Faltando uma
+    // das duas, o guarda reprova: nunca cai para `HEAD`, nunca pula.
+    // Exigir ancestralidade evita apontar para um commit estranho que
+    // por acaso contenha um arquivo parecido.
+    ok("G10w a baseline nominal existe no repositorio local",
+       commitExiste(BASELINE_M1_I1V2));
+    ok("G10w2 CONTROLE: um SHA bem formado porem inexistente reprova",
+       !commitExiste("0123456789abcdef0123456789abcdef01234567"));
+    ok("G10x a baseline e ancestral do HEAD",
+       ehAncestral(BASELINE_M1_I1V2, "HEAD"));
+    ok("G10x2 CONTROLE: o sentido inverso NAO e ancestral",
+       !ehAncestral("HEAD", BASELINE_M1_I1V2));
+
+    const capBaseline = git("show", `${BASELINE_M1_I1V2}:${CAP}`);
     const capAtual = fonte(CAP);
 
-    // `git diff --numstat` devolve "adicionadas\tremovidas\tcaminho".
-    // Zero removidas significa: o HEAD inteiro sobreviveu, em ordem, e
-    // tudo o que houve foram INSERCOES entre linhas intactas.
-    const numstat = git("diff", "--numstat", "HEAD", "--", CAP).trim();
+    // ANTI-VACUIDADE. Se os dois lados forem o mesmo conteudo, tudo
+    // abaixo passa sem provar nada — foi exatamente assim que o guarda
+    // anterior morreu calado depois do commit.
+    ok("G10y ANCORA: a baseline foi lida e tem corpo", capBaseline.length > 1000);
+    ok("G10y2 NAO-TRIVIAL: baseline e conteudo atual sao DIFERENTES",
+       capBaseline !== capAtual);
+
+    // `git diff --numstat <baseline> -- <path>` compara a baseline com o
+    // WORKTREE, e por isso continua valendo depois de qualquer commit.
+    // Zero removidas significa: a baseline inteira sobreviveu, em ordem,
+    // e tudo o que houve foram INSERCOES entre linhas intactas.
+    const numstat = git("diff", "--numstat", BASELINE_M1_I1V2, "--", CAP).trim();
     const removidas = Number.parseInt(numstat.split(/\s+/)[1] ?? "-1", 10);
     const adicionadas = Number.parseInt(numstat.split(/\s+/)[0] ?? "-1", 10);
-    ok("G10a ANCORA: o numstat do arquivo foi lido", numstat.length > 0 && removidas >= 0);
-    ok("G10a nenhuma linha do HEAD foi removida ou reescrita — so insercoes",
+    ok("G10a ANCORA: o numstat contra a baseline foi lido",
+       numstat.length > 0 && removidas >= 0 && adicionadas > 0);
+    ok("G10a nenhuma linha da baseline foi removida ou reescrita — so insercoes",
        removidas === 0 && adicionadas > 0);
 
     /**
@@ -2214,47 +2264,58 @@ async function main() {
       "filtrosTarefasDoAgente",
     ];
 
-    const corposHead = OPERACOES_DE_ANTES.map((n) => corpoExportado(capHead, n));
-    ok("G10b ANCORA: as 7 operacoes foram recortadas do HEAD",
-       corposHead.length === 7 && corposHead.every((c) => c.length > 80));
-    ok("G10b as 7 operacoes de antes continuam byte-identicas ao HEAD",
-       corposHead.every((c) => capAtual.includes(c)));
+    const corposBaseline = OPERACOES_DE_ANTES.map((n) => corpoExportado(capBaseline, n));
+    ok("G10b ANCORA: as 7 operacoes foram recortadas da BASELINE",
+       corposBaseline.length === 7 && corposBaseline.every((c) => c.length > 80));
+    ok("G10b as 7 operacoes da baseline continuam byte-identicas hoje",
+       corposBaseline.every((c) => capAtual.includes(c)));
 
-    const filtrosHead = FILTROS_DE_ANTES.map((n) => corpoExportado(capHead, n));
-    ok("G10c ANCORA: os 4 construtores foram recortados do HEAD",
-       filtrosHead.length === 4 && filtrosHead.every((c) => c.length > 40));
-    ok("G10c os 4 construtores de filtro de antes continuam byte-identicos",
-       filtrosHead.every((c) => capAtual.includes(c)));
+    const filtrosBaseline = FILTROS_DE_ANTES.map((n) => corpoExportado(capBaseline, n));
+    ok("G10c ANCORA: os 4 construtores foram recortados da BASELINE",
+       filtrosBaseline.length === 4 && filtrosBaseline.every((c) => c.length > 40));
+    ok("G10c os 4 construtores da baseline continuam byte-identicos",
+       filtrosBaseline.every((c) => capAtual.includes(c)));
 
-    const projecoesHead = [...capHead.matchAll(/const COLUNAS_(?:AGENTE|TAREFA) =[\s\S]*?;/g)]
+    const projecoesBaseline = [...capBaseline.matchAll(/const COLUNAS_(?:AGENTE|TAREFA) =[\s\S]*?;/g)]
       .map((m) => m[0]);
-    ok("G10d ANCORA: as duas projecoes foram recortadas do HEAD", projecoesHead.length === 2);
-    ok("G10d as projecoes de coluna de antes continuam byte-identicas",
-       projecoesHead.every((p) => capAtual.includes(p)));
+    ok("G10d ANCORA: as duas projecoes foram recortadas da BASELINE",
+       projecoesBaseline.length === 2);
+    ok("G10d as projecoes de coluna da baseline continuam byte-identicas",
+       projecoesBaseline.every((p) => capAtual.includes(p)));
 
-    const exportsAtuais = [...codigo(CAP).matchAll(/export\s+(?:async\s+)?function\s+(\w+)/g)]
-      .map((m) => m[1]).sort();
-    const exportsHead = [...capHead
-      .replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1")
-      .matchAll(/export\s+(?:async\s+)?function\s+(\w+)/g)].map((m) => m[1]).sort();
-    const novos = exportsAtuais.filter((n) => !exportsHead.includes(n));
-    const sumidos = exportsHead.filter((n) => !exportsAtuais.includes(n));
-    ok("G10e nenhum export do HEAD desapareceu", sumidos.length === 0);
+    const semComentarios = (t: string) =>
+      t.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+    const nomesDe = (t: string) =>
+      [...semComentarios(t).matchAll(/export\s+(?:async\s+)?function\s+(\w+)/g)]
+        .map((m) => m[1]).sort();
+
+    const exportsAtuais = nomesDe(capAtual);
+    const exportsBaseline = nomesDe(capBaseline);
+    const novos = exportsAtuais.filter((n) => !exportsBaseline.includes(n));
+    const sumidos = exportsBaseline.filter((n) => !exportsAtuais.includes(n));
+    // O esperado e LITERAL, nao derivado da diferenca observada: e ele
+    // que transforma "mudou alguma coisa" em "mudou exatamente isto".
+    const EXTENSAO_APROVADA = ["filtrosTarefasDoDono", "listarSinaisDeTarefasDoDono"];
+    ok("G10e nenhum export da baseline desapareceu", sumidos.length === 0);
     ok("G10e2 a extensao e NOMINAL: exatamente estes dois nomes",
-       JSON.stringify(novos) ===
-         JSON.stringify(["filtrosTarefasDoDono", "listarSinaisDeTarefasDoDono"]));
+       JSON.stringify(novos) === JSON.stringify(EXTENSAO_APROVADA));
 
-    // Controles negativos: o guarda novo TEM de acusar as duas formas de
-    // regressao que o congelamento antigo pegava.
+    // Controles negativos: o guarda TEM de acusar as formas de regressao
+    // que o congelamento byte a byte pegava.
     const envenenado = capAtual.replace(
       "export function filtrosAgentesDoDono(userId: string): Record<string, unknown> {",
       "export function filtrosAgentesDoDono(userId: string): Record<string, never> {"
     );
     ok("G10f MUTANTE: mexer numa regiao pre-existente reprova",
-       envenenado !== capAtual && !filtrosHead.every((c) => envenenado.includes(c)));
+       envenenado !== capAtual && !filtrosBaseline.every((c) => envenenado.includes(c)));
     ok("G10g MUTANTE: um export novo com nome inesperado reprova",
        JSON.stringify([...novos, "listarQualquerCoisa"].sort()) !==
-         JSON.stringify(["filtrosTarefasDoDono", "listarSinaisDeTarefasDoDono"]));
+         JSON.stringify(EXTENSAO_APROVADA));
+    ok("G10g2 MUTANTE: perder um dos exports aprovados tambem reprova",
+       JSON.stringify(novos.slice(1)) !== JSON.stringify(EXTENSAO_APROVADA));
+    ok("G10g3 MUTANTE: uma operacao antiga removida seria vista",
+       corposBaseline.every((c) => capAtual.includes(c)) &&
+       !corposBaseline.every((c) => capAtual.replace(corposBaseline[0], "").includes(c)));
   }
 
   // ── G10l..G10t: a fronteira dos TRES arquivos liberados no P0 ─────
