@@ -79,6 +79,7 @@ let consumidas = 0;
 function roteiro(...rs: Resposta[]): void {
   respostas = rs;
   chamadas = [];
+  entregas = [];
   consumidas = 0;
 }
 
@@ -114,12 +115,41 @@ const clienteFake = {
   rpc: () => { rpcs++; return Promise.resolve({ data: null, error: null }); },
 };
 
+/**
+ * O que o compositor ENTREGA ao motor, capturado na fronteira.
+ *
+ * E um ESPIAO, nao um duplo: `diagnosticarSkill` real continua rodando e
+ * decidindo. O que se registra e o argumento — a unica forma de provar,
+ * de fora, que conhecer o catalogo inteiro nao virou licenca para
+ * despeja-lo no motor.
+ */
+interface EntregaAoMotor {
+  funcoes: readonly { id: string; existe: boolean }[];
+  permissoes: readonly { funcaoId: string; nivel: string }[];
+}
+let entregas: EntregaAoMotor[] = [];
+const ultimaEntrega = () => entregas[entregas.length - 1];
+
 const requireOriginal = (Module as unknown as { prototype: { require: (id: string) => unknown } }).prototype.require;
 let interceptou = false;
+let espiouMotor = false;
 (Module as unknown as { prototype: { require: unknown } }).prototype.require = function (this: unknown, id: string) {
   if (typeof id === "string" && id.includes("supabase-servidor")) {
     interceptou = true;
     return { getSupabaseServidor: () => clienteFake };
+  }
+  if (typeof id === "string" && /ia[\/]skills[\/]diagnostico/.test(id)) {
+    espiouMotor = true;
+    // eslint-disable-next-line prefer-rest-params
+    const real = requireOriginal.apply(this, arguments as unknown as [string]) as Record<string, unknown>;
+    const original = real.diagnosticarSkill as (e: EntregaAoMotor) => unknown;
+    return {
+      ...real,
+      diagnosticarSkill: (entrada: EntregaAoMotor) => {
+        entregas.push({ funcoes: entrada.funcoes, permissoes: entrada.permissoes });
+        return original(entrada);
+      },
+    };
   }
   // eslint-disable-next-line prefer-rest-params
   return requireOriginal.apply(this, arguments as unknown as [string]);
@@ -136,6 +166,8 @@ const L = (n: number) => `aaaaaaaa-0000-4000-8000-00000000000${n}`;
 /** A unica Funcao realmente registrada hoje — descoberta em runtime para
  *  a suite nao envelhecer se o catalogo crescer. */
 let FUNCAO_REAL = "";
+/** O catalogo REAL, para provar o ESCOPO da leitura de permissoes. */
+let CATALOGO_REGISTRADO: readonly string[] = [];
 
 type Req = { plataforma: string; recurso: string; obrigatoria: boolean };
 
@@ -208,8 +240,16 @@ ok("A13 CONTROLE: as sondas acusam quando o padrao existe",
 
 async function principal(): Promise<void> {
   const { diagnosticarAgente } = await import("../lib/agentes/diagnostico/compositor");
-  const { listarFuncoesRegistradas } = await import("../lib/agentes/funcoes/registry");
-  FUNCAO_REAL = listarFuncoesRegistradas()[0] ?? "";
+  const { FUNCOES, listarFuncoesRegistradas } = await import("../lib/agentes/funcoes/registry");
+  CATALOGO_REGISTRADO = listarFuncoesRegistradas();
+  // M2-I1-A2: era `CATALOGO_REGISTRADO[0]`, e o indice deixou de
+  // significar o que significava. Com a segunda Funcao, a primeira da
+  // ordenacao passou a ser `mercadolivre.perguntas.listar`, que EXIGE
+  // conexao — e os budgets desta secao medem o compositor com uma Funcao
+  // SEM requisito de conexao. Escolher por posicao media outra coisa em
+  // silencio; escolher pela PROPRIEDADE mede o que sempre se quis.
+  FUNCAO_REAL =
+    CATALOGO_REGISTRADO.find((id) => FUNCOES[id]?.conexaoNecessaria === null) ?? "";
 
   secao("B. O instrumento de medida esta instalado");
 
@@ -252,19 +292,26 @@ async function principal(): Promise<void> {
 
   secao("D. Query budget — travado por cenario");
 
-  // 1 Skill sem requisito nenhum: Skills(2) + agregador(2) + permissoes(0)
+  // 1 Skill sem requisito nenhum: Skills(2) + agregador(2 + permissoes 1)
+  //
+  // M2-I1-A1-FIX1: a leitura de `agente_permissoes` mudou de dono. Ela era
+  // do compositor, com os ids que as Skills declaram — e custava ZERO
+  // query quando nenhuma Skill declarava Funcao. Agora e do AGREGADOR, com
+  // o catalogo inteiro, e acontece sempre: e ela que descobre quais
+  // Funcoes o dono habilitou, pergunta que nenhuma Skill responde.
   roteiro(
     { data: [assoc("s1")] },
     { data: [linhaSkill("s1", manifesto("skill-a", "1.0.0"))] },
     { data: [assoc("s1")] },
-    { data: [linhaSkill("s1", manifesto("skill-a", "1.0.0"))] }
+    { data: [linhaSkill("s1", manifesto("skill-a", "1.0.0"))] },
+    { data: [] }
   );
   const rSemReq = await diagnosticarAgente(AG);
-  ok("D1  1 Skill sem requisitos -> TOTAL 4 queries",
-    chamadas.length === 4 && rSemReq.coleta === "ok" && rSemReq.diagnosticos.length === 1,
+  ok("D1  1 Skill sem requisitos -> TOTAL 5 queries",
+    chamadas.length === 5 && rSemReq.coleta === "ok" && rSemReq.diagnosticos.length === 1,
     `${chamadas.length} · ${tabelas()}`);
-  ok("D2  permissoes com lista vazia -> 0 query",
-    queriesEm("agente_permissoes") === 0);
+  ok("D2  permissoes lida UMA vez, pelo agregador",
+    queriesEm("agente_permissoes") === 1, String(queriesEm("agente_permissoes")));
   ok("D3  sem requisito de conexao, o agregador nao le selecoes",
     queriesEm("agente_conexoes") === 0);
 
@@ -278,29 +325,56 @@ async function principal(): Promise<void> {
   const rFuncao = await diagnosticarAgente(AG);
   ok("D4  1 Skill so com Funcao -> TOTAL 5 queries",
     chamadas.length === 5, `${chamadas.length} · ${tabelas()}`);
-  ok("D5  permissoes chamada UMA vez, com o id requerido",
-    queriesEm("agente_permissoes") === 1 &&
-      JSON.stringify(chamadas.find((c) => c.tabela === "agente_permissoes")?.inValores) ===
-        JSON.stringify([FUNCAO_REAL]));
+  // D5 NAO afrouxou com a troca de dono. Antes provava igualdade com
+  // `[FUNCAO_REAL]`; agora prova, ao mesmo tempo: uma leitura so, o
+  // escopo EXATO do catalogo registrado, e que o id necessario esta
+  // coberto. Trocar por `calls === 1` teria deixado passar um recorte.
+  const qPermD5 = chamadas.find((c) => c.tabela === "agente_permissoes");
+  ok("D5  permissoes chamada UMA vez", queriesEm("agente_permissoes") === 1);
+  ok("D5a e o escopo e o CATALOGO INTEIRO, nao um recorte",
+    qPermD5?.inColuna === "funcao_id" &&
+      JSON.stringify([...(qPermD5?.inValores ?? [])].sort()) ===
+        JSON.stringify([...CATALOGO_REGISTRADO].sort()),
+    JSON.stringify(qPermD5?.inValores));
+  ok("D5b e o id que a Skill exige esta dentro dele",
+    (qPermD5?.inValores ?? []).includes(FUNCAO_REAL));
+  // O catalogo real tem UMA Funcao hoje, entao "o recorte das Skills" e
+  // "o catalogo" coincidem por acaso. O controle nao pode depender disso:
+  // ele prova que a comparacao de D5a REPROVA tanto um conjunto menor
+  // quanto um maior, o que continua valendo quando a segunda Funcao entrar.
+  const escopoIgual = (v: readonly string[]) =>
+    JSON.stringify([...v].sort()) === JSON.stringify([...CATALOGO_REGISTRADO].sort());
+  ok("D5c ANCORA: o catalogo lido nao esta vazio", CATALOGO_REGISTRADO.length > 0);
+  ok("D5d CONTROLE: um escopo MENOR reprova D5a", !escopoIgual([]));
+  ok("D5e CONTROLE: um escopo MAIOR tambem reprova",
+    !escopoIgual([...CATALOGO_REGISTRADO, "intrusa.funcao"]));
   ok("D6  Funcao registrada + nivel automatico -> Skill pronta",
     rFuncao.diagnosticos[0]?.diagnostico.pronto === true,
     rFuncao.diagnosticos[0]?.diagnostico.estadoGeral);
 
-  // 1 conexao selecionada, zero funcao: Skills(2) + agregador(5) + perm(0)
+  // 1 conexao selecionada, zero funcao: Skills(2) + agregador(1 perm + 5)
+  //
+  // Era 7, e passou a 8. O +1 nao e regressao nem folga: e a UNICA leitura
+  // capaz de descobrir que o dono habilitou uma Funcao com requisito de
+  // conexao quando NENHUMA Skill declara Funcao. Antes ninguem perguntava
+  // — `resolverFatosPermissoes` com lista vazia nao tocava o banco —, e
+  // por isso o agente conectado por Funcao nascia sem requisito nenhum.
   const REQ: Req = { plataforma: "shopee", recurso: "chat", obrigatoria: true };
   const manConexao = manifesto("skill-c", "1.0.0", { conexoes: [REQ] });
   const roteiroConexao = (extraLoja: Record<string, unknown> = {}) => [
     { data: [assoc("s1")] }, { data: [linhaSkill("s1", manConexao)] },
     { data: [assoc("s1")] }, { data: [linhaSkill("s1", manConexao)] },
+    { data: [] },
     { data: [linhaSelecao("shopee", "chat", L(1))] },
     { data: [linhaLojaDona(L(1))] },
     { data: [loja(L(1), extraLoja)] },
   ];
   roteiro(...roteiroConexao());
   const rConexao = await diagnosticarAgente(AG);
-  ok("D7  1 conexao selecionada, zero Funcao -> TOTAL 7 queries",
-    chamadas.length === 7, `${chamadas.length} · ${tabelas()}`);
-  ok("D8  e permissoes continua com 0 query", queriesEm("agente_permissoes") === 0);
+  ok("D7  1 conexao selecionada, zero Funcao -> TOTAL 8 queries",
+    chamadas.length === 8, `${chamadas.length} · ${tabelas()}`);
+  ok("D8  e permissoes e lida UMA vez, pelo agregador",
+    queriesEm("agente_permissoes") === 1, String(queriesEm("agente_permissoes")));
   // Conta conectada e valida NAO produz PRONTO: `coberturaDoRecurso`
   // devolve `nao_verificavel` para todo recurso, porque a CDS ainda nao
   // sabe afirmar que uma autorizacao cobre um recurso especifico. O motor
@@ -321,10 +395,10 @@ async function principal(): Promise<void> {
   roteiro(
     { data: [assoc("s1")] }, { data: [linhaSkill("s1", manCheia)] },
     { data: [assoc("s1")] }, { data: [linhaSkill("s1", manCheia)] },
+    { data: [linhaPermissao(FUNCAO_REAL, "automatico")] },
     { data: [linhaSelecao("shopee", "chat", L(1))] },
     { data: [linhaLojaDona(L(1))] },
-    { data: [loja(L(1))] },
-    { data: [linhaPermissao(FUNCAO_REAL, "automatico")] }
+    { data: [loja(L(1))] }
   );
   const rCheia = await diagnosticarAgente(AG);
   ok("D10 1 conexao + 1 Funcao -> TOTAL 8 queries",
@@ -350,10 +424,10 @@ async function principal(): Promise<void> {
   const roteiroAB = () => [
     { data: [assoc("s1"), assoc("s2")] }, { data: skillsAB },
     { data: [assoc("s1"), assoc("s2")] }, { data: skillsAB },
+    { data: [linhaPermissao(FUNCAO_REAL, "automatico")] },
     { data: selecoes5 },
     { data: [linhaLojaDona(L(1))] },
     { data: [loja(L(1))] },
-    { data: [linhaPermissao(FUNCAO_REAL, "automatico")] },
   ];
   roteiro(...roteiroAB());
   const rAB = await diagnosticarAgente(AG);
@@ -381,13 +455,19 @@ async function principal(): Promise<void> {
     { data: [linhaPermissao(FUNCAO_REAL, "automatico")] }
   );
   const rDedupe = await diagnosticarAgente(AG);
-  const qPerm = chamadas.find((c) => c.tabela === "agente_permissoes");
+  // M2-I1-A1-FIX1: a leitura de permissoes deixou de ser do compositor,
+  // entao a lista de ids que ele monta nao aparece mais num `.in()`. Ela
+  // continua existindo e continua sendo dele — e agora e observada onde
+  // importa de verdade: no que chega ao MOTOR. Prova mais forte, porque
+  // mede o efeito e nao o meio.
+  const entregaE = ultimaEntrega();
+  const idsNoMotor = (entregaE?.funcoes ?? []).map((f) => f.id);
   ok("E1  ids de Funcao deduplicados entre Skills",
-    (qPerm?.inValores ?? []).length === 2, JSON.stringify(qPerm?.inValores));
+    idsNoMotor.length === 2, JSON.stringify(idsNoMotor));
   ok("E2  funcoes_opcionais TAMBEM entram na coleta",
-    (qPerm?.inValores as string[] ?? []).includes(INEXISTENTE));
-  ok("E3  a lista enviada e ordenada, nao depende da ordem das Skills",
-    JSON.stringify(qPerm?.inValores) ===
+    idsNoMotor.includes(INEXISTENTE));
+  ok("E3  a lista e ordenada, nao depende da ordem das Skills",
+    JSON.stringify(idsNoMotor) ===
       JSON.stringify([FUNCAO_REAL, INEXISTENTE].sort((a, b) => a.localeCompare(b))));
   ok("E4  Funcao inexistente vira FALTA_FUNCAO (limitacao, pois e opcional)",
     rDedupe.diagnosticos[0]?.diagnostico.limitacoes.some(
@@ -536,12 +616,24 @@ async function principal(): Promise<void> {
   // antes de congelar o alvo na criacao, e de novo antes de consumir.
   // Compor selecao e estado por conta propria no lugar do agregador
   // seria reconstruir o agregador, que e o que esta guarda impede.
+  // M2-I1-A4: o QUARTO consumidor legitimo, e o primeiro que nao executa
+  // nada. A rota de Conexoes le o agregador para MOSTRAR ao dono o
+  // snapshot de configuracao — requisitos reais, selecao atual e se ela
+  // e utilizavel. Compor isso por conta propria seria reconstruir o
+  // agregador, que e o que esta guarda impede; e reconstruir mal, porque
+  // a selecao incompativel so aparece em `requisitos`.
+  //
+  // A exigencia nao afrouxa. Antes: conjunto == tres. Agora: conjunto ==
+  // quatro. Continua igualdade de conjunto nos DOIS sentidos, por
+  // caminho NOMINAL — nem prefixo, nem pasta, nem contagem.
   const EXECUTOR_FUNCOES = "lib/agentes/execucao-funcoes/executar.ts";
   const PERSISTENCIA_APROVACOES = "lib/agentes/aprovacoes/persistencia.ts";
+  const ROTA_CONEXOES = "app/api/agentes/[agenteId]/conexoes/route.ts";
   const CONSUMIDORES_CONEXOES: readonly string[] = [
     CONSUMIDOR_AUTORIZADO,
     EXECUTOR_FUNCOES,
     PERSISTENCIA_APROVACOES,
+    ROTA_CONEXOES,
   ];
 
   const mesmoConjunto = (a: readonly string[], b: readonly string[]): boolean =>
@@ -567,20 +659,31 @@ async function principal(): Promise<void> {
   const consCon = consumidoresDe("resolverConexoesDoAgente", "lib/agentes/conexoes/agregador.ts");
   ok(`I1  o agregador de conexoes tem exatamente os consumidores declarados (${consCon.join(", ") || "nenhum"})`,
     mesmoConjunto(consCon, CONSUMIDORES_CONEXOES));
-  ok("I1a CONTROLE: o conjunto exato dos tres autorizados passa",
-    mesmoConjunto([CONSUMIDOR_AUTORIZADO, EXECUTOR_FUNCOES, PERSISTENCIA_APROVACOES],
+  ok("I1a CONTROLE: o conjunto exato dos quatro autorizados passa",
+    mesmoConjunto(
+      [CONSUMIDOR_AUTORIZADO, EXECUTOR_FUNCOES, PERSISTENCIA_APROVACOES, ROTA_CONEXOES],
       CONSUMIDORES_CONEXOES));
   ok("I1b CONTROLE: o compositor sumir reprova",
     !mesmoConjunto([EXECUTOR_FUNCOES, PERSISTENCIA_APROVACOES], CONSUMIDORES_CONEXOES));
   ok("I1c CONTROLE: o executor sumir reprova",
     !mesmoConjunto([CONSUMIDOR_AUTORIZADO, PERSISTENCIA_APROVACOES], CONSUMIDORES_CONEXOES));
   ok("I1d CONTROLE: a persistencia sumir reprova",
-    !mesmoConjunto([CONSUMIDOR_AUTORIZADO, EXECUTOR_FUNCOES], CONSUMIDORES_CONEXOES));
-  ok("I1e CONTROLE: um quarto consumidor reprova",
+    !mesmoConjunto([CONSUMIDOR_AUTORIZADO, EXECUTOR_FUNCOES, ROTA_CONEXOES],
+      CONSUMIDORES_CONEXOES));
+  ok("I1d2 CONTROLE: a ROTA sumir reprova",
+    !mesmoConjunto([CONSUMIDOR_AUTORIZADO, EXECUTOR_FUNCOES, PERSISTENCIA_APROVACOES],
+      CONSUMIDORES_CONEXOES));
+  ok("I1e CONTROLE: um QUINTO consumidor reprova",
     !mesmoConjunto([...CONSUMIDORES_CONEXOES, "app/api/x/route.ts"], CONSUMIDORES_CONEXOES));
   ok("I1f CONTROLE: um caminho parecido nao passa por semelhanca",
     !mesmoConjunto(
-      [CONSUMIDOR_AUTORIZADO, EXECUTOR_FUNCOES, "lib/agentes/aprovacoes/identidade.ts"],
+      [CONSUMIDOR_AUTORIZADO, EXECUTOR_FUNCOES, "lib/agentes/aprovacoes/identidade.ts",
+        ROTA_CONEXOES],
+      CONSUMIDORES_CONEXOES));
+  ok("I1g CONTROLE: uma rota VIZINHA nao vale pela rota de Conexoes",
+    !mesmoConjunto(
+      [CONSUMIDOR_AUTORIZADO, EXECUTOR_FUNCOES, PERSISTENCIA_APROVACOES,
+        "app/api/agentes/[agenteId]/permissoes/route.ts"],
       CONSUMIDORES_CONEXOES));
 
   const consDiag = consumidoresDe("diagnosticarSkill", "lib/ia/skills/diagnostico.ts");
@@ -635,6 +738,129 @@ async function principal(): Promise<void> {
   ok("J3  a unica exposicao HTTP do diagnostico e a rota autorizada",
     JSON.stringify(exposicoes.sort()) === JSON.stringify([ROTA_AUTORIZADA]),
     exposicoes.join(", ") || "nenhuma");
+
+  // ─── K. A1-FIX1: fonte única de permissão, recorte preservado ───────
+  //
+  // O compositor deixou de ler `agente_permissoes` e passou a consumir o
+  // snapshot que o agregador publica. O ganho é uma leitura a menos; o
+  // risco é o oposto dele — conhecer o catálogo inteiro virar licença
+  // para despejá-lo no motor. Esta seção fecha esse risco medindo o que
+  // CHEGA ao motor, não o que foi lido do banco.
+
+  secao("K. A1-FIX1: snapshot único, e o recorte que continua valendo");
+
+  ok("K0  ANCORA: o motor está espionado", espiouMotor);
+
+  // ── L. Função registrada que nenhuma Skill declara ────────────────
+  //
+  // Ela EXISTE no catálogo e o dono a habilitou — o snapshot do agregador
+  // a traz. O motor, mesmo assim, não pode vê-la: o diagnóstico é DA
+  // SKILL, e uma Função que nenhuma Skill pede não tem por que aparecer
+  // no veredito dela.
+  roteiro(
+    { data: [assoc("s1")] },
+    { data: [linhaSkill("s1", manifesto("skill-sem-funcao", "1.0.0"))] },
+    { data: [assoc("s1")] },
+    { data: [linhaSkill("s1", manifesto("skill-sem-funcao", "1.0.0"))] },
+    { data: [linhaPermissao(FUNCAO_REAL, "automatico")] }
+  );
+  const rL = await diagnosticarAgente(AG);
+  const entregaL = ultimaEntrega();
+  ok("L1  ANCORA: o snapshot do agregador TINHA a Função habilitada",
+    (chamadas.find((c) => c.tabela === "agente_permissoes")?.inValores ?? [])
+      .includes(FUNCAO_REAL) && rL.coleta === "ok");
+  ok("L2  Função registrada que nenhuma Skill declara NÃO chega ao motor",
+    (entregaL?.permissoes ?? []).length === 0 &&
+      (entregaL?.funcoes ?? []).length === 0,
+    JSON.stringify(entregaL));
+  ok("L3  COMPOSITOR_VISIBLE_PERMISSION_SET = SUBSET, e não ALL",
+    !(entregaL?.permissoes ?? []).some((p) => p.funcaoId === FUNCAO_REAL));
+
+  // O mesmo com a Skill declarando a Função: aí ela DEVE chegar — senão
+  // L2 passaria por o motor nunca receber nada.
+  const manDeclara = manifesto("skill-declara", "1.0.0", { funcoes: [FUNCAO_REAL] });
+  roteiro(
+    { data: [assoc("s1")] }, { data: [linhaSkill("s1", manDeclara)] },
+    { data: [assoc("s1")] }, { data: [linhaSkill("s1", manDeclara)] },
+    { data: [linhaPermissao(FUNCAO_REAL, "automatico")] }
+  );
+  await diagnosticarAgente(AG);
+  const entregaDeclara = ultimaEntrega();
+  ok("L4  ANTI-VACUIDADE: declarada pela Skill, ela CHEGA ao motor",
+    (entregaDeclara?.permissoes ?? []).some((p) => p.funcaoId === FUNCAO_REAL),
+    JSON.stringify(entregaDeclara?.permissoes));
+
+  // Uma linha de permissão para um id que a Skill não pediu é filtrada
+  // mesmo vindo no mesmo snapshot da que ela pediu.
+  roteiro(
+    { data: [assoc("s1")] }, { data: [linhaSkill("s1", manDeclara)] },
+    { data: [assoc("s1")] }, { data: [linhaSkill("s1", manDeclara)] },
+    {
+      data: [
+        linhaPermissao(FUNCAO_REAL, "automatico"),
+        linhaPermissao("intrusa.funcao", "automatico"),
+      ],
+    }
+  );
+  await diagnosticarAgente(AG);
+  const entregaMista = ultimaEntrega();
+  ok("L5  do snapshot misto, só o id declarado atravessa",
+    JSON.stringify((entregaMista?.permissoes ?? []).map((p) => p.funcaoId)) ===
+      JSON.stringify([FUNCAO_REAL]),
+    JSON.stringify((entregaMista?.permissoes ?? []).map((p) => p.funcaoId)));
+  ok("L6  e a intrusa não aparece nem entre as Funções entregues",
+    !(entregaMista?.funcoes ?? []).some((f) => f.id === "intrusa.funcao"));
+
+  // ── J. A completude da CONSULTA, sem inventar linha ───────────────
+  roteiro(
+    { data: [assoc("s1")] }, { data: [linhaSkill("s1", manDeclara)] },
+    { data: [assoc("s1")] }, { data: [linhaSkill("s1", manDeclara)] },
+    { data: [] }
+  );
+  const rJ = await diagnosticarAgente(AG);
+  const qJ = chamadas.find((c) => c.tabela === "agente_permissoes");
+  ok("J1  a consulta cobre EXATAMENTE o catálogo registrado",
+    JSON.stringify([...(qJ?.inValores ?? [])].sort()) ===
+      JSON.stringify([...CATALOGO_REGISTRADO].sort()),
+    JSON.stringify(qJ?.inValores));
+  ok("J2  nenhum id fora do registry entra na consulta",
+    (qJ?.inValores ?? []).every((id) => CATALOGO_REGISTRADO.includes(String(id))));
+  ok("J3  linha AUSENTE não vira fato sintético `bloqueado`",
+    (ultimaEntrega()?.permissoes ?? []).length === 0 && rJ.coleta === "ok",
+    JSON.stringify(ultimaEntrega()?.permissoes));
+  ok("J4  e a Skill que exige a Função sem linha NÃO fica pronta",
+    rJ.diagnosticos[0]?.diagnostico.pronto === false,
+    rJ.diagnosticos[0]?.diagnostico.estadoGeral);
+
+  // ── K. Falha de coleta não é snapshot vazio válido ────────────────
+  roteiro(
+    { data: [assoc("s1")] }, { data: [linhaSkill("s1", manDeclara)] },
+    { data: [assoc("s1")] }, { data: [linhaSkill("s1", manDeclara)] },
+    { error: { code: "42501" } }
+  );
+  const rK = await diagnosticarAgente(AG);
+  ok("K1  falha ao ler permissões -> falha_leitura, e NÃO `ok` com lista vazia",
+    rK.coleta === "falha_leitura" && rK.diagnosticos.length === 0,
+    `${rK.coleta} / ${rK.diagnosticos.length}`);
+  ok("K2  o motor nem chega a ser chamado", entregas.length === 0,
+    String(entregas.length));
+  ok("K3  e nada parcial escapa junto", rK.semSelecao.length === 0);
+  ok("K4  CONTROLE: o MESMO cenário com leitura ok produz diagnóstico",
+    rJ.coleta === "ok" && rJ.diagnosticos.length === 1);
+  ok("K5  a mensagem pública não carrega erro cru de driver",
+    !/sqlstate|42501|relation|column/i.test(JSON.stringify(rK)),
+    JSON.stringify(rK).slice(0, 120));
+
+  // ── A leitura duplicada, no código ────────────────────────────────
+  ok("K6  o compositor NÃO chama mais `resolverFatosPermissoes`",
+    !/resolverFatosPermissoes/.test(CODIGO_COMPOSITOR));
+  ok("K7  ele consome o snapshot publicado e FILTRA",
+    /conexoes\.permissoes\.filter\(/.test(CODIGO_COMPOSITOR) &&
+      /funcaoIdsDeTodasAsSkills\(/.test(CODIGO_COMPOSITOR));
+  ok("K8  e o catálogo inteiro nunca é passado direto ao motor",
+    !/permissoes: conexoes\.permissoes/.test(CODIGO_COMPOSITOR));
+  ok("K9  CONTROLE: a sonda de K8 acha o padrão proibido quando ele existe",
+    /permissoes: conexoes\.permissoes/.test("diagnosticarSkill({ permissoes: conexoes.permissoes })"));
 
   console.log(`\n══ ${passou} PASS / ${falhou} FAIL ══\n`);
   process.exitCode = falhou === 0 ? 0 : 1;

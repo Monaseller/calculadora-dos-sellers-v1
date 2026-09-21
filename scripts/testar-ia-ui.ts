@@ -160,6 +160,10 @@ const ARQUIVOS_UI_1DB: readonly string[] = [
  */
 const ARQUIVOS_UI_CONSUMER: readonly string[] = [
   "lib/ia/agentes-http.ts",
+  // M2-I1-A5: a aba Conexoes. Como o dialogo de criacao abaixo, ela NAO
+  // faz rede por conta propria — chama o transporte acima, que segue
+  // sendo o unico arquivo da area autorizado a isso.
+  "components/ia/agente/ConexoesAgente.tsx",
   // SKILL-1D.agent-create-ui-B: o dialogo de criacao. Nao faz rede por
   // conta propria — chama o transporte acima, que segue sendo o unico
   // arquivo da area autorizado a isso.
@@ -286,7 +290,7 @@ secao("A. Inventario e rotas");
   // linha no inventario, e era exatamente isso que A1 e A2 estavam
   // denunciando. O numero segue literal — derivar de `ARQUIVOS_UI.length`
   // faria o assert comparar a lista consigo mesma.
-  ok("A2  51 arquivos, nem um a mais", noDisco.length === 51, String(noDisco.length));
+  ok("A2  52 arquivos, nem um a mais", noDisco.length === 52, String(noDisco.length));
 
   // ── A1b..A1e — o inventario e NOMINAL, nao uma contagem ───────────
   //
@@ -308,7 +312,7 @@ secao("A. Inventario e rotas");
     renomeado.length === declarado.length &&
     JSON.stringify(renomeado) !== JSON.stringify(declarado));
   ok("A1e e a contagem sozinha NAO distinguiria a troca",
-    renomeado.length === 51);
+    renomeado.length === 52);
 
   // ── A1f/A1g — EDITAR-AGENTE-V1 ────────────────────────────────────
   //
@@ -321,7 +325,7 @@ secao("A. Inventario e rotas");
   ok("A1f ANCORA: EditarAgente esta no inventario declarado",
     declarado.includes("components/ia/agente/EditarAgente.tsx"));
   ok("A1g CONTROLE NEGATIVO: a tela de edicao AUSENTE reprova",
-    JSON.stringify(semEdicao) !== JSON.stringify(declarado) && semEdicao.length === 50);
+    JSON.stringify(semEdicao) !== JSON.stringify(declarado) && semEdicao.length === 51);
 
   // ── A1h/A1i — PERMISSOES-FUNCTION-V1-B ────────────────────────────
   //
@@ -333,7 +337,7 @@ secao("A. Inventario e rotas");
   ok("A1h ANCORA: FuncoesAgente esta no inventario declarado",
     declarado.includes("components/ia/agente/FuncoesAgente.tsx"));
   ok("A1i CONTROLE NEGATIVO: a tela de funcoes AUSENTE reprova",
-    JSON.stringify(semFuncoes) !== JSON.stringify(declarado) && semFuncoes.length === 50);
+    JSON.stringify(semFuncoes) !== JSON.stringify(declarado) && semFuncoes.length === 51);
 
   // ── A1j/A1k — a divida que fechou ─────────────────────────────────
   //
@@ -342,10 +346,22 @@ secao("A. Inventario e rotas");
   const semExecucao = declarado.filter(
     (a) => a !== "components/ia/agente/ExecutarConsultaVendas.tsx");
 
+  // ── A1l/A1m — M2-I1-A5 ───────────────────────────────────────────
+  //
+  // A aba Conexoes entra com os MESMOS dois lados das anteriores: ancora
+  // de presenca e controle negativo de ausencia. Sem o segundo, o
+  // inventario passaria a aceitar o arquivo sumir.
+  const semConexoes = declarado.filter(
+    (a) => a !== "components/ia/agente/ConexoesAgente.tsx");
+  ok("A1l ANCORA: ConexoesAgente esta no inventario declarado",
+    declarado.includes("components/ia/agente/ConexoesAgente.tsx"));
+  ok("A1m CONTROLE NEGATIVO: a tela de conexoes AUSENTE reprova",
+    JSON.stringify(semConexoes) !== JSON.stringify(declarado) && semConexoes.length === 51);
+
   ok("A1j ANCORA: ExecutarConsultaVendas esta no inventario declarado",
     declarado.includes("components/ia/agente/ExecutarConsultaVendas.tsx"));
   ok("A1k CONTROLE NEGATIVO: a tela de execucao AUSENTE reprova",
-    JSON.stringify(semExecucao) !== JSON.stringify(declarado) && semExecucao.length === 50);
+    JSON.stringify(semExecucao) !== JSON.stringify(declarado) && semExecucao.length === 51);
 }
 
 const ROTAS = [

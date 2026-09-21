@@ -59,6 +59,7 @@ import ListaTarefas from "@/components/ia/agente/ListaTarefas";
 import ChatAgente from "@/components/ia/agente/ChatAgente";
 import EditarAgente from "@/components/ia/agente/EditarAgente";
 import FuncoesAgente from "@/components/ia/agente/FuncoesAgente";
+import ConexoesAgente from "@/components/ia/agente/ConexoesAgente";
 
 /** Sem leitura real de tarefas, ninguem tem tarefa. */
 const NENHUMA_TAREFA: readonly TarefaUI[] = [];
@@ -228,16 +229,20 @@ export default function PaginaAgente({ agenteId, aba }: { agenteId: string; aba:
             registry e grava o nivel de cada uma — configura, nunca
             executa. Como o Chat, nao depende de `agoraMs`. */}
         {aba === "funcoes" && <FuncoesAgente agenteId={agente.id} />}
+        {/* M2-I1-A5: a aba Conexoes deixou de ser placeholder. Ela escolhe
+            QUAL conta ja conectada o agente usa para cada requisito real —
+            configura o vinculo, nunca conecta conta e nunca executa. Como
+            Chat e Funcoes, nao depende de `agoraMs`. */}
+        {aba === "conexoes" && <ConexoesAgente agenteId={agente.id} />}
 
         {(aba === "visao-geral" || aba === "tarefas") && agoraMs === null && (
           <p className="cds-ia-carregando">Carregando…</p>
         )}
 
-        {/* Conexoes, Funcoes e Permissoes NAO tem caminho proprio aqui.
-            Elas voltaram a `implementada: false` na
-            SKILL-1D.ui-real-state-Bg2 e caem no bloco abaixo, junto com
-            Chat, Memoria e Custos — uma unica superficie de "Em breve"
-            para as seis, montada num lugar so. */}
+        {/* Permissoes, Memoria e Custos continuam sem caminho proprio
+            aqui: caem no bloco abaixo, numa unica superficie de "Em breve"
+            montada num lugar so. Conexoes saiu dessa lista na M2-I1-A5 e
+            Funcoes na PERMISSOES-FUNCTION-V1-B. */}
         {abaPendente(aba) && (
           <EmBreve
             titulo={rotuloDaAba(aba)}
@@ -331,7 +336,6 @@ function abaPendente(aba: AbaId): aba is AbaPendente {
 /** O que cada superficie VAI ser. Fica ao lado da pendencia, para a tela
  *  dizer as duas coisas: o destino e o que falta para chegar la. */
 const DESCRICAO_ABA: Record<AbaPendente, string> = {
-  conexoes: "As contas e os serviços que este agente poderá usar — e o que cada um permite que ele faça.",
   permissoes: "Os limites de cada ação deste agente: o que ele pode fazer sozinho e o que precisa de autorização.",
   memoria: "Instruções fixas, preferências e o que o agente aprendeu ao longo do tempo.",
   custos: "Consumo de IA deste agente por período, modelo e provedor.",

@@ -142,7 +142,11 @@ const FRASE_DE_VAZIO =
  * de produto: escolher a Funcao e escolher o nivel sao a MESMA decisao,
  * entao ela nao ganha uma segunda tela editando o mesmo dado.
  */
-const PENDENTES_BG2 = ["conexoes", "permissoes"] as const;
+// M2-I1-A5: `conexoes` saiu daqui porque virou tela real — mesmo criterio
+// de `chat` na I3 e de `funcoes` na V1-B: ha backend publicado (a rota A4),
+// a aba consome dado real e nao ha placeholder. `permissoes` fica: a aba
+// dela continua sendo `EmBreve`.
+const PENDENTES_BG2 = ["permissoes"] as const;
 
 const PAGINA_AGENTE = ler("components/ia/agente/PaginaAgente.tsx");
 const ABAS_TS = ler("lib/ia/abas.ts");
@@ -234,8 +238,12 @@ secao("D. As 8 abas: 5 implementadas, 3 pendentes");
   //
   // `implementada` voltou a significar uma coisa so: a funcionalidade
   // existe. Os asserts inverteram junto, e continuam nominais.
-  ok("D3  conexoes, funcoes e permissoes voltaram a pendentes",
+  ok("D3  as pendentes desta frente continuam pendentes",
     PENDENTES_BG2.every((id) => ABAS.find((a) => a.id === id)?.implementada === false));
+  ok("D3a `conexoes` saiu das pendentes porque virou tela real",
+    ABAS.find((a) => a.id === "conexoes")?.implementada === true &&
+    /aba === "conexoes"/.test(codigo(PAGINA_AGENTE)) &&
+    /ConexoesAgente/.test(codigo(PAGINA_AGENTE)));
   // ── D4 reconciliado na AGENT-VERTICAL-SLICE-V1-I3 ────────────────
   //
   // `chat` saiu da lista porque a aba passou a existir de verdade: cria
@@ -248,9 +256,9 @@ secao("D. As 8 abas: 5 implementadas, 3 pendentes");
   // movimento que `chat` fez na I3, e pelo mesmo criterio: existe
   // backend publicado, a aba consome dado real e nao ha placeholder. A
   // lista continua NOMINAL nos dois sentidos.
-  ok("D4  as quatro pendentes sao exatamente estas",
+  ok("D4  as tres pendentes sao exatamente estas",
     ABAS.filter((a) => !a.implementada).map((a) => a.id).join(",") ===
-    "conexoes,permissoes,memoria,custos");
+    "permissoes,memoria,custos");
   ok("D4b `funcoes` saiu das pendentes porque virou tela real",
     ABAS.find((a) => a.id === "funcoes")?.implementada === true &&
     /aba === "funcoes"/.test(codigo(PAGINA_AGENTE)) &&
@@ -276,7 +284,7 @@ secao("D. As 8 abas: 5 implementadas, 3 pendentes");
     /aba === "tarefas"/.test(pag) && /aba === "visao-geral"/.test(pag));
   ok("D7  EmBreve continua para as pendentes, e so uma vez",
     /EmBreve/.test(pag) && (pag.match(/<EmBreve/g) ?? []).length === 1);
-  ok("D8  as tres declaram pendencia e descricao para o dono",
+  ok("D8  as pendentes declaram pendencia e descricao para o dono",
     PENDENTES_BG2.every((id) =>
       new RegExp(`\\b${id}:`).test(ABAS_TS) && new RegExp(`\\b${id}:`).test(PAGINA_AGENTE)));
   // ── O texto e lido pelo DONO ────────────────────────────────────
@@ -392,8 +400,36 @@ secao("E. Conexoes");
   // (C8/C10 da suite 1c existem para que nao aceite), e a tela global
   // de conexoes tambem e um `EmBreve`: o link levaria de um "em breve" a
   // outro. A pendencia diz em TEXTO onde a configuracao vai morar.
-  ok("E15 a pendencia de conexoes diz onde a configuracao vai morar",
-    /conta CDS/.test(ABAS_TS));
+  // E15 reconciliado na M2-I1-A5: a pendencia de `conexoes` sumiu porque
+  // a aba existe. O que este assert protegia — o dono saber ONDE a
+  // configuracao mora — deixou de ser texto e virou tela: e la que ele
+  // escolhe a conta. Provar a ausencia do texto ANTIGO seria fraco; o
+  // assert passa a cobrar a presenca da tela.
+  ok("E15 a configuracao de conexoes mora na ABA, nao mais num texto",
+    !/conexoes:/.test(ABAS_TS) &&
+      /aba === "conexoes"/.test(codigo(PAGINA_AGENTE)));
+  // E15a reconciliado na M2-I1-A5-FIX2: este assert nasceu VACUOSO.
+  // `new RegExp("\bconexoes:")` usa a escapada de STRING `\b`,
+  // que e U+0008/backspace — nao a borda de palavra do regex. O padrao
+  // compilado era `<backspace>conexoes:`, que nunca casa: o `!test(...)`
+  // era `true` por construcao. A propriedade testada NAO muda — continua
+  // sendo `nenhuma pendencia sobrou anunciando o que ja existe`. Muda so
+  // o oraculo, que agora e um LITERAL de regex, onde `\b` e de fato
+  // borda de palavra.
+  const SONDA_PENDENCIA_CONEXOES = /\bconexoes:/;
+  ok("E15a e nenhuma pendencia sobrou anunciando o que ja existe",
+    !SONDA_PENDENCIA_CONEXOES.test(ABAS_TS));
+  // Controles de NAO-VACUIDADE. Sem eles o assert acima volta a passar por
+  // construcao no dia em que alguem reintroduzir a escapada errada — foi
+  // exatamente assim que ele ficou verde sem nunca ter olhado a fonte.
+  ok("FIX2-C1 controle positivo: a sonda ACHA a chave numa fonte que a tem",
+    SONDA_PENDENCIA_CONEXOES.test(
+      'const PENDENCIA_ABA = {\n  conexoes: "em breve",\n};'));
+  ok("FIX2-C2 controle negativo: e NAO acha numa fonte que nao a tem",
+    !SONDA_PENDENCIA_CONEXOES.test(
+      'const PENDENCIA_ABA = {\n  permissoes: "em breve",\n};'));
+  ok("FIX2-C3 o backspace morreu: a sonda casa `conexoes: ...` cru",
+    SONDA_PENDENCIA_CONEXOES.test("conexoes: ...") === true);
   ok("E16 NAO ha acao de conectar/reconectar/desconectar na area do agente",
     !/(Reconectar|Desconectar|Adicionar conexão|OAuth|autorizar)/i.test(codigo(PAGINA_AGENTE)));
   ok("E17 controle negativo: a sonda acharia um botao de reconectar",

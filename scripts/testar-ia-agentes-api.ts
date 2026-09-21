@@ -1724,9 +1724,25 @@ async function principal(): Promise<void> {
     const CODIGO_ESCRITA = semComentarios(ler("lib/agentes/permissoes/escrita.ts"));
 
     const FUNCOES_REAIS = [...listarFuncoesRegistradas()].sort();
-    /** A primeira Funcao REAL do registry. Nunca um id escrito a mao: se
-     *  o catalogo mudar, a suite acompanha sem ninguem editar aqui. */
-    const FUNCAO = FUNCOES_REAIS[0];
+
+    // ── Por que NAO ha mais `FUNCOES_REAIS[0]` ─────────────────────
+    //
+    // O docblock antigo dizia "a suite acompanha sem ninguem editar
+    // aqui", e isso era meia verdade: a suite acompanhava a EXISTENCIA,
+    // nunca a SEMANTICA. Enquanto o catalogo teve uma Funcao so, `[0]`
+    // e "a Funcao sem requisito de conexao" eram a mesma coisa por
+    // coincidencia. A M2-I1-A2 registrou `mercadolivre.perguntas.listar`,
+    // que ordena ANTES de `vendas.consultar` e EXIGE conexao — e o R15,
+    // que afirmava `conexaoNecessaria === null` sobre `[0]`, passou a
+    // afirmar algo falso sem que nada de errado tivesse acontecido.
+    //
+    // Posicao nao e identidade. Os cenarios abaixo escolhem por ID a
+    // Funcao com a propriedade de que precisam, e as ancoras provam que
+    // as duas continuam no catalogo.
+    const FUNCAO_SEM_CONEXAO = "vendas.consultar";
+    const FUNCAO_COM_CONEXAO = "mercadolivre.perguntas.listar";
+    /** Os cenarios de PATCH so precisam de um id REAL e estavel. */
+    const FUNCAO = FUNCAO_SEM_CONEXAO;
 
     const reqPerm = (agenteId: string, cookie: string | undefined, corpo?: string) =>
       new Request(`http://localhost/api/agentes/${agenteId}/permissoes`, {
@@ -1827,7 +1843,9 @@ async function principal(): Promise<void> {
       ok("R10b CONTROLE NEGATIVO: uma Funcao a MAIS reprovaria",
         JSON.stringify([...FUNCOES_REAIS, "zzz.nova"].sort()) !== JSON.stringify(FUNCOES_REAIS));
       ok("R10c ANCORA: o registry tem Funcao de verdade",
-        FUNCOES_REAIS.length >= 1 && typeof FUNCAO === "string" && FUNCAO.includes("."));
+        FUNCOES_REAIS.length >= 1 && typeof FUNCAO === "string" && FUNCAO.includes(".") &&
+          FUNCOES_REAIS.includes(FUNCAO_SEM_CONEXAO) &&
+          FUNCOES_REAIS.includes(FUNCAO_COM_CONEXAO));
 
       const entrada = b.permissoes.find((p: { id: string }) => p.id === FUNCAO);
       // O ponto central: sem linha gravada, `nivel` e `null`. NUNCA
@@ -1846,9 +1864,35 @@ async function principal(): Promise<void> {
           !("interpretarSaida" in entrada) && !("revisao" in entrada));
       ok("R14 nenhum campo interno da permissao vaza",
         !("user_id" in entrada) && !("criado_em" in entrada) && !("alterado_em" in entrada));
-      ok("R15 os metadados vem do registry real",
-        entrada.acesso === "leitura" && entrada.idempotente === true &&
-          entrada.conexaoNecessaria === null);
+      // R15 por ID, nunca por posicao: a Funcao conferida aqui e
+      // `vendas.consultar` porque ela e a que NAO exige conexao, e nao
+      // porque ela calha de ordenar em algum lugar.
+      const metaSem = b.permissoes.find(
+        (p: { id: string }) => p.id === FUNCAO_SEM_CONEXAO
+      );
+      const metaCom = b.permissoes.find(
+        (p: { id: string }) => p.id === FUNCAO_COM_CONEXAO
+      );
+      ok("R15 ANCORA: as DUAS Funcoes do catalogo vieram na resposta",
+        metaSem !== undefined && metaCom !== undefined,
+        b.permissoes.map((p: { id: string }) => p.id).join(", "));
+      ok("R15a `vendas.consultar`: leitura, idempotente, SEM conexao",
+        metaSem.acesso === "leitura" && metaSem.idempotente === true &&
+          metaSem.conexaoNecessaria === null,
+        JSON.stringify(metaSem));
+      ok("R15b `mercadolivre.perguntas.listar`: leitura, idempotente, COM conexao",
+        metaCom.acesso === "leitura" && metaCom.idempotente === true &&
+          metaCom.conexaoNecessaria !== null,
+        JSON.stringify(metaCom));
+      ok("R15c e o requisito dela e o par exato publicado",
+        JSON.stringify(metaCom.conexaoNecessaria) ===
+          JSON.stringify({ plataforma: "mercado_livre", recurso: "perguntas" }),
+        JSON.stringify(metaCom.conexaoNecessaria));
+      ok("R15d CONTROLE: os metadados NAO sao iguais entre as duas",
+        JSON.stringify(metaSem.conexaoNecessaria) !==
+          JSON.stringify(metaCom.conexaoNecessaria));
+      ok("R15e CONTROLE: escolher por POSICAO daria outra Funcao",
+        FUNCOES_REAIS[0] !== FUNCAO_SEM_CONEXAO, FUNCOES_REAIS[0]);
       ok("R16 a leitura foi em `agente_permissoes`, e ZERO escrita",
         operacoes.some((o) => o.tabela === "agente_permissoes" && o.tipo === "leitura") &&
           escritas() === 0);

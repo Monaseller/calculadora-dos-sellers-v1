@@ -142,10 +142,16 @@ secao("B. O que a UI NAO manda");
   // "o unico cabecalho enviado e o do corpo JSON": as duas contagens
   // sao comparadas ENTRE SI, entao um `headers:` que nao seja aquele
   // cabecalho reprova, e o veto a credencial no cabecalho nao mudou.
-  ok("B3c os UNICOS cabecalhos sao os seis Content-Type do corpo JSON",
-    (CODIGO_TRANSPORTE.match(/headers\s*:/g) ?? []).length === 6 &&
+  // ── B3c reconciliado na M2-I1-A5 ────────────────────────────────
+  //
+  // SETE corpos JSON, sete `Content-Type`: `definirConexaoDoAgente`
+  // entrou. A invariavel nao mudou e continua sendo a comparacao ENTRE
+  // as duas contagens — um `headers:` que nao seja aquele cabecalho
+  // reprova, e o veto a credencial no cabecalho segue intacto.
+  ok("B3c os UNICOS cabecalhos sao os sete Content-Type do corpo JSON",
+    (CODIGO_TRANSPORTE.match(/headers\s*:/g) ?? []).length === 7 &&
       (CODIGO_TRANSPORTE.match(/headers: \{ "Content-Type": "application\/json" \}/g) ?? [])
-        .length === 6 &&
+        .length === 7 &&
       !/"X-|Cookie|Api-Key|Idempotency-Key/i.test(CODIGO_TRANSPORTE));
   ok("B4  `credentials` omitido — o cookie same-origin ja viaja sozinho",
     !/credentials/.test(CODIGO_TRANSPORTE));
@@ -186,6 +192,10 @@ secao("B. O que a UI NAO manda");
     // deixaria o leitor novo invisivel, livre para ganhar `method` ou
     // `body` sem ninguem notar.
     "listarAprovacoesPendentes",
+    // M2-I1-A5: a OITAVA. Os requisitos de conexao do agente, com a
+    // escolha atual de cada um. Leitura pura — nao grava binding, nao
+    // consulta cobertura remota e nao toca marketplace.
+    "buscarConexoesDoAgente",
     // M1-I1-V2: a SETIMA. Mesma rota de `listarAgentes`, PROJECAO
     // diferente — esta devolve `sinais` e `atividade`, que a outra
     // descarta. Duas leituras publicadas sobre uma chamada so.
@@ -215,8 +225,38 @@ secao("B. O que a UI NAO manda");
     JSON.stringify(
       ["listarAgentes", "obterDiagnostico", "consultarConversaDoAgente", "outraLeitura"].sort()
     ) !== leiturasEsperadas);
+  // ── Controles NOMINAIS da leitura nova — M2-I1-A5-FIX1 ──────────
+  //
+  // B5a1/B5a2/B5a3 provam que o predicado reprova generico: um leitor a
+  // menos, um a mais, ou uma troca. Estes dois cobram o mesmo sobre a
+  // funcao ESPECIFICA que este gate acrescentou — sem eles, ela poderia
+  // sair da lista amanha e o conjunto continuaria "coerente consigo".
+  ok("FIX1-C1 CONTROLE: `buscarConexoesDoAgente` fora do esperado reprovaria",
+    JSON.stringify(
+      LEITURAS_AUTORIZADAS.filter((f) => f !== "buscarConexoesDoAgente").sort()
+    ) !== leiturasEsperadas);
+  ok("FIX1-C4a CONTROLE: um leitor sintetico nao publicado reprovaria",
+    JSON.stringify([...LEITURAS_AUTORIZADAS, "buscarQualquerOutraCoisa"].sort())
+      !== leiturasEsperadas);
   ok("B5a4 ANCORA: a varredura enxergou leitores de verdade",
-    leiturasReais.length === 7 && corpoDaFuncao("listarPermissoesDoAgente").length > 50);
+    leiturasReais.length === 8 && corpoDaFuncao("listarPermissoesDoAgente").length > 50);
+  // A leitura nova prova o MESMO que as outras sete: GET puro. `B5`
+  // acima ja cobre todas, mas o assert nominal existe para que a
+  // classificacao dela nao dependa de ninguem lembrar de olhar a lista.
+  ok("B5a6 a leitura de conexoes e GET puro — sem method, sem corpo",
+    corpoDaFuncao("buscarConexoesDoAgente").length > 50 &&
+      !/method\s*:|body\s*:/.test(corpoDaFuncao("buscarConexoesDoAgente")));
+  ok("B5a6a e ela aponta para `/conexoes`, pelo helper compartilhado",
+    /const caminhoDasConexoes = \(agenteId: string\) =>/.test(CODIGO_TRANSPORTE) &&
+      /\/conexoes`;/.test(CODIGO_TRANSPORTE) &&
+      /caminhoDasConexoes\(agenteId\)/.test(corpoDaFuncao("buscarConexoesDoAgente")) &&
+      /caminhoDasConexoes\(agenteId\)/.test(corpoDaFuncao("definirConexaoDoAgente")));
+  ok("B5a6b CONTROLE: a sonda de endereco acusa um caminho trocado",
+    !/caminhoDasConexoes\(agenteId\)/.test('await fetch(caminhoDasPermissoes(agenteId))') &&
+      /caminhoDasConexoes\(agenteId\)/.test('await fetch(caminhoDasConexoes(agenteId))'));
+  ok("B5a7 e ela repassa o sinal de cancelamento",
+    /signal\?: AbortSignal/.test(corpoDaFuncao("buscarConexoesDoAgente")) &&
+      /\{ signal \}/.test(corpoDaFuncao("buscarConexoesDoAgente")));
   // A leitura de permissoes e leitura: nao define nada, nao cria linha e
   // nao executa Funcao.
   ok("B5a5 a leitura de permissoes repassa o sinal e nao escreve",
@@ -259,6 +299,10 @@ secao("B. O que a UI NAO manda");
     // APPROVAL-DECISION-A3: a decisao humana. POST porque REGISTRA uma
     // decisao — e so isso: quem retoma a tarefa e o worker, depois.
     registrarDecisaoAprovacao: "POST",
+    // M2-I1-A5: escolhe ou remove a conta de UM requisito. PATCH porque
+    // ALTERA uma escolha existente — nao cria recurso e nao apaga: o
+    // "remover" e `lojaId: null`, que continua sendo uma alteracao.
+    definirConexaoDoAgente: "PATCH",
   };
   const ESCRITAS_AUTORIZADAS = Object.keys(VERBOS_AUTORIZADOS);
   const verboDaFuncao = (nome: string): string | null =>
@@ -276,7 +320,7 @@ secao("B. O que a UI NAO manda");
     JSON.stringify(Object.keys(mapa).sort().map((n) => `${n}=${mapa[n]}`));
   const paresReais = JSON.stringify(escritasReais.map((n) => `${n}=${verboDaFuncao(n)}`));
 
-  ok("B5b as escritas publicadas sao EXATAMENTE as seis nominais",
+  ok("B5b as escritas publicadas sao EXATAMENTE as sete nominais",
     JSON.stringify(escritasReais) === esperadas, escritasReais.join(", ") || "nenhuma");
   ok("B5b0 cada escrita usa EXATAMENTE o verbo autorizado para ela",
     paresReais === pares(VERBOS_AUTORIZADOS),
@@ -286,9 +330,9 @@ secao("B. O que a UI NAO manda");
       (f) =>
         verboDaFuncao(f) === VERBOS_AUTORIZADOS[f] &&
         /body: JSON\.stringify/.test(corpoDaFuncao(f))));
-  ok("B5b2 o transporte tem exatamente seis method e seis body",
-    (CODIGO_TRANSPORTE.match(/method\s*:/g) ?? []).length === 6 &&
-      (CODIGO_TRANSPORTE.match(/body\s*:/g) ?? []).length === 6);
+  ok("B5b2 o transporte tem exatamente sete method e sete body",
+    (CODIGO_TRANSPORTE.match(/method\s*:/g) ?? []).length === 7 &&
+      (CODIGO_TRANSPORTE.match(/body\s*:/g) ?? []).length === 7);
   ok("B5b3 a escrita de conversa vai para a rota de conversa, com corpo so de mensagem",
     /ROTA_SUFIXO_CONVERSA/.test(CODIGO_TRANSPORTE) &&
       /body: JSON\.stringify\(\{ mensagem \}\)/.test(corpoDaFuncao("enviarMensagemAoAgente")));
@@ -328,8 +372,33 @@ secao("B. O que a UI NAO manda");
       enviarMensagemAoAgente: "POST",
       atualizarAgenteViaApi: "POST",
     }) !== pares(VERBOS_AUTORIZADOS));
+  // ── Controles NOMINAIS da escrita nova — M2-I1-A5-FIX1 ──────────
+  ok("FIX1-C2 CONTROLE: `definirConexaoDoAgente` fora do esperado reprovaria",
+    JSON.stringify(
+      ESCRITAS_AUTORIZADAS.filter((f) => f !== "definirConexaoDoAgente").sort()
+    ) !== esperadas);
+  ok("FIX1-C3 CONTROLE: reclassificar a conexao como POST reprovaria",
+    pares({ ...VERBOS_AUTORIZADOS, definirConexaoDoAgente: "POST" }) !==
+      pares(VERBOS_AUTORIZADOS));
+  ok("FIX1-C3a CONTROLE: e como PUT tambem reprovaria",
+    pares({ ...VERBOS_AUTORIZADOS, definirConexaoDoAgente: "PUT" }) !==
+      pares(VERBOS_AUTORIZADOS));
+  ok("FIX1-C4 CONTROLE: uma escrita sintetica nao publicada reprovaria",
+    JSON.stringify([...ESCRITAS_AUTORIZADAS, "definirQualquerOutraCoisa"].sort())
+      !== esperadas);
   ok("B5b8 ANCORA: a varredura enxergou funcoes de verdade",
-    escritasReais.length === 6 && corpoDaFuncao("criarAgenteViaApi").length > 50);
+    escritasReais.length === 7 && corpoDaFuncao("criarAgenteViaApi").length > 50);
+  // O corpo da escrita nova, campo a campo. `B5b1` acima ja exige
+  // `JSON.stringify` em todas; aqui se cobra o CONTEUDO: tres chaves, e
+  // nenhuma delas e marketplace, dono ou credencial.
+  ok("B5b13 o corpo da conexao e fechado em tres chaves nominais",
+    /body: JSON\.stringify\(\{\s*plataforma: definicao\.plataforma,\s*recurso: definicao\.recurso,\s*lojaId: definicao\.lojaId,\s*\}\)/s
+      .test(corpoDaFuncao("definirConexaoDoAgente")));
+  ok("B5b13a e ele NAO e montado por spread do argumento",
+    !/body: JSON\.stringify\(\{\s*\.\.\./.test(corpoDaFuncao("definirConexaoDoAgente")));
+  ok("B5b13b nem carrega marketplace, dono, agente ou credencial",
+    !/marketplace|userId|user_id|agenteId|agente_id|sellerId|token/
+      .test(corpoDaFuncao("definirConexaoDoAgente").split("body:")[1]?.slice(0, 200) ?? ""));
   // ── A escrita de permissao, nominalmente ─────────────────────────
   // O caminho e montado por um helper compartilhado com a LEITURA —
   // como `caminhoDaConversa` ja faz —, entao a sonda mede o helper no
@@ -388,15 +457,23 @@ secao("B. O que a UI NAO manda");
   // SUBSTITUIR e APAGAR continuam fora: PUT reabriria por omissao os
   // campos que cada corpo fecha, e nao ha o que apagar (negar e
   // `bloqueado`, que GRAVA linha).
-  ok("B7b quatro POST, duas alteracoes por PATCH — e nada alem",
+  // ── B7b reconciliado na M2-I1-A5 ────────────────────────────────
+  //
+  // O terceiro PATCH entra. ALTERAR agora cobre tres coisas — os campos
+  // do agente, o nivel de autonomia de uma Funcao e a conta escolhida
+  // para um requisito. SUBSTITUIR e APAGAR continuam fora pelo mesmo
+  // motivo: PUT reabriria por omissao os campos que cada corpo fecha, e
+  // remover uma escolha e `lojaId: null`, que ALTERA a linha.
+  ok("B7b quatro POST, tres alteracoes por PATCH — e nada alem",
     (CODIGO_TRANSPORTE.match(/method:\s*"POST"/g) ?? []).length === 4 &&
       /export async function registrarDecisaoAprovacao\(/.test(CODIGO_TRANSPORTE) &&
-      (CODIGO_TRANSPORTE.match(/method:\s*"PATCH"/g) ?? []).length === 2 &&
+      (CODIGO_TRANSPORTE.match(/method:\s*"PATCH"/g) ?? []).length === 3 &&
       /export async function criarAgenteViaApi\(/.test(CODIGO_TRANSPORTE) &&
       /export async function enviarMensagemAoAgente\(/.test(CODIGO_TRANSPORTE) &&
       /export async function criarConsultaVendasDoAgente\(/.test(CODIGO_TRANSPORTE) &&
       /export async function atualizarAgenteViaApi\(/.test(CODIGO_TRANSPORTE) &&
       /export async function definirPermissaoDeFuncao\(/.test(CODIGO_TRANSPORTE) &&
+      /export async function definirConexaoDoAgente\(/.test(CODIGO_TRANSPORTE) &&
       !/"PUT"|"DELETE"/.test(CODIGO_TRANSPORTE));
   ok("B7c PUT e DELETE continuam vetados em TODA a area, nao so no transporte",
     AREA.filter((a) => /"PUT"|"DELETE"/.test(codigo(ler(a)))).length === 0,

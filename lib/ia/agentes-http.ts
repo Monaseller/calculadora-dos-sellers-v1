@@ -214,6 +214,82 @@ export interface DefinicaoDePermissao {
 }
 
 /**
+ * Uma conta que o dono PODE escolher para um requisito — M2-I1-A5.
+ *
+ * Tres campos, e a lista curta e a defesa. A rota ja projeta so isto; o
+ * tipo aqui existe para que a tela nao consiga inventar um quarto.
+ *
+ * `sellerId` NAO entra. Ele existe na tabela e a camada de credencial o
+ * le, mas nenhuma tela publicada precisa dele — e identidade externa sem
+ * consumidor e superficie sem contrapartida.
+ */
+export interface LojaElegivelUI {
+  id: string;
+  nome: string | null;
+  nickname: string | null;
+}
+
+/**
+ * Um requisito de conexao do agente, com o estado da escolha feita.
+ *
+ * ── `utilizavel` e o campo que nao pode ser perdido ─────────────────
+ *
+ * `lojaIdSelecionada` preenchido com `utilizavel: false` significa "voce
+ * escolheu uma conta, e ela nao serve para este requisito" — tipicamente
+ * uma loja de outro marketplace. A tela e obrigada a mostrar esse estado:
+ * convertê-lo em "nenhuma conta escolhida" apagaria a unica pista de que
+ * ha algo a corrigir.
+ *
+ * ── `lojasElegiveis` e LOCAL ────────────────────────────────────────
+ *
+ * Sao as contas conectadas, do dono, compativeis com a plataforma. NAO
+ * sao contas com concessao remota confirmada: cobertura e fato de
+ * execucao, e o servidor nao a consulta nesta rota de proposito — senao
+ * um 429 do marketplace impediria o dono de CONFIGURAR.
+ */
+export interface ConexaoRequisitoUI {
+  plataforma: string;
+  recurso: string;
+  obrigatoria: boolean;
+  marketplace: string | null;
+  lojaIdSelecionada: string | null;
+  utilizavel: boolean;
+  lojasElegiveis: readonly LojaElegivelUI[];
+}
+
+export type RespostaConexoes =
+  | { estado: "ok"; conexoes: readonly ConexaoRequisitoUI[] }
+  | { estado: "nao_autenticado" }
+  | { estado: "nao_encontrado" }
+  | { estado: "falha" };
+
+/**
+ * O resultado de escolher — ou remover — a conta de UM requisito.
+ *
+ * `conflito` e variante propria, e nao `dados_invalidos`, porque as duas
+ * pedem acoes diferentes do usuario. `dados_invalidos` diz "corrija o que
+ * voce mandou"; `conflito` diz "o servidor sabe algo que a tela nao
+ * sabia" — o requisito sumiu, ou a conta deixou de ser elegivel — e a
+ * unica acao correta e RESSINCRONIZAR. Colapsar as duas pediria ao dono
+ * que corrigisse algo que ele nao errou.
+ */
+export type RespostaDefinicaoConexao =
+  | { estado: "ok"; plataforma: string; recurso: string; lojaId: string | null }
+  | { estado: "conflito"; mensagem: string }
+  | { estado: "dados_invalidos"; mensagem: string }
+  | { estado: "nao_autenticado" }
+  | { estado: "nao_encontrado" }
+  | { estado: "falha" };
+
+/** O que a tela pode definir. Tres campos, e o servidor recusa qualquer
+ *  chave a mais — inclusive `marketplace`, `userId` e `agenteId`. */
+export interface DefinicaoDeConexao {
+  plataforma: string;
+  recurso: string;
+  lojaId: string | null;
+}
+
+/**
  * Diagnóstico de UM agente.
  *
  * `semSelecao` chega separado e assim permanece: requisito que existe e
@@ -1436,4 +1512,173 @@ export async function registrarDecisaoAprovacao(
   if (corpo.decisao !== decisao) return { estado: "falha" };
 
   return { estado: "ok", decisao, estadoFinal };
+}
+
+// ─── Conexões do agente — M2-I1-A5 ────────────────────────────────────
+
+const caminhoDasConexoes = (agenteId: string) =>
+  `${ROTA_BASE}/${encodeURIComponent(agenteId)}/conexoes`;
+
+/** As duas frases públicas de 409 da rota. Igualdade exata: uma frase
+ *  que o servidor não publica não é repassada ao usuário. */
+const MENSAGENS_DE_CONFLITO: readonly string[] = [
+  "Requisito não configurado para este agente.",
+  "Conta indisponível para este requisito.",
+];
+const MENSAGEM_GENERICA_CONEXAO = "Não foi possível salvar esta conexão.";
+
+/** Uma loja elegível da resposta, ou `null` se a forma divergir. */
+function lojaElegivelDaResposta(bruto: unknown): LojaElegivelUI | null {
+  if (!ehObjeto(bruto)) return null;
+  const { id, nome, nickname } = bruto;
+  if (typeof id !== "string" || id.length === 0) return null;
+  if (nome !== null && typeof nome !== "string") return null;
+  if (nickname !== null && typeof nickname !== "string") return null;
+  return { id, nome, nickname };
+}
+
+/** Um requisito da resposta, ou `null` se a forma divergir. */
+function conexaoDaResposta(bruto: unknown): ConexaoRequisitoUI | null {
+  if (!ehObjeto(bruto)) return null;
+  const { plataforma, recurso, obrigatoria, marketplace, lojaIdSelecionada, utilizavel } = bruto;
+
+  if (typeof plataforma !== "string" || plataforma.length === 0) return null;
+  if (typeof recurso !== "string" || recurso.length === 0) return null;
+  if (typeof obrigatoria !== "boolean") return null;
+  if (marketplace !== null && typeof marketplace !== "string") return null;
+  if (lojaIdSelecionada !== null && typeof lojaIdSelecionada !== "string") return null;
+  // `utilizavel` NÃO ganha default: `undefined` viraria `false` e a tela
+  // mostraria "a conta não serve" sobre algo que ninguém apurou.
+  if (typeof utilizavel !== "boolean") return null;
+  if (!Array.isArray(bruto.lojasElegiveis)) return null;
+
+  const lojasElegiveis: LojaElegivelUI[] = [];
+  for (const cru of bruto.lojasElegiveis) {
+    const loja = lojaElegivelDaResposta(cru);
+    // Item malformado condena a resposta inteira: meia lista de contas
+    // apresentada como lista completa faria o dono concluir que uma conta
+    // dele sumiu.
+    if (loja === null) return null;
+    lojasElegiveis.push(loja);
+  }
+
+  return {
+    plataforma,
+    recurso,
+    obrigatoria,
+    marketplace,
+    lojaIdSelecionada,
+    utilizavel,
+    lojasElegiveis,
+  };
+}
+
+/**
+ * Os requisitos de conexão de UM agente, com a escolha atual de cada um.
+ *
+ * `agenteId` é o único identificador que trafega, e vai no caminho. Sem
+ * dono, sem relógio, sem corpo: o servidor é a autoridade dos três.
+ */
+export async function buscarConexoesDoAgente(
+  agenteId: string,
+  signal?: AbortSignal
+): Promise<RespostaConexoes> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(caminhoDasConexoes(agenteId), { signal });
+  } catch {
+    // Inclui o abort: quem cancelou não quer mais a resposta.
+    return { estado: "falha" };
+  }
+
+  if (resposta.status === 401) return { estado: "nao_autenticado" };
+  if (resposta.status === 404) return { estado: "nao_encontrado" };
+
+  const corpo = await corpoDe(resposta);
+  if (!resposta.ok || !ehObjeto(corpo) || corpo.ok !== true || !Array.isArray(corpo.conexoes)) {
+    return { estado: "falha" };
+  }
+
+  const conexoes: ConexaoRequisitoUI[] = [];
+  for (const bruto of corpo.conexoes) {
+    const conexao = conexaoDaResposta(bruto);
+    if (conexao === null) return { estado: "falha" };
+    conexoes.push(conexao);
+  }
+  return { estado: "ok", conexoes };
+}
+
+/**
+ * Escolhe — ou remove — a conta de UM requisito.
+ *
+ * ── O corpo é FECHADO ───────────────────────────────────────────────
+ *
+ * Três chaves, montadas aqui campo a campo. Nada de espalhar o objeto
+ * recebido: um `...definicao` deixaria uma chave extra atravessar no dia
+ * em que alguém a acrescentasse ao tipo, e o servidor recusaria a
+ * requisição inteira com 400 — falha difícil de ler.
+ *
+ * `marketplace` não vai: ele é derivado server-side da plataforma.
+ * `agenteId` não vai: ele já está no caminho. Dono, token e nível nunca
+ * existiram neste contrato.
+ *
+ * ── O eco confirmado é o do SERVIDOR ────────────────────────────────
+ *
+ * O retorno traz `plataforma`, `recurso` e `lojaId` lidos da resposta,
+ * não ecoados do argumento. Mas ele NÃO é suficiente para atualizar a
+ * tela: `utilizavel` e a lista de elegíveis dependem de fatos que só o
+ * GET recalcula. Quem chama confirma aqui e ressincroniza lá.
+ */
+export async function definirConexaoDoAgente(
+  agenteId: string,
+  definicao: DefinicaoDeConexao
+): Promise<RespostaDefinicaoConexao> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(caminhoDasConexoes(agenteId), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        plataforma: definicao.plataforma,
+        recurso: definicao.recurso,
+        lojaId: definicao.lojaId,
+      }),
+    });
+  } catch {
+    return { estado: "falha" };
+  }
+
+  if (resposta.status === 401) return { estado: "nao_autenticado" };
+  if (resposta.status === 404) return { estado: "nao_encontrado" };
+
+  const corpo = await corpoDe(resposta);
+
+  if (resposta.status === 409) {
+    const bruta = ehObjeto(corpo) && typeof corpo.erro === "string" ? corpo.erro : "";
+    return {
+      estado: "conflito",
+      mensagem: MENSAGENS_DE_CONFLITO.includes(bruta) ? bruta : MENSAGEM_GENERICA_CONEXAO,
+    };
+  }
+
+  if (resposta.status === 400) {
+    // 400 aqui é defeito nosso, não do dono: a tela monta o corpo. A
+    // frase genérica evita pedir que ele corrija algo que não digitou.
+    return { estado: "dados_invalidos", mensagem: MENSAGEM_GENERICA_CONEXAO };
+  }
+
+  if (!resposta.ok || !ehObjeto(corpo) || corpo.ok !== true) return { estado: "falha" };
+
+  const conexao = corpo.conexao;
+  if (!ehObjeto(conexao)) return { estado: "falha" };
+  const { plataforma, recurso, lojaId } = conexao;
+  // Shape divergente é FALHA, nunca uma escolha meio confirmada entrando
+  // na tela como se tivesse sido gravada.
+  if (typeof plataforma !== "string" || plataforma.length === 0) return { estado: "falha" };
+  if (typeof recurso !== "string" || recurso.length === 0) return { estado: "falha" };
+  if (lojaId !== null && (typeof lojaId !== "string" || lojaId.length === 0)) {
+    return { estado: "falha" };
+  }
+
+  return { estado: "ok", plataforma, recurso, lojaId };
 }

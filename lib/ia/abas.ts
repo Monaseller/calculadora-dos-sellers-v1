@@ -53,7 +53,7 @@ export const ABAS = [
   { id: "visao-geral", rotulo: "Visão geral", implementada: true },
   { id: "chat", rotulo: "Chat", implementada: true },
   { id: "tarefas", rotulo: "Tarefas", implementada: true },
-  { id: "conexoes", rotulo: "Conexões", implementada: false },
+  { id: "conexoes", rotulo: "Conexões", implementada: true },
   { id: "funcoes", rotulo: "Funções", implementada: true },
   { id: "permissoes", rotulo: "Permissões", implementada: false },
   { id: "memoria", rotulo: "Memória", implementada: false },
@@ -92,8 +92,6 @@ type AbaPendente = Extract<(typeof ABAS)[number], { implementada: false }>["id"]
  * e montado por dentro.
  */
 export const PENDENCIA_ABA: Record<AbaPendente, string> = {
-  conexoes:
-    "falta conectar esta aba às contas que o agente realmente usa. As contas da sua conta CDS serão atribuídas a cada agente por aqui.",
   permissoes:
     "os níveis de acesso às funções são configurados na aba Funções. Esta aba fica reservada para os controles e o histórico de autorizações, que ainda não estão ligados à tela.",
   memoria: "as instruções fixas já existem e aparecem na Visão geral. Preferências, memória aprendida e exemplos ainda não têm onde morar.",
