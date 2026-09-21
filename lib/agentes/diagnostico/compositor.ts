@@ -43,7 +43,6 @@
 import "server-only";
 import { resolverSkillsDoAgente } from "@/lib/agentes/skills/fatos";
 import { resolverConexoesDoAgente } from "@/lib/agentes/conexoes/agregador";
-import { resolverFatosPermissoes } from "@/lib/agentes/permissoes/fatos";
 import { funcaoExiste } from "@/lib/agentes/funcoes/registry";
 import { diagnosticarSkill, type Diagnostico, type FatoFuncao } from "@/lib/ia/skills/diagnostico";
 import type { RequisitoConexao } from "@/lib/ia/skills/contrato";
@@ -158,15 +157,22 @@ function funcaoIdsDeTodasAsSkills(
  *
  * Skills primeiro, porque sem Skill nao ha o que diagnosticar: um agente
  * sem nenhuma associada custa UMA leitura e nada mais — nem conexoes, nem
- * permissoes, nem motor. Conexoes depois, uma vez. Permissoes por ultimo,
- * ja com a lista completa de Funcoes exigidas, tambem uma vez. O motor e
- * puro e roda por Skill sem custo de I/O.
+ * permissoes, nem motor. Conexoes depois, uma vez — e essa unica chamada
+ * ja traz junto o snapshot de permissao, entao nao ha terceira leitura. O
+ * motor e puro e roda por Skill sem custo de I/O.
  *
- * ── Por que `resolverFatosPermissoes` e chamada mesmo sem Funcoes ───
+ * ── De onde vem o fato de permissao, e por que nao de uma leitura ───
  *
- * Ela ja trata lista vazia: devolve `ok` com zero fatos e ZERO consulta.
- * Repetir esse curto-circuito aqui duplicaria a regra em dois lugares que
- * um dia discordariam.
+ * Ate a M2-I1-A1 este modulo lia `agente_permissoes` por conta propria,
+ * com os ids que as Skills declaram. Depois que o agregador passou a unir
+ * requisitos de Skills com os das Funcoes habilitadas, ele precisa do
+ * CATALOGO INTEIRO — e passou a ler a mesma tabela, na mesma requisicao.
+ * Duas leituras, e a segunda sem fato novo a acrescentar.
+ *
+ * Agora ele publica o que leu, e este modulo FILTRA. A leitura sai daqui;
+ * a semantica, nao: o motor continua recebendo fatos apenas dos ids que
+ * alguma Skill pediu. Conhecer o catalogo inteiro e necessidade do
+ * agregador, nunca licenca para despejar o catalogo no motor.
  */
 export async function diagnosticarAgente(
   entrada: EntradaDiagnosticoDoAgente
@@ -193,13 +199,17 @@ export async function diagnosticarAgente(
 
   const funcaoIds = funcaoIdsDeTodasAsSkills(skills.skills);
 
-  const permissoes = await resolverFatosPermissoes({ userId, agenteId, funcaoIds });
-  if (permissoes.coleta !== "ok") {
-    // `conexoes` e `semSelecao` ja estavam em maos — e nao saem assim
-    // mesmo. Devolver metade da resposta com aparencia de resposta
-    // inteira e o modo de falha que este envelope existe para impedir.
-    return abortar(permissoes.coleta);
-  }
+  // O RECORTE, e ele e a fronteira deste modulo.
+  //
+  // `conexoes.permissoes` traz o catalogo inteiro. O motor recebe SO os
+  // ids que alguma Skill declarou — despejar o resto daria a ele fatos
+  // sobre Funcoes que ninguem exigiu, e uma Funcao habilitada que nenhuma
+  // Skill pede nao tem por que aparecer no diagnostico DA SKILL.
+  //
+  // Nao ha checagem de `coleta` aqui: ela ja foi feita logo acima, no
+  // mesmo resultado. Uma segunda guarda sugeriria uma segunda coleta.
+  const exigidos = new Set(funcaoIds);
+  const permissoesDasSkills = conexoes.permissoes.filter((p) => exigidos.has(p.funcaoId));
 
   // Puro: o registry responde EXISTENCIA, e so para os ids que alguma
   // Skill pediu. Despejar o catalogo inteiro daria ao motor fatos sobre
@@ -216,7 +226,7 @@ export async function diagnosticarAgente(
     diagnostico: diagnosticarSkill({
       skill: { id: s.manifesto.id, requer: s.manifesto.requer },
       funcoes,
-      permissoes: permissoes.fatos,
+      permissoes: permissoesDasSkills,
       conexoes: conexoes.conexoes,
     }),
   }));

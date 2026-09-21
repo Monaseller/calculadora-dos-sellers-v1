@@ -185,6 +185,12 @@ interface Chamada {
   /** Valor cru entregue a `.limit(...)`. Guardado como veio para que um
    *  `NaN` que escapasse do normalizador fique visivel no assert. */
   limite?: unknown;
+  /** Coluna e valores de `.in(coluna, valores)`. Ate a M2-I1-A1-FIX1 o
+   *  duplo descartava os dois: nenhum assert precisava saber POR QUAIS
+   *  ids uma leitura perguntou. Precisa agora — e exatamente a diferenca
+   *  entre "leu o catalogo inteiro" e "leu so a Funcao atual". */
+  inColuna?: string;
+  inValores?: readonly unknown[];
 }
 
 interface Resposta {
@@ -248,7 +254,11 @@ function construtor(tabela: string): Record<string, unknown> {
       return b;
     },
     eq(coluna: string, valor: unknown) { c.filtros[coluna] = valor; return b; },
-    in() { return b; },
+    in(coluna: string, valores: readonly unknown[]) {
+      c.inColuna = coluna;
+      c.inValores = valores;
+      return b;
+    },
     order(coluna: string, opcoes?: { ascending?: boolean }) {
       (c.orders as { coluna: string; ascendente: boolean }[]).push({
         coluna,
@@ -329,13 +339,50 @@ interface FuncaoControlada {
 
 let catalogoControlado: Record<string, FuncaoControlada> | null = null;
 
+/**
+ * O resolver de Connections, dublado.
+ *
+ * `null` = comportamento neutro (nenhuma conexao, nenhum binding), que e
+ * o que todo cenario NAO-conectado deste arquivo assume. Os cenarios
+ * conectados o preenchem para escolher o que o pipeline enxerga.
+ *
+ * O duplo cobre `executar.ts` E `aprovacoes/persistencia.ts`, que sao os
+ * dois consumidores reais — e por isso o caminho automatico e o
+ * pos-Approval veem a MESMA fonte, como em producao.
+ */
+interface ConexoesDubladas {
+  conexoes: readonly unknown[];
+  semSelecao: readonly unknown[];
+  bindings: readonly { plataforma: string; recurso: string; lojaId: string }[];
+  /** O snapshot do CATALOGO INTEIRO que o agregador publica (M2-I1-A1-FIX1).
+   *  E daqui que o executor tira o nivel da Funcao em execucao quando ha
+   *  requisito de conexao — sem reler `agente_permissoes`. */
+  permissoes: readonly { funcaoId: string; nivel: string }[];
+  coleta: string;
+}
+let conexoesControladas: ConexoesDubladas | null = null;
+let vezesResolverConexoes = 0;
+const SEM_CONEXOES: ConexoesDubladas = {
+  conexoes: [], semSelecao: [], bindings: [], permissoes: [], coleta: "ok",
+};
+
 const requireOriginal = (Module as unknown as { prototype: { require: (id: string) => unknown } }).prototype.require;
 let interceptou = false;
 let interceptouCatalogo = false;
+let interceptouAgregador = false;
 (Module as unknown as { prototype: { require: unknown } }).prototype.require = function (this: unknown, id: string) {
   if (typeof id === "string" && id.includes("supabase-servidor")) {
     interceptou = true;
     return { getSupabaseServidor: () => clienteFake };
+  }
+  if (typeof id === "string" && id.includes("conexoes/agregador")) {
+    interceptouAgregador = true;
+    return {
+      resolverConexoesDoAgente: async () => {
+        vezesResolverConexoes++;
+        return conexoesControladas ?? SEM_CONEXOES;
+      },
+    };
   }
   if (typeof id === "string" && id.includes("funcoes/registry")) {
     interceptouCatalogo = true;
@@ -1310,7 +1357,10 @@ async function principal(): Promise<void> {
     ok("H2  os argumentos vem da APROVACAO, nao de quem retomou",
       JSON.stringify(ultimosArgumentos) === JSON.stringify({ congelado: true }));
     ok("H3  o contexto do executor carrega o userId autenticado",
-      JSON.stringify(ultimoContexto) === JSON.stringify({ userId: USER }));
+      JSON.stringify(ultimoContexto) === JSON.stringify({ userId: USER, conexao: null }));
+    ok("H3a Funcao SEM requisito recebe `conexao: null`, nunca `undefined`",
+      (ultimoContexto as { conexao?: unknown })?.conexao === null &&
+        "conexao" in (ultimoContexto as object));
     ok("H4  a definicao e resolvida ANTES do consumo",
       chamadasRpc[0]?.parametros?.p_revisao_atual === REVISAO_CONTROLADA);
     ok("H5  o requestId vem da RPC, e nao e gerado aqui",
@@ -1812,10 +1862,22 @@ async function principal(): Promise<void> {
         .filter((f) => f.endsWith(".ts") && f !== "registry.ts");
       const comFuncao = handlers.filter((f) =>
         /executarFuncao/.test(semComentarios(ler(`lib/agentes/handlers/${f}`))));
-      ok(`I68 exatamente UM handler alcanca executarFuncao (${comFuncao.join(", ")})`,
-        comFuncao.length === 1 && comFuncao[0] === "consultar-vendas.ts");
-      ok("I69 CONTROLE: dois arquivos nao satisfariam o oraculo",
-        !(["consultar-vendas.ts", "outro.ts"].length === 1));
+      // M2-I1-A7: sao DOIS, e o conjunto e NOMINAL nos dois sentidos.
+      // Contagem sozinha deixaria uma TROCA passar; `includes` deixaria um
+      // terceiro entrar. A lista ordenada compara identidade, nao tamanho.
+      const HANDLERS_COM_FUNCAO = ["consultar-perguntas-ml.ts", "consultar-vendas.ts"];
+      ok(`I68 exatamente os DOIS handlers nominais alcancam executarFuncao (${comFuncao.join(", ")})`,
+        JSON.stringify([...comFuncao].sort()) ===
+          JSON.stringify([...HANDLERS_COM_FUNCAO].sort()));
+      ok("I69 CONTROLE: um terceiro handler nao satisfaria o oraculo",
+        JSON.stringify([...HANDLERS_COM_FUNCAO, "outro.ts"].sort()) !==
+          JSON.stringify([...HANDLERS_COM_FUNCAO].sort()));
+      ok("I69a CONTROLE: perder um dos dois tambem reprova",
+        JSON.stringify(HANDLERS_COM_FUNCAO.slice(1)) !==
+          JSON.stringify([...HANDLERS_COM_FUNCAO].sort()));
+      ok("I69b CONTROLE: uma TROCA mantendo o total de dois reprova",
+        JSON.stringify(["consultar-vendas.ts", "consultar-anuncios.ts"].sort()) !==
+          JSON.stringify([...HANDLERS_COM_FUNCAO].sort()));
     }
 
     // ── As contagens de auditoria, congeladas por CONTRATO ──────────
@@ -2104,10 +2166,22 @@ async function principal(): Promise<void> {
     ok("J8  e chave de prototipo tambem — `toString` nao e contrato",
       resolverContratoResume("toString") === null &&
       resolverContratoResume("constructor") === null);
-    ok("J9  so `consultar_vendas` esta registrado",
-      tiposComContratoResume().join(",") === "consultar_vendas");
+    // M2-I1-A7: DOIS tipos com contrato de retomada. A ordem e a que o
+    // owner devolve (`Object.keys` da tabela), e nao uma reordenacao do
+    // teste — comparar contra a ordem real e o que faz o assert medir a
+    // tabela, e nao a si mesmo.
+    // Tipado como `string`: sem isso o TypeScript prova que os literais dos
+    // controles diferem e reprova a comparacao — o controle viraria erro de
+    // compilacao em vez de assert.
+    const TIPOS_COM_RESUME: string = "consultar_perguntas_ml,consultar_vendas";
+    ok("J9  os tipos com contrato de retomada sao exatamente os dois nominais",
+      tiposComContratoResume().join(",") === TIPOS_COM_RESUME);
     ok("J10 CONTROLE: um tipo a mais nao satisfaria J9",
-      ["consultar_vendas", "outro"].join(",") !== "consultar_vendas");
+      ["consultar_perguntas_ml", "consultar_vendas", "outro"].join(",") !== TIPOS_COM_RESUME);
+    ok("J10a CONTROLE: um tipo a menos tambem reprova",
+      "consultar_vendas" !== TIPOS_COM_RESUME);
+    ok("J10b CONTROLE: uma TROCA mantendo o total reprova",
+      ["consultar_perguntas_ml", "consultar_anuncios"].join(",") !== TIPOS_COM_RESUME);
 
     // ── §25. TRIPWIRE do grafo: aresta de VALOR e proibida ─────────
     //
@@ -2134,8 +2208,17 @@ async function principal(): Promise<void> {
       importsDeValor('import { executarFuncao } from "@/lib/agentes/execucao-funcoes/executar";')
         .join(",") === "@/lib/agentes/execucao-funcoes/executar" &&
       importsDeValor('import type { X } from "@/lib/agentes/execucao-funcoes/executar";').length === 0);
-    ok("J16 e o unico import de valor do resume e o contrato puro",
-      alvosResume.join(",") === "@/lib/agentes/handlers/consultar-vendas-contrato");
+    // M2-I1-A7: agora sao DOIS contratos puros, e sao SO eles. O que este
+    // assert protege — o resume nunca importa handler nem executor por
+    // valor — segue valendo, e a lista continua exata.
+    ok("J16 os imports de valor do resume sao exatamente os dois contratos puros",
+      JSON.stringify([...alvosResume].sort()) === JSON.stringify([
+        "@/lib/agentes/handlers/consultar-perguntas-ml-contrato",
+        "@/lib/agentes/handlers/consultar-vendas-contrato",
+      ]));
+    ok("J16a CONTROLE: um import de valor a mais reprova",
+      JSON.stringify([...alvosResume, "@/lib/agentes/handlers/consultar-vendas"].sort()) !==
+        JSON.stringify([...alvosResume].sort()));
 
     // ── §26. CRUZAMENTO handler x contrato ─────────────────────────
     //
@@ -2151,10 +2234,15 @@ async function principal(): Promise<void> {
       const comFuncao = handlers.filter((f) =>
         /executarFuncao\(/.test(semComentarios(ler(`lib/agentes/handlers/${f}`))));
       const registrados = tiposComContratoResume();
-      ok(`J17 exatamente um handler CHAMA executarFuncao (${comFuncao.join(", ")})`,
-        comFuncao.length === 1 && comFuncao[0] === "consultar-vendas.ts");
-      ok("J18 e o tipo dele TEM contrato de retomada",
-        registrados.includes("consultar_vendas"));
+      const CHAMAM_FUNCAO = ["consultar-perguntas-ml.ts", "consultar-vendas.ts"];
+      ok(`J17 exatamente os dois handlers nominais CHAMAM executarFuncao (${comFuncao.join(", ")})`,
+        JSON.stringify([...comFuncao].sort()) === JSON.stringify([...CHAMAM_FUNCAO].sort()));
+      // J18 e a rede que impede aprovacao ORFA: todo tipo que alcanca uma
+      // Funcao pode cair em `aguardando_aprovacao`, e sem contrato de
+      // retomada essa espera nasceria sem continuacao conhecida.
+      ok("J18 e OS DOIS tipos deles TEM contrato de retomada",
+        registrados.includes("consultar_vendas") &&
+        registrados.includes("consultar_perguntas_ml"));
       ok("J19 CONTROLE: um tipo sem contrato seria detectado",
         !registrados.includes("consultar_anuncios"));
     }
@@ -3367,8 +3455,17 @@ async function principal(): Promise<void> {
     ok("N24 F1: os argumentos executados sao os APROVADOS",
       JSON.stringify(desfechoGravado()?.linha?.funcao_id) === JSON.stringify("vendas.consultar") &&
       /argumentos: ap\.argumentos/.test(CODIGO_N));
-    ok("N25 F1: prepararEntrada recebe ap.argumentos, e so",
-      /prepararEntrada\(ap\.argumentos\)/.test(CODIGO_N));
+    // M2-I1-A7: a preparacao passou a vir AMARRADA a continuacao, por
+    // `prepararRetomada(tipo, bruta)`. A PROPRIEDADE nao mudou — os
+    // argumentos executados sao os APROVADOS, e apenas eles.
+    ok("N25 F1: prepararRetomada recebe tipoTarefa e ap.argumentos, e so",
+      /prepararRetomada\(tipoTarefa, ap\.argumentos\)/.test(CODIGO_N));
+    ok("N25a CONTROLE: outra fonte de argumentos seria acusada",
+      !/prepararRetomada\(tipoTarefa, ap\.argumentos\)/
+        .test("prepararRetomada(tipoTarefa, tarefa.linha.entrada)"));
+    ok("N25b e a preparacao SOLTA do contrato nao existe mais",
+      !/contrato\.prepararEntrada\(/.test(CODIGO_N) &&
+      !/contrato\.continuarAposFuncao\(/.test(CODIGO_N));
     ok("N26 F1: a entrada da TAREFA nunca e usada",
       !/tarefa\.linha\.entrada/.test(CODIGO_N) && !/contexto\.entrada/.test(CODIGO_N) &&
       !/\.entrada\b/.test(CODIGO_N));
@@ -3378,7 +3475,7 @@ async function principal(): Promise<void> {
       const pos = {
         preRead: CODIGO_N.indexOf("await lerAprovacaoParaRetomada("),
         tipo: CODIGO_N.indexOf("await lerTarefaDoDono("),
-        prepara: CODIGO_N.indexOf("contrato.prepararEntrada("),
+        prepara: CODIGO_N.indexOf("prepararRetomada(tipoTarefa,"),
         uuid: CODIGO_N.indexOf("randomUUID()"),
         start: CODIGO_N.indexOf("await iniciarRetomadaAprovacao("),
         abertura: CODIGO_N.indexOf("await lerNivelDaAberturaDeRetomada("),
@@ -5705,6 +5802,501 @@ async function principal(): Promise<void> {
     }
   }
 
+
+  // ─── R. M2-I1-A1: o contexto de Connection atravessa o executor ─────
+
+  secao("R. M2-I1-A1: ContextoFuncao com Connection, um ponto so");
+  {
+    const LOJA_A = "bbbbbbbb-0000-4000-8000-000000000001";
+    const LOJA_B = "bbbbbbbb-0000-4000-8000-000000000002";
+    const REQ = { plataforma: "shopee", recurso: "chat" };
+    const fatoServe = { ...REQ, estado: "conectada", cobertura: "confirmada" };
+
+    const conectada = () => controlada({ conexaoNecessaria: { ...REQ } });
+    const ctx = () => ultimoContexto as { userId: string; conexao: unknown } | undefined;
+    const lojaDoContexto = () =>
+      (ctx()?.conexao as { lojaId?: string } | null | undefined)?.lojaId;
+
+    ok("R0  ANCORA: o resolver de Connections esta dublado", interceptouAgregador);
+
+    // ── R1. Caminho AUTOMATICO ──────────────────────────────────────
+    catalogoControlado = conectada();
+    conexoesControladas = {
+      conexoes: [fatoServe],
+      semSelecao: [],
+      bindings: [{ ...REQ, lojaId: LOJA_A }],
+      permissoes: [{ funcaoId: ID_CONTROLADA, nivel: "automatico" }],
+      coleta: "ok",
+    };
+    roteiro(agenteOk, gravou, gravou);
+    roteiroRpc();
+    vezesExecutor = 0;
+    ultimoContexto = undefined;
+    const rAutoConn = await executarFuncao(baseControlada);
+
+    ok("R1  automatico + binding valido -> executa",
+      rAutoConn.tipo === "sucesso" && vezesExecutor === 1, rAutoConn.tipo);
+    ok("R2  e o executor recebe a Connection congelada",
+      JSON.stringify(ctx()?.conexao) === JSON.stringify({ ...REQ, lojaId: LOJA_A }),
+      JSON.stringify(ctx()?.conexao));
+    ok("R3  o userId continua vindo da sessao", ctx()?.userId === USER);
+    ok("R4  a auditoria grava o MESMO vinculo que o executor usou",
+      linhasGravadas()[0]?.linha?.loja_id === LOJA_A &&
+        linhasGravadas()[0]?.linha?.plataforma === "shopee" &&
+        linhasGravadas()[0]?.linha?.recurso === "chat",
+      String(linhasGravadas()[0]?.linha?.loja_id));
+    ok("R5  nenhum segredo atravessa o contexto",
+      !/token|secret|senha|credencial|seller|shop_id|partner/i.test(JSON.stringify(ctx())),
+      JSON.stringify(ctx()));
+
+    // ── R6. Binding AUSENTE: o guard nega, e nada executa ───────────
+    catalogoControlado = conectada();
+    conexoesControladas = {
+      ...SEM_CONEXOES,
+      permissoes: [{ funcaoId: ID_CONTROLADA, nivel: "automatico" }],
+    };
+    roteiro(agenteOk, gravou);
+    roteiroRpc();
+    vezesExecutor = 0;
+    const rSemBinding = await executarFuncao(baseControlada);
+    ok("R6  sem binding -> negado por conexao, e a Funcao NAO roda",
+      rSemBinding.tipo === "negado" && rSemBinding.codigo === "conexao_ausente" &&
+        vezesExecutor === 0,
+      `${rSemBinding.tipo}/${(rSemBinding as { codigo?: string }).codigo}`);
+    ok("R7  e a auditoria registra lojaId nulo, nunca um id inventado",
+      linhasGravadas()[0]?.linha?.loja_id === null,
+      String(linhasGravadas()[0]?.linha?.loja_id));
+
+    // ── R8. Cross-provider, visto de dentro do executor ─────────────
+    //
+    // Quando a loja selecionada e de outro provedor, o agregador nao
+    // produz NEM fato NEM binding — as duas colecoes concordam. O duplo
+    // reproduz essa saida, e o que se prova aqui e que o executor nao tem
+    // outra porta por onde obter um `lojaId`: nem pelos argumentos.
+    catalogoControlado = conectada();
+    conexoesControladas = {
+      conexoes: [], semSelecao: [], bindings: [],
+      permissoes: [{ funcaoId: ID_CONTROLADA, nivel: "automatico" }],
+      coleta: "ok",
+    };
+    roteiro(agenteOk, gravou);
+    roteiroRpc();
+    vezesExecutor = 0;
+    const rCross = await executarFuncao({
+      ...baseControlada,
+      argumentos: { lojaId: LOJA_B, loja_id: LOJA_B },
+    });
+    ok("R8  binding recusado -> negado, zero execucao",
+      rCross.tipo === "negado" && vezesExecutor === 0, rCross.tipo);
+    ok("R9  `lojaId` vindo dos ARGUMENTOS nao vira binding",
+      linhasGravadas()[0]?.linha?.loja_id === null,
+      String(linhasGravadas()[0]?.linha?.loja_id));
+
+    // ── R10. Caminho POS-APPROVAL ───────────────────────────────────
+    catalogoControlado = conectada();
+    conexoesControladas = {
+      conexoes: [fatoServe],
+      semSelecao: [],
+      bindings: [{ ...REQ, lojaId: LOJA_A }],
+      permissoes: [{ funcaoId: ID_CONTROLADA, nivel: "aprovacao" }],
+      coleta: "ok",
+    };
+    roteiro(
+      aprovacaoLinha({
+        conexao_plataforma: "shopee",
+        conexao_recurso: "chat",
+        conexao_loja_id: LOJA_A,
+      }),
+      aberturaComNivel("aprovacao"),
+      gravou
+    );
+    roteiroRpc(consumo("consumida"));
+    vezesExecutor = 0;
+    ultimoContexto = undefined;
+    const rResume = await retomarAprovacao({ userId: USER, aprovacaoId: APROVACAO });
+
+    ok("R10 a retomada executa a Funcao conectada",
+      rResume.tipo === "sucesso" && vezesExecutor === 1, rResume.tipo);
+    ok("R11 e o executor recebe a MESMA forma de contexto do caminho automatico",
+      JSON.stringify(ctx()?.conexao) === JSON.stringify({ ...REQ, lojaId: LOJA_A }),
+      JSON.stringify(ctx()?.conexao));
+    ok("R12 a loja executada e a CONGELADA na aprovacao", lojaDoContexto() === LOJA_A);
+
+    // ── R13. Divergencia entre a loja aprovada e o binding atual ────
+    catalogoControlado = conectada();
+    conexoesControladas = {
+      conexoes: [fatoServe],
+      semSelecao: [],
+      bindings: [{ ...REQ, lojaId: LOJA_B }],
+      permissoes: [{ funcaoId: ID_CONTROLADA, nivel: "aprovacao" }],
+      coleta: "ok",
+    };
+    roteiro(
+      aprovacaoLinha({
+        conexao_plataforma: "shopee",
+        conexao_recurso: "chat",
+        conexao_loja_id: LOJA_A,
+      }),
+      aberturaComNivel("aprovacao")
+    );
+    roteiroRpc(consumo("consumida"));
+    vezesExecutor = 0;
+    ultimoContexto = undefined;
+    const rTrocou = await retomarAprovacao({ userId: USER, aprovacaoId: APROVACAO });
+    ok("R13 binding que mudou de loja RECUSA a retomada",
+      rTrocou.tipo !== "sucesso" && vezesExecutor === 0, rTrocou.tipo);
+    ok("R14 e nunca substitui pela loja nova",
+      lojaDoContexto() !== LOJA_B && !JSON.stringify(rTrocou).includes(LOJA_B));
+
+    // ── R15. O ponto de montagem e UM so ────────────────────────────
+    ok("R15 `contextoDaFuncao` e definido uma vez e usado uma vez",
+      (EXECUTOR_CODIGO.match(/contextoDaFuncao\(/g) ?? []).length === 2,
+      String((EXECUTOR_CODIGO.match(/contextoDaFuncao\(/g) ?? []).length));
+    ok("R16 o executor e chamado com esse contexto, nunca com um literal",
+      /definicao\.executor\(contexto, argumentos\)/.test(EXECUTOR_CODIGO) &&
+        !/definicao\.executor\(\{/.test(EXECUTOR_CODIGO));
+    ok("R17 o `lojaId` do primeiro passe vem de `bindings`, e so dali",
+      /resultado\.bindings\.find\(/.test(EXECUTOR_CODIGO) &&
+        !/argumentos\.lojaId|entrada\.loja_id|\.selecoes\b/.test(EXECUTOR_CODIGO));
+    ok("R18 e a busca casa pelo par EXATO",
+      /b\.plataforma === plataforma && b\.recurso === recurso/.test(EXECUTOR_CODIGO));
+    ok("R19 CONTROLE: as sondas de R16/R17 acham o padrao proibido quando ele existe",
+      /definicao\.executor\(\{/.test("definicao.executor({ userId: x }, a)") &&
+        /argumentos\.lojaId/.test("const l = argumentos.lojaId;"));
+
+    catalogoControlado = null;
+    conexoesControladas = null;
+  }
+
+  // ─── S. A1-FIX1: uma leitura de permissoes, decisao nominal ─────────
+  //
+  // O agregador passou a publicar o snapshot do CATALOGO INTEIRO, e o
+  // executor o reutiliza no ramo conectado em vez de reler
+  // `agente_permissoes`. O risco que esta secao existe para fechar e o
+  // oposto do ganho: com um array grande em maos, a decisao poderia
+  // deixar de ser sobre a Funcao em execucao.
+
+  secao("S. A1-FIX1: permission single-source e isolamento nominal");
+  {
+    const REQ_S = { plataforma: "shopee", recurso: "chat" };
+    const fatoServe = { ...REQ_S, estado: "conectada", cobertura: "confirmada" };
+    const OUTRA = "outra.funcao";
+
+    const conectada = () => controlada({ conexaoNecessaria: { ...REQ_S } });
+    const lidasPermissao = () => chamadas.filter((c) => c.tabela === "agente_permissoes").length;
+
+    /** Snapshot do agregador com o nivel da Funcao atual e o de uma vizinha. */
+    const snapshot = (nivelAtual: string | null, nivelOutra: string | null) => ({
+      conexoes: [fatoServe],
+      semSelecao: [],
+      bindings: [{ ...REQ_S, lojaId: "cccccccc-0000-4000-8000-000000000001" }],
+      permissoes: [
+        ...(nivelAtual === null ? [] : [{ funcaoId: ID_CONTROLADA, nivel: nivelAtual }]),
+        ...(nivelOutra === null ? [] : [{ funcaoId: OUTRA, nivel: nivelOutra }]),
+      ],
+      coleta: "ok",
+    });
+
+    // ── B. O budget de leitura, ramo a ramo ─────────────────────────
+
+    catalogoControlado = conectada();
+    conexoesControladas = snapshot("automatico", "automatico");
+    roteiro(agenteOk, gravou, gravou);
+    roteiroRpc();
+    vezesExecutor = 0;
+    vezesResolverConexoes = 0;
+    const sConectado = await executarFuncao(baseControlada);
+    ok("S1  ramo CONECTADO executa", sConectado.tipo === "sucesso" && vezesExecutor === 1,
+      sConectado.tipo);
+    ok("S2  e NAO le agente_permissoes por conta propria",
+      lidasPermissao() === 0, String(lidasPermissao()));
+    ok("S3  ANCORA: ele passou mesmo pelo agregador",
+      vezesResolverConexoes === 1, String(vezesResolverConexoes));
+
+    catalogoControlado = controlada({});
+    conexoesControladas = null;
+    roteiro(agenteOk, permissaoDe(ID_CONTROLADA, "automatico"), gravou, gravou);
+    roteiroRpc();
+    vezesExecutor = 0;
+    vezesResolverConexoes = 0;
+    const sSolto = await executarFuncao(baseControlada);
+    ok("S4  ramo SEM requisito executa", sSolto.tipo === "sucesso" && vezesExecutor === 1);
+    ok("S5  e faz EXATAMENTE uma leitura de agente_permissoes",
+      lidasPermissao() === 1, String(lidasPermissao()));
+    ok("S6  sem tocar o agregador", vezesResolverConexoes === 0);
+    ok("S7  e a leitura curta pergunta SO pela Funcao atual",
+      JSON.stringify(chamadas.find((c) => c.tabela === "agente_permissoes")?.inValores) ===
+        JSON.stringify([ID_CONTROLADA]),
+      JSON.stringify(chamadas.find((c) => c.tabela === "agente_permissoes")?.inValores));
+
+    // ── G1-G4. A decisao e NOMINAL ──────────────────────────────────
+
+    catalogoControlado = conectada();
+    conexoesControladas = snapshot("bloqueado", "automatico");
+    roteiro(agenteOk, gravou);
+    roteiroRpc();
+    vezesExecutor = 0;
+    const g1 = await executarFuncao(baseControlada);
+    ok("G1  atual=bloqueado + vizinha=automatico -> NEGA, e nao executa",
+      g1.tipo === "negado" && g1.codigo === "permissao_bloqueada" && vezesExecutor === 0,
+      `${g1.tipo}/${(g1 as { codigo?: string }).codigo}`);
+
+    catalogoControlado = conectada();
+    conexoesControladas = snapshot("aprovacao", "automatico");
+    roteiro(agenteOk);
+    roteiroRpc(criouAprovacao("criada"));
+    vezesExecutor = 0;
+    const g2 = await executarFuncao(baseControlada);
+    ok("G2  atual=aprovacao + vizinha=automatico -> continua exigindo aprovacao",
+      g2.tipo === "aguardando_aprovacao" && vezesExecutor === 0, g2.tipo);
+
+    catalogoControlado = conectada();
+    conexoesControladas = snapshot("automatico", "bloqueado");
+    roteiro(agenteOk, gravou, gravou);
+    roteiroRpc();
+    vezesExecutor = 0;
+    const g3 = await executarFuncao(baseControlada);
+    ok("G3  atual=automatico + vizinha=bloqueado -> continua automatica",
+      g3.tipo === "sucesso" && vezesExecutor === 1, g3.tipo);
+
+    // G4. O MESMO cenario, variando SO os fatos das outras Funcoes.
+    const decidir = async (nivelOutra: string | null) => {
+      catalogoControlado = conectada();
+      conexoesControladas = snapshot("automatico", nivelOutra);
+      roteiro(agenteOk, gravou, gravou);
+      roteiroRpc();
+      vezesExecutor = 0;
+      const r = await executarFuncao(baseControlada);
+      return `${r.tipo}/${vezesExecutor}`;
+    };
+    const semVizinha = await decidir(null);
+    const vizinhaAuto = await decidir("automatico");
+    const vizinhaBloq = await decidir("bloqueado");
+    const vizinhaAprov = await decidir("aprovacao");
+    ok("G4  fatos de OUTRAS Funcoes nao alteram a decisao da atual",
+      semVizinha === vizinhaAuto && semVizinha === vizinhaBloq &&
+        semVizinha === vizinhaAprov && semVizinha === "sucesso/1",
+      [semVizinha, vizinhaAuto, vizinhaBloq, vizinhaAprov].join(" | "));
+
+    // A Funcao ATUAL ausente do snapshot e `permissao_ausente`, mesmo com
+    // vizinhas liberadas: ausencia e bloqueio, e nao ha `some()` global.
+    catalogoControlado = conectada();
+    conexoesControladas = snapshot(null, "automatico");
+    roteiro(agenteOk, gravou);
+    roteiroRpc();
+    vezesExecutor = 0;
+    const g5 = await executarFuncao(baseControlada);
+    ok("G5  atual AUSENTE do snapshot -> permissao_ausente, mesmo com vizinha liberada",
+      g5.tipo === "negado" && g5.codigo === "permissao_ausente" && vezesExecutor === 0,
+      `${g5.tipo}/${(g5 as { codigo?: string }).codigo}`);
+
+    // ── K. Falha de coleta NAO e snapshot vazio valido ──────────────
+
+    catalogoControlado = conectada();
+    conexoesControladas = {
+      conexoes: [], semSelecao: [], bindings: [], permissoes: [], coleta: "falha_leitura",
+    };
+    roteiro(agenteOk, gravou);
+    roteiroRpc();
+    vezesExecutor = 0;
+    const k1 = await executarFuncao(baseControlada);
+    ok("K1  coleta falha -> erro_interno, NUNCA permissao_ausente nem bloqueado",
+      k1.tipo === "erro" && k1.envelope.error.code === "erro_interno" && vezesExecutor === 0,
+      `${k1.tipo}/${(k1 as { envelope?: { error?: { code?: string } } }).envelope?.error?.code}`);
+    ok("K2  e a auditoria registra nivel NULO, nao um nivel inventado",
+      linhasGravadas()[0]?.linha?.nivel_no_momento === null,
+      String(linhasGravadas()[0]?.linha?.nivel_no_momento));
+    ok("K3  plataforma/recurso vem do CATALOGO, e nao do cliente",
+      linhasGravadas()[0]?.linha?.plataforma === "shopee" &&
+        linhasGravadas()[0]?.linha?.recurso === "chat" &&
+        linhasGravadas()[0]?.linha?.loja_id === null,
+      JSON.stringify(linhasGravadas()[0]?.linha?.plataforma));
+    ok("K4  e a mensagem publica nao carrega erro cru de driver",
+      !/sqlstate|42501|postgres|relation|column/i.test(JSON.stringify(k1)),
+      JSON.stringify(k1).slice(0, 120));
+
+    // ── Fonte unica, no codigo ──────────────────────────────────────
+    ok("S8  o executor le `resultado.permissoes` no ramo conectado",
+      /fatosPermissao = resultado\.permissoes;/.test(EXECUTOR_CODIGO));
+    ok("S9  e `resolverFatosPermissoes` sobrou em UM lugar so, o ramo curto",
+      (EXECUTOR_CODIGO.match(/await resolverFatosPermissoes\(/g) ?? []).length === 1,
+      String((EXECUTOR_CODIGO.match(/await resolverFatosPermissoes\(/g) ?? []).length));
+    ok("S10 a selecao do fato e NOMINAL, nunca por posicao ou contagem",
+      /fatosPermissao\.find\(\(p\) => p\.funcaoId === funcaoId\)/.test(EXECUTOR_CODIGO) &&
+        !/fatosPermissao\[0\]|fatosPermissao\.some\(|fatosPermissao\.length ===/
+          .test(EXECUTOR_CODIGO));
+    ok("S11 CONTROLE: as sondas de S10 acham os padroes proibidos",
+      /fatosPermissao\[0\]/.test("const f = fatosPermissao[0];") &&
+        /fatosPermissao\.some\(/.test("fatosPermissao.some((p) => p.nivel)"));
+
+    catalogoControlado = null;
+    conexoesControladas = null;
+  }
+
+  // ─── T. M2-I1-A2: duas Funcoes, resolucao por ID ────────────────────
+  //
+  // O catalogo deixou de ser singleton. Toda resolucao tem de continuar
+  // sendo por NOME — um indice que hoje aponta para a Funcao certa passa
+  // a apontar para outra no dia em que um id ordenar antes.
+
+  secao("T. M2-I1-A2: o catalogo tem duas Funcoes, resolvidas por ID");
+  {
+    const ID_ML = "mercadolivre.perguntas.listar";
+    const ID_VENDAS = "vendas.consultar";
+    const { listarFuncoesRegistradas, funcaoExiste, FUNCOES: CATALOGO } =
+      await import("../lib/agentes/funcoes/registry");
+
+    const IDS = listarFuncoesRegistradas();
+    ok("T1  o catalogo real tem exatamente os dois ids publicados",
+      JSON.stringify([...IDS].sort()) === JSON.stringify([ID_ML, ID_VENDAS].sort()),
+      IDS.join(", "));
+    ok("T2  ambos resolvem por NOME", funcaoExiste(ID_ML) && funcaoExiste(ID_VENDAS));
+    ok("T3  id desconhecido continua recusado",
+      !funcaoExiste("intrusa.funcao") && !funcaoExiste("toString") &&
+        !funcaoExiste("constructor"));
+    ok("T4  cada id resolve a SUA definicao, nunca a do vizinho",
+      CATALOGO[ID_ML].executor !== CATALOGO[ID_VENDAS].executor &&
+        CATALOGO[ID_ML].validarEntrada !== CATALOGO[ID_VENDAS].validarEntrada &&
+        CATALOGO[ID_ML].interpretarSaida !== CATALOGO[ID_VENDAS].interpretarSaida);
+    ok("T5  e os requisitos de conexao nao se misturam",
+      CATALOGO[ID_VENDAS].conexaoNecessaria === null &&
+        JSON.stringify(CATALOGO[ID_ML].conexaoNecessaria) ===
+          JSON.stringify({ plataforma: "mercado_livre", recurso: "perguntas" }));
+
+    // A ordem INVERTIDA nao muda nada: a resolucao e por chave.
+    const invertido = Object.fromEntries([...Object.entries(CATALOGO)].reverse());
+    ok("T6  invertida a ordem das entradas, a resolucao por ID e a mesma",
+      invertido[ID_ML] === CATALOGO[ID_ML] && invertido[ID_VENDAS] === CATALOGO[ID_VENDAS]);
+    ok("T7  CONTROLE: resolver por POSICAO mudaria com a inversao",
+      Object.keys(invertido)[0] !== Object.keys(CATALOGO)[0]);
+
+    // O executor real recusa id inexistente sem abrir chamada.
+    catalogoControlado = null;
+    roteiro(agenteOk, gravou);
+    roteiroRpc();
+    vezesExecutor = 0;
+    const rFantasma = await executarFuncao({
+      ...baseControlada, funcaoId: "nao.existe.mesmo",
+    });
+    ok("T8  id fora do catalogo -> `funcao_inexistente`, zero execucao",
+      rFantasma.tipo === "negado" && rFantasma.codigo === "funcao_inexistente" &&
+        vezesExecutor === 0,
+      `${rFantasma.tipo}/${(rFantasma as { codigo?: string }).codigo}`);
+    ok("T9  e o id tentado e PRESERVADO na auditoria",
+      linhasGravadas()[0]?.linha?.funcao_id === "nao.existe.mesmo",
+      String(linhasGravadas()[0]?.linha?.funcao_id));
+
+    // Nenhuma sonda de producao deste modulo indexa o catalogo.
+    ok("T10 o executor nao resolve Funcao por posicao",
+      !/listarFuncoesRegistradas\(\)\[0\]|Object\.keys\(FUNCOES\)\[0\]/.test(EXECUTOR_CODIGO));
+    ok("T11 CONTROLE: a sonda de T10 acha o padrao quando ele existe",
+      /listarFuncoesRegistradas\(\)\[0\]/.test("const f = listarFuncoesRegistradas()[0];"));
+  }
+
+  // ─── U. M2-I1-A3: onde a cobertura remota entra ─────────────────────
+  //
+  // O executor ganhou UM passo: elevar o fato do requisito em execucao,
+  // entre o binding e o guard. Esta secao prova o PONTO e o GATING —
+  // quem paga rede, quem nao paga, e que nada mais mudou.
+
+  secao("U. M2-I1-A3: cobertura remota no ponto certo, e so ali");
+  {
+    const REQ_U = { plataforma: "shopee", recurso: "chat" };
+    const conectada = () => controlada({ conexaoNecessaria: { ...REQ_U } });
+    const fatoBruto = { ...REQ_U, estado: "conectada", cobertura: "nao_verificavel" };
+    const fatoServe = { ...REQ_U, estado: "conectada", cobertura: "confirmada" };
+    const LOJA_U = "ffffffff-0000-4000-8000-000000000001";
+
+    const snap = (
+      nivel: string,
+      fatos: unknown[],
+      bindings: readonly { plataforma: string; recurso: string; lojaId: string }[]
+    ) => ({
+      conexoes: fatos,
+      semSelecao: [],
+      bindings,
+      permissoes: [{ funcaoId: ID_CONTROLADA, nivel }],
+      coleta: "ok",
+    });
+    const comBinding = [{ ...REQ_U, lojaId: LOJA_U }];
+
+    // O duplo do agregador NAO confirma nada, e `shopee` nao tem
+    // confirmador remoto. Entao o que se mede aqui e o GATING e a ordem,
+    // sem tocar provider nenhum.
+    ok("U0  ANCORA: o resolver de Connections continua dublado", interceptouAgregador);
+
+    // ── U1. `nao_verificavel` continua bloqueando ───────────────────
+    catalogoControlado = conectada();
+    conexoesControladas = snap("automatico", [fatoBruto], comBinding);
+    roteiro(agenteOk, gravou);
+    roteiroRpc();
+    vezesExecutor = 0;
+    const uBloqueia = await executarFuncao(baseControlada);
+    ok("U1  cobertura `nao_verificavel` -> conexao_ausente, zero execucao",
+      uBloqueia.tipo === "negado" &&
+        (uBloqueia as { codigo?: string }).codigo === "conexao_ausente" &&
+        vezesExecutor === 0,
+      `${uBloqueia.tipo}/${(uBloqueia as { codigo?: string }).codigo}`);
+
+    // ── U2. `confirmada` deixa seguir ───────────────────────────────
+    catalogoControlado = conectada();
+    conexoesControladas = snap("automatico", [fatoServe], comBinding);
+    roteiro(agenteOk, gravou, gravou);
+    roteiroRpc();
+    vezesExecutor = 0;
+    const uSegue = await executarFuncao(baseControlada);
+    ok("U2  cobertura `confirmada` -> executa", uSegue.tipo === "sucesso" && vezesExecutor === 1);
+
+    // ── U3. Cobertura NAO muda nivel ────────────────────────────────
+    catalogoControlado = conectada();
+    conexoesControladas = snap("bloqueado", [fatoServe], comBinding);
+    roteiro(agenteOk, gravou);
+    roteiroRpc();
+    vezesExecutor = 0;
+    const uBloq = await executarFuncao(baseControlada);
+    ok("U3  confirmada + bloqueado -> NEGA por permissao, nao por conexao",
+      uBloq.tipo === "negado" &&
+        (uBloq as { codigo?: string }).codigo === "permissao_bloqueada" &&
+        vezesExecutor === 0,
+      `${uBloq.tipo}/${(uBloq as { codigo?: string }).codigo}`);
+
+    catalogoControlado = conectada();
+    conexoesControladas = snap("aprovacao", [fatoServe], comBinding);
+    roteiro(agenteOk);
+    roteiroRpc(criouAprovacao("criada"));
+    vezesExecutor = 0;
+    const uAprov = await executarFuncao(baseControlada);
+    ok("U4  confirmada + aprovacao -> CONTINUA exigindo aprovacao",
+      uAprov.tipo === "aguardando_aprovacao" && vezesExecutor === 0, uAprov.tipo);
+
+    // ── U5-U9. O ponto e o gating, na FONTE ─────────────────────────
+    ok("U5  a cobertura e chamada UMA vez no executor",
+      (EXECUTOR_CODIGO.match(/confirmarCoberturaDosFatos\(/g) ?? []).length === 1,
+      String((EXECUTOR_CODIGO.match(/confirmarCoberturaDosFatos\(/g) ?? []).length));
+    ok("U6  e o gating exige automatico E binding E requisito",
+      /if \(requisito !== null && nivelNoMomento === "automatico" && lojaId !== null\)/
+        .test(EXECUTOR_CODIGO));
+    ok("U7  ela recebe o requisito EM EXECUCAO, nunca o snapshot inteiro",
+      /confirmarCoberturaDosFatos\(\{[\s\S]{0,200}?requisito,/.test(EXECUTOR_CODIGO) &&
+        !/conexoes\.map\([\s\S]{0,80}?confirmarCobertura/.test(EXECUTOR_CODIGO));
+    ok("U8  e o `acesso` vem do CATALOGO, amarrando o HARD BOUND",
+      /acesso: definicao\.acesso/.test(EXECUTOR_CODIGO));
+    ok("U9  o executor continua sem endpoint, token ou Authorization",
+      !/mercadolibre|Authorization|accessToken|getMLLojaById/.test(EXECUTOR_CODIGO));
+    ok("U10 a cobertura acontece ANTES do guard",
+      EXECUTOR_CODIGO.indexOf("confirmarCoberturaDosFatos(") <
+        EXECUTOR_CODIGO.indexOf("autorizarFuncao({"));
+    ok("U11 e DEPOIS do binding",
+      EXECUTOR_CODIGO.indexOf("resultado.bindings.find(") <
+        EXECUTOR_CODIGO.indexOf("confirmarCoberturaDosFatos("));
+    ok("U12 CONTROLE: as sondas acham os padroes proibidos quando existem",
+      /Authorization/.test("headers: { Authorization: x }") &&
+        /conexoes\.map\([\s\S]{0,80}?confirmarCobertura/.test(
+          "conexoes.map(async (c) => confirmarCoberturaDosFatos(c))"));
+
+    catalogoControlado = null;
+    conexoesControladas = null;
+  }
 
   console.log(`\n══ ${passou} PASS / ${falhou} FAIL ══\n`);
   process.exit(falhou === 0 ? 0 : 1);

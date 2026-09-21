@@ -53,6 +53,7 @@ import { randomUUID } from "node:crypto";
 
 import { lerAgenteDoDono, lerTarefaDoDono } from "@/lib/agentes/capability";
 import { resolverConexoesDoAgente } from "@/lib/agentes/conexoes/agregador";
+import { confirmarCoberturaDosFatos } from "@/lib/agentes/conexoes/cobertura-remota";
 import {
   envelopeValido,
   VERSAO_CONTRATO,
@@ -72,7 +73,12 @@ import {
   type CodigoAprovacao,
 } from "@/lib/agentes/aprovacoes/persistencia";
 import { autorizarFuncao, type CodigoNegacao } from "@/lib/agentes/funcoes/guard";
-import { FUNCOES, funcaoExiste, type DefinicaoFuncao } from "@/lib/agentes/funcoes/registry";
+import {
+  FUNCOES,
+  funcaoExiste,
+  type ContextoFuncao,
+  type DefinicaoFuncao,
+} from "@/lib/agentes/funcoes/registry";
 import { resolverFatosPermissoes } from "@/lib/agentes/permissoes/fatos";
 import type { FatoConexao, FatoPermissao } from "@/lib/ia/skills/diagnostico";
 
@@ -121,6 +127,20 @@ export interface EntradaExecucaoFuncao {
   tarefaId?: string | null;
   funcaoId: unknown;
   argumentos: unknown;
+  /**
+   * Chave de deduplicacao da ABERTURA - M2-I1-A8.
+   *
+   * OPCIONAL, e os callers anteriores seguem omitindo: sem ela o
+   * comportamento e exatamente o de antes, que era passar `null`.
+   *
+   * Quem a fornece e quem sabe o que conta como `a mesma chamada` na
+   * camada dele. O executor nao deriva chave nenhuma: derivar aqui
+   * exigiria conhecer a semantica do chamador, e ela muda por caminho.
+   *
+   * O banco ja a cobrava em ESCRITA e sempre a aceitou em LEITURA - o
+   * indice unico parcial passa a valer assim que ela existe.
+   */
+  idempotencyKey?: string | null;
 }
 
 /**
@@ -173,7 +193,29 @@ export type ResultadoExecucaoFuncao =
     }
   | { tipo: "aprovacao_indisponivel"; requestId: string; codigo: CodigoAprovacao }
   | { tipo: "erro"; requestId: string; envelope: EnvelopeErro; auditoria: "completa" | "incompleta" }
-  | { tipo: "falha_auditoria"; requestId: string; etapa: "abertura" | "desfecho"; reexecutavel: false }
+  | {
+      tipo: "falha_auditoria";
+      requestId: string;
+      etapa: "abertura" | "desfecho";
+      reexecutavel: false;
+      /**
+       * Por que a abertura nao foi registrada - M2-I1-A8.
+       *
+       * `"duplicada"` SO aparece quando `registrarAbertura` devolveu
+       * exatamente `duplicada`, isto e, quando a chave de idempotencia
+       * colidiu com uma abertura que ja existe. Falha de SQL, FK, erro
+       * desconhecido e timeout NAO produzem este motivo.
+       *
+       * Campo OPCIONAL de proposito: uma oitava variante no union
+       * quebraria os tres `switch` exaustivos que terminam em `never`,
+       * dois deles em modulos que este slice nao toca. Quem discrimina
+       * por `tipo` continua vendo sete variantes.
+       *
+       * Ele descreve o REGISTRO, nao o resultado da Funcao: a Funcao nao
+       * rodou, e por isso o lugar disto continua sendo `falha_auditoria`.
+       */
+      motivo?: "duplicada";
+    }
   | { tipo: "indisponivel"; requestId: string };
 
 /** O sub-tipo que os dois auxiliares de erro devolvem. Derivado, nunca
@@ -375,6 +417,44 @@ type LeituraDeArgumentos =
   | { tipo: "invalida"; codigo: string }
   | { tipo: "erro_interno" };
 
+/**
+ * O contexto do executor, derivado do SNAPSHOT — nunca da entrada.
+ *
+ * ── Por que a fonte e o snapshot ────────────────────────────────────
+ *
+ * Ele e o mesmo valor que a auditoria grava e que o guard autorizou. Ler
+ * a conexao de qualquer outro lugar aqui abriria a porta para autorizar
+ * uma conta e agir contra outra — e `EntradaExecucaoFuncao` nem tem os
+ * campos, entao o `tsc` recusa a tentativa antes de qualquer teste.
+ *
+ * ── Fail-closed, e a assimetria e proposital ────────────────────────
+ *
+ * Sem requisito, `conexao` e `null` e pronto: `vendas.consultar` continua
+ * recebendo exatamente o que sempre recebeu, mais um campo nulo que ela
+ * nao le.
+ *
+ * COM requisito, os tres campos precisam estar presentes. `null` aqui
+ * nao e "siga sem conexao": e recusa. Um `lojaId` faltando significa que
+ * o binding nao chegou, e executar assim escolheria conta por omissao.
+ *
+ * `plataforma` e `recurso` vem do snapshot, nao de `conexaoNecessaria`:
+ * os dois ja foram provados iguais — na criacao da aprovacao e no
+ * consumo — e usar a mesma fonte do `lojaId` mantem o trio coerente.
+ */
+function contextoDaFuncao(
+  snapshot: SnapshotChamada,
+  definicao: DefinicaoFuncao
+): ContextoFuncao | null {
+  if (definicao.conexaoNecessaria === null) {
+    return { userId: snapshot.userId, conexao: null };
+  }
+
+  const { plataforma, recurso, lojaId } = snapshot;
+  if (!plataforma || !recurso || !lojaId) return null;
+
+  return { userId: snapshot.userId, conexao: { plataforma, recurso, lojaId } };
+}
+
 function validarArgumentos(definicao: DefinicaoFuncao, argumentos: unknown): LeituraDeArgumentos {
   let validacao;
   try {
@@ -459,10 +539,25 @@ async function executarComAberturaFeita(
   //
   // O relogio mede a FUNCAO, nao a orquestracao: interpretador, envelope
   // e auditoria ficam de fora.
+  // ── O UNICO ponto em que o contexto do executor e montado ─────────
+  //
+  // Os dois caminhos — automatico e pos-Approval — passam por aqui, e e
+  // por isso que a montagem mora nesta funcao e nao em cada chamador.
+  // Duas construcoes divergiriam no primeiro conserto feito so de um
+  // lado, e a que divergisse seria a que decide contra QUAL conta agir.
+  const contexto = contextoDaFuncao(snapshot, definicao);
+  if (contexto === null) {
+    // Requisito de conexao sem binding no snapshot e defeito NOSSO, nao
+    // pedido malformado: o guard ja autorizou, entao o vinculo tinha de
+    // estar la. Recusa fechada ANTES do relogio — a Funcao nao rodou, e
+    // `executor_falhou` afirmaria que rodou.
+    return erroDeExecucao(snapshot, 0, "erro_interno", "erro_interno", MSG_INTERNO, false);
+  }
+
   const inicio = performance.now();
   let saida: unknown;
   try {
-    saida = await definicao.executor({ userId: snapshot.userId }, argumentos);
+    saida = await definicao.executor(contexto, argumentos);
   } catch {
     const latenciaMs = Math.round(performance.now() - inicio);
     return erroDeExecucao(snapshot, latenciaMs, "executor_falhou", "executor_falhou", MSG_EXECUTOR, false);
@@ -602,13 +697,14 @@ export async function executarFuncao(
   // Coleta que falha NAO vira `permissao_ausente`: isso afirmaria que o
   // dono nunca configurou, quando na verdade nao conseguimos ler. Sao
   // fatos diferentes e pedem acoes diferentes.
-  const permissoes = await resolverFatosPermissoes({ userId, agenteId, funcaoIds: [funcaoId] });
-  if (permissoes.coleta !== "ok") {
-    return erroSemExecucao(comFuncao, "erro_interno", "erro_interno", MSG_INTERNO, false);
-  }
-
-  const fatoPermissao: FatoPermissao | undefined = permissoes.fatos.find((p) => p.funcaoId === funcaoId);
-  const nivelNoMomento = fatoPermissao?.nivel ?? null;
+  // Um ramo ou o outro. Nunca os dois.
+  //
+  // `resolverConexoesDoAgente` le `agente_permissoes` do catalogo inteiro
+  // para montar o feed de requisitos, e publica o que leu. Quando ha
+  // requisito, reler aqui seria a MESMA tabela, na MESMA requisicao, sem
+  // fato novo. Quando nao ha requisito o resolver nem e chamado, e a
+  // leitura curta — um id so — continua sendo a certa.
+  let fatosPermissao: readonly FatoPermissao[];
 
   // ── 4b. Conexao ───────────────────────────────────────────────────
   //
@@ -627,14 +723,83 @@ export async function executarFuncao(
     const resultado = await resolverConexoesDoAgente({ userId, agenteId, agoraMs: Date.now() });
     if (resultado.coleta !== "ok") {
       return erroSemExecucao(
-        { ...comFuncao, nivelNoMomento, plataforma, recurso },
+        // `plataforma` e `recurso` vem do CATALOGO — nao do cliente, nao
+        // da entrada. Falha de coleta nao vira nivel nenhum: o snapshot
+        // sai com `nivelNoMomento` NULL, jamais `bloqueado`.
+        { ...comFuncao, nivelNoMomento: null, plataforma, recurso },
         "erro_interno",
         "erro_interno",
         MSG_INTERNO,
         false
       );
     }
+    // Do catalogo INTEIRO. A decisao continua sendo sobre UM fato.
+    fatosPermissao = resultado.permissoes;
     conexoes = resultado.conexoes;
+
+    // ── De onde o `lojaId` VEM, e de onde ele nunca pode vir ────────
+    //
+    // Do binding VALIDADO, casado pelo par exato. Nunca da selecao crua,
+    // nunca dos argumentos da Funcao, nunca da entrada da Tarefa, nunca
+    // do cliente: `agente_conexoes` nao tem invariante de banco ligando
+    // `plataforma` ao marketplace da loja, entao uma linha
+    // `(mercado_livre, perguntas, <loja Shopee>)` e estruturalmente
+    // possivel — e so a derivacao por fatos a descarta.
+    //
+    // Ausencia aqui e `null`, e `null` nao bloqueia por si: quem nega e
+    // o guard, ao nao encontrar fato utilizavel para o requisito.
+    lojaId =
+      resultado.bindings.find((b) => b.plataforma === plataforma && b.recurso === recurso)
+        ?.lojaId ?? null;
+
+  } else {
+    const permissoes = await resolverFatosPermissoes({ userId, agenteId, funcaoIds: [funcaoId] });
+    if (permissoes.coleta !== "ok") {
+      return erroSemExecucao(comFuncao, "erro_interno", "erro_interno", MSG_INTERNO, false);
+    }
+    fatosPermissao = permissoes.fatos;
+  }
+
+  // NOMINAL, e so isto. O array pode ter um fato ou o catalogo inteiro: a
+  // busca e por `funcaoId`, nunca por posicao, contagem, ordem ou por um
+  // `some()` global. Uma Funcao vizinha em `automatico` nao pode liberar
+  // esta, e uma vizinha `bloqueado` nao pode negar.
+  const fatoPermissao: FatoPermissao | undefined =
+    fatosPermissao.find((p) => p.funcaoId === funcaoId);
+  const nivelNoMomento = fatoPermissao?.nivel ?? null;
+
+  // ── 4c. Cobertura REMOTA do requisito em execucao ─────────────────
+  //
+  // `coberturaDoRecurso` devolve `nao_verificavel` constante, entao sem
+  // este passo NENHUMA Funcao conectada executaria. Aqui o fato do
+  // requisito ATUAL — e so dele — pode ser elevado a `confirmada`.
+  //
+  // ── Por que DEPOIS do nivel, e nao dentro do bloco de conexao ─────
+  //
+  // O guard decide permissao ANTES de conexao: em `bloqueado`, `ausente`
+  // ou `aprovacao` ele nem le `conexoes`. Confirmar cobertura nesses
+  // ramos seria perguntar ao Mercado Livre antes de o dono ter decidido —
+  // custo e superficie por uma resposta que ninguem ia ler. No ramo de
+  // aprovacao quem confirma e `resolverAlvo`, dentro de `criarAprovacao`,
+  // ja depois da decisao humana.
+  //
+  // `lojaId !== null` fecha o resto: sem binding validado nao ha conta
+  // contra a qual provar nada, e selecao cross-provider nao produz
+  // binding.
+  //
+  // O executor continua sem conhecer endpoint, token ou HTTP — ele chama
+  // um dono de estado e recebe fatos.
+  if (requisito !== null && nivelNoMomento === "automatico" && lojaId !== null) {
+    const elevados = await confirmarCoberturaDosFatos({
+      userId,
+      requisito,
+      lojaId,
+      // Do CATALOGO. O `acesso` amarra o HARD BOUND de leitura la na
+      // ponta: escrita nunca confirma, por mais valido que esteja o resto.
+      acesso: definicao.acesso,
+      conexoes,
+    });
+    conexoes = elevados.conexoes;
   }
 
   const snapshot = { ...comFuncao, nivelNoMomento, plataforma, recurso, lojaId };
@@ -648,7 +813,7 @@ export async function executarFuncao(
     funcaoId,
     conexaoNecessaria: definicao.conexaoNecessaria,
     funcoes: [{ id: funcaoId, existe: true }],
-    permissoes: permissoes.fatos,
+    permissoes: fatosPermissao,
     conexoes,
   });
 
@@ -734,9 +899,22 @@ export async function executarFuncao(
   // esta frente existe para impedir, e `duplicada` nao ganha um
   // `request_id` novo: colisao de UUID e sinal de bug ou replay, e
   // regerar esconderia o sinal.
-  const abertura = await registrarAbertura({ ...snapshot, idempotencyKey: null });
+  const abertura = await registrarAbertura({
+    ...snapshot,
+    idempotencyKey: entrada.idempotencyKey ?? null,
+  });
   if (abertura.estado !== "registrada") {
-    return { tipo: "falha_auditoria", requestId, etapa: "abertura", reexecutavel: false };
+    // `duplicada` ATRAVESSA, e so ela. O estado vinha sendo descartado
+    // aqui: quem pediu com chave de idempotencia nao tinha como
+    // distinguir `ja foi feito` de `o registro quebrou`, e sao coisas
+    // diferentes que pedem acoes diferentes de quem chamou.
+    return {
+      tipo: "falha_auditoria",
+      requestId,
+      etapa: "abertura",
+      reexecutavel: false,
+      ...(abertura.estado === "duplicada" ? { motivo: "duplicada" as const } : {}),
+    };
   }
 
   // ── 9. Execucao, interpretacao, envelope e desfecho ───────────────

@@ -34,7 +34,7 @@ import { randomUUID } from "node:crypto";
 
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { resolverConexoesDoAgente } from "@/lib/agentes/conexoes/agregador";
-import { resolverSelecoesDoAgente } from "@/lib/agentes/conexoes/selecao-fatos";
+import { confirmarCoberturaDosFatos } from "@/lib/agentes/conexoes/cobertura-remota";
 import { FUNCOES, funcaoExiste, type DefinicaoFuncao } from "@/lib/agentes/funcoes/registry";
 import { ErroArgumentoNaoCanonico, hashDeArgumentos, impressaoDaAcao } from "@/lib/agentes/aprovacoes/identidade";
 
@@ -223,42 +223,61 @@ const SEM_CONEXAO: AlvoConexao = Object.freeze({ plataforma: null, recurso: null
 /**
  * Resolve o alvo concreto de conexao para o requisito de uma Funcao.
  *
- * ── Duas leituras, duas perguntas diferentes ────────────────────────
+ * ── UMA leitura, e uma autoridade so ────────────────────────────────
  *
- *   `resolverConexoesDoAgente`  "esta conexao esta utilizavel?"
- *   `resolverSelecoesDoAgente`  "qual loja o dono escolheu?"
+ * Ate a M2-I1 esta funcao fazia duas: `resolverConexoesDoAgente` para
+ * "esta conexao esta utilizavel?" e `resolverSelecoesDoAgente` para
+ * "qual loja o dono escolheu?". A segunda saiu quando o agregador passou
+ * a publicar `bindings`.
  *
- * Sao autoridades distintas e nenhuma substitui a outra: `FatoConexao`
- * nao carrega `lojaId` de proposito — o registry documenta que QUAL loja
- * atende e decisao de quem resolve a conexao, nao do catalogo. Compor as
- * duas manualmente no lugar do agregador seria reconstruir o agregador;
- * usar o agregador para usabilidade e a selecao para o alvo, nao e.
+ * O motivo nao foi custo — foi CORRECAO. A selecao crua responde qual
+ * loja o dono apontou, e nada mais: `agente_conexoes` nao tem invariante
+ * de banco ligando `plataforma` ao marketplace da loja, entao a linha
+ * `(mercado_livre, perguntas, <loja Shopee do mesmo dono>)` e
+ * estruturalmente possivel e sai de la como selecao valida. Ler o
+ * `lojaId` dali dava ao congelamento da aprovacao uma conta que a camada
+ * de fatos ja havia recusado, e criava duas verdades sobre a mesma
+ * pergunta. O binding ja nasce reconciliado com o fato.
  *
  * Sem fallback: seleção ausente para o par exigido nao vira "escolhe
- * outra qualquer".
+ * outra qualquer", e selecao de outro provedor nao vira nada.
  */
 async function resolverAlvo(
   userId: string,
   agenteId: string,
-  requisito: { plataforma: string; recurso: string }
+  requisito: { plataforma: string; recurso: string },
+  acesso: "leitura" | "escrita"
 ): Promise<AlvoConexao | { codigo: "conexao_indisponivel" }> {
-  const fatos = await resolverConexoesDoAgente({ userId, agenteId, agoraMs: Date.now() });
-  if (fatos.coleta !== "ok") return { codigo: "conexao_indisponivel" };
+  const resolvido = await resolverConexoesDoAgente({ userId, agenteId, agoraMs: Date.now() });
+  if (resolvido.coleta !== "ok") return { codigo: "conexao_indisponivel" };
 
-  const fato = fatos.conexoes.find(
+  // O BINDING primeiro, e o fato depois. A ordem importa: sem vinculo
+  // escolhido nao ha o que avaliar, e perguntar "a conta serve?" antes de
+  // saber se existe conta escolhida e a pergunta na ordem errada — ela
+  // custaria trabalho para responder sobre algo que ninguem configurou.
+  const binding = resolvido.bindings.find(
+    (b) => b.plataforma === requisito.plataforma && b.recurso === requisito.recurso
+  );
+  if (binding === undefined) return { codigo: "conexao_indisponivel" };
+
+  // A cobertura REMOTA entra entre o binding e o `conexaoServe`, e a
+  // ordem e o ponto: sem binding nao ha conta contra a qual provar, e
+  // perguntar ao Mercado Livre antes disso gastaria rede para descobrir
+  // algo que a selecao ja respondia. Ver `cobertura-remota.ts`.
+  const elevados = await confirmarCoberturaDosFatos({
+    userId,
+    requisito,
+    lojaId: binding.lojaId,
+    acesso,
+    conexoes: resolvido.conexoes,
+  });
+
+  const fato = elevados.conexoes.find(
     (c) => c.plataforma === requisito.plataforma && c.recurso === requisito.recurso
   );
   if (!fato || !conexaoServe(fato)) return { codigo: "conexao_indisponivel" };
 
-  const selecoes = await resolverSelecoesDoAgente({ userId, agenteId });
-  if (selecoes.coleta !== "ok") return { codigo: "conexao_indisponivel" };
-
-  const selecao = selecoes.selecoes.find(
-    (s) => s.plataforma === requisito.plataforma && s.recurso === requisito.recurso
-  );
-  if (!selecao || !selecao.lojaId) return { codigo: "conexao_indisponivel" };
-
-  return { plataforma: requisito.plataforma, recurso: requisito.recurso, lojaId: selecao.lojaId };
+  return { plataforma: requisito.plataforma, recurso: requisito.recurso, lojaId: binding.lojaId };
 }
 
 /**
@@ -346,7 +365,7 @@ export async function criarAprovacao(entrada: EntradaCriarAprovacao): Promise<Re
   let alvo: AlvoConexao = SEM_CONEXAO;
   const requisito = definicao.conexaoNecessaria;
   if (requisito !== null) {
-    const resolvido = await resolverAlvo(userId, agenteId, requisito);
+    const resolvido = await resolverAlvo(userId, agenteId, requisito, definicao.acesso);
     if ("codigo" in resolvido) return { codigo: resolvido.codigo };
     alvo = resolvido;
   }
@@ -594,7 +613,7 @@ export async function lerAprovacaoParaRetomada(
   // loja congelada. A RPC reconfirma o vinculo atomicamente; aqui o que
   // se prova e a usabilidade, que o banco nao sabe julgar.
   if (requisito !== null) {
-    const alvo = await resolverAlvo(userId, agenteId, requisito);
+    const alvo = await resolverAlvo(userId, agenteId, requisito, definicao.acesso);
     if ("codigo" in alvo) {
       return { ok: false, codigo: alvo.codigo, detalhe: "conexao_indisponivel" };
     }

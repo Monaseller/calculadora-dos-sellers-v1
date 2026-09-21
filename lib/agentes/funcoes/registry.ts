@@ -48,6 +48,12 @@ import {
   type FiltroVendas,
   type ResultadoVendas,
 } from "@/lib/agentes/dados/vendas";
+import {
+  CONEXAO_PERGUNTAS_ML,
+  executarPerguntasML,
+  interpretarSaidaPerguntasML,
+  validarEntradaPerguntasML,
+} from "@/lib/agentes/funcoes/mercadolivre-perguntas";
 
 // ─── Contexto de autoridade ───────────────────────────────────────────
 
@@ -60,17 +66,58 @@ import {
  * `user_id + loja_id`, e `seller_id` e atributo externo que o mesmo
  * seller compartilhado entre donos torna inutil como identidade.
  *
- * `loja_id` tambem NAO esta aqui: resolver conexao e a SKILL-1D.c. A
- * primeira Funcao real nao precisa dele, e um campo sem consumidor viria
- * com a tentacao de aceita-lo de qualquer chamador.
- *
  * O contexto vem da sessao/runtime. NUNCA dos argumentos, e nunca do
  * modelo — e por isso ele e o PRIMEIRO parametro, separado do segundo:
  * a assinatura torna impossivel confundir "quem esta pedindo" com "o que
  * foi pedido".
  */
+
+/**
+ * A Connection que o executor pode usar — identidade, nunca credencial.
+ *
+ * ── Por que `lojaId` passou a existir aqui ──────────────────────────
+ *
+ * Ate a M2-I1 o contexto era so `userId`, porque a unica Funcao real
+ * (`vendas.consultar`) le tabela propria e nao tem requisito de conexao.
+ * Uma Funcao CONECTADA precisa saber contra QUAL conta agir, e com varias
+ * contas do mesmo marketplace no mesmo dono nao existe "a conta obvia":
+ * escolher dentro do executor seria decidir pelo dono qual conta sofre o
+ * efeito.
+ *
+ * ── Os tres campos andam JUNTOS ─────────────────────────────────────
+ *
+ * `lojaId` solto perderia o invariante de que aquela loja foi escolhida
+ * para AQUELE par `(plataforma, recurso)` e aprovada para ele. O
+ * sub-objeto amarra os tres num valor so.
+ *
+ * ── O que NAO entra, e nao por esquecimento ─────────────────────────
+ *
+ * Sem `access_token`, `refresh_token`, `client_secret`, `partner_key`,
+ * `seller_id` ou `shop_id`. A fronteira onde o segredo morre continua
+ * sendo `conexoes/fatos.ts`, e nada dela atravessa para ca. `lojaId` e o
+ * UUID interno de `lojas` — vinculo, nao credencial: com ele sozinho nao
+ * se chama API nenhuma.
+ */
+export interface ConexaoDoContexto {
+  readonly plataforma: string;
+  readonly recurso: string;
+  readonly lojaId: string;
+}
+
+/**
+ * ── `conexao` e `| null`, nunca opcional ────────────────────────────
+ *
+ * `conexao?: ...` deixaria um chamador esquecer o campo e receber
+ * `undefined` sem erro de tipo — a Funcao conectada quebraria em runtime
+ * em vez de quebrar na compilacao. `| null` obriga a decisao explicita.
+ *
+ * O invariante e exato: `null` se e somente se a definicao tem
+ * `conexaoNecessaria === null`. Quando ha requisito, o valor chega
+ * preenchido e JA autorizado pelo guard — o executor nunca re-resolve.
+ */
 export interface ContextoFuncao {
-  userId: string;
+  readonly userId: string;
+  readonly conexao: ConexaoDoContexto | null;
 }
 
 /**
@@ -428,6 +475,37 @@ export const FUNCOES: Readonly<Record<string, DefinicaoFuncao>> = Object.freeze(
     acesso: "leitura",
     idempotente: true,
     conexaoNecessaria: null,
+  }),
+
+  // A PRIMEIRA Funcao conectada — M2-I1-A2.
+  //
+  // Os tres wrappers moram em `funcoes/mercadolivre-perguntas.ts`, e nao
+  // aqui. Nao e estilo: uma segunda Funcao no padrao inline levaria este
+  // arquivo a ~640 linhas contra um tripwire de 560, e subir o tripwire
+  // seria desligar o alarme em vez de responder a ele. O catalogo volta
+  // a ser o mapa; a implementacao vive ao lado.
+  //
+  // O id NAO e `mercado_livre.*`: o CHECK
+  // `agente_permissoes_funcao_id_formato` e `^[a-z0-9]+(\.[a-z0-9_]+)+$`,
+  // e o primeiro segmento nao aceita underscore. `plataforma` continua
+  // sendo `mercado_livre` — a coluna e o id sao vocabularios diferentes,
+  // e forcar um no outro quebraria o banco ou o mapa de marketplaces.
+  //
+  // `conexaoNecessaria` preenchido e o que a distingue de tudo que veio
+  // antes: sem loja escolhida e sem cobertura confirmada, o guard nega
+  // `conexao_ausente` e o executor nem e chamado. Isso e o desenho, nao
+  // uma pendencia — cobertura remota e slice proprio.
+  "mercadolivre.perguntas.listar": Object.freeze({
+    executor: executarPerguntasML,
+    // Delega a `validarFiltroPerguntas`; nenhuma regra e recopiada.
+    validarEntrada: validarEntradaPerguntasML,
+    // Checagem de runtime sobre `ResultadoPerguntas`, como em vendas.
+    interpretarSaida: interpretarSaidaPerguntasML,
+    revisao: "1",
+    // Leitura: nao responde pergunta, nao altera anuncio, nao envia nada.
+    acesso: "leitura",
+    idempotente: true,
+    conexaoNecessaria: CONEXAO_PERGUNTAS_ML,
   }),
 });
 

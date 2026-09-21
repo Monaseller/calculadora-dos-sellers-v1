@@ -116,12 +116,52 @@ function construtor(tabela: string): unknown {
 
 const clienteFake = { from: (t: string) => construtor(t) };
 
+// ─── O catalogo de Funcoes, dublado ───────────────────────────────────
+//
+// O agregador passou a unir requisitos de Skills com os das Funcoes
+// HABILITADAS. O catalogo real tem hoje UMA Funcao — `vendas.consultar`,
+// com `conexaoNecessaria: null` —, entao ele nao consegue produzir um
+// unico requisito de Funcao, e uma suite que dependesse dele mediria
+// vacuo: todo assert passaria com a lista vazia.
+//
+// Registrar uma Funcao conectada so para testar seria pior: publicaria
+// no catalogo real uma capacidade sem executor ligado, e este repositorio
+// tem regra explicita contra declarar Funcao que nao roda.
+//
+// Por isso o CATALOGO e dublado, e so ele. As permissoes continuam vindo
+// do codigo real, pelo cliente duplado, e a uniao/dedupe/ordem sao as de
+// producao. O objeto e MUTAVEL e estavel: o agregador captura a
+// referencia no import, e trocar o conteudo dentro dela e o que permite
+// variar o catalogo entre casos.
+interface DefinicaoDublada {
+  conexaoNecessaria: { plataforma: string; recurso: string } | null;
+}
+const CATALOGO_FAKE: Record<string, DefinicaoDublada> = {};
+function definirCatalogo(entradas: Record<string, DefinicaoDublada>): void {
+  for (const k of Object.keys(CATALOGO_FAKE)) delete CATALOGO_FAKE[k];
+  Object.assign(CATALOGO_FAKE, entradas);
+}
+/** Atalho: Funcao que exige `(plataforma, recurso)`. */
+const fnConectada = (plataforma: string, recurso: string): DefinicaoDublada => ({
+  conexaoNecessaria: { plataforma, recurso },
+});
+const FN_SEM_CONEXAO: DefinicaoDublada = { conexaoNecessaria: null };
+
 const requireOriginal = (Module as unknown as { prototype: { require: (id: string) => unknown } }).prototype.require;
 let interceptou = false;
+let interceptouCatalogo = false;
 (Module as unknown as { prototype: { require: unknown } }).prototype.require = function (this: unknown, id: string) {
   if (typeof id === "string" && id.includes("supabase-servidor")) {
     interceptou = true;
     return { getSupabaseServidor: () => clienteFake };
+  }
+  if (typeof id === "string" && /agentes[\\/]funcoes[\\/]registry/.test(id)) {
+    interceptouCatalogo = true;
+    return {
+      FUNCOES: CATALOGO_FAKE,
+      // A MESMA forma do real: chaves ordenadas e congeladas.
+      listarFuncoesRegistradas: () => Object.freeze(Object.keys(CATALOGO_FAKE).sort()),
+    };
   }
   // eslint-disable-next-line prefer-rest-params
   return requireOriginal.apply(this, arguments as unknown as [string]);
@@ -513,6 +553,32 @@ async function principal(): Promise<void> {
     ).length;
   const tabelas = () => chamadas.map((c) => c.tabela).join(" > ");
 
+  // ── A leitura de permissoes, e por que ela aparece em todo roteiro ─
+  //
+  // Desde a M2-I1-A1 o agregador une DUAS fontes de requisito: as Skills
+  // e as Funcoes habilitadas. A segunda custa UMA leitura de
+  // `agente_permissoes`, com `.in("funcao_id", ids)` — nunca uma por
+  // Funcao —, e ela acontece logo depois das Skills, ANTES do
+  // curto-circuito de "nenhum requisito".
+  //
+  // O duplo responde por POSICAO, entao cada roteiro precisa declarar
+  // essa resposta no lugar certo. Isso e proposital: uma leitura nova
+  // inserida em silencio no meio do pipeline deslocaria o roteiro
+  // inteiro, e o teste que a ignorasse passaria medindo outra coisa.
+  const SEM_PERMISSAO: Resposta = { data: [] };
+  /** `agente_permissoes` com niveis reais. `funcao_id` precisa existir no catalogo. */
+  const permissoes = (...linhas: [string, string][]): Resposta => ({
+    data: linhas.map(([funcao_id, nivel]) => ({ funcao_id, nivel })),
+  });
+
+  // O catalogo real NUNCA e vazio, e `resolverFatosPermissoes` nao toca o
+  // banco quando a lista de ids e vazia. Um catalogo dublado vazio faria
+  // a leitura de permissoes desaparecer e deslocaria todo roteiro — os
+  // asserts de custo passariam a medir um pipeline que producao nao tem.
+  // Por isso a linha de base tem UMA Funcao, sem requisito de conexao.
+  const CATALOGO_BASE: Record<string, DefinicaoDublada> = { "base.op": FN_SEM_CONEXAO };
+  definirCatalogo(CATALOGO_BASE);
+
   secao("J. O agregador — guards e curto-circuitos");
 
   for (const [nome, e] of [
@@ -527,17 +593,18 @@ async function principal(): Promise<void> {
       `${r.coleta} / ${chamadas.length}`);
   }
 
-  roteiro({ data: [] });
+  roteiro({ data: [] }, SEM_PERMISSAO);
   const rSemSkills = await resolverConexoesDoAgente(AG);
-  ok("J3  agente sem Skills -> ok, vazio, TOTAL 1 query",
+  ok("J3  agente sem Skills -> ok, vazio, TOTAL 2 queries (Skills + permissoes)",
     rSemSkills.coleta === "ok" && rSemSkills.conexoes.length === 0 &&
-      rSemSkills.semSelecao.length === 0 && chamadas.length === 1,
+      rSemSkills.semSelecao.length === 0 && rSemSkills.bindings.length === 0 &&
+      chamadas.length === 2,
     `${rSemSkills.coleta} / ${chamadas.length} · ${tabelas()}`);
 
-  roteiro({ data: [assoc("s1")] }, { data: [linhaSkill("s1")] });
+  roteiro({ data: [assoc("s1")] }, { data: [linhaSkill("s1")] }, SEM_PERMISSAO);
   const rSemReq = await resolverConexoesDoAgente(AG);
-  ok("J4  Skill sem requer.conexoes -> ok, vazio, TOTAL 2 queries",
-    rSemReq.coleta === "ok" && rSemReq.semSelecao.length === 0 && chamadas.length === 2,
+  ok("J4  Skill sem requer.conexoes -> ok, vazio, TOTAL 3 queries",
+    rSemReq.coleta === "ok" && rSemReq.semSelecao.length === 0 && chamadas.length === 3,
     `${chamadas.length} · ${tabelas()}`);
   ok("J5  e o lote NAO roda", queriesDoLote() === 0);
 
@@ -546,12 +613,14 @@ async function principal(): Promise<void> {
   roteiro(
     { data: [assoc("s1")] },
     { data: [linhaSkill("s1", [["shopee", "chat", true]])] },
+    SEM_PERMISSAO,
     { data: [] }
   );
   const rSemSel = await resolverConexoesDoAgente(AG);
-  ok("K1  1 requisito sem selecao -> semSelecao, TOTAL 3 queries",
+  ok("K1  1 requisito sem selecao -> semSelecao, TOTAL 4 queries",
     rSemSel.coleta === "ok" && rSemSel.conexoes.length === 0 &&
-      rSemSel.semSelecao.length === 1 && chamadas.length === 3,
+      rSemSel.semSelecao.length === 1 && rSemSel.bindings.length === 0 &&
+      chamadas.length === 4,
     `${chamadas.length} · ${tabelas()}`);
   ok("K2  o requisito preserva plataforma, recurso e obrigatoria",
     rSemSel.semSelecao[0]?.plataforma === "shopee" &&
@@ -562,14 +631,15 @@ async function principal(): Promise<void> {
   roteiro(
     { data: [assoc("s1")] },
     { data: [linhaSkill("s1", [["shopee", "chat", true]])] },
+    SEM_PERMISSAO,
     { data: [linhaSelecao("shopee", "chat", L(1))] },
     { data: [linhaLojaDona(L(1))] },
     { data: [loja(L(1))] }
   );
   const rSel = await resolverConexoesDoAgente(AG);
-  ok("K4  1 requisito selecionado -> 1 fato, TOTAL 5 queries",
+  ok("K4  1 requisito selecionado -> 1 fato, TOTAL 6 queries",
     rSel.coleta === "ok" && rSel.conexoes.length === 1 && rSel.semSelecao.length === 0 &&
-      chamadas.length === 5,
+      chamadas.length === 6,
     `${chamadas.length} · ${tabelas()}`);
   ok("K5  o lote rodou UMA vez", queriesDoLote() === 1);
   ok("K6  o fato e do par pedido",
@@ -583,6 +653,7 @@ async function principal(): Promise<void> {
   roteiro(
     { data: [assoc("s1")] },
     { data: [linhaSkill("s1", [["shopee", "chat", true]])] },
+    SEM_PERMISSAO,
     { data: [linhaSelecao("shopee", "pedidos", L(2))] },
     { data: [linhaLojaDona(L(2))] }
   );
@@ -603,6 +674,7 @@ async function principal(): Promise<void> {
         linhaSkill("s2", [["shopee", "chat", true]]),
       ],
     },
+    SEM_PERMISSAO,
     { data: [] }
   );
   const rDedupe = await resolverConexoesDoAgente(AG);
@@ -619,6 +691,7 @@ async function principal(): Promise<void> {
         linhaSkill("s2", [["shopee", "pedidos", true]]),
       ],
     },
+    SEM_PERMISSAO,
     { data: [] }
   );
   const rVersoes = await resolverConexoesDoAgente(AG);
@@ -631,6 +704,7 @@ async function principal(): Promise<void> {
   roteiro(
     { data: [assoc("s1")] },
     { data: [linhaSkill("s1", [["shopee", "zeta", true], ["shopee", "alfa", true]])] },
+    SEM_PERMISSAO,
     { data: [] }
   );
   const rOrdem = await resolverConexoesDoAgente(AG);
@@ -653,13 +727,14 @@ async function principal(): Promise<void> {
     roteiro(
       { data: [assoc("s1")] },
       { data: [linhaSkill("s1", reqs)] },
+      SEM_PERMISSAO,
       { data: sels },
       { data: ids.map(linhaLojaDona) },
       { data: ids.map((id) => loja(id)) }
     );
     const r = await resolverConexoesDoAgente(AG);
-    ok(`${nome} -> ${n} fatos, TOTAL 5 queries, lote 1`,
-      r.coleta === "ok" && r.conexoes.length === n && chamadas.length === 5 &&
+    ok(`${nome} -> ${n} fatos, TOTAL 6 queries, lote 1`,
+      r.coleta === "ok" && r.conexoes.length === n && chamadas.length === 6 &&
         queriesDoLote() === 1,
       `${r.conexoes.length} fatos / ${chamadas.length} queries / lote ${queriesDoLote()}`);
   }
@@ -669,6 +744,7 @@ async function principal(): Promise<void> {
   roteiro(
     { data: [assoc("s1")] },
     { data: [linhaSkill("s1", [["shopee", "chat", true]])] },
+    SEM_PERMISSAO,
     { data: [linhaSelecao("shopee", "chat", L(1))] },
     { data: [linhaLojaDona(L(1))] },
     { data: [loja(L(1), { marketplace: "ML" })] }
@@ -681,6 +757,7 @@ async function principal(): Promise<void> {
   roteiro(
     { data: [assoc("s1")] },
     { data: [linhaSkill("s1", [["shopee", "chat", true]])] },
+    SEM_PERMISSAO,
     { data: [linhaSelecao("shopee", "chat", L(1))] },
     { data: [linhaLojaDona(L(1))] },
     { data: [loja(L(1), { token_expires_at: PASSADO })] }
@@ -699,6 +776,7 @@ async function principal(): Promise<void> {
   roteiro(
     { data: [assoc("s1")] },
     { data: [linhaSkill("s1", [["shopee", "chat", true]])] },
+    SEM_PERMISSAO,
     { error: { code: "42501" } }
   );
   const rFalhaSel = await resolverConexoesDoAgente(AG);
@@ -711,6 +789,7 @@ async function principal(): Promise<void> {
   roteiro(
     { data: [assoc("s1")] },
     { data: [linhaSkill("s1", [["shopee", "chat", true], ["shopee", "pedidos", true]])] },
+    SEM_PERMISSAO,
     { data: [linhaSelecao("shopee", "chat", L(1))] },
     { data: [linhaLojaDona(L(1))] },
     { error: { code: "42501" } }
@@ -724,6 +803,7 @@ async function principal(): Promise<void> {
   roteiro(
     { data: [assoc("s1")] },
     { data: [linhaSkill("s1", [["shopee", "chat", true]])] },
+    SEM_PERMISSAO,
     { data: [linhaSelecao("shopee", "chat", L(1))] },
     { data: [linhaLojaDona(L(1))] },
     { data: [loja(L(1))] }
@@ -740,9 +820,23 @@ async function principal(): Promise<void> {
     !/getSupabaseServidor|\.from\(|\.select\(|\.eq\(|\.in\(/.test(CODIGO_AGREGADOR));
   ok("M9  o agregador NAO usa o resolvedor individual",
     !/resolverFatoConexao\b(?!s)/.test(CODIGO_AGREGADOR));
-  ok("M10 o agregador nao diagnostica, nao escreve e nao le permissao",
-    !/diagnosticarSkill|definirSelecaoDeLoja|removerSelecaoDeLoja|resolverFatosPermissoes/.test(
-      CODIGO_AGREGADOR));
+  // Ate a M2-I1-A1 este assert tambem exigia "nao le permissao". Deixou
+  // de ser verdade por DECISAO congelada: o feed de requisitos passou a
+  // unir Skills e Funcoes habilitadas, e habilitacao e permissao. O que
+  // continua proibido — diagnosticar e escrever — segue cobrado.
+  ok("M10 o agregador nao diagnostica e nao escreve",
+    !/diagnosticarSkill|definirSelecaoDeLoja|removerSelecaoDeLoja/.test(CODIGO_AGREGADOR));
+  ok("M10a a leitura de permissao e UMA, e pelo helper tenant-safe existente",
+    (CODIGO_AGREGADOR.match(/resolverFatosPermissoes\(/g) ?? []).length === 1 &&
+      /import \{ resolverFatosPermissoes \} from "@\/lib\/agentes\/permissoes\/fatos"/
+        .test(CODIGO_AGREGADOR),
+    String((CODIGO_AGREGADOR.match(/resolverFatosPermissoes\(/g) ?? []).length));
+  ok("M10b ela pergunta pelo catalogo INTEIRO de uma vez, nao Funcao a Funcao",
+    /funcaoIds: listarFuncoesRegistradas\(\)/.test(CODIGO_AGREGADOR) &&
+      !/for \([^)]*\) \{[^}]*resolverFatosPermissoes/.test(CODIGO_AGREGADOR));
+  ok("M10c CONTROLE: a sonda de N+1 acha o padrao quando ele existe",
+    /for \([^)]*\) \{[^}]*resolverFatosPermissoes/.test(
+      "for (const f of fs) { await resolverFatosPermissoes(f); }"));
   ok("M11 zero escolha implicita de loja",
     !/\.limit\(|\.order\(|maybeSingle|vigente/.test(CODIGO_AGREGADOR));
   // A SKILL-1D.consumer-B2 deu ao agregador o seu PRIMEIRO consumidor de
@@ -772,10 +866,16 @@ async function principal(): Promise<void> {
   // a usabilidade vem daqui, e nao e recomposta a mao.
   const EXECUTOR_FUNCOES = "lib/agentes/execucao-funcoes/executar.ts";
   const PERSISTENCIA_APROVACOES = "lib/agentes/aprovacoes/persistencia.ts";
+  // M2-I1-A4: a rota de Conexoes e o QUARTO consumidor, e o primeiro que
+  // nao executa nada — ela le o snapshot para MOSTRAR ao dono o que esta
+  // escolhido e o que falta. Configuracao e execucao consomem a mesma
+  // composicao por perguntas diferentes.
+  const ROTA_CONEXOES = "app/api/agentes/[agenteId]/conexoes/route.ts";
   const CONSUMIDORES_AUTORIZADOS: readonly string[] = [
     "lib/agentes/diagnostico/compositor.ts",
     EXECUTOR_FUNCOES,
     PERSISTENCIA_APROVACOES,
+    ROTA_CONEXOES,
   ];
   const COMPOSITOR = CONSUMIDORES_AUTORIZADOS[0];
 
@@ -798,8 +898,11 @@ async function principal(): Promise<void> {
   });
   ok(`M12 o agregador tem exatamente os consumidores declarados (${consumidores.join(", ") || "nenhum"})`,
     mesmoConjunto(consumidores, CONSUMIDORES_AUTORIZADOS));
-  ok("M12a CONTROLE: o conjunto exato dos tres autorizados passa",
-    mesmoConjunto([COMPOSITOR, EXECUTOR_FUNCOES, PERSISTENCIA_APROVACOES],
+  ok("M12a CONTROLE: o conjunto exato dos quatro autorizados passa",
+    mesmoConjunto([COMPOSITOR, EXECUTOR_FUNCOES, PERSISTENCIA_APROVACOES, ROTA_CONEXOES],
+      CONSUMIDORES_AUTORIZADOS));
+  ok("M12g CONTROLE: a rota sumir reprova",
+    !mesmoConjunto([COMPOSITOR, EXECUTOR_FUNCOES, PERSISTENCIA_APROVACOES],
       CONSUMIDORES_AUTORIZADOS));
   ok("M12b CONTROLE: o compositor sumir reprova",
     !mesmoConjunto([EXECUTOR_FUNCOES, PERSISTENCIA_APROVACOES], CONSUMIDORES_AUTORIZADOS));
@@ -812,6 +915,442 @@ async function principal(): Promise<void> {
   ok("M12f CONTROLE: um caminho parecido nao passa por semelhanca",
     !mesmoConjunto([COMPOSITOR, EXECUTOR_FUNCOES, "lib/agentes/aprovacoes/identidade.ts"],
       CONSUMIDORES_AUTORIZADOS));
+
+  // ── N. O feed de requisitos: Skills UNION Funcoes habilitadas ──────
+  //
+  // Todos os casos abaixo usam o CATALOGO DUBLADO. O que esta sob teste
+  // e a regra de habilitacao, a uniao, o dedupe e a ordem — tudo codigo
+  // de producao. Ver o docblock de `CATALOGO_FAKE`.
+
+  secao("N. Feed de requisitos — Skills UNION Funcoes habilitadas");
+
+  ok("N0  ANCORA: o catalogo de Funcoes esta dublado", interceptouCatalogo);
+
+  // ANCORA DE CONTRATO: o dublo so vale se o modulo real publicar os dois
+  // simbolos com a forma que o agregador consome. Isto amarra a fixture
+  // ao codigo que ela substitui.
+  const CODIGO_REGISTRY = semComentarios(ler("lib/agentes/funcoes/registry.ts"));
+  ok("N0a ANCORA: o registry real publica `conexaoNecessaria` na definicao",
+    /conexaoNecessaria: RequisitoConexaoFuncao \| null;/.test(CODIGO_REGISTRY));
+  ok("N0b ANCORA: e `listarFuncoesRegistradas` devolve as chaves ORDENADAS",
+    /Object\.freeze\(Object\.keys\(FUNCOES\)\.sort\(\)\)/.test(CODIGO_REGISTRY));
+
+  /** Roda o agregador com 1 Skill sem requisito e o catalogo/permissoes dados. */
+  const comFeed = async (perms: Resposta, selecoes: Resposta = { data: [] }) => {
+    roteiro({ data: [assoc("s1")] }, { data: [linhaSkill("s1")] }, perms, selecoes);
+    return resolverConexoesDoAgente(AG);
+  };
+
+  definirCatalogo({ "x.bloqueada": fnConectada("shopee", "chat") });
+  const nBloq = await comFeed(permissoes(["x.bloqueada", "bloqueado"]));
+  ok("N1  Funcao BLOQUEADA nao gera requirement",
+    nBloq.coleta === "ok" && nBloq.semSelecao.length === 0,
+    JSON.stringify(nBloq.semSelecao));
+
+  const nSemLinha = await comFeed(SEM_PERMISSAO);
+  ok("N2  Funcao SEM LINHA de permissao nao gera requirement",
+    nSemLinha.coleta === "ok" && nSemLinha.semSelecao.length === 0);
+
+  definirCatalogo({ "x.aprovacao": fnConectada("shopee", "chat") });
+  const nAprov = await comFeed(permissoes(["x.aprovacao", "aprovacao"]));
+  ok("N3  Funcao em APROVACAO gera requirement",
+    nAprov.semSelecao.length === 1 && nAprov.semSelecao[0]?.recurso === "chat",
+    JSON.stringify(nAprov.semSelecao));
+
+  definirCatalogo({ "x.auto": fnConectada("shopee", "chat") });
+  const nAuto = await comFeed(permissoes(["x.auto", "automatico"]));
+  ok("N4  Funcao AUTOMATICA gera requirement", nAuto.semSelecao.length === 1);
+  ok("N5  e o requirement de Funcao e SEMPRE obrigatorio",
+    nAuto.semSelecao[0]?.obrigatoria === true);
+
+  definirCatalogo({ "x.semconexao": FN_SEM_CONEXAO });
+  const nSemReq = await comFeed(permissoes(["x.semconexao", "automatico"]));
+  ok("N6  Funcao habilitada SEM conexaoNecessaria nao gera requirement",
+    nSemReq.semSelecao.length === 0);
+
+  definirCatalogo({ "x.fantasma": fnConectada("shopee", "chat") });
+  const nDesconhecida = await comFeed(permissoes(["x.nao-registrada", "automatico"]));
+  ok("N7  permissao para Funcao FORA do catalogo nao gera requirement",
+    nDesconhecida.semSelecao.length === 0);
+
+  // Skill-only: o comportamento anterior tem de continuar identico.
+  definirCatalogo(CATALOGO_BASE);
+  roteiro(
+    { data: [assoc("s1")] },
+    { data: [linhaSkill("s1", [["shopee", "chat", true]])] },
+    SEM_PERMISSAO,
+    { data: [] }
+  );
+  const nSkillOnly = await resolverConexoesDoAgente(AG);
+  ok("N8  Skill-only continua exatamente como antes",
+    nSkillOnly.semSelecao.length === 1 && nSkillOnly.semSelecao[0]?.recurso === "chat" &&
+      nSkillOnly.semSelecao[0]?.obrigatoria === true);
+
+  // Skill e Funcao pedindo pares DIFERENTES -> dois requisitos.
+  definirCatalogo({ "x.auto": fnConectada("shopee", "pedidos") });
+  roteiro(
+    { data: [assoc("s1")] },
+    { data: [linhaSkill("s1", [["shopee", "chat", true]])] },
+    permissoes(["x.auto", "automatico"]),
+    { data: [] }
+  );
+  const nDois = await resolverConexoesDoAgente(AG);
+  ok("N9  Skill + Funcao com pares distintos -> DOIS requisitos",
+    nDois.semSelecao.length === 2, JSON.stringify(nDois.semSelecao.map((r) => r.recurso)));
+  ok("N10 e a ordem e deterministica por plataforma+recurso",
+    JSON.stringify(nDois.semSelecao.map((r) => r.recurso)) === JSON.stringify(["chat", "pedidos"]));
+
+  // Skill e Funcao pedindo o MESMO par -> um so.
+  definirCatalogo({ "x.auto": fnConectada("shopee", "chat") });
+  roteiro(
+    { data: [assoc("s1")] },
+    { data: [linhaSkill("s1", [["shopee", "chat", false]])] },
+    permissoes(["x.auto", "automatico"]),
+    { data: [] }
+  );
+  const nDedupe = await resolverConexoesDoAgente(AG);
+  ok("N11 Skill + Funcao no MESMO par -> UM requisito",
+    nDedupe.semSelecao.length === 1, String(nDedupe.semSelecao.length));
+  ok("N12 e `obrigatoria` combina por OR entre as duas fontes",
+    nDedupe.semSelecao[0]?.obrigatoria === true);
+
+  // Duas Funcoes habilitadas no mesmo par tambem deduplicam.
+  definirCatalogo({
+    "a.um": fnConectada("shopee", "chat"),
+    "b.dois": fnConectada("shopee", "chat"),
+  });
+  roteiro(
+    { data: [assoc("s1")] },
+    { data: [linhaSkill("s1")] },
+    permissoes(["a.um", "automatico"], ["b.dois", "aprovacao"]),
+    { data: [] }
+  );
+  const nDuasFn = await resolverConexoesDoAgente(AG);
+  ok("N13 duas Funcoes no mesmo par -> UM requisito", nDuasFn.semSelecao.length === 1);
+
+  // Custo: o catalogo grande NAO multiplica leituras.
+  const catalogoGrande: Record<string, DefinicaoDublada> = {};
+  for (let i = 0; i < 25; i++) catalogoGrande[`f${i}.op`] = fnConectada("shopee", `r${i}`);
+  definirCatalogo(catalogoGrande);
+  roteiro(
+    { data: [assoc("s1")] },
+    { data: [linhaSkill("s1")] },
+    permissoes(["f0.op", "automatico"], ["f1.op", "automatico"], ["f2.op", "automatico"]),
+    { data: [] }
+  );
+  const nCusto = await resolverConexoesDoAgente(AG);
+  const lidasPermissao = chamadas.filter((c) => c.tabela === "agente_permissoes");
+  ok("N14 25 Funcoes no catalogo, 3 habilitadas -> 3 requisitos",
+    nCusto.semSelecao.length === 3, String(nCusto.semSelecao.length));
+  ok("N15 e UMA leitura de agente_permissoes, nunca uma por Funcao",
+    lidasPermissao.length === 1, String(lidasPermissao.length));
+  ok("N16 o IN carrega o catalogo INTEIRO, ordenado, numa chamada so",
+    lidasPermissao[0]?.inColuna === "funcao_id" && lidasPermissao[0]?.inValores?.length === 25,
+    `${lidasPermissao[0]?.inColuna} / ${lidasPermissao[0]?.inValores?.length}`);
+  ok("N17 e o total de queries nao cresce com o catalogo",
+    chamadas.length === 4, `${chamadas.length} · ${tabelas()}`);
+
+  // Falha ao ler permissoes NAO vira "nao exige".
+  definirCatalogo({ "x.auto": fnConectada("shopee", "chat") });
+  roteiro({ data: [assoc("s1")] }, { data: [linhaSkill("s1")] }, { error: { code: "42501" } });
+  const nFalha = await resolverConexoesDoAgente(AG);
+  ok("N18 falha ao ler permissoes -> falha_leitura, tudo vazio, ZERO lote",
+    nFalha.coleta === "falha_leitura" && nFalha.semSelecao.length === 0 &&
+      nFalha.conexoes.length === 0 && nFalha.bindings.length === 0 && queriesDoLote() === 0,
+    `${nFalha.coleta} / ${tabelas()}`);
+
+  // ── J/K. O snapshot de permissao publicado ───────────────────
+  //
+  // M2-I1-A1-FIX1: o agregador publica o que leu, para que o compositor
+  // nao leia a MESMA tabela uma segunda vez na mesma requisicao.
+
+  definirCatalogo({ "a.um": fnConectada("shopee", "chat"), "b.dois": FN_SEM_CONEXAO });
+  roteiro(
+    { data: [assoc("s1")] },
+    { data: [linhaSkill("s1")] },
+    permissoes(["a.um", "automatico"], ["b.dois", "bloqueado"]),
+    { data: [] }
+  );
+  const jSnap = await resolverConexoesDoAgente(AG);
+  const qJ = chamadas.find((c) => c.tabela === "agente_permissoes");
+  ok("J1  `permissoes` e publicado no resultado",
+    Array.isArray(jSnap.permissoes) && jSnap.permissoes.length === 2,
+    JSON.stringify(jSnap.permissoes));
+  ok("J2  a CONSULTA cobre exatamente o catalogo registrado",
+    JSON.stringify([...(qJ?.inValores ?? [])].sort()) ===
+      JSON.stringify(["a.um", "b.dois"]),
+    JSON.stringify(qJ?.inValores));
+  ok("J3  e o publicado e o LIDO, sem recorte no meio do caminho",
+    JSON.stringify([...jSnap.permissoes].map((p) => p.funcaoId).sort()) ===
+      JSON.stringify(["a.um", "b.dois"]));
+  ok("J4  o bloqueado vem no snapshot, e quem decide e quem consome",
+    jSnap.permissoes.some((p) => p.funcaoId === "b.dois" && p.nivel === "bloqueado"));
+
+  // Linha AUSENTE nao vira fato sintetico.
+  roteiro(
+    { data: [assoc("s1")] },
+    { data: [linhaSkill("s1")] },
+    permissoes(["a.um", "automatico"]),
+    { data: [] }
+  );
+  const jParcial = await resolverConexoesDoAgente(AG);
+  ok("J5  Funcao registrada SEM linha nao ganha fato sintetico",
+    jParcial.permissoes.length === 1 &&
+      !jParcial.permissoes.some((p) => p.funcaoId === "b.dois"),
+    JSON.stringify(jParcial.permissoes));
+  ok("J6  e nem por isso a coleta deixa de ser `ok`", jParcial.coleta === "ok");
+
+  // K. Falha de coleta NAO e snapshot vazio valido.
+  roteiro({ data: [assoc("s1")] }, { data: [linhaSkill("s1")] }, { error: { code: "42501" } });
+  const kFalha = await resolverConexoesDoAgente(AG);
+  ok("K1  falha ao ler permissoes -> coleta de FALHA, nao `ok` vazio",
+    kFalha.coleta === "falha_leitura" && kFalha.permissoes.length === 0,
+    `${kFalha.coleta} / ${kFalha.permissoes.length}`);
+  ok("K2  e as outras colecoes tambem saem vazias, sem parcial",
+    kFalha.conexoes.length === 0 && kFalha.semSelecao.length === 0 &&
+      kFalha.bindings.length === 0);
+  ok("K3  CONTROLE: o MESMO vazio com `ok` significa outra coisa",
+    jParcial.coleta === "ok" && kFalha.coleta !== jParcial.coleta);
+
+  // Sem requisito nenhum, o snapshot ainda sai — ele FOI apurado.
+  definirCatalogo({ "b.dois": FN_SEM_CONEXAO });
+  roteiro(
+    { data: [assoc("s1")] },
+    { data: [linhaSkill("s1")] },
+    permissoes(["b.dois", "automatico"])
+  );
+  const jSemReq = await resolverConexoesDoAgente(AG);
+  ok("J7  `SEM_REQUISITOS` publica o snapshot que apurou, nao uma lista vazia",
+    jSemReq.coleta === "ok" && jSemReq.semSelecao.length === 0 &&
+      jSemReq.permissoes.length === 1 && jSemReq.permissoes[0]?.funcaoId === "b.dois",
+    JSON.stringify(jSemReq.permissoes));
+
+  // ── O. Bindings: so o que sobreviveu ao fato ───────────────────────
+
+  secao("O. Bindings — vinculo validado, nunca selecao crua");
+
+  definirCatalogo(CATALOGO_BASE);
+
+  /** 1 Skill exigindo `(shopee, chat)`, com selecao e lote parametrizados. */
+  const comBinding = async (selecao: Resposta, donas: Resposta, lote: Resposta) => {
+    roteiro(
+      { data: [assoc("s1")] },
+      { data: [linhaSkill("s1", [["shopee", "chat", true]])] },
+      SEM_PERMISSAO,
+      selecao,
+      donas,
+      lote
+    );
+    return resolverConexoesDoAgente(AG);
+  };
+
+  const oOk = await comBinding(
+    { data: [linhaSelecao("shopee", "chat", L(1))] },
+    { data: [linhaLojaDona(L(1))] },
+    { data: [loja(L(1))] }
+  );
+  ok("O1  selecao valida gera binding",
+    oOk.bindings.length === 1 && oOk.bindings[0]?.lojaId === L(1),
+    JSON.stringify(oOk.bindings));
+  ok("O2  o binding carrega o par EXATO do requisito",
+    oOk.bindings[0]?.plataforma === "shopee" && oOk.bindings[0]?.recurso === "chat");
+  ok("O3  e ele acompanha o fato, um para um",
+    oOk.conexoes.length === 1 && oOk.bindings.length === oOk.conexoes.length);
+
+  roteiro(
+    { data: [assoc("s1")] },
+    { data: [linhaSkill("s1", [["shopee", "chat", true]])] },
+    SEM_PERMISSAO,
+    { data: [] }
+  );
+  const oSemSel = await resolverConexoesDoAgente(AG);
+  ok("O4  selecao AUSENTE nao gera binding",
+    oSemSel.bindings.length === 0 && oSemSel.semSelecao.length === 1);
+
+  // ── O CASO QUE MOTIVOU O CONTRATO ─────────────────────────────────
+  //
+  // `agente_conexoes` nao tem invariante de banco ligando `plataforma` ao
+  // marketplace da loja — a FK composta prova DONO, nao PROVEDOR. Entao a
+  // selecao abaixo e estruturalmente possivel e sai da camada de selecao
+  // como valida. Quem a recusa e `fatoDaLinha`, e o binding HERDA essa
+  // recusa em vez de repeti-la.
+  const oOutroProvedor = await comBinding(
+    { data: [linhaSelecao("shopee", "chat", L(1))] },
+    { data: [linhaLojaDona(L(1))] },
+    { data: [loja(L(1), { marketplace: "ML" })] }
+  );
+  ok("O5  loja de OUTRO provedor nao gera binding",
+    oOutroProvedor.bindings.length === 0, JSON.stringify(oOutroProvedor.bindings));
+  ok("O6  e tambem nao gera fato — as duas colecoes concordam",
+    oOutroProvedor.conexoes.length === 0 && oOutroProvedor.coleta === "ok");
+  // M2-I1-A4 mudou a fronteira deste assert, e a mudanca e deliberada.
+  //
+  // Ate aqui ele cobrava que o `lojaId` incompativel nao aparecesse em
+  // NENHUM lugar. Isso era correto enquanto o resultado inteiro servia a
+  // EXECUCAO. Agora `requisitos` serve a CONFIGURACAO, e mostrar ao dono
+  // a conta que ele escolheu — junto com `utilizavel: false` — e o unico
+  // jeito de ele descobrir que precisa troca-la.
+  //
+  // O que continua proibido, e e o que sempre importou: esse id chegar a
+  // quem vai AGIR. `bindings` e `conexoes` seguem limpos.
+  ok("O7  o `lojaId` incompativel nao chega a quem AGE",
+    !JSON.stringify(oOutroProvedor.bindings).includes(L(1)) &&
+      !JSON.stringify(oOutroProvedor.conexoes).includes(L(1)) &&
+      !JSON.stringify(oOutroProvedor.semSelecao).includes(L(1)),
+    JSON.stringify(oOutroProvedor.bindings));
+  ok("O7a mas ele APARECE na colecao de configuracao, com utilizavel false",
+    oOutroProvedor.requisitos.some(
+      (r) => r.lojaIdSelecionada === L(1) && r.utilizavel === false
+    ),
+    JSON.stringify(oOutroProvedor.requisitos));
+  ok("O7b CONTROLE: se `bindings` o carregasse, O7 reprovaria",
+    JSON.stringify([{ lojaId: L(1) }]).includes(L(1)));
+
+  const oInexistente = await comBinding(
+    { data: [linhaSelecao("shopee", "chat", L(1))] },
+    { data: [linhaLojaDona(L(1))] },
+    { data: [] }
+  );
+  ok("O8  loja que nao volta do lote nao gera binding",
+    oInexistente.bindings.length === 0 && oInexistente.conexoes.length === 0);
+
+  // Recurso diferente: o join casa pelos DOIS campos.
+  const oOutroRecurso = await comBinding(
+    { data: [linhaSelecao("shopee", "pedidos", L(1))] },
+    { data: [linhaLojaDona(L(1))] },
+    { data: [loja(L(1))] }
+  );
+  ok("O9  selecao de OUTRO recurso nao gera binding para `chat`",
+    oOutroRecurso.bindings.length === 0 && oOutroRecurso.semSelecao.length === 1);
+
+  // Loja de outro dono derruba a coleta inteira, e nada escapa.
+  const oOutroDono = await comBinding(
+    { data: [linhaSelecao("shopee", "chat", L(1))] },
+    { data: [{ id: L(1), user_id: "outro-dono" }] },
+    { data: [loja(L(1))] }
+  );
+  ok("O10 loja de OUTRO dono nao gera binding",
+    oOutroDono.bindings.length === 0 && oOutroDono.coleta === "falha_leitura");
+
+  // Dois requisitos, um valido e um incompativel: o bom sobrevive, o
+  // ruim nao contamina.
+  roteiro(
+    { data: [assoc("s1")] },
+    { data: [linhaSkill("s1", [["shopee", "chat", true], ["shopee", "pedidos", true]])] },
+    SEM_PERMISSAO,
+    { data: [linhaSelecao("shopee", "chat", L(1)), linhaSelecao("shopee", "pedidos", L(2))] },
+    { data: [linhaLojaDona(L(1)), linhaLojaDona(L(2))] },
+    { data: [loja(L(1)), loja(L(2), { marketplace: "ML" })] }
+  );
+  const oMisto = await resolverConexoesDoAgente(AG);
+  ok("O11 o binding valido sobrevive e o incompativel nao",
+    oMisto.bindings.length === 1 && oMisto.bindings[0]?.recurso === "chat" &&
+      oMisto.bindings[0]?.lojaId === L(1),
+    JSON.stringify(oMisto.bindings));
+  ok("O12 e o lojaId do par recusado nao vaza junto",
+    !JSON.stringify(oMisto.bindings).includes(L(2)));
+
+  ok("O13 o binding nunca carrega credencial",
+    !/token|secret|senha|credencial/i.test(JSON.stringify(oOk.bindings)));
+  ok("O14 e tem exatamente os tres campos publicados",
+    JSON.stringify(Object.keys(oOk.bindings[0] ?? {}).sort()) ===
+      JSON.stringify(["lojaId", "plataforma", "recurso"]));
+
+  // ── P. M2-I1-A4: `requisitos`, a colecao composta ─────────────────
+  //
+  // As outras tres dispersam os requisitos em tres destinos, e o caso
+  // "selecao aponta para loja de outro provedor" nao cai em nenhum deles.
+  // Esta secao cobra que ele exista, e que continue existindo.
+
+  secao("P. `requisitos` — a colecao que nao perde o caso incompativel");
+
+  definirCatalogo(CATALOGO_BASE);
+
+  const comRequisitos = async (selecao: Resposta, donas: Resposta, lote: Resposta) => {
+    roteiro(
+      { data: [assoc("s1")] },
+      { data: [linhaSkill("s1", [["shopee", "chat", true]])] },
+      SEM_PERMISSAO,
+      selecao,
+      donas,
+      lote
+    );
+    return resolverConexoesDoAgente(AG);
+  };
+
+  const pSem = await comRequisitos({ data: [] }, { data: [] }, { data: [] });
+  ok("P1  requisito SEM selecao aparece com lojaIdSelecionada null",
+    pSem.requisitos.length === 1 &&
+      pSem.requisitos[0]?.lojaIdSelecionada === null &&
+      pSem.requisitos[0]?.utilizavel === false,
+    JSON.stringify(pSem.requisitos));
+  ok("P1a e ele carrega plataforma, recurso e obrigatoria",
+    pSem.requisitos[0]?.plataforma === "shopee" &&
+      pSem.requisitos[0]?.recurso === "chat" &&
+      pSem.requisitos[0]?.obrigatoria === true);
+
+  const pOk = await comRequisitos(
+    { data: [linhaSelecao("shopee", "chat", L(1))] },
+    { data: [linhaLojaDona(L(1))] },
+    { data: [loja(L(1))] }
+  );
+  ok("P2  selecao compativel -> lojaIdSelecionada preenchido e utilizavel",
+    pOk.requisitos[0]?.lojaIdSelecionada === L(1) &&
+      pOk.requisitos[0]?.utilizavel === true,
+    JSON.stringify(pOk.requisitos));
+
+  // O CASO QUE MOTIVOU A COLECAO: loja de outro provedor. Sem fato, sem
+  // binding — e, sem `requisitos`, tambem sem nenhuma pista para o dono.
+  const pIncompat = await comRequisitos(
+    { data: [linhaSelecao("shopee", "chat", L(1))] },
+    { data: [linhaLojaDona(L(1))] },
+    { data: [loja(L(1), { marketplace: "ML" })] }
+  );
+  ok("P3  selecao INCOMPATIVEL continua visivel, com utilizavel false",
+    pIncompat.requisitos.length === 1 &&
+      pIncompat.requisitos[0]?.lojaIdSelecionada === L(1) &&
+      pIncompat.requisitos[0]?.utilizavel === false,
+    JSON.stringify(pIncompat.requisitos));
+  ok("P3a ANCORA: ela nao aparece em conexoes NEM em semSelecao",
+    pIncompat.conexoes.length === 0 && pIncompat.semSelecao.length === 0 &&
+      pIncompat.bindings.length === 0);
+  ok("P3b CONTROLE: `semSelecao UNION bindings` PERDERIA este requisito",
+    pIncompat.semSelecao.length + pIncompat.bindings.length === 0 &&
+      pIncompat.requisitos.length === 1);
+
+  // Custo: a colecao e derivada, nunca consultada.
+  roteiro(
+    { data: [assoc("s1")] },
+    { data: [linhaSkill("s1", [["shopee", "chat", true], ["shopee", "pedidos", true]])] },
+    SEM_PERMISSAO,
+    { data: [linhaSelecao("shopee", "chat", L(1))] },
+    { data: [linhaLojaDona(L(1))] },
+    { data: [loja(L(1))] }
+  );
+  const pCusto = await resolverConexoesDoAgente(AG);
+  ok("P4  dois requisitos -> duas entradas, uma por requisito",
+    pCusto.requisitos.length === 2, String(pCusto.requisitos.length));
+  ok("P5  ZERO query adicional — a colecao e derivada",
+    chamadas.length === 6, `${chamadas.length} · ${tabelas()}`);
+  ok("P6  a ordem e a mesma de sempre: plataforma, depois recurso",
+    JSON.stringify(pCusto.requisitos.map((r) => r.recurso)) ===
+      JSON.stringify(["chat", "pedidos"]),
+    pCusto.requisitos.map((r) => r.recurso).join(", "));
+  ok("P7  e cada par aparece UMA vez — o dedupe continua valendo",
+    new Set(pCusto.requisitos.map((r) => `${r.plataforma}/${r.recurso}`)).size ===
+      pCusto.requisitos.length);
+  ok("P8  nenhuma credencial na colecao",
+    !/token|secret|senha|credencial/i.test(JSON.stringify(pCusto.requisitos)));
+  ok("P9  cada entrada tem EXATAMENTE os cinco campos publicados",
+    JSON.stringify(Object.keys(pCusto.requisitos[0] ?? {}).sort()) ===
+      JSON.stringify(["lojaIdSelecionada", "obrigatoria", "plataforma", "recurso", "utilizavel"]),
+    Object.keys(pCusto.requisitos[0] ?? {}).join(", "));
+
+  // Falha de coleta nao publica requisito nenhum.
+  roteiro({ data: [assoc("s1")] }, { data: [linhaSkill("s1")] }, { error: { code: "42501" } });
+  const pFalha = await resolverConexoesDoAgente(AG);
+  ok("P10 coleta de falha -> `requisitos` vazio, nunca parcial",
+    pFalha.coleta === "falha_leitura" && pFalha.requisitos.length === 0);
 
   console.log(`\n══ ${passou} PASS / ${falhou} FAIL ══\n`);
   process.exitCode = falhou === 0 ? 0 : 1;

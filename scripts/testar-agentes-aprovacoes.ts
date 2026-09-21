@@ -813,9 +813,53 @@ secao("N. A persistencia respeita a fronteira de confianca");
   ok("N1  e server-only", /^import "server-only";/m.test(PERS));
   ok("N2  usa o agregador como autoridade da conexao utilizavel",
     /import \{ resolverConexoesDoAgente \}/.test(PERS));
-  ok("N3  e a selecao apenas para o alvo concreto",
-    /import \{ resolverSelecoesDoAgente \}/.test(PERS) &&
-      /selecao\.lojaId/.test(PERS));
+  // Ate a M2-I1-A1 o alvo vinha de uma SEGUNDA leitura, direto da
+  // selecao crua. Nao vem mais, e a razao nao foi custo: `agente_conexoes`
+  // nao tem invariante de banco ligando `plataforma` ao marketplace da
+  // loja, entao a selecao crua responde "qual loja o dono apontou" e nada
+  // mais — podia apontar para conta de outro provedor, e o congelamento da
+  // aprovacao guardaria justamente a conta que a camada de fatos recusou.
+  //
+  // O `lojaId` agora vem de `bindings`, que ja nasce reconciliado com o
+  // fato. Uma autoridade so, e nao duas que precisariam concordar.
+  ok("N3  o alvo vem do BINDING validado, nunca da selecao crua",
+    /resolvido\.bindings\.find\(/.test(PERS) && /binding\.lojaId/.test(PERS) &&
+      !/selecao\.lojaId/.test(PERS));
+  ok("N3a e a segunda leitura de selecao NAO existe mais",
+    !/resolverSelecoesDoAgente/.test(PERS));
+  ok("N3b o binding e procurado pelo par EXATO, nunca so por plataforma",
+    /b\.plataforma === requisito\.plataforma && b\.recurso === requisito\.recurso/.test(PERS));
+  ok("N3c sem binding, recusa fechada ANTES de avaliar o fato",
+    /if \(binding === undefined\) return \{ codigo: "conexao_indisponivel" \};/.test(PERS));
+
+  // ── M2-I1-A3: a cobertura remota entra entre o binding e o fato ──
+  //
+  // A ordem e o ponto. Sem binding nao ha conta contra a qual provar, e
+  // perguntar ao provider antes disso gastaria rede para descobrir algo
+  // que a selecao ja respondia. Depois do `conexaoServe` seria tarde: o
+  // fato ja teria sido julgado com a cobertura constante.
+  ok("N3d a cobertura remota e chamada UMA vez",
+    (PERS.match(/confirmarCoberturaDosFatos\(/g) ?? []).length === 1,
+    String((PERS.match(/confirmarCoberturaDosFatos\(/g) ?? []).length));
+  ok("N3e e ela fica DEPOIS do binding e ANTES do conexaoServe",
+    PERS.indexOf("resolvido.bindings.find(") <
+      PERS.indexOf("confirmarCoberturaDosFatos(") &&
+    PERS.indexOf("confirmarCoberturaDosFatos(") < PERS.indexOf("conexaoServe(fato)"));
+  ok("N3f o fato julgado e o ELEVADO, nunca o cru",
+    /const fato = elevados\.conexoes\.find\(/.test(PERS) &&
+      !/const fato = resolvido\.conexoes\.find\(/.test(PERS));
+  ok("N3g o `acesso` vem do CATALOGO, amarrando o HARD BOUND de leitura",
+    /resolverAlvo\(userId, agenteId, requisito, definicao\.acesso\)/.test(PERS) &&
+      (PERS.match(/resolverAlvo\(userId, agenteId, requisito, definicao\.acesso\)/g) ?? [])
+        .length === 2);
+  ok("N3h a persistencia continua sem endpoint, token ou Authorization",
+    !/mercadolibre|Authorization|accessToken|getMLLojaById/.test(PERS));
+  ok("N3i o alvo so e congelado DEPOIS de tudo isso",
+    PERS.indexOf("conexaoServe(fato)") <
+      PERS.indexOf("return { plataforma: requisito.plataforma"));
+  ok("N3j CONTROLE: a sonda de N3f acha o padrao antigo quando ele existe",
+    /const fato = resolvido\.conexoes\.find\(/.test(
+      "  const fato = resolvido.conexoes.find((c) => c);"));
   ok("N4  NAO reimplementa a composicao do agregador",
     !/resolverFatosConexao|resolverSkillsDoAgente/.test(PERS));
 
