@@ -22,8 +22,20 @@
  * ignorar ensinaria o cliente a mandar, e um dia alguem leria.
  *
  * O chamador diz O QUE quer (`acao`), para QUAL agente, com quais
- * argumentos de dominio, e qual e a execucao dele (`executionId`). O
- * resto e do CDS.
+ * argumentos de dominio, qual e a execucao dele (`executionId`) e qual e
+ * a INTENCAO dele (`operationId`). O resto e do CDS.
+ *
+ * ── `executionId` e `operationId` sao coisas diferentes — M2-I1-A8B ──
+ *
+ * `executionId` identifica UMA execucao do orquestrador. Serve para
+ * correlacionar, e muda a cada disparo.
+ *
+ * `operationId` identifica a INTENCAO. Quem orquestra promete mante-lo
+ * estavel enquanto o pedido for o mesmo — um retry de transporte repete
+ * o `operationId` e ganha `executionId` novo — e troca-lo quando for
+ * outro pedido. E dele, e so dele, que a chave de idempotencia e
+ * derivada. Nenhum dos dois e aceito como `idempotencyKey` pronta: a
+ * chave final continua sendo montada no servidor.
  *
  * ── SINCRONA, sem tarefa ────────────────────────────────────────────
  *
@@ -39,7 +51,11 @@
  */
 import { NextResponse } from "next/server";
 
-import { chaveDeIdempotencia, resolverAcao } from "@/lib/agentes/acoes/catalogo";
+import {
+  chaveDeIdempotencia,
+  resolverAcao,
+  type ContratoDeAcao,
+} from "@/lib/agentes/acoes/catalogo";
 import { lerAgenteParaAcaoInterna } from "@/lib/agentes/capability-worker";
 import { executarFuncao } from "@/lib/agentes/execucao-funcoes/executar";
 
@@ -65,14 +81,24 @@ const PROVEDOR = "n8n";
  */
 const LIMITE_EXECUTION_ID = 128;
 
+/**
+ * Teto do `operationId`.
+ *
+ * Mesmo numero e mesma razao do `executionId`: um valor absurdamente
+ * longo e sinal de que algo errado esta sendo ecoado para dentro.
+ */
+const LIMITE_OPERATION_ID = 128;
+
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** As QUATRO chaves aceitas, e nenhuma outra. */
-const CHAVES_DO_CORPO = ["acao", "agenteId", "argumentos", "executionId"] as const;
-
-/** As chaves de ARGUMENTO aceitas para toda acao desta versao. A regra de
- *  dominio continua em `validarFiltroPerguntas`, dentro da Funcao. */
-const CHAVES_DOS_ARGUMENTOS = ["deslocamento", "limite", "status"] as const;
+/** As CINCO chaves aceitas, e nenhuma outra. */
+const CHAVES_DO_CORPO = [
+  "acao",
+  "agenteId",
+  "argumentos",
+  "executionId",
+  "operationId",
+] as const;
 
 function responder(corpo: unknown, status: number): NextResponse {
   return NextResponse.json(corpo, {
@@ -87,17 +113,41 @@ type LeituraCorpo =
       acao: string;
       agenteId: string;
       executionId: string;
+      operationId: string;
       argumentos: Record<string, unknown>;
     }
   | { ok: false };
+
+/**
+ * As chaves de `argumentos` sao as da ACAO, e so elas.
+ *
+ * Fechado nos dois sentidos, e por ACAO — nunca pela uniao das acoes.
+ * Uma lista global deixaria `dataInicio` passar em `consultar_perguntas`
+ * so porque vendas precisa dela, e seria por essa fresta que um campo de
+ * outra Funcao entraria sem ninguem notar.
+ *
+ * O que vale aqui e QUAIS chaves viajam. Se o VALOR serve — data no
+ * calendario, janela de 14 dias, status conhecido — quem decide e o
+ * validador da Funcao, e a resposta dele vira `entrada_invalida`, nao 400.
+ */
+function argumentosAceitos(
+  contrato: ContratoDeAcao,
+  argumentos: Record<string, unknown>
+): boolean {
+  for (const chave of Object.keys(argumentos)) {
+    if (!contrato.argumentos.includes(chave)) return false;
+  }
+  return true;
+}
 
 /**
  * Le e valida a FORMA do corpo. Nao valida acao, agente nem argumento de
  * dominio — isso e autoridade de camadas abaixo, e acontece depois.
  *
  * Fechado nos dois sentidos: falta chave, sobra chave, ou tipo errado, e
- * 400. `argumentos` tambem e fechado, e e por ele que `lojaId` seria
- * tentado.
+ * 400. As CHAVES de `argumentos` nao sao conferidas aqui: elas dependem
+ * da acao, que so e resolvida depois. `argumentos` ainda precisa ser um
+ * objeto simples — e e por ele que `lojaId` seria tentado.
  */
 async function lerCorpo(request: Request): Promise<LeituraCorpo> {
   let bruto: unknown;
@@ -126,12 +176,22 @@ async function lerCorpo(request: Request): Promise<LeituraCorpo> {
     return { ok: false };
   }
 
+  // ── `operationId`: a identidade da INTENCAO ─────────────────────────
+  //
+  // Recusa espaco nas pontas em vez de aparar. Aparar faria `" OP-A"` e
+  // `"OP-A"` virarem a MESMA chave em silencio, e quem mandasse o
+  // primeiro acharia que mandou o segundo. Duas grafias de uma chave de
+  // idempotencia e exatamente o defeito que ela existe para nao ter.
+  const operationId = o.operationId;
+  if (typeof operationId !== "string") return { ok: false };
+  if (operationId !== operationId.trim()) return { ok: false };
+  if (operationId.length === 0 || operationId.length > LIMITE_OPERATION_ID) {
+    return { ok: false };
+  }
+
   const argumentos = o.argumentos;
   if (typeof argumentos !== "object" || argumentos === null || Array.isArray(argumentos)) {
     return { ok: false };
-  }
-  for (const chave of Object.keys(argumentos)) {
-    if (!(CHAVES_DOS_ARGUMENTOS as readonly string[]).includes(chave)) return { ok: false };
   }
 
   return {
@@ -139,6 +199,7 @@ async function lerCorpo(request: Request): Promise<LeituraCorpo> {
     acao: o.acao,
     agenteId: o.agenteId,
     executionId,
+    operationId,
     // Copia campo a campo: ausente continua AUSENTE. Preencher com `null`
     // mandaria a Funcao recusar um valor que ninguem pediu.
     argumentos: { ...(argumentos as Record<string, unknown>) },
@@ -270,8 +331,16 @@ export async function POST(request: Request) {
     if (!corpo.ok) return responder({ ok: false, erro: "corpo_invalido" }, 400);
 
     // ── A ACAO vira Funcao aqui, e so aqui ──────────────────────────
-    const funcaoId = resolverAcao(corpo.acao);
-    if (funcaoId === null) return responder({ ok: false, erro: "acao_desconhecida" }, 400);
+    //
+    // O contrato vem inteiro: para onde a acao traduz E o que ela aceita.
+    // As duas metades andam juntas de proposito — resolver a Funcao sem
+    // aplicar o filtro dela seria executar com argumentos de outra acao.
+    const contrato = resolverAcao(corpo.acao);
+    if (contrato === null) return responder({ ok: false, erro: "acao_desconhecida" }, 400);
+
+    if (!argumentosAceitos(contrato, corpo.argumentos)) {
+      return responder({ ok: false, erro: "corpo_invalido" }, 400);
+    }
 
     // ── O DONO vem do BANCO ─────────────────────────────────────────
     const { agente, erro } = await lerAgenteParaAcaoInterna(corpo.agenteId);
@@ -287,13 +356,15 @@ export async function POST(request: Request) {
     const resultado = await executarFuncao({
       userId: agente.userId,
       agenteId: agente.agenteId,
-      funcaoId,
+      funcaoId: contrato.funcaoId,
       argumentos: corpo.argumentos,
-      // Derivada no SERVIDOR. A chave crua do orquestrador nunca vira
-      // namespace de dominio.
+      // Derivada no SERVIDOR, a partir do `operationId` — a identidade da
+      // INTENCAO. A chave crua do orquestrador nunca vira namespace de
+      // dominio, e o `executionId` NAO entra aqui: ele muda a cada
+      // disparo, e um retry de transporte nasceria com chave nova.
       idempotencyKey: chaveDeIdempotencia(
         PROVEDOR,
-        corpo.executionId,
+        corpo.operationId,
         corpo.acao,
         agente.agenteId
       ),

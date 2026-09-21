@@ -76,6 +76,11 @@ const SECRET_ACCESS_A8 = "SECRET_ACCESS_A8";
 const SECRET_REFRESH_A8 = "SECRET_REFRESH_A8";
 const ID_ML = "mercadolivre.perguntas.listar";
 const ACAO = "consultar_perguntas";
+/** M2-I1-A8B: a segunda acao. `vendas.consultar` tem `conexaoNecessaria:
+ *  null`, e e por isso que ela serve de caminho de prova de idempotencia
+ *  sem binding e sem marketplace. */
+const ID_VENDAS = "vendas.consultar";
+const ACAO_VENDAS = "consultar_vendas";
 const FUTURO = "2099-12-31T23:59:59.000Z";
 
 // ─── Armazem em memoria ───────────────────────────────────────────────
@@ -383,11 +388,36 @@ const req = (corpo: unknown, segredo: string | null = SEGREDO) =>
     body: typeof corpo === "string" ? corpo : JSON.stringify(corpo),
   });
 
-const corpoValido = (extra: Record<string, unknown> = {}, execId = "exec-1") => ({
+/**
+ * O corpo padrao. `execId` e `opId` sao parametros SEPARADOS de proposito
+ * — M2-I1-A8B: a suite precisa poder variar um sem o outro, que e
+ * exatamente a distincao que a fase A8B introduziu. Repetir `opId` com
+ * `execId` novo e replay; trocar `opId` e intencao nova.
+ */
+const corpoValido = (
+  extra: Record<string, unknown> = {},
+  execId = "exec-1",
+  opId = "op-1"
+) => ({
   agenteId: AGENTE_A,
   acao: ACAO,
   argumentos: { status: "UNANSWERED", limite: 20, deslocamento: 0 },
   executionId: execId,
+  operationId: opId,
+  ...extra,
+});
+
+/** Corpo da acao de VENDAS, com o contrato de argumentos dela. */
+const corpoVendas = (
+  extra: Record<string, unknown> = {},
+  execId = "exec-v1",
+  opId = "op-v1"
+) => ({
+  agenteId: AGENTE_A,
+  acao: ACAO_VENDAS,
+  argumentos: { dataInicio: "2027-01-01", dataFim: "2027-01-01" },
+  executionId: execId,
+  operationId: opId,
   ...extra,
 });
 
@@ -433,9 +463,44 @@ async function main(): Promise<void> {
   secao("B. O catalogo de acoes");
 
   ok("N8N-BRIDGE-3 a acao conhecida mapeia para a Funcao EXATA",
-    resolverAcao(ACAO) === ID_ML);
-  ok("N8N-BRIDGE-3a e ha exatamente UMA acao registrada",
-    JSON.stringify(acoesRegistradas()) === JSON.stringify([ACAO]));
+    resolverAcao(ACAO)?.funcaoId === ID_ML);
+  // MUT-9: a acao de vendas tem de resolver `vendas.consultar`, e nao
+  // qualquer outra — trocar o alvo aqui executaria a Funcao errada com
+  // os argumentos certos, que e o pior desfecho possivel.
+  ok("N8N-BRIDGE-3g `consultar_vendas` mapeia para `vendas.consultar`",
+    resolverAcao(ACAO_VENDAS)?.funcaoId === ID_VENDAS);
+  ok("N8N-A8B-MUT-9 CONTROLE NEGATIVO: as duas acoes nao apontam para a mesma Funcao",
+    resolverAcao(ACAO)?.funcaoId !== resolverAcao(ACAO_VENDAS)?.funcaoId);
+  // ANTI-VACUIDADE: conjunto EXATO, nunca `includes` nem `>= 2`. Uma
+  // terceira acao que ninguem revisou reprova aqui.
+  ok("N8N-BRIDGE-3a e ha exatamente DUAS acoes registradas",
+    JSON.stringify([...acoesRegistradas()].sort()) ===
+      JSON.stringify([ACAO_VENDAS, ACAO].sort()));
+  ok("N8N-BRIDGE-3h CONTROLE NEGATIVO: o oraculo reprova uma acao a mais",
+    JSON.stringify([...acoesRegistradas(), "consultar_anuncios"].sort()) !==
+      JSON.stringify([ACAO_VENDAS, ACAO].sort()));
+
+  // ─── Contratos de argumento, por acao ───────────────────────────────
+  //
+  // MUT-11/MUT-12: o cruzamento e o defeito que esta separacao existe
+  // para impedir. Uma whitelist global seria a UNIAO das duas listas, e
+  // `dataInicio` passaria em `consultar_perguntas` sem que nada acusasse.
+  ok("N8N-BRIDGE-3d perguntas aceita EXATAMENTE status/limite/deslocamento",
+    JSON.stringify([...(resolverAcao(ACAO)?.argumentos ?? [])].sort()) ===
+      JSON.stringify(["deslocamento", "limite", "status"]));
+  ok("N8N-BRIDGE-3e vendas aceita EXATAMENTE dataInicio/dataFim/marketplace",
+    JSON.stringify([...(resolverAcao(ACAO_VENDAS)?.argumentos ?? [])].sort()) ===
+      JSON.stringify(["dataFim", "dataInicio", "marketplace"]));
+  ok("N8N-BRIDGE-3f os dois contratos sao DISJUNTOS",
+    (resolverAcao(ACAO)?.argumentos ?? []).every(
+      (k) => !(resolverAcao(ACAO_VENDAS)?.argumentos ?? []).includes(k)));
+  ok("N8N-A8B-MUT-10a nao existe whitelist GLOBAL de argumentos na rota",
+    !/CHAVES_DOS_ARGUMENTOS/.test(ROTA));
+  // MUT-10: se `vendas.consultar` passar a exigir conexao, o caminho de
+  // prova sem binding deixa de existir — em silencio.
+  ok("N8N-A8B-MUT-10b `vendas.consultar` segue com `conexaoNecessaria: null`",
+    /"vendas\.consultar":\s*Object\.freeze\(\{[\s\S]*?conexaoNecessaria:\s*null/
+      .test(semComentarios(ler("lib/agentes/funcoes/registry.ts"))));
   ok("N8N-BRIDGE-4 acao desconhecida nao resolve",
     resolverAcao("consultar_anuncios") === null);
   ok("N8N-MUT-10 chaves de PROTOTIPO nao resolvem acao",
@@ -451,6 +516,9 @@ async function main(): Promise<void> {
   ok("N8N-BRIDGE-3b a string da Funcao nao e redigitada no catalogo",
     /FUNCAO_ID as FUNCAO_PERGUNTAS_ML/.test(ler("lib/agentes/acoes/catalogo.ts")) &&
     !/"mercadolivre\.perguntas\.listar"/.test(CATALOGO));
+  ok("N8N-SEC-3a e a de vendas tambem vem por import, nao redigitada",
+    /FUNCAO_ID as FUNCAO_VENDAS/.test(ler("lib/agentes/acoes/catalogo.ts")) &&
+    !/"vendas\.consultar"/.test(CATALOGO));
   {
     const r = await POST(corpoValido({ acao: "consultar_anuncios" }));
     ok("N8N-BRIDGE-4b a rota recusa acao desconhecida com 400", r.status === 400);
@@ -483,6 +551,53 @@ async function main(): Promise<void> {
     (await POST(corpoValido({}, "x".repeat(128)))).status !== 400);
   ok("N8N-BRIDGE-22b corpo que nao e objeto e 400",
     (await POST("[]")).status === 400 && (await POST("nao-json")).status === 400);
+
+  // ─── `operationId` — M2-I1-A8B ──────────────────────────────────────
+  //
+  // MUT-1/MUT-2/MUT-13. Obrigatorio e sem fallback: `operationId` ausente
+  // caindo em `executionId` produziria uma chave que PARECE idempotente e
+  // nunca deduplica — o modo de falha que so aparece sob Schedule.
+  ok("N8N-A8B-MUT-1 `operationId` ausente e 400",
+    (await POST({
+      agenteId: AGENTE_A, acao: ACAO, argumentos: {}, executionId: "exec-1",
+    })).status === 400);
+  ok("N8N-A8B-MUT-13 `operationId` vazio e 400",
+    (await POST(corpoValido({}, "exec-1", ""))).status === 400);
+  ok("N8N-A8B-MUT-13a `operationId` so com espaco e 400",
+    (await POST(corpoValido({}, "exec-1", "   "))).status === 400);
+  ok("N8N-A8B-MUT-13b `operationId` com espaco nas pontas e 400",
+    (await POST(corpoValido({}, "exec-1", " op-1 "))).status === 400);
+  ok("N8N-A8B-MUT-2 `operationId` acima de 128 caracteres e 400",
+    (await POST(corpoValido({}, "exec-1", "x".repeat(129)))).status === 400);
+  ok("N8N-A8B-MUT-2a e 128 exatos e aceito",
+    (await POST(corpoValido({}, "exec-1", "x".repeat(128)))).status !== 400);
+  ok("N8N-A8B-MUT-4 a rota NAO compoe a chave com `executionId`",
+    /chaveDeIdempotencia\(\s*PROVEDOR,\s*corpo\.operationId/.test(ROTA) &&
+    !/chaveDeIdempotencia\(\s*PROVEDOR,\s*corpo\.executionId/.test(ROTA));
+  ok("N8N-A8B-MUT-4a e NAO existe fallback `operationId ?? executionId`",
+    !/operationId\s*\?\?\s*(corpo\.)?executionId/.test(ROTA) &&
+    !/executionId\s*\?\?\s*(corpo\.)?operationId/.test(ROTA));
+  ok("N8N-BRIDGE-29 `executionId` continua obrigatorio, para correlacao",
+    (await POST({
+      agenteId: AGENTE_A, acao: ACAO, argumentos: {}, operationId: "op-1",
+    })).status === 400);
+
+  // ─── Cruzamento de argumentos entre acoes — MUT-11/MUT-12 ───────────
+  ok("N8N-A8B-MUT-11 `dataInicio` em consultar_perguntas e 400",
+    (await POST(corpoValido({ argumentos: { dataInicio: "2027-01-01" } }))).status === 400);
+  ok("N8N-A8B-MUT-11a `dataFim` em consultar_perguntas e 400",
+    (await POST(corpoValido({ argumentos: { dataFim: "2027-01-01" } }))).status === 400);
+  ok("N8N-A8B-MUT-11b `marketplace` em consultar_perguntas e 400",
+    (await POST(corpoValido({ argumentos: { marketplace: "ML" } }))).status === 400);
+  ok("N8N-A8B-MUT-12 `status` em consultar_vendas e 400",
+    (await POST(corpoVendas({ argumentos: { status: "UNANSWERED" } }))).status === 400);
+  ok("N8N-A8B-MUT-12a `limite` em consultar_vendas e 400",
+    (await POST(corpoVendas({ argumentos: { limite: 20 } }))).status === 400);
+  ok("N8N-A8B-MUT-12b `deslocamento` em consultar_vendas e 400",
+    (await POST(corpoVendas({ argumentos: { deslocamento: 0 } }))).status === 400);
+  ok("N8N-BRIDGE-30 ANTI-VACUIDADE: os argumentos proprios de cada acao NAO sao 400",
+    (await POST(corpoValido())).status !== 400 &&
+    (await POST(corpoVendas())).status !== 400);
 
   // ═══ D. Resolucao de dono ═══════════════════════════════════════════
   secao("D. O dono vem do banco");
@@ -556,15 +671,18 @@ async function main(): Promise<void> {
   }
 
   // ═══ F. Replay ══════════════════════════════════════════════════════
-  secao("F. Replay da mesma execucao");
+  secao("F. Replay da mesma INTENCAO");
 
   {
+    // MUT-5: mesmo `operationId`, `executionId` DIFERENTE. E o caso real
+    // de um retry de transporte — o orquestrador reenvia o mesmo pedido e
+    // o n8n gera uma execucao nova. Antes da A8B isto executava de novo.
     const aberturasAntes = aberturas();
     const perguntasAntes = conta("perguntas");
-    const r2 = await POST(corpoValido());
+    const r2 = await POST(corpoValido({}, "exec-OUTRA", "op-1"));
     const corpo2 = await r2.json();
 
-    ok("N8N-BRIDGE-14 replay devolve `already_processed`",
+    ok("N8N-A8B-MUT-5 replay da mesma intencao devolve `already_processed`",
       corpo2.estado === "already_processed" && corpo2.ok === true);
     ok("N8N-BRIDGE-23 e NAO cria segunda abertura",
       aberturas() === aberturasAntes && aberturasAntes === 1);
@@ -576,24 +694,44 @@ async function main(): Promise<void> {
       corpo2.requestId !== requestIdPrimeira);
   }
   {
-    // NAO-VACUIDADE: execucao diferente precisa executar de novo.
+    // MUT-6, NAO-VACUIDADE: intencao diferente PRECISA executar de novo.
+    // Sem este, "deduplicar tudo" passaria no assert anterior.
     const perguntasAntes = conta("perguntas");
-    const r3 = await POST(corpoValido({}, "exec-2"));
+    const r3 = await POST(corpoValido({}, "exec-2", "op-2"));
     const corpo3 = await r3.json();
-    ok("N8N-BRIDGE-24 `executionId` diferente executa normalmente",
+    ok("N8N-A8B-MUT-6 `operationId` diferente executa normalmente",
       corpo3.estado === "executada" && aberturas() === 2);
     ok("N8N-BRIDGE-24a e o provider foi chamado de novo",
       conta("perguntas") === perguntasAntes + 1);
   }
   {
-    const chave = chaveDeIdempotencia("n8n", "exec-1", ACAO, AGENTE_A);
+    // O inverso de MUT-5: `executionId` IGUAL com `operationId` diferente
+    // nao pode deduplicar. Prova que a identidade mudou de campo.
+    const perguntasAntes = conta("perguntas");
+    const r4 = await POST(corpoValido({}, "exec-1", "op-3"));
+    const corpo4 = await r4.json();
+    ok("N8N-A8B-MUT-4b `executionId` repetido NAO deduplica sozinho",
+      corpo4.estado === "executada" && conta("perguntas") === perguntasAntes + 1);
+  }
+  {
+    const chave = chaveDeIdempotencia("n8n", "op-1", ACAO, AGENTE_A);
     ok("N8N-MUT-9 a chave e DERIVADA no servidor, com prefixo de provedor",
-      chave === `n8n:exec-1:${ACAO}:${AGENTE_A}`);
+      chave === `n8n:op-1:${ACAO}:${AGENTE_A}`);
     ok("N8N-SEC-10 e a rota a deriva, nunca a recebe",
       /chaveDeIdempotencia\(/.test(ROTA) && !/idempotencyKey:\s*corpo\./.test(ROTA));
     const gravada = tabela("agente_funcao_chamadas").find((l) => l.fase === "abertura");
     ok("N8N-SEC-10a e ela foi de fato gravada na abertura",
       gravada?.idempotency_key === chave);
+
+    // MUT-7 e MUT-8: o mesmo `operationId` em OUTRO agente ou em OUTRA
+    // acao NAO pode colidir. Se colidisse, um workflow bloquearia o
+    // trabalho de outro agente — falha cruzada entre donos.
+    ok("N8N-A8B-MUT-7 mesmo operationId em agente diferente da chave diferente",
+      chaveDeIdempotencia("n8n", "op-1", ACAO, "outro-agente") !== chave);
+    ok("N8N-A8B-MUT-8 mesmo operationId em acao diferente da chave diferente",
+      chaveDeIdempotencia("n8n", "op-1", ACAO_VENDAS, AGENTE_A) !== chave);
+    ok("N8N-A8B-MUT-8a e provedor diferente tambem nao colide",
+      chaveDeIdempotencia("outro", "op-1", ACAO, AGENTE_A) !== chave);
   }
 
   // ═══ G. Aprovacao e negacao ═════════════════════════════════════════
@@ -649,7 +787,7 @@ async function main(): Promise<void> {
   ok("N8N-SEC-9 ela chama `executarFuncao`, e so",
     /executarFuncao\(/.test(ROTA));
   ok("N8N-MUT-1 nao ha `funcaoId` vindo do corpo",
-    !/corpo\.funcaoId|o\.funcaoId/.test(ROTA));
+    !/corpo\.funcaoId|o\.funcaoId/.test(ROTA));
   ok("N8N-SEC-4 nem `userId`",
     !/corpo\.userId|o\.userId/.test(ROTA) && /agente\.userId/.test(ROTA));
   ok("N8N-SEC-7 a ponte nao resolve credencial nem token",
