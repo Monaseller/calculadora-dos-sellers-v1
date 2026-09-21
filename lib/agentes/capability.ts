@@ -103,6 +103,9 @@ export const STATUS_DE_SINAL_ABERTO: readonly string[] = [
  *  aponta para um agente que nao existe OU que e de outro dono — o
  *  Postgres nao distingue os dois casos, e nos tambem nao devemos. */
 const SQLSTATE_VIOLACAO_FK = "23503";
+/** Violacao de UNIQUE. Relatada como `conflito_unico`, sem interpretacao
+ *  — ver o comentario em `criarTarefa`. */
+const SQLSTATE_VIOLACAO_UNICA = "23505";
 
 // ─── Construtores de filtro ───────────────────────────────────────────
 //
@@ -356,6 +359,25 @@ export async function criarTarefa(
   if (error) {
     if ((error as { code?: string })?.code === SQLSTATE_VIOLACAO_FK) {
       return { linha: null, erro: "agente_inexistente_ou_de_outro_dono" };
+    }
+    // ── 23505: RELATO, nao INTERPRETACAO — M2-I1-A7 ─────────────────
+    //
+    // `criarTarefa` e generica e nao conhece indice nenhum. Ela diz o
+    // que o banco disse — "colidiu com um UNIQUE" — e para por aqui.
+    //
+    // Traduzir isso para "ja enfileirada" concederia a semantica de UM
+    // indice a QUALQUER violacao de unicidade, presente ou futura. Quem
+    // pode afirmar de qual indice veio e so quem conhece o predicado
+    // dele, e essa confirmacao se faz RELENDO a linha — o mesmo caminho
+    // de `lib/marketplace/credenciais.ts`, que ja trata "23505 sem linha
+    // visivel" como violacao de outro indice e falha fechada. Ver
+    // `lib/agentes/poller/perguntas.ts`.
+    //
+    // Os dois callers anteriores (`conversa` e `consultar_vendas`) nao
+    // ganham interpretacao nova: nenhum indice alcanca os tipos deles, e
+    // um valor de erro desconhecido ja e falha generica para os dois.
+    if ((error as { code?: string })?.code === SQLSTATE_VIOLACAO_UNICA) {
+      return { linha: null, erro: "conflito_unico" };
     }
     console.error("[agentes] falha ao criar tarefa");
     return { linha: null, erro: "erro_criacao_tarefa" };

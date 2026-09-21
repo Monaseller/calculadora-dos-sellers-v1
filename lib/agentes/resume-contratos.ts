@@ -46,6 +46,16 @@ import {
   TIPO_CONSULTAR_VENDAS,
   type EntradaConsultarVendas,
 } from "@/lib/agentes/handlers/consultar-vendas-contrato";
+// M2-I1-A7: o segundo tipo com continuacao propria. Importado do
+// CONTRATO, nunca do handler — este modulo precisa continuar puro, e o
+// handler arrasta o executor consigo.
+import {
+  FUNCAO_ID as FUNCAO_ID_PERGUNTAS_ML,
+  lerEntradaConsultarPerguntasML,
+  mapearResultadoConsultarPerguntasML,
+  TIPO_CONSULTAR_PERGUNTAS_ML,
+  type EntradaConsultarPerguntasML,
+} from "@/lib/agentes/handlers/consultar-perguntas-ml-contrato";
 
 /**
  * O contrato de UM tipo de tarefa.
@@ -80,6 +90,22 @@ export interface ContratoResume<TEntrada> {
  * `EntradaConsultarVendas` preservada nas duas pontas.
  */
 const CONTRATOS = {
+  // M2-I1-A7 — polling de perguntas do Mercado Livre.
+  //
+  // Este contrato e OBRIGATORIO mesmo o produtor do polling so
+  // enfileirar quando a permissao esta em `automatico`: a permissao
+  // pode mudar entre o enfileiramento e a execucao, e nessa corrida o
+  // guard produz `aguardando_aprovacao`. Sem contrato, a aprovacao
+  // nasceria sem continuacao conhecida.
+  //
+  // Registrar o contrato NAO liga a retomada: `resolverContratoResume`
+  // continua sem caller de producao. As duas coisas sao separadas de
+  // proposito, e a segunda e outro slice.
+  [TIPO_CONSULTAR_PERGUNTAS_ML]: {
+    funcaoId: FUNCAO_ID_PERGUNTAS_ML,
+    prepararEntrada: lerEntradaConsultarPerguntasML,
+    continuarAposFuncao: mapearResultadoConsultarPerguntasML,
+  } satisfies ContratoResume<EntradaConsultarPerguntasML>,
   [TIPO_CONSULTAR_VENDAS]: {
     funcaoId: FUNCAO_ID,
     prepararEntrada: lerEntradaConsultarVendas,
@@ -113,6 +139,97 @@ export type ContratoResumeConhecido = (typeof CONTRATOS)[TipoComContratoResume];
 export function resolverContratoResume(tipo: string): ContratoResumeConhecido | null {
   if (!Object.prototype.hasOwnProperty.call(CONTRATOS, tipo)) return null;
   return CONTRATOS[tipo as TipoComContratoResume];
+}
+
+
+// ─── O acesso CORRELACIONADO ─────────────────────────────────────────
+
+/**
+ * Uma retomada com a entrada JA preparada.
+ *
+ * ── Por que esta forma existe ───────────────────────────────────────
+ *
+ * `resolverContratoResume` devolve a UNIAO dos contratos. Quem a segura
+ * prepara a entrada num ponto e continua noutro, com a execucao da
+ * Funcao no meio — e o TypeScript nao tem como saber que a entrada veio
+ * do MESMO ramo do contrato. Ele entao exige, na continuacao, o
+ * parametro que serve a TODOS os membros: a intersecao. Nenhuma entrada
+ * real satisfaz isso, e o consumidor deixa de compilar.
+ *
+ * A correlacao e feita AQUI, onde cada contrato ainda e concreto. O que
+ * sai e uma continuacao ja amarrada — ao contrato certo e a entrada
+ * certa, pela mesma closure.
+ *
+ * ── A entrada NAO e exposta, e isso e o ponto ───────────────────────
+ *
+ * Sem `entrada` neste tipo, nao existe estado representavel em que uma
+ * entrada de vendas conviva com o contrato de perguntas. A combinacao
+ * errada deixa de ser um erro a evitar e passa a ser algo que nao ha
+ * como escrever.
+ */
+export interface RetomadaPreparada {
+  /** A Funcao daquele tipo. Mesma constante do contrato. */
+  readonly funcaoId: string;
+  /** A continuacao, fechada sobre o contrato e a entrada preparada. */
+  readonly continuar: (
+    resultado: ResultadoExecucaoFuncao
+  ) => Record<string, unknown>;
+}
+
+/**
+ * Prepara a entrada e amarra a continuacao.
+ *
+ * Generico de proposito: `T` so e inferido quando o chamador passa um
+ * contrato CONCRETO. Chamar isto com a uniao nao compila — e nao e
+ * limitacao, e a propria garantia funcionando.
+ *
+ * Nao reimplementa nada: `prepararEntrada` e `continuarAposFuncao` sao
+ * as MESMAS referencias do contrato, chamadas daqui.
+ */
+function preparado<T>(contrato: ContratoResume<T>, bruta: unknown): RetomadaPreparada {
+  const entrada = contrato.prepararEntrada(bruta);
+  return {
+    funcaoId: contrato.funcaoId,
+    continuar: (resultado: ResultadoExecucaoFuncao) =>
+      contrato.continuarAposFuncao(resultado, entrada),
+  };
+}
+
+/**
+ * Resolve o contrato de um tipo E ja prepara a entrada.
+ *
+ * FAIL-CLOSED como `resolverContratoResume`: tipo desconhecido devolve
+ * `null`, nunca um preparo generico de reserva.
+ *
+ * `prepararEntrada` pode LANCAR — `ErroEntradaTarefa` para argumento
+ * fora do contrato. A excecao ATRAVESSA, porque quem chama ja a trata:
+ * engoli-la aqui transformaria argumento invalido em tipo desconhecido,
+ * que sao coisas diferentes e pedem respostas diferentes.
+ *
+ * ── O switch e sobre a CHAVE, nao sobre o contrato ──────────────────
+ *
+ * `contrato.funcaoId` NAO discrimina: a interface o declara `string`, e
+ * o tipo contextual do `satisfies` alarga a literal. Um
+ * `switch (contrato.funcaoId)` compila e nao estreita nada — medido.
+ * A chave da tabela, essa sim, e literal.
+ */
+export function prepararRetomada(tipo: string, bruta: unknown): RetomadaPreparada | null {
+  if (!Object.prototype.hasOwnProperty.call(CONTRATOS, tipo)) return null;
+
+  const chave = tipo as TipoComContratoResume;
+  switch (chave) {
+    case TIPO_CONSULTAR_VENDAS:
+      return preparado(CONTRATOS[TIPO_CONSULTAR_VENDAS], bruta);
+    case TIPO_CONSULTAR_PERGUNTAS_ML:
+      return preparado(CONTRATOS[TIPO_CONSULTAR_PERGUNTAS_ML], bruta);
+    default: {
+      // Exaustividade real: um tipo novo em `CONTRATOS` sem `case` aqui
+      // deixa de compilar. E o que impede a tabela e este acesso de
+      // divergirem em silencio.
+      const _exaustivo: never = chave;
+      return _exaustivo;
+    }
+  }
 }
 
 /** Os tipos registrados, para inventario e para as suites. Copia, para

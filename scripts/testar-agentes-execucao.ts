@@ -352,10 +352,13 @@ async function main() {
   // NOMEADO — nao virou `includes`, nao virou piso `>= 4`, nao virou
   // wildcard. Continua reprovando tipo A MENOS, A MAIS e TROCADO, que e
   // a unica forma de um registry novo nao passar despercebido.
-  const TIPOS_ESPERADOS = "analise_vendas,consultar_vendas,conversa,teste_fundacao";
+  // M2-I1-A7: o QUINTO tipo. `consultar_perguntas_ml` e o primeiro tipo
+  // de tarefa criado por gatilho automatico (o poller), e nao por acao do
+  // dono. O conjunto continua NOMINAL e fechado nos dois sentidos.
+  const TIPOS_ESPERADOS = "analise_vendas,consultar_perguntas_ml,consultar_vendas,conversa,teste_fundacao";
   const uniaoDeTipos = (tipos: readonly string[]) => [...tipos].sort().join(",");
-  ok("E2  exatamente 4 tipos registrados", TIPOS_REGISTRADOS.length === 4);
-  ok("E3  os tipos sao teste_fundacao, analise_vendas, conversa e consultar_vendas",
+  ok("E2  exatamente 5 tipos registrados", TIPOS_REGISTRADOS.length === 5);
+  ok("E3  os cinco tipos sao exatamente os nominais",
      uniaoDeTipos(TIPOS_REGISTRADOS) === TIPOS_ESPERADOS);
   ok("E3a CONTROLE NEGATIVO: o oraculo reprova tipo A MENOS",
      uniaoDeTipos(["analise_vendas", "conversa", "teste_fundacao"]) !== TIPOS_ESPERADOS);
@@ -366,7 +369,8 @@ async function main() {
      uniaoDeTipos(["analise_vendas", "consultar_venda", "conversa", "teste_fundacao"]) !==
        TIPOS_ESPERADOS);
   ok("E3d o oraculo aprova o conjunto certo em ordem embaralhada",
-     uniaoDeTipos(["conversa", "consultar_vendas", "teste_fundacao", "analise_vendas"]) ===
+     uniaoDeTipos(["conversa", "consultar_vendas", "consultar_perguntas_ml",
+                   "teste_fundacao", "analise_vendas"]) ===
        TIPOS_ESPERADOS);
   // O tipo novo nao pode existir so na allowlist: a constante do handler
   // e a chave do registry tem de ser a MESMA string.
@@ -807,7 +811,7 @@ async function main() {
   ok("M21 o executor consome a fabrica", /resolverHandler\(tarefa\.tipo\)/.test(exe2) && /construirHandler\(tarefa\.user_id\)/.test(exe2));
   ok("M22 o executor ainda chama handler(contexto, relatarProgresso)",
      /await handler\(contexto, relatarProgresso\)/.test(exe2));
-  ok("M23 exatamente 4 handlers registrados", TIPOS_REGISTRADOS.length === 4);
+  ok("M23 exatamente 5 handlers registrados", TIPOS_REGISTRADOS.length === 5);
 
   // ═══ N. WIRING DE TENANT — AGENTES-FASE1D-d ═══════════════════════
   console.log("N. Wiring de tenant");
@@ -1903,10 +1907,18 @@ async function main() {
       migsD4.includes(NOME_D5) && migsD4.indexOf(NOME_D5) < migsD4.indexOf(NOME_D5C2));
     ok("U14a2 a D5-C2 existe com o nome EXATO e precede a ultima",
       migsD4.includes(NOME_D5C2) && migsD4.indexOf(NOME_D5C2) < migsD4.indexOf(NOME_D5C3P0));
-    ok("U14a3 a D5-C3-P0 existe com o nome EXATO e e a ultima do disco",
-      migsD4.includes(NOME_D5C3P0) && migsD4[migsD4.length - 1] === NOME_D5C3P0);
+    // M2-I1-A7 reconciliado: a D5-C3-P0 deixou de ser a ultima do disco,
+    // porque o polling trouxe o indice parcial de dedupe. A CADEIA e o que
+    // importa, e ela continua provada elo a elo — D4 < D5 < D5-C2 < D5-C3-P0
+    // < A7 —, com a ultima posicao agora afirmada nominalmente.
+    const NOME_A7_POLLING = "20261008_agente_tarefas_polling_perguntas_unica.sql";
+    ok("U14a3 a D5-C3-P0 existe com o nome EXATO e precede a do polling",
+      migsD4.includes(NOME_D5C3P0) &&
+      migsD4.indexOf(NOME_D5C3P0) < migsD4.indexOf(NOME_A7_POLLING));
+    ok("U14a4 e a migration do polling A7 e a ultima do disco",
+      migsD4.includes(NOME_A7_POLLING) && migsD4[migsD4.length - 1] === NOME_A7_POLLING);
     ok("U14b CONTROLE: uma migration posterior inesperada reprovaria",
-      [...migsD4, "20261008_migration_nao_declarada.sql"].sort().at(-1) !== NOME_D5C3P0);
+      [...migsD4, "20261009_migration_nao_declarada.sql"].sort().at(-1) !== NOME_A7_POLLING);
     ok("U14b2 CONTROLE: a fase ANTERIOR, com a D5-C2 no fim, agora reprova",
       migsD4[migsD4.length - 1] !== NOME_D5C2);
     // O prefixo identifica UM arquivo so, e o guard congela o nome

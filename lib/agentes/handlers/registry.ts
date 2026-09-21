@@ -64,6 +64,15 @@ import {
   criarHandlerConsultarVendas,
   TIPO_CONSULTAR_VENDAS,
 } from "@/lib/agentes/handlers/consultar-vendas";
+// M2-I1-A7: o SEGUNDO handler que executa uma Funcao, e o primeiro
+// acionado por gatilho automatico. Mesma forma do anterior — fabrica
+// sem capability de dados, porque quem alcanca a leitura e
+// `executarFuncao`, que resolve guard, cobertura, auditoria e Approval
+// por dentro.
+import {
+  criarHandlerConsultarPerguntasML,
+  TIPO_CONSULTAR_PERGUNTAS_ML,
+} from "@/lib/agentes/handlers/consultar-perguntas-ml";
 
 /**
  * Erro de tipo nao registrado. Classe propria para que o executor o
@@ -160,6 +169,20 @@ export const HANDLERS: Readonly<Record<string, ConstruirHandler>> = Object.freez
   // `ContextoTarefa` NAO foi ampliado: `agenteId` e `tarefaId` ja estao
   // la desde a 1C, e e so disso que este handler precisa.
   [TIPO_CONSULTAR_VENDAS]: (userId: string) => criarHandlerConsultarVendas(userId),
+
+  // M2-I1-A7 — a Funcao conectada, acionada por polling.
+  //
+  // O MESMO least-capability: o `userId` entra por closure, o ALVO
+  // (agente, tarefa) vem do contexto. O handler nao le `pedidos`, nao
+  // le `perguntas` e nao conhece Supabase.
+  //
+  // Requisito de AT-LEAST-ONCE satisfeito, verificado e nao suposto:
+  // `mercadolivre.perguntas.listar` e `acesso: "leitura"` e
+  // `idempotente: true` no registry de Funcoes. Executar duas vezes tem
+  // o mesmo efeito que executar uma — nenhuma pergunta e respondida,
+  // nenhum anuncio e alterado, nada e enviado.
+  [TIPO_CONSULTAR_PERGUNTAS_ML]: (userId: string) =>
+    criarHandlerConsultarPerguntasML(userId),
 });
 
 /** Tipos registrados, para diagnostico e para a suite. */

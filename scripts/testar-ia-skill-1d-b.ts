@@ -210,19 +210,79 @@ ok("F6  controle: a sonda de fallback acusa quando existe", /fallback/.test("con
 
 // ─── G. A primeira Funcao real ────────────────────────────────────────
 
-secao("G. `vendas.consultar` — leitura, autoridade por closure");
+secao("G. O catalogo real — duas Funcoes, nenhuma por posicao");
 
-ok("G1  exatamente 1 Funcao real", IDS.length === 1, IDS.join(", "));
-ok("G2  o id e `vendas.consultar`", IDS[0] === "vendas.consultar");
+// M2-I1-A2: eram assercoes de SINGLETON — `length === 1` e `IDS[0] ===
+// ...`. As duas deixaram de ser verdade quando a segunda Funcao entrou, e
+// a correcao nao e afrouxar: e parar de medir POSICAO. O conjunto nominal
+// prova mais do que o indice provava, e continua provando quando a
+// terceira Funcao chegar em qualquer ponto da ordenacao.
+const IDS_ESPERADOS = ["mercadolivre.perguntas.listar", "vendas.consultar"];
+ok("G1  o catalogo tem EXATAMENTE os ids publicados",
+  JSON.stringify([...IDS].sort()) === JSON.stringify([...IDS_ESPERADOS].sort()),
+  IDS.join(", "));
+ok("G1a e nenhuma assercao depende da ORDEM",
+  [...IDS].sort().every((id, i) => [...IDS_ESPERADOS].sort()[i] === id) &&
+    new Set(IDS).size === IDS.length);
+ok("G1b CONTROLE: um id a mais reprova",
+  JSON.stringify([...IDS, "intrusa.funcao"].sort()) !==
+    JSON.stringify([...IDS_ESPERADOS].sort()));
+ok("G1c CONTROLE: um id a menos reprova",
+  JSON.stringify([...IDS].sort().slice(1)) !== JSON.stringify([...IDS_ESPERADOS].sort()));
+ok("G2  `vendas.consultar` continua presente, seja qual for a posicao",
+  IDS.includes("vendas.consultar"));
+ok("G2a e `mercadolivre.perguntas.listar` tambem",
+  IDS.includes("mercadolivre.perguntas.listar"));
 ok("G3  usa a leitura de dominio, nao o handler de tarefa",
   /criarLeiturasDeVendas/.test(CODIGO) && !/criarHandlerAnaliseVendas/.test(CODIGO));
 ok("G4  nao importa handlers/", !/agentes\/handlers/.test(CODIGO));
-ok("G5  o contexto tem apenas userId",
-  /interface ContextoFuncao\s*\{\s*userId: string;\s*\}/s.test(CODIGO));
-ok("G6  o contexto NAO tem seller_id/shop_id/partner_id/token",
-  !/seller_id|shop_id|partner_id|access_token|loja_id/.test(
-    CODIGO.slice(CODIGO.indexOf("interface ContextoFuncao"), CODIGO.indexOf("ExecutorFuncao"))
-  ));
+// Ate a M2-I1 o contexto era `{ userId }` e este assert congelava isso
+// byte a byte. A M2-I1 o ampliou por DECISAO: uma Funcao conectada
+// precisa saber contra qual conta agir, e com varias contas do mesmo
+// marketplace no mesmo dono nao existe "a conta obvia". O que o assert
+// protegia — "nada de credencial atravessa" — continua cobrado, e agora
+// de forma ESTRUTURAL, campo a campo, em vez de por forma literal.
+const CORPO_CONTEXTO = CODIGO.slice(
+  CODIGO.indexOf("export interface ConexaoDoContexto"),
+  CODIGO.indexOf("export type ExecutorFuncao")
+);
+ok("G5  o contexto tem userId e a conexao, e nada alem",
+  /export interface ContextoFuncao \{\s*readonly userId: string;\s*readonly conexao: ConexaoDoContexto \| null;\s*\}/s
+    .test(CODIGO));
+ok("G5a a conexao tem exatamente plataforma, recurso e lojaId",
+  /export interface ConexaoDoContexto \{\s*readonly plataforma: string;\s*readonly recurso: string;\s*readonly lojaId: string;\s*\}/s
+    .test(CODIGO));
+ok("G5b `conexao` e `| null`, nunca opcional — esquecer o campo TEM de reprovar",
+  !/conexao\?:/.test(CORPO_CONTEXTO));
+ok("G5c ANCORA: o corpo dos dois contratos foi recortado",
+  CORPO_CONTEXTO.length > 200 && CORPO_CONTEXTO.includes("ContextoFuncao"));
+
+// O guarda de segredo, agora por VOCABULARIO fechado em vez de uma lista
+// de substrings escolhidas a mao. `lojaId` nao esta aqui de proposito: e
+// o UUID interno de `lojas`, vinculo e nao credencial — com ele sozinho
+// nao se chama API nenhuma.
+const PROIBIDOS_NO_CONTEXTO = [
+  "access_token", "accessToken", "refresh_token", "refreshToken",
+  "client_secret", "clientSecret", "partner_key", "partnerKey",
+  "seller_id", "sellerId", "shop_id", "shopId", "partner_id", "partnerId",
+  "senha", "credencial", "token",
+];
+const camposDoContexto = [...CORPO_CONTEXTO.matchAll(/readonly (\w+):/g)].map((m) => m[1]);
+ok("G6  nenhum campo do contexto e credencial ou identidade de provider",
+  camposDoContexto.length > 0 &&
+    !camposDoContexto.some((c) =>
+      PROIBIDOS_NO_CONTEXTO.some((p) => c.toLowerCase().includes(p.toLowerCase()))),
+  camposDoContexto.join(", "));
+ok("G6a os campos sao EXATAMENTE os quatro publicados",
+  JSON.stringify([...camposDoContexto].sort()) ===
+    JSON.stringify(["conexao", "lojaId", "plataforma", "recurso", "userId"].sort()),
+  camposDoContexto.join(", "));
+ok("G6b CONTROLE: a sonda acusa um campo de credencial",
+  ["userId", "accessToken"].some((c) =>
+    PROIBIDOS_NO_CONTEXTO.some((p) => c.toLowerCase().includes(p.toLowerCase()))));
+ok("G6c CONTROLE: e nao acusa os campos legitimos",
+  !["userId", "plataforma", "recurso", "lojaId", "conexao"].some((c) =>
+    PROIBIDOS_NO_CONTEXTO.some((p) => c.toLowerCase().includes(p.toLowerCase()))));
 ok("G7  contexto e argumentos sao parametros SEPARADOS",
   /\(\s*contexto: ContextoFuncao,\s*argumentos: unknown\s*\)/s.test(CODIGO));
 ok("G8  argumentos entram como `unknown`, sem cast confiante na assinatura",
@@ -267,11 +327,19 @@ ok("H11 nenhum arquivo novo em lib/ia/skills", readdirSync(join(RAIZ, "lib/ia/sk
 // aparecendo sem passar por gate proprio deve reprovar. A lista cresceu de um
 // para tres porque TOOL-REGISTRY-B1 autorizou explicitamente `guard.ts`
 // (decisao pura de autorizacao) e `sanitizar.ts` (projecao por allowlist).
-ok("H12 a pasta de funcoes tem exatamente os 3 modulos autorizados",
+// M2-I1-A2 autorizou o QUARTO: `mercadolivre-perguntas.ts`, com os tres
+// wrappers da primeira Funcao conectada. Ele saiu do registry porque o
+// bloco inline levaria o catalogo a ~640 linhas contra o tripwire J1 de
+// 560 — e a resposta a um alarme nao pode ser desligar o alarme.
+// `vendas.consultar` NAO foi movida: mexer num contrato congelado so para
+// arrumar a casa nao e razao suficiente.
+const MODULOS_FUNCOES = ["guard.ts", "mercadolivre-perguntas.ts", "registry.ts", "sanitizar.ts"];
+ok("H12 a pasta de funcoes tem exatamente os 4 modulos autorizados",
   JSON.stringify(readdirSync(join(RAIZ, "lib/agentes/funcoes")).sort()) ===
-    JSON.stringify(["guard.ts", "registry.ts", "sanitizar.ts"]));
+    JSON.stringify(MODULOS_FUNCOES),
+  readdirSync(join(RAIZ, "lib/agentes/funcoes")).sort().join(", "));
 ok("H12b controle: a comparacao e exata, nao 'contem'",
-  JSON.stringify(["guard.ts", "registry.ts"]) !== JSON.stringify(["guard.ts", "registry.ts", "sanitizar.ts"]));
+  JSON.stringify(["guard.ts", "registry.ts"]) !== JSON.stringify(MODULOS_FUNCOES));
 
 // ─── I. Seguranca ─────────────────────────────────────────────────────
 
@@ -313,7 +381,14 @@ secao("J. Tripwire de tamanho");
 // O limite sobe para continuar sendo alarme, nao carimbo: 500 deixa
 // pouca folga, e a proxima Funcao registrada volta a fazer alguem
 // decidir se o arquivo ainda cabe em si.
-const LIMITE = 500;
+//
+// M2-I1-A1: 500 -> 560. O que entrou nao foi Funcao nova — foi o
+// contrato de `ContextoFuncao` na forma Option B (`ConexaoDoContexto`
+// mais o campo `conexao`) e o docblock que explica por que uma Funcao
+// conectada precisa do vinculo e por que ele nao e credencial. A folga
+// volta a ser curta de proposito: a primeira Funcao de marketplace tera
+// de fazer alguem decidir de novo.
+const LIMITE = 560;
 const linhas = FONTE.split("\n").length;
 ok(`J1  registry abaixo de ${LIMITE} linhas (hoje ${linhas})`, linhas < LIMITE, String(linhas));
 ok("J2  controle: a contagem le o arquivo real", linhas > 50);

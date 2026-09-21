@@ -103,7 +103,7 @@ import {
   registrarHeartbeatRetomada,
   type CodigoRetomadaInicio,
 } from "@/lib/agentes/retomada/persistencia-retomada";
-import { resolverContratoResume } from "@/lib/agentes/resume-contratos";
+import { prepararRetomada, resolverContratoResume } from "@/lib/agentes/resume-contratos";
 import type { TipoErroTarefa } from "@/lib/agentes/tipos-execucao";
 
 // ─── Contrato de saida ────────────────────────────────────────────────
@@ -360,12 +360,19 @@ export async function executarRetomada(
   //
   // Se `prepararEntrada` recusar, nada foi consumido: sem aprovacao
   // gasta, sem Tool Call, sem tarefa movida.
-  let entradaPreparada;
+  // A preparacao e a continuacao vem AMARRADAS: `prepararRetomada` faz a
+  // correlacao onde o contrato ainda e concreto. Guardar entrada e
+  // contrato soltos, como antes, deixava de compilar com dois tipos
+  // registrados — a uniao nao correlaciona as duas pontas a distancia.
+  let preparada;
   try {
-    entradaPreparada = contrato.prepararEntrada(ap.argumentos);
+    preparada = prepararRetomada(tipoTarefa, ap.argumentos);
   } catch {
     return { tipo: "sem_inicio", motivo: "local_argumentos_invalidos" };
   }
+  // `contrato` ja foi resolvido acima; `null` aqui so aconteceria se as
+  // duas tabelas divergissem, o que a exaustividade impede.
+  if (preparada === null) return { tipo: "sem_inicio", motivo: "contrato_desconhecido" };
 
   // ── 7. So agora existe uma correlacao ──────────────────────────────
   //
@@ -539,7 +546,7 @@ export async function executarRetomada(
   let payload: Record<string, unknown> | null = null;
   let falha: { erroTipo: TipoErroTarefa; mensagem: string } | null = null;
   try {
-    payload = contrato.continuarAposFuncao(resultadoFuncao, entradaPreparada);
+    payload = preparada.continuar(resultadoFuncao);
   } catch (err) {
     falha = classificarFalha(resultadoFuncao, err);
   }

@@ -1,0 +1,52 @@
+-- M2-I1-A7 — uma tarefa ATIVA de polling de perguntas por agente.
+--
+-- ── O problema que este indice resolve ───────────────────────────────
+--
+-- O polling de perguntas nasce de um cron (`*/5 * * * *`) que enfileira
+-- tarefas. O worker dos agentes roda a cada minuto, com `maxDuration`
+-- de 300s e orcamento de 240s: invocacoes de cron SE SOBREPOEM por
+-- desenho — e por isso o claim de tarefa ja usa FOR UPDATE SKIP LOCKED.
+--
+-- Nessa condicao, um dedupe feito em TypeScript (ler, decidir, inserir)
+-- NAO e garantia: dois produtores concorrentes leem "nao ha tarefa
+-- ativa" antes de qualquer um dos dois inserir, e o agente consulta o
+-- Mercado Livre duas vezes. TypeScript nao roda em transacao; a
+-- garantia dura precisa estar no banco.
+--
+-- ── Por que a chave e (agente_id) e NAO (agente_id, tipo) ────────────
+--
+-- Com `tipo` na CHAVE, o indice passaria a valer para TODOS os tipos de
+-- tarefa, e a regra viraria "uma tarefa ativa por tipo por agente". As
+-- duas rotas que criam tarefa hoje — `conversa` e `consultar_vendas` —
+-- NAO impedem tarefa concorrente, e nenhuma delas consulta `pendente`
+-- ou `rodando` antes de criar. O efeito seria imediato e visivel: duas
+-- mensagens enviadas em sequencia no chat, e a segunda falhando com
+-- 23505.
+--
+-- Com `tipo` no PREDICADO, a regra fica confinada ao polling. Nenhum
+-- outro tipo — presente ou futuro — e alcancado.
+--
+-- Mesmo formato de `idx_sync_jobs_loja_ativo` (20260711_sync_jobs.sql),
+-- que existe pelo mesmo motivo: "nunca 2 jobs ativos para a mesma loja".
+--
+-- ── Por que `aguardando_aprovacao` entra nos status ativos ───────────
+--
+-- O produtor so enfileira quando a permissao esta em `automatico`, mas
+-- a permissao pode mudar entre o enfileiramento e a execucao. Nessa
+-- corrida o guard produz `aguardando_aprovacao`, e a tarefa fica viva,
+-- esperando decisao. Deixa-la de fora permitiria empilhar uma nova
+-- tarefa a cada janela sobre uma aprovacao que ninguem decidiu.
+--
+-- Rejeitar ou cancelar a aprovacao encerra a tarefa
+-- (20261004_aprovacao_decidir_encerra_tarefa.sql) e o indice libera.
+--
+-- ── Custo ────────────────────────────────────────────────────────────
+--
+-- Indice PARCIAL: so indexa linhas do tipo de polling em estado ativo,
+-- que sao no maximo uma por agente. Nao concorre com
+-- `idx_agente_tarefas_fila` nem com `idx_agente_tarefas_agente`.
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agente_tarefas_polling_perguntas_ativa
+  ON public.agente_tarefas (agente_id)
+  WHERE tipo = 'consultar_perguntas_ml'
+    AND status IN ('pendente', 'rodando', 'aguardando_aprovacao');
