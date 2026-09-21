@@ -179,9 +179,13 @@ ok("A2  E server-only", /import "server-only"/.test(CODIGO_ESCRITA));
 // A 1D.e-B2 somou `agregador.ts`, que compoe as tres leituras sem abrir
 // banco. O conjunto continua conferido pelo NOME: contar aceitaria
 // qualquer setimo modulo; a lista ordenada so aceita exatamente estes.
-ok("A3  a pasta tem exatamente os 6 modulos previstos",
+// M2-I1-A3 publicou o SETIMO modulo, `cobertura-remota.ts`. Este
+// inventario ficou VERMELHO naquele gate e passou despercebido: a
+// regressao do A3 nao incluiu esta suite. Reconciliado aqui, por
+// igualdade nos dois sentidos, como os cinco gemeos dele.
+ok("A3  a pasta tem exatamente os 7 modulos previstos",
   JSON.stringify(readdirSync(join(RAIZ, "lib/agentes/conexoes")).sort()) ===
-    JSON.stringify(["agregador.ts", "estado.ts", "fatos.ts", "selecao-escrita.ts", "selecao-estado.ts", "selecao-fatos.ts"]),
+    JSON.stringify(["agregador.ts", "cobertura-remota.ts", "estado.ts", "fatos.ts", "selecao-escrita.ts", "selecao-estado.ts", "selecao-fatos.ts"]),
   readdirSync(join(RAIZ, "lib/agentes/conexoes")).sort().join(", "));
 ok("A4  nenhum segundo modulo de producao desta fase",
   !existsSync(join(RAIZ, "lib/agentes/conexoes/selecao-escrita-helpers.ts")) &&
@@ -474,7 +478,23 @@ async function principal(): Promise<void> {
   };
   varrer("lib");
   varrer("app");
-  ok("K1  zero consumidor de producao", alvos.length === 0, alvos.join(", "));
+  // M2-I1-A4 deu a esta escrita o seu PRIMEIRO consumidor de producao: a
+  // rota de Conexoes. O guarda nao afrouxou — ele trocou "ninguem chama"
+  // por "exatamente quem esta declarado", que e a mesma pergunta num
+  // momento em que a resposta deixou de ser vazia.
+  //
+  // A rota e o unico lugar autorizado a chamar porque e o unico que prova
+  // as duas coisas que o owner NAO prova: que o requisito existe de
+  // verdade para o agente, e que a loja e elegivel para a plataforma.
+  const CONSUMIDORES_AUTORIZADOS = ["app/api/agentes/[agenteId]/conexoes/route.ts"];
+  const mesmoConjuntoK = (a: readonly string[], b: readonly string[]): boolean =>
+    JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
+  ok("K1  os consumidores de producao sao exatamente os declarados",
+    mesmoConjuntoK(alvos, CONSUMIDORES_AUTORIZADOS), alvos.join(", ") || "nenhum");
+  ok("K1a CONTROLE: um consumidor a MAIS reprova",
+    !mesmoConjuntoK([...CONSUMIDORES_AUTORIZADOS, "lib/qualquer.ts"], CONSUMIDORES_AUTORIZADOS));
+  ok("K1b CONTROLE: a rota sumir tambem reprova",
+    !mesmoConjuntoK([], CONSUMIDORES_AUTORIZADOS));
   ok("K2  ANCORA: a varredura leu arquivos de verdade",
     existsSync(join(RAIZ, "lib/agentes/conexoes/fatos.ts")));
   ok("K3  diagnostico.ts nao foi tocado — sem falta_selecao ainda",
