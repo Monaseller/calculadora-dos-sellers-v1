@@ -114,6 +114,17 @@ export const ROTAS_COM_SEGREDO: Readonly<Record<string, readonly string[]>> = {
   "/api/internal/sync/executar": ["POST"], // scripts/sync-worker.mjs
   "/api/internal/agentes/executar": ["POST"], // scripts/agentes-worker.mjs
   "/api/internal/agentes/worker": ["GET"], // Vercel Cron * * * * *
+  // M2-I1-A8-FIX2. As duas entradas abaixo faltavam, e a ausência não
+  // apareceu em teste nenhum: as suítes do A7 e do A8 importam o módulo
+  // da rota e chamam o handler direto, que é a camada DEPOIS desta. O
+  // smoke de produção pegou — a ponte respondia o 401 de sessão do
+  // middleware, nunca o `nao_autorizado` do próprio handler.
+  "/api/internal/agentes/acoes": ["POST"], // orquestrador externo (n8n)
+  // Declarar NÃO liga o polling: quem liga é a entrada em `crons` de
+  // `vercel.json`, que segue ausente de propósito (A7_POLLER_CRON =
+  // NOT_DEPLOYED). Ela entra agora para que o dia em que o cron for
+  // publicado não caia no 307 silencioso que o aviso acima descreve.
+  "/api/internal/agentes/perguntas-poller": ["GET"], // Vercel Cron — NÃO publicado
 };
 
 /**

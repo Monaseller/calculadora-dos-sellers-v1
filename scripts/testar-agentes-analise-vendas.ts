@@ -2672,7 +2672,19 @@ async function main() {
       ["/api/internal/agentes/executar", '["POST"]'],
     ];
     const WORKER_AGENTES = "/api/internal/agentes/worker";
-    const ESPERADAS: [string, string][] = [...ANTERIORES, [WORKER_AGENTES, '["GET"]']];
+    // M2-I1-A8-FIX2: 6 -> 8. As duas entraram JUNTAS e por um motivo
+    // que este guarda registrou ao vermelho: elas existiam como rota
+    // deployada desde o A7/A8 e NAO estavam na politica, entao o
+    // middleware as negava antes do segredo proprio de cada uma ser
+    // lido. O conjunto continua EXATO — nunca `contains`.
+    const PONTE_N8N = "/api/internal/agentes/acoes";
+    const POLLER_PERGUNTAS = "/api/internal/agentes/perguntas-poller";
+    const ESPERADAS: [string, string][] = [
+      ...ANTERIORES,
+      [WORKER_AGENTES, '["GET"]'],
+      [PONTE_N8N, '["POST"]'],
+      [POLLER_PERGUNTAS, '["GET"]'],
+    ];
 
     /**
      * As entradas declaradas em `ROTAS_COM_SEGREDO`, lidas do literal.
@@ -2724,9 +2736,9 @@ async function main() {
 
     const declaradas = rotasComSegredoDeclaradas(mid);
     ok(`G10u0 ANCORA: o literal de ROTAS_COM_SEGREDO foi lido (${declaradas.length} entradas)`,
-      declaradas.length === 6 && declaradas.every(([c, v]) => c.startsWith("/api/") && v.startsWith("[")));
+      declaradas.length === 8 && declaradas.every(([c, v]) => c.startsWith("/api/") && v.startsWith("[")));
 
-    ok("G10u1 ROTAS_COM_SEGREDO e EXATAMENTE as cinco anteriores mais o dispatcher",
+    ok("G10u1 ROTAS_COM_SEGREDO e EXATAMENTE as seis anteriores mais a ponte e o poller",
       conjuntoDeRotasComSegredoExato(mid, ESPERADAS));
 
     // Controles negativos — o MESMO predicado, alimentado com fonte
@@ -2763,6 +2775,36 @@ async function main() {
     ok("G10u2 CONTROLE NEGATIVO: GET mais um verbo extra reprova",
       !dispatcherSoGet(mid.replace(`"${WORKER_AGENTES}": ["GET"],`, `"${WORKER_AGENTES}": ["GET", "POST"],`)));
     ok("G10u2 CONTROLE NEGATIVO: dispatcher ausente reprova", !dispatcherSoGet(semODispatcher));
+
+    /**
+     * G10u5: os verbos das DUAS rotas da FIX2, nominalmente.
+     *
+     * Mesma razao do G10u2, aplicada a cada uma. A ponte e POST e so
+     * POST: um GET liberado ali seria uma segunda porta para a mesma
+     * chave. O poller e GET e so GET, porque quem o chama e o agendador
+     * da Vercel — e enquanto o cron nao existir, ninguem o chama.
+     */
+    const verboDeclarado = (texto: string, caminho: string): string | undefined =>
+      new Map(rotasComSegredoDeclaradas(texto)).get(caminho);
+
+    ok('G10u5 a ponte do n8n esta declarada com exatamente ["POST"]',
+      verboDeclarado(mid, PONTE_N8N) === '["POST"]');
+    ok('G10u5 o poller de perguntas esta declarado com exatamente ["GET"]',
+      verboDeclarado(mid, POLLER_PERGUNTAS) === '["GET"]');
+
+    ok("G10u5 CONTROLE NEGATIVO: GET no lugar de POST na ponte reprova",
+      verboDeclarado(mid.replace(`"${PONTE_N8N}": ["POST"],`, `"${PONTE_N8N}": ["GET"],`),
+        PONTE_N8N) !== '["POST"]');
+    ok("G10u5 CONTROLE NEGATIVO: verbo extra na ponte reprova",
+      verboDeclarado(mid.replace(`"${PONTE_N8N}": ["POST"],`, `"${PONTE_N8N}": ["POST", "GET"],`),
+        PONTE_N8N) !== '["POST"]');
+    ok("G10u5 CONTROLE NEGATIVO: ponte ausente reprova",
+      verboDeclarado(mid.replace(`"${PONTE_N8N}": ["POST"],`, ""), PONTE_N8N) === undefined);
+    ok("G10u5 CONTROLE NEGATIVO: POST no lugar de GET no poller reprova",
+      verboDeclarado(mid.replace(`"${POLLER_PERGUNTAS}": ["GET"],`, `"${POLLER_PERGUNTAS}": ["POST"],`),
+        POLLER_PERGUNTAS) !== '["GET"]');
+    ok("G10u5 CONTROLE NEGATIVO: poller ausente reprova",
+      verboDeclarado(mid.replace(`"${POLLER_PERGUNTAS}": ["GET"],`, ""), POLLER_PERGUNTAS) === undefined);
 
     // G10u3 continua exigindo as cinco anteriores com os mesmos verbos,
     // lendo a MESMA lista nominal. Redundante com G10u1 de proposito:

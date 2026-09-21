@@ -195,6 +195,114 @@ t("4f. a rota de consultar-vendas e de SESSAO, nao de segredo proprio", () => {
   assert(com(caminho, "GET") === "liberar", "GET bloqueado mesmo com sessao");
 });
 
+/**
+ * Fonte de uma rota SEM comentarios.
+ *
+ * Mesma razao escrita no teste 4e: os cabecalhos destas rotas falam dos
+ * proprios segredos em prosa, e uma busca no arquivo cru passaria verde
+ * com a guarda deletada e o comentario intacto.
+ */
+function fonteSemComentarios(rota: string): string {
+  return fs
+    .readFileSync(path.join(process.cwd(), rota), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|[^:])\/\/.*$/gm, "$1");
+}
+
+t("4g. POST /api/internal/agentes/acoes passa sem cookie (ponte do n8n)", () => {
+  // M2-I1-A8-FIX2. O modo de falha aqui NAO e silencioso como o do cron —
+  // e pior de diagnosticar. O middleware respondia 401, que e exatamente
+  // o status que a ponte responde quando o segredo nao confere. Quem
+  // estivesse configurando o orquestrador leria "401" e procuraria o erro
+  // na chave, que estava certa: a requisicao nunca chegou ao handler.
+  //
+  // O que distingue os dois e o CORPO, e e por isso que o smoke de
+  // producao tem de olhar o corpo, nunca so o status:
+  //   middleware -> { erro: true, mensagem: "Sessao invalida." }
+  //   handler    -> { ok: false, erro: "nao_autorizado" }
+  assert(sem("/api/internal/agentes/acoes", "POST") === "liberar",
+    "ponte do n8n bloqueada pelo middleware — o handler nunca veria o segredo");
+});
+
+t("4h. a ponte NAO fica publica, e so por ter segredo proprio", () => {
+  // POST e o unico verbo que a rota exporta. Um GET liberado seria uma
+  // segunda porta para a mesma chave, sem revisao.
+  for (const metodo of ["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
+    assert(sem("/api/internal/agentes/acoes", metodo) === "bloquear_api",
+      `${metodo} na ponte deveria cair no default deny`);
+
+  assert(!("/api/internal/agentes/acoes" in ROTAS_PUBLICAS),
+    "ponte listada como PUBLICA — ela tem segredo proprio, nao e publica");
+  assert(!PAGINAS_PUBLICAS.has("/api/internal/agentes/acoes"),
+    "ponte listada como pagina publica");
+  assert(!("/api/internal/agentes/acoes" in EXCECOES_TEMPORARIAS_F0C),
+    "ponte listada como excecao temporaria — ela nao e divida, e rota com segredo");
+
+  const fonte = fonteSemComentarios("app/api/internal/agentes/acoes/route.ts");
+
+  assert(/process\.env\.N8N_BRIDGE_INTERNAL_SECRET/.test(fonte),
+    "ponte liberada no middleware mas NAO le N8N_BRIDGE_INTERNAL_SECRET do ambiente");
+  assert(/headers\.get\("x-worker-secret"\)/.test(fonte),
+    "ponte liberada mas nao le o header x-worker-secret");
+  assert(/!segredo/.test(fonte),
+    "ponte liberada mas nao e fail-closed quando o segredo falta no servidor");
+  assert(/!recebido/.test(fonte),
+    "ponte liberada mas nao e fail-closed quando o header falta no pedido");
+  assert(/recebido !== segredo/.test(fonte),
+    "ponte liberada mas nao compara o segredo recebido com o esperado");
+
+  // Segredo PROPRIO: reusar o do cron ou o do worker manual daria ao
+  // portador de uma chave o poder de acionar o outro dominio.
+  assert(!/CRON_SECRET/.test(fonte),
+    "ponte aceita CRON_SECRET — o isolamento entre dominios depende de chaves distintas");
+  assert(!/AGENTES_WORKER_INTERNAL_SECRET/.test(fonte),
+    "ponte aceita o segredo do worker manual — mesma razao");
+  assert(!/searchParams/.test(fonte),
+    "ponte le query string — segredo em URL vaza em log de acesso");
+});
+
+t("4i. GET /api/internal/agentes/perguntas-poller passa sem cookie", () => {
+  // M2-I1-A8-FIX2. Declarar NAO liga o polling: quem liga e a entrada em
+  // `crons` de vercel.json, que segue ausente. Ela entra agora porque o
+  // modo de falha de uma rota de cron ausente da policy e o 307 tratado
+  // como sucesso — o mesmo que ja custou 54 dias de fila parada aqui.
+  assert(sem("/api/internal/agentes/perguntas-poller", "GET") === "liberar",
+    "poller bloqueado pelo middleware — no dia em que o cron subir, falharia como sucesso");
+});
+
+t("4j. o poller NAO fica publico, e so por ter segredo proprio", () => {
+  for (const metodo of ["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
+    assert(sem("/api/internal/agentes/perguntas-poller", metodo) === "bloquear_api",
+      `${metodo} no poller deveria cair no default deny`);
+
+  assert(!("/api/internal/agentes/perguntas-poller" in ROTAS_PUBLICAS),
+    "poller listado como PUBLICO — ele tem segredo proprio");
+  assert(!PAGINAS_PUBLICAS.has("/api/internal/agentes/perguntas-poller"),
+    "poller listado como pagina publica");
+  assert(!("/api/internal/agentes/perguntas-poller" in EXCECOES_TEMPORARIAS_F0C),
+    "poller listado como excecao temporaria");
+
+  const fonte = fonteSemComentarios("app/api/internal/agentes/perguntas-poller/route.ts");
+
+  // Mesmo padrao do dispatcher e do worker do Estudio: Bearer, nao header
+  // proprio. Rota de cron se autentica como rota de cron.
+  assert(/process\.env\.CRON_SECRET/.test(fonte),
+    "poller liberado no middleware mas NAO le CRON_SECRET do ambiente");
+  assert(/headers\.get\("authorization"\)/.test(fonte),
+    "poller liberado mas nao le o header Authorization");
+  assert(/!segredo/.test(fonte),
+    "poller liberado mas nao e fail-closed quando CRON_SECRET falta");
+  assert(/auth !== `Bearer \$\{segredo\}`/.test(fonte),
+    "poller liberado mas nao compara o Bearer recebido com o esperado");
+
+  assert(!/x-worker-secret/.test(fonte),
+    "poller aceita x-worker-secret — ele tem UMA porta, e ela e o CRON_SECRET");
+  assert(!/searchParams/.test(fonte),
+    "poller le query string — segredo em URL vaza em log de acesso");
+  assert(!/request\.json\(\)/.test(fonte),
+    "poller le corpo — ele nao aceita entrada nenhuma, e segredo em body nao e melhor que em URL");
+});
+
 t("5. metodo errado numa rota com segredo NAO e liberado", () => {
   // O middleware não inventa método: worker é GET, executar é POST.
   assert(sem("/api/internal/estudio-anuncios/worker", "POST") === "bloquear_api",
@@ -205,10 +313,15 @@ t("5. metodo errado numa rota com segredo NAO e liberado", () => {
     "GET no executar de agentes deveria cair no default deny");
 });
 
-t("6. as 6 rotas com segredo estao declaradas, nem uma a mais", () => {
+t("6. as 8 rotas com segredo estao declaradas, nem uma a mais", () => {
   // 5 -> 6 na FUNCTION-RUNTIME-V1-B1: entrou o dispatcher de agentes.
-  assert(Object.keys(ROTAS_COM_SEGREDO).length === 6,
-    `esperado 6 rotas com segredo, encontrado ${Object.keys(ROTAS_COM_SEGREDO).length}`);
+  // 6 -> 8 na M2-I1-A8-FIX2: entraram a ponte do orquestrador externo e o
+  // poller de perguntas. As duas ja existiam como rota DEPLOYADA e nao
+  // estavam aqui — o middleware as negava com o 401 de sessao antes do
+  // segredo proprio de cada uma ser lido. Contagem nunca prova QUAIS; o
+  // teste 37 abaixo e que amarra a policy ao filesystem.
+  assert(Object.keys(ROTAS_COM_SEGREDO).length === 8,
+    `esperado 8 rotas com segredo, encontrado ${Object.keys(ROTAS_COM_SEGREDO).length}`);
 });
 
 // ────────────────────────────────────────────────────────────────────
@@ -435,7 +548,7 @@ t("29. asset marcado 'publico' precisa constar em ASSETS_PUBLICOS", () => {
 });
 
 // ────────────────────────────────────────────────────────────────────
-console.log("\n[8. cobertura: as 56 rotas do inventario F0.a]");
+console.log("\n[8. cobertura: as 58 rotas do inventario F0.a]");
 
 /** caminho, metodo, decisao esperada SEM sessao. */
 const INVENTARIO: [string, string, Decisao][] = [
@@ -455,6 +568,10 @@ const INVENTARIO: [string, string, Decisao][] = [
   ["/api/internal/sync/executar", "POST", "liberar"],
   ["/api/internal/agentes/executar", "POST", "liberar"],
   ["/api/internal/agentes/worker", "GET", "liberar"],
+  // M2-I1-A8-FIX2: as duas que faltavam. A ponte e chamada por um
+  // orquestrador EXTERNO; o poller, pelo cron — que segue NAO publicado.
+  ["/api/internal/agentes/acoes", "POST", "liberar"],
+  ["/api/internal/agentes/perguntas-poller", "GET", "liberar"],
   // — excecao temporaria F0.c (1; era 3 ate o cutover F0.c.5 e 2 ate a
   //   F0.c.16, quando /api/auth/status saiu do inventario por ter sido
   //   DELETADA — o caminho segue coberto pelo teste 20)
@@ -522,7 +639,7 @@ const INVENTARIO: [string, string, Decisao][] = [
   [`/api/estudio-anuncios/projetos/${UUID}/exportacao/${UUID}/arquivo`, "GET", "bloquear_api"],
 ];
 
-t("30. as 56 rotas do inventario caem na classe correta", () => {
+t("30. as 58 rotas do inventario caem na classe correta", () => {
   // 51 → 50 em F0.c.6d: `/api/auth/relay` deixou de existir.
   // 50 → 49 em F0.c.16: `/api/auth/status` deixou de existir.
   // 49 → 50 na AGENTES-FASE1C-FIX1: `/api/internal/agentes/executar` entrou.
@@ -540,7 +657,16 @@ t("30. as 56 rotas do inventario caem na classe correta", () => {
   // `/api/agentes/[agenteId]/consultar-vendas`, a primeira superficie
   // publica que enfileira uma Funcao real. Duas entradas para um
   // caminho so, porque o inventario e por (caminho, metodo).
-  assert(INVENTARIO.length === 56, `inventario tem ${INVENTARIO.length} rotas, esperado 56`);
+  // 56 -> 58 na M2-I1-A8-FIX2: `POST /api/internal/agentes/acoes` e
+  // `GET /api/internal/agentes/perguntas-poller`.
+  //
+  // ⚠ ESTA LISTA E MANUAL, e foi por isso que o defeito da FIX2 passou:
+  // as duas rotas nasceram no A7 e no A8 sem que nada aqui reclamasse da
+  // ausencia delas. Manter o inventario tem valor — ele fixa a DECISAO
+  // esperada por (caminho, metodo) —, mas quem descobre rota nova e o
+  // teste 37, que varre o filesystem. Os dois sao complementares, e o
+  // segundo e o que nao depende de alguem lembrar.
+  assert(INVENTARIO.length === 58, `inventario tem ${INVENTARIO.length} rotas, esperado 58`);
   for (const [caminho, metodo, esperado] of INVENTARIO) {
     const obtido = sem(caminho, metodo);
     assert(obtido === esperado, `${metodo} ${caminho}: esperado ${esperado}, obtido ${obtido}`);
@@ -631,6 +757,369 @@ t("35. caminhos da CDS continuam ENTRANDO no middleware", () => {
 t("36. o matcher nao usa mais a forma antiga (dois casos de _next)", () => {
   assert(!FONTE_MIDDLEWARE.includes("_next/static|_next/image"),
     "matcher ainda excluindo apenas _next/static e _next/image");
+});
+
+// ────────────────────────────────────────────────────────────────────
+console.log("\n[9b. invariante ESTRUTURAL: policy x filesystem]");
+//
+// ── O defeito que este bloco existe para impedir ────────────────────
+//
+// `/api/internal/agentes/acoes` e `/api/internal/agentes/perguntas-poller`
+// foram escritas, testadas, commitadas e deployadas sem constar na
+// policy. Nada reclamou. As suites do A7 e do A8 importam o modulo da
+// rota e chamam o handler direto — provam o handler, que era o contrato,
+// e passam ao largo do middleware, que em producao vem ANTES. O
+// inventario do teste 30 e uma lista manual, entao tambem nao acusou.
+//
+// Quem pegou foi o smoke de producao, depois do deploy.
+//
+// Este bloco fecha a classe: ele DESCOBRE a rota nova no disco em vez de
+// esperar que alguem a acrescente a uma lista.
+//
+// ── Por que o invariante tem uma GUARDA, e nao e so "tem de constar" ─
+//
+// "toda rota sob app/api/internal/ deve constar na policy" e insegura
+// como regra isolada: constar na policy e ser LIBERADA a passar sem
+// sessao. No dia em que alguem criar uma rota interna sem segredo
+// proprio, essa regra exigiria abri-la — um teste de seguranca virando
+// instrucao para produzir um buraco. Por isso a ordem importa:
+//
+//   (a) a rota tem auth propria fail-closed baseada em process.env;
+//       se NAO tem, REPROVA por auth ausente — nunca "resolve"
+//       declarando-a;
+//   (b) todo metodo que ela EXPORTA consta na policy para o caminho dela;
+//   (c) todo metodo declarado para ela e um metodo que ela exporta.
+//
+// (c) e o simetrico de (b): declarar ["GET","POST"] numa rota que so
+// exporta POST abre um verbo que ninguem implementou.
+
+const RAIZ_INTERNA = path.join(process.cwd(), "app/api/internal");
+const VERBOS_HTTP = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] as const;
+
+type RotaInterna = {
+  caminho: string;
+  arquivo: string;
+  metodos: string[];
+  fonte: string;
+  naoSuportada: string | null;
+};
+
+/**
+ * Varre o disco atras de `route.ts` sob `app/api/internal`.
+ *
+ * Segmento dinamico (`[id]`) e grupo de rota (`(grupo)`) mudam o
+ * mapeamento de pasta para URL, e a policy casa caminho EXATO. Em vez de
+ * adivinhar — ou pior, de converter `[id]` em curinga, que e o oposto do
+ * que esta policy faz — a rota e marcada como NAO SUPORTADA e o teste
+ * reprova nominalmente. Ignorar em silencio recriaria o buraco da FIX2.
+ */
+function descobrirRotasInternas(raiz: string): RotaInterna[] {
+  const achadas: RotaInterna[] = [];
+
+  const andar = (dir: string, segmentos: string[]) => {
+    for (const entrada of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entrada.isDirectory()) {
+        andar(path.join(dir, entrada.name), [...segmentos, entrada.name]);
+      } else if (entrada.name === "route.ts" || entrada.name === "route.tsx") {
+        const arquivo = path.join(dir, entrada.name);
+        const bruto = fs.readFileSync(arquivo, "utf8");
+        const fonte = bruto
+          .replace(/\/\*[\s\S]*?\*\//g, "")
+          .replace(/(^|[^:])\/\/.*$/gm, "$1");
+
+        const problematico = segmentos.find(
+          (s) => /^\[.*\]$/.test(s) || /^\(.*\)$/.test(s) || s.includes("[") || s.includes("(")
+        );
+
+        const metodos = new Set<string>();
+        for (const m of fonte.matchAll(
+          /export\s+(?:async\s+)?function\s+(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s*\(/g
+        )) metodos.add(m[1]);
+        for (const m of fonte.matchAll(
+          /export\s+const\s+(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s*[:=]/g
+        )) metodos.add(m[1]);
+
+        achadas.push({
+          caminho: "/api/internal/" + segmentos.join("/"),
+          arquivo: path.relative(process.cwd(), arquivo).replace(/\\/g, "/"),
+          metodos: [...metodos].sort(),
+          fonte,
+          naoSuportada: problematico
+            ? `segmento nao mapeavel para caminho exato: "${problematico}"`
+            : null,
+        });
+      }
+    }
+  };
+
+  andar(raiz, []);
+  return achadas.sort((a, b) => a.caminho.localeCompare(b.caminho));
+}
+
+/**
+ * A rota se autentica sozinha, e falha FECHADA?
+ *
+ * Nao basta "o arquivo contem process.env" — isso passaria verde numa
+ * rota que le o segredo e nunca o compara. O que se exige e a forma que
+ * as SETE rotas internas ja usam, identica em todas:
+ *
+ *   const <esperado> = process.env.<ALGUMA_COISA_SECRET>;
+ *   const <recebido> = request.headers.get("<header>");
+ *   if (!<esperado> || !<recebido> || <comparacao com esperado>) -> 401
+ *
+ * As tres partes da condicao sao exigidas nominalmente. A primeira
+ * (`!<esperado>`) e a que mata a mutacao conceitual que interessa:
+ * segredo AUSENTE no servidor liberando a requisicao. Sem ela, um deploy
+ * sem a variavel configurada abriria a rota para qualquer um.
+ */
+function temAuthPropriaFailClosed(fonte: string): boolean {
+  const env = fonte.match(/const\s+(\w+)\s*=\s*process\.env\.(\w*SECRET\w*)\s*;/);
+  if (!env) return false;
+  const esperado = env[1];
+
+  const header = fonte.match(/const\s+(\w+)\s*=\s*request\.headers\.get\(\s*"[^"]+"\s*\)\s*;/);
+  if (!header) return false;
+  const recebido = header[1];
+
+  const guarda = fonte.match(
+    new RegExp("if\\s*\\(\\s*!" + esperado + "\\s*\\|\\|\\s*!" + recebido + "\\s*\\|\\|([^)]*)\\)")
+  );
+  if (!guarda) return false;
+
+  // A terceira clausula tem de COMPARAR, e comparar contra o esperado.
+  const comparacao = guarda[1];
+  if (!comparacao.includes("!==") || !comparacao.includes(esperado)) return false;
+
+  // E a guarda tem de RECUSAR. Sem isto, `if (...) { /* nada */ }`
+  // satisfaria a forma e nao negaria coisa nenhuma.
+  const depois = fonte.slice((guarda.index ?? 0) + guarda[0].length, (guarda.index ?? 0) + guarda[0].length + 240);
+  return /401/.test(depois);
+}
+
+/**
+ * As violacoes do invariante. Lista vazia = invariante satisfeito.
+ *
+ * Funcao PURA sobre (rotas, policy) de proposito: e o que permite os
+ * mutantes do teste 38 alimentarem-na com entradas sinteticas em vez de
+ * escrever arquivo no repositorio para provar que o oraculo sabe dizer
+ * nao.
+ */
+function violacoesDoInvariante(
+  rotas: readonly RotaInterna[],
+  policy: Readonly<Record<string, readonly string[]>>
+): string[] {
+  const violacoes: string[] = [];
+
+  for (const rota of rotas) {
+    if (rota.naoSuportada !== null) {
+      violacoes.push(`${rota.caminho}: NAO SUPORTADA — ${rota.naoSuportada}`);
+      continue;
+    }
+
+    if (rota.metodos.length === 0) {
+      violacoes.push(`${rota.caminho}: nenhum metodo HTTP exportado reconhecido em ${rota.arquivo}`);
+      continue;
+    }
+
+    // (a) A GUARDA. Rota interna sem auth propria REPROVA aqui, e o teste
+    // nao segue para exigir declaracao — declarar seria abri-la.
+    if (!temAuthPropriaFailClosed(rota.fonte)) {
+      violacoes.push(
+        `${rota.caminho}: rota interna SEM auth propria fail-closed — corrija a ROTA, nao a policy`
+      );
+      continue;
+    }
+
+    const declarados = policy[rota.caminho];
+    if (!Array.isArray(declarados)) {
+      violacoes.push(
+        `${rota.caminho}: ausente de ROTAS_COM_SEGREDO — o middleware a nega antes do segredo dela ser lido`
+      );
+      continue;
+    }
+
+    // (b) e (c) de uma vez: igualdade de CONJUNTO, nunca `includes`.
+    const exportados = JSON.stringify([...rota.metodos].sort());
+    const naPolicy = JSON.stringify([...declarados].sort());
+    if (exportados !== naPolicy) {
+      violacoes.push(`${rota.caminho}: exporta ${exportados} mas a policy declara ${naPolicy}`);
+    }
+  }
+
+  return violacoes;
+}
+
+const ROTAS_INTERNAS = descobrirRotasInternas(RAIZ_INTERNA);
+
+t("37. ANTI-VACUIDADE: a varredura enxerga as rotas internas do disco", () => {
+  // Parser quebrado, pasta renomeada ou glob vazio devolvem lista curta e
+  // deixariam o teste 38 verde por nao ter o que reprovar.
+  assert(ROTAS_INTERNAS.length >= 7,
+    `a varredura achou ${ROTAS_INTERNAS.length} rotas internas, esperado >= 7`);
+  assert(ROTAS_INTERNAS.every((r) => r.caminho.startsWith("/api/internal/")),
+    "caminho derivado do disco fora do namespace /api/internal/");
+  // As duas da FIX2 tem de estar entre as descobertas — se a varredura
+  // nao as ve, ela nao veria a proxima tampouco.
+  for (const esperada of ["/api/internal/agentes/acoes", "/api/internal/agentes/perguntas-poller"])
+    assert(ROTAS_INTERNAS.some((r) => r.caminho === esperada),
+      `${esperada} nao foi descoberta pela varredura`);
+  // E a extracao de metodos tem de ter funcionado de fato.
+  assert(ROTAS_INTERNAS.every((r) => r.metodos.length > 0),
+    "alguma rota interna ficou sem metodo extraido — o regex de export nao casou");
+});
+
+t("38. toda rota interna com auth propria esta declarada com os metodos EXATOS", () => {
+  const violacoes = violacoesDoInvariante(ROTAS_INTERNAS, ROTAS_COM_SEGREDO);
+  assert(violacoes.length === 0, `invariante violado:\n    - ${violacoes.join("\n    - ")}`);
+});
+
+t("39. CONTROLES NEGATIVOS: o oraculo estrutural sabe dizer nao", () => {
+  const ponte = ROTAS_INTERNAS.find((r) => r.caminho === "/api/internal/agentes/acoes");
+  assert(ponte !== undefined, "ancora: a ponte precisa existir para os mutantes");
+  const p = ponte as RotaInterna;
+  assert(JSON.stringify(p.metodos) === '["POST"]',
+    `ancora: a ponte deveria exportar apenas POST, exporta ${JSON.stringify(p.metodos)}`);
+
+  const semPonte = { ...ROTAS_COM_SEGREDO } as Record<string, readonly string[]>;
+  delete semPonte["/api/internal/agentes/acoes"];
+  // MUT-1
+  assert(violacoesDoInvariante([p], semPonte).length > 0,
+    "MUT-1 sobreviveu: remover a ponte da policy passou despercebido");
+
+  // MUT-2 — verbo trocado
+  assert(violacoesDoInvariante([p], { ...ROTAS_COM_SEGREDO, "/api/internal/agentes/acoes": ["GET"] }).length > 0,
+    "MUT-2 sobreviveu: POST trocado por GET passou despercebido");
+
+  // MUT-3 / MUT-9 — verbo a mais que a rota nao exporta
+  assert(violacoesDoInvariante([p], { ...ROTAS_COM_SEGREDO, "/api/internal/agentes/acoes": ["POST", "GET"] }).length > 0,
+    "MUT-3/MUT-9 sobreviveu: verbo declarado que a rota nao exporta passou despercebido");
+
+  const poller = ROTAS_INTERNAS.find((r) => r.caminho === "/api/internal/agentes/perguntas-poller") as RotaInterna;
+  assert(poller !== undefined, "ancora: o poller precisa existir");
+  const semPoller = { ...ROTAS_COM_SEGREDO } as Record<string, readonly string[]>;
+  delete semPoller["/api/internal/agentes/perguntas-poller"];
+  // MUT-4
+  assert(violacoesDoInvariante([poller], semPoller).length > 0,
+    "MUT-4 sobreviveu: remover o poller da policy passou despercebido");
+  // MUT-5
+  assert(violacoesDoInvariante([poller], { ...ROTAS_COM_SEGREDO, "/api/internal/agentes/perguntas-poller": ["POST"] }).length > 0,
+    "MUT-5 sobreviveu: GET do poller trocado por POST passou despercebido");
+
+  // MUT-8 — rota interna NOVA, com auth propria, ausente da policy.
+  const rotaNova: RotaInterna = {
+    caminho: "/api/internal/agentes/intrusa",
+    arquivo: "sintetica",
+    metodos: ["POST"],
+    fonte: p.fonte,
+    naoSuportada: null,
+  };
+  assert(violacoesDoInvariante([rotaNova], ROTAS_COM_SEGREDO).length > 0,
+    "MUT-8 sobreviveu: rota interna nova e nao declarada passou despercebida");
+
+  // MUT-10 — rota interna SEM auth propria. O oraculo tem de reprovar por
+  // AUTH AUSENTE, e nunca "resolver" pedindo que ela seja declarada:
+  // declara-la seria liberar passagem para uma rota que nao se defende.
+  const semAuth: RotaInterna = {
+    caminho: "/api/internal/agentes/sem-guarda",
+    arquivo: "sintetica",
+    metodos: ["POST"],
+    fonte: "export async function POST(request: Request) { return Response.json({ ok: true }); }",
+    naoSuportada: null,
+  };
+  const vSemAuth = violacoesDoInvariante([semAuth], ROTAS_COM_SEGREDO);
+  assert(vSemAuth.length > 0, "MUT-10 sobreviveu: rota sem auth propria passou despercebida");
+  assert(vSemAuth.some((v) => v.includes("SEM auth propria")),
+    `MUT-10: reprovou pelo motivo errado -> ${vSemAuth.join(" | ")}`);
+  // E declara-la NAO pode calar o oraculo.
+  assert(violacoesDoInvariante([semAuth], {
+    ...ROTAS_COM_SEGREDO,
+    "/api/internal/agentes/sem-guarda": ["POST"],
+  }).some((v) => v.includes("SEM auth propria")),
+    "MUT-10: declarar a rota na policy silenciou o oraculo — auth ausente tem de reprovar de qualquer forma");
+
+  // Segmento dinamico: FALHA EXPLICITA, nunca curinga silencioso.
+  const dinamica: RotaInterna = {
+    caminho: "/api/internal/agentes/[agenteId]",
+    arquivo: "sintetica",
+    metodos: ["GET"],
+    fonte: p.fonte,
+    naoSuportada: 'segmento nao mapeavel para caminho exato: "[agenteId]"',
+  };
+  assert(violacoesDoInvariante([dinamica], ROTAS_COM_SEGREDO).some((v) => v.includes("NAO SUPORTADA")),
+    "segmento dinamico passou despercebido — ele mudaria o mapeamento de pasta para URL");
+
+  // A guarda de auth, isolada: as formas que NAO podem passar.
+  assert(!temAuthPropriaFailClosed("const s = process.env.X_SECRET;"),
+    "ler o segredo sem compara-lo contou como auth");
+  assert(!temAuthPropriaFailClosed(
+    'const s = process.env.X_SECRET;\nconst r = request.headers.get("h");\nif (r !== s) { return responder(401); }'),
+    "guarda sem `!segredo` contou como fail-closed — segredo ausente liberaria a rota");
+  assert(temAuthPropriaFailClosed(
+    'const s = process.env.X_SECRET;\nconst r = request.headers.get("h");\nif (!s || !r || r !== s) { return responder({}, 401); }'),
+    "ANTI-VACUIDADE: a forma correta foi reprovada — o oraculo estaria sempre vermelho");
+});
+
+t("40. nenhuma rota interna e liberada por curinga ou por prefixo", () => {
+  // MUT-7. A policy casa caminho EXATO, entao uma chave com `*` e inerte:
+  // ela so casaria um pathname literalmente igual a ".../*". O risco real
+  // nao e ela liberar demais — e alguem acreditar que declarou a rota.
+  const comCuringa = { ...ROTAS_COM_SEGREDO, "/api/internal/agentes/*": ["POST"] } as Record<string, readonly string[]>;
+  const semAsDuas = { ...comCuringa } as Record<string, readonly string[]>;
+  delete semAsDuas["/api/internal/agentes/acoes"];
+  delete semAsDuas["/api/internal/agentes/perguntas-poller"];
+
+  assert(decidirAcesso("/api/internal/agentes/acoes", "POST", false) === "liberar",
+    "ancora: a ponte deveria estar liberada pela declaracao nominal");
+
+  const ponte = ROTAS_INTERNAS.find((r) => r.caminho === "/api/internal/agentes/acoes") as RotaInterna;
+  const poller = ROTAS_INTERNAS.find((r) => r.caminho === "/api/internal/agentes/perguntas-poller") as RotaInterna;
+  assert(violacoesDoInvariante([ponte, poller], semAsDuas).length === 2,
+    "MUT-7 sobreviveu: o curinga foi aceito no lugar das duas declaracoes nominais");
+
+  // E nenhum prefixo libera: sub-caminho de rota declarada continua negado.
+  for (const caminho of [
+    "/api/internal/agentes/acoes/extra",
+    "/api/internal/agentes/worker/extra",
+    "/api/internal",
+    "/api/internal/",
+    "/api/internal/agentes",
+  ]) assert(sem(caminho, "POST") === "bloquear_api", `${caminho} nao deveria ser liberado por prefixo`);
+});
+
+t("41. NAO REGRESSAO: desconhecidos, verbos errados e nomes de prototipo", () => {
+  // Rota interna que nao existe continua negada, em todo verbo.
+  for (const metodo of VERBOS_HTTP)
+    assert(sem("/api/internal/agentes/inexistente", metodo) === "bloquear_api",
+      `${metodo} em rota interna desconhecida deveria cair no default deny`);
+
+  // Nomes que existem no prototipo de Object. `casa()` nao usa
+  // hasOwnProperty — ela sobrevive porque `Array.isArray` reprova o que
+  // vem da cadeia de prototipos. Este teste prende esse comportamento:
+  // trocar o guard por um `if (metodos)` abriria todos eles de uma vez.
+  for (const nome of ["toString", "constructor", "__proto__", "hasOwnProperty", "valueOf"])
+    for (const metodo of ["GET", "POST"])
+      assert(sem("/api/internal/agentes/" + nome, metodo) === "bloquear_api",
+        `${metodo} em /api/internal/agentes/${nome} foi liberado pelo prototipo`);
+  assert(sem("/toString") === "redirecionar", "nome de prototipo como PAGINA nao deveria liberar");
+
+  // As rotas com segredo ja existentes nao mudaram de comportamento.
+  assert(sem("/api/sync", "GET") === "liberar", "cron de sync regrediu");
+  assert(sem("/api/internal/agentes/worker", "GET") === "liberar", "dispatcher regrediu");
+  assert(sem("/api/internal/agentes/worker", "POST") === "bloquear_api", "verbo errado no dispatcher regrediu");
+  assert(sem("/api/internal/agentes/executar", "POST") === "liberar", "worker manual regrediu");
+
+  // Rota publica e rota de sessao seguem como estavam.
+  assert(sem("/api/auth/login", "POST") === "liberar", "rota publica regrediu");
+  assert(sem("/login") === "liberar", "pagina publica regrediu");
+  assert(sem("/api/dashboard/resumo") === "bloquear_api", "API de sessao regrediu");
+  assert(com("/api/dashboard/resumo") === "liberar", "API de sessao com cookie regrediu");
+  assert(sem("/dashboard") === "redirecionar", "pagina de sessao regrediu");
+
+  // MUT-6: o default continua NEGAR. Se alguem trocar o fim de
+  // `decidirAcesso` por `return "liberar"`, tudo acima vira decoracao.
+  const fontepolicy = fs.readFileSync(path.join(process.cwd(), "lib/middleware-rotas.ts"), "utf8");
+  assert(/return caminho\.startsWith\("\/api\/"\) \? "bloquear_api" : "redirecionar";/.test(fontepolicy),
+    "o default do middleware deixou de ser NEGAR");
 });
 
 // ────────────────────────────────────────────────────────────────────
