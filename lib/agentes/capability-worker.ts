@@ -338,6 +338,94 @@ export interface TarefaReivindicadaMinima {
  */
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// ─── Agente, para acao interna — M2-I1-A8 ─────────────────────────────
+
+/**
+ * A projecao MINIMA, e ela e o contrato.
+ *
+ * Tres colunas. `COLUNAS_AGENTE` da capability de usuario tem oito, e
+ * reusa-la aqui traria `instrucoes`, `tipo` e carimbos para um caminho
+ * que nao precisa de nenhum deles. Coluna a mais em leitura sem dono e
+ * superficie sem contrapartida.
+ */
+const COLUNAS_AGENTE_ACAO_INTERNA = "id, user_id, ativo";
+
+export interface AgenteParaAcaoInterna {
+  readonly agenteId: string;
+  /** O DONO, vindo da LINHA. E ele que vira autoridade de tenant daqui
+   *  para a frente — nunca um `userId` proposto por quem chamou. */
+  readonly userId: string;
+  readonly ativo: boolean;
+}
+
+export interface ResultadoAgenteInterno {
+  readonly agente: AgenteParaAcaoInterna | null;
+  readonly erro: string | null;
+}
+
+/**
+ * Le UM agente por id, SEM filtro de dono.
+ *
+ * ── JUSTIFICATIVA DA AUSENCIA DE `user_id` ──────────────────────────
+ *
+ * Mesma razao de `lerTarefaParaExecucao`, e ela precisa ser dita de novo
+ * porque o caso e diferente: aqui o chamador ESCOLHE o id.
+ *
+ * A ponte de orquestracao externa nao tem sessao, entao nao ha `userId`
+ * para exigir — e exigir um que viesse do proprio pedido seria pior que
+ * nao exigir nenhum: transformaria uma afirmacao do chamador em
+ * autoridade. O dono e FATO DE BANCO, lido desta linha, e e ele que
+ * fecha todas as leituras seguintes.
+ *
+ * O que protege este caminho e outra coisa: o segredo de servico da rota
+ * que chega aqui, e o fato de que conhecer um `agenteId` nao concede
+ * nada — a Funcao ainda passa por permissao, binding, cobertura e guard,
+ * todos fechados pelo `user_id` que esta leitura devolveu.
+ *
+ * ── Inexistente e alheio sao a MESMA resposta ───────────────────────
+ *
+ * `agente: null` sem erro. Nao ha como distinguir os dois de fora, e
+ * distinguir seria um oraculo de existencia de recurso alheio.
+ */
+export async function lerAgenteParaAcaoInterna(
+  agenteId: string
+): Promise<ResultadoAgenteInterno> {
+  if (!agenteId) return { agente: null, erro: "agente_id_ausente" };
+
+  const { data, error } = await getSupabaseServidor()
+    .from("agentes")
+    .select(COLUNAS_AGENTE_ACAO_INTERNA)
+    .eq("id", agenteId)
+    .maybeSingle();
+
+  if (error) {
+    // Sem `error.message`: mensagem de driver vaza nome de coluna, de
+    // constraint e as vezes de valor.
+    console.error("[agentes-interno] falha ao ler agente para acao");
+    return { agente: null, erro: "erro_consulta_agente" };
+  }
+  if (data === null) return { agente: null, erro: null };
+
+  // Leitura campo a campo, e nao `normalizarLinha`: aquele helper existe
+  // para a linha INTEIRA de tarefa, e usa-lo aqui traria a forma dela
+  // para um registro que tem tres campos.
+  const bruta = data as Record<string, unknown>;
+  const id = bruta.id;
+  const userId = bruta.user_id;
+  if (typeof id !== "string" || !id) return { agente: null, erro: "agente_shape_invalido" };
+  if (typeof userId !== "string" || !userId) {
+    return { agente: null, erro: "agente_shape_invalido" };
+  }
+
+  return {
+    // `ativo` so e verdadeiro quando o banco disse `true`. Ausente ou
+    // nulo conta como INATIVO — fail-closed, nunca `?? true`.
+    agente: { agenteId: id, userId, ativo: bruta.ativo === true },
+    erro: null,
+  };
+}
+
+
 /**
  * Reivindica a PROXIMA tarefa elegivel da fila — FUNCTION-RUNTIME-V1-B1.
  *

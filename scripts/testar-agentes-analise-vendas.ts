@@ -929,6 +929,20 @@ const MIGRATIONS_DO_APPROVAL_DECISION_D4: readonly string[] = [
  * tecnico. Lista PROPRIA, declarada nome a nome, para que o guarda de
  * inventario nao possa ser ampliado por engano junto com o D4.
  */
+/**
+ * M2-I1-A7 — o indice parcial que garante UMA tarefa de polling ativa por
+ * agente.
+ *
+ * Declarada aqui porque o guarda exige PERTENCIMENTO nominal: migration no
+ * disco sem dono conhecido e exatamente o que o G12b existe para pegar.
+ * A chave e `(agente_id)` e `tipo` vive no PREDICADO — se estivesse na
+ * chave, a regra valeria para todos os tipos e o chat quebraria na segunda
+ * mensagem seguida.
+ */
+const MIGRATIONS_DO_POLLING_A7: readonly string[] = [
+  "20261008_agente_tarefas_polling_perguntas_unica.sql",
+];
+
 const MIGRATIONS_DO_RESUME_D5_C3_I2: readonly string[] = [
   "20261007_retomada_fila_e_reconciliacao.sql",
 ];
@@ -1445,6 +1459,117 @@ const ARQUIVOS_M1_I1V2: readonly string[] = [
 ];
 
 /** Uniao EXPLICITA. Qualquer caminho fora dela reprova o G11. */
+/**
+ * O que a M2-I1-A2 acrescentou: a PRIMEIRA Funcao conectada.
+ *
+ * Lista propria, pela mesma razao de todas as anteriores — cada
+ * liberacao mantem legivel de qual frente ela veio.
+ *
+ * Dois arquivos aparecem para ESTE guarda:
+ *
+ *   lib/agentes/dados/perguntas.ts                 dominio sanitizado
+ *   lib/agentes/funcoes/mercadolivre-perguntas.ts  executor da Funcao
+ *
+ * O adapter de provider, `lib/mercado-livre-perguntas.ts`, fica FORA de
+ * `ESCOPO_AGENTES` de proposito: ele e a fronteira do CDS com o
+ * marketplace e mora junto de `lib/ml-auth.ts` e `lib/mercado-livre.ts`.
+ * Declara-lo aqui sugeriria que o escopo dos agentes o cobre, e nao cobre.
+ *
+ * `mercadolivre-perguntas.ts` e o QUARTO modulo de `lib/agentes/funcoes`,
+ * e nao por gosto: os tres wrappers da Funcao nova no padrao inline
+ * levariam `registry.ts` a ~640 linhas contra o tripwire J1 de 560, em
+ * `testar-ia-skill-1d-b.ts`. A extracao foi a resposta ao alarme;
+ * levantar o alarme teria sido desliga-lo.
+ */
+const ARQUIVOS_M2_I1_A2: readonly string[] = [
+  "lib/agentes/dados/perguntas.ts",
+  "lib/agentes/funcoes/mercadolivre-perguntas.ts",
+  "scripts/testar-agentes-funcoes-perguntas.ts",
+];
+
+/**
+ * O que a M2-I1-A3 acrescentou: a cobertura REMOTA.
+ *
+ * Um arquivo aparece para este guarda:
+ *
+ *   lib/agentes/conexoes/cobertura-remota.ts   dono do estado de cobertura
+ *
+ * O network owner, `lib/mercado-livre-concessoes.ts`, fica fora de
+ * `ESCOPO_AGENTES` pela MESMA razao do adapter de perguntas: ele e a
+ * fronteira do CDS com o marketplace, e mora junto de `lib/ml-auth.ts`.
+ *
+ * `cobertura-remota.ts` e o SETIMO modulo de `lib/agentes/conexoes`, e
+ * cinco suites congelavam aquela pasta em seis — todas reconciliadas
+ * nominalmente no mesmo gate.
+ */
+const ARQUIVOS_M2_I1_A3: readonly string[] = [
+  "lib/agentes/conexoes/cobertura-remota.ts",
+  "scripts/testar-agentes-cobertura-ml.ts",
+];
+
+/**
+ * O que a M2-I1-A7 acrescentou: o GATILHO DE PRODUTO.
+ *
+ * Ate aqui a cadeia de conexao estava inteira e nenhuma acao do produto
+ * a alcancava — `executarFuncao` so era chamada pelo handler de vendas,
+ * preso a `vendas.consultar` por constante de modulo. Esta frente cria o
+ * caminho automatico:
+ *
+ *   cron  ->  poller  ->  criarTarefa  ->  worker  ->  handler  ->  Funcao
+ *
+ * Dentro de `ESCOPO_AGENTES` aparecem seis caminhos:
+ *
+ *   lib/agentes/poller/perguntas.ts            o produtor (decide e enfileira)
+ *   lib/agentes/handlers/consultar-perguntas-ml.ts          o handler
+ *   lib/agentes/handlers/consultar-perguntas-ml-contrato.ts o contrato puro
+ *   app/api/internal/agentes/perguntas-poller/  a rota do cron
+ *   supabase/migrations/20261008_...           o indice parcial de dedupe
+ *   scripts/testar-agentes-polling-perguntas.ts             a suite
+ *
+ * `vercel.json` fica FORA deste guarda — ele nao esta em `ESCOPO_AGENTES`.
+ * `registry.ts`, `resume-contratos.ts`, `capability.ts` e
+ * `retomada/executar-retomada.ts` ja eram caminhos conhecidos por frentes
+ * anteriores, e por isso nao entram de novo: declarar duas vezes faria a
+ * origem de cada liberacao parar de ser legivel.
+ */
+/**
+ * O que a M2-I1-A8a acrescentou: a PONTE DE ORQUESTRACAO EXTERNA.
+ *
+ * O A7 deu ao produto um gatilho proprio (cron -> poller -> tarefa). O
+ * A8a da uma porta para um orquestrador de fora pedir uma ACAO, sem
+ * receber nenhuma autoridade em troca: ele nao diz qual Funcao, nao diz
+ * qual dono, nao diz qual loja e nao ve credencial.
+ *
+ * Dentro de `ESCOPO_AGENTES` aparecem quatro caminhos:
+ *
+ *   lib/agentes/acoes/catalogo.ts               acao -> Funcao, fechado
+ *   app/api/internal/agentes/acoes/route.ts     a porta autenticada
+ *   scripts/testar-agentes-ponte-n8n.ts         a suite
+ *
+ * `capability-worker.ts` e `execucao-funcoes/executar.ts` tambem mudaram,
+ * e NAO entram aqui: os dois ja sao caminhos autorizados por frentes
+ * anteriores, e redeclara-los faria a origem de cada liberacao parar de
+ * ser legivel.
+ */
+const ARQUIVOS_M2_I1_A8: readonly string[] = [
+  "lib/agentes/acoes/",
+  "lib/agentes/acoes/catalogo.ts",
+  "app/api/internal/agentes/acoes/",
+  "app/api/internal/agentes/acoes/route.ts",
+  "scripts/testar-agentes-ponte-n8n.ts",
+];
+
+const ARQUIVOS_M2_I1_A7: readonly string[] = [
+  "lib/agentes/poller/",
+  "lib/agentes/poller/perguntas.ts",
+  "lib/agentes/handlers/consultar-perguntas-ml.ts",
+  "lib/agentes/handlers/consultar-perguntas-ml-contrato.ts",
+  "app/api/internal/agentes/perguntas-poller/",
+  "app/api/internal/agentes/perguntas-poller/route.ts",
+  "supabase/migrations/20261008_agente_tarefas_polling_perguntas_unica.sql",
+  "scripts/testar-agentes-polling-perguntas.ts",
+];
+
 const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_1DD,
   ...ARQUIVOS_1DA_PERF,
@@ -1481,6 +1606,10 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_RESUME_D5_C3_I1,
   ...ARQUIVOS_RESUME_D5_C3_I2,
   ...ARQUIVOS_M1_I1V2,
+  ...ARQUIVOS_M2_I1_A2,
+  ...ARQUIVOS_M2_I1_A3,
+  ...ARQUIVOS_M2_I1_A7,
+  ...ARQUIVOS_M2_I1_A8,
 ];
 
 /**
@@ -1584,6 +1713,26 @@ const SUITES_AGENTES: readonly string[] = [
   "testar-agentes-ia-observabilidade.ts",
   "testar-agentes-ia-provider.ts",
   "testar-agentes-ia-wiring.ts",
+  // M2-I1-A3: a suite da cobertura remota — grant, matriz de falha e
+  // orcamento de rede.
+  "testar-agentes-cobertura-ml.ts",
+  // M2-I1-A2: a suite da primeira Funcao conectada — dominio, adapter,
+  // executor, e a integracao real entre executor e agregador.
+  "testar-agentes-funcoes-perguntas.ts",
+  // M2-I1-A6: a aceitacao E2E local da cadeia de conexao inteira, com
+  // armazem em memoria com estado e as duas fronteiras HTTP do ML
+  // dubladas. Declarada aqui NOMINALMENTE, e nao contornada por prefixo:
+  // este inventario ja foi driblado duas vezes por nomenclatura
+  // (`testar-ia-skill-1d-d1-banco.ts` e as duas citadas acima), e cada
+  // drible e legitimo sozinho e corroi a lista no agregado.
+  "testar-agentes-e2e-local.ts",
+  // M2-I1-A7: a suite do gatilho de produto — produtor, dedupe, race de
+  // permissao e a uniao de contratos de retomada. Declarada NOMINALMENTE,
+  // como a do A6.
+  "testar-agentes-polling-perguntas.ts",
+  // M2-I1-A8a: a suite da ponte de orquestracao externa. Declarada
+  // NOMINALMENTE, como as duas anteriores.
+  "testar-agentes-ponte-n8n.ts",
   "testar-agentes-isolamento-1de.ts",
   "testar-agentes-isolamento-banco.ts",
   "testar-agentes-vendas-capability.ts",
@@ -1997,10 +2146,13 @@ async function main() {
   // em toda reconciliacao desta suite, a allowlist e AMPLIADA POR NOME e
   // nunca afrouxada: `join` sobre a lista ordenada continua reprovando
   // chave a menos, chave a mais e chave trocada.
+  // M2-I1-A7: a QUINTA chave. `consultar_perguntas_ml` e o primeiro tipo
+  // nascido de gatilho automatico, e nao de acao do dono.
   const CHAVES_ESPERADAS =
-    "TIPO_ANALISE_VENDAS,TIPO_CONSULTAR_VENDAS,TIPO_CONVERSA,TIPO_TESTE_FUNDACAO";
-  ok("G2  registry registra EXATAMENTE 4 tipos", chavesRegistry.length === 4);
-  ok("G3  os tipos sao teste_fundacao, analise_vendas, conversa e consultar_vendas",
+    "TIPO_ANALISE_VENDAS,TIPO_CONSULTAR_PERGUNTAS_ML,TIPO_CONSULTAR_VENDAS," +
+    "TIPO_CONVERSA,TIPO_TESTE_FUNDACAO";
+  ok("G2  registry registra EXATAMENTE 5 tipos", chavesRegistry.length === 5);
+  ok("G3  as cinco chaves sao exatamente as nominais",
      chavesRegistry.join(",") === CHAVES_ESPERADAS);
   ok("G3a CONTROLE NEGATIVO: o oraculo reprova chave A MENOS",
      ["TIPO_ANALISE_VENDAS", "TIPO_CONVERSA", "TIPO_TESTE_FUNDACAO"].sort().join(",") !==
@@ -2255,9 +2407,14 @@ async function main() {
       return fim === -1 ? resto : resto.slice(0, fim + 3);
     };
 
+    // M2-I1-A7: `criarTarefa` SAIU do congelamento byte a byte, e a saida e
+    // declarada, nao silenciosa. O polling precisou que ela distinguisse
+    // `23505` — e o assert G10b1 abaixo prova que essa foi a UNICA mudanca:
+    // removido o bloco novo, o corpo volta a ser byte-identico a baseline.
+    // As outras seis continuam congeladas.
     const OPERACOES_DE_ANTES = [
       "criarAgente", "listarAgentesDoDono", "lerAgenteDoDono", "atualizarAgenteDoDono",
-      "criarTarefa", "listarTarefasDoAgente", "lerTarefaDoDono",
+      "listarTarefasDoAgente", "lerTarefaDoDono",
     ];
     const FILTROS_DE_ANTES = [
       "filtrosAgenteDoDono", "filtrosAgentesDoDono", "filtrosTarefaDoDono",
@@ -2265,10 +2422,42 @@ async function main() {
     ];
 
     const corposBaseline = OPERACOES_DE_ANTES.map((n) => corpoExportado(capBaseline, n));
-    ok("G10b ANCORA: as 7 operacoes foram recortadas da BASELINE",
-       corposBaseline.length === 7 && corposBaseline.every((c) => c.length > 80));
-    ok("G10b as 7 operacoes da baseline continuam byte-identicas hoje",
+    ok("G10b ANCORA: as 6 operacoes congeladas foram recortadas da BASELINE",
+       corposBaseline.length === 6 && corposBaseline.every((c) => c.length > 80));
+    ok("G10b as 6 operacoes congeladas continuam byte-identicas hoje",
        corposBaseline.every((c) => capAtual.includes(c)));
+
+    // ── G10b1 — `criarTarefa` mudou, e SO pelo que foi autorizado ────
+    //
+    // O bloco abaixo e o texto EXATO acrescentado pela M2-I1-A7. Remove-lo
+    // do corpo atual tem de devolver a baseline byte a byte. Se qualquer
+    // outra linha tiver sido tocada, a comparacao falha — e e por isso que
+    // este assert substitui o congelamento, em vez de afrouxa-lo.
+    const criarTarefaBaseline = corpoExportado(capBaseline, "criarTarefa");
+    const criarTarefaAtual = corpoExportado(capAtual, "criarTarefa");
+    const inicioBloco = criarTarefaAtual.indexOf("    // \u2500\u2500 23505: RELATO");
+    const fimBloco = criarTarefaAtual.indexOf(
+      'erro: "conflito_unico" };', inicioBloco);
+    // O fim do BLOCO e a chave do `if`, nao a do objeto literal que vem
+    // logo antes dela. Pular o `};` primeiro e o que separa as duas.
+    const fimObjeto = criarTarefaAtual.indexOf("};", fimBloco);
+    const fimLinha = fimObjeto === -1
+      ? -1
+      : criarTarefaAtual.indexOf("}", fimObjeto + 2);
+    const blocoA7 = inicioBloco === -1 || fimBloco === -1
+      ? null
+      : criarTarefaAtual.slice(inicioBloco, fimLinha + 1);
+
+    ok("G10b1 ANCORA: o bloco do 23505 foi localizado no corpo atual",
+       blocoA7 !== null && blocoA7.includes("conflito_unico"));
+    ok("G10b2 removido o bloco A7, `criarTarefa` volta a ser a BASELINE",
+       blocoA7 !== null &&
+       criarTarefaAtual.replace(blocoA7, "").replace(/\n\s*\n/g, "\n") ===
+         criarTarefaBaseline.replace(/\n\s*\n/g, "\n"));
+    ok("G10b3 CONTROLE: sem remover o bloco, os dois NAO sao iguais",
+       criarTarefaAtual !== criarTarefaBaseline);
+    ok("G10b4 e a baseline dela foi mesmo recortada",
+       criarTarefaBaseline.length > 200 && criarTarefaBaseline.includes("agente_tarefas"));
 
     const filtrosBaseline = FILTROS_DE_ANTES.map((n) => corpoExportado(capBaseline, n));
     ok("G10c ANCORA: os 4 construtores foram recortados da BASELINE",
@@ -3031,7 +3220,8 @@ async function main() {
       MIGRATIONS_DO_APPROVAL_RESUME_D1.includes(m) ||
       MIGRATIONS_DO_APPROVAL_PAUSE_D3_CLEANUP.includes(m) ||
       MIGRATIONS_DO_APPROVAL_DECISION_D4.includes(m) ||
-      MIGRATIONS_DO_RESUME_D5_C3_I2.includes(m);
+      MIGRATIONS_DO_RESUME_D5_C3_I2.includes(m) ||
+      MIGRATIONS_DO_POLLING_A7.includes(m);
 
     ok(`G12b nenhuma migration nao declarada no disco (${novasNoDisco.join(", ") || "nenhuma"})`,
        novasNoDisco.every(declarada));
