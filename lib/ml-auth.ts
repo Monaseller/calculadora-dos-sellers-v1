@@ -210,6 +210,171 @@ export async function saveTokensToDB(
   return gravarCredencialML(lojaId, userId, updates, refreshTokenAnterior);
 }
 
+/**
+ * Renova a credencial e persiste com COMPARE-AND-SWAP — A2-C2.
+ *
+ * ── O defeito que esta funcao existe para fechar ────────────────────
+ *
+ * `getMLLojaById` e `getMLLojaAtiva` chamavam `saveTokensToDB` com TRES
+ * argumentos. O quarto — `refreshTokenAnterior` — e o que liga a escrita
+ * condicional que `gravarCredencialML` ja implementava. Sem ele a
+ * gravacao era CEGA: duas execucoes que lessem a mesma linha vencida
+ * renovavam com o MESMO `refresh_token`, o ML rotacionava nas duas, e a
+ * segunda escrita apagava a credencial da primeira. O `refresh_token`
+ * sobrescrito pode ja nao valer no provider — e a conta cai.
+ *
+ * ── A politica de quem PERDE o CAS: reler UMA vez ───────────────────
+ *
+ * Perder significa "outra requisicao rotacionou antes de mim". A
+ * credencial que eu recebi pode ate funcionar, mas a do banco e a
+ * oficial — e reescrever por cima e exatamente o que causou o defeito.
+ * Entao o perdedor RELE e usa o que venceu.
+ *
+ * Uma releitura, nunca um laco. E ela NAO pode passar por
+ * `getMLLojaById`/`getMLLojaAtiva`, que renovariam de novo e poderiam
+ * perder de novo — a leitura entra por parametro, ja fechada no dono,
+ * e e crua por construcao.
+ *
+ * ── Validade pela regra canonica ────────────────────────────────────
+ *
+ * `credencialExpirada` decide se a credencial do vencedor serve. A regra
+ * de margem nao e reescrita aqui, e "renovou com 200" nunca vira prova
+ * de validade por si.
+ *
+ * ── Fail-closed, e a mudanca de comportamento que isso traz ─────────
+ *
+ * Antes, refresh que falhava caia fora do `if` e a funcao devolvia o
+ * token VENCIDO — um 401 garantido mais adiante, com diagnostico pior.
+ * Agora a falha primeiro PROCURA a credencial que venceu a rotacao
+ * (`procurarCredencialVencedora`); so quando nao ha vencedora e que
+ * devolve `null`, que quem chama trata como credencial ausente e o dono
+ * le como "precisa reconectar".
+ *
+ * ── O que esta funcao NAO garante ───────────────────────────────────
+ *
+ * Ela nao impede DUAS chamadas ao `/oauth/token`. O CAS acontece depois
+ * do refresh, entao a corrida remota continua possivel — e o que ela
+ * garante e que a persistencia local tenha UM vencedor e que o perdedor
+ * use a credencial dele. `lib/ml-conexao.ts` acrescenta coalescencia por
+ * instancia para o caso comum; traze-la para ca e decisao propria.
+ */
+async function renovarComCas(
+  lojaId: string,
+  userId: string,
+  refreshAnterior: string,
+  reler: Releitura
+): Promise<{ accessToken: string } | null> {
+  const resultado = await refreshMLToken(refreshAnterior);
+
+  // ── O perdedor REMOTO ─────────────────────────────────────────────
+  //
+  // O refresh_token do ML e de USO UNICO. Entao, quando duas execucoes
+  // partem do mesmo R0, o desfecho documentado NAO e "as duas renovam":
+  // e uma renovar e a outra receber `invalid_grant`. Quem falha aqui
+  // provavelmente nao tem credencial ruim — tem credencial VELHA, porque
+  // outra execucao acabou de rotacionar.
+  //
+  // Devolver `null` direto transformaria essa corrida benigna num
+  // "reconecte a conta" na cara do dono, com a conta sadia. Entao a
+  // falha vira BUSCA pela vencedora, nunca um segundo OAuth.
+  if (!resultado?.newAccessToken) {
+    return procurarCredencialVencedora(refreshAnterior, reler);
+  }
+
+  const gravou = await saveTokensToDB(lojaId, userId, resultado, refreshAnterior);
+  if (gravou) return { accessToken: resultado.newAccessToken };
+
+  // CAS perdido: outra requisicao gravou antes. Mesma busca, mesmo
+  // helper — dois algoritmos para o mesmo problema divergiriam no
+  // primeiro conserto feito so de um lado.
+  return procurarCredencialVencedora(refreshAnterior, reler);
+}
+
+/**
+ * Quantas vezes a recuperacao rele a linha. Dois, nunca um laco.
+ *
+ * A segunda leitura existe por uma janela concreta: o perdedor pode
+ * receber `invalid_grant` ANTES de o vencedor terminar de gravar. Uma
+ * leitura so, nesse instante, ainda veria a credencial velha e
+ * declararia "reconecte" sem motivo.
+ *
+ * `150` nao e garantia matematica de nada — e um teto operacional.
+ * Coberta a janela, o custo maximo de uma falha genuina e esta espera.
+ */
+const MAX_LEITURAS_DE_RECUPERACAO = 2;
+const ESPERA_ENTRE_LEITURAS_MS = 150;
+
+/** A leitura CRUA da credencial, ja fechada no dono por quem a monta. */
+type Releitura = () => Promise<{
+  access_token: string | null;
+  refresh_token: string | null;
+  token_expires_at: string | null;
+} | null>;
+
+/**
+ * A linha relida prova que OUTRA execucao venceu a rotacao?
+ *
+ * ── Por que `refresh_token` DIFERENTE e obrigatorio ─────────────────
+ *
+ * "O token esta valido" nao prova vencedor nenhum: a linha pode estar
+ * exatamente como a observamos. A evidencia de que houve rotacao e o
+ * `refresh_token` ter MUDADO — o resto sao condicoes de uso.
+ *
+ * ── A conservadoria que isto cria, declarada ────────────────────────
+ *
+ * Quando o ML renova SEM emitir refresh_token novo, `saveTokensToDB`
+ * preserva o anterior: o vencedor grava access e validade, e a coluna
+ * `refresh_token` continua sendo R0. Nesse caso o perdedor NAO
+ * reconhece a vencedora e falha fechado, mesmo com a conta sadia.
+ *
+ * E deliberado. A alternativa — aceitar "agora esta valida" como prova
+ * — devolveria credencial com base em coincidencia de tempo, e fechar
+ * demais custa um pedido de reconexao indevido; fechar de menos custa
+ * agir com credencial que ninguem confirmou.
+ */
+function vencedoraUtilizavel(
+  linha: { access_token: string | null; refresh_token: string | null; token_expires_at: string | null },
+  refreshObservado: string
+): boolean {
+  if (!linha.access_token) return false;
+  if (!linha.refresh_token) return false;
+  if (linha.refresh_token === refreshObservado) return false;
+  return !credencialExpirada(linha.token_expires_at);
+}
+
+/**
+ * Procura a credencial que VENCEU a rotacao — A2-C2.
+ *
+ * Serve aos dois perdedores, e de proposito: o do CAS (o OAuth deu certo
+ * mas outra requisicao gravou antes) e o do provider (o OAuth falhou
+ * porque outra requisicao ja consumiu o refresh_token). O problema e o
+ * mesmo — "alguem rotacionou, quem?" — e a resposta tem de ser uma.
+ *
+ * NUNCA emite um segundo OAuth. NUNCA grava. NUNCA devolve a credencial
+ * observada de volta. Sem vencedora dentro do limite: `null`, que e a
+ * direcao segura.
+ */
+async function procurarCredencialVencedora(
+  refreshObservado: string,
+  reler: Releitura
+): Promise<{ accessToken: string } | null> {
+  for (let leitura = 1; leitura <= MAX_LEITURAS_DE_RECUPERACAO; leitura++) {
+    const atual = await reler();
+
+    if (atual !== null && vencedoraUtilizavel(atual, refreshObservado)) {
+      return { accessToken: atual.access_token as string };
+    }
+
+    // Espera SO entre leituras: a ultima nao paga um atraso que nao
+    // vai usar.
+    if (leitura < MAX_LEITURAS_DE_RECUPERACAO) {
+      await new Promise((resolver) => setTimeout(resolver, ESPERA_ENTRE_LEITURAS_MS));
+    }
+  }
+
+  return null;
+}
+
 /** Busca loja ML ativa pelo userId (para sync server-side sem cookie) */
 export async function getMLLojaAtiva(userId: string): Promise<{
   lojaId:      string;
@@ -226,11 +391,17 @@ export async function getMLLojaAtiva(userId: string): Promise<{
     new Date(loja.token_expires_at).getTime() - 5 * 60 * 1000 < Date.now();
 
   if (expired && loja.refresh_token) {
-    const result = await refreshMLToken(loja.refresh_token);
-    if (result) {
-      accessToken = result.newAccessToken!;
-      await saveTokensToDB(loja.id, userId, result);
-    }
+    // A2-C2. Mesma corrida de `getMLLojaById`, mesma cura — e o MESMO
+    // helper, para que um conserto futuro nao precise ser feito duas
+    // vezes em dois lugares que ja provaram divergir.
+    const renovada = await renovarComCas(
+      loja.id,
+      userId,
+      loja.refresh_token,
+      async () => (await lerCredencialMLAtivaDoDono(userId)).linha
+    );
+    if (renovada === null) return null;
+    accessToken = renovada.accessToken;
   }
 
   return {
@@ -275,11 +446,16 @@ export async function getMLLojaById(lojaId: string, userId: string): Promise<{
     new Date(loja.token_expires_at).getTime() - 5 * 60 * 1000 < Date.now();
 
   if (expired && loja.refresh_token) {
-    const result = await refreshMLToken(loja.refresh_token);
-    if (result) {
-      accessToken = result.newAccessToken!;
-      await saveTokensToDB(loja.id, userId, result);
-    }
+    // A2-C2. Este e o caminho que o live de 2026-09-22 exercitou: a
+    // credencial estava vencida, foi renovada e persistida — sem CAS.
+    const renovada = await renovarComCas(
+      loja.id,
+      userId,
+      loja.refresh_token,
+      async () => (await lerCredencialMLPorLojaEDono(lojaId, userId)).linha
+    );
+    if (renovada === null) return null;
+    accessToken = renovada.accessToken;
   }
 
   return {
