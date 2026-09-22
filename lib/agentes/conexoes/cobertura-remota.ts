@@ -23,8 +23,34 @@
  * ── O que ele NAO faz ───────────────────────────────────────────────
  *
  * Nao altera Permission, nao altera nivel, nao escolhe binding, nao cria
- * binding, nao rebaixa `estado`, nao inventa fato e nao guarda cache.
- * So troca UM campo, de UM fato, quando ha evidencia.
+ * binding, nao inventa fato e nao guarda cache entre invocacoes.
+ *
+ * ── Por que ele mexe em `estado` — FIX1-M1 ──────────────────────────
+ *
+ * Ate a FIX1-M1 este modulo prometia trocar UM campo, `cobertura`, e
+ * deixar `estado` exatamente como a camada de fatos o produziu. A
+ * promessa era sincera e estava ERRADA no efeito.
+ *
+ * Confirmar cobertura nao e uma leitura inocente: o confirmador resolve
+ * a credencial por `getMLLojaById`, e essa funcao RENOVA token vencido e
+ * persiste a validade nova. Ou seja, esta funcao provoca uma mudanca no
+ * mesmo fato que ela devolve — e devolvia o `estado` de ANTES da
+ * mudanca. O guard exige `estado === "conectada"`, entao a primeira
+ * execucao renovava a credencial com sucesso e terminava
+ * `conexao_ausente`; a segunda passava, porque a validade nova ja estava
+ * no banco. Um sistema que precisava ser chamado duas vezes para
+ * funcionar uma.
+ *
+ * A correcao NAO e o guard aceitar `expirada`, e NAO e concluir
+ * "conectada" porque o grant respondeu 200 — as duas trocariam uma
+ * evidencia por um palpite. E reconciliar: depois de uma operacao que
+ * pode ter mexido na credencial, reler o fato pelo produtor CANONICO
+ * (`resolverFatoConexao` -> `derivarEstadoConexao`) e usar o `estado`
+ * dali. Nenhuma regra de validade e reescrita aqui.
+ *
+ * Cada campo continua com UM dono: `estado` e da camada de fatos,
+ * `cobertura` e desta. O que mudou foi o MOMENTO em que o primeiro e
+ * lido — depois do efeito colateral, nao antes.
  */
 import "server-only";
 import {
@@ -32,6 +58,7 @@ import {
   type MotivoCoberturaML,
   type PortasCoberturaML,
 } from "@/lib/mercado-livre-concessoes";
+import { resolverFatoConexao } from "@/lib/agentes/conexoes/fatos";
 import type { FatoConexao } from "@/lib/ia/skills/diagnostico";
 
 /**
@@ -133,17 +160,79 @@ export async function confirmarCoberturaDosFatos(
     cache.set(lojaId, veredito);
   }
 
+  // FIX1-M1. O confirmador RODOU, e resolver a credencial pode te-la
+  // renovado. A reconciliacao vem ANTES de olhar o veredito, de
+  // proposito: a renovacao acontece ao resolver a credencial, muito
+  // antes de o grant ser avaliado, entao ela e igualmente real quando a
+  // cobertura e recusada. Amarra-la ao ramo de sucesso deixaria o
+  // `estado` velho justamente nos casos de diagnostico.
+  const base = await comEstadoReconciliado(conexoes, alvo, userId, lojaId, requisito);
+
   if (veredito.cobertura !== "confirmada") {
-    return { conexoes, motivo: veredito.motivo, chamadasRemotas };
+    return { conexoes: base, motivo: veredito.motivo, chamadasRemotas };
   }
 
-  // Array NOVO, e so o campo `cobertura` do fato alvo muda. `estado`,
-  // `plataforma` e `recurso` saem como a camada de fatos os produziu:
-  // reinterpretar qualquer um deles criaria uma segunda autoridade sobre
-  // a mesma pergunta.
-  const elevados = conexoes.map((c, i) =>
+  // Array NOVO, e so o campo `cobertura` do fato alvo muda. `plataforma`
+  // e `recurso` saem como a camada de fatos os produziu: reinterpretar
+  // qualquer um deles criaria uma segunda autoridade sobre a mesma
+  // pergunta.
+  const elevados = base.map((c, i) =>
     i === alvo ? { ...c, cobertura: "confirmada" as const } : c
   );
 
   return { conexoes: Object.freeze(elevados), motivo: null, chamadasRemotas };
+}
+
+/**
+ * Rele o `estado` do fato alvo pelo produtor CANONICO — FIX1-M1.
+ *
+ * ── Por que reler, e nao calcular ───────────────────────────────────
+ *
+ * `resolverFatoConexao` le a linha e aplica `derivarEstadoConexao`, que
+ * e a UNICA autoridade sobre validade de credencial neste repositorio.
+ * Reproduzir a regra aqui — comparar `token_expires_at` com a margem,
+ * ou concluir "conectada" porque a chamada remota respondeu — criaria a
+ * segunda verdade que o resto do modulo evita.
+ *
+ * Do fato relido aproveita-se SOMENTE `estado`. A `cobertura` que ele
+ * traz e `nao_verificavel` por construcao (`coberturaDoRecurso` e
+ * constante), e deixa-la passar apagaria a elevacao que esta funcao
+ * acabou de provar.
+ *
+ * ── Fail-closed ─────────────────────────────────────────────────────
+ *
+ * Falha de leitura ou ausencia de linha devolvem o array INTACTO, com o
+ * `estado` antigo. Isso nega — que e a direcao segura. "Nao consegui
+ * reler" jamais pode virar "esta conectada".
+ *
+ * ── O relogio ───────────────────────────────────────────────────────
+ *
+ * `Date.now()`, e nao o `agoraMs` do snapshot: a pergunta aqui e "esta
+ * credencial serve AGORA, depois do que acabou de acontecer". Reusar o
+ * instante anterior reintroduziria, em miniatura, a defasagem que esta
+ * funcao existe para fechar.
+ */
+async function comEstadoReconciliado(
+  conexoes: readonly FatoConexao[],
+  alvo: number,
+  userId: string,
+  lojaId: string,
+  requisito: { readonly plataforma: string; readonly recurso: string }
+): Promise<readonly FatoConexao[]> {
+  const atual = await resolverFatoConexao({
+    userId,
+    lojaId,
+    plataforma: requisito.plataforma,
+    recurso: requisito.recurso,
+    agoraMs: Date.now(),
+  });
+
+  if (atual.coleta !== "ok" || atual.fato === null) return conexoes;
+
+  // Guardado antes do `map` para nao precisar de asserção de nao-nulo
+  // dentro do callback: o estreitamento acima ja provou o que importa.
+  const estado = atual.fato.estado;
+  if (estado === conexoes[alvo].estado) return conexoes;
+
+  return conexoes.map((c, i) => (i === alvo ? { ...c, estado } : c));
 }
