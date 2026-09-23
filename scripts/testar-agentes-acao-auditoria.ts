@@ -112,8 +112,9 @@ secao("D. Duas linhas, nunca um UPDATE");
 
 ok("D1  `fase` e abertura ou desfecho",
   /fase in \('abertura', 'desfecho'\)/.test(LISO));
-ok("D2  cinco estados, incluindo `parcial`",
-  /status in \('executando', 'sucesso', 'parcial', 'erro', 'negado'\)/.test(LISO));
+ok("D2  seis estados, incluindo `parcial` e `aguardando_aprovacao`",
+  /status in \( 'executando', 'sucesso', 'parcial', 'aguardando_aprovacao', 'negado', 'erro'\)/
+    .test(LISO));
 ok("D3  bicondicional: abertura sse executando",
   /\(fase = 'abertura'\) = \(status = 'executando'\)/.test(LISO));
 ok("D4  abertura EXIGE chave de tentativa",
@@ -122,25 +123,150 @@ ok("D5  abertura nao tem latencia; desfecho aceita nao negativa",
   /\(fase = 'abertura' and latencia_ms is null\) or \(fase = 'desfecho' and \(latencia_ms is null or latencia_ms >= 0\)\)/
     .test(LISO));
 
-// ─── E. Vocabulario de desfecho ───────────────────────────────────────
+// ─── E. Vocabulario de desfecho ───────────────────────────────
 secao("E. Vocabulario FECHADO, e capaz de dizer a verdade");
 
-ok("E1  `executando` e `sucesso` nao tem codigo",
+/**
+ * O mapa que a migration DEVE implementar, derivado do union real de
+ * `ResultadoSincronizacao` — nao de uma lista imaginada.
+ */
+const MAPA: ReadonlyArray<readonly [string, readonly string[]]> = [
+  ["executando", []],
+  ["sucesso", []],
+  ["parcial", ["backlog_truncado", "descartes_na_varredura"]],
+  ["aguardando_aprovacao", ["aprovacao_necessaria"]],
+  ["negado", [
+    "funcao_inexistente", "permissao_ausente",
+    "permissao_bloqueada", "conexao_ausente",
+  ]],
+  ["erro", [
+    "provedor_falhou", "contrato_violado",
+    "autoridade_divergente", "autoridade_indisponivel",
+    "persistencia_negada", "persistencia_recusada", "persistencia_falhou",
+    "auditoria_funcao_falhou", "erro_interno",
+  ]],
+];
+
+/**
+ * Le os ramos do `case` do SQL — o texto EXECUTAVEL, nunca o comentario.
+ *
+ * O veredito nao pode sair de `LISO.includes("'x'")`: um codigo citado
+ * num `comment on column` passaria por essa peneira sem nunca estar no
+ * CHECK. Aqui o ramo e recortado do proprio `case`.
+ */
+function ramosDoCase(): Map<string, string[]> {
+  const abre = LISO.indexOf(
+    "constraint agente_acao_execucoes_codigo_por_status check ( case status");
+  const fecha = LISO.indexOf(" end )", abre);
+  const corpo = abre < 0 || fecha < 0 ? "" : LISO.slice(abre, fecha);
+  const ramos = new Map<string, string[]>();
+  for (const m of corpo.matchAll(/when '([a-z_]+)' then ([^]*?)(?=when '|$)/g)) {
+    const arm = m[2];
+    ramos.set(m[1], /is null/.test(arm)
+      ? []
+      : [...arm.matchAll(/'([a-z_]+)'/g)].map((c) => c[1]));
+  }
+  return ramos;
+}
+const RAMOS = ramosDoCase();
+
+ok("E1  ha exatamente um ramo por status, e nada alem",
+  RAMOS.size === MAPA.length && MAPA.every(([s]) => RAMOS.has(s)),
+  [...RAMOS.keys()].join(","));
+
+for (const [status, esperados] of MAPA) {
+  const lidos = RAMOS.get(status) ?? ["<ausente>"];
+  ok(`E2  \`${status}\` aceita exatamente ${esperados.length === 0 ? "NENHUM codigo" : esperados.join(", ")}`,
+    lidos.length === esperados.length && esperados.every((c, i) => lidos[i] === c),
+    lidos.join(","));
+}
+
+ok("E3  `executando` e `sucesso` exigem codigo NULO",
   /when 'executando' then codigo_desfecho is null/.test(LISO)
   && /when 'sucesso' then codigo_desfecho is null/.test(LISO));
-for (const codigo of [
-  "backlog_truncado", "descartes_na_varredura", "permission_denied",
-  "provider_error", "persistence_error", "authority_drift", "internal_error",
-]) {
-  ok(`E2  o vocabulario contempla \`${codigo}\``, LISO.includes(`'${codigo}'`));
+
+{
+  // Um codigo pertence a UM status. Sem isto, `permissao_ausente` sob
+  // `erro` passaria despercebido e a leitura do ledger viraria adivinhacao.
+  const dono = new Map<string, string>();
+  let colisao = "";
+  for (const [status, codigos] of RAMOS) {
+    for (const c of codigos) {
+      if (dono.has(c)) colisao = `${c}: ${dono.get(c)} e ${status}`;
+      dono.set(c, status);
+    }
+  }
+  ok("E4  nenhum codigo pertence a dois status", colisao === "", colisao);
+
+  // O CHECK e um `case` sobre `status`: um codigo do ramo errado e
+  // recusado pelo BANCO, e nao por convencao. A prova de runtime esta em
+  // `testar-agentes-acao-auditoria-banco.ts` (secao X).
+  ok("E5  o vocabulario inteiro cabe no `case`, sem lista paralela",
+    [...dono.keys()].length === MAPA.reduce((n, [, c]) => n + c.length, 0));
 }
-ok("E3  `backlog_truncado` cai em `parcial`, nunca em `sucesso`",
-  /when 'parcial' then codigo_desfecho in \( 'backlog_truncado', 'descartes_na_varredura'\)/
-    .test(LISO));
-ok("E4  nao existe codigo generico de reserva",
-  !/'outro'|'desconhecido'|'generico'/.test(LISO));
-ok("E5  `agente_indisponivel` nao e codigo — sem agente nao ha linha",
-  !/'agente_indisponivel'/.test(LISO));
+
+ok("E6  `backlog_truncado` cai em `parcial`, nunca em `sucesso`",
+  (RAMOS.get("parcial") ?? []).includes("backlog_truncado")
+  && (RAMOS.get("sucesso") ?? []).length === 0);
+
+{
+  // CHECK aceita TRUE e NULL. Sem `is not null` explicito, um desfecho
+  // de `erro` com codigo nulo passaria — e o teste de banco (secao V)
+  // prova que a guarda funciona de verdade.
+  const comGuarda = ["parcial", "aguardando_aprovacao", "negado", "erro"];
+  const corpo = LISO.slice(
+    LISO.indexOf("constraint agente_acao_execucoes_codigo_por_status"),
+    LISO.indexOf(" end )", LISO.indexOf("constraint agente_acao_execucoes_codigo_por_status")));
+  const faltando = comGuarda.filter((s) => {
+    const i = corpo.indexOf(`when '${s}' then `);
+    return i < 0 || !corpo.slice(i, i + 60).includes("codigo_desfecho is not null");
+  });
+  ok("E13 todo status com codigo EXIGE codigo nao nulo",
+    faltando.length === 0, faltando.join(","));
+}
+
+ok("E7  nao existe codigo generico de reserva",
+  !/'outro'|'desconhecido'|'generico'|'indefinido'/.test(LISO));
+
+for (const ausente of ["agente_indisponivel", "ja_processado", "aprovacao_indisponivel"]) {
+  // Os tres sao desfechos que o servico NAO pode produzir com a acao ja
+  // aberta — ver o bloco de comentario da constraint. Um deles no
+  // vocabulario seria codigo morto convidando a mapeamento errado.
+  ok(`E8  \`${ausente}\` nao e codigo de desfecho`,
+    ![...RAMOS.values()].flat().includes(ausente));
+}
+
+{
+  // Os codigos ingleses da primeira versao deste arquivo. A migration
+  // nunca foi aplicada, entao a correcao foi feita nela mesma.
+  const INGLES = ["permission_denied", "provider_error", "persistence_error",
+    "authority_drift", "internal_error"];
+  const achados = INGLES.filter((c) => LISO.includes(`'${c}'`));
+  ok("E9  nenhum codigo em ingles sobrou", achados.length === 0, achados.join(","));
+}
+
+{
+  // ── O vinculo com o guard, lido da FONTE ──────────────────────────
+  //
+  // `CODIGOS_NEGACAO` e contrato: o docblock dele diz que renomear um
+  // deles e mudanca de contrato, nao refatoracao. Se a lista de la
+  // mudar e esta nao, este invariante reprova — que e exatamente o
+  // ponto de nao redigitar vocabulario alheio.
+  const GUARD = ler("lib/agentes/funcoes/guard.ts");
+  const bloco = GUARD.slice(GUARD.indexOf("export const CODIGOS_NEGACAO = ["));
+  const doGuard = [...bloco.slice(0, bloco.indexOf("]")).matchAll(/"([a-z_]+)"/g)]
+    .map((m) => m[1]);
+  const terminais = doGuard.filter((c) => c !== "aprovacao_necessaria");
+
+  ok("E10 o guard publica cinco codigos de negacao", doGuard.length === 5, doGuard.join(","));
+  ok("E11 `negado` adota EXATAMENTE `CodigoNegacaoTerminal`",
+    (RAMOS.get("negado") ?? []).length === terminais.length
+    && terminais.every((c) => (RAMOS.get("negado") ?? []).includes(c)),
+    terminais.join(","));
+  ok("E12 `aprovacao_necessaria` saiu de `negado` e virou status proprio",
+    !(RAMOS.get("negado") ?? []).includes("aprovacao_necessaria")
+    && (RAMOS.get("aguardando_aprovacao") ?? []).includes("aprovacao_necessaria"));
+}
 
 // ─── F. Mensagem e resumo ─────────────────────────────────────────────
 secao("F. Nada de payload comercial");
@@ -212,13 +338,24 @@ secao("J. Migrations existentes intocadas");
 const git = (...args: string[]) =>
   execFileSync("git", ["-C", RAIZ, ...args], { encoding: "utf8" });
 
-ok("J1  nenhuma migration rastreada difere do HEAD",
-  git("diff", "--name-only", "HEAD", "--", "supabase/migrations/").trim() === "");
 {
+  // A unica migration que esta frente pode alterar e a DELA — e ela so
+  // pode ser alterada porque nunca foi aplicada nem publicada. O
+  // invariante nao e "nada mudou": e "nada ALHEIO mudou".
+  const MINHA = "supabase/migrations/20261010_agente_acao_execucoes.sql";
+  const mudadas = git("diff", "--name-only", "HEAD", "--", "supabase/migrations/")
+    .split("\n").map((l) => l.trim()).filter((l) => l !== "");
+  ok("J1  nenhuma migration ALHEIA difere do HEAD",
+    mudadas.every((l) => l === MINHA), mudadas.join(" | "));
+}
+{
+  // Path estranho e o sinal que importa entre gates: arquivo fora da
+  // convencao `AAAAMMDD_nome.sql` sob `migrations/` nao veio de gate
+  // nenhum. Migration nova de gate em curso e esperada.
   const estado = git("status", "--short", "--", "supabase/migrations/")
     .split("\n").map((l) => l.trimEnd()).filter((l) => l !== "");
-  ok("J2  o unico path novo sob migrations e o desta frente",
-    estado.every((l) => /^\?\? +supabase\/migrations\/20261010_agente_acao_execucoes\.sql$/.test(l)),
+  ok("J2  nenhum path estranho sob migrations",
+    estado.every((l) => /supabase\/migrations\/\d{8}_[a-z0-9_]+\.sql$/.test(l)),
     estado.join(" | "));
 }
 {
@@ -230,6 +367,126 @@ ok("J1  nenhuma migration rastreada difere do HEAD",
     git("hash-object", "--", INBOX).trim() === git("rev-parse", `HEAD:${INBOX}`).trim());
 }
 ok("J5  zero bytes 0x08 na migration", !SQL.includes(String.fromCharCode(8)));
+
+// --- K. Cobertura do desfecho -----------------------------------------
+secao("K. Todo desfecho que o servico produz cabe no vocabulario");
+
+/**
+ * As variantes que `sincronizarPerguntas` pode devolver, lidas da FONTE.
+ *
+ * Nao e lista redigitada: o union e recortado do arquivo do servico e os
+ * `tipo:` sao extraidos dele. Variante nova la reprova aqui — que e o
+ * unico jeito de a cobertura nao envelhecer sozinha.
+ */
+function variantesDoServico(): string[] {
+  const SRC = ler("lib/agentes/ingestao/sincronizar-perguntas.ts");
+  const abre = SRC.indexOf("export type ResultadoSincronizacao =");
+  const fim = SRC.indexOf('readonly tipo: "indisponivel"', abre);
+  const corpo = abre < 0 || fim < 0 ? "" : SRC.slice(abre, SRC.indexOf("\n\n", fim));
+  return [...new Set([...corpo.matchAll(/readonly tipo: "([a-z_]+)"/g)].map((m) => m[1]))];
+}
+
+/**
+ * O mapa de desfecho. Uma linha por variante do servico.
+ *
+ * `null` significa "nao produz linha de desfecho" — e so
+ * `agente_indisponivel` tem esse direito, porque os tres motivos dela
+ * acontecem ANTES de a abertura existir.
+ */
+const MATRIZ: ReadonlyArray<readonly [string, readonly [string, string | null] | null]> = [
+  ["sincronizado", ["sucesso", null]],
+  ["backlog_truncado", ["parcial", "backlog_truncado"]],
+  ["autoridade_divergente", ["erro", "autoridade_divergente"]],
+  ["persistencia_recusada", ["erro", "persistencia_recusada"]],
+  ["agente_indisponivel", null],
+  ["negado", ["negado", "permissao_ausente"]],
+  ["aguardando_aprovacao", ["aguardando_aprovacao", "aprovacao_necessaria"]],
+  ["erro", ["erro", "provedor_falhou"]],
+  ["ja_processado", ["erro", "erro_interno"]],
+  ["indisponivel", ["erro", "autoridade_indisponivel"]],
+];
+
+{
+  const doServico = variantesDoServico();
+  const naMatriz = MATRIZ.map(([v]) => v);
+  ok("K1  o union do servico foi lido da fonte", doServico.length === 10, doServico.join(","));
+  ok("K2  toda variante do servico esta na matriz",
+    doServico.every((v) => naMatriz.includes(v)),
+    doServico.filter((v) => !naMatriz.includes(v)).join(","));
+  ok("K3  a matriz nao inventa variante que o servico nao produz",
+    naMatriz.every((v) => doServico.includes(v)),
+    naMatriz.filter((v) => !doServico.includes(v)).join(","));
+}
+
+for (const [variante, destino] of MATRIZ) {
+  if (destino === null) {
+    ok(`K4  \`${variante}\` nao produz desfecho — e so ela tem esse direito`,
+      variante === "agente_indisponivel");
+    continue;
+  }
+  const [status, codigo] = destino;
+  const aceitos = RAMOS.get(status) ?? null;
+  ok(`K5  \`${variante}\` -> ${status}/${codigo ?? "NULL"} e aceito pelo CHECK`,
+    aceitos !== null && (codigo === null ? aceitos.length === 0 : aceitos.includes(codigo)),
+    aceitos === null ? "status ausente do case" : aceitos.join(","));
+}
+
+{
+  // Todo codigo do vocabulario precisa de um caminho que o produza. A
+  // matriz cita um representante por variante; os demais codigos sao
+  // ramos INTERNOS da mesma variante (`erro` carrega nove causas), e a
+  // prova de que nenhum e orfao e o mapa de origem abaixo.
+  const ORIGEM: Readonly<Record<string, string>> = {
+    backlog_truncado: "backlog_truncado",
+    descartes_na_varredura: "sincronizado com descartes ou status inesperados",
+    aprovacao_necessaria: "aguardando_aprovacao",
+    funcao_inexistente: "negado",
+    permissao_ausente: "negado",
+    permissao_bloqueada: "negado",
+    conexao_ausente: "negado",
+    provedor_falhou: "erro: codigo do provider, ou executor_falhou",
+    contrato_violado: "erro: resposta_fora_de_forma, saida_invalida, autoridade_ausente",
+    autoridade_divergente: "autoridade_divergente",
+    autoridade_indisponivel: "indisponivel",
+    persistencia_negada: "persistencia_recusada com 42501",
+    persistencia_recusada: "persistencia_recusada com 22023 ou 25000",
+    persistencia_falhou: "erro: falha_rpc",
+    auditoria_funcao_falhou: "erro: falha_auditoria",
+    erro_interno: "erro: erro_interno, e o invariante quebrado de ja_processado",
+  };
+  const todos = [...RAMOS.values()].flat();
+  ok("K6  todo codigo do CHECK tem origem declarada",
+    todos.every((c) => c in ORIGEM),
+    todos.filter((c) => !(c in ORIGEM)).join(","));
+  ok("K7  nenhuma origem aponta para codigo que nao existe no CHECK",
+    Object.keys(ORIGEM).every((c) => todos.includes(c)),
+    Object.keys(ORIGEM).filter((c) => !todos.includes(c)).join(","));
+}
+
+{
+  // O executor tem SETE variantes. Uma oitava mudaria o que o servico
+  // pode receber, e portanto o que a auditoria precisa saber dizer.
+  const EXEC = ler("lib/agentes/execucao-funcoes/executar.ts");
+  const abre = EXEC.indexOf("export type ResultadoExecucaoFuncao =");
+  const corpo = EXEC.slice(abre, EXEC.indexOf("/** O sub-tipo", abre));
+  const tipos = [...new Set([...corpo.matchAll(/tipo: "([a-z_]+)"/g)].map((m) => m[1]))];
+  ok("K8  o executor publica exatamente sete variantes", tipos.length === 7, tipos.join(","));
+  ok("K9  `aguardando_aprovacao` e uma delas — logo, alcancavel",
+    tipos.includes("aguardando_aprovacao"));
+}
+
+{
+  // `nivel = 'aprovacao'` nao tem recorte por Funcao nem por acesso: o
+  // CHECK da migration de permissoes aceita os tres niveis para
+  // QUALQUER `funcao_id`. E por isso que `aguardando_aprovacao` e
+  // alcancavel para uma Funcao de LEITURA, e nao so em teoria.
+  const PERM = ler("supabase/migrations/20260920_agente_permissoes.sql");
+  ok("K10 o banco aceita nivel `aprovacao` para qualquer Funcao",
+    /check \(nivel in \('bloqueado','aprovacao','automatico'\)\)/.test(PERM));
+  const GUARD = ler("lib/agentes/funcoes/guard.ts");
+  ok("K11 o guard pausa em `aprovacao` sem olhar acesso nem id",
+    /if \(permissao\.nivel === "aprovacao"\) \{/.test(GUARD));
+}
 
 console.log(`\n── placar ${"─".repeat(54)}`);
 console.log(`  PASS ${passou}   FAIL ${falhou}\n`);

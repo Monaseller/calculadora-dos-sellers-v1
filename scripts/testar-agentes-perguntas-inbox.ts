@@ -363,18 +363,38 @@ secao("X. CASE 20 — migrations versionadas intocadas");
 const git = (...args: string[]) =>
   execFileSync("git", ["-C", RAIZ, ...args], { encoding: "utf8" });
 
-const diffMigrations = git("diff", "--name-only", "HEAD", "--", "supabase/migrations/").trim();
-ok("20.1 nenhuma migration rastreada difere do HEAD",
-  diffMigrations === "", diffMigrations.replace(/\n/g, " | "));
+/**
+ * A FRONTEIRA desta frente.
+ *
+ * O invariante e `EXISTING_MIGRATIONS_UNTOUCHED`, e "existente" quer
+ * dizer: a inbox e tudo que veio antes dela. Migration com versao MAIOR
+ * pertence a um gate posterior, e um gate em curso pode legitimamente
+ * editar a propria migration enquanto ela nao foi aplicada nem
+ * publicada. Amarrar o invariante a "nada mudou sob migrations/" fazia
+ * esta suite reprovar por trabalho alheio e legitimo — e um invariante
+ * que reprova o certo acaba sendo desligado.
+ */
+const ATE = "20261009";
+const versaoDe = (linha: string): string =>
+  (linha.match(/supabase\/migrations\/(\d{8})_/) ?? [])[1] ?? "";
+const souResponsavel = (linha: string): boolean => {
+  const v = versaoDe(linha);
+  return v !== "" && v <= ATE;
+};
+
+const mudadas = git("diff", "--name-only", "HEAD", "--", "supabase/migrations/")
+  .split("\n").map((l) => l.trim()).filter((l) => l !== "");
+ok(`20.1 nenhuma migration ate ${ATE} difere do HEAD`,
+  mudadas.every((l) => !souResponsavel(l)), mudadas.join(" | "));
 
 const estado = git("status", "--short", "--", "supabase/migrations/")
   .split("\n").map((l) => l.trimEnd()).filter((l) => l !== "");
-ok("20.2 todo path novo sob migrations segue a convencao de nome",
-  estado.every((l) =>
-    /^\?\? +supabase\/migrations\/\d{8}_[a-z0-9_]+\.sql$/.test(l)),
+ok("20.2 todo path sob migrations segue a convencao de nome",
+  estado.every((l) => /supabase\/migrations\/\d{8}_[a-z0-9_]+\.sql$/.test(l)),
   estado.join(" | "));
-ok("20.3 nenhuma migration modificada, apagada, renomeada ou em stage",
-  estado.every((l) => l.startsWith("??")), estado.join(" | "));
+ok(`20.3 nenhuma migration ate ${ATE} foi modificada, apagada, renomeada ou posta em stage`,
+  estado.every((l) => l.startsWith("??") || !souResponsavel(l)),
+  estado.join(" | "));
 
 const A7 = "supabase/migrations/20261008_agente_tarefas_polling_perguntas_unica.sql";
 ok("20.4 20261008 esta rastreada no HEAD",
@@ -383,6 +403,11 @@ ok("20.5 20261008 nao tem diferenca alguma contra o HEAD",
   git("diff", "HEAD", "--", A7).trim() === "");
 ok("20.6 o blob de 20261008 em disco e o mesmo registrado no HEAD",
   git("hash-object", "--", A7).trim() === git("rev-parse", `HEAD:${A7}`).trim());
+
+const INBOX_SQL = "supabase/migrations/20261009_agente_perguntas_ml.sql";
+ok("20.7 o blob de 20261009 em disco e o mesmo registrado no HEAD",
+  git("hash-object", "--", INBOX_SQL).trim()
+    === git("rev-parse", `HEAD:${INBOX_SQL}`).trim());
 
 secao("U. Semantica temporal — um instante por chamada");
 /* F2/F3: `now()` e o instante da TRANSACAO, nao da chamada. Duas chamadas

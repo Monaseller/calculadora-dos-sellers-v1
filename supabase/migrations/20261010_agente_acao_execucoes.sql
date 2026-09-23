@@ -151,11 +151,41 @@ create table public.agente_acao_execucoes (
 
   -- ── O vocabulario de status ───────────────────────────────────────
   --
-  -- Cinco estados, e cada um diz uma coisa que os outros nao dizem.
+  -- SEIS estados, e cada um diz uma coisa que os outros nao dizem.
   -- `parcial` existe para que varredura incompleta nunca precise se
   -- passar por `sucesso`.
+  --
+  -- ── Por que `aguardando_aprovacao` e status, e nao codigo de erro ──
+  --
+  -- `agente_permissoes.nivel` aceita `aprovacao` para QUALQUER Funcao —
+  -- o CHECK e `nivel in ('bloqueado','aprovacao','automatico')`, sem
+  -- recorte por acesso, e o guard pausa em `nivel === "aprovacao"` antes
+  -- mesmo de olhar conexao. Entao o dono PODE exigir aprovacao para
+  -- `mercadolivre.perguntas.listar`, e a varredura para esperando
+  -- alguem. Isso nao e erro (nada quebrou), nao e negacao (a decisao
+  -- ainda pode vir) e nao e parcial (nada foi ingerido). Enfia-lo em
+  -- `erro/erro_interno` so para caber no schema seria a mentira que este
+  -- vocabulario existe para impedir.
+  --
+  -- A palavra e a MESMA de `agente_tarefas.status` e de `ESTADOS_RECUSA`
+  -- no guard. Nenhum enum paralelo foi inventado.
+  --
+  -- ── A regra que da sentido ao conjunto ────────────────────────────
+  --
+  -- `negado` e `aguardando_aprovacao` implicam que o PROVIDER NUNCA FOI
+  -- CHAMADO: os dois nascem do guard, antes de qualquer ida ao
+  -- marketplace. Recusa que acontece DEPOIS de trabalho externo — a
+  -- inbox recusando a gravacao, por exemplo — e `erro`, com codigo
+  -- proprio. Sem essa regra os dois estados perderiam o unico conteudo
+  -- que os distingue de um erro qualquer.
   constraint agente_acao_execucoes_status_valido
-    check (status in ('executando', 'sucesso', 'parcial', 'erro', 'negado')),
+    check (status in (
+      'executando',
+      'sucesso',
+      'parcial',
+      'aguardando_aprovacao',
+      'negado',
+      'erro')),
 
   -- Abertura e desfecho sao LINHAS distintas, nunca um UPDATE. O
   -- bicondicional garante que `executando` so exista na abertura e que
@@ -165,28 +195,105 @@ create table public.agente_acao_execucoes (
 
   -- ── O vocabulario de desfecho ─────────────────────────────────────
   --
-  -- FECHADO. Cada codigo nasceu de um caminho real do servico de
-  -- ingestao, e nao ha codigo generico de reserva — um "outro" viraria
-  -- o lugar onde todo desfecho mal entendido acabaria.
+  -- FECHADO, e derivado do union REAL que `sincronizarPerguntas`
+  -- devolve — nao de uma lista imaginada. Cada codigo abaixo tem um
+  -- caminho de retorno concreto no servico, e cada caminho de retorno do
+  -- servico tem exatamente um codigo aqui. Nao ha codigo generico de
+  -- reserva: um "outro" viraria o lugar onde todo desfecho mal entendido
+  -- acabaria.
   --
-  -- `agente_indisponivel` NAO esta aqui, de proposito: a abertura exige
-  -- `agente_id` com FK, entao agente inexistente nao produz linha
-  -- nenhuma. Nao ha o que registrar quando nada comecou.
+  -- ── Por que os codigos sao em portugues ───────────────────────────
+  --
+  -- `agente_funcao_chamadas.erro_codigo` — o ledger irmao — ja usa
+  -- `permissao_ausente`, `conexao_ausente`, `executor_falhou`,
+  -- `saida_invalida`, `erro_interno`. Dois ledgers do mesmo sistema
+  -- falando idiomas diferentes obrigariam a traduzir para cruzar, e
+  -- traducao entre autoridades e onde erro de escopo se esconde. A
+  -- versao anterior deste arquivo tinha `permission_denied` e
+  -- `provider_error`; como a migration nunca foi aplicada, a correcao e
+  -- aqui mesmo, sem 20261011.
+  --
+  -- ── `negado`: os codigos sao os do GUARD, adotados inteiros ───────
+  --
+  -- Exatamente `CodigoNegacaoTerminal` = `CodigoNegacao` menos
+  -- `aprovacao_necessaria`, que virou status proprio. A lista nao e
+  -- reescrita por gosto: o docblock de `CODIGOS_NEGACAO` diz que
+  -- renomear um deles e mudanca de contrato. Uma quinta forma aqui seria
+  -- a traducao que nao queremos.
+  --
+  -- ── `erro`: um codigo por causa, e a causa e distinguivel ─────────
+  --
+  --   provedor_falhou          o marketplace falhou ou recusou
+  --   contrato_violado         a Funcao rompeu o proprio contrato de saida
+  --   autoridade_divergente    duas paginas vieram de contas diferentes
+  --   autoridade_indisponivel  agente/tarefa deixou de ser resolvivel
+  --   persistencia_negada      a RPC da inbox recusou a LOJA (42501)
+  --   persistencia_recusada    a RPC recusou o LOTE (22023 / 25000)
+  --   persistencia_falhou      a chamada da RPC nao concluiu
+  --   auditoria_funcao_falhou  a Funcao rodou e o ledger dela nao gravou
+  --   erro_interno             defeito nosso, fail-closed
+  --
+  -- `persistencia_negada` e separada das outras duas porque pede uma
+  -- acao diferente do dono: religar a conta. Colapsa-la em
+  -- `persistencia_recusada` mandaria procurar bug de dados onde o que ha
+  -- e vinculo desfeito.
+  --
+  -- ── O que NAO esta aqui, e por que ────────────────────────────────
+  --
+  -- `agente_indisponivel`: a abertura exige `agente_id` com FK e
+  -- `user_id` lido DO agente, entao os tres motivos (inexistente,
+  -- inativo, falha de leitura) acontecem ANTES de existir linha. Nao ha
+  -- o que registrar quando nada comecou. A ordem de abertura que o
+  -- servico precisa adotar — resolver e conferir o agente, so entao
+  -- abrir — e o que torna isso invariante, e nao acaso.
+  --
+  -- `ja_processado`: exige que a chave de pagina (`<tentativa>:pN`) ja
+  -- exista em `agente_funcao_chamadas`. Como a chave de pagina e
+  -- derivada da chave da TENTATIVA e a abertura da acao vem ANTES da
+  -- pagina 1, uma repeticao da mesma tentativa colide primeiro no indice
+  -- `idx_agente_acao_execucoes_tentativa` — e sem chave de tentativa
+  -- nao ha chave de pagina, entao a colisao de Funcao nem pode nascer.
+  -- Se ainda assim aparecer, o invariante quebrou: `erro_interno`, que e
+  -- fail-closed, e nunca silencio.
+  --
+  -- `aprovacao_indisponivel`: so nasce em `retomarAprovacao`, e este
+  -- servico chama `executarFuncao`. O ramo existe no `switch` por
+  -- exaustividade de tipo, nao por alcance.
+  -- ── `is not null and` NAO e redundancia ───────────────────────────
+  --
+  -- CHECK aceita TRUE **e NULL**. `codigo_desfecho in ('a','b')` com a
+  -- coluna nula avalia NULL, entao um `erro` sem codigo passaria em
+  -- silencio — exatamente a linha que nao explica nada. O `is not null`
+  -- explicito e o que torna o codigo OBRIGATORIO onde ele deve existir.
+  -- Provado em runtime: secao V do teste de banco.
   constraint agente_acao_execucoes_codigo_por_status
     check (
       case status
         when 'executando' then codigo_desfecho is null
         when 'sucesso'    then codigo_desfecho is null
-        when 'parcial'    then codigo_desfecho in (
+        when 'parcial'    then codigo_desfecho is not null
+                              and codigo_desfecho in (
                                  'backlog_truncado',
                                  'descartes_na_varredura')
-        when 'negado'     then codigo_desfecho in (
-                                 'permission_denied')
-        when 'erro'       then codigo_desfecho in (
-                                 'provider_error',
-                                 'persistence_error',
-                                 'authority_drift',
-                                 'internal_error')
+        when 'aguardando_aprovacao' then codigo_desfecho is not null
+                              and codigo_desfecho = 'aprovacao_necessaria'
+        when 'negado'     then codigo_desfecho is not null
+                              and codigo_desfecho in (
+                                 'funcao_inexistente',
+                                 'permissao_ausente',
+                                 'permissao_bloqueada',
+                                 'conexao_ausente')
+        when 'erro'       then codigo_desfecho is not null
+                              and codigo_desfecho in (
+                                 'provedor_falhou',
+                                 'contrato_violado',
+                                 'autoridade_divergente',
+                                 'autoridade_indisponivel',
+                                 'persistencia_negada',
+                                 'persistencia_recusada',
+                                 'persistencia_falhou',
+                                 'auditoria_funcao_falhou',
+                                 'erro_interno')
       end
     ),
 
@@ -260,6 +367,12 @@ comment on table public.agente_acao_execucoes is
 
 comment on column public.agente_acao_execucoes.loja_id is
   'NULL ate a primeira execucao de Funcao estabelecer a conta autoritativa da varredura. Nunca resolvido por conta propria.';
+
+comment on column public.agente_acao_execucoes.status is
+  'Vocabulario FECHADO de seis estados. `executando` so na abertura (bicondicional com `fase`). `negado` e `aguardando_aprovacao` implicam que o provider NUNCA foi chamado: os dois nascem do guard de permissao, antes de qualquer ida ao marketplace. Recusa posterior a trabalho externo — a inbox recusando a gravacao, por exemplo — e `erro` com codigo proprio. `parcial` existe para que varredura incompleta nunca precise se passar por `sucesso`.';
+
+comment on column public.agente_acao_execucoes.codigo_desfecho is
+  'NULL em `executando` e em `sucesso` limpo. Nos demais, um codigo do conjunto fechado do status. Os de `negado` sao exatamente os de `CodigoNegacaoTerminal` no guard, adotados inteiros e nao traduzidos. Detalhe que nao classifica — SQLSTATE da RPC, codigo do provider — vai em `mensagem_desfecho`, nunca aqui.';
 
 comment on column public.agente_acao_execucoes.idempotency_key is
   'Chave da TENTATIVA. Obrigatoria na abertura; prefixo das chaves de pagina em agente_funcao_chamadas.';

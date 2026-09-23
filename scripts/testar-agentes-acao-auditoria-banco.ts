@@ -133,7 +133,7 @@ async function main(): Promise<void> {
       }))) === null);
     ok("M7  segundo desfecho para o mesmo request e recusado (23505)",
       (await sqlstate(c, INSERIR, args({
-        request: "r-m1", fase: "desfecho", status: "erro", codigo: "internal_error",
+        request: "r-m1", fase: "desfecho", status: "erro", codigo: "erro_interno",
         chave: null, mensagem: "outro desfecho",
       }))) === "23505");
     ok("M4b abertura SEM chave de tentativa e recusada (23514)",
@@ -150,23 +150,82 @@ async function main(): Promise<void> {
         request: "r-m9", fase: "desfecho", status: "executando", chave: null,
       }))) === "23514");
 
-    for (const [rotulo, status, codigo] of [
-      ["M10 sucesso limpo", "sucesso", null],
-      ["M11 parcial por descartes", "parcial", "descartes_na_varredura"],
-      ["M12 backlog_truncado", "parcial", "backlog_truncado"],
-      ["M13 provider_error", "erro", "provider_error"],
-      ["M14 permission_denied", "negado", "permission_denied"],
-      ["M15 authority_drift", "erro", "authority_drift"],
-      ["M16 persistence_error", "erro", "persistence_error"],
-      ["M17 internal_error", "erro", "internal_error"],
-    ] as const) {
-      const req = `r-${rotulo.slice(0, 3).toLowerCase()}`;
-      ok(`${rotulo} e vocabulario valido`,
-        (await sqlstate(c, INSERIR, args({
-          request: req, fase: "desfecho", status, codigo, chave: null,
-          mensagem: status === "sucesso" ? null : "resumo curto",
-        }))) === null);
+    // ── O vocabulario INTEIRO, contra o banco ─────────────────────
+    //
+    // Nao basta o SQL dizer: o CHECK e do Postgres, e so ele decide.
+    // Cada par canonico entra; cada par cruzado — codigo de um status
+    // usado sob outro — tem de ser recusado com 23514.
+    const VOCABULARIO: ReadonlyArray<readonly [string, readonly (string | null)[]]> = [
+      ["sucesso", [null]],
+      ["parcial", ["backlog_truncado", "descartes_na_varredura"]],
+      ["aguardando_aprovacao", ["aprovacao_necessaria"]],
+      ["negado", [
+        "funcao_inexistente", "permissao_ausente",
+        "permissao_bloqueada", "conexao_ausente",
+      ]],
+      ["erro", [
+        "provedor_falhou", "contrato_violado",
+        "autoridade_divergente", "autoridade_indisponivel",
+        "persistencia_negada", "persistencia_recusada", "persistencia_falhou",
+        "auditoria_funcao_falhou", "erro_interno",
+      ]],
+    ];
+
+    let seq = 0;
+    for (const [status, codigos] of VOCABULARIO) {
+      for (const codigo of codigos) {
+        seq += 1;
+        ok(`V1  ${status}/${codigo ?? "NULL"} e aceito`,
+          (await sqlstate(c, INSERIR, args({
+            request: `r-v1-${seq}`, fase: "desfecho", status, codigo, chave: null,
+            mensagem: status === "sucesso" ? null : "resumo curto",
+          }))) === null);
+      }
     }
+
+    ok("V1b as 17 combinacoes canonicas foram exercitadas", seq === 17, String(seq));
+
+    // ── Cruzamento: codigo do status errado ───────────────────────
+    const TODOS = VOCABULARIO.flatMap(([, cs]) => cs).filter((x): x is string => x !== null);
+    for (const [status, proprios] of VOCABULARIO) {
+      const alheios = TODOS.filter((cd) => !proprios.includes(cd));
+      const aceitos: string[] = [];
+      for (const codigo of alheios) {
+        seq += 1;
+        const estado = await sqlstate(c, INSERIR, args({
+          request: `r-v2-${seq}`, fase: "desfecho", status, codigo, chave: null,
+          mensagem: "resumo curto",
+        }));
+        if (estado !== "23514") aceitos.push(`${codigo}:${estado ?? "ACEITO"}`);
+      }
+      ok(`V2  \`${status}\` recusa os ${alheios.length} codigos alheios`,
+        aceitos.length === 0, aceitos.join(","));
+    }
+
+    // ── O buraco do NULL, que CHECK nao pega sozinho ──────────────
+    //
+    // CHECK e satisfeito por TRUE **e por NULL**. `codigo in (...)` com
+    // a coluna nula avalia NULL, entao sem `is not null` explicito um
+    // `erro` sem codigo entraria calado. Esta e a prova de que a guarda
+    // esta la e funciona.
+    for (const status of ["parcial", "aguardando_aprovacao", "negado", "erro"]) {
+      seq += 1;
+      ok(`V3  \`${status}\` SEM codigo e recusado`,
+        (await sqlstate(c, INSERIR, args({
+          request: `r-v3-${seq}`, fase: "desfecho", status, codigo: null, chave: null,
+          mensagem: "resumo curto",
+        }))) === "23514");
+    }
+
+    // ── Status fora do conjunto ───────────────────────────────────
+    for (const status of ["concluido", "SUCESSO", "pendente", "ja_processado"]) {
+      seq += 1;
+      ok(`V4  status \`${status}\` e recusado`,
+        (await sqlstate(c, INSERIR, args({
+          request: `r-v4-${seq}`, fase: "desfecho", status, codigo: null, chave: null,
+        }))) === "23514");
+    }
+
     ok("M12b `backlog_truncado` e distinguivel de sucesso limpo",
       Number((await c.query<{ n: string }>(
         `select count(*)::int as n from public.agente_acao_execucoes
@@ -181,6 +240,17 @@ async function main(): Promise<void> {
       (await sqlstate(c, INSERIR, args({
         request: "r-o2", fase: "desfecho", status: "erro", codigo: "qualquer_coisa", chave: null,
       }))) === "23514");
+    ok("O3  `aguardando_aprovacao` na ABERTURA e recusado",
+      (await sqlstate(c, INSERIR, args({
+        request: "r-o3", fase: "abertura", status: "aguardando_aprovacao",
+        codigo: "aprovacao_necessaria", chave: "k-o3",
+      }))) === "23514");
+    ok("O4  `aguardando_aprovacao` aceita mensagem e latencia no desfecho",
+      (await sqlstate(c, INSERIR, args({
+        request: "r-o4", fase: "desfecho", status: "aguardando_aprovacao",
+        codigo: "aprovacao_necessaria", chave: null,
+        mensagem: "o dono precisa aprovar a leitura de perguntas", latencia: 340,
+      }))) === null);
 
     secao("P. Identidade, tenancy e resumo");
 
@@ -219,9 +289,19 @@ async function main(): Promise<void> {
       }))) === "23514");
     ok("M23b mensagem acima de 300 e recusada",
       (await sqlstate(c, INSERIR, args({
-        request: "r-m23b", fase: "desfecho", status: "erro", codigo: "internal_error",
+        request: "r-m23b", fase: "desfecho", status: "erro", codigo: "erro_interno",
         chave: null, mensagem: "x".repeat(301),
       }))) === "23514");
+    // O CONTROLE de M23b. Sem ele, um codigo invalido no fixture faria a
+    // linha ser recusada pelo CHECK errado — com o MESMO 23514 — e o
+    // limite de 300 passaria vacuo. Foi exatamente o que aconteceu antes
+    // de o vocabulario mudar, e o par so passa quando a UNICA diferenca
+    // entre as duas linhas e o comprimento da mensagem.
+    ok("M23c a mesma linha com 300 caracteres e aceita",
+      (await sqlstate(c, INSERIR, args({
+        request: "r-m23c", fase: "desfecho", status: "erro", codigo: "erro_interno",
+        chave: null, mensagem: "x".repeat(300),
+      }))) === null);
     ok("M24 latencia negativa e recusada",
       (await sqlstate(c, INSERIR, args({
         request: "r-m24", fase: "desfecho", status: "sucesso", chave: null, latencia: -1,
@@ -329,6 +409,55 @@ async function main(): Promise<void> {
         Number((await O.query<{ n: string }>(
           `select count(*)::int as n from public.agente_acao_execucoes
             where idempotency_key = 'n8n:w5m-DISPUTA-a1:sincronizar_perguntas:ag'`)).rows[0].n) === 1);
+
+      // ── A mesma disputa, agora no DESFECHO ────────────────────────
+      //
+      // A abertura tem chave de tentativa; o desfecho nao tem chave
+      // NENHUMA, e a unicidade dele depende so de
+      // `idx_..._desfecho_unico`. Provar isso em sequencia nao bastaria:
+      // duas sessoes fechando a MESMA varredura ao mesmo tempo e o caso
+      // real — dois workers reagindo ao mesmo processo.
+      const DISPUTADO = "r-t1-desfecho-disputado";
+      await A.query("begin");
+      await A.query(INSERIR, args({
+        request: DISPUTADO, fase: "desfecho", status: "sucesso", chave: null,
+        loja: LOJA_A, latencia: 900,
+      }));
+
+      await B.query("begin");
+      const promessaT = B.query(INSERIR, args({
+        request: DISPUTADO, fase: "desfecho", status: "erro",
+        codigo: "provedor_falhou", chave: null, mensagem: "o outro worker",
+      }));
+      let erroT: { code?: string } | null = null;
+      promessaT.catch((e) => { erroT = e as { code?: string }; });
+
+      let espiadoT = "";
+      for (let i = 0; i < 40; i += 1) {
+        await espera(250);
+        const r = await O.query<{ wait_event_type: string | null }>(
+          "select wait_event_type from pg_stat_activity where pid = $1", [pidB]);
+        if (r.rows[0]?.wait_event_type === "Lock") { espiadoT = "Lock"; break; }
+        if (erroT) break;
+      }
+      ok("T1  o segundo desfecho espera de fato no indice (lock observado)",
+        espiadoT === "Lock", espiadoT);
+
+      await A.query("commit");
+      let codigoT: string | null = null;
+      try { await promessaT; } catch (e) { codigoT = (e as { code?: string }).code ?? "SEM_CODIGO"; }
+      try { await B.query("rollback"); } catch { /* ja abortada */ }
+
+      ok("T2  a perdedora do desfecho recebe 23505", codigoT === "23505");
+      {
+        const r = await O.query<{ n: string; st: string }>(
+          `select count(*)::int as n, max(status) as st
+             from public.agente_acao_execucoes
+            where request_id = $1 and fase = 'desfecho'`, [DISPUTADO]);
+        ok("T3  exatamente UM desfecho sobreviveu, e e o do vencedor",
+          Number(r.rows[0].n) === 1 && r.rows[0].st === "sucesso",
+          `${r.rows[0].n}/${r.rows[0].st}`);
+      }
     } finally {
       for (const cli of [A, B]) { try { await cli.query("rollback"); } catch { /* fim */ } }
       await Promise.all([A.end(), B.end(), O.end()]);
