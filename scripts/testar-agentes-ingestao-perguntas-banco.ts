@@ -88,22 +88,36 @@ const pergunta = (o: Partial<PerguntaRecebida> = {}): PerguntaRecebida => ({
  * ponto da suite.
  */
 function portas(
-  linhas: PerguntaRecebida[],
+  paginas: Array<{ linhas: PerguntaRecebida[]; truncado: boolean }>,
   lojaId: string,
   userId: string
 ): PortasSincronizacao {
+  let i = 0;
   return {
     lerAgente: async () => ({ agente: { agenteId: AGENTE_A, userId, ativo: true }, erro: null }),
-    executar: async () => ({
-      tipo: "sucesso",
-      requestId: "req-local",
-      envelope: { contrato: 1, ok: true, request_id: "req-local", data: { linhas, truncado: false, erro: null } },
-      auditoria: "completa",
-      autoridade: { lojaId },
-    }),
+    executar: async () => {
+      const pag = paginas[i] ?? paginas[paginas.length - 1];
+      i += 1;
+      return {
+        tipo: "sucesso",
+        requestId: "req-local",
+        envelope: {
+          contrato: 1, ok: true, request_id: "req-local",
+          data: {
+            linhas: pag.linhas, truncado: pag.truncado, erro: null,
+            providerRecebidas: pag.linhas.length, descartadasNormalizacao: 0,
+          },
+        },
+        auditoria: "completa",
+        autoridade: { lojaId },
+      };
+    },
     gravar: gravarPerguntasNaInbox,
   } as unknown as PortasSincronizacao;
 }
+
+/** Uma pagina so, incompleta — o caso comum do I2. */
+const umaPagina = (linhas: PerguntaRecebida[]) => [{ linhas, truncado: false }];
 
 async function main(): Promise<void> {
   const { onde } = conferirAmbiente();
@@ -118,6 +132,10 @@ async function main(): Promise<void> {
     Number((await pg.query(
       "select count(*)::int as n from public.agente_perguntas_ml where loja_id = $1::uuid", [loja]
     )).rows[0].n);
+  const contarChave = async (loja: string, id: string) =>
+    Number((await pg.query(
+      "select count(*)::int as n from public.agente_perguntas_ml where loja_id = $1::uuid and id_externo = $2",
+      [loja, id])).rows[0].n);
   const linhaDe = async (loja: string, id: string) =>
     (await pg.query(
       `select texto, provider_status, estado_interno, user_id
@@ -139,7 +157,7 @@ async function main(): Promise<void> {
     secao("P. Persistencia real, uma pagina");
 
     {
-      const r = await sincronizarPerguntas({ agenteId: AGENTE_A }, portas([pergunta()], LOJA_A, DONO_A));
+      const r = await sincronizarPerguntas({ agenteId: AGENTE_A }, portas(umaPagina([pergunta()]), LOJA_A, DONO_A));
       const linha = await linhaDe(LOJA_A, "Q1");
       ok("P1  uma pergunta valida vira UMA linha, `novas=1`",
         r.tipo === "sincronizado" && r.persistencia.novas === 1
@@ -147,20 +165,20 @@ async function main(): Promise<void> {
       ok("P12 a linha gravada tem o `user_id` autoritativo", linha?.user_id === DONO_A);
     }
     {
-      const r = await sincronizarPerguntas({ agenteId: AGENTE_A }, portas([pergunta()], LOJA_A, DONO_A));
+      const r = await sincronizarPerguntas({ agenteId: AGENTE_A }, portas(umaPagina([pergunta()]), LOJA_A, DONO_A));
       ok("P2  replay identico: 1 linha final, `reobservadas=1`",
         r.tipo === "sincronizado" && r.persistencia.novas === 0
         && r.persistencia.reobservadas === 1 && (await contar(LOJA_A)) === 1);
     }
     {
       const r = await sincronizarPerguntas(
-        { agenteId: AGENTE_A }, portas([pergunta({ texto: "Texto novo." })], LOJA_A, DONO_A));
+        { agenteId: AGENTE_A }, portas(umaPagina([pergunta({ texto: "Texto novo." })]), LOJA_A, DONO_A));
       ok("P3  mudanca material: `atualizadas=1` e o texto novo prevalece",
         r.tipo === "sincronizado" && r.persistencia.atualizadas === 1
         && (await linhaDe(LOJA_A, "Q1"))?.texto === "Texto novo.");
     }
     {
-      const r = await sincronizarPerguntas({ agenteId: AGENTE_A }, portas([], LOJA_A, DONO_A));
+      const r = await sincronizarPerguntas({ agenteId: AGENTE_A }, portas(umaPagina([]), LOJA_A, DONO_A));
       ok("P4  pagina vazia: metricas zeradas e deterministicas, nada escrito",
         r.tipo === "sincronizado" && r.persistencia.recebidas === 0
         && r.persistencia.novas === 0 && (await contar(LOJA_A)) === 1);
@@ -168,7 +186,7 @@ async function main(): Promise<void> {
     {
       const antes = await contar(LOJA_A);
       const r = await sincronizarPerguntas(
-        { agenteId: AGENTE_A }, portas([pergunta({ id: "Q-ANS", status: "ANSWERED" })], LOJA_A, DONO_A));
+        { agenteId: AGENTE_A }, portas(umaPagina([pergunta({ id: "Q-ANS", status: "ANSWERED" })]), LOJA_A, DONO_A));
       ok("P5  status inesperado nao e persistido",
         r.tipo === "sincronizado" && (await contar(LOJA_A)) === antes
         && (await linhaDe(LOJA_A, "Q-ANS")) === null);
@@ -176,7 +194,7 @@ async function main(): Promise<void> {
     {
       const antes = await contar(LOJA_A);
       const r = await sincronizarPerguntas(
-        { agenteId: AGENTE_A }, portas([pergunta({ id: "Q-DT", criadaEm: "ontem" })], LOJA_A, DONO_A));
+        { agenteId: AGENTE_A }, portas(umaPagina([pergunta({ id: "Q-DT", criadaEm: "ontem" })]), LOJA_A, DONO_A));
       ok("P6  data invalida nao e persistida e nao derruba a varredura",
         r.tipo === "sincronizado" && (await contar(LOJA_A)) === antes
         && (await linhaDe(LOJA_A, "Q-DT")) === null);
@@ -189,14 +207,14 @@ async function main(): Promise<void> {
       // recusado pela guarda de tenant da propria RPC.
       const antes = await contar(LOJA_B);
       const r = await sincronizarPerguntas(
-        { agenteId: AGENTE_A }, portas([pergunta({ id: "Q-X" })], LOJA_B, DONO_A));
+        { agenteId: AGENTE_A }, portas(umaPagina([pergunta({ id: "Q-X" })]), LOJA_B, DONO_A));
       ok("P15 dono A nao consegue gravar na loja de B — recusa 42501",
         r.tipo === "persistencia_recusada" && r.codigo === "42501"
         && (await contar(LOJA_B)) === antes);
     }
     {
       const r = await sincronizarPerguntas(
-        { agenteId: AGENTE_A }, portas([pergunta({ id: "Q-B1" })], LOJA_B, DONO_B));
+        { agenteId: AGENTE_A }, portas(umaPagina([pergunta({ id: "Q-B1" })]), LOJA_B, DONO_B));
       ok("P13 a gravacao vai para a loja que a EXECUCAO devolveu",
         r.tipo === "sincronizado" && (await linhaDe(LOJA_B, "Q-B1")) !== null
         && (await linhaDe(LOJA_A, "Q-B1")) === null);
@@ -209,7 +227,7 @@ async function main(): Promise<void> {
       const antesA = await contar(LOJA_A);
       const antesB = await contar(LOJA_B);
       await sincronizarPerguntas(
-        { agenteId: AGENTE_A }, portas([pergunta({ id: "Q-TOC" })], LOJA_B, DONO_B));
+        { agenteId: AGENTE_A }, portas(umaPagina([pergunta({ id: "Q-TOC" })]), LOJA_B, DONO_B));
       ok("P14 trocar a autoridade da execucao troca o destino da gravacao",
         (await contar(LOJA_B)) === antesB + 1 && (await contar(LOJA_A)) === antesA);
     }
@@ -220,7 +238,7 @@ async function main(): Promise<void> {
       // Loja inexistente: a RPC recusa, e o servico NAO reporta sucesso.
       const fantasma = "eeeeeeee-0000-4000-8000-0000000012ff";
       const r = await sincronizarPerguntas(
-        { agenteId: AGENTE_A }, portas([pergunta({ id: "Q-F" })], fantasma, DONO_A));
+        { agenteId: AGENTE_A }, portas(umaPagina([pergunta({ id: "Q-F" })]), fantasma, DONO_A));
       ok("P9  loja inexistente: recusa, sem sucesso falso e sem escrita parcial",
         r.tipo === "persistencia_recusada" && r.codigo === "42501");
     }
@@ -228,10 +246,37 @@ async function main(): Promise<void> {
       // Identidade imutavel divergente: a RPC derruba o LOTE.
       const r = await sincronizarPerguntas(
         { agenteId: AGENTE_A },
-        portas([pergunta({ anuncioId: "OUTRO-ANUNCIO" })], LOJA_A, DONO_A));
+        portas(umaPagina([pergunta({ anuncioId: "OUTRO-ANUNCIO" })]), LOJA_A, DONO_A));
       ok("P9b identidade do provider divergente derruba o lote (22023)",
         r.tipo === "persistencia_recusada" && r.codigo === "22023"
         && (await linhaDe(LOJA_A, "Q1"))?.texto === "Texto novo.");
+    }
+
+    secao("S. Duplicata ENTRE paginas — quem decide e a RPC");
+
+    {
+      // G6: o MESMO id_externo, payload identico, nas duas paginas.
+      const q = pergunta({ id: "Q-DUP" });
+      const r = await sincronizarPerguntas({ agenteId: AGENTE_A }, portas([
+        { linhas: [q], truncado: true }, { linhas: [q], truncado: false },
+      ], LOJA_A, DONO_A));
+      ok("G6  duplicata exata entre paginas vira UMA linha",
+        r.tipo === "sincronizado"
+        && (await contarChave(LOJA_A, "Q-DUP")) === 1
+        && r.persistencia.recebidas === 2
+        && r.persistencia.unicas === 1
+        && r.persistencia.duplicadas_no_lote === 1);
+    }
+    {
+      // G7: mesma chave natural, identidade IMUTAVEL divergente.
+      const antes = await contar(LOJA_A);
+      const r = await sincronizarPerguntas({ agenteId: AGENTE_A }, portas([
+        { linhas: [pergunta({ id: "Q-DIV", anuncioId: "ITEM-A" })], truncado: true },
+        { linhas: [pergunta({ id: "Q-DIV", anuncioId: "ITEM-B" })], truncado: false },
+      ], LOJA_A, DONO_A));
+      ok("G7  duplicata DIVERGENTE entre paginas derruba o lote, zero parcial",
+        r.tipo === "persistencia_recusada" && r.codigo === "22023"
+        && (await contar(LOJA_A)) === antes);
     }
   } finally {
     for (const loja of [LOJA_A, LOJA_B]) {

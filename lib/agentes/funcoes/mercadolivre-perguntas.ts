@@ -77,7 +77,10 @@ export async function executarPerguntasML(
     conexao.recurso !== CONEXAO_PERGUNTAS_ML.recurso ||
     !conexao.lojaId
   ) {
-    return { linhas: [], truncado: false, erro: "conexao_invalida" };
+    return {
+      linhas: [], truncado: false, erro: "conexao_invalida",
+      providerRecebidas: 0, descartadasNormalizacao: 0,
+    };
   }
 
   const lerPerguntas = criarLeiturasDePerguntas(contexto.userId, conexao.lojaId);
@@ -151,6 +154,16 @@ export function interpretarSaidaPerguntasML(saida: unknown): ResultadoInterpreta
   const bruto = saida as Record<string, unknown>;
   if (!Array.isArray(bruto.linhas)) return { tipo: "invalida" };
   if (typeof bruto.truncado !== "boolean") return { tipo: "invalida" };
+  // As duas contagens sao obrigatorias e inteiras nao negativas.
+  // Aceitar ausencia como zero faria uma pagina cheia de itens
+  // malformados parecer vazia, e quem pagina pararia cedo demais.
+  const contagem = (v: unknown): number | null =>
+    typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : null;
+  const providerRecebidas = contagem(bruto.providerRecebidas);
+  const descartadasNormalizacao = contagem(bruto.descartadasNormalizacao);
+  if (providerRecebidas === null || descartadasNormalizacao === null) {
+    return { tipo: "invalida" };
+  }
 
   const erro = bruto.erro;
   if (erro === null) {
@@ -158,7 +171,15 @@ export function interpretarSaidaPerguntasML(saida: unknown): ResultadoInterpreta
       tipo: "sucesso",
       // `truncado` atravessa: silencia-lo entregaria uma pagina com cara
       // de lista inteira, e o agente concluiria que nao ha mais perguntas.
-      data: { linhas: bruto.linhas, truncado: bruto.truncado, erro: null },
+      data: {
+        linhas: bruto.linhas,
+        truncado: bruto.truncado,
+        erro: null,
+        // Aditivo. Consumidores existentes leem so `linhas` e `truncado`
+        // e ignoram o resto; quem pagina precisa da janela BRUTA.
+        providerRecebidas,
+        descartadasNormalizacao,
+      },
     };
   }
 

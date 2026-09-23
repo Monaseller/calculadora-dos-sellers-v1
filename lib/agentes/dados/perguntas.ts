@@ -110,6 +110,22 @@ export interface FiltroPerguntas {
 export interface ResultadoPerguntas {
   readonly linhas: readonly PerguntaRecebida[];
   readonly truncado: boolean;
+  /**
+   * Quantos itens o provider devolveu nesta pagina, ANTES da normalizacao.
+   *
+   * Separado de `linhas.length` de proposito. Quem pagina precisa saber
+   * se a PAGINA veio cheia — e uma pagina cheia de itens malformados
+   * continua sendo uma pagina cheia. Medir pelo que sobrou faria o
+   * descarte parecer fim de lista.
+   */
+  readonly providerRecebidas: number;
+  /**
+   * Quantos itens a normalizacao recusou por forma. Antes este numero
+   * so ia para `console.warn` e se perdia.
+   *
+   * Invariante: `providerRecebidas === linhas.length + descartadasNormalizacao`.
+   */
+  readonly descartadasNormalizacao: number;
   readonly erro: string | null;
 }
 
@@ -277,7 +293,10 @@ export function criarLeiturasDePerguntas(
   ): Promise<ResultadoPerguntas> {
     const validacao = validarFiltroPerguntas(filtro);
     if (validacao.erro !== null) {
-      return { linhas: [], truncado: false, erro: validacao.erro };
+      return {
+        linhas: [], truncado: false, erro: validacao.erro,
+        providerRecebidas: 0, descartadasNormalizacao: 0,
+      };
     }
 
     const limite = filtro.limite ?? LIMITE_PADRAO_PERGUNTAS;
@@ -296,7 +315,10 @@ export function criarLeiturasDePerguntas(
     if (bruto.erro !== null) {
       // O codigo do adapter atravessa INTACTO. Ele ja e vocabulario
       // fechado e ja foi despido de corpo, header e token.
-      return { linhas: [], truncado: false, erro: bruto.erro };
+      return {
+        linhas: [], truncado: false, erro: bruto.erro,
+        providerRecebidas: 0, descartadasNormalizacao: 0,
+      };
     }
 
     const { linhas, descartadas } = normalizarPerguntas(bruto);
@@ -307,6 +329,13 @@ export function criarLeiturasDePerguntas(
       console.warn(`[perguntas] ${descartadas} item(ns) fora da forma esperada, descartados`);
     }
 
-    return { linhas, truncado: bruto.haMais, erro: null };
+    return {
+      linhas,
+      truncado: bruto.haMais,
+      erro: null,
+      // Bruto, do adapter. `bruto.itens` e o array que o provider mandou.
+      providerRecebidas: bruto.itens.length,
+      descartadasNormalizacao: descartadas,
+    };
   };
 }

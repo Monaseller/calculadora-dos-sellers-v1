@@ -29,7 +29,11 @@ import { normalizarPergunta, type PerguntaRecebida } from "@/lib/agentes/dados/p
 import { FUNCAO_ID as FUNCAO_PERGUNTAS_ML } from "@/lib/agentes/handlers/consultar-perguntas-ml-contrato";
 import {
   ACAO_SINCRONIZAR_PERGUNTAS,
-  FILTRO_PAGINA_UNICA,
+  chaveDaPagina,
+  deslocamentoDaPagina,
+  MAX_JANELA_PROVIDER,
+  MAX_PAGINAS,
+  PAGE_LIMIT,
   sincronizarPerguntas,
   type PortasSincronizacao,
 } from "@/lib/agentes/ingestao/sincronizar-perguntas";
@@ -118,13 +122,46 @@ function portasFalsas(
 const LOJA = "cccccccc-0000-4000-8000-0000000000e1";
 
 const sucessoCom = (
-  linhas: PerguntaRecebida[], truncado = false, lojaId: string | null = LOJA
+  linhas: PerguntaRecebida[], truncado = false, lojaId: string | null = LOJA,
+  providerRecebidas = linhas.length, descartadasNormalizacao = 0
 ) => ({
   tipo: "sucesso" as const,
   requestId: "req-1",
-  envelope: { data: { linhas, truncado, erro: null } },
+  envelope: {
+    data: { linhas, truncado, erro: null, providerRecebidas, descartadasNormalizacao },
+  },
   autoridade: { lojaId },
 });
+
+/** Portas cujo executor responde uma coisa DIFERENTE por pagina. */
+function portasPorPagina(
+  respostas: unknown[],
+  opcoes: { gravacao?: unknown } = {}
+): { portas: PortasSincronizacao; espiao: Espiao } {
+  const espiao: Espiao = { chamadas: [], agentesLidos: [], gravacoes: [] };
+  const portas = {
+    lerAgente: async (agenteId: string) => {
+      espiao.agentesLidos.push(agenteId);
+      return { agente: { agenteId: AGENTE, userId: DONO, ativo: true }, erro: null };
+    },
+    executar: async (entrada: Record<string, unknown>) => {
+      const i = espiao.chamadas.length;
+      espiao.chamadas.push(entrada);
+      return respostas[i] ?? respostas[respostas.length - 1];
+    },
+    gravar: async (autoridade: Record<string, unknown>, linhas: unknown[]) => {
+      espiao.gravacoes.push({ autoridade, linhas });
+      return opcoes.gravacao ?? {
+        tipo: "gravado",
+        metricas: {
+          recebidas: linhas.length, unicas: linhas.length, duplicadas_no_lote: 0,
+          novas: linhas.length, atualizadas: 0, reobservadas: 0,
+        },
+      };
+    },
+  } as unknown as PortasSincronizacao;
+  return { portas, espiao };
+}
 
 async function main(): Promise<void> {
   console.log("\n══ CDS IA — sincronizar_perguntas: fronteira de dominio (I1) ══");
@@ -186,7 +223,8 @@ async function main(): Promise<void> {
     ok("B1  executa exatamente `mercadolivre.perguntas.listar`",
       chamada.funcaoId === FUNCAO_PERGUNTAS_ML, String(chamada.funcaoId));
     ok("B2  UMA pagina: status UNANSWERED, limite 50, deslocamento 0",
-      JSON.stringify(chamada.argumentos) === JSON.stringify(FILTRO_PAGINA_UNICA),
+      JSON.stringify(chamada.argumentos)
+        === JSON.stringify({ status: "UNANSWERED", limite: PAGE_LIMIT, deslocamento: 0 }),
       JSON.stringify(chamada.argumentos));
     ok("B3  o executor e chamado UMA unica vez no I1", espiao.chamadas.length === 1);
     ok("B4  sem `idempotencyKey`, a chave nao e inventada",
@@ -196,8 +234,8 @@ async function main(): Promise<void> {
   {
     const { portas, espiao } = portasFalsas(sucessoCom([]));
     await sincronizarPerguntas({ agenteId: AGENTE, idempotencyKey: "n8n:op:acao:ag" }, portas);
-    ok("B5  quando a chave e fornecida, ela atravessa intacta",
-      (espiao.chamadas[0] ?? {}).idempotencyKey === "n8n:op:acao:ag");
+    ok("B5  a chave da tentativa vira chave da PAGINA",
+      (espiao.chamadas[0] ?? {}).idempotencyKey === "n8n:op:acao:ag:p0");
   }
 
   {
@@ -266,7 +304,7 @@ async function main(): Promise<void> {
     const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
     ok("D1  zero perguntas e coleta valida, nao erro",
       r.tipo === "sincronizado" && r.perguntas.length === 0
-      && r.metricas.recebidas === 0 && r.metricas.ingeriveis === 0);
+      && r.metricas.provider_recebidas === 0 && r.metricas.ingeriveis === 0);
   }
   {
     const { portas } = portasFalsas(sucessoCom([pergunta()]));
@@ -291,7 +329,7 @@ async function main(): Promise<void> {
     const { portas } = portasFalsas(sucessoCom([pergunta({ criadaEm: data })]));
     const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
     ok(`D4  data invalida (${rotulo}) e descartada, nao derruba a varredura`,
-      r.tipo === "sincronizado" && r.metricas.descartadas === 1 && r.metricas.ingeriveis === 0);
+      r.tipo === "sincronizado" && r.metricas.descartadas_ingestao === 1 && r.metricas.ingeriveis === 0);
   }
   for (const data of [
     "2026-09-20T10:00:00.000-04:00",
@@ -313,13 +351,16 @@ async function main(): Promise<void> {
     const { portas } = portasFalsas(sucessoCom(linhas, true));
     const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
     ok("D6  nenhum item observado some da contabilidade",
-      r.tipo === "sincronizado"
-      && r.metricas.recebidas === 4
-      && r.metricas.ingeriveis + r.metricas.descartadas + r.metricas.status_inesperados === 4);
+      (r.tipo === "sincronizado" || r.tipo === "backlog_truncado")
+      && r.metricas.normalizadas
+         === r.metricas.ingeriveis + r.metricas.descartadas_ingestao
+            + r.metricas.status_inesperados);
     ok("D7  `providerTruncado` do adapter atravessa",
-      r.tipo === "sincronizado" && r.providerTruncado === true);
-    ok("D8  `paginas` e 1 — o I1 nao pagina",
-      r.tipo === "sincronizado" && r.metricas.paginas === 1);
+      (r.tipo === "sincronizado" || r.tipo === "backlog_truncado")
+      && r.providerTruncado === true);
+    ok("D8  `truncado` na pagina 1 faz a varredura buscar a pagina 2",
+      (r.tipo === "sincronizado" || r.tipo === "backlog_truncado")
+      && r.metricas.paginas === 2);
   }
 
   // ─── E. O normalizador compartilhado (fronteira anterior) ───────────
@@ -495,6 +536,173 @@ async function main(): Promise<void> {
     ok("H13 o resultado interno nao carrega credencial nem token",
       !/token|senha|secret|service_role|Bearer/i.test(serializado));
   }
+
+  // ─── I. Paginacao com janela BRUTA ──────────────────────────────────
+  secao("I. Paginacao — a janela e do provider, nao do que sobrou");
+
+  {
+    // G1: pagina 1 nao encheu -> varredura completa, uma pagina so.
+    const { portas, espiao } = portasPorPagina([sucessoCom([pergunta()], false)]);
+    const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    ok("G1  pagina unica incompleta encerra a varredura",
+      r.tipo === "sincronizado" && r.metricas.paginas === 1
+      && espiao.chamadas.length === 1 && r.metricas.truncado === false);
+    ok("G18 a RPC final e chamada EXATAMENTE uma vez", espiao.gravacoes.length === 1);
+    ok("G19 nenhuma escrita por pagina", espiao.gravacoes.length === 1);
+  }
+
+  {
+    // G2: duas paginas, a segunda incompleta.
+    const p1 = Array.from({ length: 50 }, (_, i) => pergunta({ id: `A${i}` }));
+    const p2 = [pergunta({ id: "B1" }), pergunta({ id: "B2" })];
+    const { portas, espiao } = portasPorPagina([sucessoCom(p1, true), sucessoCom(p2, false)]);
+    const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    ok("G2  duas paginas: tudo coletado num lote so",
+      r.tipo === "sincronizado" && r.metricas.paginas === 2
+      && r.metricas.ingeriveis === 52 && espiao.gravacoes[0].linhas.length === 52);
+    ok("G8  os deslocamentos sao FIXOS: 0 e 50",
+      (espiao.chamadas[0].argumentos as { deslocamento: number }).deslocamento === 0
+      && (espiao.chamadas[1].argumentos as { deslocamento: number }).deslocamento === 50);
+    ok("G17 a janela do provider nao passa de 100",
+      r.tipo === "sincronizado" && r.metricas.provider_recebidas <= MAX_JANELA_PROVIDER);
+  }
+
+  {
+    // G3: pagina 1 cheia, pagina 2 vazia.
+    const p1 = Array.from({ length: 50 }, (_, i) => pergunta({ id: `A${i}` }));
+    const { portas, espiao } = portasPorPagina([sucessoCom(p1, true), sucessoCom([], false)]);
+    const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    ok("G3  pagina 2 vazia encerra sem truncamento",
+      r.tipo === "sincronizado" && r.metricas.paginas === 2
+      && r.metricas.truncado === false && r.metricas.limite_atingido === false
+      && espiao.gravacoes[0].linhas.length === 50);
+  }
+
+  {
+    // G9: pagina BRUTA cheia, mas quase tudo descartado na normalizacao.
+    // Se a decisao usasse o que sobrou, a varredura pararia cedo.
+    const { portas, espiao } = portasPorPagina([
+      sucessoCom([pergunta({ id: "S1" })], true, LOJA, 50, 49),
+      sucessoCom([pergunta({ id: "S2" })], false, LOJA, 1, 0),
+    ]);
+    const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    ok("G9  pagina bruta cheia com descarte ainda busca a proxima",
+      espiao.chamadas.length === 2 && r.tipo === "sincronizado");
+    ok("G10 a contabilidade separa descarte de normalizacao do de ingestao",
+      r.tipo === "sincronizado"
+      && r.metricas.provider_recebidas === 51
+      && r.metricas.normalizadas === 2
+      && r.metricas.descartadas_normalizacao === 49
+      && r.metricas.provider_recebidas
+         === r.metricas.normalizadas + r.metricas.descartadas_normalizacao);
+    ok("G10b e a segunda invariante fecha depois do filtro de ingestao",
+      r.tipo === "sincronizado"
+      && r.metricas.normalizadas
+         === r.metricas.ingeriveis + r.metricas.descartadas_ingestao + r.metricas.status_inesperados);
+  }
+
+  {
+    // G11: teto batido com o provider ainda indicando backlog.
+    const cheia = Array.from({ length: 50 }, (_, i) => pergunta({ id: `X${i}` }));
+    const { portas, espiao } = portasPorPagina([
+      sucessoCom(cheia, true), sucessoCom(cheia.map((q) => ({ ...q, id: `Y${q.id}` })), true),
+    ]);
+    const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    ok("G11 teto atingido com backlog: PERSISTE e devolve `backlog_truncado`",
+      r.tipo === "backlog_truncado" && espiao.gravacoes.length === 1
+      && espiao.gravacoes[0].linhas.length === 100);
+    ok("G11b `truncado` e `limite_atingido` sao explicitos",
+      r.tipo === "backlog_truncado"
+      && r.metricas.truncado === true && r.metricas.limite_atingido === true);
+    ok("G11c nunca ha terceira pagina",
+      espiao.chamadas.length === MAX_PAGINAS);
+  }
+
+  {
+    // G4/G5: falha na pagina 2 -> ZERO persistencia, pagina 1 nao entra.
+    const p1 = Array.from({ length: 50 }, (_, i) => pergunta({ id: `A${i}` }));
+    for (const [rotulo, falha] of [
+      ["erro de provider", { tipo: "erro", requestId: "r2", envelope: { error: { code: "indisponivel" } } }],
+      ["negado", { tipo: "negado", requestId: "r2", codigo: "permissao_ausente" }],
+      ["indisponivel", { tipo: "indisponivel", requestId: "r2" }],
+      ["envelope fora de forma", { tipo: "sucesso", requestId: "r2", envelope: { data: { fora: 1 } }, autoridade: { lojaId: LOJA } }],
+    ] as const) {
+      const { portas, espiao } = portasPorPagina([sucessoCom(p1, true), falha]);
+      const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+      ok(`G4  pagina 2 (${rotulo}): ZERO persistencia, pagina 1 nao entra`,
+        espiao.gravacoes.length === 0 && r.tipo !== "sincronizado"
+        && r.tipo !== "backlog_truncado");
+    }
+  }
+
+  // ─── J. Autoridade entre paginas ────────────────────────────────────
+  secao("J. Autoridade — paginas de contas diferentes nunca se misturam");
+
+  {
+    const p1 = Array.from({ length: 50 }, (_, i) => pergunta({ id: `A${i}` }));
+    const { portas, espiao } = portasPorPagina([
+      sucessoCom(p1, true, LOJA), sucessoCom([pergunta({ id: "B1" })], false, LOJA),
+    ]);
+    const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    ok("G12 autoridade A -> A: gravacao permitida, numa conta so",
+      r.tipo === "sincronizado" && espiao.gravacoes.length === 1
+      && espiao.gravacoes[0].autoridade.lojaId === LOJA);
+  }
+
+  {
+    const OUTRA = "dddddddd-0000-4000-8000-0000000000e2";
+    const p1 = Array.from({ length: 50 }, (_, i) => pergunta({ id: `A${i}` }));
+    const { portas, espiao } = portasPorPagina([
+      sucessoCom(p1, true, LOJA), sucessoCom([pergunta({ id: "B1" })], false, OUTRA),
+    ]);
+    const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    ok("G13 autoridade A -> B: falha fechada, ZERO persistencia",
+      r.tipo === "autoridade_divergente"
+      && r.codigo === "autoridade_divergente_entre_paginas"
+      && espiao.gravacoes.length === 0);
+    ok("G13b a pagina 1 foi lida, mas nao foi gravada",
+      espiao.chamadas.length === 2 && espiao.gravacoes.length === 0);
+  }
+
+  // ─── K. Chaves de idempotencia por pagina ───────────────────────────
+  secao("K. Chave por pagina — deterministica e distinta");
+
+  ok("G14 paginas diferentes dao chaves DIFERENTES",
+    chaveDaPagina("n8n:w5m-X:sincronizar_perguntas:ag", 0)
+    !== chaveDaPagina("n8n:w5m-X:sincronizar_perguntas:ag", 1));
+  ok("G15 mesma tentativa e mesma pagina dao sempre a MESMA chave",
+    chaveDaPagina("n8n:w5m-X:sincronizar_perguntas:ag", 0)
+    === chaveDaPagina("n8n:w5m-X:sincronizar_perguntas:ag", 0));
+  ok("G16 tentativas diferentes dao chaves diferentes",
+    chaveDaPagina("n8n:w5m-X:sincronizar_perguntas:ag", 0)
+    !== chaveDaPagina("n8n:w5m-Y:sincronizar_perguntas:ag", 0));
+  ok("G14b a chave da tentativa e PREFIXO da chave da pagina",
+    chaveDaPagina("BASE", 0).startsWith("BASE"));
+  ok("G14c o sufixo cabe folgado no limite pratico da chave",
+    chaveDaPagina("n8n:" + "o".repeat(128) + ":sincronizar_perguntas:"
+      + "11111111-1111-4111-8111-111111111111", 1).length < 256);
+
+  {
+    const { portas, espiao } = portasPorPagina([
+      sucessoCom(Array.from({ length: 50 }, (_, i) => pergunta({ id: `A${i}` })), true),
+      sucessoCom([], false),
+    ]);
+    await sincronizarPerguntas({ agenteId: AGENTE, idempotencyKey: "BASE" }, portas);
+    ok("G14d cada pagina executa com a SUA chave",
+      espiao.chamadas[0].idempotencyKey === "BASE:p0"
+      && espiao.chamadas[1].idempotencyKey === "BASE:p1");
+  }
+
+  {
+    const { portas, espiao } = portasPorPagina([sucessoCom([pergunta()], false)]);
+    await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    ok("G14e sem chave de tentativa, nenhuma chave e inventada",
+      !("idempotencyKey" in espiao.chamadas[0]));
+  }
+
+  ok("G17b o deslocamento da pagina n e sempre n * PAGE_LIMIT",
+    deslocamentoDaPagina(0) === 0 && deslocamentoDaPagina(1) === PAGE_LIMIT
+    && MAX_JANELA_PROVIDER === PAGE_LIMIT * MAX_PAGINAS);
 
   console.log(`\n── placar ${"─".repeat(54)}`);
   console.log(`  PASS ${passou}   FAIL ${falhou}\n`);

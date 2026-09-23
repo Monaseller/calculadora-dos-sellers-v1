@@ -65,18 +65,6 @@ export const ACAO_SINCRONIZAR_PERGUNTAS = "sincronizar_perguntas";
 export const STATUS_INGERIVEL = "UNANSWERED";
 
 /**
- * O filtro de UMA pagina, no I1.
- *
- * `limite` no teto do dominio porque uma pagina maior significa menos
- * idas ao provider dentro do mesmo orcamento. `deslocamento` zero porque
- * o I1 nao pagina: provar a fronteira de dominio e outra coisa, e juntar
- * as duas esconderia qual das duas quebrou.
- */
-export const FILTRO_PAGINA_UNICA = Object.freeze({
-  status: STATUS_INGERIVEL,
-  limite: LIMITE_MAXIMO_PERGUNTAS,
-  deslocamento: 0,
-});
 
 /**
  * ISO 8601 com data, hora e fuso — o que o Mercado Livre devolve em
@@ -126,17 +114,6 @@ function comoLinha(p: PerguntaRecebida): LinhaParaInbox {
 }
 
 /** O que a ingestao contou nesta varredura. Somente escalares. */
-export interface MetricasSincronizacao {
-  readonly paginas: number;
-  /** Itens que o provider devolveu e a Funcao normalizou com sucesso. */
-  readonly recebidas: number;
-  /** Observadas, porem inaptas: data invalida. */
-  readonly descartadas: number;
-  /** Observadas com status que nao vira item novo de trabalho. */
-  readonly status_inesperados: number;
-  /** Aptas a virar linha da inbox. */
-  readonly ingeriveis: number;
-}
 
 export type ResultadoSincronizacao =
   | {
@@ -151,6 +128,21 @@ export type ResultadoSincronizacao =
       /** O provider indicou que ha mais alem desta pagina. */
       readonly providerTruncado: boolean;
     }
+  /**
+   * Varredura que bateu no teto de paginas COM o provider ainda
+   * indicando backlog. O que coube foi gravado; a varredura NAO
+   * terminou, e chamar isso de sucesso esconderia o que ficou de fora.
+   */
+  | {
+      readonly tipo: "backlog_truncado";
+      readonly requestId: string;
+      readonly perguntas: readonly PerguntaRecebida[];
+      readonly metricas: MetricasSincronizacao;
+      readonly persistencia: MetricasPersistencia;
+      readonly providerTruncado: boolean;
+    }
+  /** Duas paginas vieram de contas diferentes. ZERO gravacao. */
+  | { readonly tipo: "autoridade_divergente"; readonly requestId: string; readonly codigo: string }
   /** A RPC recusou por contrato. Nada foi gravado — ela e atomica. */
   | { readonly tipo: "persistencia_recusada"; readonly requestId: string; readonly codigo: string }
   | { readonly tipo: "agente_indisponivel"; readonly motivo: "inexistente" | "inativo" | "falha_leitura" }
@@ -192,14 +184,27 @@ const PORTAS_REAIS: PortasSincronizacao = {
 };
 
 /** A forma que a Funcao de perguntas devolve em `envelope.data`. */
-function lerDados(
-  data: unknown
-): { linhas: readonly PerguntaRecebida[]; truncado: boolean } | null {
+function lerDados(data: unknown): {
+  linhas: readonly PerguntaRecebida[];
+  truncado: boolean;
+  providerRecebidas: number;
+  descartadasNormalizacao: number;
+} | null {
   if (typeof data !== "object" || data === null || Array.isArray(data)) return null;
   const o = data as Record<string, unknown>;
   if (!Array.isArray(o.linhas)) return null;
   if (typeof o.truncado !== "boolean") return null;
-  return { linhas: o.linhas as readonly PerguntaRecebida[], truncado: o.truncado };
+  const inteiro = (v: unknown): number | null =>
+    typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : null;
+  const providerRecebidas = inteiro(o.providerRecebidas);
+  const descartadasNormalizacao = inteiro(o.descartadasNormalizacao);
+  if (providerRecebidas === null || descartadasNormalizacao === null) return null;
+  return {
+    linhas: o.linhas as readonly PerguntaRecebida[],
+    truncado: o.truncado,
+    providerRecebidas,
+    descartadasNormalizacao,
+  };
 }
 
 /**
@@ -235,11 +240,212 @@ function filtrarIngeriveis(linhas: readonly PerguntaRecebida[]): {
 }
 
 /**
- * Uma varredura de UMA pagina.
+/**
+ * A janela de paginacao. Fixa, e por isso auditavel.
  *
- * O desfecho do executor atravessa quase intacto: recusa de permissao,
- * aprovacao pendente e erro de provider sao fatos do CDS, e reembrulha-los
- * num vocabulario proprio criaria uma segunda verdade para manter.
+ * `PAGE_LIMIT` no teto do dominio (`LIMITE_MAXIMO_PERGUNTAS`) porque uma
+ * pagina maior significa menos idas ao provider dentro do mesmo
+ * orcamento. `MAX_PAGINAS` em 2 e uma cerca ESTRUTURAL do I3A: ela nao
+ * promete caber em orcamento de orquestrador nenhum, porque ainda nao
+ * existe rota. Ver `WALL_CLOCK_BUDGET`, adiado.
+ */
+export const PAGE_LIMIT = LIMITE_MAXIMO_PERGUNTAS;
+export const MAX_PAGINAS = 2;
+export const MAX_JANELA_PROVIDER = PAGE_LIMIT * MAX_PAGINAS;
+
+/**
+ * O deslocamento da pagina `n`. FIXO — nunca derivado do que sobrou.
+ *
+ * Se o offset avancasse pelo numero de linhas NORMALIZADAS, uma pagina
+ * com 3 itens malformados iria de 0 para 47 e releria 3 itens que ja
+ * passaram. Descarte de forma nao pode mover a janela do provider.
+ */
+export function deslocamentoDaPagina(indice: number): number {
+  return indice * PAGE_LIMIT;
+}
+
+/**
+ * A chave de idempotencia de UMA pagina.
+ *
+ * Deterministica: mesma tentativa e mesma pagina dao sempre a mesma
+ * chave; paginas diferentes dao chaves diferentes; tentativas
+ * diferentes tambem. Nenhum uuid e sorteado aqui — sortear tornaria
+ * todo retry uma execucao nova, que e exatamente o que a chave existe
+ * para impedir.
+ *
+ * Sufixo, e nao prefixo: a chave da tentativa ja carrega provedor, acao
+ * e agente, e manter esse comeco intacto preserva a separacao de
+ * namespace que `chaveDeIdempotencia` construiu.
+ *
+ * Sem risco de estouro: `idempotency_key` e `text` no banco, e
+ * `registrarAbertura` nao impoe comprimento. A chave da ponte ja tem
+ * ~190 caracteres no pior caso; `:p0` acrescenta tres.
+ */
+export function chaveDaPagina(chaveDaTentativa: string, indice: number): string {
+  return `${chaveDaTentativa}:p${indice}`;
+}
+
+/** O que a ingestao contou na varredura INTEIRA. Somente escalares. */
+export interface MetricasSincronizacao {
+  readonly paginas: number;
+  /** Itens que o provider devolveu, ANTES da normalizacao. */
+  readonly provider_recebidas: number;
+  /** Itens que sobreviveram a `normalizarPerguntas`. */
+  readonly normalizadas: number;
+  /** Recusados pela normalizacao, por forma. */
+  readonly descartadas_normalizacao: number;
+  /** Recusados pelo filtro de INGESTAO — hoje, data invalida. */
+  readonly descartadas_ingestao: number;
+  /** Normalizados cujo status nao vira item novo de trabalho. */
+  readonly status_inesperados: number;
+  /** Aptos a virar linha da inbox. */
+  readonly ingeriveis: number;
+  /** O provider indicou que ha mais ALEM da janela varrida. */
+  readonly truncado: boolean;
+  /** A varredura parou por bater em `MAX_PAGINAS`. */
+  readonly limite_atingido: boolean;
+}
+
+/**
+ * Uma pagina lida com sucesso, ja separada pelo filtro de ingestao.
+ */
+interface PaginaColetada {
+  readonly aptas: readonly PerguntaRecebida[];
+  readonly providerRecebidas: number;
+  readonly normalizadas: number;
+  readonly descartadasNormalizacao: number;
+  readonly descartadasIngestao: number;
+  readonly statusInesperados: number;
+  readonly haMais: boolean;
+}
+
+/**
+ * Traduz o desfecho de UMA pagina.
+ *
+ * Desfecho que nao e sucesso atravessa quase intacto: recusa de
+ * permissao, aprovacao pendente e erro de provider sao fatos do CDS, e
+ * reembrulha-los num vocabulario proprio criaria uma segunda verdade
+ * para manter. Qualquer um deles aborta a varredura ANTES de qualquer
+ * gravacao.
+ */
+type LeituraDePagina =
+  | { tipo: "ok"; pagina: PaginaColetada; lojaId: string; requestId: string }
+  | { tipo: "parar"; saida: ResultadoSincronizacao };
+
+function lerPagina(resultado: Awaited<ReturnType<typeof executarFuncao>>): LeituraDePagina {
+  switch (resultado.tipo) {
+    case "sucesso": {
+      const dados = lerDados(resultado.envelope.data);
+      if (dados === null) {
+        // A Funcao devolveu algo fora da forma. Falha fechada: adivinhar
+        // a forma aqui e o comeco de ingerir lixo.
+        return {
+          tipo: "parar",
+          saida: { tipo: "erro", requestId: resultado.requestId, codigo: "resposta_fora_de_forma" },
+        };
+      }
+
+      // A autoridade da GRAVACAO vem da EXECUCAO que buscou. Sem ela nao
+      // ha onde gravar, e inventar uma seria escolher conta por conta
+      // propria — exatamente o que este servico existe para nao fazer.
+      const lojaId = resultado.autoridade.lojaId;
+      if (lojaId === null) {
+        return {
+          tipo: "parar",
+          saida: { tipo: "erro", requestId: resultado.requestId, codigo: "autoridade_ausente" },
+        };
+      }
+
+      const { aptas, statusInesperados, descartadas } = filtrarIngeriveis(dados.linhas);
+      return {
+        tipo: "ok",
+        lojaId,
+        requestId: resultado.requestId,
+        pagina: {
+          aptas,
+          providerRecebidas: dados.providerRecebidas,
+          normalizadas: dados.linhas.length,
+          descartadasNormalizacao: dados.descartadasNormalizacao,
+          descartadasIngestao: descartadas,
+          statusInesperados,
+          // BRUTO. Uma pagina cheia de itens malformados continua sendo
+          // uma pagina cheia — medir pelo que sobrou faria o descarte
+          // parecer fim de lista.
+          haMais: dados.truncado,
+        },
+      };
+    }
+
+    case "negado":
+      return {
+        tipo: "parar",
+        saida: { tipo: "negado", requestId: resultado.requestId, codigo: resultado.codigo },
+      };
+
+    case "aguardando_aprovacao":
+      return {
+        tipo: "parar",
+        saida: {
+          tipo: "aguardando_aprovacao",
+          requestId: resultado.requestId,
+          aprovacaoId: resultado.aprovacaoId,
+        },
+      };
+
+    case "erro":
+      return {
+        tipo: "parar",
+        saida: {
+          tipo: "erro",
+          requestId: resultado.requestId,
+          // So o CODIGO. A frase do envelope nao viaja: o adapter ja
+          // descartou corpo, header e status do provider.
+          codigo: resultado.envelope.error.code,
+        },
+      };
+
+    case "falha_auditoria":
+      return {
+        tipo: "parar",
+        saida: resultado.motivo === "duplicada"
+          ? { tipo: "ja_processado" }
+          : { tipo: "erro", requestId: resultado.requestId, codigo: "falha_auditoria" },
+      };
+
+    case "aprovacao_indisponivel":
+      return {
+        tipo: "parar",
+        saida: { tipo: "erro", requestId: resultado.requestId, codigo: resultado.codigo },
+      };
+
+    case "indisponivel":
+      return {
+        tipo: "parar",
+        saida: { tipo: "indisponivel", requestId: resultado.requestId },
+      };
+
+    default: {
+      // Exaustividade: uma variante nova do executor deixa de compilar aqui.
+      const _exaustivo: never = resultado;
+      return _exaustivo;
+    }
+  }
+}
+
+/**
+ * Varre ate `MAX_PAGINAS`, coleta tudo, e grava UMA vez.
+ *
+ * ── Por que a autoridade e CONGELADA na primeira pagina ─────────────
+ *
+ * Cada `executarFuncao` resolve o binding de novo. Entao a pagina 2
+ * pode, em tese, vir de outra conta — se o vinculo mudou no meio. Um
+ * lote com paginas de contas diferentes seria dado de uma conta gravado
+ * na outra, e nenhum contador denunciaria.
+ *
+ * Como `COLLECT_THEN_WRITE` so grava no fim, dar com a divergencia
+ * durante a varredura ainda permite abortar com ZERO escrita. Por isso
+ * a primeira pagina congela a autoridade e as seguintes so podem
+ * confirma-la.
  */
 export async function sincronizarPerguntas(
   entrada: EntradaSincronizarPerguntas,
@@ -252,105 +458,104 @@ export async function sincronizarPerguntas(
   if (agente === null) return { tipo: "agente_indisponivel", motivo: "inexistente" };
   if (!agente.ativo) return { tipo: "agente_indisponivel", motivo: "inativo" };
 
-  const resultado = await portas.executar({
-    // Do BANCO. Nunca da entrada deste servico, que nao tem esse campo.
-    userId: agente.userId,
-    agenteId: agente.agenteId,
-    // Do CONTRATO da Funcao. O literal nao e redigitado aqui.
-    funcaoId: FUNCAO_PERGUNTAS_ML,
-    argumentos: { ...FILTRO_PAGINA_UNICA },
-    ...(entrada.idempotencyKey === undefined
-      ? {}
-      : { idempotencyKey: entrada.idempotencyKey }),
-  });
+  const coletadas: PaginaColetada[] = [];
+  let lojaCongelada: string | null = null;
+  let requestIdFinal = "";
+  let haMais = false;
 
-  switch (resultado.tipo) {
-    case "sucesso": {
-      const dados = lerDados(resultado.envelope.data);
-      if (dados === null) {
-        // A Funcao devolveu algo fora da forma. Falha fechada: adivinhar
-        // a forma aqui e o comeco de ingerir lixo.
-        return { tipo: "erro", requestId: resultado.requestId, codigo: "resposta_fora_de_forma" };
-      }
+  for (let indice = 0; indice < MAX_PAGINAS; indice += 1) {
+    const resultado = await portas.executar({
+      // Do BANCO. Nunca da entrada deste servico, que nao tem esse campo.
+      userId: agente.userId,
+      agenteId: agente.agenteId,
+      // Do CONTRATO da Funcao. O literal nao e redigitado aqui.
+      funcaoId: FUNCAO_PERGUNTAS_ML,
+      argumentos: {
+        status: STATUS_INGERIVEL,
+        limite: PAGE_LIMIT,
+        deslocamento: deslocamentoDaPagina(indice),
+      },
+      ...(entrada.idempotencyKey === undefined
+        ? {}
+        : { idempotencyKey: chaveDaPagina(entrada.idempotencyKey, indice) }),
+    });
 
-      // A autoridade da GRAVACAO vem da EXECUCAO que buscou. Sem ela nao
-      // ha onde gravar, e inventar uma seria escolher conta por conta
-      // propria — exatamente o que este servico existe para nao fazer.
-      const lojaId = resultado.autoridade.lojaId;
-      if (lojaId === null) {
-        return { tipo: "erro", requestId: resultado.requestId, codigo: "autoridade_ausente" };
-      }
+    const pagina = lerPagina(resultado);
+    if (pagina.tipo !== "ok") return pagina.saida;
 
-      const { aptas, statusInesperados, descartadas } = filtrarIngeriveis(dados.linhas);
-
-      const metricas: MetricasSincronizacao = {
-        paginas: 1,
-        recebidas: dados.linhas.length,
-        descartadas,
-        status_inesperados: statusInesperados,
-        ingeriveis: aptas.length,
-      };
-
-      // COLLECT_THEN_WRITE: coleta e filtra TUDO, depois grava UMA vez.
-      // Com uma pagina so isso ainda nao pesa; com varias, e o que impede
-      // ingestao pela metade quando a pagina 2 falhar.
-      const gravacao = await portas.gravar(
-        { userId: agente.userId, lojaId },
-        aptas.map(comoLinha)
-      );
-
-      if (gravacao.tipo === "recusado") {
-        return { tipo: "persistencia_recusada", requestId: resultado.requestId, codigo: gravacao.codigo };
-      }
-      if (gravacao.tipo === "erro") {
-        // Provider deu certo e o banco nao. Isso e ERRO, nunca sucesso
-        // com zero: a RPC e atomica, entao nada foi gravado pela metade.
-        return { tipo: "erro", requestId: resultado.requestId, codigo: gravacao.codigo };
-      }
-
+    // ── A cerca de autoridade entre paginas ─────────────────────────
+    if (lojaCongelada === null) {
+      lojaCongelada = pagina.lojaId;
+    } else if (pagina.lojaId !== lojaCongelada) {
+      // Nada foi gravado ainda, e nada sera. Misturar paginas de contas
+      // diferentes num lote so e o defeito que esta cerca existe para
+      // tornar impossivel.
       return {
-        tipo: "sincronizado",
-        requestId: resultado.requestId,
-        perguntas: aptas,
-        metricas,
-        persistencia: gravacao.metricas,
-        providerTruncado: dados.truncado,
+        tipo: "autoridade_divergente",
+        requestId: pagina.requestId,
+        codigo: "autoridade_divergente_entre_paginas",
       };
     }
 
-    case "negado":
-      return { tipo: "negado", requestId: resultado.requestId, codigo: resultado.codigo };
+    requestIdFinal = pagina.requestId;
+    coletadas.push(pagina.pagina);
+    haMais = pagina.pagina.haMais;
 
-    case "aguardando_aprovacao":
-      return {
-        tipo: "aguardando_aprovacao",
-        requestId: resultado.requestId,
-        aprovacaoId: resultado.aprovacaoId,
-      };
-
-    case "erro":
-      return {
-        tipo: "erro",
-        requestId: resultado.requestId,
-        // So o CODIGO. A frase do envelope nao viaja: o adapter ja
-        // descartou corpo, header e status do provider.
-        codigo: resultado.envelope.error.code,
-      };
-
-    case "falha_auditoria":
-      if (resultado.motivo === "duplicada") return { tipo: "ja_processado" };
-      return { tipo: "erro", requestId: resultado.requestId, codigo: "falha_auditoria" };
-
-    case "aprovacao_indisponivel":
-      return { tipo: "erro", requestId: resultado.requestId, codigo: resultado.codigo };
-
-    case "indisponivel":
-      return { tipo: "indisponivel", requestId: resultado.requestId };
-
-    default: {
-      // Exaustividade: uma variante nova do executor deixa de compilar aqui.
-      const _exaustivo: never = resultado;
-      return _exaustivo;
-    }
+    // Pagina que nao encheu significa fim de lista: pedir a seguinte
+    // seria uma ida ao provider que ninguem precisa.
+    if (!haMais) break;
   }
+
+  if (lojaCongelada === null) {
+    // Nao houve pagina alguma — so acontece se `MAX_PAGINAS` for zero.
+    return { tipo: "erro", requestId: requestIdFinal, codigo: "autoridade_ausente" };
+  }
+
+  const aptas = coletadas.flatMap((p) => [...p.aptas]);
+  const soma = (f: (p: PaginaColetada) => number) =>
+    coletadas.reduce((acc, p) => acc + f(p), 0);
+
+  // Bateu no teto E o provider ainda indica mais: a varredura NAO
+  // terminou, e dizer "sucesso" aqui esconderia backlog.
+  const limiteAtingido = coletadas.length === MAX_PAGINAS && haMais;
+
+  const metricas: MetricasSincronizacao = {
+    paginas: coletadas.length,
+    provider_recebidas: soma((p) => p.providerRecebidas),
+    normalizadas: soma((p) => p.normalizadas),
+    descartadas_normalizacao: soma((p) => p.descartadasNormalizacao),
+    descartadas_ingestao: soma((p) => p.descartadasIngestao),
+    status_inesperados: soma((p) => p.statusInesperados),
+    ingeriveis: aptas.length,
+    truncado: haMais,
+    limite_atingido: limiteAtingido,
+  };
+
+  // COLLECT_THEN_WRITE: so agora, e uma vez so. Duplicata ENTRE paginas
+  // chega junta ao mesmo lote, e quem decide o que fazer com ela e a
+  // RPC — que ja prova colapso de duplicata exata e recusa de duplicata
+  // divergente. Uma segunda politica de dedupe em TypeScript criaria uma
+  // segunda verdade para manter.
+  const gravacao = await portas.gravar(
+    { userId: agente.userId, lojaId: lojaCongelada },
+    aptas.map(comoLinha)
+  );
+
+  if (gravacao.tipo === "recusado") {
+    return { tipo: "persistencia_recusada", requestId: requestIdFinal, codigo: gravacao.codigo };
+  }
+  if (gravacao.tipo === "erro") {
+    // Provider deu certo e o banco nao. Isso e ERRO, nunca sucesso com
+    // zero: a RPC e atomica, entao nada foi gravado pela metade.
+    return { tipo: "erro", requestId: requestIdFinal, codigo: gravacao.codigo };
+  }
+
+  return {
+    tipo: limiteAtingido ? "backlog_truncado" : "sincronizado",
+    requestId: requestIdFinal,
+    perguntas: aptas,
+    metricas,
+    persistencia: gravacao.metricas,
+    providerTruncado: haMais,
+  };
 }
