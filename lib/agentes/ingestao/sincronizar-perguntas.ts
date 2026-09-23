@@ -16,7 +16,13 @@
  * `acao_desconhecida`. A exposicao e um gate proprio, com rota dedicada
  * e agente vindo do servidor — nunca do chamador.
  *
- * Tambem nao persiste. Chamar `agente_perguntas_ml_upsert_lote` e o I2.
+ * ── Buscar e gravar usam a MESMA autoridade ────────────────────────
+ *
+ * A conta em que se grava e a conta de onde se leu, e isso NAO e
+ * disciplina: `executarFuncao` devolve, no sucesso, o `lojaId` do mesmo
+ * `snapshot` que alimentou a Funcao. Nao ha segunda resolucao de
+ * binding, entao nao ha janela entre buscar e gravar em que o vinculo
+ * pudesse mudar e o dado de uma conta acabar na outra.
  *
  * ── Por que passa por `executarFuncao`, e nao pelo adapter ──────────
  *
@@ -34,6 +40,11 @@
  * ele e LIDO do agente, nunca recebido.
  */
 import { lerAgenteParaAcaoInterna } from "@/lib/agentes/capability-worker";
+import {
+  gravarPerguntasNaInbox,
+  type LinhaParaInbox,
+  type MetricasPersistencia,
+} from "@/lib/agentes/dados/perguntas-inbox";
 import type { PerguntaRecebida } from "@/lib/agentes/dados/perguntas";
 import { LIMITE_MAXIMO_PERGUNTAS } from "@/lib/agentes/dados/perguntas";
 import { executarFuncao } from "@/lib/agentes/execucao-funcoes/executar";
@@ -97,6 +108,23 @@ function dataUtilizavel(criadaEm: string): boolean {
   return Number.isFinite(Date.parse(criadaEm));
 }
 
+/**
+ * `PerguntaRecebida` -> a linha que a RPC espera.
+ *
+ * Cinco chaves, e so elas. `user_id` e `loja_id` NAO entram na linha:
+ * eles sao parametros da RPC, um por chamada. Uma linha carregando a
+ * propria autoridade abriria a porta para um lote com duas.
+ */
+function comoLinha(p: PerguntaRecebida): LinhaParaInbox {
+  return {
+    id_externo: p.id,
+    anuncio_id_externo: p.anuncioId,
+    texto: p.texto,
+    provider_status: p.status,
+    criada_em_provider: p.criadaEm,
+  };
+}
+
 /** O que a ingestao contou nesta varredura. Somente escalares. */
 export interface MetricasSincronizacao {
   readonly paginas: number;
@@ -112,14 +140,19 @@ export interface MetricasSincronizacao {
 
 export type ResultadoSincronizacao =
   | {
-      readonly tipo: "coletado";
+      readonly tipo: "sincronizado";
       readonly requestId: string;
       /** INTERNO. Nao atravessa a ponte nem o n8n. */
       readonly perguntas: readonly PerguntaRecebida[];
+      /** O que a INGESTAO observou e filtrou. */
       readonly metricas: MetricasSincronizacao;
+      /** O que a RPC de fato gravou. Fonte unica, inclusive no lote vazio. */
+      readonly persistencia: MetricasPersistencia;
       /** O provider indicou que ha mais alem desta pagina. */
       readonly providerTruncado: boolean;
     }
+  /** A RPC recusou por contrato. Nada foi gravado — ela e atomica. */
+  | { readonly tipo: "persistencia_recusada"; readonly requestId: string; readonly codigo: string }
   | { readonly tipo: "agente_indisponivel"; readonly motivo: "inexistente" | "inativo" | "falha_leitura" }
   | { readonly tipo: "negado"; readonly requestId: string; readonly codigo: string }
   | { readonly tipo: "aguardando_aprovacao"; readonly requestId: string; readonly aprovacaoId: string }
@@ -149,11 +182,13 @@ export interface EntradaSincronizarPerguntas {
 export interface PortasSincronizacao {
   readonly lerAgente: typeof lerAgenteParaAcaoInterna;
   readonly executar: typeof executarFuncao;
+  readonly gravar: typeof gravarPerguntasNaInbox;
 }
 
 const PORTAS_REAIS: PortasSincronizacao = {
   lerAgente: lerAgenteParaAcaoInterna,
   executar: executarFuncao,
+  gravar: gravarPerguntasNaInbox,
 };
 
 /** A forma que a Funcao de perguntas devolve em `envelope.data`. */
@@ -238,19 +273,47 @@ export async function sincronizarPerguntas(
         return { tipo: "erro", requestId: resultado.requestId, codigo: "resposta_fora_de_forma" };
       }
 
+      // A autoridade da GRAVACAO vem da EXECUCAO que buscou. Sem ela nao
+      // ha onde gravar, e inventar uma seria escolher conta por conta
+      // propria — exatamente o que este servico existe para nao fazer.
+      const lojaId = resultado.autoridade.lojaId;
+      if (lojaId === null) {
+        return { tipo: "erro", requestId: resultado.requestId, codigo: "autoridade_ausente" };
+      }
+
       const { aptas, statusInesperados, descartadas } = filtrarIngeriveis(dados.linhas);
 
+      const metricas: MetricasSincronizacao = {
+        paginas: 1,
+        recebidas: dados.linhas.length,
+        descartadas,
+        status_inesperados: statusInesperados,
+        ingeriveis: aptas.length,
+      };
+
+      // COLLECT_THEN_WRITE: coleta e filtra TUDO, depois grava UMA vez.
+      // Com uma pagina so isso ainda nao pesa; com varias, e o que impede
+      // ingestao pela metade quando a pagina 2 falhar.
+      const gravacao = await portas.gravar(
+        { userId: agente.userId, lojaId },
+        aptas.map(comoLinha)
+      );
+
+      if (gravacao.tipo === "recusado") {
+        return { tipo: "persistencia_recusada", requestId: resultado.requestId, codigo: gravacao.codigo };
+      }
+      if (gravacao.tipo === "erro") {
+        // Provider deu certo e o banco nao. Isso e ERRO, nunca sucesso
+        // com zero: a RPC e atomica, entao nada foi gravado pela metade.
+        return { tipo: "erro", requestId: resultado.requestId, codigo: gravacao.codigo };
+      }
+
       return {
-        tipo: "coletado",
+        tipo: "sincronizado",
         requestId: resultado.requestId,
         perguntas: aptas,
-        metricas: {
-          paginas: 1,
-          recebidas: dados.linhas.length,
-          descartadas,
-          status_inesperados: statusInesperados,
-          ingeriveis: aptas.length,
-        },
+        metricas,
+        persistencia: gravacao.metricas,
         providerTruncado: dados.truncado,
       };
     }

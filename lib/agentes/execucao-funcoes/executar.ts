@@ -180,7 +180,31 @@ export interface EntradaExecucaoFuncao {
  * elas sao devolvidas.
  */
 export type ResultadoExecucaoFuncao =
-  | { tipo: "sucesso"; requestId: string; envelope: EnvelopeSucesso; auditoria: "completa" | "incompleta" }
+  | {
+      tipo: "sucesso";
+      requestId: string;
+      envelope: EnvelopeSucesso;
+      auditoria: "completa" | "incompleta";
+      /**
+       * A autoridade REAL desta execucao — INTERNA.
+       *
+       * Existe para um caso so: quem executou uma Funcao de leitura e
+       * precisa PERSISTIR o que leu tem de gravar na MESMA conta que a
+       * leitura usou. Resolver o binding uma segunda vez abriria uma
+       * janela entre buscar e gravar, e nessa janela o vinculo pode
+       * mudar — o dado de uma conta acabaria na outra.
+       *
+       * `lojaId` aqui e o MESMO valor que `contextoDaFuncao` entregou a
+       * Funcao como `contexto.conexao.lojaId`: os dois saem do mesmo
+       * `snapshot`, de uma unica resolucao. Nao ha como divergirem.
+       *
+       * `null` quando a Funcao nao exige conexao.
+       *
+       * NAO atravessa a ponte: `mapear` em `acoes/route.ts` monta a
+       * resposta campo a campo, e nenhum consumidor espalha o resultado.
+       */
+      autoridade: { readonly lojaId: string | null };
+    }
   | { tipo: "negado"; requestId: string; codigo: CodigoNegacaoTerminal }
   | {
       tipo: "aguardando_aprovacao";
@@ -625,6 +649,9 @@ async function executarComAberturaFeita(
     requestId: snapshot.requestId,
     envelope,
     auditoria: desfecho.estado === "registrada" ? "completa" : "incompleta",
+    // Do MESMO snapshot que alimentou `contextoDaFuncao`. Nao e uma
+    // segunda leitura: e o mesmo valor, devolvido.
+    autoridade: { lojaId: snapshot.lojaId ?? null },
   };
 }
 

@@ -791,6 +791,7 @@ async function main(): Promise<void> {
         data: { linhas: [], truncado: false, erro: null },
       },
       auditoria: "completa" as const,
+      autoridade: { lojaId: null } as const,
     };
     const saida = pp === null ? {} : pp.continuar(envelope);
     ok("RESUME-UNION-4 o resultado passa pela continuacao do MESMO tipo",

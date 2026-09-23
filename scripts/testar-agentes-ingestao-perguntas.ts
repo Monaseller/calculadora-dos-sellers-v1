@@ -76,13 +76,18 @@ const pergunta = (
 interface Espiao {
   chamadas: Array<Record<string, unknown>>;
   agentesLidos: string[];
+  gravacoes: Array<{ autoridade: Record<string, unknown>; linhas: unknown[] }>;
 }
 
 function portasFalsas(
   resposta: unknown,
-  opcoes: { agente?: { agenteId: string; userId: string; ativo: boolean } | null; erro?: string | null } = {}
+  opcoes: {
+    agente?: { agenteId: string; userId: string; ativo: boolean } | null;
+    erro?: string | null;
+    gravacao?: unknown;
+  } = {}
 ): { portas: PortasSincronizacao; espiao: Espiao } {
-  const espiao: Espiao = { chamadas: [], agentesLidos: [] };
+  const espiao: Espiao = { chamadas: [], agentesLidos: [], gravacoes: [] };
   const agente =
     opcoes.agente === undefined ? { agenteId: AGENTE, userId: DONO, ativo: true } : opcoes.agente;
 
@@ -95,15 +100,30 @@ function portasFalsas(
       espiao.chamadas.push(entrada);
       return resposta;
     },
+    gravar: async (autoridade: Record<string, unknown>, linhas: unknown[]) => {
+      espiao.gravacoes.push({ autoridade, linhas });
+      return opcoes.gravacao ?? {
+        tipo: "gravado",
+        metricas: {
+          recebidas: linhas.length, unicas: linhas.length, duplicadas_no_lote: 0,
+          novas: linhas.length, atualizadas: 0, reobservadas: 0,
+        },
+      };
+    },
   } as unknown as PortasSincronizacao;
 
   return { portas, espiao };
 }
 
-const sucessoCom = (linhas: PerguntaRecebida[], truncado = false) => ({
+const LOJA = "cccccccc-0000-4000-8000-0000000000e1";
+
+const sucessoCom = (
+  linhas: PerguntaRecebida[], truncado = false, lojaId: string | null = LOJA
+) => ({
   tipo: "sucesso" as const,
   requestId: "req-1",
   envelope: { data: { linhas, truncado, erro: null } },
+  autoridade: { lojaId },
 });
 
 async function main(): Promise<void> {
@@ -146,8 +166,8 @@ async function main(): Promise<void> {
   {
     const fonte = ler("lib/agentes/ingestao/sincronizar-perguntas.ts");
     const semComentario = fonte.replace(/^\s*(\/\*[\s\S]*?\*\/|\*.*|\/\/.*)$/gm, "");
-    ok("A8  `lojaId` nao existe nem como identificador no codigo executavel",
-      !/\blojaId\b/.test(semComentario));
+    ok("A8  o servico nao le `lojaId` de argumento nem de entrada",
+      !/entrada\.lojaId|argumentos\.lojaId|p\.lojaId/.test(semComentario));
     const blocoEntrada = fonte.slice(
       fonte.indexOf("interface EntradaSincronizarPerguntas"),
       fonte.indexOf("}", fonte.indexOf("interface EntradaSincronizarPerguntas")));
@@ -245,20 +265,20 @@ async function main(): Promise<void> {
     const { portas } = portasFalsas(sucessoCom([]));
     const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
     ok("D1  zero perguntas e coleta valida, nao erro",
-      r.tipo === "coletado" && r.perguntas.length === 0
+      r.tipo === "sincronizado" && r.perguntas.length === 0
       && r.metricas.recebidas === 0 && r.metricas.ingeriveis === 0);
   }
   {
     const { portas } = portasFalsas(sucessoCom([pergunta()]));
     const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
     ok("D2  uma pergunta valida e ingerivel",
-      r.tipo === "coletado" && r.metricas.ingeriveis === 1 && r.perguntas[0].id === "Q1");
+      r.tipo === "sincronizado" && r.metricas.ingeriveis === 1 && r.perguntas[0].id === "Q1");
   }
   {
     const { portas } = portasFalsas(sucessoCom([pergunta({ status: "ANSWERED" })]));
     const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
     ok("D3  status inesperado e CONTADO e excluido, nunca vira item novo",
-      r.tipo === "coletado" && r.metricas.status_inesperados === 1
+      r.tipo === "sincronizado" && r.metricas.status_inesperados === 1
       && r.metricas.ingeriveis === 0 && r.perguntas.length === 0);
   }
   for (const [rotulo, data] of [
@@ -271,7 +291,7 @@ async function main(): Promise<void> {
     const { portas } = portasFalsas(sucessoCom([pergunta({ criadaEm: data })]));
     const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
     ok(`D4  data invalida (${rotulo}) e descartada, nao derruba a varredura`,
-      r.tipo === "coletado" && r.metricas.descartadas === 1 && r.metricas.ingeriveis === 0);
+      r.tipo === "sincronizado" && r.metricas.descartadas === 1 && r.metricas.ingeriveis === 0);
   }
   for (const data of [
     "2026-09-20T10:00:00.000-04:00",
@@ -281,7 +301,7 @@ async function main(): Promise<void> {
     const { portas } = portasFalsas(sucessoCom([pergunta({ criadaEm: data })]));
     const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
     ok(`D5  data ISO com fuso (${data}) e aceita`,
-      r.tipo === "coletado" && r.metricas.ingeriveis === 1);
+      r.tipo === "sincronizado" && r.metricas.ingeriveis === 1);
   }
   {
     const linhas = [
@@ -293,13 +313,13 @@ async function main(): Promise<void> {
     const { portas } = portasFalsas(sucessoCom(linhas, true));
     const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
     ok("D6  nenhum item observado some da contabilidade",
-      r.tipo === "coletado"
+      r.tipo === "sincronizado"
       && r.metricas.recebidas === 4
       && r.metricas.ingeriveis + r.metricas.descartadas + r.metricas.status_inesperados === 4);
     ok("D7  `providerTruncado` do adapter atravessa",
-      r.tipo === "coletado" && r.providerTruncado === true);
+      r.tipo === "sincronizado" && r.providerTruncado === true);
     ok("D8  `paginas` e 1 — o I1 nao pagina",
-      r.tipo === "coletado" && r.metricas.paginas === 1);
+      r.tipo === "sincronizado" && r.metricas.paginas === 1);
   }
 
   // ─── E. O normalizador compartilhado (fronteira anterior) ───────────
@@ -320,9 +340,9 @@ async function main(): Promise<void> {
   {
     const fonte = ler("lib/agentes/ingestao/sincronizar-perguntas.ts");
     const codigo = lerCodigo("lib/agentes/ingestao/sincronizar-perguntas.ts");
-    ok("F1  o servico NAO chama a RPC da inbox",
+    ok("F1  o servico nao conhece o nome da RPC — quem grava e o cliente",
       !/agente_perguntas_ml_upsert_lote/.test(codigo));
-    ok("F2  o servico NAO toca a tabela da inbox",
+    ok("F2  o servico nao nomeia a tabela da inbox",
       !/agente_perguntas_ml/.test(codigo));
     ok("F3  `sincronizar_perguntas` NAO esta no catalogo de acoes",
       resolverAcao(ACAO_SINCRONIZAR_PERGUNTAS) === null);
@@ -333,6 +353,147 @@ async function main(): Promise<void> {
       !/sincronizar_perguntas/.test(ler("app/api/internal/agentes/acoes/route.ts")));
     ok("F6  nenhuma migration nova entrou nesta frente",
       !/20261010|20261011/.test(ler("lib/agentes/ingestao/sincronizar-perguntas.ts")));
+  }
+
+  // ─── G. Handoff de autoridade: buscar e gravar na MESMA conta ───────
+  secao("G. Handoff — a conta que gravou e a conta que leu");
+
+  {
+    const { portas, espiao } = portasFalsas(sucessoCom([pergunta()]));
+    const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+
+    ok("G1  a gravacao usa o `lojaId` devolvido pela PROPRIA execucao",
+      espiao.gravacoes.length === 1 && espiao.gravacoes[0].autoridade.lojaId === LOJA,
+      JSON.stringify(espiao.gravacoes[0]?.autoridade));
+    ok("G2  a gravacao usa o `userId` do AGENTE, nunca do chamador",
+      espiao.gravacoes[0].autoridade.userId === DONO);
+    ok("G3  a autoridade tem exatamente dois campos",
+      Object.keys(espiao.gravacoes[0].autoridade).sort().join(",") === "lojaId,userId");
+    ok("G4  a linha enviada tem exatamente as cinco chaves da RPC",
+      Object.keys((espiao.gravacoes[0].linhas[0] ?? {}) as object).sort().join(",")
+        === "anuncio_id_externo,criada_em_provider,id_externo,provider_status,texto",
+      Object.keys((espiao.gravacoes[0].linhas[0] ?? {}) as object).sort().join(","));
+    ok("G5  a linha NAO carrega autoridade propria",
+      !("user_id" in (espiao.gravacoes[0].linhas[0] as object))
+      && !("loja_id" in (espiao.gravacoes[0].linhas[0] as object)));
+    ok("G6  o resultado traz as metricas da RPC, alem das da ingestao",
+      r.tipo === "sincronizado" && r.persistencia.novas === 1 && r.metricas.ingeriveis === 1);
+  }
+
+  {
+    // A conta da gravacao NAO pode vir de uma segunda resolucao: se a
+    // execucao devolveu outra loja, e essa outra que vale.
+    const OUTRA = "dddddddd-0000-4000-8000-0000000000e2";
+    const { portas, espiao } = portasFalsas(sucessoCom([pergunta()], false, OUTRA));
+    await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    ok("G7  trocar a loja da execucao troca a loja da gravacao — nao ha 2a resolucao",
+      espiao.gravacoes[0].autoridade.lojaId === OUTRA);
+  }
+
+  {
+    const codigo = lerCodigo("lib/agentes/ingestao/sincronizar-perguntas.ts");
+    const atribuicoes = codigo.match(/\blojaId\s*=(?!=)/g) ?? [];
+    ok("G8  ha UMA unica origem de `lojaId` no servico", atribuicoes.length === 1,
+      String(atribuicoes.length));
+    ok("G9  e essa origem e `resultado.autoridade`",
+      /const\s+lojaId\s*=\s*resultado\.autoridade\.lojaId;/.test(codigo));
+    ok("G10 o servico nao resolve binding nem conexao por conta propria",
+      !/resolverConexoesDoAgente|resolverFatoConexao|agente_conexoes|bindings/.test(codigo));
+  }
+
+  {
+    // Funcao sem conexao devolveria `lojaId: null`. Gravar "em lugar
+    // nenhum" nao existe: falha fechada.
+    const { portas, espiao } = portasFalsas(sucessoCom([pergunta()], false, null));
+    const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    ok("G11 sem autoridade de loja, NAO grava e falha fechada",
+      r.tipo === "erro" && r.codigo === "autoridade_ausente" && espiao.gravacoes.length === 0);
+  }
+
+  // ─── H. Caminhos de falha: a RPC nunca e chamada a toa ──────────────
+  secao("H. Falha — provider ruim nao vira gravacao");
+
+  for (const [rotulo, resposta] of [
+    ["negado", { tipo: "negado", requestId: "r", codigo: "permissao_ausente" }],
+    ["erro de provider", { tipo: "erro", requestId: "r", envelope: { error: { code: "indisponivel" } } }],
+    ["indisponivel", { tipo: "indisponivel", requestId: "r" }],
+    ["aguardando aprovacao", { tipo: "aguardando_aprovacao", requestId: "r", aprovacaoId: "a1" }],
+    ["ja processado", { tipo: "falha_auditoria", requestId: "r", motivo: "duplicada" }],
+  ] as const) {
+    const { portas, espiao } = portasFalsas(resposta);
+    await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    ok(`H1  ${rotulo}: a RPC da inbox NAO e chamada`, espiao.gravacoes.length === 0);
+  }
+
+  {
+    const { portas, espiao } = portasFalsas(sucessoCom([]), {
+      agente: { agenteId: AGENTE, userId: DONO, ativo: false },
+    });
+    await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    ok("H2  agente inativo: nem executa Funcao, nem grava",
+      espiao.chamadas.length === 0 && espiao.gravacoes.length === 0);
+  }
+
+  {
+    const { portas } = portasFalsas(sucessoCom([pergunta()]), {
+      gravacao: { tipo: "recusado", codigo: "42501" },
+    });
+    const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    ok("H3  recusa de contrato da RPC vira `persistencia_recusada`, nunca sucesso",
+      r.tipo === "persistencia_recusada" && r.codigo === "42501");
+  }
+
+  {
+    const { portas } = portasFalsas(sucessoCom([pergunta()]), {
+      gravacao: { tipo: "erro", codigo: "falha_rpc" },
+    });
+    const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    ok("H4  falha da RPC vira ERRO — provider ok e banco nao e erro, nao sucesso",
+      r.tipo === "erro" && r.codigo === "falha_rpc");
+  }
+
+  {
+    // Pagina vazia AINDA chama a RPC: e assim que a guarda de tenant roda
+    // em toda sincronizacao, e nao so quando ha pergunta.
+    const { portas, espiao } = portasFalsas(sucessoCom([]));
+    const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    ok("H5  pagina vazia chama a RPC com lote vazio",
+      espiao.gravacoes.length === 1 && espiao.gravacoes[0].linhas.length === 0);
+    ok("H6  e as metricas continuam vindo de UMA fonte",
+      r.tipo === "sincronizado" && r.persistencia.novas === 0 && r.metricas.ingeriveis === 0);
+  }
+
+  {
+    const { portas, espiao } = portasFalsas(sucessoCom([
+      pergunta({ id: "A" }),
+      pergunta({ id: "B", status: "ANSWERED" }),
+      pergunta({ id: "C", criadaEm: "ontem" }),
+    ]));
+    await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    const enviadas = espiao.gravacoes[0].linhas as Array<{ id_externo: string }>;
+    ok("H7  status inesperado e data invalida NAO chegam a RPC",
+      enviadas.length === 1 && enviadas[0].id_externo === "A");
+  }
+
+  {
+    const codigo = lerCodigo("lib/agentes/dados/perguntas-inbox.ts");
+    ok("H8  o cliente de persistencia nao resolve agente nem binding",
+      !/lerAgenteParaAcaoInterna|resolverConexoesDoAgente|executarFuncao/.test(codigo));
+    ok("H9  o cliente nao chama marketplace",
+      !/mercado-livre|mercadolibre|buscarPerguntasRecebidas/.test(codigo));
+    ok("H10 o cliente nao embute chave de servico",
+      !/SUPABASE_SERVICE_ROLE_KEY|service_role_key|eyJ/.test(codigo));
+    ok("H11 o cliente usa o mecanismo de servidor ja existente",
+      /getSupabaseServidor\(\)\.rpc\(/.test(codigo));
+    ok("H12 o cliente e `server-only`", /import "server-only";/.test(codigo));
+  }
+
+  {
+    const { portas } = portasFalsas(sucessoCom([pergunta()]));
+    const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    const serializado = JSON.stringify(r);
+    ok("H13 o resultado interno nao carrega credencial nem token",
+      !/token|senha|secret|service_role|Bearer/i.test(serializado));
   }
 
   console.log(`\n── placar ${"─".repeat(54)}`);
