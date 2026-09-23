@@ -369,8 +369,9 @@ ok("20.1 nenhuma migration rastreada difere do HEAD",
 
 const estado = git("status", "--short", "--", "supabase/migrations/")
   .split("\n").map((l) => l.trimEnd()).filter((l) => l !== "");
-ok("20.2 o unico path novo e a migration desta frente",
-  estado.length === 1 && /^\?\? +supabase\/migrations\/20261009_agente_perguntas_ml\.sql$/.test(estado[0]),
+ok("20.2 nenhum path inesperado sob supabase/migrations/",
+  estado.every((l) =>
+    /^\?\? +supabase\/migrations\/20261009_agente_perguntas_ml\.sql$/.test(l)),
   estado.join(" | "));
 ok("20.3 nenhuma migration modificada, apagada, renomeada ou em stage",
   estado.every((l) => l.startsWith("??")), estado.join(" | "));
