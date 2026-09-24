@@ -154,7 +154,58 @@ export function credencialExpirada(
  * (`lib/ml-conexao.ts`) precisa do MESMO refresh, e não de uma segunda
  * implementação que possa divergir desta.
  */
-export async function refreshMLToken(refreshToken: string): Promise<MLTokenResult | null> {
+export const TIMEOUT_REFRESH_MS = 20_000;
+
+/**
+ * O limite da renovacao. OPCIONAL, e com padrao limitado.
+ *
+ * ── Por que isto existe ─────────────────────────────────────────────
+ *
+ * Ate o I4B1 este `fetch` nao tinha `AbortController` nem timeout: uma
+ * ponta de rede parada segurava a requisicao para sempre. Ele e
+ * alcancavel de dentro da ingestao de perguntas — `getMLLojaById` roda
+ * no confirmador de cobertura e de novo no adapter — entao qualquer
+ * orcamento de acao construido sobre ele seria orcamento sobre um passo
+ * ilimitado, que nao e orcamento.
+ *
+ * ── Por que o padrao e limitado, e nao `undefined` ──────────────────
+ *
+ * Os tres chamadores existentes passam UM argumento e tratam `null`
+ * como falha. Um padrao limitado nao muda o contrato deles: muda apenas
+ * o caso em que hoje eles esperariam indefinidamente — e esperar
+ * indefinidamente ja era pior para todos, nao so para a ingestao. Os
+ * 20 s sao os mesmos das outras duas chamadas ao Mercado Livre
+ * (`mercado-livre-concessoes.ts`, `mercado-livre-perguntas.ts`), para
+ * que exista UM numero neste caminho e nao tres.
+ */
+export interface OpcoesRefreshML {
+  /** Teto proprio desta chamada. Sem ele, `TIMEOUT_REFRESH_MS`. */
+  readonly timeoutMs?: number;
+  /** Cancelamento vindo de fora — o deadline de quem orquestra. */
+  readonly signal?: AbortSignal;
+}
+
+export async function refreshMLToken(
+  refreshToken: string,
+  opcoes?: OpcoesRefreshML
+): Promise<MLTokenResult | null> {
+  const limite = opcoes?.timeoutMs ?? TIMEOUT_REFRESH_MS;
+  const controlador = new AbortController();
+  const externo = opcoes?.signal;
+
+  // ── Abortar de verdade, nao correr contra ─────────────────────────
+  //
+  // `Promise.race` devolveria cedo e deixaria a requisicao HTTP VIVA,
+  // consumindo socket e podendo gravar token depois de quem desistiu ja
+  // ter respondido. O sinal vai para dentro do `fetch`, que e o unico
+  // lugar de onde a rede pode de fato ser cancelada.
+  const relogio = setTimeout(() => controlador.abort(), limite);
+  const propagar = () => controlador.abort();
+  // Sinal que JA veio abortado nao dispara `abort` de novo: confere-se o
+  // estado antes de escutar.
+  if (externo?.aborted) controlador.abort();
+  else externo?.addEventListener("abort", propagar, { once: true });
+
   try {
     const res = await fetch("https://api.mercadolibre.com/oauth/token", {
       method: "POST",
@@ -165,6 +216,7 @@ export async function refreshMLToken(refreshToken: string): Promise<MLTokenResul
         client_secret: process.env.ML_CLIENT_SECRET!.trim(),
         refresh_token: refreshToken,
       }),
+      signal: controlador.signal,
     });
     if (!res.ok) return null;
     const data = await res.json();
@@ -176,7 +228,13 @@ export async function refreshMLToken(refreshToken: string): Promise<MLTokenResul
       expires:         data.expires_in ?? 21600,
     };
   } catch {
+    // Timeout, cancelamento e queda de rede chegam aqui iguais, e e
+    // assim que os tres ja eram tratados: `null` e a falha tipada desta
+    // funcao, e os tres chamadores ja a interpretam.
     return null;
+  } finally {
+    clearTimeout(relogio);
+    externo?.removeEventListener("abort", propagar);
   }
 }
 

@@ -550,12 +550,14 @@ ok("M10 o par (status, codigo) e revalidado em runtime, nao so em tipo",
     HELPER_CODIGO.indexOf("const CHAVES_DO_RESUMO"),
     HELPER_CODIGO.indexOf("];", HELPER_CODIGO.indexOf("const CHAVES_DO_RESUMO")));
   const chaves = [...lista.matchAll(/"([a-z_]+)"/g)].map((m) => m[1]);
-  ok("M11 o resumo e projetado por allowlist de chaves", chaves.length === 16, String(chaves.length));
+  ok("M11 o resumo e projetado por allowlist de chaves", chaves.length === 17, String(chaves.length));
   ok("M12 e nenhuma delas identifica pergunta, anuncio, conta ou pessoa",
     chaves.every((c) => !/texto|id_externo|anuncio|pergunta|loja|user|token|credencial/.test(c)),
     chaves.join(","));
   ok("M13 `auditoria_funcao_incompleta` esta entre elas",
     chaves.includes("auditoria_funcao_incompleta"));
+  ok("M13b `orcamento_esgotado` tambem — o corte por RELOGIO precisa viajar",
+    chaves.includes("orcamento_esgotado"));
   ok("M14 so numero finito e booleano sobrevivem a projecao",
     /typeof valor === "boolean"/.test(HELPER_CODIGO)
     && /typeof valor === "number" && Number\.isFinite\(valor\)/.test(HELPER_CODIGO));
@@ -626,8 +628,13 @@ ok("N10 a auditoria da pagina e LIDA, nao descartada",
   /auditoriaDaFuncao: resultado\.auditoria/.test(SERVICO_CODIGO));
 ok("N11 a precedencia dos parciais mora numa funcao so",
   (SERVICO_CODIGO.match(/function desfechoDeVarreduraCompleta/g) ?? []).length === 1
-  && /if \(m\.limite_atingido\) return \{ status: "parcial", codigo: "backlog_truncado" \};/
+  && /if \(m\.limite_atingido \|\| m\.orcamento_esgotado\) \{\s*return \{ status: "parcial", codigo: "backlog_truncado" \};/
     .test(SERVICO_CODIGO));
+ok("N11b teto de paginas e orcamento levam ao MESMO desfecho, e isso e deliberado",
+  /codigo: "backlog_truncado"/.test(SERVICO_CODIGO)
+  && !/"tempo_esgotado"|"orcamento_esgotado_terminal"/.test(SERVICO_CODIGO));
+ok("N15 o orcamento nunca deixa a acao sem reserva para finalizar",
+  /ORCAMENTO_EXTERNO_MS = ORCAMENTO_TOTAL_MS - RESERVA_FINALIZACAO_MS/.test(SERVICO_CODIGO));
 ok("N12 os dois `fora de forma` tem nomes distintos",
   /"resposta_funcao_fora_de_forma"/.test(SERVICO_CODIGO)
   && !/"resposta_fora_de_forma"/.test(SERVICO_CODIGO));

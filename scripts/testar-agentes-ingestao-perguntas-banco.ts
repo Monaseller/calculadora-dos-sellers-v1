@@ -707,7 +707,7 @@ async function main(): Promise<void> {
       const chaves = new Set(
         textos.flatMap((l) => Object.keys(JSON.parse(l.r) as Record<string, unknown>)));
       ok("A14b toda chave do resumo pertence a allowlist de metricas",
-        [...chaves].every((k) => /^(paginas|provider_recebidas|normalizadas|descartadas_normalizacao|descartadas_ingestao|status_inesperados|ingeriveis|recebidas|unicas|duplicadas_no_lote|novas|atualizadas|reobservadas|truncado|limite_atingido|auditoria_funcao_incompleta)$/.test(k)),
+        [...chaves].every((k) => /^(paginas|provider_recebidas|normalizadas|descartadas_normalizacao|descartadas_ingestao|status_inesperados|ingeriveis|recebidas|unicas|duplicadas_no_lote|novas|atualizadas|reobservadas|truncado|limite_atingido|orcamento_esgotado|auditoria_funcao_incompleta)$/.test(k)),
         [...chaves].join(","));
     }
 
@@ -726,8 +726,15 @@ async function main(): Promise<void> {
     }
 
     {
+      // SEM comentario. O docblock do orcamento cita os arquivos de
+      // adapter para explicar de onde saem os 20 s, e a primeira versao
+      // deste invariante reprovou por causa da propria prosa que
+      // documenta a decisao — o mesmo defeito de oraculo que ja custou
+      // caro nesta frente.
       const fonte = readFileSync(
-        join(__dirname, "..", "lib/agentes/ingestao/sincronizar-perguntas.ts"), "utf8");
+        join(__dirname, "..", "lib/agentes/ingestao/sincronizar-perguntas.ts"), "utf8")
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/^[ 	]*\/\/.*$/gm, "");
       ok("A18 o servico nao alcanca o marketplace real por caminho nenhum",
         !/mercado-livre|buscarPerguntasRecebidasML|fetch\(/.test(fonte));
     }

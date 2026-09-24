@@ -332,6 +332,55 @@ export const MAX_PAGINAS = 2;
 export const MAX_JANELA_PROVIDER = PAGE_LIMIT * MAX_PAGINAS;
 
 /**
+ * ── O ORCAMENTO DE RELOGIO DA ACAO ─────────────────────────────────
+ *
+ * Os numeros abaixo NAO sao estimativa de latencia — ninguem mediu
+ * essas chamadas em producao, e inventar uma media seria pior que nao
+ * ter. Eles saem dos limites DUROS de fora para dentro:
+ *
+ *   corte do servidor (vercel.json, `app/api/**`)  = 60 s
+ *   timeout HTTP de quem chama (n8n)               = 45 s
+ *
+ * Para operacao desassistida o que vale e o MENOR: uma acao que passa de
+ * 45 s termina sozinha do lado de la, e quem chamou nao aprende o
+ * desfecho. Entao o teto e 38 s — 7 s de folga contra o chamador e 22 s
+ * contra o corte do servidor.
+ *
+ * ── Por que existe RESERVA ─────────────────────────────────────────
+ *
+ * Depois da ULTIMA ida ao provider ainda falta gravar: a RPC da inbox, o
+ * desfecho da acao e a resposta. Um orcamento que so contasse as idas ao
+ * marketplace gastaria tudo nelas e deixaria a varredura sem onde
+ * registrar o que coletou — que e exatamente o defeito que a auditoria
+ * duravel existe para nao ter. A reserva e tempo SEPARADO, e nenhuma
+ * pagina pode consumi-la.
+ *
+ * ── Por que o minimo de pagina e 20 s ──────────────────────────────
+ *
+ * E o teto de UMA chamada externa limitada deste caminho — os mesmos
+ * 20 s de `mercado-livre-concessoes.ts`, `mercado-livre-perguntas.ts` e
+ * agora `refreshMLToken`. Comecar uma pagina com menos que isso seria
+ * comecar sabendo que ao menos uma das chamadas dela nao cabe no proprio
+ * teto; o desfecho provavel seria um timeout classificado como falha de
+ * provider, trocando um parcial honesto por um erro que nao aconteceu.
+ */
+export const ORCAMENTO_TOTAL_MS = 38_000;
+export const RESERVA_FINALIZACAO_MS = 8_000;
+export const ORCAMENTO_EXTERNO_MS = ORCAMENTO_TOTAL_MS - RESERVA_FINALIZACAO_MS;
+export const CUSTO_MINIMO_DE_PAGINA_MS = 20_000;
+
+/**
+ * O relogio das decisoes de orcamento e MONOTONICO.
+ *
+ * `Date.now()` anda para tras num acerto de NTP, e um orcamento que
+ * dependesse dele poderia concluir que sobram 30 s quando ja se
+ * passaram 30. `performance.now()` nao volta.
+ */
+function agoraMonotonico(): number {
+  return performance.now();
+}
+
+/**
  * O deslocamento da pagina `n`. FIXO — nunca derivado do que sobrou.
  *
  * Se o offset avancasse pelo numero de linhas NORMALIZADAS, uma pagina
@@ -383,6 +432,17 @@ export interface MetricasSincronizacao {
   readonly truncado: boolean;
   /** A varredura parou por bater em `MAX_PAGINAS`. */
   readonly limite_atingido: boolean;
+  /**
+   * A varredura parou porque o ORCAMENTO DE RELOGIO nao comportava mais
+   * uma pagina.
+   *
+   * Separado de `limite_atingido` de proposito: os dois terminam a
+   * varredura com backlog, e o desfecho dos dois e o mesmo, mas a acao
+   * de quem opera e oposta. Teto de paginas pede continuacao; orcamento
+   * esgotado pede olhar latencia. Colapsa-los mandaria procurar no lugar
+   * errado.
+   */
+  readonly orcamento_esgotado: boolean;
   /**
    * Alguma pagina rodou com sucesso e teve o desfecho de FUNCAO perdido.
    *
@@ -647,6 +707,7 @@ interface ContextoDaAcao {
   readonly userId: string;
   readonly agenteId: string;
   readonly requestId: string;
+  /** Monotonico, de `performance.now()`. Nunca `Date.now()`. */
   readonly inicio: number;
 }
 
@@ -718,15 +779,39 @@ export async function sincronizarPerguntas(
     userId: agente.userId,
     agenteId: agente.agenteId,
     requestId,
-    inicio: Date.now(),
+    // O relogio comeca depois da ABERTURA: o orcamento e sobre o
+    // trabalho que a acao vai fazer, e a abertura ja aconteceu.
+    inicio: agoraMonotonico(),
   };
 
   // ── 5. As paginas ─────────────────────────────────────────────────
   const coletadas: PaginaColetada[] = [];
   let lojaCongelada: string | null = null;
   let haMais = false;
+  let orcamentoEsgotado = false;
 
   for (let indice = 0; indice < MAX_PAGINAS; indice += 1) {
+    // ── A regra de INICIO de pagina ────────────────────────────────
+    //
+    // Vale da SEGUNDA pagina em diante. A primeira comeca logo depois da
+    // abertura, entao o restante e o orcamento inteiro por construcao e
+    // nao ha decisao a tomar — e recusa-la deixaria a acao sem varredura
+    // nenhuma, que nao e um desfecho que este vocabulario saiba contar.
+    //
+    // A regra e sobre COMECAR. Uma pagina ja em voo nao e interrompida
+    // por ela: o deadline nao alcanca dentro de `executarFuncao`, e
+    // dizer que alcanca seria a mentira que este gate existe para nao
+    // contar. O que ela garante e que a acao nunca INICIA trabalho que
+    // nao cabe no que sobrou — e que a reserva de finalizacao chega
+    // intacta ao fim.
+    if (indice > 0) {
+      const restante = ORCAMENTO_EXTERNO_MS - (agoraMonotonico() - ctx.inicio);
+      if (restante < CUSTO_MINIMO_DE_PAGINA_MS) {
+        orcamentoEsgotado = true;
+        break;
+      }
+    }
+
     const resultado = await portas.executar({
       // Do BANCO. Nunca da entrada deste servico, que nao tem esse campo.
       userId: agente.userId,
@@ -803,6 +888,9 @@ export async function sincronizarPerguntas(
 
   // Bateu no teto E o provider ainda indica mais: a varredura NAO
   // terminou, e dizer "sucesso" aqui esconderia backlog.
+  //
+  // `orcamentoEsgotado` so pode ser verdadeiro com backlog: o laco so
+  // chega a uma segunda volta quando `haMais` e verdadeiro.
   const limiteAtingido = coletadas.length === MAX_PAGINAS && haMais;
   const auditoriaFuncaoIncompleta = coletadas.some((p) => p.auditoriaDaFuncao === "incompleta");
 
@@ -816,6 +904,7 @@ export async function sincronizarPerguntas(
     ingeriveis: aptas.length,
     truncado: haMais,
     limite_atingido: limiteAtingido,
+    orcamento_esgotado: orcamentoEsgotado,
     auditoria_funcao_incompleta: auditoriaFuncaoIncompleta,
   };
 
@@ -872,7 +961,10 @@ export async function sincronizarPerguntas(
   };
 
   const saida: ResultadoPosAbertura = {
-    tipo: limiteAtingido ? "backlog_truncado" : "sincronizado",
+    // Teto de paginas ou orcamento: os dois deixam backlog para tras, e
+    // os dois sao a mesma coisa para quem le o resultado — a varredura
+    // nao terminou. A CAUSA fica nos escalares.
+    tipo: limiteAtingido || orcamentoEsgotado ? "backlog_truncado" : "sincronizado",
     requestId,
     perguntas: aptas,
     metricas,
@@ -899,7 +991,14 @@ export async function sincronizarPerguntas(
  * inteira.
  */
 function desfechoDeVarreduraCompleta(m: MetricasSincronizacao): DesfechoDaAcao {
-  if (m.limite_atingido) return { status: "parcial", codigo: "backlog_truncado" };
+  // `backlog_truncado` cobre as DUAS causas de varredura interrompida
+  // com backlog. Nao houve codigo novo, e por isso nao houve migration:
+  // o vocabulario do banco ja dizia a verdade ("a varredura parou e
+  // sobrou trabalho"), e o que faltava era distinguir POR QUE — que e
+  // papel de escalar, nao de classificacao.
+  if (m.limite_atingido || m.orcamento_esgotado) {
+    return { status: "parcial", codigo: "backlog_truncado" };
+  }
   const descartes =
     m.descartadas_normalizacao + m.descartadas_ingestao + m.status_inesperados;
   if (descartes > 0) return { status: "parcial", codigo: "descartes_na_varredura" };
@@ -922,6 +1021,7 @@ function resumoDaVarredura(m: MetricasSincronizacao): ResumoDaAcao {
     ingeriveis: m.ingeriveis,
     truncado: m.truncado,
     limite_atingido: m.limite_atingido,
+    orcamento_esgotado: m.orcamento_esgotado,
     auditoria_funcao_incompleta: m.auditoria_funcao_incompleta,
   };
 }
@@ -1003,7 +1103,10 @@ async function fechar(
     requestId: ctx.requestId,
     lojaId: extras.lojaId,
     mensagem: extras.mensagem,
-    latenciaMs: Math.max(0, Math.round(Date.now() - ctx.inicio)),
+    // Monotonica, pela mesma razao do orcamento: uma latencia negativa
+    // por acerto de relogio seria recusada pelo CHECK do banco, e o
+    // desfecho inteiro se perderia por causa de um numero.
+    latenciaMs: Math.max(0, Math.round(agoraMonotonico() - ctx.inicio)),
     resumo: extras.resumo,
     ...desfecho,
   });

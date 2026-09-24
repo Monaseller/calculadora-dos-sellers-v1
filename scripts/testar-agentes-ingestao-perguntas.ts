@@ -35,6 +35,10 @@ import {
   MAX_PAGINAS,
   PAGE_LIMIT,
   sincronizarPerguntas,
+  CUSTO_MINIMO_DE_PAGINA_MS,
+  ORCAMENTO_EXTERNO_MS,
+  ORCAMENTO_TOTAL_MS,
+  RESERVA_FINALIZACAO_MS,
   type EntradaSincronizarPerguntas,
   type PortasSincronizacao,
 } from "@/lib/agentes/ingestao/sincronizar-perguntas";
@@ -1048,6 +1052,177 @@ async function main(): Promise<void> {
       Object.keys(resumo).join(","));
     ok("L13c e todo valor do resumo e escalar",
       Object.values(resumo).every((v) => typeof v === "number" || typeof v === "boolean"));
+  }
+
+  // --- D. O orcamento de relogio da acao -------------------------------
+  secao("D. Orcamento — a acao nao comeca o que nao cabe");
+
+  /**
+   * O relogio monotonico, sob controle do teste.
+   *
+   * O servico le `performance.now()`. Trocar o global e a mesma tecnica
+   * do `fetch` nas suites de rede: o codigo de producao nao sabe que
+   * esta sendo medido, e o teste decide quanto tempo passou.
+   *
+   * O que ISTO prova e a REGRA DE DECISAO. Que o cancelamento de rede
+   * acontece de verdade e provado onde ele mora — em
+   * `testar-ml-auth-refresh-timeout.ts`, com AbortController real.
+   */
+  function comRelogio<T>(
+    avancoPorChamadaDePagina: number,
+    corpo: (marcar: () => void) => Promise<T>
+  ): Promise<T> {
+    const originalNow = performance.now.bind(performance);
+    let simulado = 0;
+    performance.now = () => simulado;
+    const marcar = () => { simulado += avancoPorChamadaDePagina; };
+    return corpo(marcar).finally(() => { performance.now = originalNow; });
+  }
+
+  ok("D0  o orcamento fecha: externo + reserva = total",
+    ORCAMENTO_EXTERNO_MS + RESERVA_FINALIZACAO_MS === ORCAMENTO_TOTAL_MS
+    && ORCAMENTO_TOTAL_MS === 38_000 && RESERVA_FINALIZACAO_MS === 8_000,
+    `${ORCAMENTO_EXTERNO_MS}+${RESERVA_FINALIZACAO_MS}=${ORCAMENTO_TOTAL_MS}`);
+  ok("D0b o total fica abaixo dos dois limites duros (45 s / 60 s)",
+    ORCAMENTO_TOTAL_MS < 45_000 && ORCAMENTO_TOTAL_MS < 60_000);
+  ok("D0c a reserva NAO cabe uma pagina — ela e so para finalizar",
+    RESERVA_FINALIZACAO_MS < CUSTO_MINIMO_DE_PAGINA_MS);
+
+  {
+    // Paginas rapidas: as duas cabem, e o comportamento e o de sempre.
+    const cheia = Array.from({ length: 50 }, (_, i) => pergunta({ id: `D1-${i}` }));
+    const r = await comRelogio(1_000, async (marcar) => {
+      const { portas, espiao } = portasPorPagina([
+        sucessoCom(cheia, true), sucessoCom([pergunta({ id: "D1-fim" })], false),
+      ]);
+      const original = portas.executar;
+      const p = { ...portas, executar: async (e: never) => { marcar(); return original(e); } };
+      const saida = await sincronizarPerguntas(entradaPadrao(), p as PortasSincronizacao);
+      return { saida, espiao };
+    });
+    ok("D1  com orcamento de sobra, a segunda pagina executa",
+      r.espiao.chamadas.length === 2 && r.saida.tipo === "sincronizado");
+    ok("D1b e o escalar de orcamento sai FALSO",
+      r.saida.tipo === "sincronizado"
+      && r.saida.metricas.orcamento_esgotado === false);
+  }
+
+  {
+    // Pagina 1 lenta: sobra menos que o minimo, e a 2 nao comeca.
+    const cheia = Array.from({ length: 50 }, (_, i) => pergunta({ id: `D2-${i}` }));
+    const r = await comRelogio(ORCAMENTO_EXTERNO_MS - 1_000, async (marcar) => {
+      const { portas, espiao } = portasPorPagina([
+        sucessoCom(cheia, true), sucessoCom(cheia, true),
+      ]);
+      const original = portas.executar;
+      const p = { ...portas, executar: async (e: never) => { marcar(); return original(e); } };
+      const saida = await sincronizarPerguntas(entradaPadrao(), p as PortasSincronizacao);
+      return { saida, espiao };
+    });
+    ok("D2  sem orcamento, a proxima ida ao provider NAO acontece",
+      r.espiao.chamadas.length === 1, String(r.espiao.chamadas.length));
+    ok("D3  o que a pagina 1 coletou AINDA e gravado",
+      r.espiao.gravacoes.length === 1
+      && (r.espiao.gravacoes[0].linhas as unknown[]).length === 50);
+    ok("D3b e o desfecho da acao e escrito — a reserva serviu para isto",
+      r.espiao.desfechos.length === 1);
+    ok("D4  a reserva nao foi consumida por uma pagina nova",
+      r.espiao.chamadas.length === 1 && r.espiao.desfechos.length === 1);
+    ok("D2b o desfecho e `parcial/backlog_truncado`, nunca sucesso limpo",
+      (r.espiao.desfechos[0] ?? {}).status === "parcial"
+      && (r.espiao.desfechos[0] ?? {}).codigo === "backlog_truncado",
+      JSON.stringify(r.espiao.desfechos[0] ?? {}));
+    {
+      const resumo = ((r.espiao.desfechos[0] ?? {}).resumo ?? {}) as Record<string, unknown>;
+      ok("D2c o resumo distingue RELOGIO de teto de paginas",
+        resumo.orcamento_esgotado === true && resumo.limite_atingido === false
+        && resumo.truncado === true,
+        JSON.stringify(resumo));
+    }
+    ok("D2d e o servico devolve `backlog_truncado`, nao `sincronizado`",
+      r.saida.tipo === "backlog_truncado");
+  }
+
+  {
+    // A fronteira exata: sobra EXATAMENTE o minimo -> pode comecar.
+    const cheia = Array.from({ length: 50 }, (_, i) => pergunta({ id: `D5-${i}` }));
+    const r = await comRelogio(ORCAMENTO_EXTERNO_MS - CUSTO_MINIMO_DE_PAGINA_MS, async (marcar) => {
+      const { portas, espiao } = portasPorPagina([
+        sucessoCom(cheia, true), sucessoCom([], false),
+      ]);
+      const original = portas.executar;
+      const p = { ...portas, executar: async (e: never) => { marcar(); return original(e); } };
+      await sincronizarPerguntas(entradaPadrao(), p as PortasSincronizacao);
+      return espiao;
+    });
+    ok("D5  restante == minimo ainda permite comecar (`<`, nao `<=`)",
+      r.chamadas.length === 2, String(r.chamadas.length));
+  }
+
+  {
+    // Um milissegundo a menos que o minimo -> nao comeca.
+    const cheia = Array.from({ length: 50 }, (_, i) => pergunta({ id: `D6-${i}` }));
+    const r = await comRelogio(
+      ORCAMENTO_EXTERNO_MS - CUSTO_MINIMO_DE_PAGINA_MS + 1,
+      async (marcar) => {
+        const { portas, espiao } = portasPorPagina([
+          sucessoCom(cheia, true), sucessoCom([], false),
+        ]);
+        const original = portas.executar;
+        const p = { ...portas, executar: async (e: never) => { marcar(); return original(e); } };
+        await sincronizarPerguntas(entradaPadrao(), p as PortasSincronizacao);
+        return espiao;
+      });
+    ok("D6  um milissegundo abaixo do minimo ja impede a pagina",
+      r.chamadas.length === 1, String(r.chamadas.length));
+  }
+
+  {
+    // Pagina 1 que NAO indica backlog: o orcamento nem e consultado, e o
+    // desfecho e sucesso limpo.
+    const r = await comRelogio(ORCAMENTO_EXTERNO_MS - 1_000, async (marcar) => {
+      const { portas, espiao } = portasPorPagina([sucessoCom([pergunta()], false)]);
+      const original = portas.executar;
+      const p = { ...portas, executar: async (e: never) => { marcar(); return original(e); } };
+      const saida = await sincronizarPerguntas(entradaPadrao(), p as PortasSincronizacao);
+      return { saida, espiao };
+    });
+    ok("D7  fim de lista com orcamento curto continua sendo SUCESSO limpo",
+      (r.espiao.desfechos[0] ?? {}).status === "sucesso"
+      && (r.espiao.desfechos[0] ?? {}).codigo === null,
+      JSON.stringify(r.espiao.desfechos[0] ?? {}));
+    ok("D7b o escalar de orcamento nao mente quando nada foi cortado",
+      r.saida.tipo === "sincronizado"
+      && r.saida.metricas.orcamento_esgotado === false);
+  }
+
+  {
+    // A latencia gravada tambem sai do relogio MONOTONICO.
+    const r = await comRelogio(7_000, async (marcar) => {
+      const { portas, espiao } = portasPorPagina([sucessoCom([pergunta()], false)]);
+      const original = portas.executar;
+      const p = { ...portas, executar: async (e: never) => { marcar(); return original(e); } };
+      await sincronizarPerguntas(entradaPadrao(), p as PortasSincronizacao);
+      return espiao;
+    });
+    ok("D8  a latencia do desfecho vem do relogio monotonico",
+      (r.desfechos[0] ?? {}).latenciaMs === 7_000,
+      String((r.desfechos[0] ?? {}).latenciaMs));
+  }
+
+  {
+    const codigo = lerCodigo("lib/agentes/ingestao/sincronizar-perguntas.ts");
+    ok("D9  o orcamento NAO entra pela entrada — quem chama nao o escolhe",
+      !/orcamento|budget|deadline/i.test(
+        codigo.slice(
+          codigo.indexOf("interface EntradaSincronizarPerguntas"),
+          codigo.indexOf("interface PortasSincronizacao"))));
+    ok("D9b a decisao usa `performance.now`, nunca `Date.now`",
+      /function agoraMonotonico\(\): number \{\s*return performance\.now\(\);/.test(codigo)
+      && !/Date\.now\(\)/.test(codigo));
+    ok("D9c a regra vale da SEGUNDA pagina em diante",
+      /if \(indice > 0\) \{[\s\S]{0,200}?ORCAMENTO_EXTERNO_MS - \(agoraMonotonico\(\) - ctx\.inicio\)/
+        .test(codigo));
   }
 
   console.log(`\n── placar ${"─".repeat(54)}`);

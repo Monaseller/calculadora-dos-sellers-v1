@@ -113,6 +113,8 @@ export interface ResumoDaAcao {
   readonly reobservadas?: number;
   readonly truncado?: boolean;
   readonly limite_atingido?: boolean;
+  /** A varredura parou por RELOGIO, nao por teto de paginas. */
+  readonly orcamento_esgotado?: boolean;
   readonly auditoria_funcao_incompleta?: boolean;
 }
 
@@ -124,7 +126,8 @@ const CHAVES_DO_RESUMO: ReadonlyArray<keyof ResumoDaAcao> = [
   "descartadas_normalizacao", "descartadas_ingestao", "status_inesperados",
   "ingeriveis", "recebidas", "unicas", "duplicadas_no_lote",
   "novas", "atualizadas", "reobservadas",
-  "truncado", "limite_atingido", "auditoria_funcao_incompleta",
+  "truncado", "limite_atingido", "orcamento_esgotado",
+  "auditoria_funcao_incompleta",
 ];
 
 /**
