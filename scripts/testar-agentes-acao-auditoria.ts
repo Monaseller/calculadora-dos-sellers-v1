@@ -412,6 +412,11 @@ const MATRIZ: ReadonlyArray<readonly [string, readonly [string, string | null] |
   ["aguardando_aprovacao", ["aguardando_aprovacao", "aprovacao_necessaria"]],
   ["erro", ["erro", "provedor_falhou"]],
   ["indisponivel", ["erro", "autoridade_indisponivel"]],
+  // A conta do cursor mudou. Nada foi ingerido, e o desfecho reusa
+  // `autoridade_divergente` — que e literalmente o que houve — em vez de
+  // pedir vocabulario novo ao banco. O escalar `cursor_reiniciado` no
+  // resumo e o que distingue as duas origens da divergencia.
+  ["cursor_reiniciado", ["erro", "autoridade_divergente"]],
   // ── Antes da abertura: nao ha acao aberta, logo nao ha desfecho ────
   ["agente_indisponivel", null],
   ["chave_ausente", null],
@@ -422,7 +427,7 @@ const MATRIZ: ReadonlyArray<readonly [string, readonly [string, string | null] |
 {
   const doServico = variantesDoServico();
   const naMatriz = MATRIZ.map(([v]) => v);
-  ok("K1  o union do servico foi lido da fonte", doServico.length === 12, doServico.join(","));
+  ok("K1  o union do servico foi lido da fonte", doServico.length === 13, doServico.join(","));
   ok("K2  toda variante do servico esta na matriz",
     doServico.every((v) => naMatriz.includes(v)),
     doServico.filter((v) => !naMatriz.includes(v)).join(","));
@@ -550,7 +555,7 @@ ok("M10 o par (status, codigo) e revalidado em runtime, nao so em tipo",
     HELPER_CODIGO.indexOf("const CHAVES_DO_RESUMO"),
     HELPER_CODIGO.indexOf("];", HELPER_CODIGO.indexOf("const CHAVES_DO_RESUMO")));
   const chaves = [...lista.matchAll(/"([a-z_]+)"/g)].map((m) => m[1]);
-  ok("M11 o resumo e projetado por allowlist de chaves", chaves.length === 17, String(chaves.length));
+  ok("M11 o resumo e projetado por allowlist de chaves", chaves.length === 21, String(chaves.length));
   ok("M12 e nenhuma delas identifica pergunta, anuncio, conta ou pessoa",
     chaves.every((c) => !/texto|id_externo|anuncio|pergunta|loja|user|token|credencial/.test(c)),
     chaves.join(","));
@@ -558,6 +563,10 @@ ok("M10 o par (status, codigo) e revalidado em runtime, nao so em tipo",
     chaves.includes("auditoria_funcao_incompleta"));
   ok("M13b `orcamento_esgotado` tambem — o corte por RELOGIO precisa viajar",
     chaves.includes("orcamento_esgotado"));
+  ok("M13c os quatro escalares de CONTINUACAO viajam, e nenhum identifica conta",
+    ["deslocamento_inicial", "continuacao_pendente",
+      "cursor_atualizado", "cursor_reiniciado"].every((c) => chaves.includes(c))
+    && !chaves.includes("cursor_loja_id"));
   ok("M14 so numero finito e booleano sobrevivem a projecao",
     /typeof valor === "boolean"/.test(HELPER_CODIGO)
     && /typeof valor === "number" && Number\.isFinite\(valor\)/.test(HELPER_CODIGO));

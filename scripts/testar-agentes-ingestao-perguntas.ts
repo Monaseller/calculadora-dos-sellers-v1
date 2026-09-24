@@ -105,7 +105,15 @@ interface Espiao {
   /** A ordem GLOBAL dos efeitos. E ela que prova que nada tocou o
    *  provider antes de a acao existir. */
   ordem: string[];
+  /** O que o CURSOR duravel recebeu, na ordem. */
+  escritasDeCursor: Array<Record<string, unknown>>;
 }
+
+/** O cursor que os duplos devolvem quando a escrita "aplica". */
+const CURSOR_BASE = {
+  agenteId: AGENTE, userId: DONO, lojaId: null,
+  proximoDeslocamento: 0, versao: 1,
+};
 
 function portasFalsas(
   resposta: unknown,
@@ -115,11 +123,13 @@ function portasFalsas(
     gravacao?: unknown;
     abertura?: unknown;
     desfecho?: unknown;
+    cursor?: unknown;
+    escritaDeCursor?: unknown;
   } = {}
 ): { portas: PortasSincronizacao; espiao: Espiao } {
   const espiao: Espiao = {
     chamadas: [], agentesLidos: [], gravacoes: [],
-    aberturas: [], desfechos: [], ordem: [],
+    aberturas: [], desfechos: [], ordem: [], escritasDeCursor: [],
   };
   const agente =
     opcoes.agente === undefined ? { agenteId: AGENTE, userId: DONO, ativo: true } : opcoes.agente;
@@ -156,6 +166,30 @@ function portasFalsas(
       espiao.ordem.push("desfecho");
       return opcoes.desfecho ?? { estado: "registrada" };
     },
+    lerCursor: async () => {
+      espiao.ordem.push("cursor:ler");
+      return opcoes.cursor ?? { estado: "ausente" };
+    },
+    iniciarCursor: async (e: Record<string, unknown>) => {
+      espiao.escritasDeCursor.push({ op: "iniciar", ...e });
+      espiao.ordem.push("cursor:iniciar");
+      return opcoes.escritaDeCursor ?? { estado: "aplicada", continuacao: CURSOR_BASE };
+    },
+    avancarCursor: async (c: unknown, lojaId: unknown, deslocamento: unknown) => {
+      espiao.escritasDeCursor.push({ op: "avancar", lojaId, deslocamento, esperada: c });
+      espiao.ordem.push("cursor:avancar");
+      return opcoes.escritaDeCursor ?? { estado: "aplicada", continuacao: CURSOR_BASE };
+    },
+    reiniciarCursor: async (c: unknown, lojaId: unknown) => {
+      espiao.escritasDeCursor.push({ op: "reiniciar", lojaId, esperada: c });
+      espiao.ordem.push("cursor:reiniciar");
+      return opcoes.escritaDeCursor ?? { estado: "aplicada", continuacao: CURSOR_BASE };
+    },
+    reapontarCursor: async (c: unknown, lojaId: unknown) => {
+      espiao.escritasDeCursor.push({ op: "reapontar", lojaId, esperada: c });
+      espiao.ordem.push("cursor:reapontar");
+      return opcoes.escritaDeCursor ?? { estado: "aplicada", continuacao: CURSOR_BASE };
+    },
   } as unknown as PortasSincronizacao;
 
   return { portas, espiao };
@@ -183,11 +217,14 @@ const sucessoCom = (
 /** Portas cujo executor responde uma coisa DIFERENTE por pagina. */
 function portasPorPagina(
   respostas: unknown[],
-  opcoes: { gravacao?: unknown; abertura?: unknown; desfecho?: unknown } = {}
+  opcoes: {
+    gravacao?: unknown; abertura?: unknown; desfecho?: unknown;
+    cursor?: unknown; escritaDeCursor?: unknown;
+  } = {}
 ): { portas: PortasSincronizacao; espiao: Espiao } {
   const espiao: Espiao = {
     chamadas: [], agentesLidos: [], gravacoes: [],
-    aberturas: [], desfechos: [], ordem: [],
+    aberturas: [], desfechos: [], ordem: [], escritasDeCursor: [],
   };
   const portas = {
     lerAgente: async (agenteId: string) => {
@@ -221,6 +258,30 @@ function portasPorPagina(
       espiao.desfechos.push(e);
       espiao.ordem.push("desfecho");
       return opcoes.desfecho ?? { estado: "registrada" };
+    },
+    lerCursor: async () => {
+      espiao.ordem.push("cursor:ler");
+      return opcoes.cursor ?? { estado: "ausente" };
+    },
+    iniciarCursor: async (e: Record<string, unknown>) => {
+      espiao.escritasDeCursor.push({ op: "iniciar", ...e });
+      espiao.ordem.push("cursor:iniciar");
+      return opcoes.escritaDeCursor ?? { estado: "aplicada", continuacao: CURSOR_BASE };
+    },
+    avancarCursor: async (c: unknown, lojaId: unknown, deslocamento: unknown) => {
+      espiao.escritasDeCursor.push({ op: "avancar", lojaId, deslocamento, esperada: c });
+      espiao.ordem.push("cursor:avancar");
+      return opcoes.escritaDeCursor ?? { estado: "aplicada", continuacao: CURSOR_BASE };
+    },
+    reiniciarCursor: async (c: unknown, lojaId: unknown) => {
+      espiao.escritasDeCursor.push({ op: "reiniciar", lojaId, esperada: c });
+      espiao.ordem.push("cursor:reiniciar");
+      return opcoes.escritaDeCursor ?? { estado: "aplicada", continuacao: CURSOR_BASE };
+    },
+    reapontarCursor: async (c: unknown, lojaId: unknown) => {
+      espiao.escritasDeCursor.push({ op: "reapontar", lojaId, esperada: c });
+      espiao.ordem.push("cursor:reapontar");
+      return opcoes.escritaDeCursor ?? { estado: "aplicada", continuacao: CURSOR_BASE };
     },
   } as unknown as PortasSincronizacao;
   return { portas, espiao };
@@ -815,9 +876,18 @@ async function main(): Promise<void> {
   {
     const { portas, espiao } = portasFalsas(sucessoCom([pergunta()]));
     const r = await sincronizarPerguntas(entradaPadrao(), portas);
-    ok("L1  a ordem e agente -> abertura -> provider -> rpc -> desfecho",
-      espiao.ordem.join(">") === "agente>abertura>provider>rpc>desfecho",
+    // A ORDEM DE ESCRITA, inteira. Ela nao e estilistica: o cursor vem
+    // DEPOIS da inbox porque quebrar entre os dois repete um pedaco
+    // (barato, a chave natural absorve) e quebrar na ordem inversa
+    // perderia perguntas que nenhuma releitura traria de volta.
+    ok("L1  agente > abertura > cursor:ler > provider > rpc > cursor > desfecho",
+      espiao.ordem.join(">")
+        === "agente>abertura>cursor:ler>provider>rpc>cursor:iniciar>desfecho",
       espiao.ordem.join(">"));
+    ok("L1c o cursor e lido ANTES do provider e escrito DEPOIS da inbox",
+      espiao.ordem.indexOf("cursor:ler") < espiao.ordem.indexOf("provider")
+      && espiao.ordem.indexOf("rpc") < espiao.ordem.indexOf("cursor:iniciar")
+      && espiao.ordem.indexOf("cursor:iniciar") < espiao.ordem.indexOf("desfecho"));
     ok("L1b o resultado declara a saude do registro",
       r.tipo === "sincronizado" && r.auditoria === "completa");
   }

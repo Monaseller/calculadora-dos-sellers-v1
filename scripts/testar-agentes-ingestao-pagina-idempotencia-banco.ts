@@ -183,6 +183,13 @@ import {
   registrarDesfechoAcao,
 } from "@/lib/agentes/acoes/auditoria-acao";
 import { gravarPerguntasNaInbox } from "@/lib/agentes/dados/perguntas-inbox";
+import {
+  avancarContinuacao,
+  iniciarContinuacao,
+  lerContinuacao,
+  reapontarContinuacao,
+  reiniciarContinuacao,
+} from "@/lib/agentes/dados/continuacao-perguntas";
 import { lerAgenteParaAcaoInterna } from "@/lib/agentes/capability-worker";
 
 // ─── Fixtures ─────────────────────────────────────────────────────────
@@ -231,6 +238,8 @@ async function main(): Promise<void> {
 
   try {
     // ── Fixtures sinteticos ─────────────────────────────────────────
+    await pg.query(
+      "delete from public.agente_perguntas_continuacao where user_id = $1", [DONO]);
     await pg.query("delete from public.agente_acao_execucoes where user_id = $1", [DONO]);
     await pg.query("delete from public.agente_funcao_chamadas where user_id = $1", [DONO]);
     await pg.query("delete from public.agente_perguntas_ml where user_id = $1", [DONO]);
@@ -287,6 +296,14 @@ async function main(): Promise<void> {
       gravar: gravarPerguntasNaInbox,
       abrirAcao: registrarAberturaAcao,
       fecharAcao: registrarDesfechoAcao,
+      // O cursor tambem e REAL: a chave que o servico deriva depende de
+      // onde a varredura comeca, e um duplo aqui deixaria a prova
+      // dependendo de um numero que o proprio teste escolheu.
+      lerCursor: lerContinuacao,
+      iniciarCursor: iniciarContinuacao,
+      avancarCursor: avancarContinuacao,
+      reiniciarCursor: reiniciarContinuacao,
+      reapontarCursor: reapontarContinuacao,
     };
 
     const r = await sincronizarPerguntas(
@@ -453,6 +470,8 @@ async function main(): Promise<void> {
       && !acoesRegistradas().includes(ACAO_SINCRONIZAR_PERGUNTAS),
       acoesRegistradas().join(","));
   } finally {
+    await pg.query(
+      "delete from public.agente_perguntas_continuacao where user_id = $1", [DONO]);
     await pg.query("delete from public.agente_acao_execucoes where user_id = $1", [DONO]);
     await pg.query("delete from public.agente_funcao_chamadas where user_id = $1", [DONO]);
     await pg.query("delete from public.agente_perguntas_ml where user_id = $1", [DONO]);

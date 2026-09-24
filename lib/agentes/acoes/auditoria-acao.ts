@@ -116,6 +116,14 @@ export interface ResumoDaAcao {
   /** A varredura parou por RELOGIO, nao por teto de paginas. */
   readonly orcamento_esgotado?: boolean;
   readonly auditoria_funcao_incompleta?: boolean;
+  /** Onde a varredura COMECOU. Escalar de orquestracao, nao de negocio. */
+  readonly deslocamento_inicial?: number;
+  /** Ha trabalho alem da janela varrida. */
+  readonly continuacao_pendente?: boolean;
+  /** O cursor duravel avancou nesta acao. */
+  readonly cursor_atualizado?: boolean;
+  /** A conta mudou debaixo do cursor e ele voltou ao zero. */
+  readonly cursor_reiniciado?: boolean;
 }
 
 /** A allowlist, em runtime. Uma chave a mais no tipo sem uma chave a
@@ -128,6 +136,8 @@ const CHAVES_DO_RESUMO: ReadonlyArray<keyof ResumoDaAcao> = [
   "novas", "atualizadas", "reobservadas",
   "truncado", "limite_atingido", "orcamento_esgotado",
   "auditoria_funcao_incompleta",
+  "deslocamento_inicial", "continuacao_pendente",
+  "cursor_atualizado", "cursor_reiniciado",
 ];
 
 /**

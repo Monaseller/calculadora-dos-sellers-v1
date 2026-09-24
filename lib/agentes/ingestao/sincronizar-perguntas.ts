@@ -56,6 +56,14 @@ import {
 } from "@/lib/agentes/acoes/auditoria-acao";
 import { lerAgenteParaAcaoInterna } from "@/lib/agentes/capability-worker";
 import {
+  avancarContinuacao,
+  iniciarContinuacao,
+  lerContinuacao,
+  reapontarContinuacao,
+  reiniciarContinuacao,
+  type Continuacao,
+} from "@/lib/agentes/dados/continuacao-perguntas";
+import {
   gravarPerguntasNaInbox,
   type LinhaParaInbox,
   type MetricasPersistencia,
@@ -163,7 +171,9 @@ export type OrigemDoErro =
   /** O ledger de Funcao nao gravou. */
   | "auditoria_funcao"
   /** O cliente da inbox falhou ou devolveu forma estranha. */
-  | "persistencia";
+  | "persistencia"
+  /** O cursor duravel nao pode ser lido, e sem ele nao se sabe onde comecar. */
+  | "continuacao";
 
 /**
  * Tudo que pode acontecer DEPOIS que a acao foi aberta.
@@ -210,7 +220,22 @@ export type ResultadoPosAbertura =
       readonly codigo: string;
       readonly origem: OrigemDoErro;
     }
-  | { readonly tipo: "indisponivel"; readonly requestId: string };
+  | { readonly tipo: "indisponivel"; readonly requestId: string }
+  /**
+   * O cursor apontava para uma conta e a execucao devolveu outra.
+   *
+   * Nada foi gravado: o deslocamento guardado valia para a conta
+   * ANTERIOR, e aplicar aquela pagina seria afirmar que se varreu a
+   * conta nova a partir de uma posicao que nunca foi percorrida nela. O
+   * cursor foi reapontado para o zero da conta nova, e a proxima
+   * operacao comeca limpa.
+   */
+  | {
+      readonly tipo: "cursor_reiniciado";
+      readonly requestId: string;
+      readonly lojaAnterior: string;
+      readonly lojaAtual: string;
+    };
 
 export type ResultadoSincronizacao =
   // ── Antes da abertura: ZERO linha de acao, ZERO provider ──────────
@@ -252,6 +277,11 @@ export interface PortasSincronizacao {
   readonly gravar: typeof gravarPerguntasNaInbox;
   readonly abrirAcao: typeof registrarAberturaAcao;
   readonly fecharAcao: typeof registrarDesfechoAcao;
+  readonly lerCursor: typeof lerContinuacao;
+  readonly iniciarCursor: typeof iniciarContinuacao;
+  readonly avancarCursor: typeof avancarContinuacao;
+  readonly reiniciarCursor: typeof reiniciarContinuacao;
+  readonly reapontarCursor: typeof reapontarContinuacao;
 }
 
 const PORTAS_REAIS: PortasSincronizacao = {
@@ -260,6 +290,11 @@ const PORTAS_REAIS: PortasSincronizacao = {
   gravar: gravarPerguntasNaInbox,
   abrirAcao: registrarAberturaAcao,
   fecharAcao: registrarDesfechoAcao,
+  lerCursor: lerContinuacao,
+  iniciarCursor: iniciarContinuacao,
+  avancarCursor: avancarContinuacao,
+  reiniciarCursor: reiniciarContinuacao,
+  reapontarCursor: reapontarContinuacao,
 };
 
 /** A forma que a Funcao de perguntas devolve em `envelope.data`. */
@@ -452,6 +487,14 @@ export interface MetricasSincronizacao {
    * teria quem a explicasse.
    */
   readonly auditoria_funcao_incompleta: boolean;
+  /** Onde ESTA varredura comecou. Vem do cursor, nunca do chamador. */
+  readonly deslocamento_inicial: number;
+  /** Ha trabalho alem da janela varrida, e o cursor o registrou. */
+  readonly continuacao_pendente: boolean;
+  /** O cursor avancou de forma duravel nesta acao. */
+  readonly cursor_atualizado: boolean;
+  /** A conta mudou debaixo do cursor e ele voltou ao zero. */
+  readonly cursor_reiniciado: boolean;
 }
 
 /** Uma pagina lida com sucesso, ja separada pelo filtro de ingestao. */
@@ -784,7 +827,34 @@ export async function sincronizarPerguntas(
     inicio: agoraMonotonico(),
   };
 
-  // ── 5. As paginas ─────────────────────────────────────────────────
+  // ── 5. O CURSOR: onde esta varredura comeca ───────────────────────
+  //
+  // Ler o cursor NAO e resolver vinculo. E ler o nosso proprio estado de
+  // controle: um numero e a conta para a qual ele vale. A autoridade
+  // continua vindo de `resultado.autoridade.lojaId`, da execucao que de
+  // fato buscar — e e a COMPARACAO entre as duas que torna a troca de
+  // vinculo segura.
+  const leituraCursor = await portas.lerCursor({
+    userId: agente.userId,
+    agenteId: agente.agenteId,
+  });
+  if (leituraCursor.estado === "falhou") {
+    // Fail-closed ANTES do provider. Sem cursor legivel nao se sabe onde
+    // comecar, e comecar do zero por conta propria reingeriria tudo a
+    // cada leitura que falhasse.
+    return fechar(
+      portas,
+      ctx,
+      { tipo: "erro", requestId, codigo: "cursor_ilegivel", origem: "continuacao" },
+      { status: "erro", codigo: "erro_interno" },
+      { lojaId: null, mensagem: "o cursor de continuacao nao pode ser lido", resumo: {} }
+    );
+  }
+  const cursor: Continuacao | null =
+    leituraCursor.estado === "encontrada" ? leituraCursor.continuacao : null;
+  const deslocamentoInicial = cursor?.proximoDeslocamento ?? 0;
+
+  // ── 6. As paginas ─────────────────────────────────────────────────
   const coletadas: PaginaColetada[] = [];
   let lojaCongelada: string | null = null;
   let haMais = false;
@@ -821,7 +891,9 @@ export async function sincronizarPerguntas(
       argumentos: {
         status: STATUS_INGERIVEL,
         limite: PAGE_LIMIT,
-        deslocamento: deslocamentoDaPagina(indice),
+        // A janela comeca onde o CURSOR parou. `deslocamentoDaPagina`
+        // continua cuidando so do passo DENTRO desta varredura.
+        deslocamento: deslocamentoInicial + deslocamentoDaPagina(indice),
       },
       // Derivada da chave da TENTATIVA. O prefixo intacto e o que liga a
       // acao as paginas dela em `agente_funcao_chamadas`.
@@ -837,6 +909,44 @@ export async function sincronizarPerguntas(
         mensagem: pagina.mensagem ?? null,
         resumo: resumoParcial(coletadas),
       });
+    }
+
+    // ── A cerca do CURSOR contra a conta REAL ───────────────────────
+    //
+    // O cursor dizia `A`; a execucao devolveu `B`. O deslocamento
+    // guardado valia para A e nao significa nada em B — aplica-lo
+    // saltaria, em silencio, as primeiras perguntas de B.
+    //
+    // A pagina ja buscada e DESCARTADA de proposito: ela veio de B na
+    // posicao que era de A, entao persisti-la afirmaria uma varredura de
+    // B que nunca comecou. O cursor e reapontado para o zero de B, e a
+    // proxima operacao comeca limpa.
+    if (cursor !== null && cursor.lojaId !== null && pagina.lojaId !== cursor.lojaId) {
+      const troca = await portas.reapontarCursor(cursor, pagina.lojaId);
+      return fechar(
+        portas,
+        ctx,
+        {
+          tipo: "cursor_reiniciado",
+          requestId,
+          lojaAnterior: cursor.lojaId,
+          lojaAtual: pagina.lojaId,
+        },
+        { status: "erro", codigo: "autoridade_divergente" },
+        {
+          // Nenhuma conta foi tocada: nada entrou na inbox.
+          lojaId: null,
+          mensagem: "a conta do cursor mudou; a janela foi reiniciada",
+          resumo: {
+            deslocamento_inicial: deslocamentoInicial,
+            cursor_reiniciado: true,
+            // `perdida` aqui significa que outra execucao ja reapontou o
+            // mesmo cursor. O resultado dela e igualmente valido, e
+            // insistir seria sobrescrever trabalho alheio.
+            cursor_atualizado: troca.estado === "aplicada",
+          },
+        }
+      );
     }
 
     // ── A cerca de autoridade entre paginas ─────────────────────────
@@ -906,6 +1016,12 @@ export async function sincronizarPerguntas(
     limite_atingido: limiteAtingido,
     orcamento_esgotado: orcamentoEsgotado,
     auditoria_funcao_incompleta: auditoriaFuncaoIncompleta,
+    deslocamento_inicial: deslocamentoInicial,
+    // Preenchidos depois da persistencia: enquanto a inbox nao gravou,
+    // nao ha pedaco consumido e o cursor nao se move.
+    continuacao_pendente: haMais,
+    cursor_atualizado: false,
+    cursor_reiniciado: false,
   };
 
   // ── 6. COLLECT_THEN_WRITE: so agora, e uma vez so ─────────────────
@@ -949,9 +1065,64 @@ export async function sincronizarPerguntas(
     );
   }
 
-  // ── 7. O desfecho de uma varredura que terminou ───────────────────
+  // ── 7. O CURSOR avanca — e so agora ───────────────────────────────
+  //
+  // ── A ordem, e por que ela nao e negociavel ──────────────────────
+  //
+  //   1. inbox   2. cursor   3. desfecho da acao
+  //
+  // Nao ha transacao distribuida aqui, entao o que resta e escolher QUAL
+  // falha e barata. Quebrar entre 1 e 2 deixa o cursor velho: a proxima
+  // varredura relê o mesmo pedaco e a chave natural `(loja_id,
+  // id_externo)` da inbox absorve — custa uma ida ao provider. Quebrar
+  // na ordem inversa deixaria o cursor adiante de um pedaco que NUNCA
+  // foi gravado, e nenhuma releitura traria aquelas perguntas de volta.
+  // Uma das falhas repete trabalho; a outra perde dado.
+  //
+  // Quebrar entre 2 e 3 deixa o cursor certo e a acao orfa — e orfa e
+  // justamente o que a reconciliacao de operacao sabe reportar.
+  //
+  // ── Teto de paginas e orcamento avancam IGUAL ────────────────────
+  //
+  // Os dois significam a mesma coisa para o cursor: este pedaco foi
+  // consumido de forma duravel e sobrou trabalho. Deixar o cursor parado
+  // em qualquer um deles faria a proxima operacao varrer de novo a mesma
+  // janela, para sempre.
+  const janelaConsumida = coletadas.length * PAGE_LIMIT;
+  let cursorAtualizado = false;
+
+  if (cursor === null) {
+    // Primeiro ciclo deste agente. `perdida` significa que outra
+    // execucao criou a linha primeiro — o resultado dela vale tanto
+    // quanto o nosso, e sobrescrever seria desfazer trabalho alheio.
+    const criado = await portas.iniciarCursor({
+      userId: agente.userId,
+      agenteId: agente.agenteId,
+      lojaId: lojaCongelada,
+      proximoDeslocamento: haMais ? deslocamentoInicial + janelaConsumida : 0,
+    });
+    cursorAtualizado = criado.estado === "aplicada";
+  } else if (haMais) {
+    const avanco = await portas.avancarCursor(
+      cursor, lojaCongelada, deslocamentoInicial + janelaConsumida);
+    cursorAtualizado = avanco.estado === "aplicada";
+  } else {
+    // Fim de lista: a travessia terminou e a proxima comeca do zero, na
+    // MESMA conta. E este reinicio periodico que limita o estrago da
+    // mutacao de offset do provider — o que foi pulado numa travessia
+    // reaparece na seguinte.
+    const reinicio = await portas.reiniciarCursor(cursor, lojaCongelada);
+    cursorAtualizado = reinicio.estado === "aplicada";
+  }
+
+  const metricasFinais: MetricasSincronizacao = {
+    ...metricas,
+    cursor_atualizado: cursorAtualizado,
+  };
+
+  // ── 8. O desfecho de uma varredura que terminou ───────────────────
   const resumo: ResumoDaAcao = {
-    ...resumoDaVarredura(metricas),
+    ...resumoDaVarredura(metricasFinais),
     recebidas: gravacao.metricas.recebidas,
     unicas: gravacao.metricas.unicas,
     duplicadas_no_lote: gravacao.metricas.duplicadas_no_lote,
@@ -967,12 +1138,12 @@ export async function sincronizarPerguntas(
     tipo: limiteAtingido || orcamentoEsgotado ? "backlog_truncado" : "sincronizado",
     requestId,
     perguntas: aptas,
-    metricas,
+    metricas: metricasFinais,
     persistencia: gravacao.metricas,
     providerTruncado: haMais,
   };
 
-  return fechar(portas, ctx, saida, desfechoDeVarreduraCompleta(metricas), {
+  return fechar(portas, ctx, saida, desfechoDeVarreduraCompleta(metricasFinais), {
     lojaId: lojaCongelada,
     mensagem: null,
     resumo,
@@ -1023,6 +1194,10 @@ function resumoDaVarredura(m: MetricasSincronizacao): ResumoDaAcao {
     limite_atingido: m.limite_atingido,
     orcamento_esgotado: m.orcamento_esgotado,
     auditoria_funcao_incompleta: m.auditoria_funcao_incompleta,
+    deslocamento_inicial: m.deslocamento_inicial,
+    continuacao_pendente: m.continuacao_pendente,
+    cursor_atualizado: m.cursor_atualizado,
+    cursor_reiniciado: m.cursor_reiniciado,
   };
 }
 

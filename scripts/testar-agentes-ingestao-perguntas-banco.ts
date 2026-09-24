@@ -38,6 +38,13 @@ import {
 import type { PerguntaRecebida } from "@/lib/agentes/dados/perguntas";
 import { gravarPerguntasNaInbox } from "@/lib/agentes/dados/perguntas-inbox";
 import {
+  avancarContinuacao,
+  iniciarContinuacao,
+  lerContinuacao,
+  reapontarContinuacao,
+  reiniciarContinuacao,
+} from "@/lib/agentes/dados/continuacao-perguntas";
+import {
   sincronizarPerguntas,
   type PortasSincronizacao,
 } from "@/lib/agentes/ingestao/sincronizar-perguntas";
@@ -152,6 +159,11 @@ function portas(
     gravar: gravarPerguntasNaInbox,
     abrirAcao: registrarAberturaAcao,
     fecharAcao: registrarDesfechoAcao,
+    lerCursor: lerContinuacao,
+    iniciarCursor: iniciarContinuacao,
+    avancarCursor: avancarContinuacao,
+    reiniciarCursor: reiniciarContinuacao,
+    reapontarCursor: reapontarContinuacao,
   } as unknown as PortasSincronizacao;
 }
 
@@ -176,6 +188,11 @@ function portasComFalha(
     gravar: gravarPerguntasNaInbox,
     abrirAcao: registrarAberturaAcao,
     fecharAcao: registrarDesfechoAcao,
+    lerCursor: lerContinuacao,
+    iniciarCursor: iniciarContinuacao,
+    avancarCursor: avancarContinuacao,
+    reiniciarCursor: reiniciarContinuacao,
+    reapontarCursor: reapontarContinuacao,
   } as unknown as PortasSincronizacao;
 }
 
@@ -207,6 +224,11 @@ async function main(): Promise<void> {
 
   try {
     // Fixtures: dois donos, duas lojas ML. Sem dado de producao.
+    // O cursor referencia `lojas` com RESTRICT, entao ele sai PRIMEIRO —
+    // senao a limpeza da loja esbarra na FK.
+    await pg.query(
+      "delete from public.agente_perguntas_continuacao where user_id in ($1,$2)",
+      [DONO_A, DONO_B]);
     await pg.query(
       "delete from public.agente_acao_execucoes where user_id in ($1,$2)", [DONO_A, DONO_B]);
     for (const [dono, loja, agente, nome] of [
@@ -272,11 +294,31 @@ async function main(): Promise<void> {
         && (await linhaDe(LOJA_A, "Q-DT")) === null);
     }
 
+    /**
+     * Zera o CURSOR entre cenarios que trocam de loja DE PROPOSITO.
+     *
+     * Desde o I4B2 o servico compara a conta do cursor com a da
+     * execucao e, quando elas diferem, descarta a pagina e reinicia — a
+     * cerca que impede aplicar o deslocamento de uma conta em outra.
+     * Ela e correta e age ANTES da RPC, entao um cenario que queira
+     * exercitar a guarda de tenant da RPC precisa comecar sem cursor.
+     * Isolar a camada sob teste nao e contornar a cerca: os dois
+     * caminhos tem prova propria, e a da cerca vive na suite de
+     * continuacao.
+     */
+    const zerarCursor = async () => {
+      await pg.query(
+        "delete from public.agente_perguntas_continuacao where user_id in ($1,$2)",
+        [DONO_A, DONO_B]);
+    };
+
     secao("Q. Autoridade e isolamento entre donos");
+    await zerarCursor();
 
     {
       // A loja B e do dono B. Gravar nela com o dono A tem de ser
       // recusado pela guarda de tenant da propria RPC.
+      await zerarCursor();
       const antes = await contar(LOJA_B);
       const r = await sincronizarPerguntas(
         { agenteId: AGENTE_A, idempotencyKey: chaveNova() }, portas(umaPagina([pergunta({ id: "Q-X" })]), LOJA_B, DONO_A));
@@ -285,6 +327,7 @@ async function main(): Promise<void> {
         && (await contar(LOJA_B)) === antes);
     }
     {
+      await zerarCursor();
       const r = await sincronizarPerguntas(
         { agenteId: AGENTE_A, idempotencyKey: chaveNova() }, portas(umaPagina([pergunta({ id: "Q-B1" })]), LOJA_B, DONO_B, { agenteId: AGENTE_B }));
       ok("P13 a gravacao vai para a loja que a EXECUCAO devolveu",
@@ -296,6 +339,7 @@ async function main(): Promise<void> {
       // Trocar so a autoridade, com tudo mais igual, troca o destino —
       // e isso e a prova de que nao ha segunda resolucao entre buscar e
       // gravar. Sem segunda leitura, nao ha janela para divergir.
+      await zerarCursor();
       const antesA = await contar(LOJA_A);
       const antesB = await contar(LOJA_B);
       await sincronizarPerguntas(
@@ -305,9 +349,11 @@ async function main(): Promise<void> {
     }
 
     secao("R. Falha da persistencia");
+    await zerarCursor();
 
     {
       // Loja inexistente: a RPC recusa, e o servico NAO reporta sucesso.
+      await zerarCursor();
       const fantasma = "eeeeeeee-0000-4000-8000-0000000012ff";
       const r = await sincronizarPerguntas(
         { agenteId: AGENTE_A, idempotencyKey: chaveNova() }, portas(umaPagina([pergunta({ id: "Q-F" })]), fantasma, DONO_A));
@@ -316,6 +362,7 @@ async function main(): Promise<void> {
     }
     {
       // Identidade imutavel divergente: a RPC derruba o LOTE.
+      await zerarCursor();
       const r = await sincronizarPerguntas(
         { agenteId: AGENTE_A, idempotencyKey: chaveNova() },
         portas(umaPagina([pergunta({ anuncioId: "OUTRO-ANUNCIO" })]), LOJA_A, DONO_A));
@@ -325,6 +372,7 @@ async function main(): Promise<void> {
     }
 
     secao("S. Duplicata ENTRE paginas — quem decide e a RPC");
+    await zerarCursor();
 
     {
       // G6: o MESMO id_externo, payload identico, nas duas paginas.
@@ -355,6 +403,7 @@ async function main(): Promise<void> {
     // A. O CICLO DE VIDA DA ACAO, contra a tabela REAL
     // =================================================================
     secao("A. Ciclo de vida da acao — tabelas reais, provider falso");
+    await zerarCursor();
 
     /** As linhas de auditoria de UMA execucao de acao. */
     const linhasDaAcao = async (requestId: string) =>
@@ -483,6 +532,11 @@ async function main(): Promise<void> {
         gravar: gravarPerguntasNaInbox,
         abrirAcao: registrarAberturaAcao,
         fecharAcao: registrarDesfechoAcao,
+        lerCursor: lerContinuacao,
+        iniciarCursor: iniciarContinuacao,
+        avancarCursor: avancarContinuacao,
+        reiniciarCursor: reiniciarContinuacao,
+        reapontarCursor: reapontarContinuacao,
       } as unknown as PortasSincronizacao;
 
       const r = await sincronizarPerguntas(
@@ -502,6 +556,7 @@ async function main(): Promise<void> {
 
     {
       // Divergencia de autoridade entre paginas: ZERO inbox, um desfecho.
+      await zerarCursor();
       let i = 0;
       const inboxAntesA = await contar(LOJA_A);
       const inboxAntesB = await contar(LOJA_B);
@@ -521,6 +576,11 @@ async function main(): Promise<void> {
         gravar: gravarPerguntasNaInbox,
         abrirAcao: registrarAberturaAcao,
         fecharAcao: registrarDesfechoAcao,
+        lerCursor: lerContinuacao,
+        iniciarCursor: iniciarContinuacao,
+        avancarCursor: avancarContinuacao,
+        reiniciarCursor: reiniciarContinuacao,
+        reapontarCursor: reapontarContinuacao,
       } as unknown as PortasSincronizacao;
 
       const r = await sincronizarPerguntas(
@@ -539,6 +599,7 @@ async function main(): Promise<void> {
     {
       // Loja de outro dono: a RPC recusa com 42501, e o desfecho precisa
       // gravar mesmo assim — e por isso `loja_id` vai NULL.
+      await zerarCursor();
       const r = await sincronizarPerguntas(
         { agenteId: AGENTE_A, idempotencyKey: chaveNova() },
         portas(umaPagina([pergunta({ id: "A8" })]), LOJA_B, DONO_A));
@@ -616,6 +677,11 @@ async function main(): Promise<void> {
         }),
         gravar: gravarPerguntasNaInbox,
         abrirAcao: registrarAberturaAcao,
+        lerCursor: lerContinuacao,
+        iniciarCursor: iniciarContinuacao,
+        avancarCursor: avancarContinuacao,
+        reiniciarCursor: reiniciarContinuacao,
+        reapontarCursor: reapontarContinuacao,
         fecharAcao: async (e: { requestId: string }) => {
           requestVisto = e.requestId;
           await pg.query(
@@ -670,6 +736,11 @@ async function main(): Promise<void> {
         gravar: gravarPerguntasNaInbox,
         // A abertura e REAL; so o desfecho e que nao acontece.
         abrirAcao: registrarAberturaAcao,
+        lerCursor: lerContinuacao,
+        iniciarCursor: iniciarContinuacao,
+        avancarCursor: avancarContinuacao,
+        reiniciarCursor: reiniciarContinuacao,
+        reapontarCursor: reapontarContinuacao,
         fecharAcao: async () => ({ estado: "falhou" }),
       } as unknown as PortasSincronizacao;
 
@@ -707,7 +778,7 @@ async function main(): Promise<void> {
       const chaves = new Set(
         textos.flatMap((l) => Object.keys(JSON.parse(l.r) as Record<string, unknown>)));
       ok("A14b toda chave do resumo pertence a allowlist de metricas",
-        [...chaves].every((k) => /^(paginas|provider_recebidas|normalizadas|descartadas_normalizacao|descartadas_ingestao|status_inesperados|ingeriveis|recebidas|unicas|duplicadas_no_lote|novas|atualizadas|reobservadas|truncado|limite_atingido|orcamento_esgotado|auditoria_funcao_incompleta)$/.test(k)),
+        [...chaves].every((k) => /^(paginas|provider_recebidas|normalizadas|descartadas_normalizacao|descartadas_ingestao|status_inesperados|ingeriveis|recebidas|unicas|duplicadas_no_lote|novas|atualizadas|reobservadas|truncado|limite_atingido|orcamento_esgotado|auditoria_funcao_incompleta|deslocamento_inicial|continuacao_pendente|cursor_atualizado|cursor_reiniciado)$/.test(k)),
         [...chaves].join(","));
     }
 
@@ -743,6 +814,7 @@ async function main(): Promise<void> {
     // T. AS TRES CAMADAS DE IDEMPOTENCIA, ao mesmo tempo
     // =================================================================
     secao("T. Tres camadas — e nenhuma delas faz o trabalho da outra");
+    await zerarCursor();
 
     {
       // Camada 1 (ACAO): a mesma tentativa nao varre duas vezes.
@@ -809,6 +881,7 @@ async function main(): Promise<void> {
     // C. A COLISAO DE `resposta_fora_de_forma`
     // =================================================================
     secao("C. As duas formas ruins deixaram de ter o mesmo nome");
+    await zerarCursor();
 
     let terminalC1 = "";
     let terminalC2 = "";
@@ -844,6 +917,11 @@ async function main(): Promise<void> {
         gravar: async () => ({ tipo: "erro", codigo: "resposta_rpc_fora_de_forma" }),
         abrirAcao: registrarAberturaAcao,
         fecharAcao: registrarDesfechoAcao,
+        lerCursor: lerContinuacao,
+        iniciarCursor: iniciarContinuacao,
+        avancarCursor: avancarContinuacao,
+        reiniciarCursor: reiniciarContinuacao,
+        reapontarCursor: reapontarContinuacao,
       } as unknown as PortasSincronizacao;
 
       const r = await sincronizarPerguntas(
@@ -871,6 +949,7 @@ async function main(): Promise<void> {
     // F. AUDITORIA DE FUNCAO INCOMPLETA
     // =================================================================
     secao("F. O ledger de Funcao furado deixou de ser invisivel");
+    await zerarCursor();
 
     {
       const r = await sincronizarPerguntas(
@@ -959,6 +1038,11 @@ async function main(): Promise<void> {
         gravar: gravarPerguntasNaInbox,
         abrirAcao: registrarAberturaAcao,
         fecharAcao: registrarDesfechoAcao,
+        lerCursor: lerContinuacao,
+        iniciarCursor: iniciarContinuacao,
+        avancarCursor: avancarContinuacao,
+        reiniciarCursor: reiniciarContinuacao,
+        reapontarCursor: reapontarContinuacao,
       } as unknown as PortasSincronizacao;
 
       const r = await sincronizarPerguntas(
@@ -985,6 +1069,11 @@ async function main(): Promise<void> {
     }
 
   } finally {
+    // O cursor referencia `lojas` com RESTRICT, entao ele sai PRIMEIRO —
+    // senao a limpeza da loja esbarra na FK.
+    await pg.query(
+      "delete from public.agente_perguntas_continuacao where user_id in ($1,$2)",
+      [DONO_A, DONO_B]);
     await pg.query(
       "delete from public.agente_acao_execucoes where user_id in ($1,$2)", [DONO_A, DONO_B]);
     for (const loja of [LOJA_A, LOJA_B]) {
