@@ -59,6 +59,7 @@ import {
   type PortasCoberturaML,
 } from "@/lib/mercado-livre-concessoes";
 import { resolverFatoConexao } from "@/lib/agentes/conexoes/fatos";
+import type { LimiteExterno } from "@/lib/controle-tempo";
 import type { FatoConexao } from "@/lib/ia/skills/diagnostico";
 
 /**
@@ -102,7 +103,8 @@ export interface ResultadoCoberturaRemota {
  */
 type Confirmador = (
   entrada: { userId: string; lojaId: string; acesso: "leitura" | "escrita" },
-  portas?: PortasCoberturaML
+  portas?: PortasCoberturaML,
+  limiteExterno?: LimiteExterno
 ) => Promise<{ cobertura: string; motivo: MotivoCoberturaML | null }>;
 
 const CONFIRMADORES: Readonly<Record<string, Confirmador>> = Object.freeze({
@@ -129,7 +131,9 @@ const CONFIRMADORES: Readonly<Record<string, Confirmador>> = Object.freeze({
  */
 export async function confirmarCoberturaDosFatos(
   entrada: EntradaCoberturaRemota,
-  portas?: PortasCoberturaML
+  portas?: PortasCoberturaML,
+  /** OPCIONAL. O orcamento COMPARTILHADO do provider, repassado intacto. */
+  limiteExterno?: LimiteExterno
 ): Promise<ResultadoCoberturaRemota> {
   const { userId, requisito, lojaId, acesso, conexoes } = entrada;
 
@@ -155,7 +159,7 @@ export async function confirmarCoberturaDosFatos(
 
   let veredito = cache.get(lojaId);
   if (veredito === undefined) {
-    veredito = await confirmador({ userId, lojaId, acesso }, portas);
+    veredito = await confirmador({ userId, lojaId, acesso }, portas, limiteExterno);
     chamadasRemotas = 1;
     cache.set(lojaId, veredito);
   }

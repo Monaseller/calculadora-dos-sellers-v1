@@ -83,7 +83,10 @@ export async function executarPerguntasML(
     };
   }
 
-  const lerPerguntas = criarLeiturasDePerguntas(contexto.userId, conexao.lojaId);
+  // O orcamento vem do CONTEXTO — nunca dos argumentos. Ausente, o
+  // adapter usa o limite proprio dele, como sempre usou.
+  const lerPerguntas = criarLeiturasDePerguntas(
+    contexto.userId, conexao.lojaId, undefined, contexto.limiteDoProvider);
   // O cast satisfaz a assinatura; a VALIDACAO acontece dentro, e
   // `validarFiltroPerguntas` recusa nao-objeto antes de tocar campo.
   return lerPerguntas(argumentos as FiltroPerguntas);

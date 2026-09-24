@@ -6277,7 +6277,7 @@ async function principal(): Promise<void> {
       /if \(requisito !== null && nivelNoMomento === "automatico" && lojaId !== null\)/
         .test(EXECUTOR_CODIGO));
     ok("U7  ela recebe o requisito EM EXECUCAO, nunca o snapshot inteiro",
-      /confirmarCoberturaDosFatos\(\{[\s\S]{0,200}?requisito,/.test(EXECUTOR_CODIGO) &&
+      /confirmarCoberturaDosFatos\(\s*\{[\s\S]{0,240}?requisito,/.test(EXECUTOR_CODIGO) &&
         !/conexoes\.map\([\s\S]{0,80}?confirmarCobertura/.test(EXECUTOR_CODIGO));
     ok("U8  e o `acesso` vem do CATALOGO, amarrando o HARD BOUND",
       /acesso: definicao\.acesso/.test(EXECUTOR_CODIGO));

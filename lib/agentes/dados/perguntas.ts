@@ -27,6 +27,7 @@
  * valor inventado: vira item descartado.
  */
 import "server-only";
+import type { LimiteExterno } from "@/lib/controle-tempo";
 import {
   buscarPerguntasRecebidasML,
   type PortasPerguntasML,
@@ -286,7 +287,9 @@ export function normalizarPerguntas(
 export function criarLeiturasDePerguntas(
   userId: string,
   lojaId: string,
-  portas?: PortasPerguntasML
+  portas?: PortasPerguntasML,
+  /** OPCIONAL. O orcamento COMPARTILHADO do provider, repassado intacto. */
+  limiteExterno?: LimiteExterno
 ): LerPerguntasRecebidas {
   return async function lerPerguntasRecebidas(
     filtro: FiltroPerguntas
@@ -309,7 +312,8 @@ export function criarLeiturasDePerguntas(
         limite,
         deslocamento: filtro.deslocamento ?? 0,
       },
-      portas
+      portas,
+      limiteExterno
     );
 
     if (bruto.erro !== null) {

@@ -24,6 +24,7 @@
  * permissao, nao decide nivel e nao escolhe loja.
  */
 import "server-only";
+import type { LimiteExterno } from "@/lib/controle-tempo";
 import { getMLLojaById } from "@/lib/ml-auth";
 import type { CoberturaRecurso } from "@/lib/ia/skills/diagnostico";
 
@@ -106,7 +107,9 @@ export interface EntradaCoberturaML {
 export interface PortasCoberturaML {
   readonly resolverCredencial?: (
     lojaId: string,
-    userId: string
+    userId: string,
+    /** O orcamento compartilhado, quando quem chama o tem. */
+    limiteExterno?: LimiteExterno
   ) => Promise<{ accessToken: string; sellerId: string } | null>;
   readonly buscar?: typeof fetch;
 }
@@ -172,7 +175,9 @@ function temEscopoRead(scopes: unknown): boolean {
  */
 export async function confirmarCoberturaML(
   entrada: EntradaCoberturaML,
-  portas?: PortasCoberturaML
+  portas?: PortasCoberturaML,
+  /** OPCIONAL. O orcamento COMPARTILHADO do provider — ver `controle-tempo`. */
+  limiteExterno?: LimiteExterno
 ): Promise<ResultadoCoberturaML> {
   const { userId, lojaId, acesso } = entrada;
 
@@ -198,8 +203,9 @@ export async function confirmarCoberturaML(
   try {
     // Este e o UNICO caminho de token, e ele ja trata renovacao. Um
     // segundo mecanismo de refresh aqui divergiria do primeiro no
-    // primeiro conserto feito so de um lado.
-    credencial = await resolver(lojaId, userId);
+    // primeiro conserto feito so de um lado. O orcamento viaja junto:
+    // uma renovacao disparada aqui nao pode abrir 20 s proprios.
+    credencial = await resolver(lojaId, userId, limiteExterno);
   } catch {
     // Sem `error.message`: mensagem de driver vaza coluna e as vezes valor.
     console.error("[ml-concessoes] falha ao resolver credencial da loja");
@@ -214,8 +220,19 @@ export async function confirmarCoberturaML(
 
   const url = `${BASE_ML}/users/${encodeURIComponent(credencial.sellerId)}/applications`;
 
+  // O teto EFETIVO: o menor entre o limite proprio e o que resta do
+  // orcamento compartilhado. Esgotado, nao se comeca a chamada.
+  const teto = limiteExterno === undefined
+    ? TIMEOUT_MS
+    : Math.min(TIMEOUT_MS, limiteExterno.restanteMs());
+  if (teto <= 0) return recusa("indisponivel");
+
   const controlador = new AbortController();
-  const relogio = setTimeout(() => controlador.abort(), TIMEOUT_MS);
+  const relogio = setTimeout(() => controlador.abort(), teto);
+  const propagar = () => controlador.abort();
+  const doOrcamento = limiteExterno?.signal;
+  if (doOrcamento?.aborted) controlador.abort();
+  else doOrcamento?.addEventListener("abort", propagar, { once: true });
 
   let resposta: Response;
   try {
@@ -229,6 +246,7 @@ export async function confirmarCoberturaML(
     return recusa("indisponivel");
   } finally {
     clearTimeout(relogio);
+    doOrcamento?.removeEventListener("abort", propagar);
   }
 
   if (!resposta.ok) return recusa(classificarStatus(resposta.status));

@@ -196,7 +196,7 @@ secao("H. A fiacao: cursor lido antes, escrito depois");
   ok("H5  cursor ilegivel falha FECHADO, antes do provider",
     /leituraCursor\.estado === "falhou"\) \{[\s\S]{0,600}?codigo: "cursor_ilegivel"/.test(SERV));
   ok("H6  a deriva de conta reaponta e NAO grava a pagina",
-    /portas\.reapontarCursor\(cursor, pagina\.lojaId\)/.test(SERV)
+    /portas\.reapontarCursor\(\s*cursor, pagina\.lojaId/.test(SERV)
     && SERV.indexOf("portas.reapontarCursor(") < SERV.indexOf("portas.gravar("));
   ok("H7  teto de paginas e orcamento avancam o cursor IGUAL",
     /const janelaConsumida = coletadas\.length \* PAGE_LIMIT;/.test(SERV)
@@ -205,7 +205,7 @@ secao("H. A fiacao: cursor lido antes, escrito depois");
     /coletadas\.length \* PAGE_LIMIT/.test(SERV)
     && !/aptas\.length \* PAGE_LIMIT|normalizadas \* PAGE_LIMIT/.test(SERV));
   ok("H9  fim de lista REINICIA em vez de avancar",
-    /portas\.reiniciarCursor\(cursor, lojaCongelada\)/.test(SERV));
+    /portas\.reiniciarCursor\(\s*cursor, lojaCongelada/.test(SERV));
   ok("H10 o chamador nao escolhe deslocamento em lugar nenhum",
     !/entrada\.deslocamento|entrada\.offset|entrada\.cursor/.test(SERV));
 }
@@ -217,11 +217,18 @@ const git = (...args: string[]) =>
   execFileSync("git", ["-C", RAIZ, ...args], { encoding: "utf8" });
 
 {
-  const MINHA = "supabase/migrations/20261011_agente_perguntas_continuacao.sql";
+  // As DUAS migrations desta frente seguem nao publicadas e nao
+  // aplicadas, entao corrigir o vocabulario delas e legitimo — foi assim
+  // que `orcamento_esgotado` entrou na 20261010 no I4B3. "Alheia" aqui
+  // quer dizer 20261009 ou anterior.
+  const MINHAS = [
+    "supabase/migrations/20261010_agente_acao_execucoes.sql",
+    "supabase/migrations/20261011_agente_perguntas_continuacao.sql",
+  ];
   const mudadas = git("diff", "--name-only", "HEAD", "--", "supabase/migrations/")
     .split("\n").map((l) => l.trim()).filter((l) => l !== "");
   ok("I1  nenhuma migration ALHEIA difere do HEAD",
-    mudadas.every((l) => l === MINHA), mudadas.join(" | "));
+    mudadas.every((l) => MINHAS.includes(l)), mudadas.join(" | "));
 }
 {
   const estado = git("status", "--short", "--", "supabase/migrations/")
@@ -233,7 +240,6 @@ const git = (...args: string[]) =>
 for (const [rotulo, caminho] of [
   ["20261008", "supabase/migrations/20261008_agente_tarefas_polling_perguntas_unica.sql"],
   ["20261009", "supabase/migrations/20261009_agente_perguntas_ml.sql"],
-  ["20261010", "supabase/migrations/20261010_agente_acao_execucoes.sql"],
 ] as const) {
   ok(`I3  ${rotulo} segue byte-identica ao HEAD`,
     git("hash-object", "--", caminho).trim() === git("rev-parse", `HEAD:${caminho}`).trim());

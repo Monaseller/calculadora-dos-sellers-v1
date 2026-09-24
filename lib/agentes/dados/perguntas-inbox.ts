@@ -122,13 +122,17 @@ function lerMetricas(bruto: unknown): MetricasPersistencia | null {
  */
 export async function gravarPerguntasNaInbox(
   autoridade: AutoridadeDaInbox,
-  linhas: readonly LinhaParaInbox[]
+  linhas: readonly LinhaParaInbox[],
+  /** OPCIONAL. O sinal RIGIDO da acao — nunca o do provider. */
+  signal?: AbortSignal
 ): Promise<ResultadoPersistencia> {
-  const { data, error } = await getSupabaseServidor().rpc(RPC_UPSERT_LOTE, {
+  const chamada = getSupabaseServidor().rpc(RPC_UPSERT_LOTE, {
     p_user_id: autoridade.userId,
     p_loja_id: autoridade.lojaId,
     p_perguntas: linhas,
   });
+  const { data, error } = await (signal === undefined
+    ? chamada : chamada.abortSignal(signal));
 
   if (error) {
     // Sem `error.message`: mensagem de driver vaza nome de coluna, de

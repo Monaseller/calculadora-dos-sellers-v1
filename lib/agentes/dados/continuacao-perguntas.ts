@@ -111,19 +111,22 @@ function comoContinuacao(bruta: unknown): Continuacao | null {
 export async function lerContinuacao(entrada: {
   readonly userId: string;
   readonly agenteId: string;
+  /** OPCIONAL. O sinal RIGIDO da acao. */
+  readonly signal?: AbortSignal;
 }): Promise<LeituraContinuacao> {
   if (!textoUtil(entrada.userId) || !textoUtil(entrada.agenteId)) {
     return { estado: "falhou" };
   }
 
-  const { data, error } = await getSupabaseServidor()
+  const base = getSupabaseServidor()
     .from(TABELA_CONTINUACAO)
     .select(COLUNAS)
     .eq("agente_id", entrada.agenteId)
     .eq("user_id", entrada.userId)
     .eq("plataforma", PLATAFORMA)
-    .eq("recurso", RECURSO)
-    .maybeSingle();
+    .eq("recurso", RECURSO);
+  const { data, error } = await (entrada.signal === undefined
+    ? base : base.abortSignal(entrada.signal)).maybeSingle();
 
   if (error) {
     // Sem `error.message`: mensagem de driver vaza nome de coluna, de
@@ -155,6 +158,8 @@ export async function iniciarContinuacao(entrada: {
   readonly agenteId: string;
   readonly lojaId: string;
   readonly proximoDeslocamento: number;
+  /** OPCIONAL. O sinal RIGIDO da acao. */
+  readonly signal?: AbortSignal;
 }): Promise<EscritaContinuacao> {
   if (!textoUtil(entrada.userId) || !textoUtil(entrada.agenteId)) {
     return { estado: "falhou" };
@@ -164,7 +169,7 @@ export async function iniciarContinuacao(entrada: {
     return { estado: "falhou" };
   }
 
-  const { data, error } = await getSupabaseServidor()
+  const insercao = getSupabaseServidor()
     .from(TABELA_CONTINUACAO)
     .insert({
       agente_id: entrada.agenteId,
@@ -174,9 +179,9 @@ export async function iniciarContinuacao(entrada: {
       loja_id: entrada.lojaId,
       proximo_deslocamento: entrada.proximoDeslocamento,
       versao: 1,
-    })
-    .select(COLUNAS)
-    .maybeSingle();
+    });
+  const { data, error } = await (entrada.signal === undefined
+    ? insercao : insercao.abortSignal(entrada.signal)).select(COLUNAS).maybeSingle();
 
   if (error) {
     const codigo = typeof (error as { code?: unknown }).code === "string"
@@ -210,7 +215,8 @@ export async function iniciarContinuacao(entrada: {
  */
 async function trocar(
   esperada: Continuacao,
-  novo: { readonly lojaId: string; readonly proximoDeslocamento: number }
+  novo: { readonly lojaId: string; readonly proximoDeslocamento: number },
+  signal?: AbortSignal
 ): Promise<EscritaContinuacao> {
   if (!Number.isInteger(novo.proximoDeslocamento) || novo.proximoDeslocamento < 0) {
     return { estado: "falhou" };
@@ -241,7 +247,8 @@ async function trocar(
     ? consulta.is("loja_id", null)
     : consulta.eq("loja_id", esperada.lojaId);
 
-  const { data, error } = await consulta.select(COLUNAS).maybeSingle();
+  const { data, error } = await (signal === undefined
+    ? consulta : consulta.abortSignal(signal)).select(COLUNAS).maybeSingle();
 
   if (error) {
     const codigo = typeof (error as { code?: unknown }).code === "string"
@@ -269,9 +276,10 @@ async function trocar(
 export async function avancarContinuacao(
   esperada: Continuacao,
   lojaId: string,
-  proximoDeslocamento: number
+  proximoDeslocamento: number,
+  signal?: AbortSignal
 ): Promise<EscritaContinuacao> {
-  return trocar(esperada, { lojaId, proximoDeslocamento });
+  return trocar(esperada, { lojaId, proximoDeslocamento }, signal);
 }
 
 /**
@@ -283,9 +291,10 @@ export async function avancarContinuacao(
  */
 export async function reiniciarContinuacao(
   esperada: Continuacao,
-  lojaId: string
+  lojaId: string,
+  signal?: AbortSignal
 ): Promise<EscritaContinuacao> {
-  return trocar(esperada, { lojaId, proximoDeslocamento: 0 });
+  return trocar(esperada, { lojaId, proximoDeslocamento: 0 }, signal);
 }
 
 /**
@@ -301,7 +310,8 @@ export async function reiniciarContinuacao(
  */
 export async function reapontarContinuacao(
   esperada: Continuacao,
-  lojaNova: string
+  lojaNova: string,
+  signal?: AbortSignal
 ): Promise<EscritaContinuacao> {
-  return trocar(esperada, { lojaId: lojaNova, proximoDeslocamento: 0 });
+  return trocar(esperada, { lojaId: lojaNova, proximoDeslocamento: 0 }, signal);
 }

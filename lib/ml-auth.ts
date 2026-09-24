@@ -3,6 +3,7 @@ import {
   lerCredencialMLAtivaDoDono,
   gravarCredencialML,
 } from "@/lib/marketplace/credenciais";
+import { tetoEfetivoMs, type LimiteExterno } from "@/lib/controle-tempo";
 
 /**
  * LOJAS-ANON-SELECT: este módulo tinha um cliente ANON próprio, usado só
@@ -183,13 +184,27 @@ export interface OpcoesRefreshML {
   readonly timeoutMs?: number;
   /** Cancelamento vindo de fora — o deadline de quem orquestra. */
   readonly signal?: AbortSignal;
+  /**
+   * O orcamento COMPARTILHADO do provider. Quando presente, o teto desta
+   * chamada passa a ser `min(timeoutMs, restante)` e o sinal dele
+   * tambem cancela. Ausente, tudo se comporta como antes.
+   */
+  readonly limiteExterno?: LimiteExterno;
 }
 
 export async function refreshMLToken(
   refreshToken: string,
   opcoes?: OpcoesRefreshML
 ): Promise<MLTokenResult | null> {
-  const limite = opcoes?.timeoutMs ?? TIMEOUT_REFRESH_MS;
+  // O teto EFETIVO: o menor entre o limite proprio desta chamada e o que
+  // ainda resta do orcamento COMPARTILHADO da acao. Sem o `min`, tres
+  // chamadas de 20 s somariam 60 s dentro de um orcamento de 30 s.
+  const limite = opcoes?.limiteExterno === undefined
+    ? (opcoes?.timeoutMs ?? TIMEOUT_REFRESH_MS)
+    : tetoEfetivoMs(opcoes.timeoutMs ?? TIMEOUT_REFRESH_MS, opcoes.limiteExterno);
+
+  // Orcamento ja esgotado: nao se comeca uma ida a rede que nasce morta.
+  if (limite <= 0) return null;
   const controlador = new AbortController();
   const externo = opcoes?.signal;
 
@@ -205,6 +220,11 @@ export async function refreshMLToken(
   // estado antes de escutar.
   if (externo?.aborted) controlador.abort();
   else externo?.addEventListener("abort", propagar, { once: true });
+
+  // O sinal do orcamento compartilhado, quando existe, cancela igual.
+  const doOrcamento = opcoes?.limiteExterno?.signal;
+  if (doOrcamento?.aborted) controlador.abort();
+  else doOrcamento?.addEventListener("abort", propagar, { once: true });
 
   try {
     const res = await fetch("https://api.mercadolibre.com/oauth/token", {
@@ -235,6 +255,7 @@ export async function refreshMLToken(
   } finally {
     clearTimeout(relogio);
     externo?.removeEventListener("abort", propagar);
+    doOrcamento?.removeEventListener("abort", propagar);
   }
 }
 
@@ -320,9 +341,10 @@ async function renovarComCas(
   lojaId: string,
   userId: string,
   refreshAnterior: string,
-  reler: Releitura
+  reler: Releitura,
+  limiteExterno?: LimiteExterno
 ): Promise<{ accessToken: string } | null> {
-  const resultado = await refreshMLToken(refreshAnterior);
+  const resultado = await refreshMLToken(refreshAnterior, { limiteExterno });
 
   // ── O perdedor REMOTO ─────────────────────────────────────────────
   //
@@ -489,7 +511,16 @@ export async function getMLLojaAtiva(userId: string): Promise<{
  * O critério de SELEÇÃO da loja não mudou: continua sendo "exatamente
  * esta loja", nunca "a mais recente".
  */
-export async function getMLLojaById(lojaId: string, userId: string): Promise<{
+export async function getMLLojaById(
+  lojaId: string,
+  userId: string,
+  /**
+   * OPCIONAL. Quando presente, a renovacao de token que este caminho
+   * pode disparar passa a respeitar o orcamento da acao em vez de
+   * abrir 20 s proprios com o orcamento quase vencido.
+   */
+  limiteExterno?: LimiteExterno
+): Promise<{
   lojaId:      string;
   accessToken: string;
   sellerId:    string;
@@ -510,7 +541,8 @@ export async function getMLLojaById(lojaId: string, userId: string): Promise<{
       loja.id,
       userId,
       loja.refresh_token,
-      async () => (await lerCredencialMLPorLojaEDono(lojaId, userId)).linha
+      async () => (await lerCredencialMLPorLojaEDono(lojaId, userId)).linha,
+      limiteExterno
     );
     if (renovada === null) return null;
     accessToken = renovada.accessToken;

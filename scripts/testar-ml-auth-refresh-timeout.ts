@@ -224,13 +224,24 @@ async function main(): Promise<void> {
       // porque o filtro do grep escondeu `ml-auth.ts:110`. A conclusao
       // nao muda — todos passam UM argumento —, mas a contagem agora sai
       // da fonte a cada execucao, em vez de uma leitura feita uma vez.
-      ok("T6b todos os chamadores internos seguem passando UM argumento",
-        chamadas.length === 4 && chamadas.every((arg) => !arg.includes(",")),
+      // Tres seguem com UM argumento. O quarto — `renovarComCas` —
+      // passou a repassar o orcamento da acao no I4B3, e e justamente o
+      // caminho que `getMLLojaById` alcanca a partir da ingestao. Os
+      // outros tres provam que nada virou obrigatorio.
+      const comOrcamento = chamadas.filter((arg) => arg.includes("limiteExterno"));
+      ok("T6b tres chamadores com UM argumento; so o da ingestao repassa",
+        chamadas.length === 4 && comOrcamento.length === 1
+        && chamadas.filter((arg) => !arg.includes(",")).length === 3,
         `${chamadas.length}: ${chamadas.join(" | ")}`);
     }
     ok("T6c o padrao e limitado, nao `undefined`",
-      /const limite = opcoes\?\.timeoutMs \?\? TIMEOUT_REFRESH_MS;/.test(CODIGO)
+      /opcoes\?\.timeoutMs \?\? TIMEOUT_REFRESH_MS/.test(CODIGO)
       && TIMEOUT_REFRESH_MS === 20_000);
+    ok("T6f com orcamento compartilhado, o teto e o MENOR dos dois",
+      /tetoEfetivoMs\(opcoes\.timeoutMs \?\? TIMEOUT_REFRESH_MS, opcoes\.limiteExterno\)/
+        .test(CODIGO));
+    ok("T6g orcamento ja esgotado nao inicia ida a rede",
+      /if \(limite <= 0\) return null;/.test(CODIGO));
     ok("T6d o sinal chega ao `fetch`, e nao a um `Promise.race`",
       /signal: controlador\.signal,/.test(CODIGO)
       && !/Promise\.race/.test(CODIGO));

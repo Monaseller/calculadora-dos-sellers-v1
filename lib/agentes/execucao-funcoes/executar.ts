@@ -50,6 +50,7 @@
  */
 import "server-only";
 import { randomUUID } from "node:crypto";
+import type { ControleDeTempo } from "@/lib/controle-tempo";
 
 import { lerAgenteDoDono, lerTarefaDoDono } from "@/lib/agentes/capability";
 import { resolverConexoesDoAgente } from "@/lib/agentes/conexoes/agregador";
@@ -124,6 +125,20 @@ const FORMA_FUNCAO_ID = /^[a-z0-9]+(\.[a-z0-9_]+)+$/;
 export interface EntradaExecucaoFuncao {
   userId: string;
   agenteId: string;
+  /**
+   * O controle de tempo da ACAO — OPCIONAL e INTERNO. I4B3.
+   *
+   * Quem nao o passa se comporta exatamente como antes: sem limite
+   * compartilhado, cada chamada externa usa o teto proprio dela e as
+   * idas ao banco nao sao canceladas por ninguem.
+   *
+   * Ele NAO vem da rota, do n8n nem dos argumentos — e criado por quem
+   * orquestra a acao. Os dois relogios servem a coisas diferentes: o do
+   * provider corta o marketplace, o rigido corta a acao inteira. Cortar
+   * o marketplace NAO pode cancelar a auditoria que explica o corte, e e
+   * por isso que sao dois.
+   */
+  controleTempo?: ControleDeTempo;
   tarefaId?: string | null;
   funcaoId: unknown;
   argumentos: unknown;
@@ -467,16 +482,27 @@ type LeituraDeArgumentos =
  */
 function contextoDaFuncao(
   snapshot: SnapshotChamada,
-  definicao: DefinicaoFuncao
+  definicao: DefinicaoFuncao,
+  controle?: ControleDeTempo
 ): ContextoFuncao | null {
+  // SO o limite do provider atravessa. O rigido fica desta camada: uma
+  // Funcao nao tem o que fazer com o relogio da persistencia, e
+  // entrega-lo abriria a porta para um executor cancelar a auditoria
+  // que explica o proprio cancelamento.
+  const limiteDoProvider = controle?.limiteDoProvider;
+
   if (definicao.conexaoNecessaria === null) {
-    return { userId: snapshot.userId, conexao: null };
+    return { userId: snapshot.userId, conexao: null, limiteDoProvider };
   }
 
   const { plataforma, recurso, lojaId } = snapshot;
   if (!plataforma || !recurso || !lojaId) return null;
 
-  return { userId: snapshot.userId, conexao: { plataforma, recurso, lojaId } };
+  return {
+    userId: snapshot.userId,
+    conexao: { plataforma, recurso, lojaId },
+    limiteDoProvider,
+  };
 }
 
 function validarArgumentos(definicao: DefinicaoFuncao, argumentos: unknown): LeituraDeArgumentos {
@@ -557,7 +583,8 @@ async function recusaDeCriacao(
 async function executarComAberturaFeita(
   snapshot: SnapshotChamada,
   definicao: DefinicaoFuncao,
-  argumentos: unknown
+  argumentos: unknown,
+  controle?: ControleDeTempo
 ): Promise<ResultadoExecucaoFuncao> {
   // ── Execucao ──────────────────────────────────────────────────────
   //
@@ -569,7 +596,7 @@ async function executarComAberturaFeita(
   // por isso que a montagem mora nesta funcao e nao em cada chamador.
   // Duas construcoes divergiriam no primeiro conserto feito so de um
   // lado, e a que divergisse seria a que decide contra QUAL conta agir.
-  const contexto = contextoDaFuncao(snapshot, definicao);
+  const contexto = contextoDaFuncao(snapshot, definicao, controle);
   if (contexto === null) {
     // Requisito de conexao sem binding no snapshot e defeito NOSSO, nao
     // pedido malformado: o guard ja autorizou, entao o vinculo tinha de
@@ -817,15 +844,22 @@ export async function executarFuncao(
   // O executor continua sem conhecer endpoint, token ou HTTP — ele chama
   // um dono de estado e recebe fatos.
   if (requisito !== null && nivelNoMomento === "automatico" && lojaId !== null) {
-    const elevados = await confirmarCoberturaDosFatos({
-      userId,
-      requisito,
-      lojaId,
-      // Do CATALOGO. O `acesso` amarra o HARD BOUND de leitura la na
-      // ponta: escrita nunca confirma, por mais valido que esteja o resto.
-      acesso: definicao.acesso,
-      conexoes,
-    });
+    const elevados = await confirmarCoberturaDosFatos(
+      {
+        userId,
+        requisito,
+        lojaId,
+        // Do CATALOGO. O `acesso` amarra o HARD BOUND de leitura la na
+        // ponta: escrita nunca confirma, por mais valido que esteja o resto.
+        acesso: definicao.acesso,
+        conexoes,
+      },
+      undefined,
+      // A cobertura divide o MESMO orcamento do provider com a busca de
+      // perguntas. Sem isto ela abriria 20 s proprios e a pagina
+      // seguinte comecaria ja fora do prazo.
+      entrada.controleTempo?.limiteDoProvider
+    );
     conexoes = elevados.conexoes;
   }
 
@@ -949,7 +983,7 @@ export async function executarFuncao(
   // Daqui para a frente a chamada JA esta aberta, e o que acontece nao
   // depende de como ela foi aberta. Uma implementacao so — a mesma que
   // fecha uma abertura vinda da RPC de aprovacao.
-  return executarComAberturaFeita(snapshot, definicao, argumentos);
+  return executarComAberturaFeita(snapshot, definicao, argumentos, entrada.controleTempo);
 }
 
 // ─── A retomada ───────────────────────────────────────────────────────

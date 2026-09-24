@@ -231,7 +231,16 @@ create table public.agente_acao_execucoes (
   --   persistencia_recusada    a RPC recusou o LOTE (22023 / 25000)
   --   persistencia_falhou      a chamada da RPC nao concluiu
   --   auditoria_funcao_falhou  a Funcao rodou e o ledger dela nao gravou
+  --   orcamento_esgotado       o RELOGIO da propria acao cortou antes de
+  --                            a primeira pagina comecar
   --   erro_interno             defeito nosso, fail-closed
+  --
+  -- `orcamento_esgotado` NAO e `provedor_falhou`: culpar o Mercado Livre
+  -- por um corte que o CDS impos mandaria investigar o lugar errado. E
+  -- tambem nao e `backlog_truncado`, porque nenhuma pagina chegou a
+  -- provar que havia backlog. Quando o corte acontece DEPOIS de uma
+  -- pagina durável, ai sim o desfecho e `parcial/backlog_truncado`, e o
+  -- escalar `orcamento_esgotado` no resumo diz por que.
   --
   -- `persistencia_negada` e separada das outras duas porque pede uma
   -- acao diferente do dono: religar a conta. Colapsa-la em
@@ -314,6 +323,7 @@ create table public.agente_acao_execucoes (
                                  'persistencia_recusada',
                                  'persistencia_falhou',
                                  'auditoria_funcao_falhou',
+                                 'orcamento_esgotado',
                                  'erro_interno')
       end
     ),

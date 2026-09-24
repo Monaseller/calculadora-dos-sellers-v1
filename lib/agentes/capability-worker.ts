@@ -388,15 +388,18 @@ export interface ResultadoAgenteInterno {
  * distinguir seria um oraculo de existencia de recurso alheio.
  */
 export async function lerAgenteParaAcaoInterna(
-  agenteId: string
+  agenteId: string,
+  /** OPCIONAL. O sinal RIGIDO da acao. Ausente, nada muda. */
+  signal?: AbortSignal
 ): Promise<ResultadoAgenteInterno> {
   if (!agenteId) return { agente: null, erro: "agente_id_ausente" };
 
-  const { data, error } = await getSupabaseServidor()
+  const base = getSupabaseServidor()
     .from("agentes")
     .select(COLUNAS_AGENTE_ACAO_INTERNA)
-    .eq("id", agenteId)
-    .maybeSingle();
+    .eq("id", agenteId);
+  const { data, error } = await (signal === undefined
+    ? base : base.abortSignal(signal)).maybeSingle();
 
   if (error) {
     // Sem `error.message`: mensagem de driver vaza nome de coluna, de

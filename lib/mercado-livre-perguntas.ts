@@ -38,6 +38,7 @@
  * `GET /users/$SELLER_ID/applications` continuam fora deste slice.
  */
 import "server-only";
+import type { LimiteExterno } from "@/lib/controle-tempo";
 import { getMLLojaById } from "@/lib/ml-auth";
 
 const BASE_ML = "https://api.mercadolibre.com";
@@ -93,7 +94,9 @@ export interface EntradaPerguntasML {
 export interface PortasPerguntasML {
   readonly resolverCredencial?: (
     lojaId: string,
-    userId: string
+    userId: string,
+    /** O orcamento compartilhado, quando quem chama o tem. */
+    limiteExterno?: LimiteExterno
   ) => Promise<{ accessToken: string } | null>;
   readonly buscar?: typeof fetch;
 }
@@ -139,7 +142,9 @@ function classificarStatus(status: number): ErroPerguntasML {
  */
 export async function buscarPerguntasRecebidasML(
   entrada: EntradaPerguntasML,
-  portas?: PortasPerguntasML
+  portas?: PortasPerguntasML,
+  /** OPCIONAL. O orcamento COMPARTILHADO do provider. */
+  limiteExterno?: LimiteExterno
 ): Promise<ResultadoBrutoPerguntasML> {
   const { userId, lojaId, status, limite, deslocamento } = entrada;
 
@@ -150,7 +155,9 @@ export async function buscarPerguntasRecebidasML(
 
   let credencial: { accessToken: string } | null;
   try {
-    credencial = await resolver(lojaId, userId);
+    // O orcamento viaja junto: uma renovacao de token disparada aqui
+    // nao pode abrir 20 s proprios com a acao quase vencida.
+    credencial = await resolver(lojaId, userId, limiteExterno);
   } catch {
     // Falha ao RESOLVER credencial e infraestrutura nossa, nao recusa do
     // provider. Sem `error.message`: a mensagem do driver vaza coluna e
@@ -166,8 +173,21 @@ export async function buscarPerguntasRecebidasML(
   url.searchParams.set("offset", String(deslocamento));
   if (status !== null) url.searchParams.set("status", status);
 
+  // O teto EFETIVO: o menor entre o limite proprio e o que resta do
+  // orcamento compartilhado. Esgotado, nao se comeca a chamada — e o
+  // codigo e `indisponivel`, o mesmo de qualquer "nao consegui
+  // perguntar".
+  const teto = limiteExterno === undefined
+    ? TIMEOUT_MS
+    : Math.min(TIMEOUT_MS, limiteExterno.restanteMs());
+  if (teto <= 0) return falha("indisponivel");
+
   const controlador = new AbortController();
-  const relogio = setTimeout(() => controlador.abort(), TIMEOUT_MS);
+  const relogio = setTimeout(() => controlador.abort(), teto);
+  const propagar = () => controlador.abort();
+  const doOrcamento = limiteExterno?.signal;
+  if (doOrcamento?.aborted) controlador.abort();
+  else doOrcamento?.addEventListener("abort", propagar, { once: true });
 
   let resposta: Response;
   try {
@@ -181,6 +201,7 @@ export async function buscarPerguntasRecebidasML(
     return falha("indisponivel");
   } finally {
     clearTimeout(relogio);
+    doOrcamento?.removeEventListener("abort", propagar);
   }
 
   if (!resposta.ok) return falha(classificarStatus(resposta.status));

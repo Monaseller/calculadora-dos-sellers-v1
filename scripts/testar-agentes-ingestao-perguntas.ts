@@ -307,8 +307,11 @@ async function main(): Promise<void> {
     ok("A4  o servico nao repassa `sellerId` nem credencial",
       !("sellerId" in chamada) && !("credencial" in chamada) && !("token" in chamada));
     ok("A5  nenhum campo alem do contrato do executor viaja",
+      // `controleTempo` entrou no I4B3. Ele e INTERNO — criado pelo
+      // servico, nunca recebido — e por isso pertence a este contrato,
+      // ao contrario de `lojaId` ou `userId`, que seguem de fora.
       Object.keys(chamada).sort().join(",")
-        === "agenteId,argumentos,funcaoId,idempotencyKey,userId",
+        === "agenteId,argumentos,controleTempo,funcaoId,idempotencyKey,userId",
       Object.keys(chamada).sort().join(","));
   }
 
@@ -1291,8 +1294,23 @@ async function main(): Promise<void> {
       /function agoraMonotonico\(\): number \{\s*return performance\.now\(\);/.test(codigo)
       && !/Date\.now\(\)/.test(codigo));
     ok("D9c a regra vale da SEGUNDA pagina em diante",
-      /if \(indice > 0\) \{[\s\S]{0,200}?ORCAMENTO_EXTERNO_MS - \(agoraMonotonico\(\) - ctx\.inicio\)/
+      /const restante = restanteDoProviderMs\(controle\);\s*if \(indice > 0\) \{/
         .test(codigo));
+    ok("D9d o restante vem do orcamento COMPARTILHADO, nao de aritmetica local",
+      /restanteDoProviderMs\(controle\)/.test(codigo)
+      && !/ORCAMENTO_EXTERNO_MS - \(agoraMonotonico/.test(codigo));
+    ok("D9e a primeira pagina tambem e barrada quando o orcamento ja acabou",
+      /\} else if \(restante <= 0\) \{/.test(codigo)
+      && /codigo: "orcamento_esgotado_antes_do_provider"/.test(codigo));
+    ok("D9f os dois relogios sao criados pelo SERVICO, nunca recebidos",
+      /criarControleDeTempo\(\{/.test(codigo)
+      && /orcamentoRigidoMs: ORCAMENTO_TOTAL_MS/.test(codigo)
+      && /orcamentoDoProviderMs: ORCAMENTO_EXTERNO_MS/.test(codigo));
+    ok("D9g os timers sao encerrados num `finally`",
+      /\} finally \{\s*encerrar\(\);/.test(codigo));
+    ok("D9h a persistencia usa o sinal RIGIDO, nunca o do provider",
+      /controle\.sinalRigido/.test(codigo)
+      && !/limiteDoProvider\.signal/.test(codigo));
   }
 
   console.log(`\n── placar ${"─".repeat(54)}`);

@@ -145,7 +145,7 @@ const MAPA: ReadonlyArray<readonly [string, readonly string[]]> = [
     "provedor_falhou", "contrato_violado",
     "autoridade_divergente", "autoridade_indisponivel",
     "persistencia_negada", "persistencia_recusada", "persistencia_falhou",
-    "auditoria_funcao_falhou", "erro_interno",
+    "auditoria_funcao_falhou", "orcamento_esgotado", "erro_interno",
   ]],
 ];
 
@@ -475,6 +475,8 @@ for (const [variante, destino] of MATRIZ) {
     persistencia_recusada: "persistencia_recusada com 22023 ou 25000",
     persistencia_falhou: "erro: falha_rpc",
     auditoria_funcao_falhou: "erro: falha_auditoria",
+    orcamento_esgotado:
+      "o relogio da ACAO cortou antes de a primeira pagina comecar",
     erro_interno: "erro: erro_interno, e o invariante quebrado de ja_processado",
   };
   const todos = [...RAMOS.values()].flat();

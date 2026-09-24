@@ -73,6 +73,11 @@ import { LIMITE_MAXIMO_PERGUNTAS } from "@/lib/agentes/dados/perguntas";
 import { executarFuncao } from "@/lib/agentes/execucao-funcoes/executar";
 import { FUNCAO_ID as FUNCAO_PERGUNTAS_ML } from "@/lib/agentes/handlers/consultar-perguntas-ml-contrato";
 import { randomUUID } from "node:crypto";
+import {
+  criarControleDeTempo,
+  restanteDoProviderMs,
+  type ControleDeTempo,
+} from "@/lib/controle-tempo";
 
 /**
  * O nome publico da acao — REEXPORTADO de `auditoria-acao.ts`.
@@ -173,7 +178,9 @@ export type OrigemDoErro =
   /** O cliente da inbox falhou ou devolveu forma estranha. */
   | "persistencia"
   /** O cursor duravel nao pode ser lido, e sem ele nao se sabe onde comecar. */
-  | "continuacao";
+  | "continuacao"
+  /** O relogio da propria acao cortou. NAO e falha do marketplace. */
+  | "orcamento";
 
 /**
  * Tudo que pode acontecer DEPOIS que a acao foi aberta.
@@ -414,6 +421,17 @@ export const CUSTO_MINIMO_DE_PAGINA_MS = 20_000;
 function agoraMonotonico(): number {
   return performance.now();
 }
+
+/**
+ * O que a acao devolve quando o orcamento do provider acabou ANTES da
+ * primeira pagina.
+ *
+ * NAO e `backlog_truncado`: nenhuma pagina provou backlog. E tambem NAO
+ * e `provedor_falhou` — culpar o Mercado Livre por um corte que o CDS
+ * impos seria mandar investigar o lugar errado.
+ */
+const DESFECHO_ORCAMENTO: DesfechoDaAcao =
+  Object.freeze({ status: "erro", codigo: "orcamento_esgotado" } as const);
 
 /**
  * O deslocamento da pagina `n`. FIXO — nunca derivado do que sobrou.
@@ -752,6 +770,8 @@ interface ContextoDaAcao {
   readonly requestId: string;
   /** Monotonico, de `performance.now()`. Nunca `Date.now()`. */
   readonly inicio: number;
+  /** Os dois relogios. O `fechar` usa o RIGIDO, nunca o do provider. */
+  readonly controle: ControleDeTempo;
 }
 
 /**
@@ -773,8 +793,34 @@ export async function sincronizarPerguntas(
   entrada: EntradaSincronizarPerguntas,
   portas: PortasSincronizacao = PORTAS_REAIS
 ): Promise<ResultadoSincronizacao> {
+  // ── 0. Os DOIS relogios, e eles cobrem a acao INTEIRA ─────────────
+  //
+  // Criados aqui, no comeco: o limite rigido precisa alcancar tambem as
+  // leituras que vem ANTES do provider — agente, abertura, cursor —,
+  // senao um banco parado seguraria a acao por tempo indeterminado e o
+  // orcamento seria decorativo.
+  //
+  // `encerrar` no `finally` nao e higiene opcional: sem ele os dois
+  // `setTimeout` mantêm o processo vivo ate o fim do orcamento, mesmo
+  // quando a acao terminou em 200 ms.
+  const { controle, encerrar } = criarControleDeTempo({
+    orcamentoRigidoMs: ORCAMENTO_TOTAL_MS,
+    orcamentoDoProviderMs: ORCAMENTO_EXTERNO_MS,
+  });
+  try {
+    return await executarSincronizacao(entrada, portas, controle);
+  } finally {
+    encerrar();
+  }
+}
+
+async function executarSincronizacao(
+  entrada: EntradaSincronizarPerguntas,
+  portas: PortasSincronizacao,
+  controle: ControleDeTempo
+): Promise<ResultadoSincronizacao> {
   // ── 1. O dono, e ele vem do BANCO ─────────────────────────────────
-  const { agente, erro } = await portas.lerAgente(entrada.agenteId);
+  const { agente, erro } = await portas.lerAgente(entrada.agenteId, controle.sinalRigido);
   if (erro !== null) return { tipo: "agente_indisponivel", motivo: "falha_leitura" };
   // Inexistente e alheio dao a MESMA resposta: distingui-las seria um
   // oraculo de existencia de recurso de terceiro.
@@ -804,6 +850,7 @@ export async function sincronizarPerguntas(
     acaoId: ACAO_SINCRONIZAR_PERGUNTAS,
     requestId,
     idempotencyKey: chave,
+    signal: controle.sinalRigido,
   });
 
   if (abertura.estado === "duplicada") {
@@ -822,6 +869,7 @@ export async function sincronizarPerguntas(
     userId: agente.userId,
     agenteId: agente.agenteId,
     requestId,
+    controle,
     // O relogio comeca depois da ABERTURA: o orcamento e sobre o
     // trabalho que a acao vai fazer, e a abertura ja aconteceu.
     inicio: agoraMonotonico(),
@@ -837,6 +885,7 @@ export async function sincronizarPerguntas(
   const leituraCursor = await portas.lerCursor({
     userId: agente.userId,
     agenteId: agente.agenteId,
+    signal: controle.sinalRigido,
   });
   if (leituraCursor.estado === "falhou") {
     // Fail-closed ANTES do provider. Sem cursor legivel nao se sabe onde
@@ -874,12 +923,36 @@ export async function sincronizarPerguntas(
     // contar. O que ela garante e que a acao nunca INICIA trabalho que
     // nao cabe no que sobrou — e que a reserva de finalizacao chega
     // intacta ao fim.
+    // O restante vem do MESMO relogio que os adapters consultam: um so
+    // orcamento absoluto para a acao inteira. Nenhuma pagina recebe
+    // janela nova de 30 s.
+    const restante = restanteDoProviderMs(controle);
     if (indice > 0) {
-      const restante = ORCAMENTO_EXTERNO_MS - (agoraMonotonico() - ctx.inicio);
       if (restante < CUSTO_MINIMO_DE_PAGINA_MS) {
         orcamentoEsgotado = true;
         break;
       }
+    } else if (restante <= 0) {
+      // O orcamento do provider acabou ANTES da primeira pagina — o
+      // trabalho anterior o consumiu inteiro. Nao se liga para o
+      // Mercado Livre so para receber um timeout que nos mesmos
+      // impusemos, e o desfecho diz isso com o nome certo.
+      return fechar(
+        portas,
+        ctx,
+        {
+          tipo: "erro",
+          requestId,
+          codigo: "orcamento_esgotado_antes_do_provider",
+          origem: "orcamento",
+        },
+        DESFECHO_ORCAMENTO,
+        {
+          lojaId: null,
+          mensagem: "o orcamento do provider acabou antes da primeira pagina",
+          resumo: { deslocamento_inicial: deslocamentoInicial, orcamento_esgotado: true },
+        }
+      );
     }
 
     const resultado = await portas.executar({
@@ -898,6 +971,9 @@ export async function sincronizarPerguntas(
       // Derivada da chave da TENTATIVA. O prefixo intacto e o que liga a
       // acao as paginas dela em `agente_funcao_chamadas`.
       idempotencyKey: chaveDaPagina(chave, indice),
+      // Os dois relogios atravessam. Dentro do executor so o do provider
+      // segue para a Funcao; o rigido fica com a auditoria.
+      controleTempo: controle,
     });
 
     const pagina = lerPagina(resultado, requestId);
@@ -922,7 +998,8 @@ export async function sincronizarPerguntas(
     // B que nunca comecou. O cursor e reapontado para o zero de B, e a
     // proxima operacao comeca limpa.
     if (cursor !== null && cursor.lojaId !== null && pagina.lojaId !== cursor.lojaId) {
-      const troca = await portas.reapontarCursor(cursor, pagina.lojaId);
+      const troca = await portas.reapontarCursor(
+        cursor, pagina.lojaId, ctx.controle.sinalRigido);
       return fechar(
         portas,
         ctx,
@@ -1032,7 +1109,10 @@ export async function sincronizarPerguntas(
   // TypeScript criaria uma segunda verdade para manter.
   const gravacao = await portas.gravar(
     { userId: agente.userId, lojaId: lojaCongelada },
-    aptas.map(comoLinha)
+    aptas.map(comoLinha),
+    // RIGIDO, nunca o do provider: o corte do marketplace nao pode
+    // cancelar a gravacao do que ele ja entregou.
+    controle.sinalRigido
   );
 
   if (gravacao.tipo !== "gravado") {
@@ -1100,18 +1180,21 @@ export async function sincronizarPerguntas(
       agenteId: agente.agenteId,
       lojaId: lojaCongelada,
       proximoDeslocamento: haMais ? deslocamentoInicial + janelaConsumida : 0,
+      signal: controle.sinalRigido,
     });
     cursorAtualizado = criado.estado === "aplicada";
   } else if (haMais) {
     const avanco = await portas.avancarCursor(
-      cursor, lojaCongelada, deslocamentoInicial + janelaConsumida);
+      cursor, lojaCongelada, deslocamentoInicial + janelaConsumida,
+      controle.sinalRigido);
     cursorAtualizado = avanco.estado === "aplicada";
   } else {
     // Fim de lista: a travessia terminou e a proxima comeca do zero, na
     // MESMA conta. E este reinicio periodico que limita o estrago da
     // mutacao de offset do provider — o que foi pulado numa travessia
     // reaparece na seguinte.
-    const reinicio = await portas.reiniciarCursor(cursor, lojaCongelada);
+    const reinicio = await portas.reiniciarCursor(
+      cursor, lojaCongelada, controle.sinalRigido);
     cursorAtualizado = reinicio.estado === "aplicada";
   }
 
@@ -1283,6 +1366,9 @@ async function fechar(
     // desfecho inteiro se perderia por causa de um numero.
     latenciaMs: Math.max(0, Math.round(agoraMonotonico() - ctx.inicio)),
     resumo: extras.resumo,
+    // RIGIDO. Se o corte do provider cancelasse o desfecho, a acao
+    // terminaria sem rastro exatamente no caso em que mais precisa dele.
+    signal: ctx.controle.sinalRigido,
     ...desfecho,
   });
 

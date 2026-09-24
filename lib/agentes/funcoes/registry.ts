@@ -41,6 +41,7 @@
  * Uma UI que precise saber se uma Funcao existe pedira isso ao servidor
  * — nao importando este modulo.
  */
+import type { LimiteExterno } from "@/lib/controle-tempo";
 import "server-only";
 import {
   criarLeiturasDeVendas,
@@ -118,6 +119,20 @@ export interface ConexaoDoContexto {
 export interface ContextoFuncao {
   readonly userId: string;
   readonly conexao: ConexaoDoContexto | null;
+  /**
+   * O orcamento COMPARTILHADO do provider — OPCIONAL e INTERNO.
+   *
+   * Existe para que uma Funcao que fala com o marketplace respeite o
+   * relogio de quem a chamou, em vez de abrir um limite proprio. Quem
+   * nao o recebe se comporta exatamente como antes, e nenhuma Funcao e
+   * obrigada a entende-lo: `vendas.consultar` o ignora.
+   *
+   * NAO vem dos argumentos, NAO vem da rota, NAO vem do n8n, e NAO e
+   * serializado: um `AbortSignal` nao vira JSON e um instante de relogio
+   * deste processo nao significa nada em outro. Por isso ele tambem
+   * nunca entra em auditoria.
+   */
+  readonly limiteDoProvider?: LimiteExterno;
 }
 
 /**

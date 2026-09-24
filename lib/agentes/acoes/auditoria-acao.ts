@@ -73,7 +73,7 @@ export const CODIGOS_POR_STATUS = {
     "provedor_falhou", "contrato_violado",
     "autoridade_divergente", "autoridade_indisponivel",
     "persistencia_negada", "persistencia_recusada", "persistencia_falhou",
-    "auditoria_funcao_falhou", "erro_interno",
+    "auditoria_funcao_falhou", "orcamento_esgotado", "erro_interno",
   ],
 } as const satisfies Readonly<Record<string, readonly string[]>>;
 
@@ -208,8 +208,14 @@ function mensagemOuNull(bruta: string | null | undefined): string | null {
 /** O UNICO ponto que fala com o banco. Privado: a API exportada e por
  *  FORMA de linha, para que uma combinacao invalida seja dificil de
  *  escrever antes mesmo de o CHECK reprova-la. */
-async function inserir(linha: Record<string, unknown>): Promise<ResultadoRegistroAcao> {
-  const r = await getSupabaseServidor().from(TABELA_ACOES).insert(linha);
+async function inserir(
+  linha: Record<string, unknown>,
+  /** O sinal RIGIDO da acao. Ausente, a chamada nao e cancelada por
+   *  ninguem — que e o comportamento de todo chamador anterior. */
+  signal?: AbortSignal
+): Promise<ResultadoRegistroAcao> {
+  const consulta = getSupabaseServidor().from(TABELA_ACOES).insert(linha);
+  const r = await (signal === undefined ? consulta : consulta.abortSignal(signal));
 
   if (r.error) {
     const codigo = codigoDe(r.error);
@@ -244,6 +250,9 @@ export interface EntradaAberturaAcao {
   readonly requestId: string;
   /** A chave da TENTATIVA. OBRIGATORIA — ver o docblock abaixo. */
   readonly idempotencyKey: string;
+  /** OPCIONAL. O sinal RIGIDO da acao — nunca o do provider: cancelar o
+   *  marketplace nao pode cancelar o registro que o explica. */
+  readonly signal?: AbortSignal;
 }
 
 /**
@@ -289,7 +298,7 @@ export async function registrarAberturaAcao(
     idempotency_key: entrada.idempotencyKey,
     entrada_resumo: {},
     latencia_ms: null,
-  });
+  }, entrada.signal);
 }
 
 export type EntradaDesfechoAcao = {
@@ -303,6 +312,8 @@ export type EntradaDesfechoAcao = {
   readonly mensagem?: string | null;
   readonly latenciaMs?: number | null;
   readonly resumo?: ResumoDaAcao;
+  /** OPCIONAL. O sinal RIGIDO da acao. */
+  readonly signal?: AbortSignal;
 } & DesfechoDaAcao;
 
 /**
@@ -353,5 +364,5 @@ export async function registrarDesfechoAcao(
     idempotency_key: null,
     entrada_resumo: resumoSeguro(entrada.resumo),
     latencia_ms: latencia ?? null,
-  });
+  }, entrada.signal);
 }
