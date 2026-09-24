@@ -133,7 +133,9 @@ secao("E. Vocabulario FECHADO, e capaz de dizer a verdade");
 const MAPA: ReadonlyArray<readonly [string, readonly string[]]> = [
   ["executando", []],
   ["sucesso", []],
-  ["parcial", ["backlog_truncado", "descartes_na_varredura"]],
+  ["parcial", [
+    "backlog_truncado", "descartes_na_varredura", "auditoria_funcao_incompleta",
+  ]],
   ["aguardando_aprovacao", ["aprovacao_necessaria"]],
   ["negado", [
     "funcao_inexistente", "permissao_ausente",
@@ -380,9 +382,16 @@ secao("K. Todo desfecho que o servico produz cabe no vocabulario");
  */
 function variantesDoServico(): string[] {
   const SRC = ler("lib/agentes/ingestao/sincronizar-perguntas.ts");
-  const abre = SRC.indexOf("export type ResultadoSincronizacao =");
-  const fim = SRC.indexOf('readonly tipo: "indisponivel"', abre);
-  const corpo = abre < 0 || fim < 0 ? "" : SRC.slice(abre, SRC.indexOf("\n\n", fim));
+  // Duas declaracoes desde o I3B: o que acontece ANTES da abertura nao
+  // produz desfecho, e por isso vive num union proprio.
+  const bloco = (marca: string): string => {
+    const abre = SRC.indexOf(marca);
+    if (abre < 0) return "";
+    const fim = SRC.indexOf("\n\n", abre);
+    return SRC.slice(abre, fim < 0 ? undefined : fim);
+  };
+  const corpo = bloco("export type ResultadoPosAbertura =")
+    + bloco("export type ResultadoSincronizacao =");
   return [...new Set([...corpo.matchAll(/readonly tipo: "([a-z_]+)"/g)].map((m) => m[1]))];
 }
 
@@ -394,22 +403,26 @@ function variantesDoServico(): string[] {
  * acontecem ANTES de a abertura existir.
  */
 const MATRIZ: ReadonlyArray<readonly [string, readonly [string, string | null] | null]> = [
+  // ── Depois da abertura: cada uma fecha a acao ──────────────────────
   ["sincronizado", ["sucesso", null]],
   ["backlog_truncado", ["parcial", "backlog_truncado"]],
   ["autoridade_divergente", ["erro", "autoridade_divergente"]],
   ["persistencia_recusada", ["erro", "persistencia_recusada"]],
-  ["agente_indisponivel", null],
   ["negado", ["negado", "permissao_ausente"]],
   ["aguardando_aprovacao", ["aguardando_aprovacao", "aprovacao_necessaria"]],
   ["erro", ["erro", "provedor_falhou"]],
-  ["ja_processado", ["erro", "erro_interno"]],
   ["indisponivel", ["erro", "autoridade_indisponivel"]],
+  // ── Antes da abertura: nao ha acao aberta, logo nao ha desfecho ────
+  ["agente_indisponivel", null],
+  ["chave_ausente", null],
+  ["ja_processado", null],
+  ["abertura_falhou", null],
 ];
 
 {
   const doServico = variantesDoServico();
   const naMatriz = MATRIZ.map(([v]) => v);
-  ok("K1  o union do servico foi lido da fonte", doServico.length === 10, doServico.join(","));
+  ok("K1  o union do servico foi lido da fonte", doServico.length === 12, doServico.join(","));
   ok("K2  toda variante do servico esta na matriz",
     doServico.every((v) => naMatriz.includes(v)),
     doServico.filter((v) => !naMatriz.includes(v)).join(","));
@@ -420,8 +433,11 @@ const MATRIZ: ReadonlyArray<readonly [string, readonly [string, string | null] |
 
 for (const [variante, destino] of MATRIZ) {
   if (destino === null) {
-    ok(`K4  \`${variante}\` nao produz desfecho — e so ela tem esse direito`,
-      variante === "agente_indisponivel");
+    // As QUATRO que acontecem antes de a acao existir. Nenhuma outra
+    // pode entrar nesta lista: uma acao ja aberta SEMPRE fecha.
+    ok(`K4  \`${variante}\` acontece antes da abertura, logo sem desfecho`,
+      ["agente_indisponivel", "chave_ausente", "ja_processado", "abertura_falhou"]
+        .includes(variante));
     continue;
   }
   const [status, codigo] = destino;
@@ -439,6 +455,8 @@ for (const [variante, destino] of MATRIZ) {
   const ORIGEM: Readonly<Record<string, string>> = {
     backlog_truncado: "backlog_truncado",
     descartes_na_varredura: "sincronizado com descartes ou status inesperados",
+    auditoria_funcao_incompleta:
+      "sincronizado cuja pagina devolveu auditoria: incompleta",
     aprovacao_necessaria: "aguardando_aprovacao",
     funcao_inexistente: "negado",
     permissao_ausente: "negado",
@@ -487,6 +505,136 @@ for (const [variante, destino] of MATRIZ) {
   ok("K11 o guard pausa em `aprovacao` sem olhar acesso nem id",
     /if \(permissao\.nivel === "aprovacao"\) \{/.test(GUARD));
 }
+
+// --- M. O helper de auditoria de acao ---------------------------------
+secao("M. `auditoria-acao.ts` — a unica porta de escrita");
+
+const HELPER = ler("lib/agentes/acoes/auditoria-acao.ts");
+const HELPER_CODIGO = HELPER
+  .replace(/\/\*[\s\S]*?\*\//g, "")
+  .replace(/^[ \t]*\/\/.*$/gm, "");
+
+ok("M1  o modulo e `server-only`", /^import "server-only";$/m.test(HELPER_CODIGO));
+ok("M2  escreve SOMENTE por `insert` — nunca update, delete ou upsert",
+  /\.insert\(/.test(HELPER_CODIGO)
+  && !/\.update\(|\.delete\(|\.upsert\(|\.rpc\(/.test(HELPER_CODIGO));
+ok("M3  ha UM unico ponto que fala com o banco",
+  (HELPER_CODIGO.match(/getSupabaseServidor\(\)/g) ?? []).length === 1);
+ok("M4  `acao_id` vem de lista fechada, nunca de parametro livre",
+  /const ACOES_AUDITAVEIS = \[ACAO_SINCRONIZAR_PERGUNTAS\] as const;/.test(HELPER_CODIGO)
+  && /ACOES_AUDITAVEIS as readonly string\[\]\)\.includes\(entrada\.acaoId\)/.test(HELPER_CODIGO));
+ok("M5  a abertura nao aceita `lojaId` — a conta ainda nao existe",
+  !/lojaId/.test(
+    HELPER_CODIGO.slice(
+      HELPER_CODIGO.indexOf("interface EntradaAberturaAcao"),
+      HELPER_CODIGO.indexOf("export type EntradaDesfechoAcao"))));
+ok("M6  a abertura grava `loja_id: null` e `status: \"executando\"`",
+  /loja_id: null,[\s\S]{0,200}fase: "abertura",[\s\S]{0,60}status: "executando"/.test(HELPER_CODIGO));
+ok("M7  a chave da tentativa e obrigatoria em TIPO e em runtime",
+  /readonly idempotencyKey: string;/.test(HELPER_CODIGO)
+  && /!textoUtil\(entrada\.idempotencyKey\)\) return ENTRADA_INVALIDA/.test(HELPER_CODIGO));
+ok("M8  o desfecho grava `idempotency_key: null`",
+  /fase: "desfecho",[\s\S]{0,400}idempotency_key: null,/.test(HELPER_CODIGO));
+ok("M9  23505 vira `duplicada`, e nao um `select` antes do `insert`",
+  /codigo === SQLSTATE_UNICO\) return DUPLICADA/.test(HELPER_CODIGO)
+  && !/\.select\(|maybeSingle|count\(/.test(HELPER_CODIGO));
+ok("M10 o par (status, codigo) e revalidado em runtime, nao so em tipo",
+  /const aceitos = CODIGOS_POR_STATUS\[entrada\.status\]/.test(HELPER_CODIGO)
+  && /entrada\.codigo === null \|\| !aceitos\.includes\(entrada\.codigo\)\) \{\s*return ENTRADA_INVALIDA;/
+    .test(HELPER_CODIGO));
+
+{
+  // O resumo tem ALLOWLIST DE CHAVES, que e mais forte que "somente
+  // escalares": chave fora da lista nao entra nem sendo escalar.
+  const lista = HELPER_CODIGO.slice(
+    HELPER_CODIGO.indexOf("const CHAVES_DO_RESUMO"),
+    HELPER_CODIGO.indexOf("];", HELPER_CODIGO.indexOf("const CHAVES_DO_RESUMO")));
+  const chaves = [...lista.matchAll(/"([a-z_]+)"/g)].map((m) => m[1]);
+  ok("M11 o resumo e projetado por allowlist de chaves", chaves.length === 16, String(chaves.length));
+  ok("M12 e nenhuma delas identifica pergunta, anuncio, conta ou pessoa",
+    chaves.every((c) => !/texto|id_externo|anuncio|pergunta|loja|user|token|credencial/.test(c)),
+    chaves.join(","));
+  ok("M13 `auditoria_funcao_incompleta` esta entre elas",
+    chaves.includes("auditoria_funcao_incompleta"));
+  ok("M14 so numero finito e booleano sobrevivem a projecao",
+    /typeof valor === "boolean"/.test(HELPER_CODIGO)
+    && /typeof valor === "number" && Number\.isFinite\(valor\)/.test(HELPER_CODIGO));
+}
+
+{
+  // ── O espelho entre TypeScript e o CHECK ─────────────────────────
+  //
+  // `CODIGOS_POR_STATUS` e uma SEGUNDA copia do vocabulario, e isso e
+  // assumido: TypeScript nao le CHECK de Postgres. O que impede as duas
+  // de divergirem e este invariante — nao disciplina.
+  const abre = HELPER_CODIGO.indexOf("export const CODIGOS_POR_STATUS = {");
+  const corpo = HELPER_CODIGO.slice(abre, HELPER_CODIGO.indexOf("} as const satisfies", abre));
+  const doTs = new Map<string, string[]>();
+  for (const m of corpo.matchAll(/^\s{2}([a-z_]+): \[([^\]]*)\]/gms)) {
+    doTs.set(m[1], [...m[2].matchAll(/"([a-z_]+)"/g)].map((c) => c[1]));
+  }
+  // `executando` fica de fora do mapa TS de proposito: ele e a fase de
+  // ABERTURA, e a abertura nao passa por `registrarDesfechoAcao`. O tipo
+  // de la cobre os TERMINAIS, que sao os cinco restantes.
+  const terminais = [...RAMOS.keys()].filter((s) => s !== "executando");
+  ok("M15 o mapa em TypeScript cobre exatamente os status TERMINAIS do CHECK",
+    doTs.size === terminais.length && terminais.every((s) => doTs.has(s)),
+    `TS=[${[...doTs.keys()].join(",")}] SQL=[${terminais.join(",")}]`);
+  const divergentes: string[] = [];
+  for (const [status, codigos] of RAMOS) {
+    if (status === "executando") continue;
+    const ts = doTs.get(status) ?? ["<ausente>"];
+    if (ts.length !== codigos.length || !codigos.every((c, k) => ts[k] === c)) {
+      divergentes.push(`${status}: SQL=[${codigos.join(",")}] TS=[${ts.join(",")}]`);
+    }
+  }
+  ok("M16 e exatamente os mesmos codigos, na mesma ordem",
+    divergentes.length === 0, divergentes.join(" | "));
+}
+
+// --- N. A fiacao do servico -------------------------------------------
+secao("N. O servico abre antes de tocar o provider");
+
+const SERVICO = ler("lib/agentes/ingestao/sincronizar-perguntas.ts");
+const SERVICO_CODIGO = SERVICO
+  .replace(/\/\*[\s\S]*?\*\//g, "")
+  .replace(/^[ \t]*\/\/.*$/gm, "");
+
+ok("N1  a chave da tentativa e OBRIGATORIA no contrato de entrada",
+  /readonly idempotencyKey: string;/.test(SERVICO_CODIGO)
+  && !/readonly idempotencyKey\?/.test(SERVICO_CODIGO));
+ok("N2  a abertura vem ANTES do laco de paginas",
+  SERVICO_CODIGO.indexOf("portas.abrirAcao(") < SERVICO_CODIGO.indexOf("portas.executar(")
+  && SERVICO_CODIGO.indexOf("portas.abrirAcao(") > 0);
+ok("N3  a abertura vem ANTES da gravacao na inbox",
+  SERVICO_CODIGO.indexOf("portas.abrirAcao(") < SERVICO_CODIGO.indexOf("portas.gravar("));
+ok("N4  abertura duplicada devolve `ja_processado` e RETORNA",
+  /abertura\.estado === "duplicada"\) \{[\s\S]{0,400}?return \{ tipo: "ja_processado"/.test(SERVICO_CODIGO));
+ok("N5  abertura que nao registrou devolve `abertura_falhou` e RETORNA",
+  /abertura\.estado !== "registrada"\) \{[\s\S]{0,500}?return \{ tipo: "abertura_falhou"/.test(SERVICO_CODIGO));
+ok("N6  o `requestId` da acao nasce de `randomUUID`, no servidor",
+  /const requestId = randomUUID\(\);/.test(SERVICO_CODIGO)
+  && !/entrada\.requestId|requestId:\s*entrada\./.test(SERVICO_CODIGO));
+ok("N7  a chave da pagina deriva da chave da tentativa, sempre",
+  /idempotencyKey: chaveDaPagina\(chave, indice\)/.test(SERVICO_CODIGO));
+ok("N8  o desfecho e escrito num lugar so",
+  (SERVICO_CODIGO.match(/portas\.fecharAcao\(/g) ?? []).length === 1);
+ok("N9  a saude do registro nunca substitui o resultado de negocio",
+  /\.\.\.saida,\s*auditoria: registro\.estado === "registrada" \? "completa" : "incompleta",/
+    .test(SERVICO_CODIGO));
+ok("N10 a auditoria da pagina e LIDA, nao descartada",
+  /auditoriaDaFuncao: resultado\.auditoria/.test(SERVICO_CODIGO));
+ok("N11 a precedencia dos parciais mora numa funcao so",
+  (SERVICO_CODIGO.match(/function desfechoDeVarreduraCompleta/g) ?? []).length === 1
+  && /if \(m\.limite_atingido\) return \{ status: "parcial", codigo: "backlog_truncado" \};/
+    .test(SERVICO_CODIGO));
+ok("N12 os dois `fora de forma` tem nomes distintos",
+  /"resposta_funcao_fora_de_forma"/.test(SERVICO_CODIGO)
+  && !/"resposta_fora_de_forma"/.test(SERVICO_CODIGO));
+ok("N13 o mapa de persistencia e FECHADO, sem padrao permissivo",
+  /DESFECHO_POR_CODIGO_DA_PERSISTENCIA\[codigo\] \?\? DESFECHO_INTERNO/.test(SERVICO_CODIGO));
+ok("N14 o servico continua fora do catalogo de acoes",
+  !/catalogo/.test(SERVICO_CODIGO));
 
 console.log(`\n── placar ${"─".repeat(54)}`);
 console.log(`  PASS ${passou}   FAIL ${falhou}\n`);

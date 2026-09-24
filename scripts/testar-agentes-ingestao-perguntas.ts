@@ -35,6 +35,7 @@ import {
   MAX_PAGINAS,
   PAGE_LIMIT,
   sincronizarPerguntas,
+  type EntradaSincronizarPerguntas,
   type PortasSincronizacao,
 } from "@/lib/agentes/ingestao/sincronizar-perguntas";
 
@@ -65,6 +66,19 @@ const lerCodigo = (rel: string) =>
 const AGENTE = "11111111-1111-4111-8111-111111111111";
 const DONO = "aaaaaaaa-0000-4000-8000-0000000000d1";
 
+/**
+ * A chave da TENTATIVA deixou de ser opcional no I3B.
+ *
+ * Uma por chamada, e distintas entre si: duas chamadas com a mesma
+ * chave sao, por definicao, a mesma tentativa — e provar comportamento
+ * diferente com tentativas iguais confundiria os dois conceitos.
+ */
+let sequencia = 0;
+const entradaPadrao = (): EntradaSincronizarPerguntas => {
+  sequencia += 1;
+  return { agenteId: AGENTE, idempotencyKey: `n8n:t${sequencia}:sincronizar_perguntas:ag` };
+};
+
 const pergunta = (
   over: Partial<PerguntaRecebida> = {}
 ): PerguntaRecebida => ({
@@ -81,6 +95,12 @@ interface Espiao {
   chamadas: Array<Record<string, unknown>>;
   agentesLidos: string[];
   gravacoes: Array<{ autoridade: Record<string, unknown>; linhas: unknown[] }>;
+  /** O que o registro DURAVEL recebeu, na ordem em que recebeu. */
+  aberturas: Array<Record<string, unknown>>;
+  desfechos: Array<Record<string, unknown>>;
+  /** A ordem GLOBAL dos efeitos. E ela que prova que nada tocou o
+   *  provider antes de a acao existir. */
+  ordem: string[];
 }
 
 function portasFalsas(
@@ -89,23 +109,31 @@ function portasFalsas(
     agente?: { agenteId: string; userId: string; ativo: boolean } | null;
     erro?: string | null;
     gravacao?: unknown;
+    abertura?: unknown;
+    desfecho?: unknown;
   } = {}
 ): { portas: PortasSincronizacao; espiao: Espiao } {
-  const espiao: Espiao = { chamadas: [], agentesLidos: [], gravacoes: [] };
+  const espiao: Espiao = {
+    chamadas: [], agentesLidos: [], gravacoes: [],
+    aberturas: [], desfechos: [], ordem: [],
+  };
   const agente =
     opcoes.agente === undefined ? { agenteId: AGENTE, userId: DONO, ativo: true } : opcoes.agente;
 
   const portas = {
     lerAgente: async (agenteId: string) => {
       espiao.agentesLidos.push(agenteId);
+      espiao.ordem.push("agente");
       return { agente, erro: opcoes.erro ?? null };
     },
     executar: async (entrada: Record<string, unknown>) => {
       espiao.chamadas.push(entrada);
+      espiao.ordem.push("provider");
       return resposta;
     },
     gravar: async (autoridade: Record<string, unknown>, linhas: unknown[]) => {
       espiao.gravacoes.push({ autoridade, linhas });
+      espiao.ordem.push("rpc");
       return opcoes.gravacao ?? {
         tipo: "gravado",
         metricas: {
@@ -113,6 +141,16 @@ function portasFalsas(
           novas: linhas.length, atualizadas: 0, reobservadas: 0,
         },
       };
+    },
+    abrirAcao: async (e: Record<string, unknown>) => {
+      espiao.aberturas.push(e);
+      espiao.ordem.push("abertura");
+      return opcoes.abertura ?? { estado: "registrada" };
+    },
+    fecharAcao: async (e: Record<string, unknown>) => {
+      espiao.desfechos.push(e);
+      espiao.ordem.push("desfecho");
+      return opcoes.desfecho ?? { estado: "registrada" };
     },
   } as unknown as PortasSincronizacao;
 
@@ -123,34 +161,45 @@ const LOJA = "cccccccc-0000-4000-8000-0000000000e1";
 
 const sucessoCom = (
   linhas: PerguntaRecebida[], truncado = false, lojaId: string | null = LOJA,
-  providerRecebidas = linhas.length, descartadasNormalizacao = 0
+  providerRecebidas = linhas.length, descartadasNormalizacao = 0,
+  // A saude do ledger de FUNCAO daquela pagina. Vinha faltando no duplo,
+  // e um `undefined` aqui faria o servico "nao ver" incompletude nenhuma
+  // — o duplo confirmaria o que ele mesmo omitiu.
+  auditoria: "completa" | "incompleta" = "completa"
 ) => ({
   tipo: "sucesso" as const,
   requestId: "req-1",
   envelope: {
     data: { linhas, truncado, erro: null, providerRecebidas, descartadasNormalizacao },
   },
+  auditoria,
   autoridade: { lojaId },
 });
 
 /** Portas cujo executor responde uma coisa DIFERENTE por pagina. */
 function portasPorPagina(
   respostas: unknown[],
-  opcoes: { gravacao?: unknown } = {}
+  opcoes: { gravacao?: unknown; abertura?: unknown; desfecho?: unknown } = {}
 ): { portas: PortasSincronizacao; espiao: Espiao } {
-  const espiao: Espiao = { chamadas: [], agentesLidos: [], gravacoes: [] };
+  const espiao: Espiao = {
+    chamadas: [], agentesLidos: [], gravacoes: [],
+    aberturas: [], desfechos: [], ordem: [],
+  };
   const portas = {
     lerAgente: async (agenteId: string) => {
       espiao.agentesLidos.push(agenteId);
+      espiao.ordem.push("agente");
       return { agente: { agenteId: AGENTE, userId: DONO, ativo: true }, erro: null };
     },
     executar: async (entrada: Record<string, unknown>) => {
       const i = espiao.chamadas.length;
       espiao.chamadas.push(entrada);
+      espiao.ordem.push("provider");
       return respostas[i] ?? respostas[respostas.length - 1];
     },
     gravar: async (autoridade: Record<string, unknown>, linhas: unknown[]) => {
       espiao.gravacoes.push({ autoridade, linhas });
+      espiao.ordem.push("rpc");
       return opcoes.gravacao ?? {
         tipo: "gravado",
         metricas: {
@@ -158,6 +207,16 @@ function portasPorPagina(
           novas: linhas.length, atualizadas: 0, reobservadas: 0,
         },
       };
+    },
+    abrirAcao: async (e: Record<string, unknown>) => {
+      espiao.aberturas.push(e);
+      espiao.ordem.push("abertura");
+      return opcoes.abertura ?? { estado: "registrada" };
+    },
+    fecharAcao: async (e: Record<string, unknown>) => {
+      espiao.desfechos.push(e);
+      espiao.ordem.push("desfecho");
+      return opcoes.desfecho ?? { estado: "registrada" };
     },
   } as unknown as PortasSincronizacao;
   return { portas, espiao };
@@ -171,7 +230,7 @@ async function main(): Promise<void> {
 
   {
     const { portas, espiao } = portasFalsas(sucessoCom([pergunta()]));
-    await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    await sincronizarPerguntas(entradaPadrao(), portas);
     const chamada = espiao.chamadas[0] ?? {};
 
     ok("A1  o agente e resolvido no banco, pelo id recebido",
@@ -183,7 +242,8 @@ async function main(): Promise<void> {
     ok("A4  o servico nao repassa `sellerId` nem credencial",
       !("sellerId" in chamada) && !("credencial" in chamada) && !("token" in chamada));
     ok("A5  nenhum campo alem do contrato do executor viaja",
-      Object.keys(chamada).sort().join(",") === "agenteId,argumentos,funcaoId,userId",
+      Object.keys(chamada).sort().join(",")
+        === "agenteId,argumentos,funcaoId,idempotencyKey,userId",
       Object.keys(chamada).sort().join(","));
   }
 
@@ -191,9 +251,10 @@ async function main(): Promise<void> {
     // Chave estranha na entrada nao vira autoridade: o servico so le
     // `agenteId` e `idempotencyKey`, e TypeScript ja recusaria o resto.
     const { portas, espiao } = portasFalsas(sucessoCom([]));
-    const entradaSuja = { agenteId: AGENTE, userId: "OUTRO", lojaId: "OUTRA" } as unknown as {
-      agenteId: string;
-    };
+    const entradaSuja = {
+      agenteId: AGENTE, idempotencyKey: "n8n:suja:sincronizar_perguntas:ag",
+      userId: "OUTRO", lojaId: "OUTRA",
+    } as unknown as EntradaSincronizarPerguntas;
     await sincronizarPerguntas(entradaSuja, portas);
     const chamada = espiao.chamadas[0] ?? {};
     ok("A6  `userId` de fora e IGNORADO — vale o do banco", chamada.userId === DONO);
@@ -217,7 +278,7 @@ async function main(): Promise<void> {
 
   {
     const { portas, espiao } = portasFalsas(sucessoCom([]));
-    await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    await sincronizarPerguntas(entradaPadrao(), portas);
     const chamada = espiao.chamadas[0] ?? {};
 
     ok("B1  executa exatamente `mercadolivre.perguntas.listar`",
@@ -227,8 +288,14 @@ async function main(): Promise<void> {
         === JSON.stringify({ status: "UNANSWERED", limite: PAGE_LIMIT, deslocamento: 0 }),
       JSON.stringify(chamada.argumentos));
     ok("B3  o executor e chamado UMA unica vez no I1", espiao.chamadas.length === 1);
-    ok("B4  sem `idempotencyKey`, a chave nao e inventada",
-      !("idempotencyKey" in chamada));
+    // Antes do I3B a chave era opcional e este invariante dizia "sem
+    // chave, nenhuma chave e inventada". Agora ela e obrigatoria, e o
+    // que precisa ser provado e o oposto: a chave da pagina SEMPRE
+    // deriva da chave da tentativa, sem sorteio no meio.
+    ok("B4  a chave da pagina deriva da chave da TENTATIVA",
+      typeof chamada.idempotencyKey === "string"
+      && (chamada.idempotencyKey as string).endsWith(":p0"),
+      String(chamada.idempotencyKey));
   }
 
   {
@@ -257,7 +324,7 @@ async function main(): Promise<void> {
     const { portas } = portasFalsas({
       tipo: "negado", requestId: "req-n", codigo: "permissao_ausente",
     });
-    const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    const r = await sincronizarPerguntas(entradaPadrao(), portas);
     ok("C1  negacao de permissao propaga com o codigo do guard",
       r.tipo === "negado" && r.codigo === "permissao_ausente");
   }
@@ -265,19 +332,44 @@ async function main(): Promise<void> {
     const { portas } = portasFalsas({
       tipo: "erro", requestId: "req-e", envelope: { error: { code: "limite_excedido" } },
     });
-    const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    const r = await sincronizarPerguntas(entradaPadrao(), portas);
     ok("C2  erro do provider propaga SO o codigo",
       r.tipo === "erro" && r.codigo === "limite_excedido");
   }
   {
-    const { portas } = portasFalsas({ tipo: "falha_auditoria", requestId: "r", motivo: "duplicada" });
-    const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
-    ok("C3  abertura duplicada vira `ja_processado`, nunca coleta vazia",
-      r.tipo === "ja_processado");
+    // `ja_processado` MUDOU DE DONO no I3B. Antes ele nascia da
+    // idempotencia de FUNCAO (`falha_auditoria` com `duplicada`); agora
+    // nasce da idempotencia de ACAO, e a de Funcao virou invariante
+    // quebrado — a chave de pagina deriva da chave da tentativa, entao a
+    // repeticao colide na ABERTURA, antes do provider. Chegar aqui e
+    // sinal de bug, e a resposta e fechada, nunca silencio.
+    const { portas, espiao } = portasFalsas(
+      { tipo: "falha_auditoria", requestId: "r", etapa: "abertura", motivo: "duplicada" });
+    const r = await sincronizarPerguntas(entradaPadrao(), portas);
+    ok("C3  `duplicada` de FUNCAO nao e mais `ja_processado` — e erro fechado",
+      r.tipo === "erro" && r.codigo === "falha_auditoria" && r.origem === "auditoria_funcao"
+      && espiao.gravacoes.length === 0,
+      r.tipo);
+    ok("C3b e o desfecho registrado e `erro_interno`, porque o invariante quebrou",
+      (espiao.desfechos[0] ?? {}).status === "erro"
+      && (espiao.desfechos[0] ?? {}).codigo === "erro_interno",
+      JSON.stringify(espiao.desfechos[0] ?? {}));
+  }
+  {
+    // O `ja_processado` de verdade: a ABERTURA perdeu no indice unico.
+    const { portas, espiao } = portasFalsas(sucessoCom([pergunta()]), {
+      abertura: { estado: "duplicada" },
+    });
+    const r = await sincronizarPerguntas(entradaPadrao(), portas);
+    ok("C3c tentativa repetida para ANTES do provider e da RPC",
+      r.tipo === "ja_processado"
+      && espiao.chamadas.length === 0
+      && espiao.gravacoes.length === 0
+      && espiao.desfechos.length === 0);
   }
   {
     const { portas } = portasFalsas(sucessoCom([]), { agente: null });
-    const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    const r = await sincronizarPerguntas(entradaPadrao(), portas);
     ok("C4  agente inexistente/alheio nao executa nada",
       r.tipo === "agente_indisponivel" && r.motivo === "inexistente");
   }
@@ -285,15 +377,17 @@ async function main(): Promise<void> {
     const { portas, espiao } = portasFalsas(sucessoCom([]), {
       agente: { agenteId: AGENTE, userId: DONO, ativo: false },
     });
-    const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    const r = await sincronizarPerguntas(entradaPadrao(), portas);
     ok("C5  agente inativo nao executa Funcao alguma",
       r.tipo === "agente_indisponivel" && r.motivo === "inativo" && espiao.chamadas.length === 0);
   }
   {
     const { portas } = portasFalsas({ tipo: "sucesso", requestId: "r", envelope: { data: { fora: 1 } } });
-    const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    const r = await sincronizarPerguntas(entradaPadrao(), portas);
     ok("C6  resposta fora de forma falha FECHADA, nao vira lote vazio",
-      r.tipo === "erro" && r.codigo === "resposta_fora_de_forma");
+      r.tipo === "erro" && r.codigo === "resposta_funcao_fora_de_forma"
+      && r.origem === "contrato",
+      r.tipo === "erro" ? r.codigo : r.tipo);
   }
 
   // ─── D. Filtro de ingestao ──────────────────────────────────────────
@@ -301,20 +395,20 @@ async function main(): Promise<void> {
 
   {
     const { portas } = portasFalsas(sucessoCom([]));
-    const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    const r = await sincronizarPerguntas(entradaPadrao(), portas);
     ok("D1  zero perguntas e coleta valida, nao erro",
       r.tipo === "sincronizado" && r.perguntas.length === 0
       && r.metricas.provider_recebidas === 0 && r.metricas.ingeriveis === 0);
   }
   {
     const { portas } = portasFalsas(sucessoCom([pergunta()]));
-    const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    const r = await sincronizarPerguntas(entradaPadrao(), portas);
     ok("D2  uma pergunta valida e ingerivel",
       r.tipo === "sincronizado" && r.metricas.ingeriveis === 1 && r.perguntas[0].id === "Q1");
   }
   {
     const { portas } = portasFalsas(sucessoCom([pergunta({ status: "ANSWERED" })]));
-    const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    const r = await sincronizarPerguntas(entradaPadrao(), portas);
     ok("D3  status inesperado e CONTADO e excluido, nunca vira item novo",
       r.tipo === "sincronizado" && r.metricas.status_inesperados === 1
       && r.metricas.ingeriveis === 0 && r.perguntas.length === 0);
@@ -327,7 +421,7 @@ async function main(): Promise<void> {
     ["vazia", ""],
   ] as const) {
     const { portas } = portasFalsas(sucessoCom([pergunta({ criadaEm: data })]));
-    const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    const r = await sincronizarPerguntas(entradaPadrao(), portas);
     ok(`D4  data invalida (${rotulo}) e descartada, nao derruba a varredura`,
       r.tipo === "sincronizado" && r.metricas.descartadas_ingestao === 1 && r.metricas.ingeriveis === 0);
   }
@@ -337,7 +431,7 @@ async function main(): Promise<void> {
     "2026-09-20T10:00:00-0400",
   ]) {
     const { portas } = portasFalsas(sucessoCom([pergunta({ criadaEm: data })]));
-    const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    const r = await sincronizarPerguntas(entradaPadrao(), portas);
     ok(`D5  data ISO com fuso (${data}) e aceita`,
       r.tipo === "sincronizado" && r.metricas.ingeriveis === 1);
   }
@@ -349,7 +443,7 @@ async function main(): Promise<void> {
       pergunta({ id: "D" }),
     ];
     const { portas } = portasFalsas(sucessoCom(linhas, true));
-    const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    const r = await sincronizarPerguntas(entradaPadrao(), portas);
     ok("D6  nenhum item observado some da contabilidade",
       (r.tipo === "sincronizado" || r.tipo === "backlog_truncado")
       && r.metricas.normalizadas
@@ -401,7 +495,7 @@ async function main(): Promise<void> {
 
   {
     const { portas, espiao } = portasFalsas(sucessoCom([pergunta()]));
-    const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    const r = await sincronizarPerguntas(entradaPadrao(), portas);
 
     ok("G1  a gravacao usa o `lojaId` devolvido pela PROPRIA execucao",
       espiao.gravacoes.length === 1 && espiao.gravacoes[0].autoridade.lojaId === LOJA,
@@ -426,7 +520,7 @@ async function main(): Promise<void> {
     // execucao devolveu outra loja, e essa outra que vale.
     const OUTRA = "dddddddd-0000-4000-8000-0000000000e2";
     const { portas, espiao } = portasFalsas(sucessoCom([pergunta()], false, OUTRA));
-    await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    await sincronizarPerguntas(entradaPadrao(), portas);
     ok("G7  trocar a loja da execucao troca a loja da gravacao — nao ha 2a resolucao",
       espiao.gravacoes[0].autoridade.lojaId === OUTRA);
   }
@@ -446,7 +540,7 @@ async function main(): Promise<void> {
     // Funcao sem conexao devolveria `lojaId: null`. Gravar "em lugar
     // nenhum" nao existe: falha fechada.
     const { portas, espiao } = portasFalsas(sucessoCom([pergunta()], false, null));
-    const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    const r = await sincronizarPerguntas(entradaPadrao(), portas);
     ok("G11 sem autoridade de loja, NAO grava e falha fechada",
       r.tipo === "erro" && r.codigo === "autoridade_ausente" && espiao.gravacoes.length === 0);
   }
@@ -462,7 +556,7 @@ async function main(): Promise<void> {
     ["ja processado", { tipo: "falha_auditoria", requestId: "r", motivo: "duplicada" }],
   ] as const) {
     const { portas, espiao } = portasFalsas(resposta);
-    await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    await sincronizarPerguntas(entradaPadrao(), portas);
     ok(`H1  ${rotulo}: a RPC da inbox NAO e chamada`, espiao.gravacoes.length === 0);
   }
 
@@ -470,7 +564,7 @@ async function main(): Promise<void> {
     const { portas, espiao } = portasFalsas(sucessoCom([]), {
       agente: { agenteId: AGENTE, userId: DONO, ativo: false },
     });
-    await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    await sincronizarPerguntas(entradaPadrao(), portas);
     ok("H2  agente inativo: nem executa Funcao, nem grava",
       espiao.chamadas.length === 0 && espiao.gravacoes.length === 0);
   }
@@ -479,7 +573,7 @@ async function main(): Promise<void> {
     const { portas } = portasFalsas(sucessoCom([pergunta()]), {
       gravacao: { tipo: "recusado", codigo: "42501" },
     });
-    const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    const r = await sincronizarPerguntas(entradaPadrao(), portas);
     ok("H3  recusa de contrato da RPC vira `persistencia_recusada`, nunca sucesso",
       r.tipo === "persistencia_recusada" && r.codigo === "42501");
   }
@@ -488,7 +582,7 @@ async function main(): Promise<void> {
     const { portas } = portasFalsas(sucessoCom([pergunta()]), {
       gravacao: { tipo: "erro", codigo: "falha_rpc" },
     });
-    const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    const r = await sincronizarPerguntas(entradaPadrao(), portas);
     ok("H4  falha da RPC vira ERRO — provider ok e banco nao e erro, nao sucesso",
       r.tipo === "erro" && r.codigo === "falha_rpc");
   }
@@ -497,7 +591,7 @@ async function main(): Promise<void> {
     // Pagina vazia AINDA chama a RPC: e assim que a guarda de tenant roda
     // em toda sincronizacao, e nao so quando ha pergunta.
     const { portas, espiao } = portasFalsas(sucessoCom([]));
-    const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    const r = await sincronizarPerguntas(entradaPadrao(), portas);
     ok("H5  pagina vazia chama a RPC com lote vazio",
       espiao.gravacoes.length === 1 && espiao.gravacoes[0].linhas.length === 0);
     ok("H6  e as metricas continuam vindo de UMA fonte",
@@ -510,7 +604,7 @@ async function main(): Promise<void> {
       pergunta({ id: "B", status: "ANSWERED" }),
       pergunta({ id: "C", criadaEm: "ontem" }),
     ]));
-    await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    await sincronizarPerguntas(entradaPadrao(), portas);
     const enviadas = espiao.gravacoes[0].linhas as Array<{ id_externo: string }>;
     ok("H7  status inesperado e data invalida NAO chegam a RPC",
       enviadas.length === 1 && enviadas[0].id_externo === "A");
@@ -531,7 +625,7 @@ async function main(): Promise<void> {
 
   {
     const { portas } = portasFalsas(sucessoCom([pergunta()]));
-    const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    const r = await sincronizarPerguntas(entradaPadrao(), portas);
     const serializado = JSON.stringify(r);
     ok("H13 o resultado interno nao carrega credencial nem token",
       !/token|senha|secret|service_role|Bearer/i.test(serializado));
@@ -543,7 +637,7 @@ async function main(): Promise<void> {
   {
     // G1: pagina 1 nao encheu -> varredura completa, uma pagina so.
     const { portas, espiao } = portasPorPagina([sucessoCom([pergunta()], false)]);
-    const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    const r = await sincronizarPerguntas(entradaPadrao(), portas);
     ok("G1  pagina unica incompleta encerra a varredura",
       r.tipo === "sincronizado" && r.metricas.paginas === 1
       && espiao.chamadas.length === 1 && r.metricas.truncado === false);
@@ -556,7 +650,7 @@ async function main(): Promise<void> {
     const p1 = Array.from({ length: 50 }, (_, i) => pergunta({ id: `A${i}` }));
     const p2 = [pergunta({ id: "B1" }), pergunta({ id: "B2" })];
     const { portas, espiao } = portasPorPagina([sucessoCom(p1, true), sucessoCom(p2, false)]);
-    const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    const r = await sincronizarPerguntas(entradaPadrao(), portas);
     ok("G2  duas paginas: tudo coletado num lote so",
       r.tipo === "sincronizado" && r.metricas.paginas === 2
       && r.metricas.ingeriveis === 52 && espiao.gravacoes[0].linhas.length === 52);
@@ -571,7 +665,7 @@ async function main(): Promise<void> {
     // G3: pagina 1 cheia, pagina 2 vazia.
     const p1 = Array.from({ length: 50 }, (_, i) => pergunta({ id: `A${i}` }));
     const { portas, espiao } = portasPorPagina([sucessoCom(p1, true), sucessoCom([], false)]);
-    const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    const r = await sincronizarPerguntas(entradaPadrao(), portas);
     ok("G3  pagina 2 vazia encerra sem truncamento",
       r.tipo === "sincronizado" && r.metricas.paginas === 2
       && r.metricas.truncado === false && r.metricas.limite_atingido === false
@@ -585,7 +679,7 @@ async function main(): Promise<void> {
       sucessoCom([pergunta({ id: "S1" })], true, LOJA, 50, 49),
       sucessoCom([pergunta({ id: "S2" })], false, LOJA, 1, 0),
     ]);
-    const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    const r = await sincronizarPerguntas(entradaPadrao(), portas);
     ok("G9  pagina bruta cheia com descarte ainda busca a proxima",
       espiao.chamadas.length === 2 && r.tipo === "sincronizado");
     ok("G10 a contabilidade separa descarte de normalizacao do de ingestao",
@@ -607,7 +701,7 @@ async function main(): Promise<void> {
     const { portas, espiao } = portasPorPagina([
       sucessoCom(cheia, true), sucessoCom(cheia.map((q) => ({ ...q, id: `Y${q.id}` })), true),
     ]);
-    const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    const r = await sincronizarPerguntas(entradaPadrao(), portas);
     ok("G11 teto atingido com backlog: PERSISTE e devolve `backlog_truncado`",
       r.tipo === "backlog_truncado" && espiao.gravacoes.length === 1
       && espiao.gravacoes[0].linhas.length === 100);
@@ -628,7 +722,7 @@ async function main(): Promise<void> {
       ["envelope fora de forma", { tipo: "sucesso", requestId: "r2", envelope: { data: { fora: 1 } }, autoridade: { lojaId: LOJA } }],
     ] as const) {
       const { portas, espiao } = portasPorPagina([sucessoCom(p1, true), falha]);
-      const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+      const r = await sincronizarPerguntas(entradaPadrao(), portas);
       ok(`G4  pagina 2 (${rotulo}): ZERO persistencia, pagina 1 nao entra`,
         espiao.gravacoes.length === 0 && r.tipo !== "sincronizado"
         && r.tipo !== "backlog_truncado");
@@ -643,7 +737,7 @@ async function main(): Promise<void> {
     const { portas, espiao } = portasPorPagina([
       sucessoCom(p1, true, LOJA), sucessoCom([pergunta({ id: "B1" })], false, LOJA),
     ]);
-    const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    const r = await sincronizarPerguntas(entradaPadrao(), portas);
     ok("G12 autoridade A -> A: gravacao permitida, numa conta so",
       r.tipo === "sincronizado" && espiao.gravacoes.length === 1
       && espiao.gravacoes[0].autoridade.lojaId === LOJA);
@@ -655,7 +749,7 @@ async function main(): Promise<void> {
     const { portas, espiao } = portasPorPagina([
       sucessoCom(p1, true, LOJA), sucessoCom([pergunta({ id: "B1" })], false, OUTRA),
     ]);
-    const r = await sincronizarPerguntas({ agenteId: AGENTE }, portas);
+    const r = await sincronizarPerguntas(entradaPadrao(), portas);
     ok("G13 autoridade A -> B: falha fechada, ZERO persistencia",
       r.tipo === "autoridade_divergente"
       && r.codigo === "autoridade_divergente_entre_paginas"
@@ -694,15 +788,267 @@ async function main(): Promise<void> {
   }
 
   {
+    // Sem chave, a acao nao chega nem a existir: nao ha abertura, nao ha
+    // provider, nao ha RPC. Antes do I3B isto era um caminho valido que
+    // simplesmente nao deduplicava.
     const { portas, espiao } = portasPorPagina([sucessoCom([pergunta()], false)]);
-    await sincronizarPerguntas({ agenteId: AGENTE }, portas);
-    ok("G14e sem chave de tentativa, nenhuma chave e inventada",
-      !("idempotencyKey" in espiao.chamadas[0]));
+    const r = await sincronizarPerguntas(
+      { agenteId: AGENTE, idempotencyKey: "   " }, portas);
+    ok("G14e chave em branco para ANTES do provider e ANTES da abertura",
+      r.tipo === "chave_ausente"
+      && espiao.aberturas.length === 0
+      && espiao.chamadas.length === 0
+      && espiao.gravacoes.length === 0);
   }
 
   ok("G17b o deslocamento da pagina n e sempre n * PAGE_LIMIT",
     deslocamentoDaPagina(0) === 0 && deslocamentoDaPagina(1) === PAGE_LIMIT
     && MAX_JANELA_PROVIDER === PAGE_LIMIT * MAX_PAGINAS);
+
+  // --- L. O ciclo de vida da ACAO -------------------------------------
+  secao("L. Ciclo de vida — a acao existe antes de o provider ser tocado");
+
+  {
+    const { portas, espiao } = portasFalsas(sucessoCom([pergunta()]));
+    const r = await sincronizarPerguntas(entradaPadrao(), portas);
+    ok("L1  a ordem e agente -> abertura -> provider -> rpc -> desfecho",
+      espiao.ordem.join(">") === "agente>abertura>provider>rpc>desfecho",
+      espiao.ordem.join(">"));
+    ok("L1b o resultado declara a saude do registro",
+      r.tipo === "sincronizado" && r.auditoria === "completa");
+  }
+
+  {
+    // FAIL_CLOSED_BEFORE_PROVIDER. Uma varredura que o marketplace ve e
+    // que nenhum registro menciona e pior que uma que nao aconteceu.
+    const { portas, espiao } = portasFalsas(sucessoCom([pergunta()]), {
+      abertura: { estado: "falhou" },
+    });
+    const r = await sincronizarPerguntas(entradaPadrao(), portas);
+    ok("L2  abertura que nao grava impede provider E rpc",
+      r.tipo === "abertura_falhou"
+      && espiao.chamadas.length === 0
+      && espiao.gravacoes.length === 0
+      && espiao.desfechos.length === 0,
+      espiao.ordem.join(">"));
+  }
+
+  {
+    const { portas, espiao } = portasFalsas(sucessoCom([pergunta()]));
+    await sincronizarPerguntas(
+      { agenteId: AGENTE, idempotencyKey: "n8n:L3:sincronizar_perguntas:ag" }, portas);
+    const ab = espiao.aberturas[0] ?? {};
+    ok("L3  a abertura leva o dono do BANCO, a acao e a chave da tentativa",
+      ab.userId === DONO && ab.agenteId === AGENTE
+      && ab.acaoId === ACAO_SINCRONIZAR_PERGUNTAS
+      && ab.idempotencyKey === "n8n:L3:sincronizar_perguntas:ag");
+    ok("L3b a abertura NAO carrega loja — a conta ainda nao existe",
+      !("lojaId" in ab));
+    ok("L3c o `requestId` da acao e gerado no servidor, e nao e a chave",
+      typeof ab.requestId === "string" && (ab.requestId as string).length === 36
+      && ab.requestId !== ab.idempotencyKey);
+  }
+
+  {
+    const { portas, espiao } = portasFalsas(sucessoCom([pergunta()]));
+    const r = await sincronizarPerguntas(entradaPadrao(), portas);
+    const ab = espiao.aberturas[0] ?? {};
+    const de = espiao.desfechos[0] ?? {};
+    ok("L4  abertura e desfecho compartilham identidade, exceto a loja",
+      de.requestId === ab.requestId && de.userId === ab.userId
+      && de.agenteId === ab.agenteId && de.acaoId === ab.acaoId);
+    ok("L4b o desfecho traz a conta AUTORITATIVA da varredura", de.lojaId === LOJA);
+    ok("L4c o servico devolve o `requestId` da ACAO, nao o da Funcao",
+      r.tipo === "sincronizado" && r.requestId === ab.requestId
+      && r.requestId !== "req-1");
+  }
+
+  {
+    // O mapa inteiro, uma linha por variante do executor. Nenhum destes
+    // pares e derivado de substring: cada ramo de `lerPagina` devolve a
+    // classificacao junto com a parada.
+    const CASOS: ReadonlyArray<readonly [string, unknown, string, string | null]> = [
+      ["negado/permissao_ausente",
+        { tipo: "negado", requestId: "r", codigo: "permissao_ausente" },
+        "negado", "permissao_ausente"],
+      ["negado/conexao_ausente",
+        { tipo: "negado", requestId: "r", codigo: "conexao_ausente" },
+        "negado", "conexao_ausente"],
+      ["aguardando_aprovacao",
+        { tipo: "aguardando_aprovacao", requestId: "r", aprovacaoId: "a1" },
+        "aguardando_aprovacao", "aprovacao_necessaria"],
+      ["indisponivel",
+        { tipo: "indisponivel", requestId: "r" },
+        "erro", "autoridade_indisponivel"],
+      ["erro do provider",
+        { tipo: "erro", requestId: "r", envelope: { error: { code: "limite_excedido" } } },
+        "erro", "provedor_falhou"],
+      ["erro do executor",
+        { tipo: "erro", requestId: "r", envelope: { error: { code: "executor_falhou" } } },
+        "erro", "provedor_falhou"],
+      ["saida invalida da Funcao",
+        { tipo: "erro", requestId: "r", envelope: { error: { code: "saida_invalida" } } },
+        "erro", "contrato_violado"],
+      ["erro interno do executor",
+        { tipo: "erro", requestId: "r", envelope: { error: { code: "erro_interno" } } },
+        "erro", "erro_interno"],
+      ["argumento invalido — defeito NOSSO",
+        { tipo: "erro", requestId: "r", envelope: { error: { code: "limite_invalido" } } },
+        "erro", "erro_interno"],
+      ["ledger de Funcao nao gravou",
+        { tipo: "falha_auditoria", requestId: "r", etapa: "desfecho" },
+        "erro", "auditoria_funcao_falhou"],
+      ["envelope fora de forma",
+        { tipo: "sucesso", requestId: "r", auditoria: "completa",
+          autoridade: { lojaId: LOJA }, envelope: { data: { fora: 1 } } },
+        "erro", "contrato_violado"],
+      ["sucesso sem conta autoritativa",
+        { tipo: "sucesso", requestId: "r", auditoria: "completa",
+          autoridade: { lojaId: null },
+          envelope: { data: { linhas: [], truncado: false, erro: null,
+            providerRecebidas: 0, descartadasNormalizacao: 0 } } },
+        "erro", "contrato_violado"],
+    ];
+    for (const [rotulo, resposta, status, codigo] of CASOS) {
+      const { portas, espiao } = portasFalsas(resposta);
+      await sincronizarPerguntas(entradaPadrao(), portas);
+      const de = espiao.desfechos[0] ?? {};
+      ok(`L5  ${rotulo} -> ${status}/${codigo}`,
+        espiao.desfechos.length === 1 && de.status === status && de.codigo === codigo,
+        JSON.stringify({ s: de.status, c: de.codigo }));
+      ok(`L5b ${rotulo}: a RPC da inbox NAO foi chamada`, espiao.gravacoes.length === 0);
+    }
+  }
+
+  {
+    // A persistencia tem tres codigos distintos, e eles pedem acoes
+    // diferentes: religar a conta, investigar o lote, olhar o banco.
+    const CASOS: ReadonlyArray<readonly [string, unknown, string]> = [
+      ["42501 — a loja nao serve", { tipo: "recusado", codigo: "42501" }, "persistencia_negada"],
+      ["22023 — lote recusado", { tipo: "recusado", codigo: "22023" }, "persistencia_recusada"],
+      ["25000 — lote incompleto", { tipo: "recusado", codigo: "25000" }, "persistencia_recusada"],
+      ["falha da RPC", { tipo: "erro", codigo: "falha_rpc" }, "persistencia_falhou"],
+      ["resposta da RPC fora de forma",
+        { tipo: "erro", codigo: "resposta_rpc_fora_de_forma" }, "persistencia_falhou"],
+    ];
+    for (const [rotulo, gravacao, codigo] of CASOS) {
+      const { portas, espiao } = portasFalsas(sucessoCom([pergunta()]), { gravacao });
+      await sincronizarPerguntas(entradaPadrao(), portas);
+      const de = espiao.desfechos[0] ?? {};
+      ok(`L6  ${rotulo} -> erro/${codigo}`,
+        de.status === "erro" && de.codigo === codigo,
+        JSON.stringify({ s: de.status, c: de.codigo }));
+      // A regra e UMA: conta so no desfecho que de fato gravou. No 42501
+      // ela nem poderia ser escrita — a FK composta e a mesma cerca que
+      // a RPC acabou de aplicar.
+      ok(`L6b ${rotulo}: o desfecho nao reivindica conta nenhuma`,
+        de.lojaId === null, String(de.lojaId));
+    }
+  }
+
+  {
+    // A COLISAO fechada. As duas formas ruins produziam a mesma string.
+    const daFuncao = portasFalsas(
+      { tipo: "sucesso", requestId: "r", auditoria: "completa",
+        autoridade: { lojaId: LOJA }, envelope: { data: { fora: 1 } } });
+    const rF = await sincronizarPerguntas(entradaPadrao(), daFuncao.portas);
+
+    const daRpc = portasFalsas(sucessoCom([pergunta()]), {
+      gravacao: { tipo: "erro", codigo: "resposta_rpc_fora_de_forma" },
+    });
+    const rR = await sincronizarPerguntas(entradaPadrao(), daRpc.portas);
+
+    ok("L7  os dois `fora de forma` tem codigos DIFERENTES no servico",
+      rF.tipo === "erro" && rR.tipo === "erro" && rF.codigo !== rR.codigo,
+      `${rF.tipo === "erro" ? rF.codigo : rF.tipo} vs ${rR.tipo === "erro" ? rR.codigo : rR.tipo}`);
+    ok("L7b e origens diferentes, declaradas na FONTE",
+      rF.tipo === "erro" && rF.origem === "contrato"
+      && rR.tipo === "erro" && rR.origem === "persistencia");
+    ok("L7c e desfechos de acao diferentes",
+      (daFuncao.espiao.desfechos[0] ?? {}).codigo === "contrato_violado"
+      && (daRpc.espiao.desfechos[0] ?? {}).codigo === "persistencia_falhou");
+  }
+
+  for (const [rotulo, desfecho] of [
+    ["o desfecho nao gravou", { estado: "falhou" }],
+    ["outra sessao ja fechou esta execucao", { estado: "duplicada" }],
+  ] as const) {
+    const { portas } = portasFalsas(sucessoCom([pergunta()]), { desfecho });
+    const r = await sincronizarPerguntas(entradaPadrao(), portas);
+    ok(`L8  ${rotulo}: o resultado de NEGOCIO e preservado`,
+      r.tipo === "sincronizado" && r.persistencia.novas === 1);
+    ok(`L8b ${rotulo}: e a auditoria e declarada incompleta`,
+      r.tipo === "sincronizado" && r.auditoria === "incompleta");
+  }
+
+  {
+    // Erro de provider cujo desfecho tambem nao grava: a causa primaria
+    // NAO vira "falha de auditoria". Sao duas dimensoes.
+    const { portas } = portasFalsas(
+      { tipo: "erro", requestId: "r", envelope: { error: { code: "limite_excedido" } } },
+      { desfecho: { estado: "falhou" } });
+    const r = await sincronizarPerguntas(entradaPadrao(), portas);
+    ok("L9  causa primaria e saude do registro sao dimensoes separadas",
+      r.tipo === "erro" && r.codigo === "limite_excedido" && r.auditoria === "incompleta");
+  }
+
+  {
+    // A precedencia dos parciais, e o que ela NAO apaga.
+    const { portas, espiao } = portasPorPagina([
+      sucessoCom(Array.from({ length: 50 }, (_, i) => pergunta({ id: `A${i}` })), true,
+        LOJA, 50, 0, "incompleta"),
+      sucessoCom([pergunta({ id: "X", status: "ANSWERED" })], true),
+    ]);
+    const r = await sincronizarPerguntas(entradaPadrao(), portas);
+    const de = espiao.desfechos[0] ?? {};
+    ok("L10 backlog vence descartes e auditoria incompleta",
+      de.status === "parcial" && de.codigo === "backlog_truncado",
+      JSON.stringify({ s: de.status, c: de.codigo }));
+    const resumo = (de.resumo ?? {}) as Record<string, unknown>;
+    ok("L10b o resumo NAO perde os fatos que perderam a precedencia",
+      resumo.auditoria_funcao_incompleta === true
+      && resumo.status_inesperados === 1
+      && resumo.truncado === true
+      && resumo.limite_atingido === true,
+      JSON.stringify(resumo));
+    ok("L10c e o resultado carrega o mesmo no `metricas`",
+      r.tipo === "backlog_truncado" && r.metricas.auditoria_funcao_incompleta === true);
+  }
+
+  {
+    const { portas, espiao } = portasFalsas(
+      sucessoCom([pergunta({ id: "Z", status: "ANSWERED" })]));
+    await sincronizarPerguntas(entradaPadrao(), portas);
+    const de = espiao.desfechos[0] ?? {};
+    ok("L11 descarte sem backlog -> parcial/descartes_na_varredura",
+      de.status === "parcial" && de.codigo === "descartes_na_varredura");
+  }
+
+  {
+    const { portas, espiao } = portasFalsas(
+      sucessoCom([pergunta()], false, LOJA, 1, 0, "incompleta"));
+    const r = await sincronizarPerguntas(entradaPadrao(), portas);
+    const de = espiao.desfechos[0] ?? {};
+    ok("L12 varredura limpa com ledger de Funcao furado NAO e sucesso limpo",
+      de.status === "parcial" && de.codigo === "auditoria_funcao_incompleta",
+      JSON.stringify({ s: de.status, c: de.codigo }));
+    ok("L12b a inbox recebeu normalmente — o dado do provider e verdadeiro",
+      r.tipo === "sincronizado" && r.persistencia.novas === 1);
+  }
+
+  {
+    const { portas, espiao } = portasFalsas(sucessoCom([pergunta()]));
+    await sincronizarPerguntas(entradaPadrao(), portas);
+    const de = espiao.desfechos[0] ?? {};
+    ok("L13 varredura sem descarte, sem backlog e com ledger inteiro e SUCESSO",
+      de.status === "sucesso" && de.codigo === null);
+    const resumo = (de.resumo ?? {}) as Record<string, unknown>;
+    ok("L13b o resumo nao carrega nada que identifique pergunta ou anuncio",
+      Object.keys(resumo).every((k) => !/texto|id_externo|anuncio|pergunta|token|loja/.test(k)),
+      Object.keys(resumo).join(","));
+    ok("L13c e todo valor do resumo e escalar",
+      Object.values(resumo).every((v) => typeof v === "number" || typeof v === "boolean"));
+  }
 
   console.log(`\n── placar ${"─".repeat(54)}`);
   console.log(`  PASS ${passou}   FAIL ${falhou}\n`);

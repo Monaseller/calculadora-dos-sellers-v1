@@ -238,6 +238,26 @@ create table public.agente_acao_execucoes (
   -- `persistencia_recusada` mandaria procurar bug de dados onde o que ha
   -- e vinculo desfeito.
   --
+  -- ── Por que `auditoria_funcao_incompleta` e PARCIAL ───────────────
+  --
+  -- Leitura idempotente cujo desfecho de Funcao nao gravou devolve
+  -- `sucesso` com `auditoria: "incompleta"` (`executar.ts`, ramo de
+  -- sucesso). O dado do provider e verdadeiro e a inbox recebe tudo: o
+  -- NEGOCIO terminou. O REGISTRO e que ficou pela metade — a abertura
+  -- de Funcao permanece orfa em `executando`.
+  --
+  -- Gravar isso como `sucesso` limpo esconderia a orfa: quem filtra
+  -- `status='sucesso'` nao teria como saber que ha um rastro quebrado.
+  -- E um `erro` seria pior ainda, porque afirmaria que a varredura
+  -- falhou quando ela nao falhou. `parcial` e o unico dos tres que diz
+  -- a verdade — e a linha da acao passa a ser a explicacao de POR QUE
+  -- existe uma abertura de Funcao sem desfecho.
+  --
+  -- E o de MENOR precedencia entre os parciais: backlog e descartes
+  -- falam do que o negocio deixou de fazer, e isso vem antes do que a
+  -- auditoria deixou de registrar. Quando um deles vence, o fato
+  -- continua no `entrada_resumo` como escalar.
+  --
   -- ── O que NAO esta aqui, e por que ────────────────────────────────
   --
   -- `agente_indisponivel`: a abertura exige `agente_id` com FK e
@@ -274,7 +294,8 @@ create table public.agente_acao_execucoes (
         when 'parcial'    then codigo_desfecho is not null
                               and codigo_desfecho in (
                                  'backlog_truncado',
-                                 'descartes_na_varredura')
+                                 'descartes_na_varredura',
+                                 'auditoria_funcao_incompleta')
         when 'aguardando_aprovacao' then codigo_desfecho is not null
                               and codigo_desfecho = 'aprovacao_necessaria'
         when 'negado'     then codigo_desfecho is not null

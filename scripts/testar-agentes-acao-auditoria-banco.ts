@@ -157,7 +157,9 @@ async function main(): Promise<void> {
     // usado sob outro — tem de ser recusado com 23514.
     const VOCABULARIO: ReadonlyArray<readonly [string, readonly (string | null)[]]> = [
       ["sucesso", [null]],
-      ["parcial", ["backlog_truncado", "descartes_na_varredura"]],
+      ["parcial", [
+        "backlog_truncado", "descartes_na_varredura", "auditoria_funcao_incompleta",
+      ]],
       ["aguardando_aprovacao", ["aprovacao_necessaria"]],
       ["negado", [
         "funcao_inexistente", "permissao_ausente",
@@ -183,7 +185,7 @@ async function main(): Promise<void> {
       }
     }
 
-    ok("V1b as 17 combinacoes canonicas foram exercitadas", seq === 17, String(seq));
+    ok("V1b as 18 combinacoes canonicas foram exercitadas", seq === 18, String(seq));
 
     // ── Cruzamento: codigo do status errado ───────────────────────
     const TODOS = VOCABULARIO.flatMap(([, cs]) => cs).filter((x): x is string => x !== null);

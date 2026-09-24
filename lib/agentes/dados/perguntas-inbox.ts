@@ -72,7 +72,21 @@ export type ResultadoPersistencia =
    * crua: ela pode citar coluna, constraint e as vezes valor.
    */
   | { readonly tipo: "recusado"; readonly codigo: string }
-  | { readonly tipo: "erro"; readonly codigo: "falha_rpc" | "resposta_fora_de_forma" };
+  /**
+   * ── Por que `resposta_rpc_fora_de_forma`, e nao `resposta_fora_de_forma` ──
+   *
+   * O nome curto colidia. `sincronizarPerguntas` usa exatamente a mesma
+   * palavra quando o ENVELOPE DA FUNCAO vem fora de forma, e as duas
+   * viajavam achatadas em `{ tipo: "erro", codigo }`. Quem registra o
+   * desfecho da acao recebia uma string que podia significar "a Funcao
+   * rompeu o contrato dela" ou "a RPC da inbox rompeu o dela" — duas
+   * causas, duas acoes, e nenhuma forma de distinguir sem adivinhar pelo
+   * estado em volta.
+   *
+   * O prefixo resolve na FONTE. Nenhum consumidor precisa inferir
+   * procedencia depois.
+   */
+  | { readonly tipo: "erro"; readonly codigo: "falha_rpc" | "resposta_rpc_fora_de_forma" };
 
 /**
  * A autoridade da gravacao. Vem inteira do executor que buscou as
@@ -129,7 +143,7 @@ export async function gravarPerguntasNaInbox(
   }
 
   const metricas = lerMetricas(data);
-  if (metricas === null) return { tipo: "erro", codigo: "resposta_fora_de_forma" };
+  if (metricas === null) return { tipo: "erro", codigo: "resposta_rpc_fora_de_forma" };
 
   return { tipo: "gravado", metricas };
 }
