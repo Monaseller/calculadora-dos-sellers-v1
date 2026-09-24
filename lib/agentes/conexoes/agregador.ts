@@ -74,6 +74,11 @@ export interface EntradaConexoesDoAgente {
   userId: string;
   agenteId: string;
   agoraMs: number;
+  /**
+   * OPCIONAL. O sinal RIGIDO da acao, repassado INTACTO aos dois
+   * resolvedores que esta composicao usa. Ausente, nada muda.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -495,6 +500,7 @@ export async function resolverConexoesDoAgente(
   // resposta ainda nao esta apurada. E uma leitura constante a mais no
   // caso vazio, declarada e aceita — nao um N+1.
   const permissoes = await resolverFatosPermissoes({
+    signal: entrada.signal,
     userId,
     agenteId,
     funcaoIds: listarFuncoesRegistradas(),
@@ -513,7 +519,8 @@ export async function resolverConexoesDoAgente(
   // a cruzar, nada a resolver: as duas leituras seguintes nem acontecem.
   if (requisitos.length === 0) return semRequisitos(permissoes.fatos);
 
-  const selecoes = await resolverSelecoesDoAgente({ userId, agenteId });
+  const selecoes = await resolverSelecoesDoAgente({
+    signal: entrada.signal, userId, agenteId });
   if (selecoes.coleta !== "ok") {
     return selecoes.coleta === "entrada_invalida" ? ENTRADA_INVALIDA : FALHA;
   }

@@ -133,6 +133,17 @@ export interface ContextoFuncao {
    * nunca entra em auditoria.
    */
   readonly limiteDoProvider?: LimiteExterno;
+  /**
+   * O sinal RIGIDO — OPCIONAL, e SO para leituras de BANCO que esta
+   * Funcao faca (hoje, a credencial da loja).
+   *
+   * Ele nao alcanca auditoria: a abertura e o desfecho de Funcao sao
+   * escritos por `executarFuncao`, fora daqui, e uma Funcao nao tem como
+   * cancelar o registro do proprio desfecho. Sao dois sinais porque sao
+   * dois relogios, e trocar um pelo outro faria o corte do marketplace
+   * cancelar uma consulta de banco.
+   */
+  readonly sinalDoBanco?: AbortSignal;
 }
 
 /**

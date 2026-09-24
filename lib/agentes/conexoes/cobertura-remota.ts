@@ -104,7 +104,8 @@ export interface ResultadoCoberturaRemota {
 type Confirmador = (
   entrada: { userId: string; lojaId: string; acesso: "leitura" | "escrita" },
   portas?: PortasCoberturaML,
-  limiteExterno?: LimiteExterno
+  limiteExterno?: LimiteExterno,
+  signalDoBanco?: AbortSignal
 ) => Promise<{ cobertura: string; motivo: MotivoCoberturaML | null }>;
 
 const CONFIRMADORES: Readonly<Record<string, Confirmador>> = Object.freeze({
@@ -133,7 +134,9 @@ export async function confirmarCoberturaDosFatos(
   entrada: EntradaCoberturaRemota,
   portas?: PortasCoberturaML,
   /** OPCIONAL. O orcamento COMPARTILHADO do provider, repassado intacto. */
-  limiteExterno?: LimiteExterno
+  limiteExterno?: LimiteExterno,
+  /** OPCIONAL. O sinal RIGIDO, so para as leituras de BANCO daqui. */
+  signalDoBanco?: AbortSignal
 ): Promise<ResultadoCoberturaRemota> {
   const { userId, requisito, lojaId, acesso, conexoes } = entrada;
 
@@ -159,7 +162,8 @@ export async function confirmarCoberturaDosFatos(
 
   let veredito = cache.get(lojaId);
   if (veredito === undefined) {
-    veredito = await confirmador({ userId, lojaId, acesso }, portas, limiteExterno);
+    veredito = await confirmador(
+      { userId, lojaId, acesso }, portas, limiteExterno, signalDoBanco);
     chamadasRemotas = 1;
     cache.set(lojaId, veredito);
   }
@@ -170,7 +174,8 @@ export async function confirmarCoberturaDosFatos(
   // antes de o grant ser avaliado, entao ela e igualmente real quando a
   // cobertura e recusada. Amarra-la ao ramo de sucesso deixaria o
   // `estado` velho justamente nos casos de diagnostico.
-  const base = await comEstadoReconciliado(conexoes, alvo, userId, lojaId, requisito);
+  const base = await comEstadoReconciliado(
+    conexoes, alvo, userId, lojaId, requisito, signalDoBanco);
 
   if (veredito.cobertura !== "confirmada") {
     return { conexoes: base, motivo: veredito.motivo, chamadasRemotas };
@@ -221,9 +226,11 @@ async function comEstadoReconciliado(
   alvo: number,
   userId: string,
   lojaId: string,
-  requisito: { readonly plataforma: string; readonly recurso: string }
+  requisito: { readonly plataforma: string; readonly recurso: string },
+  signalDoBanco?: AbortSignal
 ): Promise<readonly FatoConexao[]> {
   const atual = await resolverFatoConexao({
+    signal: signalDoBanco,
     userId,
     lojaId,
     plataforma: requisito.plataforma,

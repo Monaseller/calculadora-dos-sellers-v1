@@ -289,7 +289,9 @@ export function criarLeiturasDePerguntas(
   lojaId: string,
   portas?: PortasPerguntasML,
   /** OPCIONAL. O orcamento COMPARTILHADO do provider, repassado intacto. */
-  limiteExterno?: LimiteExterno
+  limiteExterno?: LimiteExterno,
+  /** OPCIONAL. O sinal RIGIDO, so para a leitura de credencial no banco. */
+  signalDoBanco?: AbortSignal
 ): LerPerguntasRecebidas {
   return async function lerPerguntasRecebidas(
     filtro: FiltroPerguntas
@@ -313,7 +315,8 @@ export function criarLeiturasDePerguntas(
         deslocamento: filtro.deslocamento ?? 0,
       },
       portas,
-      limiteExterno
+      limiteExterno,
+      signalDoBanco
     );
 
     if (bruto.erro !== null) {

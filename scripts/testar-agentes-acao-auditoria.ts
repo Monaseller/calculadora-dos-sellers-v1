@@ -28,6 +28,8 @@ function secao(titulo: string): void {
 
 const RAIZ = join(__dirname, "..");
 const ler = (rel: string) => readFileSync(join(RAIZ, rel), "utf8");
+const lerCodigo = (rel: string) =>
+  ler(rel).replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ 	]*\/\/.*$/gm, "");
 
 const ARQUIVO = "supabase/migrations/20261010_agente_acao_execucoes.sql";
 const SQL = ler(ARQUIVO);
@@ -633,8 +635,16 @@ ok("N7  a chave da pagina deriva da chave da tentativa, sempre",
 ok("N8  o desfecho e escrito num lugar so",
   (SERVICO_CODIGO.match(/portas\.fecharAcao\(/g) ?? []).length === 1);
 ok("N9  a saude do registro nunca substitui o resultado de negocio",
-  /\.\.\.saida,\s*auditoria: registro\.estado === "registrada" \? "completa" : "incompleta",/
+  /\.\.\.saidaFinal,\s*auditoria: registro\.estado === "registrada" \? "completa" : "incompleta",/
     .test(SERVICO_CODIGO));
+ok("N9b mas o PRAZO vencido substitui, e essa e a unica excecao",
+  /const porPrazo = prazoVenceu\(ctx\.controle\);/.test(SERVICO_CODIGO)
+  && /const desfechoFinal = porPrazo \? DESFECHO_ORCAMENTO : desfecho;/.test(SERVICO_CODIGO));
+ok("N9c e a causa do aborto sai do SINAL, nunca de texto de erro",
+  /return controle\.sinalRigido\.aborted;/.test(
+    lerCodigo("lib/controle-tempo.ts"))
+  && !/AbortError|message\.includes|\.name ===/.test(
+    SERVICO_CODIGO.slice(SERVICO_CODIGO.indexOf("const porPrazo"))));
 ok("N10 a auditoria da pagina e LIDA, nao descartada",
   /auditoriaDaFuncao: resultado\.auditoria/.test(SERVICO_CODIGO));
 ok("N11 a precedencia dos parciais mora numa funcao so",

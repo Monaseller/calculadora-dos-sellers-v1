@@ -491,8 +491,10 @@ function contextoDaFuncao(
   // que explica o proprio cancelamento.
   const limiteDoProvider = controle?.limiteDoProvider;
 
+  const sinalDoBanco = controle?.sinalRigido;
+
   if (definicao.conexaoNecessaria === null) {
-    return { userId: snapshot.userId, conexao: null, limiteDoProvider };
+    return { userId: snapshot.userId, conexao: null, limiteDoProvider, sinalDoBanco };
   }
 
   const { plataforma, recurso, lojaId } = snapshot;
@@ -502,6 +504,7 @@ function contextoDaFuncao(
     userId: snapshot.userId,
     conexao: { plataforma, recurso, lojaId },
     limiteDoProvider,
+    sinalDoBanco,
   };
 }
 
@@ -717,15 +720,26 @@ export async function executarFuncao(
   // proposito: distingui-los seria um oraculo de existencia de recurso
   // alheio. Mesma escolha das FKs da auditoria, onde as causas chegam
   // indistinguiveis.
-  const agente = await lerAgenteDoDono(agenteId, userId);
+  const sinalDoBanco = entrada.controleTempo?.sinalRigido;
+
+  const agente = await lerAgenteDoDono(agenteId, userId, sinalDoBanco);
   if (agente.erro !== null || agente.linha === null) return { tipo: "indisponivel", requestId };
 
   if (tarefaId !== null) {
-    const tarefa = await lerTarefaDoDono(tarefaId, userId);
+    const tarefa = await lerTarefaDoDono(tarefaId, userId, sinalDoBanco);
     if (tarefa.erro !== null || tarefa.linha === null) return { tipo: "indisponivel", requestId };
   }
 
-  const base = { userId, agenteId, requestId, tarefaId };
+  // ── O sinal entra no SNAPSHOT, e nao em cada chamada ──────────────
+  //
+  // `SnapshotChamada` deriva de `EntradaDesfechoDeExecucao`, entao um
+  // `signal` aqui viaja em TODO `...snapshot` — abertura, desfecho com
+  // execucao e desfecho sem execucao. Passa-lo sitio a sitio seria
+  // pedir que cada caminho futuro se lembrasse dele, e foi exatamente
+  // esse esquecimento que o harness do I4B4 encontrou: o desfecho de
+  // Funcao ficou sem sinal e travou ate o timeout de 300 s do servidor,
+  // dez vezes o orcamento da acao.
+  const base = { userId, agenteId, requestId, tarefaId, signal: sinalDoBanco };
 
   // ── 3. Catalogo ───────────────────────────────────────────────────
   const classificacao = classificarFuncaoId(entrada.funcaoId);
@@ -774,7 +788,9 @@ export async function executarFuncao(
     plataforma = requisito.plataforma;
     recurso = requisito.recurso;
 
-    const resultado = await resolverConexoesDoAgente({ userId, agenteId, agoraMs: Date.now() });
+    const resultado = await resolverConexoesDoAgente({
+      userId, agenteId, agoraMs: Date.now(), signal: sinalDoBanco,
+    });
     if (resultado.coleta !== "ok") {
       return erroSemExecucao(
         // `plataforma` e `recurso` vem do CATALOGO — nao do cliente, nao
@@ -807,7 +823,9 @@ export async function executarFuncao(
         ?.lojaId ?? null;
 
   } else {
-    const permissoes = await resolverFatosPermissoes({ userId, agenteId, funcaoIds: [funcaoId] });
+    const permissoes = await resolverFatosPermissoes({
+      userId, agenteId, funcaoIds: [funcaoId], signal: sinalDoBanco,
+    });
     if (permissoes.coleta !== "ok") {
       return erroSemExecucao(comFuncao, "erro_interno", "erro_interno", MSG_INTERNO, false);
     }
@@ -858,7 +876,10 @@ export async function executarFuncao(
       // A cobertura divide o MESMO orcamento do provider com a busca de
       // perguntas. Sem isto ela abriria 20 s proprios e a pagina
       // seguinte comecaria ja fora do prazo.
-      entrada.controleTempo?.limiteDoProvider
+      entrada.controleTempo?.limiteDoProvider,
+      // E as leituras de BANCO dela — credencial, reconciliacao — vao
+      // sob o relogio RIGIDO. Os dois nunca se cruzam.
+      sinalDoBanco
     );
     conexoes = elevados.conexoes;
   }

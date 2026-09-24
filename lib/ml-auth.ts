@@ -519,14 +519,22 @@ export async function getMLLojaById(
    * pode disparar passa a respeitar o orcamento da acao em vez de
    * abrir 20 s proprios com o orcamento quase vencido.
    */
-  limiteExterno?: LimiteExterno
+  limiteExterno?: LimiteExterno,
+  /**
+   * O sinal RIGIDO da acao. Ele governa a LEITURA no banco; a renovacao
+   * de token continua sob `limiteExterno`, que e o relogio do provider.
+   * Trocar os dois faria o corte do marketplace cancelar uma consulta de
+   * banco, ou o contrario — e os dois erros sao silenciosos.
+   */
+  signalDoBanco?: AbortSignal
 ): Promise<{
   lojaId:      string;
   accessToken: string;
   sellerId:    string;
   nickname:    string;
 } | null> {
-  const { linha: loja } = await lerCredencialMLPorLojaEDono(lojaId, userId);
+  const { linha: loja } = await lerCredencialMLPorLojaEDono(
+    lojaId, userId, { signal: signalDoBanco });
 
   if (!loja || !loja.access_token) return null;
 
@@ -541,7 +549,8 @@ export async function getMLLojaById(
       loja.id,
       userId,
       loja.refresh_token,
-      async () => (await lerCredencialMLPorLojaEDono(lojaId, userId)).linha,
+      async () => (await lerCredencialMLPorLojaEDono(
+        lojaId, userId, { signal: signalDoBanco })).linha,
       limiteExterno
     );
     if (renovada === null) return null;

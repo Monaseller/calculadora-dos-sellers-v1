@@ -96,7 +96,9 @@ export interface PortasPerguntasML {
     lojaId: string,
     userId: string,
     /** O orcamento compartilhado, quando quem chama o tem. */
-    limiteExterno?: LimiteExterno
+    limiteExterno?: LimiteExterno,
+    /** O sinal RIGIDO, para a LEITURA da credencial no banco. */
+    signalDoBanco?: AbortSignal
   ) => Promise<{ accessToken: string } | null>;
   readonly buscar?: typeof fetch;
 }
@@ -144,7 +146,9 @@ export async function buscarPerguntasRecebidasML(
   entrada: EntradaPerguntasML,
   portas?: PortasPerguntasML,
   /** OPCIONAL. O orcamento COMPARTILHADO do provider. */
-  limiteExterno?: LimiteExterno
+  limiteExterno?: LimiteExterno,
+  /** OPCIONAL. O sinal RIGIDO, so para a leitura de credencial no banco. */
+  signalDoBanco?: AbortSignal
 ): Promise<ResultadoBrutoPerguntasML> {
   const { userId, lojaId, status, limite, deslocamento } = entrada;
 
@@ -157,7 +161,7 @@ export async function buscarPerguntasRecebidasML(
   try {
     // O orcamento viaja junto: uma renovacao de token disparada aqui
     // nao pode abrir 20 s proprios com a acao quase vencida.
-    credencial = await resolver(lojaId, userId, limiteExterno);
+    credencial = await resolver(lojaId, userId, limiteExterno, signalDoBanco);
   } catch {
     // Falha ao RESOLVER credencial e infraestrutura nossa, nao recusa do
     // provider. Sem `error.message`: a mensagem do driver vaza coluna e

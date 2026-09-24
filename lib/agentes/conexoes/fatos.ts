@@ -81,6 +81,14 @@ export interface EntradaFatoConexao {
   plataforma: string;
   recurso: string;
   agoraMs: number;
+  /**
+   * OPCIONAL. O sinal RIGIDO da acao que orquestra esta leitura.
+   *
+   * Ausente — que e o caso de todo chamador anterior a esta linha — a
+   * consulta nao e cancelada por ninguem e o comportamento e identico ao
+   * de antes. Presente, ela morre junto com o orcamento da acao.
+   */
+  readonly signal?: AbortSignal;
 }
 
 /**
@@ -179,12 +187,13 @@ export async function resolverFatoConexao(
   const marketplaceEsperado = marketplaceDe(plataforma);
   if (marketplaceEsperado === null) return AUSENTE;
 
-  const { data, error } = await getSupabaseServidor()
+  const consulta = getSupabaseServidor()
     .from("lojas")
     .select(COLUNAS)
     .eq("id", lojaId)
-    .eq("user_id", String(userId))
-    .maybeSingle();
+    .eq("user_id", String(userId));
+  const { data, error } = await (entrada.signal === undefined
+    ? consulta : consulta.abortSignal(entrada.signal)).maybeSingle();
 
   if (error) {
     // Sem `error.message`: mensagem de driver vaza nome de coluna, de

@@ -162,17 +162,25 @@ function aplicarFiltros(consulta: any, filtros: Record<string, unknown>): any {
 export async function lerCredencialMLPorLojaEDono(
   lojaId: string,
   userId: string,
-  opcoes: { somenteAtiva?: boolean } = {}
+  /**
+   * `signal` e OPCIONAL e so existe para que a acao que orquestra a
+   * leitura possa cancela-la quando o orcamento dela vencer. Ausente —
+   * o caso de todo chamador anterior, inclusive o sync de pedidos — a
+   * consulta segue sem limite, exatamente como sempre seguiu.
+   */
+  opcoes: { somenteAtiva?: boolean; signal?: AbortSignal } = {}
 ): Promise<ResultadoLeitura<LinhaCredencialML>> {
   if (!lojaId || !userId) return { linha: null, erro: null };
 
   const filtros = filtrosMLPorLojaEDono(lojaId, userId);
   if (opcoes.somenteAtiva) filtros.ativo = true;
 
-  const { data, error } = await aplicarFiltros(
+  const consulta = aplicarFiltros(
     getSupabaseServidor().from("lojas").select(COLUNAS_ML),
     filtros
-  ).maybeSingle();
+  );
+  const { data, error } = await (opcoes.signal === undefined
+    ? consulta : consulta.abortSignal(opcoes.signal)).maybeSingle();
 
   if (error) return { linha: null, erro: error.message };
   return { linha: (data as LinhaCredencialML | null) ?? null, erro: null };

@@ -75,6 +75,7 @@ import { FUNCAO_ID as FUNCAO_PERGUNTAS_ML } from "@/lib/agentes/handlers/consult
 import { randomUUID } from "node:crypto";
 import {
   criarControleDeTempo,
+  prazoVenceu,
   restanteDoProviderMs,
   type ControleDeTempo,
 } from "@/lib/controle-tempo";
@@ -1354,26 +1355,56 @@ async function fechar(
     resumo: ResumoDaAcao;
   }
 ): Promise<ResultadoSincronizacao> {
+  // ── O PRAZO vence toda outra classificacao ────────────────────────
+  //
+  // Se o relogio rigido caiu, a chamada que acabou de falhar falhou
+  // DENTRO do nosso prazo vencido. O que veio de baixo — permissao
+  // ausente, conexao ausente, ledger que nao gravou — descreve o
+  // SINTOMA; a causa fomos nos. Registrar o sintoma mandaria alguem
+  // procurar configuracao onde o que houve foi falta de tempo.
+  //
+  // `prazoVenceu` le `signal.aborted`, nunca texto de erro: aquele sinal
+  // so e abortado pelo relogio que este servico criou.
+  const porPrazo = prazoVenceu(ctx.controle);
+  const desfechoFinal = porPrazo ? DESFECHO_ORCAMENTO : desfecho;
+  const saidaFinal: ResultadoPosAbertura = porPrazo
+    ? {
+        tipo: "erro",
+        requestId: ctx.requestId,
+        codigo: "orcamento_esgotado",
+        origem: "orcamento",
+      }
+    : saida;
+
   const registro = await portas.fecharAcao({
     userId: ctx.userId,
     agenteId: ctx.agenteId,
     acaoId: ACAO_SINCRONIZAR_PERGUNTAS,
     requestId: ctx.requestId,
-    lojaId: extras.lojaId,
-    mensagem: extras.mensagem,
+    // Prazo vencido nao reivindica conta: a acao pode nem ter chegado a
+    // gravar em lugar nenhum.
+    lojaId: porPrazo ? null : extras.lojaId,
+    mensagem: porPrazo ? "o orcamento da acao venceu" : extras.mensagem,
     // Monotonica, pela mesma razao do orcamento: uma latencia negativa
     // por acerto de relogio seria recusada pelo CHECK do banco, e o
     // desfecho inteiro se perderia por causa de um numero.
     latenciaMs: Math.max(0, Math.round(agoraMonotonico() - ctx.inicio)),
-    resumo: extras.resumo,
+    resumo: porPrazo
+      ? { ...extras.resumo, orcamento_esgotado: true }
+      : extras.resumo,
     // RIGIDO. Se o corte do provider cancelasse o desfecho, a acao
     // terminaria sem rastro exatamente no caso em que mais precisa dele.
+    //
+    // Quando o RIGIDO ja caiu, este `insert` recebe o sinal abortado e
+    // pode nem entrar. A abertura orfa que sobra e evidencia legitima —
+    // e forcar um desfecho depois do prazo seria inventar um fim que
+    // ninguem registrou.
     signal: ctx.controle.sinalRigido,
-    ...desfecho,
+    ...desfechoFinal,
   });
 
   return {
-    ...saida,
+    ...saidaFinal,
     auditoria: registro.estado === "registrada" ? "completa" : "incompleta",
   };
 }

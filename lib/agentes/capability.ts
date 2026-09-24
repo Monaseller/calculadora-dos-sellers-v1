@@ -224,14 +224,22 @@ export async function listarAgentesDoDono(userId: string): Promise<ResultadoList
 /** UM agente do dono. Par incoerente devolve `linha: null`, nunca a linha alheia. */
 export async function lerAgenteDoDono(
   agenteId: string,
-  userId: string
+  userId: string,
+  /**
+   * OPCIONAL. O sinal RIGIDO da acao que orquestra a leitura. Ausente —
+   * todo chamador anterior — a consulta segue sem limite, identica ao
+   * que sempre foi.
+   */
+  signal?: AbortSignal
 ): Promise<ResultadoLeitura<LinhaAgente>> {
   if (!agenteId || !userId) return { linha: null, erro: null };
 
-  const { data, error } = await aplicarFiltros(
+  const consulta = aplicarFiltros(
     getSupabaseServidor().from("agentes").select(COLUNAS_AGENTE),
     filtrosAgenteDoDono(agenteId, userId)
-  ).maybeSingle();
+  );
+  const { data, error } = await (signal === undefined
+    ? consulta : consulta.abortSignal(signal)).maybeSingle();
 
   if (error) {
     console.error("[agentes] falha ao ler agente do dono");
@@ -486,14 +494,22 @@ export async function listarSinaisDeTarefasDoDono(
 /** UMA tarefa do dono, sem passar pelo agente. Par incoerente devolve `null`. */
 export async function lerTarefaDoDono(
   tarefaId: string,
-  userId: string
+  userId: string,
+  /**
+   * OPCIONAL. O sinal RIGIDO da acao que orquestra a leitura. Ausente —
+   * todo chamador anterior — a consulta segue sem limite, identica ao
+   * que sempre foi.
+   */
+  signal?: AbortSignal
 ): Promise<ResultadoLeitura<LinhaTarefa>> {
   if (!tarefaId || !userId) return { linha: null, erro: null };
 
-  const { data, error } = await aplicarFiltros(
+  const consulta = aplicarFiltros(
     getSupabaseServidor().from("agente_tarefas").select(COLUNAS_TAREFA),
     filtrosTarefaDoDono(tarefaId, userId)
-  ).maybeSingle();
+  );
+  const { data, error } = await (signal === undefined
+    ? consulta : consulta.abortSignal(signal)).maybeSingle();
 
   if (error) {
     console.error("[agentes] falha ao ler tarefa do dono");

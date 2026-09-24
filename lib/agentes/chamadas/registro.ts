@@ -113,6 +113,14 @@ interface BaseChamada {
   acesso?: "leitura" | "escrita" | null;
   /** Snapshot. `null` quando nenhum nivel foi resolvido. */
   nivelNoMomento?: "automatico" | "aprovacao" | "bloqueado" | null;
+  /**
+   * OPCIONAL. O sinal RIGIDO da acao que orquestra esta execucao.
+   *
+   * Ausente — todo chamador anterior — a gravacao nao e cancelada por
+   * ninguem. Presente, ela morre junto com o orcamento da acao, e a
+   * abertura orfa resultante e evidencia legitima.
+   */
+  signal?: AbortSignal;
   plataforma?: string | null;
   recurso?: string | null;
   lojaId?: string | null;
@@ -234,8 +242,13 @@ function identidadeValida(entrada: BaseChamada): boolean {
 /** O unico ponto que fala com o banco. Privado de proposito: a API
  *  exportada e por FORMA de linha, para que uma combinacao invalida
  *  seja difícil de escrever antes mesmo de o CHECK reprova-la. */
-async function inserir(linha: Record<string, unknown>): Promise<ResultadoRegistro> {
-  const r = await getSupabaseServidor().from(TABELA_CHAMADAS).insert(linha);
+async function inserir(
+  linha: Record<string, unknown>,
+  /** OPCIONAL. O sinal RIGIDO da acao. Ausente, nada e cancelado. */
+  signal?: AbortSignal
+): Promise<ResultadoRegistro> {
+  const consulta = getSupabaseServidor().from(TABELA_CHAMADAS).insert(linha);
+  const r = await (signal === undefined ? consulta : consulta.abortSignal(signal));
 
   if (r.error) {
     const codigo = codigoDe(r.error);
@@ -285,7 +298,7 @@ export async function registrarDesfechoSemExecucao(
     mensagem_desfecho: mensagemOuNull(entrada.mensagem),
     idempotency_key: null,
     latencia_ms: null,
-  });
+  }, entrada.signal);
 }
 
 /**
@@ -313,7 +326,7 @@ export async function registrarAbertura(entrada: EntradaAbertura): Promise<Resul
     mensagem_desfecho: null,
     idempotency_key: entrada.idempotencyKey ?? null,
     latencia_ms: null,
-  });
+  }, entrada.signal);
 }
 
 /**
@@ -347,7 +360,7 @@ export async function registrarDesfechoDeExecucao(
     mensagem_desfecho: entrada.status === "sucesso" ? null : mensagemOuNull(entrada.mensagem),
     idempotency_key: null,
     latencia_ms: latencia ?? null,
-  });
+  }, entrada.signal);
 }
 
 /**

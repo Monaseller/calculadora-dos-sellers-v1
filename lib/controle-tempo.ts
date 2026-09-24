@@ -56,6 +56,26 @@ export interface ControleDeTempo {
   readonly limiteDoProvider: LimiteExterno;
 }
 
+/**
+ * O prazo da ACAO venceu?
+ *
+ * ── Por que `signal.aborted`, e nao a mensagem do erro ─────────────
+ *
+ * Um `AbortError` chega ate quem chama embrulhado de formas diferentes
+ * conforme a camada — o driver do PostgREST devolve `{ error }` com
+ * texto, o `fetch` lanca um `DOMException`, e um `catch` intermediario
+ * pode ter trocado os dois por um codigo de dominio. Casar texto seria
+ * adivinhar.
+ *
+ * O sinal nao mente: ele so e abortado pelo relogio que NOS criamos.
+ * Se ele esta abortado no instante em que uma chamada volta com falha,
+ * a falha aconteceu dentro do nosso prazo vencido — e a causa e nossa,
+ * nao do banco nem do marketplace.
+ */
+export function prazoVenceu(controle: ControleDeTempo): boolean {
+  return controle.sinalRigido.aborted;
+}
+
 /** Quanto sobra do orcamento RIGIDO. Negativo quando ja estourou. */
 export function restanteRigidoMs(controle: ControleDeTempo): number {
   return controle.limiteRigidoEm - performance.now();

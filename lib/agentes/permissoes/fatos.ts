@@ -70,6 +70,14 @@ export interface EntradaFatosPermissoes {
   userId: string;
   agenteId: string;
   funcaoIds: readonly string[];
+  /**
+   * OPCIONAL. O sinal RIGIDO da acao que orquestra esta leitura.
+   *
+   * Ausente — que e o caso de todo chamador anterior a esta linha — a
+   * consulta nao e cancelada por ninguem e o comportamento e identico ao
+   * de antes. Presente, ela morre junto com o orcamento da acao.
+   */
+  readonly signal?: AbortSignal;
 }
 
 /**
@@ -167,7 +175,9 @@ export async function resolverFatosPermissoes(
     filtrosPermissoesDoAgente(agenteId, userId)
   );
 
-  const { data, error } = await consulta.in("funcao_id", [...ids]);
+  const comIds = consulta.in("funcao_id", [...ids]);
+  const { data, error } = await (entrada.signal === undefined
+    ? comIds : comIds.abortSignal(entrada.signal));
 
   if (error) {
     // Sem `error.message`: mensagem de driver vaza nome de coluna, de

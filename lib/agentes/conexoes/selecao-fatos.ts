@@ -69,6 +69,14 @@ const COLUNAS_LOJA = "id, user_id";
 export interface EntradaSelecoesDoAgente {
   userId: string;
   agenteId: string;
+  /**
+   * OPCIONAL. O sinal RIGIDO da acao que orquestra esta leitura.
+   *
+   * Ausente — que e o caso de todo chamador anterior a esta linha — a
+   * consulta nao e cancelada por ninguem e o comportamento e identico ao
+   * de antes. Presente, ela morre junto com o orcamento da acao.
+   */
+  readonly signal?: AbortSignal;
 }
 
 export interface ResultadoSelecoesDoAgente {
@@ -116,10 +124,11 @@ export async function resolverSelecoesDoAgente(
   if (!userId || !agenteId) return ENTRADA_INVALIDA;
 
   // ── QUERY 1 — as selecoes persistidas ─────────────────────────────
-  const r1 = await aplicarFiltros(
+  const q1 = aplicarFiltros(
     getSupabaseServidor().from("agente_conexoes").select(COLUNAS_SELECAO),
     filtrosSelecoesDoAgente(agenteId, userId)
   );
+  const r1 = await (entrada.signal === undefined ? q1 : q1.abortSignal(entrada.signal));
 
   if (r1.error) {
     // Sem `error.message`: mensagem de driver vaza nome de coluna, de
@@ -144,10 +153,11 @@ export async function resolverSelecoesDoAgente(
   // `lojaIdsDistintos` deduplica: duas capacidades apontando para a
   // MESMA loja e o caso normal, e pedir o mesmo uuid duas vezes so
   // aumentaria o `IN` sem mudar a resposta.
-  const r2 = await aplicarFiltros(
+  const q2 = aplicarFiltros(
     getSupabaseServidor().from("lojas").select(COLUNAS_LOJA),
     filtrosLojasDoDono(userId)
   ).in("id", lojaIdsDistintos(selecoes));
+  const r2 = await (entrada.signal === undefined ? q2 : q2.abortSignal(entrada.signal));
 
   if (r2.error) {
     console.error("[conexoes] falha ao confirmar lojas selecionadas");

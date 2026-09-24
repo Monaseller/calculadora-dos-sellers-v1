@@ -109,7 +109,9 @@ export interface PortasCoberturaML {
     lojaId: string,
     userId: string,
     /** O orcamento compartilhado, quando quem chama o tem. */
-    limiteExterno?: LimiteExterno
+    limiteExterno?: LimiteExterno,
+    /** O sinal RIGIDO, para a LEITURA da credencial no banco. */
+    signalDoBanco?: AbortSignal
   ) => Promise<{ accessToken: string; sellerId: string } | null>;
   readonly buscar?: typeof fetch;
 }
@@ -177,7 +179,9 @@ export async function confirmarCoberturaML(
   entrada: EntradaCoberturaML,
   portas?: PortasCoberturaML,
   /** OPCIONAL. O orcamento COMPARTILHADO do provider — ver `controle-tempo`. */
-  limiteExterno?: LimiteExterno
+  limiteExterno?: LimiteExterno,
+  /** OPCIONAL. O sinal RIGIDO, so para a leitura de credencial no banco. */
+  signalDoBanco?: AbortSignal
 ): Promise<ResultadoCoberturaML> {
   const { userId, lojaId, acesso } = entrada;
 
@@ -205,7 +209,7 @@ export async function confirmarCoberturaML(
     // segundo mecanismo de refresh aqui divergiria do primeiro no
     // primeiro conserto feito so de um lado. O orcamento viaja junto:
     // uma renovacao disparada aqui nao pode abrir 20 s proprios.
-    credencial = await resolver(lojaId, userId, limiteExterno);
+    credencial = await resolver(lojaId, userId, limiteExterno, signalDoBanco);
   } catch {
     // Sem `error.message`: mensagem de driver vaza coluna e as vezes valor.
     console.error("[ml-concessoes] falha ao resolver credencial da loja");
