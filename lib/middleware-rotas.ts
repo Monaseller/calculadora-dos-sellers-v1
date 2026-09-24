@@ -125,6 +125,16 @@ export const ROTAS_COM_SEGREDO: Readonly<Record<string, readonly string[]>> = {
   // NOT_DEPLOYED). Ela entra agora para que o dia em que o cron for
   // publicado não caia no 307 silencioso que o aviso acima descreve.
   "/api/internal/agentes/perguntas-poller": ["GET"], // Vercel Cron — NÃO publicado
+  // M2-I1-A8B-I4C1. A porta AGENDADA da ingestao de perguntas. Ela nasceu
+  // no I4C com segredo proprio e FICOU DE FORA daqui — o mesmo defeito da
+  // FIX2, pela mesma razao: as suites da rota chamam `route.POST()` direto,
+  // que e a camada DEPOIS desta. Desta vez quem pegou foi o invariante 38,
+  // ANTES do deploy.
+  //
+  // Declarar aqui NAO autentica nada: so deixa a requisicao CHEGAR. Quem
+  // autoriza continua sendo `N8N_INGESTAO_INTERNAL_SECRET`, dentro da rota,
+  // fail-closed. E so POST, porque so POST e exportado.
+  "/api/internal/agentes/ingestao-perguntas": ["POST"], // orquestrador externo (n8n) — ingestao
 };
 
 /**

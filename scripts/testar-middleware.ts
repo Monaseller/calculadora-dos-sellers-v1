@@ -22,6 +22,7 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   decidirAcesso,
+  precisaDeSessao,
   PAGINAS_PUBLICAS,
   ASSETS_PUBLICOS,
   CLASSIFICACAO_ASSETS_PUBLIC,
@@ -303,6 +304,98 @@ t("4j. o poller NAO fica publico, e so por ter segredo proprio", () => {
     "poller le corpo — ele nao aceita entrada nenhuma, e segredo em body nao e melhor que em URL");
 });
 
+t("4k. POST /api/internal/agentes/ingestao-perguntas passa sem cookie", () => {
+  // M2-I1-A8B-I4C1. Terceira vez que uma rota interna com segredo proprio
+  // nasce fora desta lista, e a primeira em que o defeito morre ANTES do
+  // deploy: o invariante 38 reprovou no gate de prontidao do release.
+  //
+  // O modo de falha e o da ponte, e ele engana: o middleware responde 401,
+  // o MESMO status que a rota responde quando o segredo nao confere. Quem
+  // configurasse o n8n leria "401" e trocaria a chave, que estava certa.
+  assert(sem("/api/internal/agentes/ingestao-perguntas", "POST") === "liberar",
+    "rota de ingestao bloqueada pelo middleware — o handler nunca veria o segredo");
+});
+
+t("4l. a rota de ingestao NAO fica publica, e so por ter segredo proprio", () => {
+  // POST e o unico verbo exportado por route.ts. Qualquer outro liberado
+  // seria uma segunda porta para a mesma chave, sem revisao.
+  for (const metodo of ["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
+    assert(sem("/api/internal/agentes/ingestao-perguntas", metodo) === "bloquear_api",
+      `${metodo} na rota de ingestao deveria cair no default deny`);
+
+  assert(!("/api/internal/agentes/ingestao-perguntas" in ROTAS_PUBLICAS),
+    "rota de ingestao listada como PUBLICA — ela tem segredo proprio");
+  assert(!PAGINAS_PUBLICAS.has("/api/internal/agentes/ingestao-perguntas"),
+    "rota de ingestao listada como pagina publica");
+  assert(!("/api/internal/agentes/ingestao-perguntas" in EXCECOES_TEMPORARIAS_F0C),
+    "rota de ingestao listada como excecao temporaria — ela nao e divida");
+
+  // Declarada UMA vez, e so com POST.
+  assert(
+    JSON.stringify(ROTAS_COM_SEGREDO["/api/internal/agentes/ingestao-perguntas"]) === '["POST"]',
+    "a declaracao da rota de ingestao nao e exatamente [POST]");
+
+  const fonte = fonteSemComentarios("app/api/internal/agentes/ingestao-perguntas/route.ts");
+
+  assert(/process\.env\.N8N_INGESTAO_INTERNAL_SECRET/.test(fonte),
+    "rota liberada no middleware mas NAO le N8N_INGESTAO_INTERNAL_SECRET do ambiente");
+  assert(/headers\.get\("x-worker-secret"\)/.test(fonte),
+    "rota liberada mas nao le o header x-worker-secret");
+  assert(/!segredo/.test(fonte),
+    "rota liberada mas nao e fail-closed quando o segredo falta no servidor");
+  assert(/!recebido/.test(fonte),
+    "rota liberada mas nao e fail-closed quando o header falta no pedido");
+  assert(/recebido !== segredo/.test(fonte),
+    "rota liberada mas nao compara o segredo recebido com o esperado");
+
+  // Segredo PROPRIO. Reusar o da ponte daria a esta porta o alcance
+  // daquela, que e o oposto do motivo de ela existir.
+  assert(!/N8N_BRIDGE_INTERNAL_SECRET/.test(fonte),
+    "rota de ingestao aceita o segredo da ponte generica — o isolamento depende de chaves distintas");
+  assert(!/CRON_SECRET/.test(fonte),
+    "rota de ingestao aceita CRON_SECRET — mesma razao");
+  assert(!/AGENTES_WORKER_INTERNAL_SECRET/.test(fonte),
+    "rota de ingestao aceita o segredo do worker manual — mesma razao");
+  assert(!/searchParams/.test(fonte),
+    "rota le query string — segredo em URL vaza em log de acesso");
+});
+
+t("4m. CHEGAR nao e AUTENTICAR: as duas camadas e os dois 401", () => {
+  // O que esta suite nao provava, e que deixou o defeito passar: as suites
+  // da rota chamam `route.POST()` direto, que e a camada DEPOIS desta.
+  // Aqui se prova a ORDEM, nao o handler.
+  //
+  // Limitacao declarada: `next/server` nao roda fora do Next, entao as duas
+  // fronteiras sao provadas SEPARADAMENTE — a decisao pela funcao pura, a
+  // forma do 401 pela fonte de cada camada. O encadeamento num unico
+  // runtime NAO e provado aqui; fica para o smoke de producao, e e por isso
+  // que o smoke tem de olhar o CORPO, nunca so o status.
+
+  // (a) a decisao do middleware e "deixar chegar", nao "esta autenticado"
+  assert(sem("/api/internal/agentes/ingestao-perguntas", "POST") === "liberar",
+    "a requisicao precisa CHEGAR ao handler");
+  assert(precisaDeSessao("/api/internal/agentes/ingestao-perguntas", "POST") === false,
+    "rota com segredo proprio nao deve pagar verificacao de sessao");
+  // Sessao nao substitui o segredo: com ou sem cookie a decisao e a MESMA,
+  // e quem autoriza continua sendo a rota.
+  assert(com("/api/internal/agentes/ingestao-perguntas", "POST")
+      === sem("/api/internal/agentes/ingestao-perguntas", "POST"),
+    "a presenca de sessao muda a decisao — o segredo deixaria de ser a autoridade");
+
+  // (b) o handler continua recusando por conta propria, e com OUTRA forma
+  const rota = fonteSemComentarios("app/api/internal/agentes/ingestao-perguntas/route.ts");
+  assert(/estado: "nao_autorizado"/.test(rota) && /401/.test(rota),
+    "a rota nao devolve o proprio 401 `nao_autorizado`");
+
+  const mw = fonteSemComentarios("middleware.ts");
+  assert(/Sessão inválida\./.test(mw),
+    "o middleware mudou a mensagem do 401 de sessao — o smoke de producao usa o CORPO para distinguir");
+  assert(!/nao_autorizado/.test(mw),
+    "o middleware passou a usar o vocabulario da rota — os dois 401 deixariam de ser distinguiveis");
+  assert(!/Sessão inválida\./.test(rota),
+    "a rota passou a usar a mensagem do middleware — mesma razao");
+});
+
 t("5. metodo errado numa rota com segredo NAO e liberado", () => {
   // O middleware não inventa método: worker é GET, executar é POST.
   assert(sem("/api/internal/estudio-anuncios/worker", "POST") === "bloquear_api",
@@ -313,15 +406,19 @@ t("5. metodo errado numa rota com segredo NAO e liberado", () => {
     "GET no executar de agentes deveria cair no default deny");
 });
 
-t("6. as 8 rotas com segredo estao declaradas, nem uma a mais", () => {
+t("6. as 9 rotas com segredo estao declaradas, nem uma a mais", () => {
   // 5 -> 6 na FUNCTION-RUNTIME-V1-B1: entrou o dispatcher de agentes.
   // 6 -> 8 na M2-I1-A8-FIX2: entraram a ponte do orquestrador externo e o
   // poller de perguntas. As duas ja existiam como rota DEPLOYADA e nao
   // estavam aqui — o middleware as negava com o 401 de sessao antes do
   // segredo proprio de cada uma ser lido. Contagem nunca prova QUAIS; o
   // teste 37 abaixo e que amarra a policy ao filesystem.
-  assert(Object.keys(ROTAS_COM_SEGREDO).length === 8,
-    `esperado 8 rotas com segredo, encontrado ${Object.keys(ROTAS_COM_SEGREDO).length}`);
+  // 8 -> 9 na M2-I1-A8B-I4C1: entrou a porta agendada da ingestao de
+  // perguntas, com o mesmo defeito de origem das duas da FIX2 — so que
+  // desta vez o invariante 37/38 a descobriu no disco antes do deploy, e
+  // nao o smoke de producao depois.
+  assert(Object.keys(ROTAS_COM_SEGREDO).length === 9,
+    `esperado 9 rotas com segredo, encontrado ${Object.keys(ROTAS_COM_SEGREDO).length}`);
 });
 
 // ────────────────────────────────────────────────────────────────────
@@ -572,6 +669,8 @@ const INVENTARIO: [string, string, Decisao][] = [
   // orquestrador EXTERNO; o poller, pelo cron — que segue NAO publicado.
   ["/api/internal/agentes/acoes", "POST", "liberar"],
   ["/api/internal/agentes/perguntas-poller", "GET", "liberar"],
+  // M2-I1-A8B-I4C1: a porta agendada da ingestao de perguntas.
+  ["/api/internal/agentes/ingestao-perguntas", "POST", "liberar"],
   // — excecao temporaria F0.c (1; era 3 ate o cutover F0.c.5 e 2 ate a
   //   F0.c.16, quando /api/auth/status saiu do inventario por ter sido
   //   DELETADA — o caminho segue coberto pelo teste 20)
@@ -666,7 +765,8 @@ t("30. as 58 rotas do inventario caem na classe correta", () => {
   // esperada por (caminho, metodo) —, mas quem descobre rota nova e o
   // teste 37, que varre o filesystem. Os dois sao complementares, e o
   // segundo e o que nao depende de alguem lembrar.
-  assert(INVENTARIO.length === 58, `inventario tem ${INVENTARIO.length} rotas, esperado 58`);
+  // 58 -> 59 na M2-I1-A8B-I4C1: `POST /api/internal/agentes/ingestao-perguntas`.
+  assert(INVENTARIO.length === 59, `inventario tem ${INVENTARIO.length} rotas, esperado 59`);
   for (const [caminho, metodo, esperado] of INVENTARIO) {
     const obtido = sem(caminho, metodo);
     assert(obtido === esperado, `${metodo} ${caminho}: esperado ${esperado}, obtido ${obtido}`);
@@ -960,7 +1060,8 @@ t("37. ANTI-VACUIDADE: a varredura enxerga as rotas internas do disco", () => {
     "caminho derivado do disco fora do namespace /api/internal/");
   // As duas da FIX2 tem de estar entre as descobertas — se a varredura
   // nao as ve, ela nao veria a proxima tampouco.
-  for (const esperada of ["/api/internal/agentes/acoes", "/api/internal/agentes/perguntas-poller"])
+  for (const esperada of ["/api/internal/agentes/acoes", "/api/internal/agentes/perguntas-poller",
+                          "/api/internal/agentes/ingestao-perguntas"])
     assert(ROTAS_INTERNAS.some((r) => r.caminho === esperada),
       `${esperada} nao foi descoberta pela varredura`);
   // E a extracao de metodos tem de ter funcionado de fato.
