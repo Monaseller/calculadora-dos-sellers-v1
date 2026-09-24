@@ -49,10 +49,12 @@
  */
 import {
   ACAO_SINCRONIZAR_PERGUNTAS,
+  projetarResumoDaAcao,
   registrarAberturaAcao,
   registrarDesfechoAcao,
   type DesfechoDaAcao,
   type ResumoDaAcao,
+  type StatusTerminalAcao,
 } from "@/lib/agentes/acoes/auditoria-acao";
 import { lerAgenteParaAcaoInterna } from "@/lib/agentes/capability-worker";
 import {
@@ -167,6 +169,40 @@ export interface SaudeDaAuditoria {
   readonly auditoria: "completa" | "incompleta";
 }
 
+/**
+ * O que a linha de DESFECHO registrou — I4C.
+ *
+ * ── Por que o servico devolve isto ──────────────────────────────────
+ *
+ * A rota dedicada responde duas vezes pela mesma operacao: uma AO VIVO,
+ * logo depois da execucao, e outra num REPLAY, lendo o ledger. As duas
+ * respostas precisam dizer a mesma coisa, senao quem orquestra aprende
+ * dois vocabularios para um fato so.
+ *
+ * Havia duas formas de conseguir isso. Uma era a rota reconstruir o
+ * desfecho a partir de `tipo` e das metricas — uma SEGUNDA tradução, que
+ * precisaria concordar para sempre com `desfechoDeVarreduraCompleta` e
+ * que ninguem lembraria de atualizar junto. A outra e esta: o servico
+ * devolve o par `(status, codigo)` que ELE acabou de gravar, e o resumo
+ * projetado pela MESMA allowlist que a leitura usa.
+ *
+ * Nao ha coluna nova nem escalar novo no banco. O fato ja era duravel —
+ * o que faltava era ele voltar tambem por cima, pelo retorno da funcao.
+ *
+ * ── Esta presente mesmo quando a gravacao falhou ────────────────────
+ *
+ * `auditoria: "incompleta"` diz que a linha nao entrou. O par continua
+ * aqui porque ele descreve o que a acao DECIDIU, e essa decisao
+ * aconteceu — o que nao aconteceu foi o registro dela. Quem le tem os
+ * dois fatos separados, e pode tratar cada um pelo que e.
+ */
+export interface DesfechoRegistrado {
+  readonly status: StatusTerminalAcao;
+  readonly codigo: string | null;
+  /** Somente escalares, pela allowlist de `auditoria-acao.ts`. */
+  readonly resumo: Record<string, number | boolean>;
+}
+
 /** De onde veio o codigo de um `erro`. Declarada na FONTE, para que
  *  ninguem precise inferir procedencia pelo estado em volta. */
 export type OrigemDoErro =
@@ -255,7 +291,7 @@ export type ResultadoSincronizacao =
   /** A abertura nao gravou por falha tecnica. FAIL_CLOSED_BEFORE_PROVIDER. */
   | { readonly tipo: "abertura_falhou"; readonly requestId: string }
   // ── Depois da abertura ────────────────────────────────────────────
-  | (ResultadoPosAbertura & SaudeDaAuditoria);
+  | (ResultadoPosAbertura & SaudeDaAuditoria & { readonly desfechoDuravel: DesfechoRegistrado });
 
 /**
  * A entrada. DOIS campos, e nenhum deles escolhe autoridade.
@@ -1376,6 +1412,10 @@ async function fechar(
       }
     : saida;
 
+  const resumoFinal: ResumoDaAcao = porPrazo
+    ? { ...extras.resumo, orcamento_esgotado: true }
+    : extras.resumo;
+
   const registro = await portas.fecharAcao({
     userId: ctx.userId,
     agenteId: ctx.agenteId,
@@ -1389,9 +1429,7 @@ async function fechar(
     // por acerto de relogio seria recusada pelo CHECK do banco, e o
     // desfecho inteiro se perderia por causa de um numero.
     latenciaMs: Math.max(0, Math.round(agoraMonotonico() - ctx.inicio)),
-    resumo: porPrazo
-      ? { ...extras.resumo, orcamento_esgotado: true }
-      : extras.resumo,
+    resumo: resumoFinal,
     // RIGIDO. Se o corte do provider cancelasse o desfecho, a acao
     // terminaria sem rastro exatamente no caso em que mais precisa dele.
     //
@@ -1406,5 +1444,12 @@ async function fechar(
   return {
     ...saidaFinal,
     auditoria: registro.estado === "registrada" ? "completa" : "incompleta",
+    // Projetado pela MESMA funcao que a leitura usa: o que sai daqui ao
+    // vivo e o que sairia do banco num replay, chave por chave.
+    desfechoDuravel: {
+      status: desfechoFinal.status,
+      codigo: desfechoFinal.codigo,
+      resumo: projetarResumoDaAcao(resumoFinal),
+    },
   };
 }

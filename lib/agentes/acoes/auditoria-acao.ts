@@ -149,10 +149,28 @@ const CHAVES_DO_RESUMO: ReadonlyArray<keyof ResumoDaAcao> = [
  * coisa, e devolver um objeto vazio e mais honesto que omitir a coluna.
  */
 function resumoSeguro(bruto: ResumoDaAcao | undefined): Record<string, number | boolean> {
-  if (bruto === undefined || bruto === null) return {};
+  return projetarResumoDaAcao(bruto);
+}
+
+/**
+ * A MESMA allowlist, aplicada na LEITURA — I4C.
+ *
+ * A reconciliacao le `entrada_resumo` de volta e o devolve a quem
+ * orquestra. Uma linha gravada por uma versao anterior — ou por uma
+ * versao FUTURA, que ja conheca uma chave a mais — passaria por aqui, e
+ * projetar na leitura garante que o que sai hoje e exatamente o
+ * vocabulario de hoje.
+ *
+ * E deliberadamente a mesma funcao da escrita, e nao uma copia: duas
+ * allowlists precisariam concordar para sempre, e a segunda so seria
+ * lembrada na metade das vezes.
+ */
+export function projetarResumoDaAcao(bruto: unknown): Record<string, number | boolean> {
+  if (typeof bruto !== "object" || bruto === null || Array.isArray(bruto)) return {};
+  const origem = bruto as Record<string, unknown>;
   const destino: Record<string, number | boolean> = {};
   for (const chave of CHAVES_DO_RESUMO) {
-    const valor = bruto[chave];
+    const valor = origem[chave];
     if (typeof valor === "boolean") { destino[chave] = valor; continue; }
     if (typeof valor === "number" && Number.isFinite(valor)) destino[chave] = valor;
   }
