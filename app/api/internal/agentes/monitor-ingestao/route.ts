@@ -73,6 +73,14 @@ export async function GET(request: Request) {
       return responder({ ok: true, estado: "avaliado", metricas: r.metricas }, 200);
     }
 
+    if (r.estado === "ignorado_por_sobreposicao") {
+      // Outra execucao ja estava avaliando este escopo. Nao e falha do
+      // agendador, nao e cegueira do vigia e nao gera alerta nenhum: o
+      // proximo minuto reavalia a janela inteira. Sem log, porque isso
+      // pode ser rotina e um registro por minuto viraria ruido.
+      return responder({ ok: true, estado: "ignorado_por_sobreposicao" }, 200);
+    }
+
     if (r.estado === "avaliacao_parcial") {
       // NUNCA 200. Uma rodada que gravou parte das observacoes e parou
       // no meio pareceria saudavel no painel do cron, e o silencio

@@ -21,6 +21,25 @@
  * disponibilidade de Vercel/Postgres fica com o monitoramento de
  * plataforma, que e quem tem como observa-la de fora.
  *
+ * ── DUAS EXECUCOES NAO PODEM AVALIAR JUNTAS (I4P9-R1) ───────────────
+ *
+ * O indice unico parcial dos alertas serializa a ABERTURA do mesmo
+ * incidente, e so isso. Ele nao serializa duas AVALIACOES sobrepostas, e
+ * o caso pior nem chega a tocar linha de alerta:
+ *
+ *   T2  a execucao NOVA le tudo saudavel -> NOOP, nada e escrito
+ *   T1  a execucao VELHA, atrasada, le um gap antigo -> ABRE incidente
+ *
+ * Nao existe linha contra a qual comparar, entao nenhum CAS por alerta
+ * resolve. O que falta e impedir que as duas avaliem ao mesmo tempo:
+ * antes de qualquer leitura de estado, a execucao adquire o direito de
+ * avaliar aquele escopo. Quem nao adquire NAO avalia e NAO toca o ciclo
+ * de vida — sai com 200 e o proximo minuto reavalia tudo do zero.
+ *
+ * Pular uma rodada custa um minuto de latencia. Escrever estado velho
+ * por cima de evidencia nova custa um incidente falso que ninguem sabe
+ * de onde veio.
+ *
  * ── ALVO AUSENTE NAO E CONFIGURACAO AUSENTE ─────────────────────────
  *
  * Sem `N8N_INGESTAO_AGENT_ID` nao se sabe nem de QUEM seria a
@@ -102,6 +121,22 @@ export type EscritaDoIncidente =
   | { readonly estado: "duplicada" }
   | { readonly estado: "falhou" };
 
+/** O escopo que o lease serializa. A mesma forma do escopo do alerta. */
+export type EscopoDaSerializacao = EscopoDoAlerta;
+
+export type AquisicaoDaSerializacao =
+  | {
+      readonly estado: "adquirida";
+      /** Opaco, por execucao. E o que impede A de liberar o lease de B. */
+      readonly portador: string;
+      readonly expiraEm: string | null;
+      /** O portador anterior morreu sem liberar. Sintoma, nao rotina. */
+      readonly tomadaDeExpirada: boolean;
+    }
+  /** Outra execucao esta avaliando este escopo AGORA. Nao e falha. */
+  | { readonly estado: "ocupada" }
+  | { readonly estado: "falhou" };
+
 export interface PortasDoMonitor {
   readonly agora: () => number;
   /** O id do agente alvo, cru, como veio do ambiente. */
@@ -118,6 +153,9 @@ export interface PortasDoMonitor {
     readonly userId: string;
     readonly agenteId: string;
   }) => Promise<LeituraDoCursorDoMonitor>;
+  readonly adquirirSerializacao: (escopo: EscopoDaSerializacao) => Promise<AquisicaoDaSerializacao>;
+  /** Melhor esforco: a expiracao e a garantia real. Nunca lanca. */
+  readonly liberarSerializacao: (escopo: EscopoDaSerializacao, portador: string) => Promise<void>;
   readonly lerIncidenteAberto: (escopo: EscopoDoAlerta, tipo: TipoDeAlerta) => Promise<LeituraDoIncidente>;
   readonly abrirIncidente: (novo: NovoIncidente) => Promise<EscritaDoIncidente>;
   readonly atualizarIncidente: (id: string, campos: CamposDeAtualizacao) => Promise<EscritaDoIncidente>;
@@ -144,6 +182,8 @@ export type ResultadoDoMonitor =
       readonly metricas: MetricasDoMonitor;
       readonly estagio: string;
     }
+  /** Outra execucao detinha o direito de avaliar. NAO e erro. */
+  | { readonly estado: "ignorado_por_sobreposicao" }
   | { readonly estado: "alvo_nao_configurado" }
   | { readonly estado: "alvo_invalido" }
   | { readonly estado: "falha_de_plataforma"; readonly estagio: string };
@@ -234,6 +274,41 @@ export async function executarMonitorDaIngestao(
     recurso: RECURSO_DO_MONITOR,
   };
 
+  // ── Serializacao ──────────────────────────────────────────────────
+  //
+  // Depois do alvo e da autoridade, porque sem escopo nao ha o que
+  // serializar; e ANTES de qualquer leitura de estado, porque uma
+  // avaliacao que ja comecou nao pode ser desfeita.
+  const lease = await portas.adquirirSerializacao(escopo);
+  if (lease.estado === "falhou") {
+    return { estado: "falha_de_plataforma", estagio: "aquisicao_da_serializacao" };
+  }
+  if (lease.estado === "ocupada") {
+    // Sobreposicao nao e falha do agendador nem cegueira do vigia: e o
+    // vigia funcionando. Abrir alerta aqui seria alarme sobre si mesmo.
+    return { estado: "ignorado_por_sobreposicao" };
+  }
+
+  try {
+    return await avaliarEAplicar(portas, escopo);
+  } finally {
+    // O `finally` NAO pode derrubar o resultado que ja foi decidido: se
+    // a liberacao falhar, a expiracao resolve sozinha.
+    try {
+      await portas.liberarSerializacao(escopo, lease.portador);
+    } catch {
+      // Silencio deliberado. Ver acima.
+    }
+  }
+}
+
+async function avaliarEAplicar(
+  portas: PortasDoMonitor,
+  escopo: EscopoDoAlerta
+): Promise<ResultadoDoMonitor> {
+  const { agenteId } = escopo;
+  // O instante e lido DEPOIS da aquisicao: a avaliacao pertence a janela
+  // serializada, nao ao momento em que a requisicao chegou.
   const agora = portas.agora();
 
   // ── Configuracao ──────────────────────────────────────────────────

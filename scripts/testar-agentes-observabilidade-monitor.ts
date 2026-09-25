@@ -35,6 +35,7 @@ import {
 import { avaliarIngestao } from "../lib/agentes/observabilidade/monitor-avaliacao";
 import {
   executarMonitorDaIngestao,
+  type AquisicaoDaSerializacao,
   janelaDeConsulta,
   MARGEM_DA_CONSULTA_MS,
   PLATAFORMA_DO_MONITOR,
@@ -525,7 +526,76 @@ function lojaDeAlertas(): Loja {
   return { abertos: new Map(), eventos: [] };
 }
 
-function portas(over: Partial<PortasDoMonitor> = {}, loja = lojaDeAlertas()): PortasDoMonitor {
+interface Serializador {
+  adquirir(escopo: EscopoDoAlerta): AquisicaoDaSerializacao;
+  liberar(escopo: EscopoDoAlerta, portador: string): void;
+}
+
+const chaveDoEscopo = (e: EscopoDoAlerta) =>
+  JSON.stringify([e.userId, e.agenteId, e.plataforma, e.recurso]);
+
+/**
+ * O serializador que NAO serializa — o modelo anterior ao I4P9-R1.
+ *
+ * Existe para que os cenarios de corrida possam ser demonstrados como
+ * defeito REAL antes de serem demonstrados como corrigidos. Um teste que
+ * so mostra o depois nao prova que o antes era quebrado.
+ */
+function sempreConcede(): Serializador {
+  let n = 0;
+  return {
+    adquirir: () => ({
+      estado: "adquirida", portador: "portador-" + ++n,
+      expiraEm: null, tomadaDeExpirada: false,
+    }),
+    liberar: () => undefined,
+  };
+}
+
+/**
+ * Um lease de verdade, em memoria: por ESCOPO, com relogio proprio e
+ * expiracao. Modela o contrato da RPC, que e o que o codigo depende.
+ */
+function leaseEmMemoria(relogio: { agora: number }): Serializador {
+  const donos = new Map<string, { portador: string; expiraEm: number; liberado: boolean }>();
+  let n = 0;
+  return {
+    adquirir: (escopo) => {
+      const k = chaveDoEscopo(escopo);
+      const dono = donos.get(k) ?? null;
+      if (dono !== null && dono.expiraEm > relogio.agora) return { estado: "ocupada" };
+      const tomadaDeExpirada = dono !== null && !dono.liberado;
+      const novo = {
+        portador: "portador-" + ++n,
+        expiraEm: relogio.agora + TTL_SINTETICO_MS,
+        liberado: false,
+      };
+      donos.set(k, novo);
+      return {
+        estado: "adquirida", portador: novo.portador,
+        expiraEm: new Date(novo.expiraEm).toISOString(), tomadaDeExpirada,
+      };
+    },
+    liberar: (escopo, portador) => {
+      // Casada com o PORTADOR: A nunca libera o lease que B adquiriu.
+      const k = chaveDoEscopo(escopo);
+      const dono = donos.get(k) ?? null;
+      if (dono === null || dono.portador !== portador) return;
+      donos.set(k, { ...dono, expiraEm: relogio.agora, liberado: true });
+    },
+  };
+}
+
+/** O mesmo TTL do modulo de producao, para o duplo nao divergir dele. */
+const TTL_SINTETICO_MS = 90_000;
+
+function portas(
+  over: Partial<PortasDoMonitor> = {},
+  loja = lojaDeAlertas(),
+  leases: Serializador = sempreConcede(),
+  /** Marca de qual execucao escreveu. E o que prova a ordenacao. */
+  rotulo = ""
+): PortasDoMonitor {
   return {
     agora: () => AGORA,
     lerAlvo: () => AG,
@@ -533,6 +603,8 @@ function portas(over: Partial<PortasDoMonitor> = {}, loja = lojaDeAlertas()): Po
     lerConfiguracao: async () => CONFIG_ATIVA,
     carregarLedger: async () => montarCarga(seisBuckets((n) => n * 100), ESCOPO_CARGA, false),
     lerCursor: async () => lerCursorDoMonitor(CURSOR_PROGRESSO, ESCOPO_CARGA),
+    adquirirSerializacao: async (escopo) => leases.adquirir(escopo),
+    liberarSerializacao: async (escopo, portador) => leases.liberar(escopo, portador),
     lerIncidenteAberto: async (_e, tipo) => {
       const a = loja.abertos.get(tipo);
       return a ? { estado: "encontrado", id: a.id, incidente: a.incidente } : { estado: "ausente" };
@@ -551,7 +623,7 @@ function portas(over: Partial<PortasDoMonitor> = {}, loja = lojaDeAlertas()): Po
           evidenciasSaudaveisConsecutivas: novo.evidenciasSaudaveisConsecutivas,
         },
       });
-      loja.eventos.push("OPEN:" + novo.tipo);
+      loja.eventos.push(rotulo + "OPEN:" + novo.tipo);
       return { estado: "aplicada" };
     },
     atualizarIncidente: async (id, campos) => {
@@ -559,13 +631,13 @@ function portas(over: Partial<PortasDoMonitor> = {}, loja = lojaDeAlertas()): Po
       const a = loja.abertos.get(tipo);
       if (!a) return { estado: "falhou" };
       loja.abertos.set(tipo, { id, incidente: { ...a.incidente, ...campos } as IncidenteAberto });
-      loja.eventos.push("UPDATE:" + tipo);
+      loja.eventos.push(rotulo + "UPDATE:" + tipo);
       return { estado: "aplicada" };
     },
     resolverIncidente: async (id) => {
       const tipo = id.slice(3) as TipoDeAlerta;
       loja.abertos.delete(tipo);
-      loja.eventos.push("RESOLVE:" + tipo);
+      loja.eventos.push(rotulo + "RESOLVE:" + tipo);
       return { estado: "aplicada" };
     },
     ...over,
@@ -880,6 +952,7 @@ const FONTES = [
   "lib/agentes/observabilidade/monitor-carga.ts",
   "lib/agentes/observabilidade/monitor-ingestao.ts",
   "lib/agentes/observabilidade/monitor-portas.ts",
+  "lib/agentes/observabilidade/monitor-lease.ts",
   "app/api/internal/agentes/monitor-ingestao/route.ts",
 ] as const;
 
@@ -904,6 +977,20 @@ for (const f of FONTES) {
     !portasFonte.includes(".insert(") && !portasFonte.includes(".update(") &&
     !portasFonte.includes(".upsert(") && !portasFonte.includes(".delete(") &&
     !portasFonte.includes(".rpc("));
+  {
+    // O lease escreve, e tem de escrever. O que ele NAO pode e encostar
+    // em tabela comercial: a escrita dele e coordenacao, nao varredura.
+    const leaseFonte = semComentarios(ler("lib/agentes/observabilidade/monitor-lease.ts"));
+    ok("L5b a escrita do lease sai por RPC dedicada, e so por ela",
+      (leaseFonte.match(/\.rpc\(/g) || []).length === 2 &&
+      leaseFonte.includes("adquirir_lease_monitor_ingestao") &&
+      leaseFonte.includes("liberar_lease_monitor_ingestao"));
+    ok("L5c e ele nao alcanca nenhuma tabela comercial",
+      !leaseFonte.includes(".from(") &&
+      !leaseFonte.includes("agente_perguntas") &&
+      !leaseFonte.includes("agente_acao_execucoes") &&
+      !leaseFonte.includes("pedidos"));
+  }
   ok("L6  a unica escrita do monitor sai pelo repositorio do OBS-4",
     portasFonte.includes("criarAlerta") && portasFonte.includes("resolverAlerta"));
   ok("L7  o alvo vem do AMBIENTE, nao da tabela de configuracao",
@@ -913,6 +1000,317 @@ for (const f of FONTES) {
 }
 ok("L9  zero bytes de controle nas fontes novas",
   FONTES.every((f) => !ler(f).includes(String.fromCharCode(0))));
+
+
+// --- M. Reentrancia do proprio vigia (I4P9-R1) -----------------------
+secao("M. Reentrancia");
+
+/** Um portao que deixa uma execucao parada onde o teste quiser. */
+function diferida(): { portao: Promise<void>; abrir: () => void } {
+  let abrir!: () => void;
+  const portao = new Promise<void>((r) => { abrir = r; });
+  return { portao, abrir };
+}
+
+const LEDGER_COM_GAP = (() => {
+  const l: unknown[] = [];
+  for (let n = 0; n <= 4; n++) l.push(...linhasDoBucket(n, { offset: n * 100 }));
+  return l;
+})();
+
+/**
+ * Duas execucoes sobrepostas: a VELHA (A) carrega um ledger com gap e
+ * fica presa; a NOVA (B) carrega tudo saudavel e termina primeiro.
+ *
+ * `serializa` decide se o modelo tem lease. Sem ele, as duas avaliam.
+ */
+async function sobrepor(serializa: boolean, loja: Loja, cenarioB: Partial<PortasDoMonitor> = {}) {
+  const relogio = { agora: AGORA };
+  const leases = serializa ? leaseEmMemoria(relogio) : sempreConcede();
+  const d = diferida();
+
+  const pA = portas({
+    agora: () => AGORA,
+    carregarLedger: async () => {
+      await d.portao;
+      return montarCarga(LEDGER_COM_GAP, ESCOPO_CARGA, false);
+    },
+  }, loja, leases, "A:");
+  const pB = portas({ agora: () => AGORA + 60_000, ...cenarioB }, loja, leases, "B:");
+
+  const corridaA = executarMonitorDaIngestao(pA);
+  // B inteira enquanto A esta presa dentro da propria avaliacao.
+  const rB = await executarMonitorDaIngestao(pB);
+  d.abrir();
+  const rA = await corridaA;
+  return { rA, rB };
+}
+
+{
+  // SS3.C — o caso que NENHUM CAS por linha de alerta resolve: a
+  // avaliacao saudavel mais nova nao escreve nada, entao nao ha linha
+  // contra a qual comparar quando a velha chega atrasada.
+  const loja = lojaDeAlertas();
+  const { rA, rB } = await sobrepor(false, loja);
+  ok("M1  SEM serializacao as DUAS execucoes avaliam",
+    rB.estado === "avaliado" && rA.estado === "avaliado");
+  ok("M2  e a execucao VELHA abre um incidente depois de a nova ter visto saude",
+    loja.abertos.has("scheduler_gap") &&
+    loja.eventos.includes("A:OPEN:scheduler_gap"));
+  ok("M3  o defeito e real: nenhuma linha de alerta existia para proteger",
+    !loja.eventos.some((e) => e.startsWith("B:")));
+}
+{
+  // O MESMO cenario, agora serializado.
+  const loja = lojaDeAlertas();
+  const { rA, rB } = await sobrepor(true, loja);
+  ok("M4  COM serializacao a segunda execucao nao avalia",
+    rB.estado === "ignorado_por_sobreposicao");
+  ok("M5  e ela nao escreve nada", !loja.eventos.some((e) => e.startsWith("B:")));
+  ok("M6  a execucao que detem o direito termina normalmente", rA.estado === "avaliado");
+  ok("M7  entao as escritas do ciclo vem de UMA execucao so",
+    loja.eventos.length > 0 && loja.eventos.every((e) => e.startsWith("A:")));
+}
+{
+  // SS3.A — incidente ABERTO, a nova registra recuperacao e a velha
+  // volta e apaga essa recuperacao.
+  const loja = lojaDeAlertas();
+  loja.abertos.set("scheduler_gap", {
+    id: "id-scheduler_gap",
+    incidente: {
+      tipo: "scheduler_gap", severidadeAtual: "warning", severidadeMaxima: "warning",
+      causaAtual: "missing", ocorrencias: 1,
+      ultimaEvidenciaChave: "b:" + idDoBucket(4) + "#a:missing",
+      evidenciasSaudaveisConsecutivas: 0,
+    },
+  });
+  await sobrepor(false, loja);
+  ok("M8  SEM serializacao a evidencia saudavel da execucao nova e desfeita",
+    loja.abertos.get("scheduler_gap")?.incidente.evidenciasSaudaveisConsecutivas === 0 &&
+    loja.eventos.includes("B:UPDATE:scheduler_gap") &&
+    loja.eventos.indexOf("A:UPDATE:scheduler_gap") > loja.eventos.indexOf("B:UPDATE:scheduler_gap"));
+}
+{
+  const loja = lojaDeAlertas();
+  loja.abertos.set("scheduler_gap", {
+    id: "id-scheduler_gap",
+    incidente: {
+      tipo: "scheduler_gap", severidadeAtual: "warning", severidadeMaxima: "warning",
+      causaAtual: "missing", ocorrencias: 1,
+      ultimaEvidenciaChave: "b:" + idDoBucket(4) + "#a:missing",
+      evidenciasSaudaveisConsecutivas: 0,
+    },
+  });
+  await sobrepor(true, loja);
+  ok("M9  COM serializacao nenhuma escrita fora de ordem acontece",
+    loja.eventos.every((e) => e.startsWith("A:")));
+}
+{
+  // SS3.B — o espelho: a nova observa ATIVO e a velha, saudavel.
+  const loja = lojaDeAlertas();
+  const { rB } = await sobrepor(true, loja, {
+    carregarLedger: async () => montarCarga(LEDGER_COM_GAP, ESCOPO_CARGA, false),
+  });
+  ok("M10 saudavel velho tambem nao passa na frente de ativo novo",
+    rB.estado === "ignorado_por_sobreposicao" &&
+    !loja.eventos.some((e) => e.startsWith("B:")));
+}
+{
+  // SS3.D/E — duas invocacoes IDENTICAS, mesmo minuto, mesma evidencia.
+  const relogio = { agora: AGORA };
+  const leases = leaseEmMemoria(relogio);
+  const loja = lojaDeAlertas();
+  const d = diferida();
+  const pA = portas({
+    lerConfiguracao: async () => ({ estado: "configuracao_ausente" }),
+    lerIncidenteAberto: async (_e, tipo) => {
+      await d.portao;
+      const a = loja.abertos.get(tipo);
+      return a ? { estado: "encontrado", id: a.id, incidente: a.incidente } : { estado: "ausente" };
+    },
+  }, loja, leases, "A:");
+  const pB = portas({ lerConfiguracao: async () => ({ estado: "configuracao_ausente" }) },
+    loja, leases, "B:");
+  const corridaA = executarMonitorDaIngestao(pA);
+  const rB = await executarMonitorDaIngestao(pB);
+  d.abrir();
+  const rA = await corridaA;
+  ok("M11 invocacao duplicada: UMA avalia, a outra pula",
+    (rA.estado === "avaliado") !== (rB.estado === "avaliado"));
+  ok("M12 e exatamente um incidente nasce",
+    loja.eventos.filter((e) => e.endsWith("OPEN:monitor_configuration_missing")).length === 1);
+}
+{
+  // SS18.C — lease vencido pode ser tomado, e a tomada e reconhecida.
+  const relogio = { agora: AGORA };
+  const leases = leaseEmMemoria(relogio);
+  const primeira = leases.adquirir(ESCOPO);
+  ok("M13 a primeira aquisicao vence", primeira.estado === "adquirida");
+  ok("M14 a segunda, com lease valido, e OCUPADA",
+    leases.adquirir(ESCOPO).estado === "ocupada");
+
+  relogio.agora += TTL_SINTETICO_MS + 1;
+  const tomada = leases.adquirir(ESCOPO);
+  ok("M15 depois de vencer, o direito volta sozinho — sem intervencao",
+    tomada.estado === "adquirida");
+  ok("M16 e a tomada de um portador que nao liberou e reconhecida como tal",
+    tomada.estado === "adquirida" && tomada.tomadaDeExpirada);
+
+  // O portador ANTIGO tenta liberar o lease do novo.
+  if (primeira.estado === "adquirida") leases.liberar(ESCOPO, primeira.portador);
+  ok("M17 o portador antigo NAO libera o lease que o novo adquiriu",
+    leases.adquirir(ESCOPO).estado === "ocupada");
+
+  if (tomada.estado === "adquirida") leases.liberar(ESCOPO, tomada.portador);
+  const depois = leases.adquirir(ESCOPO);
+  ok("M18 o portador atual libera, e o direito fica disponivel na hora",
+    depois.estado === "adquirida");
+  ok("M19 e aquisicao apos liberacao normal NAO e tomada de vencido",
+    depois.estado === "adquirida" && !depois.tomadaDeExpirada);
+}
+{
+  // SS18.I — o lease de um agente nao bloqueia o outro.
+  const leases = leaseEmMemoria({ agora: AGORA });
+  ok("M20 escopo A adquire", leases.adquirir(ESCOPO).estado === "adquirida");
+  ok("M21 e o escopo de OUTRO agente adquire junto",
+    leases.adquirir({ ...ESCOPO, agenteId: OUTRO_AG }).estado === "adquirida");
+  ok("M22 sem deixar de bloquear o proprio escopo",
+    leases.adquirir(ESCOPO).estado === "ocupada");
+}
+{
+  // SS12 — o banco falha ao coordenar. Isso e plataforma.
+  const loja = lojaDeAlertas();
+  const r = await executarMonitorDaIngestao(portas({
+    adquirirSerializacao: async () => ({ estado: "falhou" }),
+  }, loja));
+  ok("M23 falha ao adquirir o lease -> falha de PLATAFORMA",
+    r.estado === "falha_de_plataforma" && r.estagio === "aquisicao_da_serializacao");
+  ok("M24 e zero avaliacao, zero alerta", loja.eventos.length === 0);
+}
+{
+  // SS18.J — config inativa continua serializada.
+  const relogio = { agora: AGORA };
+  const leases = leaseEmMemoria(relogio);
+  const loja = lojaDeAlertas();
+  const d = diferida();
+  const pA = portas({
+    lerConfiguracao: async () => { await d.portao; return { estado: "configurado_inativo" }; },
+  }, loja, leases, "A:");
+  const pB = portas({ lerConfiguracao: async () => ({ estado: "configurado_inativo" }) },
+    loja, leases, "B:");
+  const corridaA = executarMonitorDaIngestao(pA);
+  const rB = await executarMonitorDaIngestao(pB);
+  d.abrir();
+  await corridaA;
+  ok("M25 config inativa tambem e serializada",
+    rB.estado === "ignorado_por_sobreposicao");
+}
+{
+  // A liberacao acontece MESMO quando a avaliacao falha no meio.
+  const relogio = { agora: AGORA };
+  const leases = leaseEmMemoria(relogio);
+  const loja = lojaDeAlertas();
+  const r = await executarMonitorDaIngestao(portas({
+    lerIncidenteAberto: async () => ({ estado: "falhou" }),
+  }, loja, leases));
+  ok("M26 avaliacao parcial nao engole o lease",
+    r.estado === "avaliacao_parcial" && leases.adquirir(ESCOPO).estado === "adquirida");
+}
+{
+  // E uma liberacao que EXPLODE nao pode derrubar o resultado.
+  const loja = lojaDeAlertas();
+  // A chamada e envolvida porque a falha esperada e um RESULTADO errado,
+  // nao uma excecao: sem isto, um `finally` que propaga derrubaria a
+  // suite inteira em vez de reprovar este assert.
+  let r: ResultadoDoMonitor | null = null;
+  try {
+    r = await executarMonitorDaIngestao(portas({
+      liberarSerializacao: async () => { throw new Error("banco caiu na liberacao"); },
+    }, loja));
+  } catch {
+    r = null;
+  }
+  ok("M27 falha ao liberar nao muda o resultado ja decidido",
+    r !== null && r.estado === "avaliado");
+}
+
+// --- N. A migration do lease -----------------------------------------
+secao("N. Migration do lease");
+
+{
+  const SQL = ler("supabase/migrations/20261014_agente_ingestao_monitor_lease.sql");
+  const LISO = SQL.replace(/^\s*--.*$/gm, "").replace(/\s+/g, " ");
+
+  ok("N1  tabela propria: o lease nao mora no alerta nem no cursor",
+    LISO.includes("create table public.agente_ingestao_monitor_lease") &&
+    !LISO.includes("agente_ingestao_alertas") &&
+    !LISO.includes("agente_perguntas_continuacao"));
+  ok("N2  sem `if not exists` — objeto de outra forma nao passa calado",
+    !/create table if not exists/i.test(LISO));
+  ok("N3  a chave e por ESCOPO, nunca um singleton global",
+    LISO.includes("primary key (agente_id, plataforma, recurso)"));
+  ok("N4  cerca de dono pela FK composta",
+    LISO.includes("foreign key (agente_id, user_id)") &&
+    LISO.includes("references public.agentes (id, user_id)"));
+  ok("N5  o par canonico e travado",
+    LISO.includes("plataforma = 'mercado_livre' and recurso = 'perguntas'"));
+
+  ok("N6  a aquisicao e UM comando: insert ... on conflict do update",
+    /insert into public\.agente_ingestao_monitor_lease[\s\S]*on conflict \(agente_id, plataforma, recurso\) do update/.test(LISO));
+  ok("N7  com a condicao de expiracao NO PROPRIO comando",
+    /do update[\s\S]*where alvo\.expira_em <= now\(\)/.test(LISO));
+  ok("N8  e cerca de dono junto",
+    /where alvo\.expira_em <= now\(\)[\s]*and alvo\.user_id = p_user_id/.test(LISO));
+  ok("N9  NAO existe select-depois-update desprotegido",
+    !/select[\s\S]*from public\.agente_ingestao_monitor_lease[\s\S]*update public\.agente_ingestao_monitor_lease/.test(LISO));
+
+  ok("N10 o relogio e o do BANCO, nunca o de quem chama",
+    LISO.includes("now() + make_interval(secs => p_ttl_segundos)") &&
+    !/p_\w*(expira|agora|instante)\w* timestamptz/.test(LISO));
+  ok("N11 o TTL cru e revalidado dentro da RPC",
+    LISO.includes("p_ttl_segundos <= 0 or p_ttl_segundos > 600"));
+  ok("N12 o portador cru tambem",
+    LISO.includes("length(btrim(p_portador)) = 0"));
+
+  ok("N13 a liberacao casa com o PORTADOR",
+    /update public\.agente_ingestao_monitor_lease[\s\S]*and alvo\.portador = p_portador/.test(LISO));
+  ok("N14 e so libera lease ainda nao liberado",
+    /and alvo\.liberada_em is null/.test(LISO));
+
+  ok("N15 as duas RPCs sao `security invoker` com search_path fixo",
+    (LISO.match(/security invoker set search_path = public/g) || []).length === 2);
+  ok("N16 revoke nominal nos tres papeis, nas funcoes",
+    (LISO.match(/revoke all on function public\.adquirir_lease_monitor_ingestao/g) || []).length === 3 &&
+    (LISO.match(/revoke all on function public\.liberar_lease_monitor_ingestao/g) || []).length === 3);
+  ok("N17 execute so para service_role",
+    (LISO.match(/grant execute on function[^;]*to service_role/g) || []).length === 2);
+  ok("N18 a tabela nao concede nada a public/anon/authenticated",
+    ["public", "anon", "authenticated", "service_role"].every((papel) =>
+      LISO.includes("revoke all on table public.agente_ingestao_monitor_lease from " + papel)));
+  ok("N19 e DELETE/TRUNCATE ficam de fora",
+    LISO.includes("revoke delete, truncate on table public.agente_ingestao_monitor_lease from service_role"));
+  ok("N20 sem trigger e sem regra de negocio escondida no schema",
+    !/create trigger/i.test(LISO));
+  ok("N21 zero bytes de controle", !SQL.includes(String.fromCharCode(0)));
+}
+{
+  const lease = semComentarios(ler("lib/agentes/observabilidade/monitor-lease.ts"));
+  ok("N22 o TTL do codigo e o declarado", lease.includes("TTL_DO_LEASE_SEGUNDOS = 90"));
+  ok("N23 o portador nasce dentro da porta, nao vem de fora",
+    lease.includes("randomUUID()") && !/portador:\s*\w+\s*\)/.test(lease.split("export async function adquirir")[0]));
+  ok("N24 forma inesperada da RPC NAO vira direito adquirido",
+    lease.includes('typeof linha.adquirida !== "boolean"'));
+  ok("N25 a porta declara `server-only`", lease.includes("server-only"));
+  ok("N26 e nao chama provedor nem n8n",
+    !lease.includes("fetch(") && !lease.includes("mercado-livre") && !lease.includes("ponte-n8n"));
+}
+{
+  const rota = semComentarios(ler("app/api/internal/agentes/monitor-ingestao/route.ts"));
+  ok("N27 sobreposicao responde 200, nao erro",
+    /ignorado_por_sobreposicao[\s\S]*200/.test(rota));
+  ok("N28 e a resposta nao expoe o portador do lease",
+    !rota.includes("portador"));
+}
 
 }
 

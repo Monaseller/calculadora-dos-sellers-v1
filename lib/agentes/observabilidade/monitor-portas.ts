@@ -26,6 +26,7 @@ import {
   resolverAlerta,
 } from "./alerta-repositorio";
 import { lerEstadoEsperadoDaIngestao } from "./estado-esperado";
+import { adquirirLeaseDoMonitor, liberarLeaseDoMonitor } from "./monitor-lease";
 import { lerCursorDoMonitor, montarCarga, type EscopoDaCarga } from "./monitor-carga";
 import type { CargaDoLedger, LeituraDoCursorDoMonitor } from "./monitor-avaliacao";
 import {
@@ -149,6 +150,8 @@ export function portasDeProducao(): PortasDoMonitor {
     lerConfiguracao: (agenteId: string) => lerEstadoEsperadoDaIngestao(agenteId),
     carregarLedger,
     lerCursor,
+    adquirirSerializacao: (escopo) => adquirirLeaseDoMonitor(escopo),
+    liberarSerializacao: (escopo, portador) => liberarLeaseDoMonitor(escopo, portador),
     lerIncidenteAberto: (escopo, tipo) => lerAlertaAberto(escopo, tipo),
     abrirIncidente: (novo) => criarAlerta(novo),
     atualizarIncidente: (id, campos) => atualizarAlerta(id, campos),
