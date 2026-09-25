@@ -145,7 +145,14 @@ export type Severidade = "nenhuma" | "warning" | "alert" | "critical";
 
 // ─── Junção das duas fases ────────────────────────────────────────────
 
-interface Execucao {
+/**
+ * Uma travessia inteira: a abertura e, se houve, o desfecho.
+ *
+ * EXPORTADA no I4P9 porque o monitor precisa da MESMA juncao para montar
+ * a proveniencia do cursor. Duplicar a juncao la seria duplicar a
+ * fronteira de tenant que ela existe para proteger.
+ */
+export interface ExecucaoDoLedger {
   readonly userId: string;
   readonly requestId: string;
   readonly abertura: LinhaDoLedger;
@@ -161,8 +168,8 @@ interface Execucao {
  * de um tenant fechar a abertura de outro — um heartbeat falso, e do
  * tipo mais dificil de enxergar depois.
  */
-function juntarFases(linhas: readonly LinhaDoLedger[]): {
-  readonly execucoes: readonly Execucao[];
+export function juntarFasesDoLedger(linhas: readonly LinhaDoLedger[]): {
+  readonly execucoes: readonly ExecucaoDoLedger[];
   readonly achados: readonly AchadoDoLedger[];
 } {
   const aberturas = new Map<string, LinhaDoLedger>();
@@ -192,7 +199,7 @@ function juntarFases(linhas: readonly LinhaDoLedger[]): {
     }
   }
 
-  const execucoes: Execucao[] = [];
+  const execucoes: ExecucaoDoLedger[] = [];
   for (const [k, abertura] of aberturas) {
     execucoes.push({
       userId: abertura.userId,
@@ -312,7 +319,7 @@ export function detectarSaudeDosBuckets(entrada: {
   const ultimoNominal = Math.floor(agora / CADENCIA_MS) * CADENCIA_MS;
   const esperados = bucketsNoIntervalo(inicioDaJanela, Math.max(ultimoFechado, ultimoNominal));
 
-  const { execucoes, achados } = juntarFases(entrada.linhas);
+  const { execucoes, achados } = juntarFasesDoLedger(entrada.linhas);
   const achadosTodos: AchadoDoLedger[] = [...achados];
 
   // Agrupa por (bucket canonico, agente). O tenant ja esta implicito: a

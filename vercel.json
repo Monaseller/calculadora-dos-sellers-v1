@@ -11,6 +11,10 @@
     {
       "path": "/api/internal/agentes/worker",
       "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/internal/agentes/monitor-ingestao",
+      "schedule": "* * * * *"
     }
   ],
   "functions": {

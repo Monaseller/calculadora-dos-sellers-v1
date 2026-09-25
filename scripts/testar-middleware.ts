@@ -433,8 +433,20 @@ t("6. as 9 rotas com segredo estao declaradas, nem uma a mais", () => {
   // perguntas, com o mesmo defeito de origem das duas da FIX2 — so que
   // desta vez o invariante 37/38 a descobriu no disco antes do deploy, e
   // nao o smoke de producao depois.
-  assert(Object.keys(ROTAS_COM_SEGREDO).length === 8,
-    `esperado 8 rotas com segredo, encontrado ${Object.keys(ROTAS_COM_SEGREDO).length}`);
+  // M2-I1-A8B-I4P11. Numero RECOMPOSTO, e nenhum dos dois lados do
+  // conflito estava certo: o 8 era de antes do vigia existir, o 10 era de
+  // antes da ponte generica sair. O valor vem da medicao neste branch —
+  // 8 depois do I4O4 (a MAIN saiu), mais 1 do `monitor-ingestao`.
+  assert(Object.keys(ROTAS_COM_SEGREDO).length === 9,
+    `esperado 9 rotas com segredo, encontrado ${Object.keys(ROTAS_COM_SEGREDO).length}`);
+  // E o conjunto, nominalmente: contagem sozinha nao distingue "a MAIN
+  // voltou e o monitor saiu" de "esta tudo certo".
+  assert(!("/api/internal/agentes/acoes" in ROTAS_COM_SEGREDO),
+    "a ponte generica removida no I4O4 reapareceu na policy");
+  assert(JSON.stringify(ROTAS_COM_SEGREDO["/api/internal/agentes/monitor-ingestao"]) === '["GET"]',
+    "o vigia da ingestao nao esta declarado com exatamente [GET]");
+  assert(JSON.stringify(ROTAS_COM_SEGREDO["/api/internal/agentes/ingestao-perguntas"]) === '["POST"]',
+    "a rota dedicada da ingestao nao esta declarada com exatamente [POST]");
 });
 
 // ────────────────────────────────────────────────────────────────────

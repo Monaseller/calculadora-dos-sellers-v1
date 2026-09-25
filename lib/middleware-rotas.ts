@@ -142,6 +142,13 @@ export const ROTAS_COM_SEGREDO: Readonly<Record<string, readonly string[]>> = {
   // autoriza continua sendo `N8N_INGESTAO_INTERNAL_SECRET`, dentro da rota,
   // fail-closed. E so POST, porque so POST e exportado.
   "/api/internal/agentes/ingestao-perguntas": ["POST"], // orquestrador externo (n8n) — ingestao
+  // M2-I1-A8B-I4P9 (OBS-5). O VIGIA da ingestao, alvo do Vercel Cron.
+  // Declarado junto com a rota, e nao depois dela: o I4C mostrou que a
+  // ausencia aqui nao aparece em teste de rota nenhum, porque as suites
+  // chamam o handler direto -- o que o middleware nega e a requisicao,
+  // uma camada antes. Quem autoriza continua sendo `CRON_SECRET`, dentro
+  // da rota, fail-closed. So GET, porque so GET e exportado.
+  "/api/internal/agentes/monitor-ingestao": ["GET"], // Vercel Cron * * * * *
 };
 
 /**
