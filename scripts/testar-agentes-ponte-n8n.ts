@@ -520,276 +520,115 @@ async function main(): Promise<void> {
     /FUNCAO_ID as FUNCAO_VENDAS/.test(ler("lib/agentes/acoes/catalogo.ts")) &&
     !/"vendas\.consultar"/.test(CATALOGO));
   {
+    // I4O2: nao ha mais "acao desconhecida" para recusar. A rota termina
+    // antes de olhar a acao, entao conhecida e desconhecida sao iguais.
     const r = await POST(corpoValido({ acao: "consultar_anuncios" }));
-    ok("N8N-BRIDGE-4b a rota recusa acao desconhecida com 400", r.status === 400);
+    ok("N8N-BRIDGE-4b acao desconhecida termina igual: 410", r.status === 410);
   }
 
-  // ═══ C. Corpo fechado ═══════════════════════════════════════════════
-  secao("C. Autoridade recusada na entrada");
+  // ═══ C. Quarentena da superficie generica ═════════════════
+  //
+  // I4O2. As secoes C a G desta suite provavam o COMPORTAMENTO COMERCIAL
+  // da ponte: corpo fechado, dono vindo do banco, cadeia ponta a ponta,
+  // replay da mesma intencao, aprovacao e bloqueio. Esse comportamento
+  // deixou de existir — a rota entrou em quarentena e termina antes de
+  // ler o corpo.
+  //
+  // O que entra no lugar nao e menos, e mais forte. Antes se provava que
+  // cada campo de autoridade era RECUSADO com 400; agora se prova que
+  // campo nenhum tem EFEITO, porque nenhum e lido. E onde havia um 400
+  // vindo do catalogo ha um 410 terminal alcancado sem carregar agente,
+  // sem executar Funcao, sem abrir ledger e sem tocar rede.
+  secao("C. Quarentena da superficie generica");
+  semear();
+
+  const QUARENTENA = 410;
+  const COD_QUARENTENA = "main_generico_em_aposentadoria";
+
+  {
+    rede = [];
+    const antes = aberturas();
+    const r = await POST(corpoValido());
+    const corpo = await r.json();
+    ok("I4O2-Q1 um corpo comercial PERFEITO termina em 410", r.status === QUARENTENA);
+    ok("I4O2-Q2 o desfecho e terminal e nomeado",
+      corpo.ok === false && corpo.estado === "indisponivel" && corpo.codigo === COD_QUARENTENA);
+    ok("I4O2-Q3 nenhuma abertura de ledger nasceu", aberturas() === antes);
+    ok("I4O2-Q4 nenhuma chamada de rede saiu", rede.length === 0);
+    ok("I4O2-Q5 nenhuma chamada ao provider de perguntas", conta("perguntas") === 0);
+  }
+
+  {
+    // O ponto central da aposentadoria: o `agenteId` do corpo era a
+    // superficie ampla — dono derivado de QUALQUER agente, sem escopo de
+    // usuario. Agora ele nao leva a lugar nenhum.
+    rede = [];
+    const antes = aberturas();
+    const alheio = "11111111-2222-4333-8444-555555555555";
+    const r = await POST(corpoValido({ agenteId: alheio }));
+    ok("I4O2-Q6 agenteId arbitrario nao muda nada: 410", r.status === QUARENTENA);
+    ok("I4O2-Q7 e nenhum agente foi carregado do banco", aberturas() === antes);
+    ok("I4O2-Q8 e nada saiu para rede", rede.length === 0);
+  }
 
   for (const proibida of [
     "funcaoId", "userId", "lojaId", "sellerId", "accessToken",
     "refreshToken", "requestId", "permission", "nivel", "idempotencyKey",
   ]) {
+    rede = [];
     const r = await POST(corpoValido({ [proibida]: "x" }));
-    ok(`N8N-SEC/${proibida} no corpo e recusado com 400`, r.status === 400);
-  }
-  {
-    const r = await POST(corpoValido({
-      argumentos: { status: "UNANSWERED", lojaId: LOJA_A },
-    }));
-    ok("N8N-BRIDGE-7 `lojaId` dentro de `argumentos` tambem e recusado",
-      r.status === 400);
-  }
-  ok("N8N-BRIDGE-22 `executionId` ausente e 400",
-    (await POST({ agenteId: AGENTE_A, acao: ACAO, argumentos: {} })).status === 400);
-  ok("N8N-BRIDGE-22a `executionId` vazio e 400",
-    (await POST(corpoValido({}, ""))).status === 400);
-  ok("N8N-BRIDGE-28 `executionId` acima de 128 caracteres e 400",
-    (await POST(corpoValido({}, "x".repeat(129)))).status === 400);
-  ok("N8N-BRIDGE-28a e 128 exatos e aceito",
-    (await POST(corpoValido({}, "x".repeat(128)))).status !== 400);
-  ok("N8N-BRIDGE-22b corpo que nao e objeto e 400",
-    (await POST("[]")).status === 400 && (await POST("nao-json")).status === 400);
-
-  // ─── `operationId` — M2-I1-A8B ──────────────────────────────────────
-  //
-  // MUT-1/MUT-2/MUT-13. Obrigatorio e sem fallback: `operationId` ausente
-  // caindo em `executionId` produziria uma chave que PARECE idempotente e
-  // nunca deduplica — o modo de falha que so aparece sob Schedule.
-  ok("N8N-A8B-MUT-1 `operationId` ausente e 400",
-    (await POST({
-      agenteId: AGENTE_A, acao: ACAO, argumentos: {}, executionId: "exec-1",
-    })).status === 400);
-  ok("N8N-A8B-MUT-13 `operationId` vazio e 400",
-    (await POST(corpoValido({}, "exec-1", ""))).status === 400);
-  ok("N8N-A8B-MUT-13a `operationId` so com espaco e 400",
-    (await POST(corpoValido({}, "exec-1", "   "))).status === 400);
-  ok("N8N-A8B-MUT-13b `operationId` com espaco nas pontas e 400",
-    (await POST(corpoValido({}, "exec-1", " op-1 "))).status === 400);
-  ok("N8N-A8B-MUT-2 `operationId` acima de 128 caracteres e 400",
-    (await POST(corpoValido({}, "exec-1", "x".repeat(129)))).status === 400);
-  ok("N8N-A8B-MUT-2a e 128 exatos e aceito",
-    (await POST(corpoValido({}, "exec-1", "x".repeat(128)))).status !== 400);
-  ok("N8N-A8B-MUT-4 a rota NAO compoe a chave com `executionId`",
-    /chaveDeIdempotencia\(\s*PROVEDOR,\s*corpo\.operationId/.test(ROTA) &&
-    !/chaveDeIdempotencia\(\s*PROVEDOR,\s*corpo\.executionId/.test(ROTA));
-  ok("N8N-A8B-MUT-4a e NAO existe fallback `operationId ?? executionId`",
-    !/operationId\s*\?\?\s*(corpo\.)?executionId/.test(ROTA) &&
-    !/executionId\s*\?\?\s*(corpo\.)?operationId/.test(ROTA));
-  ok("N8N-BRIDGE-29 `executionId` continua obrigatorio, para correlacao",
-    (await POST({
-      agenteId: AGENTE_A, acao: ACAO, argumentos: {}, operationId: "op-1",
-    })).status === 400);
-
-  // ─── Cruzamento de argumentos entre acoes — MUT-11/MUT-12 ───────────
-  ok("N8N-A8B-MUT-11 `dataInicio` em consultar_perguntas e 400",
-    (await POST(corpoValido({ argumentos: { dataInicio: "2027-01-01" } }))).status === 400);
-  ok("N8N-A8B-MUT-11a `dataFim` em consultar_perguntas e 400",
-    (await POST(corpoValido({ argumentos: { dataFim: "2027-01-01" } }))).status === 400);
-  ok("N8N-A8B-MUT-11b `marketplace` em consultar_perguntas e 400",
-    (await POST(corpoValido({ argumentos: { marketplace: "ML" } }))).status === 400);
-  ok("N8N-A8B-MUT-12 `status` em consultar_vendas e 400",
-    (await POST(corpoVendas({ argumentos: { status: "UNANSWERED" } }))).status === 400);
-  ok("N8N-A8B-MUT-12a `limite` em consultar_vendas e 400",
-    (await POST(corpoVendas({ argumentos: { limite: 20 } }))).status === 400);
-  ok("N8N-A8B-MUT-12b `deslocamento` em consultar_vendas e 400",
-    (await POST(corpoVendas({ argumentos: { deslocamento: 0 } }))).status === 400);
-  ok("N8N-BRIDGE-30 ANTI-VACUIDADE: os argumentos proprios de cada acao NAO sao 400",
-    (await POST(corpoValido())).status !== 400 &&
-    (await POST(corpoVendas())).status !== 400);
-
-  // ═══ D. Resolucao de dono ═══════════════════════════════════════════
-  secao("D. O dono vem do banco");
-
-  {
-    semear();
-    operacoes = [];
-    const r = await lerAgenteParaAcaoInterna(AGENTE_A);
-    const leitura = operacoes.find((o) => o.tabela === "agentes");
-    ok("N8N-BRIDGE-9 o dono e resolvido no CDS, a partir do agente",
-      r.agente?.userId === USER_A && r.agente?.agenteId === AGENTE_A);
-    ok("N8N-BRIDGE-21 a projecao tem EXATAMENTE tres colunas",
-      JSON.stringify([...(leitura?.colunas ?? [])].sort()) ===
-        JSON.stringify(["ativo", "id", "user_id"]));
-    ok("N8N-MUT-11 e nao usa `COLUNAS_AGENTE` nem `select(\"*\")`",
-      /COLUNAS_AGENTE_ACAO_INTERNA/.test(WORKER) &&
-      !/\.select\(COLUNAS_AGENTE\)[\s\S]{0,80}lerAgenteParaAcaoInterna/.test(WORKER));
-    ok("N8N-MUT-17 `normalizarLinha(data)` continua com QUATRO ocorrencias",
-      (WORKER.match(/normalizarLinha\(data\)/g) ?? []).length === 4);
-    ok("N8N-BRIDGE-20 agente inexistente: `null` sem erro — fail-closed",
-      (await lerAgenteParaAcaoInterna("00000000-0000-4000-8000-000000000000")).agente === null);
-    ok("N8N-BRIDGE-20a e a rota responde 404",
-      (await POST(corpoValido({ agenteId: "00000000-0000-4000-8000-000000000000" }))).status === 404);
-    ok("N8N-BRIDGE-19 agente INATIVO e recusado com 409",
-      (await POST(corpoValido({ agenteId: AGENTE_OFF }))).status === 409);
-    ok("N8N-MUT-12 e a Funcao nao chegou a rodar", aberturas() === 0);
-    ok("N8N-BRIDGE-9a `instrucoes` do agente nao volta na projecao",
-      !JSON.stringify(r.agente).includes("segredo interno"));
+    ok(`I4O2-Q/${proibida} no corpo nao tem efeito algum: 410`,
+      r.status === QUARENTENA && rede.length === 0);
   }
 
-  // ═══ E. Execucao feliz ══════════════════════════════════════════════
-  secao("E. A cadeia real, ponta a ponta");
-
-  let requestIdPrimeira: unknown = null;
   {
-    semear();
-    permitir("automatico");
-    conectar();
-    respostaGrant = { status: 200, corpo: grantOk() };
-    respostaPerguntas = { status: 200, corpo: perguntasOk() };
+    // Prova de que o corpo nao e PARSEADO, e nao apenas ignorado: uma
+    // requisicao sem corpo nenhum atravessa igual. Se houvesse
+    // `await request.json()` no caminho, isto lancaria.
+    const semCorpo = new Request("http://localhost/api/internal/agentes/acoes", {
+      method: "POST",
+      headers: { "x-worker-secret": SEGREDO },
+    });
+    const r = await rota.POST(semCorpo);
+    ok("I4O2-Q9 sem corpo nenhum, ainda 410 — o corpo nao e lido",
+      r.status === QUARENTENA);
+  }
+
+  {
+    // Replay: a mesma INTENCAO duas vezes. Antes isto era o coracao da
+    // idempotencia; agora as duas terminam iguais e nenhuma chave nasce.
     rede = [];
-
-    const r = await POST(corpoValido());
-    const corpo = await r.json();
-    requestIdPrimeira = corpo.requestId;
-    const abertura = tabela("agente_funcao_chamadas").find((l) => l.fase === "abertura");
-
-    ok("N8N-BRIDGE-10 o guard REAL rodou: ha abertura com o nivel do momento",
-      abertura?.nivel_no_momento === "automatico");
-    ok("N8N-BRIDGE-11 o binding REAL forneceu a loja",
-      abertura?.loja_id === LOJA_A && abertura?.plataforma === "mercado_livre");
-    ok("N8N-BRIDGE-3c a Funcao despachada e a do catalogo",
-      abertura?.funcao_id === ID_ML);
-    ok("N8N-BRIDGE-12 o resultado e sanitizado — cinco chaves",
-      corpo.ok === true && corpo.estado === "executada" &&
-      JSON.stringify(Object.keys(corpo.resultado.linhas[0]).sort()) ===
-        JSON.stringify(["anuncioId", "criadaEm", "id", "status", "texto"]));
-    ok("N8N-BRIDGE-13 o `requestId` do CDS volta na resposta",
-      typeof corpo.requestId === "string" && corpo.requestId.length > 0);
-    ok("N8N-BRIDGE-16 zero credencial na resposta",
-      !JSON.stringify(corpo).includes(SECRET_ACCESS_A8) &&
-      !JSON.stringify(corpo).includes(SECRET_REFRESH_A8) &&
-      !JSON.stringify(corpo).includes(SELLER_A));
-    ok("N8N-BRIDGE-17 ZERO tarefa criada", tabela("agente_tarefas").length === 0);
-    ok("N8N-BRIDGE-17a e nenhum path do motor de tarefas foi tocado",
-      !operacoes.some((o) => o.tabela === "agente_tarefas"));
-    ok("N8N-BRIDGE-16a as duas chamadas ao ML foram as previstas",
-      conta("grant") === 1 && conta("perguntas") === 1 && conta("inesperada") === 0);
-    ok("N8N-SEC-13 `requestId` enviado no corpo foi recusado antes de tudo",
-      (await POST(corpoValido({ requestId: "forjado" }))).status === 400);
+    const antes = aberturas();
+    const a = await POST(corpoValido({}, "exec-r1", "op-replay"));
+    const b = await POST(corpoValido({}, "exec-r2", "op-replay"));
+    ok("I4O2-Q10 replay da mesma operationId: as duas em 410",
+      a.status === QUARENTENA && b.status === QUARENTENA);
+    ok("I4O2-Q11 e nenhuma chave de idempotencia comercial nasceu",
+      aberturas() === antes);
   }
-
-  // ═══ F. Replay ══════════════════════════════════════════════════════
-  secao("F. Replay da mesma INTENCAO");
 
   {
-    // MUT-5: mesmo `operationId`, `executionId` DIFERENTE. E o caso real
-    // de um retry de transporte — o orquestrador reenvia o mesmo pedido e
-    // o n8n gera uma execucao nova. Antes da A8B isto executava de novo.
-    const aberturasAntes = aberturas();
-    const perguntasAntes = conta("perguntas");
-    const r2 = await POST(corpoValido({}, "exec-OUTRA", "op-1"));
-    const corpo2 = await r2.json();
-
-    ok("N8N-A8B-MUT-5 replay da mesma intencao devolve `already_processed`",
-      corpo2.estado === "already_processed" && corpo2.ok === true);
-    ok("N8N-BRIDGE-23 e NAO cria segunda abertura",
-      aberturas() === aberturasAntes && aberturasAntes === 1);
-    ok("N8N-MUT-7 o provider NAO foi chamado de novo",
-      conta("perguntas") === perguntasAntes);
-    ok("N8N-BRIDGE-27 o `requestId` do replay e `null`, nao um id novo",
-      corpo2.requestId === null && requestIdPrimeira !== null);
-    ok("N8N-MUT-15 e a resposta nao contem o id da primeira",
-      corpo2.requestId !== requestIdPrimeira);
-  }
-  {
-    // MUT-6, NAO-VACUIDADE: intencao diferente PRECISA executar de novo.
-    // Sem este, "deduplicar tudo" passaria no assert anterior.
-    const perguntasAntes = conta("perguntas");
-    const r3 = await POST(corpoValido({}, "exec-2", "op-2"));
-    const corpo3 = await r3.json();
-    ok("N8N-A8B-MUT-6 `operationId` diferente executa normalmente",
-      corpo3.estado === "executada" && aberturas() === 2);
-    ok("N8N-BRIDGE-24a e o provider foi chamado de novo",
-      conta("perguntas") === perguntasAntes + 1);
-  }
-  {
-    // O inverso de MUT-5: `executionId` IGUAL com `operationId` diferente
-    // nao pode deduplicar. Prova que a identidade mudou de campo.
-    const perguntasAntes = conta("perguntas");
-    const r4 = await POST(corpoValido({}, "exec-1", "op-3"));
-    const corpo4 = await r4.json();
-    ok("N8N-A8B-MUT-4b `executionId` repetido NAO deduplica sozinho",
-      corpo4.estado === "executada" && conta("perguntas") === perguntasAntes + 1);
-  }
-  {
-    const chave = chaveDeIdempotencia("n8n", "op-1", ACAO, AGENTE_A);
-    ok("N8N-MUT-9 a chave e DERIVADA no servidor, com prefixo de provedor",
-      chave === `n8n:op-1:${ACAO}:${AGENTE_A}`);
-    ok("N8N-SEC-10 e a rota a deriva, nunca a recebe",
-      /chaveDeIdempotencia\(/.test(ROTA) && !/idempotencyKey:\s*corpo\./.test(ROTA));
-    const gravada = tabela("agente_funcao_chamadas").find((l) => l.fase === "abertura");
-    ok("N8N-SEC-10a e ela foi de fato gravada na abertura",
-      gravada?.idempotency_key === chave);
-
-    // MUT-7 e MUT-8: o mesmo `operationId` em OUTRO agente ou em OUTRA
-    // acao NAO pode colidir. Se colidisse, um workflow bloquearia o
-    // trabalho de outro agente — falha cruzada entre donos.
-    ok("N8N-A8B-MUT-7 mesmo operationId em agente diferente da chave diferente",
-      chaveDeIdempotencia("n8n", "op-1", ACAO, "outro-agente") !== chave);
-    ok("N8N-A8B-MUT-8 mesmo operationId em acao diferente da chave diferente",
-      chaveDeIdempotencia("n8n", "op-1", ACAO_VENDAS, AGENTE_A) !== chave);
-    ok("N8N-A8B-MUT-8a e provedor diferente tambem nao colide",
-      chaveDeIdempotencia("outro", "op-1", ACAO, AGENTE_A) !== chave);
+    // Aprovacao: a ponte nao cria mais nenhuma.
+    const antesAprov = tabela("agente_funcao_aprovacoes").length;
+    await POST(corpoValido({}, "exec-aprov", "op-aprov"));
+    ok("I4O2-Q12 nenhuma aprovacao foi criada",
+      tabela("agente_funcao_aprovacoes").length === antesAprov);
   }
 
-  // ═══ G. Aprovacao e negacao ═════════════════════════════════════════
-  secao("G. Aprovacao termina, bloqueio nega");
-
-  {
-    semear();
-    permitir("aprovacao");
-    conectar();
-    respostaGrant = { status: 200, corpo: grantOk() };
-    rede = [];
-
-    const r = await POST(corpoValido({}, "exec-aprov"));
-    const corpo = await r.json();
-    ok("N8N-BRIDGE-15 aprovacao devolve `aguardando_aprovacao` + `aprovacaoId`",
-      corpo.estado === "aguardando_aprovacao" &&
-      typeof corpo.aprovacaoId === "string" && corpo.aprovacaoId.length > 0);
-    ok("N8N-BRIDGE-15a e `estadoAprovacao` e o real",
-      corpo.estadoAprovacao === "criada" || corpo.estadoAprovacao === "reutilizada");
-    ok("N8N-MUT-14 ZERO chamada ao provider de perguntas", conta("perguntas") === 0);
-    ok("N8N-BRIDGE-15b ZERO tarefa criada", tabela("agente_tarefas").length === 0);
-    ok("N8N-BRIDGE-15c a aprovacao existe de verdade",
-      tabela("agente_funcao_aprovacoes").length === 1);
-    ok("N8N-BRIDGE-15d a ponte NAO tenta continuar: sem retomada no codigo",
-      !/retomarAprovacao|executarFuncaoAprovada|consumirAprovacao/.test(ROTA));
-  }
-  {
-    semear();
-    permitir("bloqueado");
-    conectar();
-    rede = [];
-    const corpo = await (await POST(corpoValido({}, "exec-bloq"))).json();
-    ok("N8N-BRIDGE-10a nivel bloqueado: o guard nega",
-      corpo.ok === false && corpo.estado === "negado" &&
-      corpo.codigo === "permissao_bloqueada");
-    ok("N8N-MUT-4 e zero chamada ao marketplace", rede.length === 0);
-  }
-  {
-    semear();
-    permitir("automatico"); // sem conexao
-    rede = [];
-    const corpo = await (await POST(corpoValido({}, "exec-sem-conexao"))).json();
-    ok("N8N-BRIDGE-11a sem binding, o guard nega `conexao_ausente`",
-      corpo.estado === "negado" && corpo.codigo === "conexao_ausente");
-    ok("N8N-BRIDGE-11b e a ponte nao escolheu loja nenhuma", conta("perguntas") === 0);
-  }
+  ok("I4O2-Q13 auth continua ANTES da quarentena — sem segredo e 401, nao 410",
+    (await POST(corpoValido(), "errado")).status === 401);
 
   // ═══ H. Fronteiras estaticas ════════════════════════════════════════
   secao("H. O que a ponte nao pode conter");
 
   ok("N8N-MUT-5 a ponte nao chama o handler da Funcao nem o adapter",
     !/executarPerguntasML|criarLeiturasDePerguntas|buscarPerguntasRecebidasML/.test(ROTA));
-  ok("N8N-SEC-9 ela chama `executarFuncao`, e so",
-    /executarFuncao\(/.test(ROTA));
+  ok("N8N-SEC-9 I4O2: a ponte NAO chama mais `executarFuncao`",
+    !/executarFuncao/.test(ROTA));
   ok("N8N-MUT-1 nao ha `funcaoId` vindo do corpo",
     !/corpo\.funcaoId|o\.funcaoId/.test(ROTA));
-  ok("N8N-SEC-4 nem `userId`",
-    !/corpo\.userId|o\.userId/.test(ROTA) && /agente\.userId/.test(ROTA));
+  ok("N8N-SEC-4 nem `userId` — e agora nem sequer deriva dono nenhum",
+    !/corpo\.userId|o\.userId/.test(ROTA) && !/agente\.userId/.test(ROTA));
   ok("N8N-SEC-7 a ponte nao resolve credencial nem token",
     !/access_token|refresh_token|getMLLojaById/.test(ROTA));
   ok("N8N-MUT-3 e nao monta `lojaId`", !/lojaId:/.test(ROTA));
@@ -815,6 +654,18 @@ async function main(): Promise<void> {
   ok("N8N-MUT-13 `motivo: \"duplicada\"` so nasce do estado `duplicada`",
     /abertura\.estado === "duplicada" \? \{ motivo: "duplicada" as const \} : \{\}/
       .test(ler("lib/agentes/execucao-funcoes/executar.ts")));
+  ok("I4O2-H1 a rota nao importa NADA comercial",
+    !/acoes\/catalogo|capability-worker|execucao-funcoes/.test(ROTA));
+  ok("I4O2-H2 o unico import e o do framework",
+    (ROTA.match(/^import /gm) || []).length === 1 && /from "next\/server"/.test(ROTA));
+  ok("I4O2-H3 a rota nao le o corpo do pedido",
+    !/request\.json\(\)|await request\.text\(\)/.test(ROTA));
+  ok("I4O2-H4 o desfecho terminal esta nomeado no codigo",
+    /main_generico_em_aposentadoria/.test(ROTA) && /410/.test(ROTA));
+  ok("I4O2-H5 o evento da janela de observacao existe e e sanitizado",
+    /MAIN_GENERIC_QUARANTINE_HIT/.test(ROTA) &&
+    !/agenteId|operationId|argumentos|x-worker-secret|cookie/i.test(
+      (ROTA.match(/console\.warn\([\s\S]*?\);/) || [""])[0]));
   ok("N8N-BRIDGE-25 zero banco real e zero rede inesperada",
     interceptouBanco === true && conta("inesperada") === 0);
 

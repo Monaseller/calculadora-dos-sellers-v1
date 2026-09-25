@@ -1,312 +1,91 @@
 /**
- * POST /api/internal/agentes/acoes — M2-I1-A8.
+ * POST /api/internal/agentes/acoes — EM QUARENTENA (M2-I1-A8B-I4O2).
  *
- * A porta por onde um ORQUESTRADOR EXTERNO pede uma acao de produto.
+ * Esta rota foi a ponte generica entre um orquestrador externo e as
+ * Funcoes de produto. Ela nao e mais isso. O que resta aqui e uma
+ * superficie TERMINAL, mantida no ar por uma janela de observacao antes
+ * da remocao definitiva.
  *
- * ── O que ela e, e o que ela nao e ──────────────────────────────────
+ * ── Por que aposentar ───────────────────────────────────────────────
  *
- * Ela traduz e delega. Autentica o servico, le um corpo FECHADO, resolve
- * o DONO a partir do agente, traduz a acao em Funcao pelo catalogo e
- * chama `executarFuncao`. Tudo o que decide autorizacao — permissao,
- * binding, cobertura remota, guard — continua acontecendo la dentro, sem
- * atalho e sem copia.
+ * O I4O1 auditou a superficie inteira e nao achou consumidor:
  *
- * Ela NAO chama o handler da Funcao, NAO chama o adapter do marketplace,
- * NAO resolve credencial, NAO escolhe loja e NAO cria tarefa.
+ *   `consultar_perguntas` foi substituida por
+ *   `/api/internal/agentes/ingestao-perguntas`, que faz estritamente
+ *   mais — cursor duravel, idempotencia com reconciliacao, persistencia
+ *   na inbox, admissao temporal — e foi validada em runtime no I4L3.
  *
- * ── O que o chamador NAO pode dizer ─────────────────────────────────
+ *   `consultar_vendas` nunca precisou desta porta: a UI dispara pela
+ *   rota propria `/api/agentes/[agenteId]/consultar-vendas`, que cria
+ *   TAREFA, e quem executa a Funcao e o dispatcher da fila.
  *
- * `funcaoId`, `userId`, `lojaId`, `sellerId`, token, permissao, nivel,
- * `requestId` e `idempotencyKey`. Nenhum deles e ignorado em silencio: o
- * corpo e fechado, e chave desconhecida recusa com 400. Aceitar e
- * ignorar ensinaria o cliente a mandar, e um dia alguem leria.
+ *   Zero callers de runtime no repositorio. Zero workflows ativos.
+ *   O unico caller n8n restante era um harness de prova de idempotencia,
+ *   inativo, cujo objeto de prova era justamente esta ponte.
  *
- * O chamador diz O QUE quer (`acao`), para QUAL agente, com quais
- * argumentos de dominio, qual e a execucao dele (`executionId`) e qual e
- * a INTENCAO dele (`operationId`). O resto e do CDS.
+ * ── Por que a superficie era ampla demais ───────────────────────────
  *
- * ── `executionId` e `operationId` sao coisas diferentes — M2-I1-A8B ──
+ * O chamador escolhia `agenteId`, e o dono era derivado DAQUELE agente.
+ * A leitura era por `id`, sem escopo de usuario: quem tivesse o segredo
+ * da ponte podia pedir uma acao em nome do agente de qualquer usuario.
+ * Permissao e conexao seguravam o resto, mas isso e defesa em
+ * profundidade, nao escopo.
  *
- * `executionId` identifica UMA execucao do orquestrador. Serve para
- * correlacionar, e muda a cada disparo.
+ * ── O que a quarentena faz, e o que NAO faz ─────────────────────────
  *
- * `operationId` identifica a INTENCAO. Quem orquestra promete mante-lo
- * estavel enquanto o pedido for o mesmo — um retry de transporte repete
- * o `operationId` e ganha `executionId` novo — e troca-lo quando for
- * outro pedido. E dele, e so dele, que a chave de idempotencia e
- * derivada. Nenhum dos dois e aceito como `idempotencyKey` pronta: a
- * chave final continua sendo montada no servidor.
+ * Autenticacao continua exatamente como era, fail-closed, com a mesma
+ * resposta generica. Ela e preservada de proposito: sem ela, nao ha como
+ * distinguir um scanner anonimo de um consumidor legitimo que ainda
+ * possua o segredo.
  *
- * ── SINCRONA, sem tarefa ────────────────────────────────────────────
+ * Depois da autenticacao valida, nada comercial acontece. Nao se le o
+ * corpo, nao se resolve acao, nao se carrega agente, nao se executa
+ * Funcao, nao se toca provider, ledger, aprovacao ou idempotencia. Os
+ * imports desses modulos foram REMOVIDOS deste arquivo — a ausencia de
+ * alcance e estrutural, nao uma promessa de fluxo.
  *
- * Quem orquestra e quem espera. Esta rota nao enfileira, nao bate
- * heartbeat e nao faz fencing — esses mecanismos pertencem ao motor de
- * tarefas, e esta ponte deliberadamente nao passa por ele.
+ * ── O sinal que a janela produz ─────────────────────────────────────
  *
- * ── Aprovacao TERMINA aqui, nesta versao ────────────────────────────
+ * Uma requisicao autenticada devolve 410. O codigo 410 nao e usado em
+ * nenhum outro lugar desta aplicacao, o que faz dele um sentinela sem
+ * ruido: um unico 410 nos logs de producao significa que alguem ainda
+ * detem o segredo da ponte e a esta chamando. Enquanto for zero, a
+ * ausencia de consumidor deixa de ser inferida do codigo e passa a ser
+ * observada em producao.
  *
- * Se o guard pedir aprovacao, a resposta diz isso e a chamada acaba. Nao
- * ha retomada automatica, nao ha callback e nao ha polling de decisao. O
- * orquestrador recebe o estado real e decide o que fazer com ele.
+ * 410 e nao 404 porque a diferenca importa para quem chama: o recurso
+ * existiu, foi removido deliberadamente, e nao vai voltar. 404 diria
+ * "nunca existiu" e convidaria a retentar.
+ *
+ * ── Fase 2 ──────────────────────────────────────────────────────────
+ *
+ * Depois da janela: remover esta rota, o harness de replay, a entrada em
+ * `ROTAS_COM_SEGREDO` e `N8N_BRIDGE_INTERNAL_SECRET`. O catalogo de
+ * acoes e as Funcoes de dominio NAO sao apagados por isso — aposentar a
+ * superficie generica e apagar capacidade sao decisoes distintas, e as
+ * duas Funcoes seguem alcancaveis pelos caminhos proprios.
  */
 import { NextResponse } from "next/server";
 
-import {
-  chaveDeIdempotencia,
-  resolverAcao,
-  type ContratoDeAcao,
-} from "@/lib/agentes/acoes/catalogo";
-import { lerAgenteParaAcaoInterna } from "@/lib/agentes/capability-worker";
-import { executarFuncao } from "@/lib/agentes/execucao-funcoes/executar";
-
 /**
- * O provedor desta ponte, no namespace de idempotencia.
+ * O evento da janela de observacao.
  *
- * Constante: a rota nao aceita "de quem sou" do pedido. Um segundo
- * orquestrador, se existir, ganha rota e prefixo proprios.
+ * Nome proprio e estavel porque e o que se procura no log. Sanitizado
+ * por construcao: nao ha corpo para vazar, e nenhum campo do pedido
+ * alem do metodo, do caminho e de um recorte curto do `user-agent`
+ * entra aqui. Sem `agenteId`, sem `operationId`, sem argumentos, sem
+ * header de autorizacao, sem cookie, sem IP.
  */
-const PROVEDOR = "n8n";
+const EVENTO_QUARENTENA = "MAIN_GENERIC_QUARANTINE_HIT";
 
-/**
- * Teto do `executionId`.
- *
- * Mesmo numero e mesma razao de `LIMITE_EXECUTION_ID` em
- * `lib/agentes/chamadas/contrato.ts`: "um valor absurdamente longo e
- * sinal de que algo errado esta sendo ecoado para dentro".
- *
- * Reproduzido, e nao importado, de proposito: aquela constante e do
- * contrato de ENVELOPE, que descreve o que o executor devolve. Importa-la
- * aqui criaria uma dependencia entre a porta de entrada e a forma da
- * saida, e as duas passariam a ter de mudar juntas sem motivo.
- */
-const LIMITE_EXECUTION_ID = 128;
-
-/**
- * Teto do `operationId`.
- *
- * Mesmo numero e mesma razao do `executionId`: um valor absurdamente
- * longo e sinal de que algo errado esta sendo ecoado para dentro.
- */
-const LIMITE_OPERATION_ID = 128;
-
-const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-/** As CINCO chaves aceitas, e nenhuma outra. */
-const CHAVES_DO_CORPO = [
-  "acao",
-  "agenteId",
-  "argumentos",
-  "executionId",
-  "operationId",
-] as const;
+/** Teto do recorte de `user-agent` que vai para o log. */
+const LIMITE_USER_AGENT = 60;
 
 function responder(corpo: unknown, status: number): NextResponse {
   return NextResponse.json(corpo, {
     status,
     headers: { "Cache-Control": "no-store" },
   });
-}
-
-type LeituraCorpo =
-  | {
-      ok: true;
-      acao: string;
-      agenteId: string;
-      executionId: string;
-      operationId: string;
-      argumentos: Record<string, unknown>;
-    }
-  | { ok: false };
-
-/**
- * As chaves de `argumentos` sao as da ACAO, e so elas.
- *
- * Fechado nos dois sentidos, e por ACAO — nunca pela uniao das acoes.
- * Uma lista global deixaria `dataInicio` passar em `consultar_perguntas`
- * so porque vendas precisa dela, e seria por essa fresta que um campo de
- * outra Funcao entraria sem ninguem notar.
- *
- * O que vale aqui e QUAIS chaves viajam. Se o VALOR serve — data no
- * calendario, janela de 14 dias, status conhecido — quem decide e o
- * validador da Funcao, e a resposta dele vira `entrada_invalida`, nao 400.
- */
-function argumentosAceitos(
-  contrato: ContratoDeAcao,
-  argumentos: Record<string, unknown>
-): boolean {
-  for (const chave of Object.keys(argumentos)) {
-    if (!contrato.argumentos.includes(chave)) return false;
-  }
-  return true;
-}
-
-/**
- * Le e valida a FORMA do corpo. Nao valida acao, agente nem argumento de
- * dominio — isso e autoridade de camadas abaixo, e acontece depois.
- *
- * Fechado nos dois sentidos: falta chave, sobra chave, ou tipo errado, e
- * 400. As CHAVES de `argumentos` nao sao conferidas aqui: elas dependem
- * da acao, que so e resolvida depois. `argumentos` ainda precisa ser um
- * objeto simples — e e por ele que `lojaId` seria tentado.
- */
-async function lerCorpo(request: Request): Promise<LeituraCorpo> {
-  let bruto: unknown;
-  try {
-    bruto = await request.json();
-  } catch {
-    return { ok: false };
-  }
-
-  if (typeof bruto !== "object" || bruto === null || Array.isArray(bruto)) {
-    return { ok: false };
-  }
-
-  const o = bruto as Record<string, unknown>;
-  const chaves = Object.keys(o).sort();
-  if (JSON.stringify(chaves) !== JSON.stringify([...CHAVES_DO_CORPO])) {
-    return { ok: false };
-  }
-
-  if (typeof o.acao !== "string" || o.acao.length === 0) return { ok: false };
-  if (typeof o.agenteId !== "string" || !UUID_REGEX.test(o.agenteId)) return { ok: false };
-
-  const executionId = o.executionId;
-  if (typeof executionId !== "string") return { ok: false };
-  if (executionId.length === 0 || executionId.length > LIMITE_EXECUTION_ID) {
-    return { ok: false };
-  }
-
-  // ── `operationId`: a identidade da INTENCAO ─────────────────────────
-  //
-  // Recusa espaco nas pontas em vez de aparar. Aparar faria `" OP-A"` e
-  // `"OP-A"` virarem a MESMA chave em silencio, e quem mandasse o
-  // primeiro acharia que mandou o segundo. Duas grafias de uma chave de
-  // idempotencia e exatamente o defeito que ela existe para nao ter.
-  const operationId = o.operationId;
-  if (typeof operationId !== "string") return { ok: false };
-  if (operationId !== operationId.trim()) return { ok: false };
-  if (operationId.length === 0 || operationId.length > LIMITE_OPERATION_ID) {
-    return { ok: false };
-  }
-
-  const argumentos = o.argumentos;
-  if (typeof argumentos !== "object" || argumentos === null || Array.isArray(argumentos)) {
-    return { ok: false };
-  }
-
-  return {
-    ok: true,
-    acao: o.acao,
-    agenteId: o.agenteId,
-    executionId,
-    operationId,
-    // Copia campo a campo: ausente continua AUSENTE. Preencher com `null`
-    // mandaria a Funcao recusar um valor que ninguem pediu.
-    argumentos: { ...(argumentos as Record<string, unknown>) },
-  };
-}
-
-/**
- * Traduz o desfecho do executor na resposta da ponte.
- *
- * ── `already_processed` nasce AQUI, nao no executor ─────────────────
- *
- * O executor devolve `falha_auditoria` com `motivo: "duplicada"` — um
- * fato sobre o REGISTRO. O significado de produto disso ("essa execucao
- * ja foi processada") e desta camada, que e a unica que sabe o que o
- * `executionId` quis dizer.
- *
- * ── `requestId` no replay e `null`, e isso e deliberado ─────────────
- *
- * O `request_id` da abertura ORIGINAL nao volta no conflito: o insert nao
- * tem `select` e o retorno de duplicidade nao carrega linha. Gerar um id
- * novo aqui o faria passar por original numa superficie que existe
- * exatamente para nao mentir. Quem orquestra ja guardou o da primeira
- * resposta.
- */
-function mapear(resultado: Awaited<ReturnType<typeof executarFuncao>>): {
-  corpo: Record<string, unknown>;
-  status: number;
-} {
-  switch (resultado.tipo) {
-    case "sucesso":
-      return {
-        corpo: {
-          ok: true,
-          estado: "executada",
-          requestId: resultado.requestId,
-          resultado: resultado.envelope.data,
-        },
-        status: 200,
-      };
-
-    case "aguardando_aprovacao":
-      return {
-        corpo: {
-          ok: true,
-          estado: "aguardando_aprovacao",
-          requestId: resultado.requestId,
-          aprovacaoId: resultado.aprovacaoId,
-          estadoAprovacao: resultado.estadoAprovacao,
-        },
-        status: 200,
-      };
-
-    case "negado":
-      return {
-        corpo: { ok: false, estado: "negado", requestId: resultado.requestId, codigo: resultado.codigo },
-        status: 200,
-      };
-
-    case "erro":
-      return {
-        corpo: {
-          ok: false,
-          estado: "erro",
-          requestId: resultado.requestId,
-          // So o CODIGO. `message` do envelope nao viaja: o adapter ja
-          // descartou corpo, header e status do provider, e repetir a
-          // frase aqui nao acrescenta fato nenhum.
-          codigo: resultado.envelope.error.code,
-        },
-        status: 200,
-      };
-
-    case "falha_auditoria":
-      if (resultado.motivo === "duplicada") {
-        return {
-          corpo: { ok: true, estado: "already_processed", requestId: null },
-          status: 200,
-        };
-      }
-      return {
-        corpo: { ok: false, estado: "falha_auditoria", requestId: resultado.requestId },
-        status: 500,
-      };
-
-    case "aprovacao_indisponivel":
-      return {
-        corpo: {
-          ok: false,
-          estado: "aprovacao_indisponivel",
-          requestId: resultado.requestId,
-          codigo: resultado.codigo,
-        },
-        status: 200,
-      };
-
-    case "indisponivel":
-      return {
-        corpo: { ok: false, estado: "indisponivel", requestId: resultado.requestId },
-        status: 404,
-      };
-
-    default: {
-      // Exaustividade: uma variante nova deixa de compilar aqui.
-      const _exaustivo: never = resultado;
-      return _exaustivo;
-    }
-  }
 }
 
 export async function POST(request: Request) {
@@ -320,61 +99,36 @@ export async function POST(request: Request) {
   //
   // Resposta generica: nao revela se o que faltou foi a configuracao do
   // servidor ou o header de quem chamou.
+  //
+  // PRESERVADO NA QUARENTENA, e nao por inercia: sem autenticacao a
+  // janela de observacao nao distingue scanner de consumidor real, e o
+  // sinal que ela existe para produzir deixaria de ter valor.
   const segredo = process.env.N8N_BRIDGE_INTERNAL_SECRET;
   const recebido = request.headers.get("x-worker-secret");
   if (!segredo || !recebido || recebido !== segredo) {
     return responder({ ok: false, erro: "nao_autorizado" }, 401);
   }
 
-  try {
-    const corpo = await lerCorpo(request);
-    if (!corpo.ok) return responder({ ok: false, erro: "corpo_invalido" }, 400);
+  // ── Daqui para baixo, nada comercial ──────────────────────────────
+  //
+  // O corpo NAO e lido. Ler para descartar ensinaria o chamador que o
+  // contrato antigo ainda vale, e criaria um ramo onde um campo do
+  // pedido poderia influenciar a resposta. Nenhum campo influencia:
+  // `acao`, `agenteId`, `operationId`, `argumentos` e qualquer outro
+  // terminam aqui, iguais.
+  const agente = request.headers.get("user-agent");
+  console.warn(
+    JSON.stringify({
+      evento: EVENTO_QUARENTENA,
+      quando: new Date().toISOString(),
+      metodo: "POST",
+      caminho: "/api/internal/agentes/acoes",
+      userAgent: typeof agente === "string" ? agente.slice(0, LIMITE_USER_AGENT) : null,
+    })
+  );
 
-    // ── A ACAO vira Funcao aqui, e so aqui ──────────────────────────
-    //
-    // O contrato vem inteiro: para onde a acao traduz E o que ela aceita.
-    // As duas metades andam juntas de proposito — resolver a Funcao sem
-    // aplicar o filtro dela seria executar com argumentos de outra acao.
-    const contrato = resolverAcao(corpo.acao);
-    if (contrato === null) return responder({ ok: false, erro: "acao_desconhecida" }, 400);
-
-    if (!argumentosAceitos(contrato, corpo.argumentos)) {
-      return responder({ ok: false, erro: "corpo_invalido" }, 400);
-    }
-
-    // ── O DONO vem do BANCO ─────────────────────────────────────────
-    const { agente, erro } = await lerAgenteParaAcaoInterna(corpo.agenteId);
-    if (erro !== null) return responder({ ok: false, erro: "falha_leitura" }, 500);
-    // Inexistente e alheio sao a MESMA resposta: distingui-las seria um
-    // oraculo de existencia de recurso alheio.
-    if (agente === null) return responder({ ok: false, erro: "agente_nao_encontrado" }, 404);
-    // Agente desligado nao age. Mesma recusa das rotas que criam tarefa,
-    // e aqui ela importa mais: la a tarefa ficaria parada, aqui a Funcao
-    // executaria de fato.
-    if (!agente.ativo) return responder({ ok: false, erro: "agente_inativo" }, 409);
-
-    const resultado = await executarFuncao({
-      userId: agente.userId,
-      agenteId: agente.agenteId,
-      funcaoId: contrato.funcaoId,
-      argumentos: corpo.argumentos,
-      // Derivada no SERVIDOR, a partir do `operationId` — a identidade da
-      // INTENCAO. A chave crua do orquestrador nunca vira namespace de
-      // dominio, e o `executionId` NAO entra aqui: ele muda a cada
-      // disparo, e um retry de transporte nasceria com chave nova.
-      idempotencyKey: chaveDeIdempotencia(
-        PROVEDOR,
-        corpo.operationId,
-        corpo.acao,
-        agente.agenteId
-      ),
-    });
-
-    const { corpo: saida, status } = mapear(resultado);
-    return responder(saida, status);
-  } catch {
-    // Sem inspecionar nem logar o erro: qualquer detalhe daqui e material
-    // de reconhecimento.
-    return responder({ ok: false, erro: "falha_ponte" }, 500);
-  }
+  return responder(
+    { ok: false, estado: "indisponivel", codigo: "main_generico_em_aposentadoria" },
+    410
+  );
 }

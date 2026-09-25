@@ -723,7 +723,15 @@ async function main(): Promise<void> {
       }),
     });
     const r = await ponte.POST(pedido);
-    ok("R28c e a MAIN recusa a acao com 400", r.status === 400);
+    // I4O2: a MAIN entrou em QUARENTENA. Ela nao recusa mais por acao
+    // desconhecida — ela nao chega a olhar a acao. O invariante que
+    // importa aqui continua o mesmo, e ficou mais forte: `sincronizar_perguntas`
+    // nao executa pela ponte generica. Antes isso era um 400 do catalogo;
+    // agora e um 410 terminal, alcancado sem ler o corpo.
+    ok("R28c e a MAIN termina em 410 de aposentadoria, sem olhar a acao",
+      r.status === 410);
+    ok("R28d e o corpo diz qual e o estado da ponte",
+      (await r.clone().json()).codigo === "main_generico_em_aposentadoria");
     const pedidoIngestao = new Request("http://localhost/api/internal/agentes/acoes", {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-worker-secret": SEGREDO_INGESTAO },
