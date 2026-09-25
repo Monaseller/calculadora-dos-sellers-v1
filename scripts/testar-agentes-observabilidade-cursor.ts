@@ -19,6 +19,11 @@ import type {
   ResumoDaTentativa,
   SaudeDoBucket,
 } from "../lib/agentes/observabilidade/gap";
+import {
+  classificarOperacao,
+  podeTerEscritoOCursor,
+  type EvidenciaDeMutacaoDoCursor,
+} from "../lib/agentes/observabilidade/provenancia-cursor";
 
 let passou = 0;
 let falhou = 0;
@@ -85,8 +90,59 @@ const cursor = (proximo: number, emBucket: number, extra: Partial<CursorAtual> =
   ...extra,
 });
 
-const analisar = (buckets: SaudeDoBucket[], c: CursorAtual | null = null) =>
-  analisarProgressoDoCursor({ escopo: ESCOPO, buckets, cursorAtual: c });
+/** A evidencia do proprio agendador, uma por bucket: o caso limpo. */
+function provenienciaLimpa(buckets: SaudeDoBucket[]): EvidenciaDeMutacaoDoCursor[] {
+  return buckets
+    .filter((b) => b.classificacao !== "BUCKET_MISSING")
+    .map((b) => ({
+      userId: "user-a",
+      agenteId: AG,
+      plataforma: "mercado_livre",
+      recurso: "perguntas",
+      requestId: "req-" + b.canonicalBucketId,
+      tipoDeOperacao: "scheduler_bucket" as const,
+      canonicalBucketId: b.canonicalBucketId,
+      ocorridoEm: b.bucketEm + 1000,
+      cursorAtualizado: true,
+      cursorReiniciado: false,
+      temTerminal: true,
+    }));
+}
+
+/** Um escritor ALHEIO ao agendador, no instante indicado. */
+function externo(
+  emBucket: number,
+  p: Partial<EvidenciaDeMutacaoDoCursor> = {}
+): EvidenciaDeMutacaoDoCursor {
+  return {
+    userId: "user-a",
+    agenteId: AG,
+    plataforma: "mercado_livre",
+    recurso: "perguntas",
+    requestId: "req-externo-" + emBucket,
+    tipoDeOperacao: "diagnostico",
+    canonicalBucketId: null,
+    ocorridoEm: T0 + emBucket * CAD + 60000,
+    cursorAtualizado: true,
+    cursorReiniciado: false,
+    temTerminal: true,
+    ...p,
+  };
+}
+
+const analisar = (
+  buckets: SaudeDoBucket[],
+  c: CursorAtual | null = null,
+  mutacoes: EvidenciaDeMutacaoDoCursor[] | null = null
+) =>
+  analisarProgressoDoCursor({
+    escopo: ESCOPO,
+    buckets,
+    cursorAtual: c,
+    // Por padrao a proveniencia e LIMPA: so o proprio agendador escreveu.
+    // Os testes de contaminacao passam a lista explicitamente.
+    mutacoes: mutacoes ?? provenienciaLimpa(buckets),
+  });
 
 console.log("\n══ CDS IA — OBS-3: progresso do cursor (puro) ══");
 
@@ -275,8 +331,125 @@ secao("F. Bucket aberto");
   const r = analisar(abertos, cursor(300, 1));
   ok("F1  BUCKET_OPEN nao entra nas transicoes",
     r.transicoes.every((t) => t.canonicalBucketId !== "w5m-2"));
-  ok("F2  e nao impede a leitura de progresso", r.estado === "progress");
+  // O bucket ABERTO ja pode ter executado e movido o cursor — ele esta
+  // dentro da propria folga. Atribuir o cursor atual ao bucket anterior
+  // seria creditar a ele um avanco que talvez nao tenha sido dele.
+  ok("F2  bucket aberto que ja pode ter escrito torna o cursor atual inatribuivel",
+    r.estado === "uncertain");
 }
+{
+  // O mesmo cenario, mas com prova de que o bucket aberto ainda NAO
+  // executou: a atribuicao volta a ser segura.
+  const abertos2 = [bucket(0, 100), bucket(1, 200), bucket(2, null, "BUCKET_OPEN")];
+  const semOAberto = provenienciaLimpa(abertos2).filter((m) => m.canonicalBucketId !== "w5m-2");
+  const r2 = analisar(abertos2, cursor(300, 1), semOAberto);
+  ok("F3  sem execucao do bucket aberto, o progresso volta a ser legivel",
+    r2.estado === "progress");
+}
+
+// --- H. Proveniencia -------------------------------------------------
+secao("H. Proveniencia: quem moveu o cursor");
+
+{
+  const bs = [bucket(0, 100), bucket(1, 200)];
+  const m = [...provenienciaLimpa(bs), externo(0)];
+  const r = analisar(bs, cursor(200, 1), m);
+  ok("H1  escritor externo no intervalo CONTAMINA a transicao",
+    r.transicoes[0].certeza === "CONTAMINADA");
+  ok("H2  e o estado nao afirma progresso", r.estado === "uncertain");
+  ok("H3  com diagnostico nomeado",
+    r.diagnosticos.some((d) => d.startsWith("transicao_contaminada")));
+}
+{
+  const bs = [bucket(0, 100), bucket(1, 100), bucket(2, 100)];
+  const m = [...provenienciaLimpa(bs), externo(0), externo(1)];
+  const r = analisar(bs, cursor(100, 2), m);
+  ok("H4  escritor externo impede afirmar TRAVAMENTO", r.estado !== "stuck");
+}
+{
+  const bs = [bucket(0, 100), bucket(1, 200)];
+  const r = analisar(bs, cursor(300, 1));
+  ok("H5  sem escritor externo, progresso e determinado",
+    r.estado === "progress" && r.transicoes[0].certeza === "DETERMINADA");
+}
+{
+  const bs = [bucket(0, 100), bucket(1, 200)];
+  const m = [...provenienciaLimpa(bs), externo(0, { cursorAtualizado: false, cursorReiniciado: false })];
+  const r = analisar(bs, cursor(300, 1), m);
+  ok("H6  execucao diagnostica que NAO escreveu nao contamina",
+    r.transicoes[0].certeza === "DETERMINADA");
+}
+{
+  const bs = [bucket(0, 100), bucket(1, 200)];
+  const m = [...provenienciaLimpa(bs), externo(0, { tipoDeOperacao: "desconhecido" })];
+  const r = analisar(bs, cursor(300, 1), m);
+  ok("H7  escritor DESCONHECIDO contamina", r.transicoes[0].certeza === "CONTAMINADA");
+}
+{
+  const bs = [bucket(0, 100), bucket(1, 200)];
+  const m = [...provenienciaLimpa(bs), externo(0, { temTerminal: false, cursorAtualizado: null, cursorReiniciado: null })];
+  const r = analisar(bs, cursor(300, 1), m);
+  ok("H8  execucao sem terminal conta como possivel escritora",
+    r.transicoes[0].certeza === "CONTAMINADA");
+}
+for (const [rot, p] of [
+  ["outro agente", { agenteId: "11111111-2222-4333-8444-555555555555" }],
+  ["outra plataforma", { plataforma: "shopee" }],
+  ["outro recurso", { recurso: "vendas" }],
+] as const) {
+  const bs = [bucket(0, 100), bucket(1, 200)];
+  const m = [...provenienciaLimpa(bs), externo(0, p)];
+  const r = analisar(bs, cursor(300, 1), m);
+  ok("H9  escritor de " + rot + " NAO contamina", r.transicoes[0].certeza === "DETERMINADA");
+}
+{
+  const bs = [bucket(0, 100), bucket(1, 200), bucket(2, 300)];
+  const m = [...provenienciaLimpa(bs), externo(2)];
+  const r = analisar(bs, cursor(400, 2), m);
+  ok("H10 escritor tardio nao contamina transicoes fechadas antes dele",
+    r.transicoes[0].certeza === "DETERMINADA");
+}
+{
+  const bs = [bucket(0, 100)];
+  const m = [...provenienciaLimpa(bs), externo(0, { ocorridoEm: T0 + 200000 })];
+  const r = analisar(bs, cursor(999, 0), m);
+  ok("H11 cursor atual nao e atribuido quando ha escritor alheio",
+    r.transicoes[0].certeza === "CONTAMINADA" &&
+    r.diagnosticos.includes("cursor_atual_contaminado"));
+  ok("H12 e o estado fica incerto, nunca progresso", r.estado === "uncertain");
+}
+{
+  const bs = [bucket(0, 100)];
+  const r = analisar(bs, cursor(200, 0));
+  ok("H13 sem concorrente, o cursor atual e atribuivel",
+    r.transicoes[0].certeza === "DETERMINADA" && r.estado === "progress");
+}
+{
+  const bs = [bucket(0, 100), bucket(1, 200)];
+  const r = analisarProgressoDoCursor({
+    escopo: ESCOPO, buckets: bs, cursorAtual: cursor(300, 1), mutacoes: null,
+  });
+  ok("H14 sem lista de proveniencia, tudo e contaminado - fail closed",
+    r.estado === "uncertain" && r.transicoes.every((t) => t.certeza === "CONTAMINADA"));
+}
+
+secao("I. Classificacao de operacao");
+
+ok("I1  chave do agendador e reconhecida",
+  classificarOperacao("n8n:w5m-20260926T1300Z:sincronizar_perguntas:" + AG).tipo === "scheduler_bucket");
+ok("I2  chave com continuacao tambem, e devolve o bucket canonico",
+  classificarOperacao("n8n:w5m-20260926T1300Z:c1:sincronizar_perguntas:" + AG).canonicalBucketId === "w5m-20260926T1300Z");
+ok("I3  `diag-*` e diagnostico",
+  classificarOperacao("n8n:diag-38:sincronizar_perguntas:" + AG).tipo === "diagnostico");
+ok("I4  chave irreconhecivel e DESCONHECIDA, nao ignorada",
+  classificarOperacao("lixo").tipo === "desconhecido");
+ok("I5  null e desconhecida", classificarOperacao(null).tipo === "desconhecido");
+ok("I6  sem terminal -> pode ter escrito",
+  podeTerEscritoOCursor(externo(0, { temTerminal: false, cursorAtualizado: null, cursorReiniciado: null })));
+ok("I7  terminal declarando que nao escreveu -> nao pode",
+  !podeTerEscritoOCursor(externo(0, { cursorAtualizado: false, cursorReiniciado: false })));
+ok("I8  reinicio tambem conta como escrita",
+  podeTerEscritoOCursor(externo(0, { cursorAtualizado: false, cursorReiniciado: true })));
 
 // ─── G. Fronteiras estáticas ──────────────────────────────────────────
 secao("G. O que este modulo NAO pode alcancar");

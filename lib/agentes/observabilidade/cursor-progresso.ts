@@ -39,6 +39,11 @@ import {
   type ClassificacaoDeBucket,
   type SaudeDoBucket,
 } from "./gap";
+import {
+  noMesmoEscopo,
+  podeTerEscritoOCursor,
+  type EvidenciaDeMutacaoDoCursor,
+} from "./provenancia-cursor";
 
 /** Quantos buckets entregues sem avanco caracterizam travamento. */
 export const BUCKETS_PARA_TRAVAMENTO = 3;
@@ -68,7 +73,7 @@ export type EvidenciaDeEntrega = "limpa" | "degradada" | "ausente" | "nao_fechad
 
 export type OrigemDoFim = "PROXIMO_BUCKET" | "CURSOR_ATUAL" | "INDISPONIVEL";
 
-export type Certeza = "DETERMINADA" | "INCERTA";
+export type Certeza = "DETERMINADA" | "INCERTA" | "CONTAMINADA";
 
 export interface TransicaoDoCursor {
   readonly canonicalBucketId: string;
@@ -135,6 +140,38 @@ function temPressaoDeOrcamento(b: SaudeDoBucket): boolean {
 }
 
 /**
+ * Houve escritor ALHEIO ao bucket `b` capaz de mover o cursor no
+ * intervalo em que o delta `inicio(b) -> inicio(seguinte)` se formou?
+ *
+ * O intervalo e deliberadamente generoso — do instante nominal de `b`
+ * ate o fim da folga do bucket seguinte. O cursor e escrito DURANTE a
+ * execucao, e nenhum campo do ledger diz o instante exato dessa escrita;
+ * estreitar a janela por um timestamp de fechamento daria falsa precisao.
+ * Errar para o lado da contaminacao custa uma leitura incerta. Errar para
+ * o outro lado credita ao agendador um avanco que nao foi dele.
+ */
+function contaminadaPorTerceiro(
+  extremos: readonly (string | null)[],
+  de: number,
+  ate: number,
+  escopo: EscopoDaAnalise,
+  mutacoes: readonly EvidenciaDeMutacaoDoCursor[]
+): boolean {
+  return mutacoes.some((m) => {
+    if (!noMesmoEscopo(m, escopo)) return false;
+    // As execucoes dos DOIS extremos nao contaminam: a de `Bn` e a
+    // escritora atribuida, e a de `Bn+1` e quem LE o cursor para formar o
+    // `inicio` que estamos usando como fim — a escrita dela vem depois
+    // dessa leitura. Contaminador e um TERCEIRO.
+    if (m.tipoDeOperacao === "scheduler_bucket" && extremos.includes(m.canonicalBucketId)) {
+      return false;
+    }
+    if (m.ocorridoEm < de || m.ocorridoEm > ate) return false;
+    return podeTerEscritoOCursor(m);
+  });
+}
+
+/**
  * Reconstroi as transicoes e diz o que o cursor esta fazendo.
  *
  * `buckets` vem do OBS-2, no mesmo escopo. `cursorAtual` pode faltar —
@@ -144,9 +181,19 @@ export function analisarProgressoDoCursor(entrada: {
   readonly escopo: EscopoDaAnalise;
   readonly buckets: readonly SaudeDoBucket[];
   readonly cursorAtual?: CursorAtual | null;
+  /**
+   * Toda acao do recurso na janela, do agendador ou nao. Sem ela nao ha
+   * como provar que o delta entre dois buckets foi do agendador, entao a
+   * ausencia de evidencia NAO e tratada como ausencia de escritor: as
+   * transicoes ficam CONTAMINADAS.
+   */
+  readonly mutacoes?: readonly EvidenciaDeMutacaoDoCursor[] | null;
 }): AnaliseDoCursor {
   const diagnosticos: string[] = [];
   const cursor = entrada.cursorAtual ?? null;
+  // `undefined` e `null` significam a MESMA coisa aqui, e de proposito:
+  // quem nao fornece proveniencia nao recebe atribuicao determinada.
+  const mutacoes = entrada.mutacoes ?? null;
 
   // ── Escopo: nunca cruzar agente, plataforma ou recurso ────────────
   let cursorUtil = cursor;
@@ -195,8 +242,19 @@ export function analisarProgressoDoCursor(entrada: {
         // O cursor e escrito ANTES do desfecho: um bucket sem entrega
         // pode te-lo movido e nao ter registrado terminal. Atribuir o
         // movimento a ele seria inventar causa.
-        certeza = evidencia === "ausente" ? "INCERTA" : "DETERMINADA";
-        motivo = certeza === "DETERMINADA" ? "fim = inicio do bucket seguinte" : "bucket sem entrega no intervalo";
+        if (mutacoes === null) {
+          certeza = "CONTAMINADA";
+          motivo = "sem evidencia de proveniencia: nao da para provar quem escreveu";
+        } else if (
+          contaminadaPorTerceiro([b.canonicalBucketId, seguinte.canonicalBucketId], b.bucketEm, seguinte.bucketEm + FOLGA_DE_FECHAMENTO_MS, entrada.escopo, mutacoes)
+        ) {
+          certeza = "CONTAMINADA";
+          motivo = "outro escritor pode ter movido o cursor neste intervalo";
+          diagnosticos.push("transicao_contaminada:" + b.canonicalBucketId);
+        } else {
+          certeza = evidencia === "ausente" ? "INCERTA" : "DETERMINADA";
+          motivo = certeza === "DETERMINADA" ? "fim = inicio do bucket seguinte" : "bucket sem entrega no intervalo";
+        }
       }
     } else if (cursorUtil !== null) {
       const t = Date.parse(cursorUtil.alteradoEm);
@@ -205,8 +263,22 @@ export function analisarProgressoDoCursor(entrada: {
       if (dentro) {
         fim = cursorUtil.proximoDeslocamento;
         origemDoFim = "CURSOR_ATUAL";
-        certeza = evidencia === "ausente" ? "INCERTA" : "DETERMINADA";
-        motivo = "fim = cursor atual, alterado dentro da janela deste bucket";
+        if (mutacoes === null) {
+          certeza = "CONTAMINADA";
+          motivo = "sem evidencia de proveniencia para o cursor atual";
+        } else if (
+          contaminadaPorTerceiro([b.canonicalBucketId], b.bucketEm, Number.MAX_SAFE_INTEGER, entrada.escopo, mutacoes)
+        ) {
+          // Para o ULTIMO bucket o limite superior e aberto: qualquer
+          // escritor alheio DEPOIS dele tambem pode ter deixado o cursor
+          // no valor que estamos lendo agora.
+          certeza = "CONTAMINADA";
+          motivo = "outro escritor pode ter deixado o cursor neste valor";
+          diagnosticos.push("cursor_atual_contaminado");
+        } else {
+          certeza = evidencia === "ausente" ? "INCERTA" : "DETERMINADA";
+          motivo = "fim = cursor atual, alterado dentro da janela deste bucket";
+        }
       } else {
         motivo = "cursor atual foi alterado fora da janela deste bucket";
         diagnosticos.push("cursor_alterado_fora_da_janela");
@@ -285,8 +357,17 @@ export function analisarProgressoDoCursor(entrada: {
   }
 
   const ultima = uteis[uteis.length - 1];
-  if (ultima.certeza === "INCERTA") {
-    return { ...base, estado: "uncertain", motivo: "a transicao mais recente nao e atribuivel" };
+  // CONTAMINADA e INCERTA levam ao MESMO lugar: sem atribuicao segura nao
+  // se afirma progresso nem travamento.
+  if (ultima.certeza !== "DETERMINADA") {
+    return {
+      ...base,
+      estado: "uncertain",
+      motivo:
+        ultima.certeza === "CONTAMINADA"
+          ? "a transicao mais recente foi contaminada por outro escritor do cursor"
+          : "a transicao mais recente nao e atribuivel",
+    };
   }
 
   // ── Travamento ────────────────────────────────────────────────────
