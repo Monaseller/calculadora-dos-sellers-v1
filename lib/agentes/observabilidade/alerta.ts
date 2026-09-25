@@ -7,14 +7,42 @@
  * ── REAVALIAR NAO E OBSERVAR DE NOVO ────────────────────────────────
  *
  * O vigia roda a cada minuto; o agendador, a cada cinco. Cinco leituras
- * do MESMO bucket nao sao cinco evidencias — sao a mesma evidencia lida
+ * do MESMO fato nao sao cinco evidencias — sao a mesma evidencia lida
  * cinco vezes. Contar chamadas do monitor faria um incidente escalar
  * sozinho e, pior, faria um alerta se resolver sem que o agendador
  * tivesse produzido nada de novo.
  *
- * Por isso toda observacao carrega uma `chaveDaEvidencia`, e o incidente
- * guarda a ultima que viu. Chave repetida atualiza o relogio de
- * avaliacao e mais nada.
+ * ── MAS O MESMO BUCKET PODE TRAZER FATO NOVO (I4P8-R1) ──────────────
+ *
+ * A reciproca tambem e falsa: chave igual ao bucket canonico confundiria
+ * duas coisas diferentes. As 13h05 o bucket B esta INCOMPLETE — ha
+ * abertura e nao ha terminal. As 13h11 o terminal atrasado chega e o
+ * MESMO bucket B fica SUCCEEDED. Isso nao e releitura; e fato novo sobre
+ * a mesma unidade. Com a chave igual ao bucket, essa recuperacao nao
+ * seria contada e o incidente ficaria aberto para sempre.
+ *
+ * Entao a evidencia tem duas partes:
+ *
+ *   SUJEITO — a unidade logica observada: o bucket, a configuracao, o
+ *             input de observabilidade. Muda quando a observacao passa a
+ *             falar de OUTRA coisa.
+ *   FATO    — o que se sabe sobre ela agora, ja marcado como ativo
+ *             (`a:`) ou saudavel (`h:`). Muda quando o conhecimento muda.
+ *
+ * A chave e `sujeito#fato`, e disso saem tres transicoes — so tres:
+ *
+ *   REPETICAO    — sujeito e fato iguais. O vigia passou de novo pelo
+ *                  mesmo fato. Nao conta nada.
+ *   REFINAMENTO  — mesmo sujeito, mesma classe, fato diferente. MISSING
+ *                  virando INCOMPLETE no mesmo bucket e o mesmo
+ *                  incidente ficando mais nitido, nao um incidente novo.
+ *   NOVA UNIDADE — o sujeito mudou, ou a classe virou (ativo <-> saudavel).
+ *                  E o UNICO caso que conta ocorrencia ou recuperacao.
+ *
+ * A classe dentro do fato e o que permite o terminal tardio do PROPRIO
+ * bucket valer como primeira evidencia saudavel e, ao mesmo tempo,
+ * impede que dois fatos saudaveis sobre o MESMO bucket resolvam sozinhos
+ * um alerta cuja politica exige dois buckets saudaveis.
  *
  * ── INCERTEZA TEM DUAS CAUSAS, E SO UMA E ALERTA ────────────────────
  *
@@ -81,6 +109,117 @@ export const EVIDENCIAS_PARA_RESOLVER: Readonly<Record<TipoDeAlerta, number>> =
     observability_data_incomplete: 1,
   });
 
+// ── Identidade da evidencia ──────────────────────────────────────────
+
+export const SEPARADOR_DA_EVIDENCIA = "#";
+export const LIMITE_DO_PEDACO = 48;
+
+/** Sujeitos que nao vem de bucket: a condicao existe fora do agendador. */
+export const SUJEITO_DA_CONFIGURACAO = "cfg";
+export const SUJEITO_DA_OBSERVABILIDADE = "obs";
+
+const MARCA_ATIVA = "a";
+const MARCA_SAUDAVEL = "h";
+
+/**
+ * So enum, codigo curto e contador entram numa chave de evidencia.
+ * Qualquer outro caractere vira `_`.
+ *
+ * A chave e guardada por tempo indeterminado e lida por gente. Deixar
+ * texto livre passar faria dela a porta por onde pergunta de comprador,
+ * identificador de conta ou pedaco de header entrariam sem ninguem
+ * notar — a mesma razao pela qual `detalhes` tem allowlist.
+ */
+const FORA_DO_ALFABETO = /[^A-Za-z0-9_.:-]+/g;
+
+export function normalizarPedacoDaEvidencia(bruto: unknown): string {
+  if (typeof bruto !== "string" || bruto.length === 0) return "_";
+  return bruto.replace(FORA_DO_ALFABETO, "_").slice(0, LIMITE_DO_PEDACO);
+}
+
+/** O bucket canonico como sujeito: `b:w5m-20260926T1300Z`. */
+export function sujeitoDoBucket(canonicalBucketId: string): string {
+  return "b:" + normalizarPedacoDaEvidencia(canonicalBucketId);
+}
+
+function montarFato(marca: string, codigo: string, contagem?: number): string {
+  const base = marca + ":" + normalizarPedacoDaEvidencia(codigo);
+  if (contagem === undefined) return base;
+  // Contador invalido NAO some em silencio: vira `n?`, visivel em
+  // qualquer leitura. Descartar o pedaco fundiria dois fatos distintos
+  // numa chave so, que e exatamente o erro que este modulo evita.
+  const n = Number.isSafeInteger(contagem) && contagem >= 0 ? String(contagem) : "?";
+  return base + ":n" + n;
+}
+
+/** O fato de a condicao estar valendo: `a:missing`, `a:stuck:n3`. */
+export function fatoAtivo(codigo: string, contagem?: number): string {
+  return montarFato(MARCA_ATIVA, codigo, contagem);
+}
+
+/** O fato de a condicao ter cedido: `h:succeeded`, `h:sem_pressao`. */
+export function fatoSaudavel(codigo: string, contagem?: number): string {
+  return montarFato(MARCA_SAUDAVEL, codigo, contagem);
+}
+
+export function chaveDaEvidencia(sujeito: string, fato: string): string {
+  return (
+    normalizarPedacoDaEvidencia(sujeito) +
+    SEPARADOR_DA_EVIDENCIA +
+    normalizarPedacoDaEvidencia(fato)
+  );
+}
+
+export type ClasseDaEvidencia = "ativa" | "saudavel" | "indefinida";
+
+export interface LeituraDaEvidencia {
+  readonly sujeito: string;
+  readonly fato: string;
+  readonly classe: ClasseDaEvidencia;
+}
+
+/**
+ * Le a chave guardada de volta nas duas partes.
+ *
+ * Nao ha coluna nova para o sujeito: `#` esta fora do alfabeto dos
+ * pedacos, entao a chave e decomponivel sem ambiguidade e
+ * `ultima_evidencia_chave` continua bastando.
+ */
+export function lerChaveDaEvidencia(chave: unknown): LeituraDaEvidencia | null {
+  if (typeof chave !== "string") return null;
+  const i = chave.indexOf(SEPARADOR_DA_EVIDENCIA);
+  if (i <= 0 || i === chave.length - 1) return null;
+  const fato = chave.slice(i + 1);
+  const classe: ClasseDaEvidencia = fato.startsWith(MARCA_ATIVA + ":")
+    ? "ativa"
+    : fato.startsWith(MARCA_SAUDAVEL + ":")
+      ? "saudavel"
+      : "indefinida";
+  return { sujeito: chave.slice(0, i), fato, classe };
+}
+
+export type TransicaoDaEvidencia = "repeticao" | "refinamento" | "nova_unidade";
+
+export function compararEvidencias(
+  anterior: string | null,
+  atual: string
+): TransicaoDaEvidencia {
+  if (anterior === atual) return "repeticao";
+  const a = lerChaveDaEvidencia(anterior);
+  const b = lerChaveDaEvidencia(atual);
+  // Chave anterior ausente ou ilegivel conta como unidade nova. Errar
+  // para cima aqui infla uma contagem; errar para baixo esconderia uma
+  // reincidencia — e reincidencia e a primeira coisa que alguem procura
+  // as tres da manha.
+  if (a === null || b === null) return "nova_unidade";
+  if (a.sujeito !== b.sujeito) return "nova_unidade";
+  // Classe virada (ativo <-> saudavel) e sempre unidade nova: e a
+  // recuperacao, ou a recaida. `indefinida` tambem, por nao ser
+  // comparavel com seguranca.
+  if (a.classe !== b.classe || a.classe === "indefinida") return "nova_unidade";
+  return "refinamento";
+}
+
 export interface EscopoDoAlerta {
   readonly userId: string;
   readonly agenteId: string;
@@ -97,8 +236,10 @@ export interface ObservacaoDeAlerta {
   readonly severidade?: SeveridadeDoAlerta | null;
   /** A causa dentro do tipo: `missing`, `incomplete`, `failed`… */
   readonly causa?: string | null;
-  /** O que torna esta observacao NOVA. Tipicamente o bucket canonico. */
-  readonly chaveDaEvidencia: string;
+  /** A unidade logica observada. `sujeitoDoBucket(...)` ou um dos fixos. */
+  readonly sujeitoDaEvidencia: string;
+  /** O que se sabe sobre ela: `fatoAtivo(...)` ou `fatoSaudavel(...)`. */
+  readonly fatoDaEvidencia: string;
   readonly detalhes?: unknown;
   /** Epoch ms. */
   readonly observadoEm: number;
@@ -208,8 +349,9 @@ export function reduzirEstadoDoAlerta(
   obs: ObservacaoDeAlerta
 ): IntencaoDoAlerta {
   const detalhes = sanitizarDetalhesDoAlerta(obs.detalhes);
-  const mesmaEvidencia =
-    atual !== null && atual.ultimaEvidenciaChave === obs.chaveDaEvidencia;
+  const chave = chaveDaEvidencia(obs.sujeitoDaEvidencia, obs.fatoDaEvidencia);
+  const transicao: TransicaoDaEvidencia =
+    atual === null ? "nova_unidade" : compararEvidencias(atual.ultimaEvidenciaChave, chave);
 
   // ── Condicao ATIVA ────────────────────────────────────────────────
   if (obs.ativo) {
@@ -225,7 +367,7 @@ export function reduzirEstadoDoAlerta(
           severidadeMaxima: severidade,
           causaAtual: obs.causa ?? null,
           ocorrencias: 1,
-          ultimaEvidenciaChave: obs.chaveDaEvidencia,
+          ultimaEvidenciaChave: chave,
           evidenciasSaudaveisConsecutivas: 0,
           abertoEm: obs.observadoEm,
           ultimoVistoEm: obs.observadoEm,
@@ -235,10 +377,11 @@ export function reduzirEstadoDoAlerta(
       };
     }
 
-    if (mesmaEvidencia) {
-      // A MESMA evidencia relida. Nao ha novidade: nao conta ocorrencia,
-      // nao escala por repeticao. Mas zera a recuperacao, porque a
-      // condicao continua valendo.
+    if (transicao === "repeticao") {
+      // O MESMO fato relido. Nao ha novidade: nao conta ocorrencia, nao
+      // escala por repeticao, nao avanca `ultimoVistoEm` — releitura nao
+      // e observacao. Mas zera a recuperacao, porque a condicao continua
+      // valendo, e ainda deixa a severidade acompanhar o que veio.
       return {
         acao: "UPDATE",
         motivo: "mesma evidencia ainda ativa",
@@ -253,20 +396,35 @@ export function reduzirEstadoDoAlerta(
       };
     }
 
+    const comuns = {
+      evidenciasSaudaveisConsecutivas: 0,
+      ultimaEvidenciaChave: chave,
+      causaAtual: obs.causa ?? null,
+      severidadeAtual: severidade,
+      severidadeMaxima: severidadeMaior(atual.severidadeMaxima, severidade),
+      // Fato novo sobre condicao ativa: a condicao FOI vista de novo,
+      // com informacao nova. Isso avanca `ultimoVistoEm` mesmo quando e
+      // so refinamento.
+      ultimoVistoEm: obs.observadoEm,
+      ultimaAvaliacaoEm: obs.observadoEm,
+      detalhes,
+    };
+
+    if (transicao === "refinamento") {
+      // MISSING virando INCOMPLETE no MESMO bucket e o mesmo incidente
+      // ficando mais nitido. Contar ocorrencia aqui inflaria a
+      // reincidencia com o proprio detalhamento do incidente.
+      return {
+        acao: "UPDATE",
+        motivo: "mesmo sujeito, fato ativo novo: refinamento",
+        campos: comuns,
+      };
+    }
+
     return {
       acao: "UPDATE",
-      motivo: "nova evidencia ativa",
-      campos: {
-        ocorrencias: atual.ocorrencias + 1,
-        evidenciasSaudaveisConsecutivas: 0,
-        ultimaEvidenciaChave: obs.chaveDaEvidencia,
-        causaAtual: obs.causa ?? null,
-        severidadeAtual: severidade,
-        severidadeMaxima: severidadeMaior(atual.severidadeMaxima, severidade),
-        ultimoVistoEm: obs.observadoEm,
-        ultimaAvaliacaoEm: obs.observadoEm,
-        detalhes,
-      },
+      motivo: "nova unidade de evidencia ativa",
+      campos: { ...comuns, ocorrencias: atual.ocorrencias + 1 },
     };
   }
 
@@ -275,14 +433,25 @@ export function reduzirEstadoDoAlerta(
     return { acao: "NOOP", motivo: "nada ativo e nenhum incidente aberto" };
   }
 
-  if (mesmaEvidencia) {
-    // Saude relida sobre a MESMA evidencia nao e recuperacao nova. Sem
-    // isto, um monitor de um minuto resolveria qualquer incidente em dois
+  if (transicao === "repeticao") {
+    // Saude relida sobre o MESMO fato nao e recuperacao nova. Sem isto,
+    // um monitor de um minuto resolveria qualquer incidente em dois
     // minutos sem o agendador ter produzido bucket algum.
     return {
       acao: "UPDATE",
       motivo: "mesma evidencia saudavel reavaliada",
       campos: { ultimaAvaliacaoEm: obs.observadoEm },
+    };
+  }
+
+  if (transicao === "refinamento") {
+    // Dois fatos saudaveis sobre o MESMO sujeito sao a mesma recuperacao
+    // vista com mais nitidez. Conta-los como dois resolveria com UM
+    // bucket um alerta cuja politica exige dois.
+    return {
+      acao: "UPDATE",
+      motivo: "refinamento da mesma evidencia saudavel",
+      campos: { ultimaEvidenciaChave: chave, ultimaAvaliacaoEm: obs.observadoEm },
     };
   }
 
@@ -296,7 +465,7 @@ export function reduzirEstadoDoAlerta(
       motivo: `${saudaveis} evidencia(s) saudavel(is) distinta(s), exigidas ${exigidas}`,
       campos: {
         evidenciasSaudaveisConsecutivas: saudaveis,
-        ultimaEvidenciaChave: obs.chaveDaEvidencia,
+        ultimaEvidenciaChave: chave,
         ultimaAvaliacaoEm: obs.observadoEm,
       },
     };
@@ -307,7 +476,7 @@ export function reduzirEstadoDoAlerta(
     motivo: `recuperacao em andamento: ${saudaveis} de ${exigidas}`,
     campos: {
       evidenciasSaudaveisConsecutivas: saudaveis,
-      ultimaEvidenciaChave: obs.chaveDaEvidencia,
+      ultimaEvidenciaChave: chave,
       ultimaAvaliacaoEm: obs.observadoEm,
     },
   };
