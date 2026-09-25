@@ -59,6 +59,12 @@ export const AREAS_CDS_IA: readonly ItemNav[] = [
   { href: "/ia/conexoes", rotulo: "Conexões" },
   { href: "/ia/aprovacoes", rotulo: "Aprovações" },
   { href: "/ia/atividade", rotulo: "Atividade" },
+  // I4P10. Entra ao lado de Atividade, e nao dentro dela, porque sao
+  // perguntas diferentes: "o que aconteceu" e historia, "o que esta
+  // quebrado agora" e estado. E Atividade ainda e simulada — misturar
+  // incidente real com feed simulado poria a tarja de simulacao em cima
+  // de dado verdadeiro.
+  { href: "/ia/monitoramento", rotulo: "Monitoramento" },
   { href: "/ia/custos", rotulo: "Custos" },
 ];
 

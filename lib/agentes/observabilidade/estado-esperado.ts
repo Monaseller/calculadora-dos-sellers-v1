@@ -61,7 +61,14 @@ export type EscritaDoEstadoEsperado =
   | { readonly estado: "agente_desconhecido" }
   | { readonly estado: "falhou" };
 
-function lerLinha(bruta: unknown): EstadoEsperadoDaIngestao {
+/**
+ * O que UMA linha significa.
+ *
+ * EXPORTADA no I4P10 porque a superficie do operador le a mesma tabela
+ * com outro recorte — todas as linhas do DONO, numa consulta so, em vez
+ * de uma por agente. A consulta muda; a interpretacao nao pode mudar.
+ */
+export function interpretarLinhaDoEstadoEsperado(bruta: unknown): EstadoEsperadoDaIngestao {
   if (typeof bruta !== "object" || bruta === null) return { estado: "falhou_leitura" };
   const o = bruta as Record<string, unknown>;
   const ativo = o.esperado_ativo;
@@ -112,7 +119,7 @@ export async function lerEstadoEsperadoDaIngestao(
     console.error("[observabilidade] mais de uma configuracao para o mesmo escopo");
     return { estado: "falhou_leitura" };
   }
-  return lerLinha(data[0]);
+  return interpretarLinhaDoEstadoEsperado(data[0]);
 }
 
 /**
