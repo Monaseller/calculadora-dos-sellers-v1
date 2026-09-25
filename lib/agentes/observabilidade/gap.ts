@@ -67,7 +67,13 @@ export interface LinhaDoLedger {
   readonly idempotencyKey: string | null;
   readonly criadoEm: string;
   readonly codigoDesfecho?: string | null;
+  // As metricas abaixo JA existem em `entrada_resumo` do desfecho; elas
+  // viajam aqui para que o OBS-3 nao precise reabrir o ledger.
   readonly continuacaoPendente?: boolean | null;
+  readonly deslocamentoInicial?: number | null;
+  readonly truncado?: boolean | null;
+  readonly limiteAtingido?: boolean | null;
+  readonly orcamentoEsgotado?: boolean | null;
 }
 
 export type EstadoEsperado =
@@ -82,6 +88,10 @@ export interface ResumoDaTentativa {
   readonly status: string | null;
   readonly codigoDesfecho: string | null;
   readonly continuacaoPendente: boolean | null;
+  readonly deslocamentoInicial: number | null;
+  readonly truncado: boolean | null;
+  readonly limiteAtingido: boolean | null;
+  readonly orcamentoEsgotado: boolean | null;
   readonly temTerminal: boolean;
 }
 
@@ -325,6 +335,10 @@ export function detectarSaudeDosBuckets(entrada: {
       status: t ? t.status : null,
       codigoDesfecho: t ? t.codigoDesfecho ?? null : null,
       continuacaoPendente: t ? t.continuacaoPendente ?? null : null,
+      deslocamentoInicial: t ? t.deslocamentoInicial ?? null : null,
+      truncado: t ? t.truncado ?? null : null,
+      limiteAtingido: t ? t.limiteAtingido ?? null : null,
+      orcamentoEsgotado: t ? t.orcamentoEsgotado ?? null : null,
       temTerminal: t !== null,
     };
     const lista = porBucket.get(leitura.identidade.canonicalBucketId);
