@@ -1543,8 +1543,11 @@ const ARQUIVOS_M2_I1_A3: readonly string[] = [
  * Dentro de `ESCOPO_AGENTES` aparecem quatro caminhos:
  *
  *   lib/agentes/acoes/catalogo.ts               acao -> Funcao, fechado
- *   app/api/internal/agentes/acoes/route.ts     a porta autenticada
  *   scripts/testar-agentes-ponte-n8n.ts         a suite
+ *
+ * `app/api/internal/agentes/acoes/route.ts` saiu desta lista no I4O4:
+ * a rota foi removida, e caminho autorizado para arquivo inexistente e
+ * autorizacao sem sujeito.
  *
  * `capability-worker.ts` e `execucao-funcoes/executar.ts` tambem mudaram,
  * e NAO entram aqui: os dois ja sao caminhos autorizados por frentes
@@ -1554,8 +1557,6 @@ const ARQUIVOS_M2_I1_A3: readonly string[] = [
 const ARQUIVOS_M2_I1_A8: readonly string[] = [
   "lib/agentes/acoes/",
   "lib/agentes/acoes/catalogo.ts",
-  "app/api/internal/agentes/acoes/",
-  "app/api/internal/agentes/acoes/route.ts",
   "scripts/testar-agentes-ponte-n8n.ts",
 ];
 
@@ -2677,12 +2678,13 @@ async function main() {
     // deployada desde o A7/A8 e NAO estavam na politica, entao o
     // middleware as negava antes do segredo proprio de cada uma ser
     // lido. O conjunto continua EXATO — nunca `contains`.
-    const PONTE_N8N = "/api/internal/agentes/acoes";
+    // M2-I1-A8B-I4O4: a ponte generica saiu da policy junto com o
+    // arquivo dela. O conjunto continua EXATO — nunca `contains`.
     const POLLER_PERGUNTAS = "/api/internal/agentes/perguntas-poller";
+    const INGESTAO_PERGUNTAS = "/api/internal/agentes/ingestao-perguntas";
     const ESPERADAS: [string, string][] = [
       ...ANTERIORES,
       [WORKER_AGENTES, '["GET"]'],
-      [PONTE_N8N, '["POST"]'],
       [POLLER_PERGUNTAS, '["GET"]'],
     ];
 
@@ -2787,19 +2789,25 @@ async function main() {
     const verboDeclarado = (texto: string, caminho: string): string | undefined =>
       new Map(rotasComSegredoDeclaradas(texto)).get(caminho);
 
-    ok('G10u5 a ponte do n8n esta declarada com exatamente ["POST"]',
-      verboDeclarado(mid, PONTE_N8N) === '["POST"]');
+    // M2-I1-A8B-I4O4: a ponte generica saiu da policy junto com o arquivo
+    // dela. O assert dela INVERTEU — de "declarada com POST" para "nao
+    // declarada" —, e a dedicada da ingestao assume o papel de ancora
+    // positiva, com os mesmos controles negativos.
+    ok("G10u5 a ponte generica NAO esta mais declarada na policy",
+      verboDeclarado(mid, "/api/internal/agentes/acoes") === undefined);
+    ok('G10u5 a rota dedicada da ingestao esta declarada com exatamente ["POST"]',
+      verboDeclarado(mid, INGESTAO_PERGUNTAS) === '["POST"]');
     ok('G10u5 o poller de perguntas esta declarado com exatamente ["GET"]',
       verboDeclarado(mid, POLLER_PERGUNTAS) === '["GET"]');
 
-    ok("G10u5 CONTROLE NEGATIVO: GET no lugar de POST na ponte reprova",
-      verboDeclarado(mid.replace(`"${PONTE_N8N}": ["POST"],`, `"${PONTE_N8N}": ["GET"],`),
-        PONTE_N8N) !== '["POST"]');
-    ok("G10u5 CONTROLE NEGATIVO: verbo extra na ponte reprova",
-      verboDeclarado(mid.replace(`"${PONTE_N8N}": ["POST"],`, `"${PONTE_N8N}": ["POST", "GET"],`),
-        PONTE_N8N) !== '["POST"]');
-    ok("G10u5 CONTROLE NEGATIVO: ponte ausente reprova",
-      verboDeclarado(mid.replace(`"${PONTE_N8N}": ["POST"],`, ""), PONTE_N8N) === undefined);
+    ok("G10u5 CONTROLE NEGATIVO: GET no lugar de POST na dedicada reprova",
+      verboDeclarado(mid.replace(`"${INGESTAO_PERGUNTAS}": ["POST"],`, `"${INGESTAO_PERGUNTAS}": ["GET"],`),
+        INGESTAO_PERGUNTAS) !== '["POST"]');
+    ok("G10u5 CONTROLE NEGATIVO: verbo extra na dedicada reprova",
+      verboDeclarado(mid.replace(`"${INGESTAO_PERGUNTAS}": ["POST"],`, `"${INGESTAO_PERGUNTAS}": ["POST", "GET"],`),
+        INGESTAO_PERGUNTAS) !== '["POST"]');
+    ok("G10u5 CONTROLE NEGATIVO: dedicada ausente reprova",
+      verboDeclarado(mid.replace(`"${INGESTAO_PERGUNTAS}": ["POST"],`, ""), INGESTAO_PERGUNTAS) === undefined);
     ok("G10u5 CONTROLE NEGATIVO: POST no lugar de GET no poller reprova",
       verboDeclarado(mid.replace(`"${POLLER_PERGUNTAS}": ["GET"],`, `"${POLLER_PERGUNTAS}": ["POST"],`),
         POLLER_PERGUNTAS) !== '["GET"]');

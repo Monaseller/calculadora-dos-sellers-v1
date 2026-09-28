@@ -114,12 +114,19 @@ export const ROTAS_COM_SEGREDO: Readonly<Record<string, readonly string[]>> = {
   "/api/internal/sync/executar": ["POST"], // scripts/sync-worker.mjs
   "/api/internal/agentes/executar": ["POST"], // scripts/agentes-worker.mjs
   "/api/internal/agentes/worker": ["GET"], // Vercel Cron * * * * *
-  // M2-I1-A8-FIX2. As duas entradas abaixo faltavam, e a ausência não
-  // apareceu em teste nenhum: as suítes do A7 e do A8 importam o módulo
-  // da rota e chamam o handler direto, que é a camada DEPOIS desta. O
-  // smoke de produção pegou — a ponte respondia o 401 de sessão do
-  // middleware, nunca o `nao_autorizado` do próprio handler.
-  "/api/internal/agentes/acoes": ["POST"], // orquestrador externo (n8n)
+  // M2-I1-A8-FIX2. A entrada abaixo faltava, e a ausência não apareceu
+  // em teste nenhum: as suítes do A7 importam o módulo da rota e chamam o
+  // handler direto, que é a camada DEPOIS desta. O smoke de produção
+  // pegou — a rota respondia o 401 de sessão do middleware, nunca o
+  // `nao_autorizado` do próprio handler.
+  //
+  // M2-I1-A8B-I4O4: a ponte GENÉRICA (`/api/internal/agentes/acoes`) saiu
+  // desta lista junto com o arquivo dela, depois da quarentena do I4O2 e
+  // da janela de observação do I4O3 (70 h 44 min, zero caller
+  // autenticado). Tirá-la daqui é parte da remoção, não faxina: policy
+  // com entrada para rota inexistente é afirmação falsa sobre a
+  // superfície do sistema, e o invariante estrutural da suíte de
+  // middleware reprova as DUAS metades dessa inconsistência.
   // Declarar NÃO liga o polling: quem liga é a entrada em `crons` de
   // `vercel.json`, que segue ausente de propósito (A7_POLLER_CRON =
   // NOT_DEPLOYED). Ela entra agora para que o dia em que o cron for

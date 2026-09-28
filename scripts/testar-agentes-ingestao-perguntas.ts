@@ -552,8 +552,11 @@ async function main(): Promise<void> {
     ok("F4  o catalogo segue com as duas acoes de leitura, e so elas",
       [...acoesRegistradas()].sort().join(",") === "consultar_perguntas,consultar_vendas",
       [...acoesRegistradas()].sort().join(","));
-    ok("F5  a rota da ponte nao menciona a acao de ingestao",
-      !/sincronizar_perguntas/.test(ler("app/api/internal/agentes/acoes/route.ts")));
+    // M2-I1-A8B-I4O4: a rota da ponte generica foi removida. "Ela nao
+    // menciona a acao" virou "ela nao existe", que e mais forte.
+    ok("F5  a ponte generica nao existe mais para mencionar a acao",
+      (() => { try { ler("app/api/internal/agentes/acoes/route.ts"); return false; }
+               catch { return true; } })());
     ok("F6  nenhuma migration nova entrou nesta frente",
       !/20261010|20261011/.test(ler("lib/agentes/ingestao/sincronizar-perguntas.ts")));
   }

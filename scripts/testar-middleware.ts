@@ -210,7 +210,7 @@ function fonteSemComentarios(rota: string): string {
     .replace(/(^|[^:])\/\/.*$/gm, "$1");
 }
 
-t("4g. POST /api/internal/agentes/acoes passa sem cookie (ponte do n8n)", () => {
+t("4g. POST /api/internal/agentes/acoes e NEGADO — a ponte generica foi removida", () => {
   // M2-I1-A8-FIX2. O modo de falha aqui NAO e silencioso como o do cron —
   // e pior de diagnosticar. O middleware respondia 401, que e exatamente
   // o status que a ponte responde quando o segredo nao confere. Quem
@@ -221,11 +221,15 @@ t("4g. POST /api/internal/agentes/acoes passa sem cookie (ponte do n8n)", () => 
   // producao tem de olhar o corpo, nunca so o status:
   //   middleware -> { erro: true, mensagem: "Sessao invalida." }
   //   handler    -> { ok: false, erro: "nao_autorizado" }
-  assert(sem("/api/internal/agentes/acoes", "POST") === "liberar",
-    "ponte do n8n bloqueada pelo middleware — o handler nunca veria o segredo");
+  // M2-I1-A8B-I4O4. O assert INVERTEU, e de proposito: a rota generica
+  // saiu do disco e da policy, entao o caminho volta ao default deny.
+  // Manter o teste invertido em vez de apaga-lo e o que faz uma
+  // reintroducao silenciosa da entrada na policy ficar vermelha aqui.
+  assert(sem("/api/internal/agentes/acoes", "POST") === "bloquear_api",
+    "o caminho da ponte generica removida voltou a ser liberado pela policy");
 });
 
-t("4h. a ponte NAO fica publica, e so por ter segredo proprio", () => {
+t("4h. a ponte generica removida nao aparece em NENHUMA lista", () => {
   // POST e o unico verbo que a rota exporta. Um GET liberado seria uma
   // segunda porta para a mesma chave, sem revisao.
   for (const metodo of ["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
@@ -239,10 +243,22 @@ t("4h. a ponte NAO fica publica, e so por ter segredo proprio", () => {
   assert(!("/api/internal/agentes/acoes" in EXCECOES_TEMPORARIAS_F0C),
     "ponte listada como excecao temporaria — ela nao e divida, e rota com segredo");
 
-  const fonte = fonteSemComentarios("app/api/internal/agentes/acoes/route.ts");
+  // M2-I1-A8B-I4O4: nao ha mais fonte para inspecionar. O que substitui
+  // os asserts de forma da guarda e o fato de o arquivo nao existir — e
+  // arquivo ausente nao le segredo, nao compara header e nao responde.
+  assert(!fs.existsSync(path.join(process.cwd(), "app/api/internal/agentes/acoes/route.ts")),
+    "o arquivo da ponte generica voltou a existir — isso e decisao de arquitetura, nao commit");
+  assert(!fs.existsSync(path.join(process.cwd(), "app/api/internal/agentes/acoes")),
+    "a pasta da ponte generica voltou a existir");
+  assert(fs.existsSync(path.join(process.cwd(), "app/api/internal/agentes/ingestao-perguntas/route.ts")),
+    "ANTI-VACUIDADE: o oraculo de ausencia precisa saber dizer SIM para uma rota que existe");
+});
 
-  assert(/process\.env\.N8N_BRIDGE_INTERNAL_SECRET/.test(fonte),
-    "ponte liberada no middleware mas NAO le N8N_BRIDGE_INTERNAL_SECRET do ambiente");
+t("4h2. DIVIDA HISTORICA: a forma da guarda continua exigida da rota DEDICADA", () => {
+  const fonte = fonteSemComentarios("app/api/internal/agentes/ingestao-perguntas/route.ts");
+
+  assert(/process\.env\.N8N_INGESTAO_INTERNAL_SECRET/.test(fonte),
+    "rota dedicada liberada no middleware mas NAO le o segredo dela do ambiente");
   assert(/headers\.get\("x-worker-secret"\)/.test(fonte),
     "ponte liberada mas nao le o header x-worker-secret");
   assert(/!segredo/.test(fonte),
@@ -417,8 +433,8 @@ t("6. as 9 rotas com segredo estao declaradas, nem uma a mais", () => {
   // perguntas, com o mesmo defeito de origem das duas da FIX2 — so que
   // desta vez o invariante 37/38 a descobriu no disco antes do deploy, e
   // nao o smoke de producao depois.
-  assert(Object.keys(ROTAS_COM_SEGREDO).length === 9,
-    `esperado 9 rotas com segredo, encontrado ${Object.keys(ROTAS_COM_SEGREDO).length}`);
+  assert(Object.keys(ROTAS_COM_SEGREDO).length === 8,
+    `esperado 8 rotas com segredo, encontrado ${Object.keys(ROTAS_COM_SEGREDO).length}`);
 });
 
 // ────────────────────────────────────────────────────────────────────
@@ -665,9 +681,13 @@ const INVENTARIO: [string, string, Decisao][] = [
   ["/api/internal/sync/executar", "POST", "liberar"],
   ["/api/internal/agentes/executar", "POST", "liberar"],
   ["/api/internal/agentes/worker", "GET", "liberar"],
-  // M2-I1-A8-FIX2: as duas que faltavam. A ponte e chamada por um
-  // orquestrador EXTERNO; o poller, pelo cron — que segue NAO publicado.
-  ["/api/internal/agentes/acoes", "POST", "liberar"],
+  // M2-I1-A8-FIX2: as duas que faltavam. O poller e chamado pelo cron —
+  // que segue NAO publicado.
+  // M2-I1-A8B-I4O4: a ponte generica FOI REMOVIDA. A entrada FICA no
+  // inventario, com a decisao invertida: e ela que prende a retirada.
+  // Apagar a linha deixaria o caminho sem expectativa declarada, e uma
+  // reintroducao futura na policy passaria sem nada acusar.
+  ["/api/internal/agentes/acoes", "POST", "bloquear_api"],
   ["/api/internal/agentes/perguntas-poller", "GET", "liberar"],
   // M2-I1-A8B-I4C1: a porta agendada da ingestao de perguntas.
   ["/api/internal/agentes/ingestao-perguntas", "POST", "liberar"],
@@ -1058,9 +1078,11 @@ t("37. ANTI-VACUIDADE: a varredura enxerga as rotas internas do disco", () => {
     `a varredura achou ${ROTAS_INTERNAS.length} rotas internas, esperado >= 7`);
   assert(ROTAS_INTERNAS.every((r) => r.caminho.startsWith("/api/internal/")),
     "caminho derivado do disco fora do namespace /api/internal/");
-  // As duas da FIX2 tem de estar entre as descobertas — se a varredura
-  // nao as ve, ela nao veria a proxima tampouco.
-  for (const esperada of ["/api/internal/agentes/acoes", "/api/internal/agentes/perguntas-poller",
+  // As rotas conhecidas tem de estar entre as descobertas — se a
+  // varredura nao as ve, ela nao veria a proxima tampouco. A ponte
+  // generica saiu desta lista no I4O4 porque saiu do disco; quem prende a
+  // ausencia dela agora e o teste 4h.
+  for (const esperada of ["/api/internal/agentes/perguntas-poller",
                           "/api/internal/agentes/ingestao-perguntas"])
     assert(ROTAS_INTERNAS.some((r) => r.caminho === esperada),
       `${esperada} nao foi descoberta pela varredura`);
@@ -1075,24 +1097,28 @@ t("38. toda rota interna com auth propria esta declarada com os metodos EXATOS",
 });
 
 t("39. CONTROLES NEGATIVOS: o oraculo estrutural sabe dizer nao", () => {
-  const ponte = ROTAS_INTERNAS.find((r) => r.caminho === "/api/internal/agentes/acoes");
-  assert(ponte !== undefined, "ancora: a ponte precisa existir para os mutantes");
-  const p = ponte as RotaInterna;
+  // M2-I1-A8B-I4O4: a ancora era a ponte generica. Com ela removida, os
+  // mutantes passam a usar a rota DEDICADA da ingestao — mesma forma
+  // (unico POST exportado, segredo proprio, fail-closed), entao a forca
+  // do controle negativo nao muda.
+  const dedicada = ROTAS_INTERNAS.find((r) => r.caminho === "/api/internal/agentes/ingestao-perguntas");
+  assert(dedicada !== undefined, "ancora: a rota dedicada precisa existir para os mutantes");
+  const p = dedicada as RotaInterna;
   assert(JSON.stringify(p.metodos) === '["POST"]',
-    `ancora: a ponte deveria exportar apenas POST, exporta ${JSON.stringify(p.metodos)}`);
+    `ancora: a dedicada deveria exportar apenas POST, exporta ${JSON.stringify(p.metodos)}`);
 
-  const semPonte = { ...ROTAS_COM_SEGREDO } as Record<string, readonly string[]>;
-  delete semPonte["/api/internal/agentes/acoes"];
+  const semDedicada = { ...ROTAS_COM_SEGREDO } as Record<string, readonly string[]>;
+  delete semDedicada["/api/internal/agentes/ingestao-perguntas"];
   // MUT-1
-  assert(violacoesDoInvariante([p], semPonte).length > 0,
-    "MUT-1 sobreviveu: remover a ponte da policy passou despercebido");
+  assert(violacoesDoInvariante([p], semDedicada).length > 0,
+    "MUT-1 sobreviveu: remover a dedicada da policy passou despercebido");
 
   // MUT-2 — verbo trocado
-  assert(violacoesDoInvariante([p], { ...ROTAS_COM_SEGREDO, "/api/internal/agentes/acoes": ["GET"] }).length > 0,
+  assert(violacoesDoInvariante([p], { ...ROTAS_COM_SEGREDO, "/api/internal/agentes/ingestao-perguntas": ["GET"] }).length > 0,
     "MUT-2 sobreviveu: POST trocado por GET passou despercebido");
 
   // MUT-3 / MUT-9 — verbo a mais que a rota nao exporta
-  assert(violacoesDoInvariante([p], { ...ROTAS_COM_SEGREDO, "/api/internal/agentes/acoes": ["POST", "GET"] }).length > 0,
+  assert(violacoesDoInvariante([p], { ...ROTAS_COM_SEGREDO, "/api/internal/agentes/ingestao-perguntas": ["POST", "GET"] }).length > 0,
     "MUT-3/MUT-9 sobreviveu: verbo declarado que a rota nao exporta passou despercebido");
 
   const poller = ROTAS_INTERNAS.find((r) => r.caminho === "/api/internal/agentes/perguntas-poller") as RotaInterna;
@@ -1166,15 +1192,16 @@ t("40. nenhuma rota interna e liberada por curinga ou por prefixo", () => {
   // nao e ela liberar demais — e alguem acreditar que declarou a rota.
   const comCuringa = { ...ROTAS_COM_SEGREDO, "/api/internal/agentes/*": ["POST"] } as Record<string, readonly string[]>;
   const semAsDuas = { ...comCuringa } as Record<string, readonly string[]>;
-  delete semAsDuas["/api/internal/agentes/acoes"];
+  delete semAsDuas["/api/internal/agentes/ingestao-perguntas"];
   delete semAsDuas["/api/internal/agentes/perguntas-poller"];
 
-  assert(decidirAcesso("/api/internal/agentes/acoes", "POST", false) === "liberar",
-    "ancora: a ponte deveria estar liberada pela declaracao nominal");
+  // M2-I1-A8B-I4O4: as duas ancoras passam a ser a dedicada e o poller.
+  assert(decidirAcesso("/api/internal/agentes/ingestao-perguntas", "POST", false) === "liberar",
+    "ancora: a dedicada deveria estar liberada pela declaracao nominal");
 
-  const ponte = ROTAS_INTERNAS.find((r) => r.caminho === "/api/internal/agentes/acoes") as RotaInterna;
+  const dedicada = ROTAS_INTERNAS.find((r) => r.caminho === "/api/internal/agentes/ingestao-perguntas") as RotaInterna;
   const poller = ROTAS_INTERNAS.find((r) => r.caminho === "/api/internal/agentes/perguntas-poller") as RotaInterna;
-  assert(violacoesDoInvariante([ponte, poller], semAsDuas).length === 2,
+  assert(violacoesDoInvariante([dedicada, poller], semAsDuas).length === 2,
     "MUT-7 sobreviveu: o curinga foi aceito no lugar das duas declaracoes nominais");
 
   // E nenhum prefixo libera: sub-caminho de rota declarada continua negado.

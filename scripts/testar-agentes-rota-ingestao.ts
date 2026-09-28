@@ -713,35 +713,20 @@ async function main(): Promise<void> {
   ok("R28b o catalogo continua com exatamente as duas acoes de consulta",
     [...acoesRegistradas()].sort().join(",") === "consultar_perguntas,consultar_vendas");
   {
-    const ponte = await import("../app/api/internal/agentes/acoes/route");
-    const pedido = new Request("http://localhost/api/internal/agentes/acoes", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-worker-secret": SEGREDO_PONTE },
-      body: JSON.stringify({
-        agenteId: AGENTE, acao: "sincronizar_perguntas", argumentos: {},
-        executionId: "e1", operationId: "o1",
-      }),
-    });
-    const r = await ponte.POST(pedido);
-    // I4O2: a MAIN entrou em QUARENTENA. Ela nao recusa mais por acao
-    // desconhecida — ela nao chega a olhar a acao. O invariante que
-    // importa aqui continua o mesmo, e ficou mais forte: `sincronizar_perguntas`
-    // nao executa pela ponte generica. Antes isso era um 400 do catalogo;
-    // agora e um 410 terminal, alcancado sem ler o corpo.
-    ok("R28c e a MAIN termina em 410 de aposentadoria, sem olhar a acao",
-      r.status === 410);
-    ok("R28d e o corpo diz qual e o estado da ponte",
-      (await r.clone().json()).codigo === "main_generico_em_aposentadoria");
-    const pedidoIngestao = new Request("http://localhost/api/internal/agentes/acoes", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-worker-secret": SEGREDO_INGESTAO },
-      body: JSON.stringify({
-        agenteId: AGENTE, acao: "consultar_perguntas", argumentos: {},
-        executionId: "e1", operationId: "o1",
-      }),
-    });
-    ok("R32 o segredo de INGESTAO nao muda a autoridade da MAIN",
-      (await ponte.POST(pedidoIngestao)).status === 401);
+    // M2-I1-A8B-I4O4: a MAIN generica foi REMOVIDA. Os asserts que
+    // provavam o 410 dela sairam com ela; o invariante que importa aqui
+    // ficou mais forte, porque agora nao existe superficie generica por
+    // onde `sincronizar_perguntas` pudesse ser pedida.
+    const existe = (rel: string) => {
+      try { ler(rel); return true; } catch { return false; }
+    };
+    ok("R28c a ponte generica nao existe mais para alcancar a acao",
+      !existe("app/api/internal/agentes/acoes/route.ts"));
+    ok("R28d ANTI-VACUIDADE: o oraculo de ausencia sabe dizer SIM",
+      existe("app/api/internal/agentes/ingestao-perguntas/route.ts"));
+    ok("R32 e a rota dedicada continua com o segredo PROPRIO dela",
+      /process\.env\.N8N_INGESTAO_INTERNAL_SECRET/.test(ROTA) &&
+      !ROTA.includes("N8N_BRIDGE_INTERNAL_SECRET"));
   }
 
   // ── Fronteiras estruturais ──
