@@ -1,0 +1,58 @@
+-- ============================================================
+-- M2-I1-A8B-I4P13-R1 — `agente_ingestao_monitor_lease`: devolver ao
+-- runtime o SELECT que a `20261014` omitiu.
+--
+-- ── O DEFEITO, MEDIDO EM PRODUCAO ──────────────────────────────────
+--
+-- A `20261014` concedeu `insert, update` e NAO concedeu `select`, com
+-- esta justificativa escrita no proprio arquivo:
+--
+--   "SELECT nao entra porque nenhum caminho le a linha direto — a
+--    aquisicao devolve o que importa."
+--
+-- A frase esta errada, e o vigia em producao provou em 18 execucoes
+-- seguidas: toda passagem do cron respondeu 500 com
+-- `falha_de_plataforma / aquisicao_da_serializacao`, e a RPC executada
+-- sob `service_role` devolve
+--
+--   SQLSTATE 42501  permission denied for table agente_ingestao_monitor_lease
+--
+-- ── POR QUE SELECT E NECESSARIO — QUATRO RAZOES ────────────────────
+--
+-- A. As duas RPCs sao `security invoker`. Elas nao rodam como dono:
+--    rodam com os privilegios de quem chama, que em producao e
+--    `service_role`. O `grant execute` autoriza CHAMAR a funcao; ele
+--    nao empresta privilegio nenhum sobre a tabela.
+--
+-- B. `INSERT ... RETURNING` LE. O `returning alvo.expira_em,
+--    alvo.tomada_de_expirada` da aquisicao exige SELECT nessas colunas —
+--    devolver um valor e le-lo, ainda que no mesmo comando.
+--
+-- C. O `where` do `on conflict do update` (`alvo.expira_em <= now()` e
+--    `alvo.user_id = p_user_id`) e o `where` inteiro da liberacao LEEM
+--    colunas da tabela. `UPDATE` com condicao exige SELECT nas colunas
+--    que a condicao consulta.
+--
+-- D. E a afirmacao "nenhum caminho le a linha direto" era falsa ja no
+--    codigo da mesma entrega: `lib/agentes/observabilidade/
+--    alerta-consulta.ts` faz `select agente_id, adquirida_em,
+--    liberada_em` nesta tabela para mostrar ao operador quando o vigia
+--    passou pela ultima vez. Sem este grant, a superficie tambem falha.
+--
+-- ── O QUE ESTE ARQUIVO NAO FAZ ─────────────────────────────────────
+--
+-- Nao toca schema, constraint, indice, RPC, TTL, `security invoker`,
+-- `search_path` nem a semantica do lease. Nao concede DELETE nem
+-- TRUNCATE — a linha e reaproveitada a cada aquisicao, e apagar
+-- perderia `tomadas`, o unico sinal de que o vigia anda morrendo no
+-- meio. Nao concede nada a `PUBLIC`, `anon` ou `authenticated`.
+--
+-- A `20261014` NAO foi editada, porque ja esta aplicada: o comentario
+-- errado dela permanece como registro historico, e e este arquivo que
+-- passa a valer.
+-- ============================================================
+
+grant select on table public.agente_ingestao_monitor_lease to service_role;
+
+comment on table public.agente_ingestao_monitor_lease is
+  'Direito temporario de AVALIAR a ingestao de um agente. Coordenacao do vigia, nao incidente e nao cursor: uma linha por escopo, sobrescrita a cada aquisicao, sem historico. A expiracao e a garantia real — liberacao explicita e melhor esforco. SELECT e necessario ao runtime: as RPCs sao `security invoker` e tanto o RETURNING da aquisicao quanto os WHERE de aquisicao e liberacao leem colunas desta tabela (ver 20261015).';
