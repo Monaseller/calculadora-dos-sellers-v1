@@ -153,6 +153,127 @@ export const DECLARACOES: Readonly<Record<string, { descricao: string; schemaEnt
         additionalProperties: false,
       }),
     }),
+    // ── AGENT-FACTORY-F3: as Tools deterministicas ──────────────────
+    //
+    // As descricoes dizem ao modelo o que a Tool FAZ e, onde importa, o
+    // que ela NAO faz. "Devolve as linhas, nunca um total ja calculado"
+    // e "a Tool calcula; nao estime" existem porque um modelo que acha
+    // que pode somar, soma — e some com o erro dentro de um numero de
+    // aparencia perfeita.
+    "planilha.inspecionar": Object.freeze({
+      descricao:
+        "Descreve uma planilha sem despejar o conteudo: abas, cabecalhos, quantas linhas " +
+        "e colunas, se ha formulas. Use SEMPRE antes de ler ou agregar, para saber que " +
+        "colunas existem em vez de adivinhar o nome delas.",
+      schemaEntrada: Object.freeze({
+        type: "object",
+        properties: {
+          fileId: { type: "string", description: "Identificador do arquivo. NUNCA um caminho." },
+        },
+        required: ["fileId"],
+        additionalProperties: false,
+      }),
+    }),
+    "planilha.ler": Object.freeze({
+      descricao:
+        "Le linhas de uma aba, com limite obrigatorio. Serve para VER exemplos de dado. " +
+        "Nao use para calcular: para somar, contar ou agrupar existe planilha.agregar, " +
+        "que calcula sem passar os numeros por voce.",
+      schemaEntrada: Object.freeze({
+        type: "object",
+        properties: {
+          fileId: { type: "string", description: "Identificador do arquivo. NUNCA um caminho." },
+          aba: { type: "string", description: "Opcional. Padrao: a primeira aba." },
+          colunas: {
+            type: "array", items: { type: "string" },
+            description: "Opcional. Nomes de cabecalho; padrao e todas.",
+          },
+          inicio: { type: "integer", description: "Opcional. Primeira linha de dado, base 0." },
+          limite: { type: "integer", description: "Opcional. Maximo de linhas (teto 500)." },
+        },
+        required: ["fileId"],
+        additionalProperties: false,
+      }),
+    }),
+    "planilha.agregar": Object.freeze({
+      descricao:
+        "Calcula sobre uma aba: count, sum, min, max, average, distinct, missing, duplicates. " +
+        "Aceita filtros e agrupamento na MESMA chamada. Use isto para qualquer total — nao " +
+        "some voce mesmo os valores lidos, e nao estime. Para filtrar por periodo, pegue o " +
+        "intervalo com calendario.periodo e use o operador 'entre'.",
+      schemaEntrada: Object.freeze({
+        type: "object",
+        properties: {
+          fileId: { type: "string", description: "Identificador do arquivo. NUNCA um caminho." },
+          aba: { type: "string", description: "Opcional. Padrao: a primeira aba." },
+          operacao: {
+            type: "string",
+            enum: ["count", "sum", "min", "max", "average", "distinct", "missing", "duplicates"],
+          },
+          coluna: { type: "string", description: "Obrigatoria, exceto para count." },
+          agruparPor: { type: "string", description: "Opcional. Cabecalho pelo qual agrupar." },
+          filtros: {
+            type: "array",
+            description: "Opcional. Todos os filtros precisam passar (E, nao OU).",
+            items: {
+              type: "object",
+              properties: {
+                coluna: { type: "string" },
+                operador: {
+                  type: "string",
+                  enum: ["igual", "diferente", "contem", "maior", "menor", "entre", "vazio", "nao_vazio"],
+                },
+                valor: { description: "Valor de comparacao. Para datas, use AAAA-MM-DD." },
+                ate: { description: "Limite superior, so com o operador 'entre'." },
+              },
+              required: ["coluna", "operador"],
+              additionalProperties: false,
+            },
+          },
+        },
+        required: ["fileId", "operacao"],
+        additionalProperties: false,
+      }),
+    }),
+    "calculadora.calcular": Object.freeze({
+      descricao:
+        "Aritmetica exata para dinheiro. Operacao nomeada mais uma lista de valores — nao " +
+        "aceita expressao escrita. Use para QUALQUER conta, inclusive as que parecem faceis: " +
+        "e ela que garante o centavo. subtract, divide e percentage levam exatamente 2 valores.",
+      schemaEntrada: Object.freeze({
+        type: "object",
+        properties: {
+          operacao: {
+            type: "string",
+            enum: ["add", "subtract", "multiply", "divide", "percentage", "average"],
+          },
+          valores: {
+            type: "array",
+            items: { type: ["string", "number"] },
+            description: "Aceita 1.234,56 e 1234.56. Em percentage: [valor, percentual].",
+          },
+        },
+        required: ["operacao", "valores"],
+        additionalProperties: false,
+      }),
+    }),
+    "calendario.periodo": Object.freeze({
+      descricao:
+        "Converte um periodo em datas reais (America/Sao_Paulo), com inicio e fim INCLUSIVOS. " +
+        "Use SEMPRE que a pergunta citar um periodo: voce nao tem relogio, e uma data " +
+        "escrita de memoria produz um total certo sobre o mes errado.",
+      schemaEntrada: Object.freeze({
+        type: "object",
+        properties: {
+          periodo: {
+            type: "string",
+            enum: ["hoje", "ontem", "esta_semana", "semana_passada", "este_mes", "mes_passado", "este_ano"],
+          },
+        },
+        required: ["periodo"],
+        additionalProperties: false,
+      }),
+    }),
     "mercadolivre.perguntas.listar": Object.freeze({
       descricao:
         "Lista as perguntas recebidas na conta do Mercado Livre ligada a este agente. " +

@@ -1501,6 +1501,39 @@ const ARQUIVOS_M1_I1V2: readonly string[] = [
  * `testar-ia-skill-1d-b.ts`. A extracao foi a resposta ao alarme;
  * levantar o alarme teria sido desliga-lo.
  */
+/**
+ * AGENT-FACTORY-F3 — a separacao estrutural do catalogo.
+ *
+ * `vendas.ts` e o QUINTO modulo de `lib/agentes/funcoes`, pela mesma
+ * razao que publicou o quarto: o tripwire J1 tocou em 583 linhas contra
+ * 560, e a resposta a um alarme nao e desliga-lo. O bloco de
+ * `vendas.consultar` foi movido LITERALMENTE — os corpos e os
+ * comentarios sao os mesmos, so ganharam `export` — e os ids do
+ * catalogo nao mudaram. `registry.ts` continua sendo a UNICA autoridade
+ * sobre o que existe; este modulo exporta funcoes soltas que, sem o
+ * mapa, nao sao Funcao nenhuma.
+ */
+const ARQUIVOS_F3: readonly string[] = [
+  // A separacao estrutural que resolveu J1.
+  "lib/agentes/funcoes/vendas.ts",
+  // As tres Tools deterministicas: wrappers no padrao do catalogo.
+  "lib/agentes/funcoes/planilha.ts",
+  "lib/agentes/funcoes/calculadora.ts",
+  "lib/agentes/funcoes/calendario.ts",
+  // O mecanismo de planilha. Diretorio proprio, e nao dentro de
+  // `funcoes/`, porque ali o tripwire H12 cobra conteudo EXATO e estes
+  // sete modulos nao sao Funcao — sao leitura, numero, data e
+  // agregacao, usados PELAS Funcoes. Nenhum deles conhece guard,
+  // catalogo ou permissao.
+  "lib/agentes/planilhas/zip.ts",
+  "lib/agentes/planilhas/leitura.ts",
+  "lib/agentes/planilhas/tabela.ts",
+  "lib/agentes/planilhas/numeros.ts",
+  "lib/agentes/planilhas/datas.ts",
+  "lib/agentes/planilhas/agregacao.ts",
+  "lib/agentes/planilhas/fonte.ts",
+];
+
 const ARQUIVOS_M2_I1_A2: readonly string[] = [
   "lib/agentes/dados/perguntas.ts",
   "lib/agentes/funcoes/mercadolivre-perguntas.ts",
@@ -1593,6 +1626,7 @@ const ARQUIVOS_M2_I1_A7: readonly string[] = [
 
 const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_F1F2,
+  ...ARQUIVOS_F3,
   ...ARQUIVOS_1DD,
   ...ARQUIVOS_1DA_PERF,
   ...ARQUIVOS_1EA,
@@ -1758,6 +1792,8 @@ const SUITES_AGENTES: readonly string[] = [
   "testar-agentes-isolamento-1de.ts",
   "testar-agentes-isolamento-banco.ts",
   "testar-agentes-vendas-capability.ts",
+  // AGENT-FACTORY-F3: a suite das Tools deterministicas.
+  "testar-agentes-planilhas-tools.ts",
 ];
 
 /** PREDICADO de G11t. */
@@ -2874,7 +2910,13 @@ async function main() {
     // ── G11 — nada inesperado no escopo dos agentes ────────────────
     // Propriedade arquitetural, nao estado do Git: vale com o handler
     // untracked, staged ou ja commitado.
-    const saida = git("status", "--porcelain", "--", ...ESCOPO_AGENTES);
+    // `--untracked-files=all` e correcao, nao afrouxamento: sem ele o
+    // git COLAPSA um diretorio novo inteiro numa linha so
+    // (`lib/agentes/planilhas/`), e bastaria criar uma pasta para que
+    // qualquer quantidade de arquivo nao declarado passasse por este
+    // guarda como um caminho unico. Com `-uall` cada arquivo aparece e
+    // precisa estar declarado — que e o que G11 sempre quis dizer.
+    const saida = git("status", "--porcelain", "--untracked-files=all", "--", ...ESCOPO_AGENTES);
     const caminhos = caminhosDeStatus(saida);
     const foraDoEsperado = caminhos.filter((p) => !ARQUIVOS_ESPERADOS.includes(p));
 

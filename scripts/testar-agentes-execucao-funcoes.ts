@@ -156,6 +156,19 @@ const EXECUTOR = ler("lib/agentes/execucao-funcoes/executar.ts");
 const EXECUTOR_CODIGO = semComentarios(EXECUTOR);
 const REGISTRY = ler("lib/agentes/funcoes/registry.ts");
 const REGISTRY_CODIGO = semComentarios(REGISTRY);
+// AGENT-FACTORY-F3: os wrappers de `vendas.consultar` sairam do mapa
+// para `funcoes/vendas.ts` (tripwire J1). Os asserts que perguntam "o
+// registry delega, e nao recopia" continuam querendo dizer a mesma
+// coisa — mas a frase que eles procuram agora mora no modulo irmao.
+// Medir so `registry.ts` depois da mudanca seria olhar para o lugar
+// errado e chamar isso de prova. `REGISTRY_CODIGO` segue existindo
+// intacto para os asserts que falam do MAPA (como B9, que cobra que os
+// codigos de dominio NAO apareçam nele).
+const CATALOGO_CODIGO = [
+  REGISTRY_CODIGO,
+  semComentarios(ler("lib/agentes/funcoes/vendas.ts")),
+  semComentarios(ler("lib/agentes/funcoes/mercadolivre-perguntas.ts")),
+].join("\n");
 
 // ─── O duplo do cliente Supabase ──────────────────────────────────────
 
@@ -577,8 +590,12 @@ async function principal(): Promise<void> {
     // no registry — eles vem de `validarFiltroVendas`.
     ok("B9  os codigos de dominio NAO foram recopiados no registry",
       !/filtro_ausente|periodo_invertido|janela_excedida|marketplace_invalido/.test(REGISTRY_CODIGO));
-    ok("B10 e o registry delega a autoridade existente",
-      /validarFiltroVendas/.test(REGISTRY_CODIGO));
+    ok("B10 e o catalogo delega a autoridade existente",
+      /validarFiltroVendas/.test(CATALOGO_CODIGO));
+    ok("B10a CONTROLE: o oraculo do catalogo nao esta lendo vazio",
+      CATALOGO_CODIGO.length > REGISTRY_CODIGO.length + 1000);
+    ok("B10b CONTROLE: e o MAPA sozinho ja nao carrega a delegacao",
+      !/validarFiltroVendas/.test(REGISTRY_CODIGO));
   }
 
   secao("B3. O interpretador valida a forma em RUNTIME");
@@ -616,7 +633,7 @@ async function principal(): Promise<void> {
     }
 
     ok("B16 o cast sozinho NAO e a autoridade — ha checagem de runtime",
-      /Array\.isArray/.test(REGISTRY_CODIGO) && /typeof .*truncado.*boolean|truncado.*!== "boolean"/.test(REGISTRY_CODIGO));
+      /Array\.isArray/.test(CATALOGO_CODIGO) && /typeof .*truncado.*boolean|truncado.*!== "boolean"/.test(CATALOGO_CODIGO));
   }
 
   // ─── C. Caminhos que nao chegam ao executor ────────────────────────
@@ -6147,9 +6164,19 @@ async function principal(): Promise<void> {
       await import("../lib/agentes/funcoes/registry");
 
     const IDS = listarFuncoesRegistradas();
-    ok("T1  o catalogo real tem exatamente os dois ids publicados",
-      JSON.stringify([...IDS].sort()) === JSON.stringify([ID_ML, ID_VENDAS].sort()),
+    // AGENT-FACTORY-F3 acrescentou cinco Tools deterministicas. A lista
+    // segue NOMINAL e EXATA — e o que o assert sempre quis dizer.
+    const IDS_PUBLICADOS = [
+  "vendas.consultar", "mercadolivre.perguntas.listar",
+  "planilha.inspecionar", "planilha.ler", "planilha.agregar",
+  "calculadora.calcular", "calendario.periodo",
+];
+    ok("T1  o catalogo real tem exatamente os ids publicados",
+      JSON.stringify([...IDS].sort()) === JSON.stringify([...IDS_PUBLICADOS].sort()),
       IDS.join(", "));
+    ok("T1a CONTROLE: um id a mais reprova",
+      JSON.stringify([...IDS, "intrusa.funcao"].sort()) !==
+        JSON.stringify([...IDS_PUBLICADOS].sort()));
     ok("T2  ambos resolvem por NOME", funcaoExiste(ID_ML) && funcaoExiste(ID_VENDAS));
     ok("T3  id desconhecido continua recusado",
       !funcaoExiste("intrusa.funcao") && !funcaoExiste("toString") &&

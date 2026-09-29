@@ -252,9 +252,18 @@ async function principal(): Promise<void> {
   secao("C. O catalogo real tem as duas Funcoes (A1-O2)");
 
   const IDS = registry.listarFuncoesRegistradas();
+  // AGENT-FACTORY-F3: mais cinco Tools deterministicas no catalogo.
+  // Lista nominal e exata, como sempre.
+  const IDS_PUBLICADOS = [
+  "vendas.consultar", "mercadolivre.perguntas.listar",
+  "planilha.inspecionar", "planilha.ler", "planilha.agregar",
+  "calculadora.calcular", "calendario.periodo",
+];
   ok("C1  o conjunto de ids e exatamente o publicado",
-    JSON.stringify([...IDS].sort()) === JSON.stringify([ID_ML, ID_VENDAS].sort()),
+    JSON.stringify([...IDS].sort()) === JSON.stringify([...IDS_PUBLICADOS].sort()),
     IDS.join(", "));
+  ok("C1a CONTROLE: um id a menos reprova",
+    JSON.stringify([...IDS].sort().slice(1)) !== JSON.stringify([...IDS_PUBLICADOS].sort()));
   ok("C2  e a resolucao NAO depende de posicao",
     registry.funcaoExiste(ID_ML) && registry.funcaoExiste(ID_VENDAS) &&
       !registry.funcaoExiste("intrusa.funcao"));
@@ -494,10 +503,19 @@ async function principal(): Promise<void> {
     chamadas.map((c) => c.tabela).join(" > "));
   ok("I2  UMA leitura de agente_permissoes", lidasPermissao.length === 1,
     String(lidasPermissao.length));
+  // AGENT-FACTORY-F3: o que este assert quer dizer e "a consulta cobre
+  // TODO o catalogo, e nao o subset que as Skills citam". Comparar com
+  // dois ids literais dizia isso por acidente, enquanto o catalogo tinha
+  // dois. Comparar com `listarFuncoesRegistradas()` diz de propria —
+  // e continua reprovando se algum dia a query virar subset.
   ok("I3  e ela cobre o CATALOGO INTEIRO (A1-O4)",
     JSON.stringify([...(lidasPermissao[0]?.inValores ?? [])].sort()) ===
-      JSON.stringify([ID_ML, ID_VENDAS].sort()),
+      JSON.stringify([...IDS].sort()),
     JSON.stringify(lidasPermissao[0]?.inValores));
+  ok("I3a CONTROLE: o catalogo nao esta vazio — senao I3 seria vacuo",
+    IDS.length >= 2, String(IDS.length));
+  ok("I3b CONTROLE: um subset reprovaria",
+    JSON.stringify([...IDS].slice(1).sort()) !== JSON.stringify([...IDS].sort()));
   ok("I4  mesmo com ZERO Skill declarando qualquer Funcao",
     chamadas.filter((c) => c.tabela === "agente_skills").length >= 1);
   ok("I5  a leitura de permissoes e fechada no par (agente, dono)",
@@ -609,12 +627,13 @@ async function principal(): Promise<void> {
 
   // A1-O4: a query cobre ALL mesmo com o subset das Skills vazio.
   const qFeed = chamadas.find((c) => c.tabela === "agente_permissoes");
-  ok("J6  a consulta do feed cobre os DOIS ids do catalogo (A1-O4)",
+  ok("J6  a consulta do feed cobre TODO o catalogo (A1-O4)",
     JSON.stringify([...(qFeed?.inValores ?? [])].sort()) ===
-      JSON.stringify([ID_ML, ID_VENDAS].sort()),
+      JSON.stringify([...IDS].sort()),
     JSON.stringify(qFeed?.inValores));
   ok("J7  e agora ALL != subset: o subset das Skills esta VAZIO",
-    (qFeed?.inValores ?? []).length === 2);
+    (qFeed?.inValores ?? []).length === IDS.length && IDS.length > 0,
+    `${(qFeed?.inValores ?? []).length} vs ${IDS.length}`);
   ok("J8  o snapshot publicado traz o fato lido",
     jAuto.permissoes.some((p) => p.funcaoId === ID_ML && p.nivel === "automatico"));
   ok("J9  ausencia de linha nao vira fato sintetico",
