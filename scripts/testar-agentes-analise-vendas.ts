@@ -475,6 +475,11 @@ const ARQUIVOS_IA_F1F2: readonly string[] = [
   // ao modelo. Puro — sem `server-only`, sem I/O —, por isso mora aqui
   // dentro, na zona que a suite da 1E-a varre.
   "falhas-de-ferramenta.ts",
+  // F6: a UNICA camada que monta a instrucao do agente. Puro tambem —
+  // ela recebe material do dono ja lido e devolve texto. E onde a
+  // fronteira "confiavel vs dado" vira assinatura de funcao, em vez de
+  // uma frase que sete chamadores precisariam lembrar.
+  "contexto-do-agente.ts",
 ];
 
 const ARQUIVOS_F1F2: readonly string[] = [
@@ -714,6 +719,10 @@ const ARQUIVOS_SKILL_1DD1: readonly string[] = [
  * explicita, e o proprio cabecalho do arquivo diz isso.
  */
 const MIGRATIONS_NO_DISCO_NAO_COMMITADAS: readonly string[] = [
+  // AGENT-FACTORY-F6 — `agente_memorias`. NAO APLICADA, pela mesma
+  // razao de ambiente da 20261016: sem CLI do Docker nao ha
+  // `supabase start`, e `db push` remoto e proibido.
+  "20261017_agente_memorias.sql",
   // AGENT-FACTORY-F5 — `agente_fontes`. NAO APLICADA: o CLI do Docker
   // nao existe neste ambiente, entao `supabase start` e impossivel e
   // `db push` remoto e proibido pelo gate. Ela esta no disco, sera
@@ -1574,6 +1583,24 @@ const ARQUIVOS_F4: readonly string[] = [
  * upload e o resolvedor que finalmente implementa a porta que o F3
  * deixou negando por default.
  */
+/**
+ * AGENT-FACTORY-F6 — memoria manual.
+ *
+ * Skills NAO aparecem aqui: elas ja existiam (`lib/agentes/skills/`,
+ * `skills` + `agente_skills`, desde a 20260922) e F6 as REUSA. Criar
+ * uma segunda arquitetura de Skill era exatamente o que o gate proibiu.
+ *
+ * O que e novo: `lib/agentes/memorias/` e a migration dela. O
+ * construtor de contexto entra por `ARQUIVOS_IA_F1F2`, porque mora em
+ * `lib/agentes/ia/`, que tem inventario proprio.
+ */
+const ARQUIVOS_F6: readonly string[] = [
+  "supabase/migrations/20261017_agente_memorias.sql",
+  "lib/agentes/memorias/tipos.ts",
+  "lib/agentes/memorias/repositorio.ts",
+  "lib/agentes/memorias/servico.ts",
+];
+
 const ARQUIVOS_F41_F5: readonly string[] = [
   "supabase/migrations/20261016_agente_fontes.sql",
   "lib/agentes/ia/falhas-de-ferramenta.ts",
@@ -1679,6 +1706,7 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_F3,
   ...ARQUIVOS_F4,
   ...ARQUIVOS_F41_F5,
+  ...ARQUIVOS_F6,
   ...ARQUIVOS_1DD,
   ...ARQUIVOS_1DA_PERF,
   ...ARQUIVOS_1EA,
@@ -1853,6 +1881,8 @@ const SUITES_AGENTES: readonly string[] = [
   "testar-agentes-live-tool-call.ts",
   // AGENT-FACTORY-F4.1 + F5: fail-closed de ferramenta e fontes.
   "testar-agentes-fontes.ts",
+  // AGENT-FACTORY-F6: Skills (reusadas), memoria manual e contexto.
+  "testar-agentes-skills-memoria.ts",
 ];
 
 /** PREDICADO de G11t. */
