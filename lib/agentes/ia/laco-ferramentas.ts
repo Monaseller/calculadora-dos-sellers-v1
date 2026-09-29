@@ -83,6 +83,19 @@ export interface EntradaDoLaco {
   readonly historico?: readonly MensagemDoDialogo[];
   readonly maxPassos?: number;
   /**
+   * Obriga a PRIMEIRA ferramenta — AGENT-FACTORY-F4.
+   *
+   * So o primeiro turno: forcar em todos faria o modelo pedir
+   * ferramenta para sempre, porque ele nunca teria um turno livre para
+   * escrever a resposta final. O laco pararia no teto e o usuario
+   * receberia `null` — um bug que parece limite de passos.
+   *
+   * Producao nao passa este campo. Ele existe para a prova de
+   * protocolo, onde a pergunta e "o provedor sabe emitir e receber uma
+   * chamada de ferramenta", e nao "o modelo escolhe bem".
+   */
+  readonly escolhaDeFerramenta?: "auto" | { readonly nome: string };
+  /**
    * A PORTA de execucao — opcional, e o default e a porta real.
    *
    * ── Por que ela existe, e por que nao afrouxa a cerca ─────────────
@@ -219,6 +232,7 @@ export async function conversarComFerramentas(
       instrucao: entrada.instrucao,
       mensagens,
       ferramentas: entrada.ferramentas,
+      escolhaDeFerramenta: passo === 0 ? entrada.escolhaDeFerramenta : "auto",
     });
     turnos += 1;
     provedor = r.provedor;

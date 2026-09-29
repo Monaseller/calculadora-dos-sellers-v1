@@ -37,11 +37,15 @@ import {
   lerResposta,
   montarFerramentas,
   montarMensagens,
+  mapearNomes,
+  montarEscolha,
+  sanitizarNome,
 } from "@/lib/ai-gateway/provedores/anthropic-ferramentas";
 import {
   lerPassos,
   montarFerramentasGoogle,
   montarPassos,
+  montarEscolhaGoogle,
 } from "@/lib/ai-gateway/provedores/google-ferramentas";
 
 let passou = 0;
@@ -351,9 +355,17 @@ async function main(): Promise<void> {
   {
     const t = montarFerramentas(TODAS);
     ok("H1  ferramenta vira {name, description, input_schema}",
-      t.length === 1 && t[0].name === ID_VENDAS &&
+      t.length === 1 && t[0].name === sanitizarNome(ID_VENDAS) &&
         typeof t[0].description === "string" && typeof t[0].input_schema === "object");
-    ok("H2  o `name` e o funcaoId, sem alias", t[0].name === ID_VENDAS);
+    // AGENT-FACTORY-F4: a primeira chamada REAL derrubou o "sem alias".
+    // A Anthropic recusa ponto em nome de ferramenta (400 explicito), e
+    // todo `funcaoId` da CDS tem um — o CHECK do banco EXIGE. O que o
+    // assert protegia continua cobrado, so que na propriedade certa: a
+    // traducao tem de ser REVERSIVEL, e o que sai do adaptador de volta
+    // e o funcaoId. Ver secao J.
+    ok("H2  o `name` e o funcaoId TRADUZIDO, e a traducao volta",
+      t[0].name === sanitizarNome(ID_VENDAS) &&
+        mapearNomes(TODAS).paraFuncao.get(t[0].name) === ID_VENDAS);
 
     const msgs = montarMensagens([
       { papel: "usuario", texto: "oi" },
@@ -366,7 +378,7 @@ async function main(): Promise<void> {
     ok("H4  pedido vira bloco tool_use com id, name e input",
       (() => { const b = (msgs[1].content as unknown as { type: string; id: string; name: string; input: unknown }[])[0];
         return msgs[1].role === "assistant" && b.type === "tool_use" &&
-          b.id === "tu_1" && b.name === ID_VENDAS &&
+          b.id === "tu_1" && b.name === sanitizarNome(ID_VENDAS) &&
           JSON.stringify(b.input) === '{"a":1}'; })());
     ok("H5  resposta de ferramenta vira role user com tool_result amarrado pelo id",
       (() => { const b = (msgs[2].content as unknown as { type: string; tool_use_id: string; is_error: boolean }[])[0];
@@ -480,8 +492,89 @@ async function main(): Promise<void> {
     // esta atras dele. Se um dia divergirem, e aqui que aparece.
     ok("I17 Anthropic e Google produzem o mesmo numero de ferramentas",
       montarFerramentas(TODAS).length === montarFerramentasGoogle(TODAS).length);
-    ok("I18 e o mesmo `name`, sem alias em nenhum dos dois",
-      montarFerramentas(TODAS)[0].name === montarFerramentasGoogle(TODAS)[0].name);
+    // F4 mediu que os dois divergem, e por que: o Gemini ACEITA ponto
+    // (provado na rede), a Anthropic nao. Forcar o mesmo nome nos dois
+    // seria degradar o Google por causa de um limite que so a Anthropic
+    // tem. O que precisa valer nos dois e a REVERSIBILIDADE.
+    ok("I18 cada provedor usa o nome que a SUA API aceita",
+      montarFerramentasGoogle(TODAS)[0].name === ID_VENDAS &&
+        montarFerramentas(TODAS)[0].name === sanitizarNome(ID_VENDAS));
+    ok("I19 e os dois voltam ao MESMO funcaoId",
+      mapearNomes(TODAS).paraFuncao.get(montarFerramentas(TODAS)[0].name) ===
+        montarFerramentasGoogle(TODAS)[0].name);
+  }
+
+  // =====================================================================
+  secao("J. AGENT-FACTORY-F4: o nome da ferramenta na rede real");
+  // =====================================================================
+  //
+  // A primeira chamada REAL devolveu 400 da Anthropic: nome de
+  // ferramenta nao aceita ponto, e todo `funcaoId` da CDS tem um. Estes
+  // asserts congelam a traducao e, sobretudo, a REVERSAO — porque o
+  // perigo nunca foi o nome feio, foi um pedido virar outra Funcao.
+  {
+    ok("J1  ponto vira sublinhado",
+      sanitizarNome("calculadora.calcular") === "calculadora_calcular");
+    ok("J2  o resultado casa a gramatica que a API exigiu",
+      /^[a-zA-Z0-9_-]{1,128}$/.test(sanitizarNome("mercadolivre.perguntas.listar")));
+    ok("J3  CONTROLE: o id ORIGINAL nao casaria",
+      !/^[a-zA-Z0-9_-]{1,128}$/.test("calculadora.calcular"));
+
+    const mapa = mapearNomes(TODAS);
+    ok("J4  o mapa vai e volta sem perder o id",
+      TODAS.every((f) => mapa.paraFuncao.get(mapa.paraApi.get(f.nome) as string) === f.nome));
+
+    let lancou = false;
+    try {
+      mapearNomes([
+        { nome: "a.b", descricao: "x", schemaEntrada: {} },
+        { nome: "a_b", descricao: "y", schemaEntrada: {} },
+      ]);
+    } catch { lancou = true; }
+    ok("J5  COLISAO lanca em vez de escolher um dos dois", lancou);
+
+    const so = [{ nome: ID_VENDAS, descricao: "d", schemaEntrada: {} }];
+    const mapaSo = mapearNomes(so);
+    ok("J6  a declaracao sai com o nome da API",
+      montarFerramentas(so, mapaSo)[0].name === sanitizarNome(ID_VENDAS));
+    ok("J7  e a LEITURA devolve o funcaoId, nunca o nome traduzido",
+      lerResposta({ content: [{ type: "tool_use", id: "t1",
+        name: sanitizarNome(ID_VENDAS), input: {} }], stop_reason: "tool_use" }, mapaSo)
+        .pedidos[0].nome === ID_VENDAS);
+    ok("J8  sem mapa, o nome passa CRU — quem recusa e o laco, nao esta camada",
+      lerResposta({ content: [{ type: "tool_use", id: "t1", name: "zzz", input: {} }],
+        stop_reason: "tool_use" }).pedidos[0].nome === "zzz");
+    ok("J9  o ECO do turno anterior tambem viaja traduzido",
+      (() => { const m = montarMensagens([{ papel: "assistente", texto: null,
+          pedidos: [{ id: "t1", nome: ID_VENDAS, argumentos: {} }] }], mapaSo);
+        return ((m[0].content as unknown as { name: string }[])[0]).name ===
+          sanitizarNome(ID_VENDAS); })());
+
+    ok("J10 `auto` NAO manda tool_choice — o default da API ja e esse",
+      JSON.stringify(montarEscolha("auto")) === "{}" &&
+        JSON.stringify(montarEscolha(undefined)) === "{}");
+    ok("J11 forcar manda tool_choice com o nome da API",
+      JSON.stringify(montarEscolha({ nome: ID_VENDAS }, mapaSo)) ===
+        JSON.stringify({ tool_choice: { type: "tool", name: sanitizarNome(ID_VENDAS) } }));
+    ok("J12 no Google a escolha mora em generation_config, e nao ao lado de tools",
+      JSON.stringify(montarEscolhaGoogle({ nome: ID_VENDAS })) ===
+        JSON.stringify({ generation_config: { tool_choice:
+          { allowed_tools: { mode: "any", tools: [ID_VENDAS] } } } }));
+    ok("J13 e o Google nao traduz o nome — a API real aceita o ponto",
+      JSON.stringify(montarEscolhaGoogle({ nome: ID_VENDAS })).includes(ID_VENDAS));
+
+    const GOOG = ler("lib/ai-gateway/provedores/google-ferramentas.ts");
+    ok("J14 o Gemini continua com store:false — a regra nao foi trocada por um verde",
+      /store:\s*false/.test(GOOG) && !/store:\s*true,/.test(GOOG));
+    ok("J15 e devolver resultado ao Gemini falha com codigo proprio",
+      /CODIGO_RETORNO_BLOQUEADO/.test(GOOG) &&
+        /papel === "ferramenta"/.test(semComentarios(GOOG)));
+
+    const LACO_F4 = semComentarios(ler("lib/agentes/ia/laco-ferramentas.ts"));
+    ok("J16 forcar ferramenta vale SO no primeiro turno",
+      /passo === 0/.test(LACO_F4) && /escolhaDeFerramenta/.test(LACO_F4));
+    ok("J17 e forcar NAO e autorizacao: o laco segue sem guard proprio",
+      !/autorizarFuncao|resolverFuncao/.test(LACO_F4));
   }
 }
 
