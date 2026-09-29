@@ -41,6 +41,7 @@ import { declararFerramentas } from "@/lib/agentes/ia/ferramentas";
 import { conversarComFerramentas } from "@/lib/agentes/ia/laco-ferramentas";
 import type { AdaptadorIAComFerramentas, MensagemDoDialogo } from "@/lib/agentes/ia/ferramentas";
 import { chamarClaudeComFerramentas } from "@/lib/ai-gateway/provedores/anthropic-ferramentas";
+import { MENSAGEM_DE_BLOQUEIO } from "@/lib/agentes/ia/falhas-de-ferramenta";
 import { CODIGO_RETORNO_BLOQUEADO, chamarGeminiComFerramentas } from "@/lib/ai-gateway/provedores/google-ferramentas";
 import type { FatoConexao, FatoFuncao, FatoPermissao } from "@/lib/ia/skills/diagnostico";
 
@@ -442,11 +443,18 @@ async function main(): Promise<void> {
         c.functionExecutions === 0, String(c.functionExecutions));
       ok("7.4 nenhum resultado de Tool foi produzido",
         c.resultadosDaTool.length === 0, c.resultadosDaTool.join(","));
-      ok("7.5 o runtime terminou de forma CONTROLADA, sem lancar",
-        saida.motivo === "concluido" || saida.motivo === "teto_de_passos",
-        String(saida.motivo));
-      ok("7.6 e o provedor recebeu a recusa como resultado de ferramenta",
+      // AGENT-FACTORY-F4.1: era aqui que o modelo REAL respondia
+      // "a ferramenta nao esta disponivel, mas a conta da R$ 46.719,65".
+      // Agora o turno FECHA e ele nao e chamado de novo.
+      ok("7.5 o runtime FECHOU o turno — o modelo nao foi chamado outra vez",
+        saida.motivo === "bloqueado_por_ferramenta", String(saida.motivo));
+      ok("7.6 a recusa viajou no dialogo, para auditoria",
         saida.mensagens.some((m) => m.papel === "ferramenta"));
+      ok("7.7 o texto final e do RUNTIME", saida.texto === MENSAGEM_DE_BLOQUEIO);
+      ok(`7.8 e ${ESPERADO} NAO aparece em lugar nenhum da conversa`,
+        !JSON.stringify(saida.mensagens).includes(ESPERADO) &&
+          !(saida.texto ?? "").includes(ESPERADO),
+        String(saida.texto).slice(0, 100));
       log(`  resposta final: ${String(saida.texto).slice(0, 160)}`);
     } catch (e) {
       falhou += 1;

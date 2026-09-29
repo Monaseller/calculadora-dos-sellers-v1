@@ -686,8 +686,12 @@ async function main(): Promise<void> {
         JSON.stringify(espiao));
       ok("AI2 e o passo registrado e a negacao, nao sucesso",
         r.passos[0].desfecho === "negado" && r.passos[0].executou === false);
-      ok("AI3 o modelo recebe a recusa e a conversa continua",
-        r.motivo === "concluido" && r.texto === "nao deu");
+      // F4.1: negacao agora FECHA o turno. O roteiro do fake ainda tem
+      // um "nao deu" a dizer, e o assert cobra que ele NAO foi dito —
+      // porque o modelo nao chegou a ser chamado.
+      ok("AI3 a negacao FECHA o turno — o modelo nao responde por conta propria",
+        r.motivo === "bloqueado_por_ferramenta" && r.texto !== "nao deu",
+        `${r.motivo}/${String(r.texto).slice(0, 40)}`);
 
       const espiao2: EspiaoDaPorta = { guard: [], executor: [] };
       await conversarComFerramentas({

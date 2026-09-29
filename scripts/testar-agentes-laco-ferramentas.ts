@@ -28,6 +28,7 @@ import {
   type FerramentaDeclarada,
 } from "@/lib/agentes/ia/ferramentas";
 import { criarAdaptadorFakeComFerramentas, type EspiaoDoFake } from "@/lib/agentes/ia/ferramentas-fake";
+import { MENSAGEM_DE_BLOQUEIO } from "@/lib/agentes/ia/falhas-de-ferramenta";
 import {
   conversarComFerramentas,
   MAX_PASSOS_DE_FERRAMENTA,
@@ -201,11 +202,30 @@ async function main(): Promise<void> {
         ], espiaoFake),
         executar: portaQueResponde([{ tipo }], { chamadas: [] }),
       });
+      // AGENT-FACTORY-F4.1 mudou isto de proposito, e para MAIS forte.
+      //
+      // Antes: a recusa voltava ao modelo e "o dialogo seguia" — e foi
+      // exatamente ai que a conversa REAL do F4 mostrou o modelo
+      // respondendo com um numero que nenhuma ferramenta produziu.
+      //
+      // Agora o turno FECHA. A frase da recusa continua sendo cobrada
+      // (ela viaja no dialogo, para auditoria e para a UI), mas o
+      // modelo NAO e chamado outra vez — e e isso que o assert passa a
+      // medir. "Nao executou" continua valendo; ganhou-se "e nao teve
+      // onde escrever".
+      const ultimaFerramenta = [...r.mensagens].reverse()
+        .find((m) => m.papel === "ferramenta");
       ok(rotulo,
         r.passos.length === 1 && r.passos[0].executou === false &&
           r.passos[0].desfecho === tipo &&
-          espiaoFake.chamadas[1]?.ultimaRespostaDeFerramenta === frase,
+          ultimaFerramenta?.papel === "ferramenta" &&
+          ultimaFerramenta.respostas[0]?.conteudo === frase,
         `${r.passos[0]?.desfecho}/${r.passos[0]?.executou}`);
+      ok(`${rotulo.slice(0, 2)}f o turno FECHOU — o modelo nao foi chamado de novo`,
+        r.motivo === "bloqueado_por_ferramenta" && espiaoFake.chamadas.length === 1,
+        `${r.motivo}/${espiaoFake.chamadas.length}`);
+      ok(`${rotulo.slice(0, 2)}g e o texto final e do RUNTIME`,
+        r.texto === MENSAGEM_DE_BLOQUEIO && r.texto !== "ok");
     }
 
     // O modelo pede uma ferramenta que NAO lhe foi declarada.

@@ -41,6 +41,10 @@ import type {
   PedidoDeFerramenta,
   RespostaDeFerramenta,
 } from "@/lib/agentes/ia/ferramentas";
+import {
+  MENSAGEM_DE_BLOQUEIO,
+  classificarFalha,
+} from "@/lib/agentes/ia/falhas-de-ferramenta";
 import type { ProvedorIA } from "@/lib/ai-gateway/tipos";
 
 /**
@@ -120,13 +124,24 @@ export interface PassoDeFerramenta {
   readonly desfecho: string;
   readonly requestId: string | null;
   readonly executou: boolean;
+  /** Codigo de dominio, quando a Funcao devolveu um. F4.1 classifica por ele. */
+  readonly codigo: string | null;
 }
 
 export interface ResultadoDoLaco {
   readonly texto: string | null;
   readonly passos: readonly PassoDeFerramenta[];
   readonly mensagens: readonly MensagemDoDialogo[];
-  readonly motivo: "concluido" | "teto_de_passos";
+  readonly motivo: "concluido" | "teto_de_passos" | "bloqueado_por_ferramenta";
+  /**
+   * Preenchido quando o turno FECHOU por falha de ferramenta — F4.1.
+   *
+   * Nesse caso `texto` foi escrito pelo RUNTIME, e nao pelo modelo: ele
+   * nao chegou a ser chamado de novo. E essa a diferenca entre pedir ao
+   * modelo que nao estime e nao lhe dar onde escrever.
+   */
+  readonly bloqueio: { readonly funcaoId: string; readonly desfecho: string;
+    readonly codigo: string | null } | null;
   readonly uso: {
     readonly provedor: ProvedorIA | null;
     readonly modelo: string | null;
@@ -165,7 +180,8 @@ async function executarUmPedido(
   if (!permitidas.has(pedido.nome)) {
     return {
       resposta: { id: pedido.id, conteudo: RECUSAS.nome_invalido, erro: true },
-      passo: { funcaoId: pedido.nome, desfecho: "nome_invalido", requestId: null, executou: false },
+      passo: { funcaoId: pedido.nome, desfecho: "nome_invalido", requestId: null,
+        executou: false, codigo: "nome_invalido" },
     };
   }
 
@@ -183,7 +199,8 @@ async function executarUmPedido(
         conteudo: conteudoDeSucesso((r as { envelope?: { data?: unknown } }).envelope?.data),
         erro: false,
       },
-      passo: { funcaoId: pedido.nome, desfecho: "sucesso", requestId: r.requestId, executou: true },
+      passo: { funcaoId: pedido.nome, desfecho: "sucesso", requestId: r.requestId,
+        executou: true, codigo: null },
     };
   }
 
@@ -195,6 +212,7 @@ async function executarUmPedido(
       desfecho: r.tipo,
       requestId: (r as { requestId?: string }).requestId ?? null,
       executou: false,
+      codigo: (r as { codigo?: string }).codigo ?? null,
     },
   };
 }
@@ -249,18 +267,46 @@ export async function conversarComFerramentas(
         passos,
         mensagens,
         motivo: "concluido",
+        bloqueio: null,
         uso: { provedor, modelo, tokensEntrada, tokensSaida, tempoMs, turnos },
       };
     }
 
     const respostas: RespostaDeFerramenta[] = [];
+    const passosDesteTurno: PassoDeFerramenta[] = [];
     for (const pedido of r.pedidos) {
       const { resposta, passo: p } = await executarUmPedido(
         entrada.userId, entrada.agenteId, pedido, permitidas, porta);
       respostas.push(resposta);
       passos.push(p);
+      passosDesteTurno.push(p);
     }
     mensagens.push({ papel: "ferramenta", respostas });
+
+    // ── F4.1: a cerca contra numero nao verificado ──────────────────
+    //
+    // Se ALGUM passo deste turno falhou por indisponibilidade — guard,
+    // aprovacao, conexao, fonte, auditoria —, o laco PARA AQUI. O
+    // modelo nao e chamado outra vez, entao nao existe turno em que ele
+    // possa escrever um total que nenhuma ferramenta produziu.
+    //
+    // Falha CORRIGIVEL (argumento errado, aba inexistente) nao para: ali
+    // o proximo turno e util e o modelo acerta com o que a recusa
+    // contou. A lista de corrigiveis e fechada; o default e parar.
+    const fechou = passosDesteTurno.find(
+      (p) => p.desfecho !== "sucesso" && classificarFalha(p.desfecho, p.codigo) === "fecha_o_turno"
+    );
+    if (fechou !== undefined) {
+      return {
+        // Escrito pelo RUNTIME. Nao veio do modelo e nao passou por ele.
+        texto: MENSAGEM_DE_BLOQUEIO,
+        passos,
+        mensagens,
+        motivo: "bloqueado_por_ferramenta",
+        bloqueio: { funcaoId: fechou.funcaoId, desfecho: fechou.desfecho, codigo: fechou.codigo },
+        uso: { provedor, modelo, tokensEntrada, tokensSaida, tempoMs, turnos },
+      };
+    }
   }
 
   // Teto atingido com pedido pendente. Devolve o que ha; nao lanca, e
@@ -270,6 +316,7 @@ export async function conversarComFerramentas(
     passos,
     mensagens,
     motivo: "teto_de_passos",
+    bloqueio: null,
     uso: { provedor, modelo, tokensEntrada, tokensSaida, tempoMs, turnos },
   };
 }
