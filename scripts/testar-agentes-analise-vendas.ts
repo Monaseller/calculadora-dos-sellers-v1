@@ -460,6 +460,25 @@ const ARQUIVOS_1EB: readonly string[] = [
 ];
 
 /**
+ * AGENT-FACTORY-F1/F2 — o contrato de ferramentas e o laco.
+ *
+ * Lista propria, pela mesma razao das anteriores: cada liberacao mantem
+ * legivel de qual frente ela veio. `ferramentas.ts` e `ferramentas-fake.ts`
+ * sao PUROS (sem `server-only`, sem rede); `laco-ferramentas.ts` e
+ * server-only porque alcanca `executarFuncao`.
+ */
+const ARQUIVOS_IA_F1F2: readonly string[] = [
+  "ferramentas.ts",
+  "ferramentas-fake.ts",
+  "laco-ferramentas.ts",
+];
+
+const ARQUIVOS_F1F2: readonly string[] = [
+  ...ARQUIVOS_IA_F1F2.map((nome) => `lib/agentes/ia/${nome}`),
+  "scripts/testar-agentes-laco-ferramentas.ts",
+];
+
+/**
  * O que a AGENTES-FASE1E-c acrescentou: o wiring da interpretacao no
  * runtime (flag + decorator) e a suite dele.
  *
@@ -956,7 +975,8 @@ const ARQUIVOS_RESUME_D5_C3_I2: readonly string[] = [
  * O guarda de disco (G11l) compara contra ESTA uniao, nunca contra uma
  * frente isolada — senao cada fase nova reprovaria a anterior.
  */
-const ARQUIVOS_IA_ESPERADOS: readonly string[] = [...ARQUIVOS_IA_1EA, ...ARQUIVOS_IA_1EB];
+const ARQUIVOS_IA_ESPERADOS: readonly string[] =
+  [...ARQUIVOS_IA_1EA, ...ARQUIVOS_IA_1EB, ...ARQUIVOS_IA_F1F2];
 
 /**
  * SKILL-1D.e — o agregador requisito -> selecao -> conexao.
@@ -1572,6 +1592,7 @@ const ARQUIVOS_M2_I1_A7: readonly string[] = [
 ];
 
 const ARQUIVOS_ESPERADOS: readonly string[] = [
+  ...ARQUIVOS_F1F2,
   ...ARQUIVOS_1DD,
   ...ARQUIVOS_1DA_PERF,
   ...ARQUIVOS_1EA,
