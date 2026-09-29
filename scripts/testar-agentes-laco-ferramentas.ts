@@ -107,7 +107,7 @@ async function main(): Promise<void> {
   console.log("\n══ CDS IA — laco de ferramentas: contrato, guard e teto ══");
 
   // =====================================================================
-  secao("A. Declaracao: o modelo so ve o que pode usar");
+  secao("A. Declaracao: o modelo ve o que o dono CONFIGUROU");
   // =====================================================================
   {
     const auto = declararFerramentas({
@@ -121,9 +121,21 @@ async function main(): Promise<void> {
       declararFerramentas({ catalogo: FUNCOES,
         permissoes: [{ funcaoId: ID_VENDAS, nivel: "aprovacao" }] }).length === 1);
 
-    ok("A3  `bloqueado` NAO entra",
+    // AGENT-FACTORY-F7b inverteu isto, e para MAIS seguro. Antes
+    // `bloqueado` nao era declarado, e o efeito medido num turno REAL
+    // foi o modelo responder de cabeca porque o guard nunca era
+    // consultado. Agora `bloqueado` E declarado: o modelo pede, o guard
+    // nega, o laco fecha o turno.
+    ok("A3  `bloqueado` ENTRA — para o guard poder negar e fechar o turno",
       declararFerramentas({ catalogo: FUNCOES,
-        permissoes: [{ funcaoId: ID_VENDAS, nivel: "bloqueado" }] }).length === 0);
+        permissoes: [{ funcaoId: ID_VENDAS, nivel: "bloqueado" }] }).length === 1);
+    ok("A3a mas permissao AUSENTE continua fora — ninguem decidiu nada",
+      declararFerramentas({ catalogo: FUNCOES, permissoes: [] }).length === 0);
+    ok("A3b e a declaracao NAO avisa que esta bloqueada — um modelo que",
+      (() => { const d = declararFerramentas({ catalogo: FUNCOES,
+          permissoes: [{ funcaoId: ID_VENDAS, nivel: "bloqueado" }] })[0];
+        // ...soubesse desviaria, e desviar significa responder de cabeca.
+        return !/bloquead|negad|indisponivel|sem permiss/i.test(d.descricao); })());
 
     ok("A4  sem permissao NAO entra",
       declararFerramentas({ catalogo: FUNCOES, permissoes: [] }).length === 0);
