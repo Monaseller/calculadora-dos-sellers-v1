@@ -471,6 +471,10 @@ const ARQUIVOS_IA_F1F2: readonly string[] = [
   "ferramentas.ts",
   "ferramentas-fake.ts",
   "laco-ferramentas.ts",
+  // F4.1: a classificacao que decide quando o laco NAO devolve o turno
+  // ao modelo. Puro — sem `server-only`, sem I/O —, por isso mora aqui
+  // dentro, na zona que a suite da 1E-a varre.
+  "falhas-de-ferramenta.ts",
 ];
 
 const ARQUIVOS_F1F2: readonly string[] = [
@@ -710,6 +714,13 @@ const ARQUIVOS_SKILL_1DD1: readonly string[] = [
  * explicita, e o proprio cabecalho do arquivo diz isso.
  */
 const MIGRATIONS_NO_DISCO_NAO_COMMITADAS: readonly string[] = [
+  // AGENT-FACTORY-F5 — `agente_fontes`. NAO APLICADA: o CLI do Docker
+  // nao existe neste ambiente, entao `supabase start` e impossivel e
+  // `db push` remoto e proibido pelo gate. Ela esta no disco, sera
+  // commitada, e a aplicacao e decisao de um gate proprio. Enquanto
+  // isso, este e o estado honesto: existe como arquivo, nao como
+  // schema.
+  "20261016_agente_fontes.sql",
   // A migration da SKILL-1D.f.4 NAO entra aqui. Esta lista descreve um
   // estado TRANSITORIO do git ("esta no disco e ainda nao no HEAD"), e
   // esse estado deixa de valer no instante em que a f.4 e publicada.
@@ -1548,6 +1559,31 @@ const ARQUIVOS_F4: readonly string[] = [
   "lib/agentes/ia/laco-ferramentas.ts",
 ];
 
+/**
+ * AGENT-FACTORY-F4.1 + F5.
+ *
+ * F4.1 publicou `falhas-de-ferramenta.ts`: a classificacao que decide
+ * quando o laco NAO devolve o turno ao modelo. Nasceu de um achado da
+ * conversa REAL — com a Tool negada, o modelo calculou de cabeca e
+ * apresentou o numero. A cerca e estrutural; a instrucao que mora no
+ * mesmo arquivo e defesa em profundidade, nunca a cerca.
+ *
+ * F5 publicou `lib/agentes/fontes/` — cinco modulos, diretorio proprio.
+ * Nao entram em `lib/agentes/funcoes/` porque ali o tripwire H12 cobra
+ * conteudo EXATO e nenhum deles e Funcao: sao contrato, storage, banco,
+ * upload e o resolvedor que finalmente implementa a porta que o F3
+ * deixou negando por default.
+ */
+const ARQUIVOS_F41_F5: readonly string[] = [
+  "supabase/migrations/20261016_agente_fontes.sql",
+  "lib/agentes/ia/falhas-de-ferramenta.ts",
+  "lib/agentes/fontes/tipos.ts",
+  "lib/agentes/fontes/armazenamento.ts",
+  "lib/agentes/fontes/repositorio.ts",
+  "lib/agentes/fontes/resolvedor.ts",
+  "lib/agentes/fontes/upload.ts",
+];
+
 const ARQUIVOS_M2_I1_A2: readonly string[] = [
   "lib/agentes/dados/perguntas.ts",
   "lib/agentes/funcoes/mercadolivre-perguntas.ts",
@@ -1642,6 +1678,7 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_F1F2,
   ...ARQUIVOS_F3,
   ...ARQUIVOS_F4,
+  ...ARQUIVOS_F41_F5,
   ...ARQUIVOS_1DD,
   ...ARQUIVOS_1DA_PERF,
   ...ARQUIVOS_1EA,
@@ -1814,6 +1851,8 @@ const SUITES_AGENTES: readonly string[] = [
   // arquivo desconhecido, mas NAO entra em varredura automatica: ela e
   // invocada a mao, num gate que autoriza o custo.
   "testar-agentes-live-tool-call.ts",
+  // AGENT-FACTORY-F4.1 + F5: fail-closed de ferramenta e fontes.
+  "testar-agentes-fontes.ts",
 ];
 
 /** PREDICADO de G11t. */
