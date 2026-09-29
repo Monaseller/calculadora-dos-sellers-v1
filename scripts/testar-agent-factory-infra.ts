@@ -44,6 +44,7 @@ import {
   criarMemoria, definirAtivoDaMemoria, listarMemorias, removerMemoria,
 } from "@/lib/agentes/memorias/servico";
 import { montarContextoDoAgente } from "@/lib/agentes/ia/contexto-do-agente";
+import { criarPortaDeConversas } from "@/lib/agentes/conversas/repositorio";
 import { registrarFonteDeArquivo } from "@/lib/agentes/funcoes/planilha";
 import { resolverFuncao, type ContextoFuncao } from "@/lib/agentes/funcoes/registry";
 
@@ -131,6 +132,8 @@ async function limparFixtures(db: SupabaseClient): Promise<{
   const caminhos = (comCaminho ?? []).map((l) => (l as { caminho_objeto: string }).caminho_objeto);
   if (caminhos.length > 0) await db.storage.from(BUCKET_FONTES).remove(caminhos);
 
+  // Conversas primeiro: o CASCADE leva as mensagens junto.
+  await db.from("agente_conversas").delete().like("user_id", `${PREFIXO}%`);
   const { count: cm } = await db.from("agente_memorias")
     .delete({ count: "exact" }).like("user_id", `${PREFIXO}%`);
   const { count: cf } = await db.from("agente_fontes")
@@ -342,6 +345,83 @@ async function main(): Promise<void> {
         ok("E11 remover memoria",
           (await removerMemoria(portaM, DONO_A, AG_A1, m.memoria.id)).ok === true);
       }
+    }
+
+    // ═════════════════════════════════════════════════════════════════
+    secao("F. CROSS-CHAT contra o banco REAL");
+    // ═════════════════════════════════════════════════════════════════
+    {
+      const portaC = criarPortaDeConversas(db);
+      const chatA = await portaC.criarConversa(DONO_A, AG_A1, "Chat A");
+      const chatB = await portaC.criarConversa(DONO_A, AG_A1, "Chat B");
+      ok("F1  duas conversas do mesmo agente", chatA.id !== chatB.id);
+
+      await portaC.anexarMensagem({ userId: DONO_A, conversaId: chatA.id,
+        papel: "usuario", conteudo: "assunto exclusivo do chat A" });
+      await portaC.anexarMensagem({ userId: DONO_A, conversaId: chatA.id,
+        papel: "assistente", conteudo: "resposta do A",
+        provedor: "anthropic", modelo: "fixture", tokensEntrada: 1, tokensSaida: 1, tempoMs: 1 });
+      await portaC.anexarMensagem({ userId: DONO_A, conversaId: chatB.id,
+        papel: "usuario", conteudo: "assunto do chat B" });
+
+      const msgsA = await portaC.listarMensagens(DONO_A, chatA.id);
+      const msgsB = await portaC.listarMensagens(DONO_A, chatB.id);
+      ok("F2  a ordem e sequencial e o UNIQUE do banco aceitou",
+        msgsA.map((m) => m.ordem).join(",") === "0,1" && msgsB[0].ordem === 0);
+      ok("F3  HISTORICO de A NAO aparece em B",
+        !msgsB.some((m) => m.conteudo.includes("exclusivo do chat A")));
+      ok("F4  CONTROLE: em A ele aparece",
+        msgsA.some((m) => m.conteudo.includes("exclusivo do chat A")));
+
+      // ANEXO no chat A (escopo conversa) vs FONTE do agente.
+      const bytesCsv = new Uint8Array(readFileSync(join(FIXTURES, "movimentos.csv")));
+      const anexo = await receberFonte(portaF, {
+        userId: DONO_A, escopo: "conversa", conversaId: chatA.id,
+        nome: "anexo-temporario.csv", bytes: bytesCsv });
+      ok("F5  anexo aceito no chat A", anexo.ok === true, anexo.ok ? "" : anexo.codigo);
+
+      const resA = criarFonteDeArquivoDasSources({
+        porta: portaF, userId: DONO_A, agenteId: AG_A1, conversaId: chatA.id });
+      const resB = criarFonteDeArquivoDasSources({
+        porta: portaF, userId: DONO_A, agenteId: AG_A1, conversaId: chatB.id });
+
+      ok("F6  FONTE do agente resolve no chat A",
+        (await resA.resolver(DONO_A, ids["entrada.xlsx"])) !== null);
+      ok("F7  e resolve TAMBEM no chat B — atravessa a conversa",
+        (await resB.resolver(DONO_A, ids["entrada.xlsx"])) !== null);
+      ok("F8  ANEXO resolve no chat A",
+        anexo.ok && (await resA.resolver(DONO_A, anexo.fonte.id)) !== null);
+      ok("F9  e NAO resolve no chat B — fica na conversa",
+        anexo.ok && (await resB.resolver(DONO_A, anexo.fonte.id)) === null);
+
+      // MEMORIA atravessa: ela e do agente.
+      const m = await criarMemoria(portaM, { userId: DONO_A, agenteId: AG_A1,
+        conteudo: "Fixture AF cross-chat: saldo primeiro." });
+      const ativas = await listarMemorias(portaM, DONO_A, AG_A1, { somenteAtivas: true });
+      const fontesDoAgente = (await portaF.listarDoAgente(DONO_A, AG_A1)).map((f) => ({
+        id: f.id, nome: f.nome, descricao: f.descricao, papel: f.papel, tipo: f.tipo }));
+      const ctxA = montarContextoDoAgente({ instrucoesDoAgente: "fixture", skills: [],
+        memorias: ativas, fontes: fontesDoAgente });
+      const ctxB = montarContextoDoAgente({ instrucoesDoAgente: "fixture", skills: [],
+        memorias: ativas, fontes: fontesDoAgente });
+      ok("F10 MEMORIA aparece nos DOIS chats",
+        m.ok && ctxA.instrucao.includes("cross-chat: saldo primeiro") &&
+        ctxB.instrucao.includes("cross-chat: saldo primeiro"));
+      ok("F11 o ANEXO NAO entra no contexto do agente",
+        !ctxA.instrucao.includes("anexo-temporario.csv"));
+      ok("F12 e nenhum caminho de storage no contexto",
+        !new RegExp(`${BUCKET_FONTES}|${DONO_A}/agente`).test(ctxA.instrucao));
+
+      // Conversa de outro dono nao e lida.
+      ok("F13 conversa do dono A nao e lida pelo dono B",
+        (await portaC.obterConversa(DONO_B, chatA.id)) === null);
+
+      // O BANCO recusa o vinculo cruzado.
+      const { error: crossC } = await db.from("agente_conversas")
+        .insert({ user_id: DONO_B, agente_id: AG_A1, titulo: "invasora" });
+      ok("F14 o BANCO recusa conversa cross-tenant",
+        crossC !== null && /foreign key|violates/i.test(String(crossC.message)),
+        String(crossC?.message ?? "(passou!)").slice(0, 70));
     }
   } finally {
     // ═════════════════════════════════════════════════════════════════

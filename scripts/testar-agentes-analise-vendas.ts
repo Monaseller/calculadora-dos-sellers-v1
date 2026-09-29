@@ -719,6 +719,13 @@ const ARQUIVOS_SKILL_1DD1: readonly string[] = [
  * explicita, e o proprio cabecalho do arquivo diz isso.
  */
 const MIGRATIONS_NO_DISCO_NAO_COMMITADAS: readonly string[] = [
+  // AGENT-FACTORY-F7a — `agente_conversas` + `agente_mensagens`.
+  // APLICADA no proprio gate F7a via `apply_migration` (nunca db push),
+  // como versao 20260929... pelo relogio — a convencao que TODAS as 30
+  // entradas anteriores do ledger ja seguiam. Fica aqui porque esta
+  // lista descreve "arquivo no disco cuja versao NAO consta no ledger",
+  // e a divergencia versao-vs-nome vale para as 31.
+  "20261018_agente_conversas.sql",
   // AGENT-FACTORY-F6 — `agente_memorias`. NAO APLICADA, pela mesma
   // razao de ambiente da 20261016: sem CLI do Docker nao ha
   // `supabase start`, e `db push` remoto e proibido.
@@ -1594,6 +1601,31 @@ const ARQUIVOS_F4: readonly string[] = [
  * construtor de contexto entra por `ARQUIVOS_IA_F1F2`, porque mora em
  * `lib/agentes/ia/`, que tem inventario proprio.
  */
+/**
+ * AGENT-FACTORY-F7a — a fundação do chat.
+ *
+ * `lib/agentes/conversas/` guarda o que foi dito NAQUELA conversa —
+ * historico, que morre com ela. Memoria e fonte, que atravessam, tem
+ * casa propria (F6 e F5) e nao foram tocadas.
+ *
+ * `lib/agentes/api/porta.ts` e o guarda de autoridade das rotas novas.
+ * Ele NASCEU aqui porque o padrao existia como funcao local dentro da
+ * rota de permissoes, e copiar para sete rotas criaria sete lugares
+ * onde alguem pode esquecer o `lerAgenteDoDono`. A rota de permissoes
+ * NAO foi alterada: ela esta provada, e convergir as duas e limpeza
+ * propria.
+ *
+ * As rotas em si vivem em `app/api/agentes/`, fora de `ESCOPO_AGENTES`
+ * — o inventario cobre `app/api/internal/agentes`, que e outra coisa.
+ */
+const ARQUIVOS_F7A: readonly string[] = [
+  "supabase/migrations/20261018_agente_conversas.sql",
+  "lib/agentes/conversas/tipos.ts",
+  "lib/agentes/conversas/repositorio.ts",
+  "lib/agentes/conversas/runtime.ts",
+  "lib/agentes/api/porta.ts",
+];
+
 const ARQUIVOS_F6: readonly string[] = [
   "supabase/migrations/20261017_agente_memorias.sql",
   "lib/agentes/memorias/tipos.ts",
@@ -1707,6 +1739,7 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_F4,
   ...ARQUIVOS_F41_F5,
   ...ARQUIVOS_F6,
+  ...ARQUIVOS_F7A,
   ...ARQUIVOS_1DD,
   ...ARQUIVOS_1DA_PERF,
   ...ARQUIVOS_1EA,
@@ -1883,6 +1916,8 @@ const SUITES_AGENTES: readonly string[] = [
   "testar-agentes-fontes.ts",
   // AGENT-FACTORY-F6: Skills (reusadas), memoria manual e contexto.
   "testar-agentes-skills-memoria.ts",
+  // AGENT-FACTORY-F7a: conversas, historico e as rotas novas.
+  "testar-agentes-conversas.ts",
 ];
 
 /** PREDICADO de G11t. */
