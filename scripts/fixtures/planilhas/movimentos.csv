@@ -1,0 +1,6 @@
+﻿Data;Descricao;Valor;Categoria
+03/09/2026;Venda CSV;1.100,00;vendas
+13/09/2026;Outra venda;900,50;vendas
+23/09/2026;"Venda; com ponto e virgula";250,00;vendas
+24/09/2026;=SOMA(A1:A9);10,00;injecao
+25/09/2026;@INJECAO;20,00;injecao

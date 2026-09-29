@@ -471,9 +471,14 @@ ok("P3  lib/agentes/conexoes com o conjunto exato de 6 modulos — nenhum e da 1
 // sendo de IGUALDADE, nunca `includes`/`some`/subconjunto. Um quarto
 // modulo aparecendo nesta pasta sem passar por gate proprio continua
 // reprovando — que e a unica coisa que P4 sempre quis dizer.
-const FUNCOES_AUTORIZADAS = ["guard.ts", "registry.ts", "sanitizar.ts"];
+// AGENT-FACTORY-F3: P4 seguia VERMELHO nesta base — a M2-I1-A2 publicou
+// `mercadolivre-perguntas.ts` e reconciliou so o gemeo H12, deixando este
+// para tras. Alinhado agora ao conjunto canonico, que ganhou tambem
+// `vendas.ts` nesta fase. A comparacao continua sendo de IGUALDADE: um
+// sexto modulo sem gate proprio segue reprovando.
+const FUNCOES_AUTORIZADAS = ["calculadora.ts", "calendario.ts", "guard.ts", "mercadolivre-perguntas.ts", "planilha.ts", "registry.ts", "sanitizar.ts", "vendas.ts"];
 const funcoesNoDisco = readdirSync(join(RAIZ, "lib/agentes/funcoes")).sort();
-ok("P4  lib/agentes/funcoes com o conjunto exato de 3 modulos autorizados",
+ok("P4  lib/agentes/funcoes com o conjunto exato de 8 modulos autorizados",
   JSON.stringify(funcoesNoDisco) === JSON.stringify(FUNCOES_AUTORIZADAS),
   funcoesNoDisco.join(", "));
 ok("P4b controle: a comparacao e exata — um quarto modulo reprovaria",

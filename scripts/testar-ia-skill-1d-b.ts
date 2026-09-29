@@ -217,7 +217,23 @@ secao("G. O catalogo real — duas Funcoes, nenhuma por posicao");
 // a correcao nao e afrouxar: e parar de medir POSICAO. O conjunto nominal
 // prova mais do que o indice provava, e continua provando quando a
 // terceira Funcao chegar em qualquer ponto da ordenacao.
-const IDS_ESPERADOS = ["mercadolivre.perguntas.listar", "vendas.consultar"];
+// AGENT-FACTORY-F3 acrescentou cinco Tools DETERMINISTICAS. Ids
+// genericos de proposito: nada aqui e `agente_financeiro.*`, porque o
+// catalogo descreve o que a CDS sabe fazer, e nao quem pode fazer.
+// Nenhuma delas escreve, alcanca rede ou usa credencial — e todas
+// continuam passando pelo guard, provado em
+// `testar-agentes-planilhas-tools.ts`, secoes AB..AE.
+//
+// Lista EXATA, como sempre: uma Funcao a mais ou a menos reprova.
+const IDS_ESPERADOS = [
+  "mercadolivre.perguntas.listar",
+  "vendas.consultar",
+  "planilha.inspecionar",
+  "planilha.ler",
+  "planilha.agregar",
+  "calculadora.calcular",
+  "calendario.periodo",
+];
 ok("G1  o catalogo tem EXATAMENTE os ids publicados",
   JSON.stringify([...IDS].sort()) === JSON.stringify([...IDS_ESPERADOS].sort()),
   IDS.join(", "));
@@ -233,9 +249,27 @@ ok("G2  `vendas.consultar` continua presente, seja qual for a posicao",
   IDS.includes("vendas.consultar"));
 ok("G2a e `mercadolivre.perguntas.listar` tambem",
   IDS.includes("mercadolivre.perguntas.listar"));
+// AGENT-FACTORY-F3: a chamada a `criarLeiturasDeVendas` saiu de
+// `registry.ts` junto com o bloco de `vendas.consultar` (tripwire J1).
+// O que G3 sempre quis dizer — "a Funcao le pela camada de DOMINIO, e
+// nao pelo handler da fila" — nao mudou nem um pouco; mudou o arquivo
+// onde a frase mora. Entao o oraculo passa a olhar o CATALOGO INTEIRO:
+// o mapa mais os modulos irmaos que o implementam. Medir so `registry.ts`
+// depois da mudanca nao seria mais rigoroso — seria olhar para o lugar
+// errado e chamar isso de prova.
+const CODIGO_CATALOGO = [
+  CODIGO,
+  semComentarios(ler("lib/agentes/funcoes/vendas.ts")),
+  semComentarios(ler("lib/agentes/funcoes/mercadolivre-perguntas.ts")),
+].join("\n");
 ok("G3  usa a leitura de dominio, nao o handler de tarefa",
-  /criarLeiturasDeVendas/.test(CODIGO) && !/criarHandlerAnaliseVendas/.test(CODIGO));
-ok("G4  nao importa handlers/", !/agentes\/handlers/.test(CODIGO));
+  /criarLeiturasDeVendas/.test(CODIGO_CATALOGO) &&
+    !/criarHandlerAnaliseVendas/.test(CODIGO_CATALOGO));
+ok("G3a CONTROLE: o oraculo enxerga o handler se ele aparecer",
+  /criarHandlerAnaliseVendas/.test(`${CODIGO_CATALOGO} criarHandlerAnaliseVendas()`));
+ok("G3b CONTROLE: e nao esta lendo um texto vazio",
+  CODIGO_CATALOGO.length > CODIGO.length + 500);
+ok("G4  nao importa handlers/", !/agentes\/handlers/.test(CODIGO_CATALOGO));
 // Ate a M2-I1 o contexto era `{ userId }` e este assert congelava isso
 // byte a byte. A M2-I1 o ampliou por DECISAO: uma Funcao conectada
 // precisa saber contra qual conta agir, e com varias contas do mesmo
@@ -331,10 +365,17 @@ ok("H11 nenhum arquivo novo em lib/ia/skills", readdirSync(join(RAIZ, "lib/ia/sk
 // wrappers da primeira Funcao conectada. Ele saiu do registry porque o
 // bloco inline levaria o catalogo a ~640 linhas contra o tripwire J1 de
 // 560 — e a resposta a um alarme nao pode ser desligar o alarme.
-// `vendas.consultar` NAO foi movida: mexer num contrato congelado so para
-// arrumar a casa nao e razao suficiente.
-const MODULOS_FUNCOES = ["guard.ts", "mercadolivre-perguntas.ts", "registry.ts", "sanitizar.ts"];
-ok("H12 a pasta de funcoes tem exatamente os 4 modulos autorizados",
+// AGENT-FACTORY-F3 autoriza o QUINTO: `vendas.ts`. E a mesma razao de
+// antes, agora valendo para `vendas.consultar` — J1 tocou em 583 contra
+// 560, e o jeito de calar o alarme nao e subir o limite. O bloco foi
+// movido LITERALMENTE e os ids do catalogo nao mudaram.
+// AGENT-FACTORY-F3 publicou tres modulos de Tool deterministica —
+// `planilha.ts`, `calculadora.ts` e `calendario.ts` — pelo mesmo
+// criterio de sempre: implementacao concreta mora ao lado, o mapa fica
+// em `registry.ts`. Continua sendo lista EXATA: um nono modulo sem gate
+// proprio reprova.
+const MODULOS_FUNCOES = ["calculadora.ts", "calendario.ts", "guard.ts", "mercadolivre-perguntas.ts", "planilha.ts", "registry.ts", "sanitizar.ts", "vendas.ts"];
+ok("H12 a pasta de funcoes tem exatamente os 8 modulos autorizados",
   JSON.stringify(readdirSync(join(RAIZ, "lib/agentes/funcoes")).sort()) ===
     JSON.stringify(MODULOS_FUNCOES),
   readdirSync(join(RAIZ, "lib/agentes/funcoes")).sort().join(", "));
