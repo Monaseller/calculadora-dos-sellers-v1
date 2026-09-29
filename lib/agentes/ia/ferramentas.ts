@@ -81,6 +81,23 @@ export interface PedidoIAComFerramentas {
    * que ele pode e defesa em profundidade, nao substituicao da cerca.
    */
   readonly ferramentas: readonly FerramentaDeclarada[];
+  /**
+   * Como o modelo escolhe a ferramenta — AGENT-FACTORY-F4.
+   *
+   * `"auto"` (o padrao) e o comportamento de producao: o modelo decide.
+   * `{ nome }` OBRIGA aquela ferramenta, usando o mecanismo oficial de
+   * cada provedor (`tool_choice` na Anthropic,
+   * `generation_config.tool_choice` na Interactions API do Google).
+   *
+   * Existe para PROVA, e a distincao importa: forcar mostra que o
+   * protocolo de ida-e-volta funciona; nao forcar mostra se o modelo
+   * ESCOLHE a ferramenta sozinho. Sao perguntas diferentes, e misturar
+   * as duas faria um "sim" responder pela outra.
+   *
+   * Nada disto e autorizacao: forcar uma ferramenta nao pula o guard —
+   * quem decide se ela pode rodar continua sendo `executarFuncao`.
+   */
+  readonly escolhaDeFerramenta?: "auto" | { readonly nome: string };
 }
 
 export interface RespostaIAComFerramentas {

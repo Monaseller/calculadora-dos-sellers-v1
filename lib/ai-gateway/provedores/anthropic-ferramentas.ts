@@ -60,6 +60,69 @@ export function obterModeloFerramentas(): string {
   return modelo;
 }
 
+// ─── O nome da ferramenta ─────────────────────────────────────────────
+
+/**
+ * A Anthropic NAO aceita ponto em nome de ferramenta.
+ *
+ * ── Medido, nao suposto (AGENT-FACTORY-F4) ─────────────────────────
+ *
+ * A primeira chamada real devolveu 400, dizendo que
+ * `tools.0.custom.name` precisa casar a gramatica de letras, digitos,
+ * sublinhado e hifen — e `calculadora.calcular` tem ponto.
+ *
+ * O F1 dizia, com todas as letras, que `nome` seria o `funcaoId` "sem
+ * traducao", porque um dicionario a mais e mais um lugar onde um pedido
+ * pode virar outra Funcao. A API real refutou isso: a gramatica de id
+ * da CDS (fixada pelo CHECK `agente_permissoes_funcao_id_formato`, que
+ * EXIGE o ponto) e a da Anthropic sao incompativeis. Traduzir deixou de
+ * ser escolha.
+ *
+ * ── Como o risco daquela decisao continua coberto ───────────────────
+ *
+ * O mapa NAO e global, NAO e persistido e NAO e um catalogo paralelo.
+ * Ele nasce e morre dentro de UMA requisicao, derivado das ferramentas
+ * daquela chamada, e e verificado INJETIVO: se dois ids diferentes
+ * produzissem o mesmo nome, isto LANCA em vez de escolher um. E o nome
+ * volta a ser o `funcaoId` antes de sair do adaptador — o laco, o guard
+ * e o catalogo nunca veem a forma traduzida.
+ */
+export function sanitizarNome(nome: string): string {
+  return nome.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 128);
+}
+
+export interface MapaDeNomes {
+  /** funcaoId -> nome aceito pela API. */
+  readonly paraApi: ReadonlyMap<string, string>;
+  /** nome aceito pela API -> funcaoId. */
+  readonly paraFuncao: ReadonlyMap<string, string>;
+}
+
+/**
+ * Constroi o mapa da requisicao e PROVA que ele e reversivel.
+ *
+ * Colisao lanca. Devolver "um dos dois" faria um pedido de ferramenta
+ * executar outra Funcao — o unico erro que esta camada nao pode
+ * cometer.
+ */
+export function mapearNomes(ferramentas: readonly FerramentaDeclarada[]): MapaDeNomes {
+  const paraApi = new Map<string, string>();
+  const paraFuncao = new Map<string, string>();
+  for (const f of ferramentas) {
+    const api = sanitizarNome(f.nome);
+    const jaUsado = paraFuncao.get(api);
+    if (jaUsado !== undefined && jaUsado !== f.nome) {
+      throw new ErroProvedorIA(
+        "validation",
+        `Colisao de nome de ferramenta: '${jaUsado}' e '${f.nome}' viram '${api}'.`
+      );
+    }
+    paraApi.set(f.nome, api);
+    paraFuncao.set(api, f.nome);
+  }
+  return { paraApi, paraFuncao };
+}
+
 // ─── Conversoes puras ─────────────────────────────────────────────────
 
 /**
@@ -70,10 +133,11 @@ export function obterModeloFerramentas(): string {
  * mais onde um pedido pode virar outra Funcao.
  */
 export function montarFerramentas(
-  ferramentas: readonly FerramentaDeclarada[]
+  ferramentas: readonly FerramentaDeclarada[],
+  mapa: MapaDeNomes = mapearNomes(ferramentas)
 ): { name: string; description: string; input_schema: object }[] {
   return ferramentas.map((f) => ({
-    name: f.nome,
+    name: mapa.paraApi.get(f.nome) ?? sanitizarNome(f.nome),
     description: f.descricao,
     input_schema: f.schemaEntrada,
   }));
@@ -88,7 +152,8 @@ export function montarFerramentas(
  * qual resultado pertence a qual chamada quando houve mais de uma.
  */
 export function montarMensagens(
-  mensagens: readonly MensagemDoDialogo[]
+  mensagens: readonly MensagemDoDialogo[],
+  mapa?: MapaDeNomes
 ): Anthropic.MessageParam[] {
   const saida: Anthropic.MessageParam[] = [];
   for (const m of mensagens) {
@@ -100,7 +165,10 @@ export function montarMensagens(
       const blocos: unknown[] = [];
       if (m.texto) blocos.push({ type: "text", text: m.texto });
       for (const p of m.pedidos) {
-        blocos.push({ type: "tool_use", id: p.id, name: p.nome, input: p.argumentos ?? {} });
+        // O eco do turno anterior tambem viaja com o nome da API: um
+        // `tool_use` com ponto seria recusado igual ao da declaracao.
+        const nomeApi = mapa?.paraApi.get(p.nome) ?? sanitizarNome(p.nome);
+        blocos.push({ type: "tool_use", id: p.id, name: nomeApi, input: p.argumentos ?? {} });
       }
       // Turno vazio nao existe na API; um assistente sem texto e sem
       // pedido seria recusado com 400. Pular e mais honesto que enviar
@@ -132,12 +200,15 @@ export function montarMensagens(
  * no segundo o `input` de uma ferramenta pode estar truncado, o que
  * produziria uma chamada com argumento pela metade.
  */
-export function lerResposta(resposta: {
-  content: readonly unknown[];
-  stop_reason?: string | null;
-  model?: string;
-  usage?: { input_tokens?: number; output_tokens?: number } | null;
-}): { texto: string | null; pedidos: PedidoDeFerramenta[] } {
+export function lerResposta(
+  resposta: {
+    content: readonly unknown[];
+    stop_reason?: string | null;
+    model?: string;
+    usage?: { input_tokens?: number; output_tokens?: number } | null;
+  },
+  mapa?: MapaDeNomes
+): { texto: string | null; pedidos: PedidoDeFerramenta[] } {
   if (resposta.stop_reason === "refusal") {
     throw new ErroProvedorIA(
       "conteudo_rejeitado",
@@ -158,10 +229,30 @@ export function lerResposta(resposta: {
     if (b.type === "text" && typeof b.text === "string" && b.text !== "") {
       texto = texto === null ? b.text : `${texto}\n${b.text}`;
     } else if (b.type === "tool_use" && typeof b.id === "string" && typeof b.name === "string") {
-      pedidos.push({ id: b.id, nome: b.name, argumentos: b.input ?? {} });
+      // De volta ao `funcaoId`. Nome desconhecido passa CRU de
+      // proposito: quem recusa nome invalido e o laco, com a lista
+      // declarada — nao esta camada, adivinhando.
+      const nomeFuncao = mapa?.paraFuncao.get(b.name) ?? b.name;
+      pedidos.push({ id: b.id, nome: nomeFuncao, argumentos: b.input ?? {} });
     }
   }
   return { texto, pedidos };
+}
+
+/**
+ * `escolhaDeFerramenta` -> `tool_choice`.
+ *
+ * `"auto"` e a AUSENCIA do campo, e nao `{type:"auto"}`: o default da
+ * API ja e auto, e mandar o campo a toa seria descrever como decisao
+ * nossa algo que e o comportamento normal.
+ */
+export function montarEscolha(
+  escolha: PedidoIAComFerramentas["escolhaDeFerramenta"],
+  mapa?: MapaDeNomes
+): { tool_choice?: { type: "tool"; name: string } } {
+  if (escolha === undefined || escolha === "auto") return {};
+  const nome = mapa?.paraApi.get(escolha.nome) ?? sanitizarNome(escolha.nome);
+  return { tool_choice: { type: "tool", name: nome } };
 }
 
 // ─── O adaptador ──────────────────────────────────────────────────────
@@ -176,18 +267,21 @@ export async function chamarClaudeComFerramentas(
   const cliente = obterCliente();
   const modelo = obterModeloFerramentas();
   const inicio = Date.now();
+  // UM mapa por requisicao. Declaracao, eco e leitura usam o mesmo.
+  const mapa = mapearNomes(pedido.ferramentas);
 
   try {
     const resposta = await cliente.messages.create({
       model: modelo,
       max_tokens: MAX_TOKENS,
       system: pedido.instrucao,
-      messages: montarMensagens(pedido.mensagens),
-      tools: montarFerramentas(pedido.ferramentas) as Anthropic.ToolUnion[],
+      messages: montarMensagens(pedido.mensagens, mapa),
+      tools: montarFerramentas(pedido.ferramentas, mapa) as Anthropic.ToolUnion[],
+      ...montarEscolha(pedido.escolhaDeFerramenta, mapa),
     } as Anthropic.MessageCreateParamsNonStreaming);
 
     const { texto, pedidos } = lerResposta(
-      resposta as unknown as Parameters<typeof lerResposta>[0]);
+      resposta as unknown as Parameters<typeof lerResposta>[0], mapa);
 
     return {
       texto,

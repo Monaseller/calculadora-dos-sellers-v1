@@ -1534,6 +1534,20 @@ const ARQUIVOS_F3: readonly string[] = [
   "lib/agentes/planilhas/fonte.ts",
 ];
 
+/**
+ * AGENT-FACTORY-F4 — o que a chamada REAL obrigou a mudar.
+ *
+ * `ferramentas.ts` ganhou `escolhaDeFerramenta` e `laco-ferramentas.ts`
+ * passou a repassa-la no PRIMEIRO turno. Nada disso e autorizacao:
+ * forcar uma ferramenta nao pula o guard. Os adaptadores de provedor
+ * mudaram tambem, mas vivem em `lib/ai-gateway/` e ficam fora de
+ * `ESCOPO_AGENTES`.
+ */
+const ARQUIVOS_F4: readonly string[] = [
+  "lib/agentes/ia/ferramentas.ts",
+  "lib/agentes/ia/laco-ferramentas.ts",
+];
+
 const ARQUIVOS_M2_I1_A2: readonly string[] = [
   "lib/agentes/dados/perguntas.ts",
   "lib/agentes/funcoes/mercadolivre-perguntas.ts",
@@ -1627,6 +1641,7 @@ const ARQUIVOS_M2_I1_A7: readonly string[] = [
 const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_F1F2,
   ...ARQUIVOS_F3,
+  ...ARQUIVOS_F4,
   ...ARQUIVOS_1DD,
   ...ARQUIVOS_1DA_PERF,
   ...ARQUIVOS_1EA,
@@ -1794,6 +1809,11 @@ const SUITES_AGENTES: readonly string[] = [
   "testar-agentes-vendas-capability.ts",
   // AGENT-FACTORY-F3: a suite das Tools deterministicas.
   "testar-agentes-planilhas-tools.ts",
+  // AGENT-FACTORY-F4: a UNICA suite deste repositorio que vai a REDE e
+  // GASTA credito de API. Declarada aqui para o inventario nao acusar
+  // arquivo desconhecido, mas NAO entra em varredura automatica: ela e
+  // invocada a mao, num gate que autoriza o custo.
+  "testar-agentes-live-tool-call.ts",
 ];
 
 /** PREDICADO de G11t. */

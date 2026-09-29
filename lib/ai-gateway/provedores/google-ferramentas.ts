@@ -23,6 +23,33 @@
  * cada um no topo. Por isso os dois provedores tem mapeadores proprios e
  * nenhum `if (provedor === ...)` no meio de uma funcao so.
  *
+ * ── ACHADO F4: o RETORNO da ferramenta esbarra no `store: false` ────
+ *
+ * Medido contra a API real em 2026-09-29, com `gemini-3.6-flash`:
+ *
+ *   turno 1 (declarar ferramenta e receber `function_call`)
+ *     store: false  -> FUNCIONA. A forma abaixo e aceita, o modelo
+ *                      emite `function_call` de verdade.
+ *
+ *   turno 2 (devolver o resultado)
+ *     sem `previous_interaction_id`  -> 400 "Invalid input received",
+ *       com QUALQUER forma de `function_result`: result como string,
+ *       como objeto, como lista de conteudo, com e sem `name`, com e
+ *       sem eco do `function_call`, e ate ecoando os `steps`
+ *       devolvidos verbatim. Nenhuma passa.
+ *     com `previous_interaction_id` + `store: true` + `name` no
+ *       `function_result`  -> FUNCIONA.
+ *
+ * Ou seja: a Interactions API so fecha o ciclo de ferramenta com
+ * CONTINUACAO SERVER-SIDE, e continuacao server-side exige reter a
+ * interacao. `store: false` neste repositorio nao e otimizacao — e a
+ * regra que impede o Google de guardar dado do cliente por ate 55 dias.
+ *
+ * Trocar a regra por um caminho verde seria decisao de privacidade
+ * tomada de passagem, e nao e desta camada. Entao o segundo turno
+ * LANCA com codigo proprio e diz o motivo, em vez de mandar um corpo
+ * que a API vai recusar com um 400 sem explicacao.
+ *
  * ── As tres conversoes sao PURAS e exportadas ───────────────────────
  *
  * `montarFerramentasGoogle`, `montarPassos` e `lerPassos` nao tocam
@@ -159,6 +186,27 @@ export function lerPassos(
   return { texto, pedidos };
 }
 
+/**
+ * `escolhaDeFerramenta` -> `generation_config.tool_choice`.
+ *
+ * Na Interactions API a escolha NAO fica ao lado de `tools`: ela mora
+ * dentro de `generation_config`, e a forma de exigir UMA ferramenta e
+ * `allowed_tools` com `mode: "any"` mais a lista de nomes — outra forma
+ * que so o tipo real do SDK revela (`AllowedTools`, genai.d.ts:254).
+ *
+ * `"auto"` nao manda nada: e o default da API.
+ */
+export function montarEscolhaGoogle(
+  escolha: PedidoIAComFerramentas["escolhaDeFerramenta"]
+): { generation_config?: { tool_choice: { allowed_tools: { mode: string; tools: string[] } } } } {
+  if (escolha === undefined || escolha === "auto") return {};
+  return {
+    generation_config: {
+      tool_choice: { allowed_tools: { mode: "any", tools: [escolha.nome] } },
+    },
+  };
+}
+
 // ─── O adaptador ──────────────────────────────────────────────────────
 
 /**
@@ -169,9 +217,23 @@ export function lerPassos(
  * outras chamadas deste repositorio, e aqui pesa mais, porque o
  * historico enviado carrega resultado de Funcao do lojista.
  */
+export const CODIGO_RETORNO_BLOQUEADO = "google_tool_result_exige_store";
+
 export async function chamarGeminiComFerramentas(
   pedido: PedidoIAComFerramentas
 ): Promise<RespostaIAComFerramentas> {
+  // Ver o ACHADO F4 no cabecalho. Fail-closed e com o motivo escrito:
+  // um 400 generico da API mandaria alguem depurar o corpo por horas
+  // ate redescobrir o que ja esta medido aqui.
+  if (pedido.mensagens.some((m) => m.papel === "ferramenta")) {
+    throw new ErroProvedorIA(
+      "validation",
+      `${CODIGO_RETORNO_BLOQUEADO}: a Interactions API so aceita resultado de ferramenta ` +
+        "via previous_interaction_id, que exige store:true — e store:false e regra de " +
+        "privacidade deste repositorio. Use a Anthropic para dialogo com ferramenta " +
+        "enquanto a decisao de privacidade nao for tomada."
+    );
+  }
   const cliente = obterClienteGoogle();
   const modelo = obterModeloFerramentasGoogle();
   const inicio = Date.now();
@@ -185,6 +247,7 @@ export async function chamarGeminiComFerramentas(
         tools: montarFerramentasGoogle(pedido.ferramentas),
         store: false,
         stream: false,
+        ...montarEscolhaGoogle(pedido.escolhaDeFerramenta),
       },
       { timeout: TIMEOUT_MS }
     );
