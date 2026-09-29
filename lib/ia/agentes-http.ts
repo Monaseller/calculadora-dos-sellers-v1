@@ -1682,3 +1682,864 @@ export async function definirConexaoDoAgente(
 
   return { estado: "ok", plataforma, recurso, lojaId };
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// AGENT-FACTORY-F7b.1 — o transporte da Factory e do chat do agente
+//
+// Dezessete funcoes novas, e todas moram AQUI pelo mesmo motivo que as
+// outras: `lib/ia/agentes-http.ts` e o unico arquivo da area que fala
+// com a rede, e a suite de fonte cobra isso por igualdade de conjunto.
+// Um `fetch` dentro de um componente nao seria um atalho — seria um
+// segundo lugar onde um endereco de API, um verbo ou um cabecalho
+// poderiam mudar sem ninguem olhar.
+//
+// ── O que este bloco traz de NOVO ao contrato da area ───────────────
+//
+// DELETE entra. Ate aqui a area tinha "cria e altera, nunca apaga", e
+// isso era verdade porque nada que ela criava era descartavel: agente
+// tem tarefa, aprovacao e auditoria penduradas nele, e apagar um seria
+// frente propria.
+//
+// Memoria e fonte nao sao assim. Sao conteudo que o DONO escreveu e
+// enviou, e uma tela onde a pessoa adiciona sem poder remover nao e
+// conservadora — e um deposito. O veto a DELETE continua valendo para
+// AGENTE; para estes dois recursos ele cai, e cai nominalmente.
+//
+// ── E o que ele NAO traz ────────────────────────────────────────────
+//
+// Nao ha funcao para apagar conversa nem para desvincular Skill, apesar
+// de as rotas aceitarem. Superficie de rede se publica quando uma tela
+// precisa dela; publicar antes seria autorizar o que ninguem pediu.
+// ─────────────────────────────────────────────────────────────────────
+
+const ROTA_SKILLS_DO_DONO = "/api/skills";
+const ROTA_SUFIXO_CONVERSAS = "/conversas";
+const ROTA_SUFIXO_MEMORIAS = "/memorias";
+const ROTA_SUFIXO_FONTES = "/fontes";
+const ROTA_SUFIXO_SKILLS = "/skills";
+const ROTA_SUFIXO_ATIVACAO = "/ativacao";
+
+const caminhoDoAgente = (agenteId: string): string =>
+  `${ROTA_BASE}/${encodeURIComponent(agenteId)}`;
+
+/**
+ * O desfecho comum das dezessete.
+ *
+ * Mesmo vocabulario das outras: `falha` nao distingue rede de shape de
+ * proposito, e `nao_autenticado`/`nao_encontrado` existem porque a tela
+ * reage diferente a cada um.
+ *
+ * `recusado` carrega DUAS coisas, e as duas vem do servidor: a frase que
+ * ele escolheu e o `codigo` classificado. A tela traduz o codigo numa
+ * frase sua quando conhece o caso, e cai na frase do servidor quando
+ * nao conhece — nunca inventa a explicacao.
+ */
+export type RespostaDaFactory<T> =
+  | { estado: "ok"; dados: T }
+  | { estado: "recusado"; mensagem: string; codigo: string | null }
+  | { estado: "nao_autenticado" }
+  | { estado: "nao_encontrado" }
+  | { estado: "falha" };
+
+/** Frase de recusa do servidor, truncada. Nunca eco de dado do usuario. */
+const LIMITE_DA_RECUSA = 300;
+
+function recusaDaResposta(corpo: unknown): { mensagem: string; codigo: string | null } | null {
+  if (!ehObjeto(corpo) || typeof corpo.erro !== "string") return null;
+  const frase = corpo.erro.trim();
+  if (frase.length === 0) return null;
+  return {
+    mensagem: frase.slice(0, LIMITE_DA_RECUSA),
+    codigo: typeof corpo.codigo === "string" && corpo.codigo.length > 0 ? corpo.codigo : null,
+  };
+}
+
+/**
+ * A classificacao de status compartilhada pelas dezessete.
+ *
+ * Existe para que um desfecho novo (um 413 que ninguem esperava) caia em
+ * `falha` em UM lugar, e nao em dezessete com dezessete redacoes
+ * diferentes. Devolve `null` quando a resposta foi boa — o chamador
+ * segue para ler o corpo.
+ */
+function desfechoDaResposta<T>(
+  resposta: Response,
+  corpo: unknown
+): RespostaDaFactory<T> | null {
+  if (resposta.status === 401) return { estado: "nao_autenticado" };
+  if (resposta.status === 404) return { estado: "nao_encontrado" };
+  if (!resposta.ok) {
+    const recusa = recusaDaResposta(corpo);
+    // Sem frase do servidor nao ha recusa apresentavel: `falha` diz
+    // "nao deu", que e honesto, em vez de inventar o porque.
+    return recusa === null
+      ? { estado: "falha" }
+      : { estado: "recusado", mensagem: recusa.mensagem, codigo: recusa.codigo };
+  }
+  if (!ehObjeto(corpo) || corpo.ok !== true) return { estado: "falha" };
+  return null;
+}
+
+// ─── Os formatos que a tela recebe ────────────────────────────────────
+
+export interface ConversaDoChatUI {
+  readonly id: string;
+  readonly titulo: string | null;
+  readonly criadoEm: string | null;
+}
+
+/**
+ * A procedencia de UM passo de ferramenta.
+ *
+ * Espelha `PassoRegistrado` do dominio, campo a campo. `requestId` viaja
+ * porque e o que liga este passo a linha de auditoria — e fica em
+ * "detalhes tecnicos" na tela, nunca na conversa.
+ */
+export interface PassoDoChatUI {
+  readonly funcaoId: string;
+  readonly desfecho: string;
+  readonly executou: boolean;
+  readonly requestId: string | null;
+}
+
+/** O custo de um turno. So mensagem de assistente tem. */
+export interface UsoDoTurnoUI {
+  readonly tokensEntrada: number | null;
+  readonly tokensSaida: number | null;
+  readonly tempoMs: number | null;
+}
+
+export interface MensagemDoChatUI {
+  readonly id: string;
+  readonly papel: "usuario" | "assistente";
+  readonly conteudo: string;
+  readonly criadoEm: string | null;
+  readonly passos: readonly PassoDoChatUI[];
+  readonly modelo: string | null;
+  readonly uso: UsoDoTurnoUI | null;
+}
+
+/** O turno inteiro: a sua mensagem, a resposta, e por que ela terminou. */
+export interface TurnoDoChatUI {
+  readonly mensagemDoUsuario: MensagemDoChatUI;
+  readonly resposta: MensagemDoChatUI;
+  readonly motivo: string | null;
+}
+
+export interface MemoriaDoAgenteUI {
+  readonly id: string;
+  readonly conteudo: string;
+  readonly tipo: string | null;
+  readonly ordem: number;
+  readonly ativo: boolean;
+}
+
+export interface FonteDoAgenteUI {
+  readonly id: string;
+  readonly nome: string;
+  readonly descricao: string | null;
+  readonly papel: string | null;
+  readonly tipo: string;
+}
+
+/** Um arquivo preso a UMA conversa. Projecao menor, de proposito. */
+export interface AnexoDaConversaUI {
+  readonly id: string;
+  readonly nome: string;
+  readonly tipo: string;
+}
+
+/** O que a tela de fontes recebe: as do agente e as desta conversa. */
+export interface FontesDoChatUI {
+  readonly fontes: readonly FonteDoAgenteUI[];
+  readonly anexos: readonly AnexoDaConversaUI[];
+}
+
+export interface SkillDoAgenteUI {
+  readonly id: string;
+  readonly nome: string;
+  readonly versao: string;
+  readonly descricao: string | null;
+  readonly quandoUsar: readonly string[];
+}
+
+export interface FerramentaDaAtivacaoUI {
+  readonly id: string;
+  readonly nome: string;
+  readonly completo: boolean;
+  readonly nivel: string | null;
+  readonly faltando: number;
+}
+
+export interface ImpedimentoUI {
+  readonly codigo: string;
+  readonly mensagem: string;
+  readonly etapa: number;
+}
+
+export interface AtivacaoDoAgenteUI {
+  readonly nome: string;
+  readonly ativo: boolean;
+  readonly temInstrucoes: boolean;
+  readonly modelo: string | null;
+  readonly provedor: string | null;
+  readonly ferramentas: readonly FerramentaDaAtivacaoUI[];
+  readonly podeAtivar: boolean;
+  readonly impedimentos: readonly ImpedimentoUI[];
+}
+
+/** O que a criacao de Skill devolve: o id, e se ela nasceu agora. */
+export interface SkillCriadaUI {
+  readonly skillId: string;
+  readonly novaSkill: boolean;
+}
+
+// ─── Validacao de shape — um item torto condena a lista ───────────────
+
+function textoOuNulo(bruto: unknown): string | null {
+  return typeof bruto === "string" ? bruto : null;
+}
+
+function numeroOuNulo(bruto: unknown): number | null {
+  return typeof bruto === "number" && Number.isFinite(bruto) ? bruto : null;
+}
+
+function conversaDaResposta(bruto: unknown): ConversaDoChatUI | null {
+  if (!ehObjeto(bruto)) return null;
+  if (typeof bruto.id !== "string" || bruto.id.length === 0) return null;
+  return {
+    id: bruto.id,
+    titulo: textoOuNulo(bruto.titulo),
+    criadoEm: textoOuNulo(bruto.criadoEm),
+  };
+}
+
+function passoDaResposta(bruto: unknown): PassoDoChatUI | null {
+  if (!ehObjeto(bruto)) return null;
+  const { funcaoId, desfecho, executou, requestId } = bruto;
+  if (typeof funcaoId !== "string" || funcaoId.length === 0) return null;
+  if (typeof desfecho !== "string" || desfecho.length === 0) return null;
+  if (typeof executou !== "boolean") return null;
+  return { funcaoId, desfecho, executou, requestId: textoOuNulo(requestId) };
+}
+
+function usoDaResposta(bruto: unknown): UsoDoTurnoUI | null {
+  if (!ehObjeto(bruto)) return null;
+  return {
+    tokensEntrada: numeroOuNulo(bruto.tokensEntrada),
+    tokensSaida: numeroOuNulo(bruto.tokensSaida),
+    tempoMs: numeroOuNulo(bruto.tempoMs),
+  };
+}
+
+function mensagemDaResposta(bruto: unknown): MensagemDoChatUI | null {
+  if (!ehObjeto(bruto)) return null;
+  const { id, papel, conteudo, criadoEm, passos, modelo, uso } = bruto;
+  if (typeof id !== "string" || id.length === 0) return null;
+  if (papel !== "usuario" && papel !== "assistente") return null;
+  if (typeof conteudo !== "string") return null;
+
+  const lidos: PassoDoChatUI[] = [];
+  // Ausente e legitimo: a maioria das mensagens nao teve ferramenta.
+  if (passos !== undefined && passos !== null) {
+    if (!Array.isArray(passos)) return null;
+    for (const cru of passos) {
+      const passo = passoDaResposta(cru);
+      // Procedencia meio lida e pior que nenhuma: ela e justamente a
+      // prova de onde o numero veio.
+      if (passo === null) return null;
+      lidos.push(passo);
+    }
+  }
+  return {
+    id, papel, conteudo,
+    criadoEm: textoOuNulo(criadoEm),
+    passos: lidos,
+    modelo: textoOuNulo(modelo),
+    uso: uso === null || uso === undefined ? null : usoDaResposta(uso),
+  };
+}
+
+function memoriaDaResposta(bruto: unknown): MemoriaDoAgenteUI | null {
+  if (!ehObjeto(bruto)) return null;
+  const { id, conteudo, tipo, ordem, ativo } = bruto;
+  if (typeof id !== "string" || id.length === 0) return null;
+  if (typeof conteudo !== "string" || conteudo.length === 0) return null;
+  if (typeof ordem !== "number" || !Number.isFinite(ordem)) return null;
+  if (typeof ativo !== "boolean") return null;
+  return { id, conteudo, tipo: textoOuNulo(tipo), ordem, ativo };
+}
+
+function fonteDaResposta(bruto: unknown): FonteDoAgenteUI | null {
+  if (!ehObjeto(bruto)) return null;
+  const { id, nome, descricao, papel, tipo } = bruto;
+  if (typeof id !== "string" || id.length === 0) return null;
+  if (typeof nome !== "string" || nome.length === 0) return null;
+  if (typeof tipo !== "string" || tipo.length === 0) return null;
+  return { id, nome, descricao: textoOuNulo(descricao), papel: textoOuNulo(papel), tipo };
+}
+
+function anexoDaResposta(bruto: unknown): AnexoDaConversaUI | null {
+  if (!ehObjeto(bruto)) return null;
+  const { id, nome, tipo } = bruto;
+  if (typeof id !== "string" || id.length === 0) return null;
+  if (typeof nome !== "string" || nome.length === 0) return null;
+  if (typeof tipo !== "string" || tipo.length === 0) return null;
+  return { id, nome, tipo };
+}
+
+function skillDaResposta(bruto: unknown): SkillDoAgenteUI | null {
+  if (!ehObjeto(bruto)) return null;
+  const { id, nome, versao, descricao, quandoUsar } = bruto;
+  if (typeof id !== "string" || id.length === 0) return null;
+  if (typeof nome !== "string" || nome.length === 0) return null;
+  if (typeof versao !== "string" || versao.length === 0) return null;
+
+  const quando: string[] = [];
+  if (quandoUsar !== undefined && quandoUsar !== null) {
+    if (!Array.isArray(quandoUsar)) return null;
+    for (const item of quandoUsar) {
+      if (typeof item !== "string") return null;
+      quando.push(item);
+    }
+  }
+  return { id, nome, versao, descricao: textoOuNulo(descricao), quandoUsar: quando };
+}
+
+function ferramentaDaResposta(bruto: unknown): FerramentaDaAtivacaoUI | null {
+  if (!ehObjeto(bruto)) return null;
+  const { id, nome, completo, nivel, faltando } = bruto;
+  if (typeof id !== "string" || id.length === 0) return null;
+  if (typeof nome !== "string" || nome.length === 0) return null;
+  if (typeof completo !== "boolean") return null;
+  if (typeof faltando !== "number" || !Number.isFinite(faltando)) return null;
+  return { id, nome, completo, nivel: textoOuNulo(nivel), faltando };
+}
+
+function impedimentoDaResposta(bruto: unknown): ImpedimentoUI | null {
+  if (!ehObjeto(bruto)) return null;
+  const { mensagem, etapa } = bruto;
+  if (typeof bruto.codigo !== "string" || bruto.codigo.length === 0) return null;
+  if (typeof mensagem !== "string" || mensagem.length === 0) return null;
+  if (typeof etapa !== "number" || !Number.isFinite(etapa)) return null;
+  return { codigo: bruto.codigo, mensagem, etapa };
+}
+
+/** Le uma lista inteira ou nada: item torto condena o conjunto. */
+function listaDaResposta<T>(
+  bruto: unknown,
+  de: (item: unknown) => T | null
+): readonly T[] | null {
+  if (!Array.isArray(bruto)) return null;
+  const lidos: T[] = [];
+  for (const item of bruto) {
+    const lido = de(item);
+    if (lido === null) return null;
+    lidos.push(lido);
+  }
+  return lidos;
+}
+
+// ─── As sete LEITURAS ─────────────────────────────────────────────────
+
+/** As conversas do agente, da mais recente para a mais antiga. */
+export async function listarConversasDoChat(
+  agenteId: string,
+  signal?: AbortSignal
+): Promise<RespostaDaFactory<readonly ConversaDoChatUI[]>> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(`${caminhoDoAgente(agenteId)}${ROTA_SUFIXO_CONVERSAS}`, { signal });
+  } catch {
+    return { estado: "falha" };
+  }
+  const corpo = await corpoDe(resposta);
+  const desfecho = desfechoDaResposta<readonly ConversaDoChatUI[]>(resposta, corpo);
+  if (desfecho !== null) return desfecho;
+  const dados = listaDaResposta(
+    (corpo as { conversas?: unknown }).conversas, conversaDaResposta);
+  return dados === null ? { estado: "falha" } : { estado: "ok", dados };
+}
+
+/** O historico de UMA conversa. Leitura pura: nao cria, nao responde. */
+export async function lerConversaDoChat(
+  agenteId: string,
+  conversaId: string,
+  signal?: AbortSignal
+): Promise<RespostaDaFactory<readonly MensagemDoChatUI[]>> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(
+      `${caminhoDoAgente(agenteId)}${ROTA_SUFIXO_CONVERSAS}/${encodeURIComponent(conversaId)}`,
+      { signal }
+    );
+  } catch {
+    return { estado: "falha" };
+  }
+  const corpo = await corpoDe(resposta);
+  const desfecho = desfechoDaResposta<readonly MensagemDoChatUI[]>(resposta, corpo);
+  if (desfecho !== null) return desfecho;
+  const dados = listaDaResposta(
+    (corpo as { mensagens?: unknown }).mensagens, mensagemDaResposta);
+  return dados === null ? { estado: "falha" } : { estado: "ok", dados };
+}
+
+/** As memorias que o DONO escreveu para este agente. */
+export async function listarMemoriasDoAgente(
+  agenteId: string,
+  signal?: AbortSignal
+): Promise<RespostaDaFactory<readonly MemoriaDoAgenteUI[]>> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(`${caminhoDoAgente(agenteId)}${ROTA_SUFIXO_MEMORIAS}`, { signal });
+  } catch {
+    return { estado: "falha" };
+  }
+  const corpo = await corpoDe(resposta);
+  const desfecho = desfechoDaResposta<readonly MemoriaDoAgenteUI[]>(resposta, corpo);
+  if (desfecho !== null) return desfecho;
+  const dados = listaDaResposta(
+    (corpo as { memorias?: unknown }).memorias, memoriaDaResposta);
+  return dados === null ? { estado: "falha" } : { estado: "ok", dados };
+}
+
+/**
+ * As fontes do agente e, quando uma conversa e informada, os anexos dela.
+ *
+ * `caminhoObjeto` nao chega aqui porque o servidor nao o publica — e
+ * este arquivo tambem nao o le, para que voltar a publica-lo nao vaze
+ * por acidente.
+ *
+ * `conversaId` vai na QUERY e nao no caminho: e um filtro de leitura, e
+ * a ausencia dele significa "so as do agente", nao "de todas".
+ */
+export async function listarFontesDoAgente(
+  agenteId: string,
+  conversaId: string | null,
+  signal?: AbortSignal
+): Promise<RespostaDaFactory<FontesDoChatUI>> {
+  const base = `${caminhoDoAgente(agenteId)}${ROTA_SUFIXO_FONTES}`;
+  const alvo = conversaId === null
+    ? base
+    : `${base}?conversaId=${encodeURIComponent(conversaId)}`;
+
+  let resposta: Response;
+  try {
+    resposta = await fetch(alvo, { signal });
+  } catch {
+    return { estado: "falha" };
+  }
+  const corpo = await corpoDe(resposta);
+  const desfecho = desfechoDaResposta<FontesDoChatUI>(resposta, corpo);
+  if (desfecho !== null) return desfecho;
+
+  const bruto = corpo as { fontes?: unknown; anexos?: unknown };
+  const fontes = listaDaResposta(bruto.fontes, fonteDaResposta);
+  // `anexos` so vem quando a conversa foi pedida; ausente e lista vazia.
+  const anexos = bruto.anexos === undefined
+    ? []
+    : listaDaResposta(bruto.anexos, anexoDaResposta);
+  if (fontes === null || anexos === null) return { estado: "falha" };
+  return { estado: "ok", dados: { fontes, anexos } };
+}
+
+/** As Skills vinculadas a ESTE agente. */
+export async function listarSkillsDoAgente(
+  agenteId: string,
+  signal?: AbortSignal
+): Promise<RespostaDaFactory<readonly SkillDoAgenteUI[]>> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(`${caminhoDoAgente(agenteId)}${ROTA_SUFIXO_SKILLS}`, { signal });
+  } catch {
+    return { estado: "falha" };
+  }
+  const corpo = await corpoDe(resposta);
+  const desfecho = desfechoDaResposta<readonly SkillDoAgenteUI[]>(resposta, corpo);
+  if (desfecho !== null) return desfecho;
+  const dados = listaDaResposta((corpo as { skills?: unknown }).skills, skillDaResposta);
+  return dados === null ? { estado: "falha" } : { estado: "ok", dados };
+}
+
+/** A biblioteca de Skills do dono — reusavel entre agentes. */
+export async function listarSkillsDoDono(
+  signal?: AbortSignal
+): Promise<RespostaDaFactory<readonly SkillDoAgenteUI[]>> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(ROTA_SKILLS_DO_DONO, { signal });
+  } catch {
+    return { estado: "falha" };
+  }
+  const corpo = await corpoDe(resposta);
+  const desfecho = desfechoDaResposta<readonly SkillDoAgenteUI[]>(resposta, corpo);
+  if (desfecho !== null) return desfecho;
+  const dados = listaDaResposta((corpo as { skills?: unknown }).skills, skillDaResposta);
+  return dados === null ? { estado: "falha" } : { estado: "ok", dados };
+}
+
+/**
+ * O que falta para ATIVAR, e o resumo que a tela Revisar mostra.
+ *
+ * Leitura pura: perguntar se pode ativar nao ativa. Quem decide e o
+ * servidor — esta funcao nao reimplementa impedimento nenhum, nem
+ * deduz `podeAtivar` da lista que recebeu.
+ */
+export async function lerAtivacaoDoAgente(
+  agenteId: string,
+  signal?: AbortSignal
+): Promise<RespostaDaFactory<AtivacaoDoAgenteUI>> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(`${caminhoDoAgente(agenteId)}${ROTA_SUFIXO_ATIVACAO}`, { signal });
+  } catch {
+    return { estado: "falha" };
+  }
+  const corpo = await corpoDe(resposta);
+  const desfecho = desfechoDaResposta<AtivacaoDoAgenteUI>(resposta, corpo);
+  if (desfecho !== null) return desfecho;
+
+  const bruto = corpo as {
+    resumo?: unknown; ferramentas?: unknown;
+    podeAtivar?: unknown; impedimentos?: unknown;
+  };
+  if (!ehObjeto(bruto.resumo) || typeof bruto.podeAtivar !== "boolean") {
+    return { estado: "falha" };
+  }
+  const { nome, ativo, temInstrucoes, modelo, provedor } = bruto.resumo;
+  if (typeof nome !== "string") return { estado: "falha" };
+  if (typeof ativo !== "boolean" || typeof temInstrucoes !== "boolean") {
+    return { estado: "falha" };
+  }
+  const ferramentas = listaDaResposta(bruto.ferramentas, ferramentaDaResposta);
+  const impedimentos = listaDaResposta(bruto.impedimentos, impedimentoDaResposta);
+  if (ferramentas === null || impedimentos === null) return { estado: "falha" };
+
+  return {
+    estado: "ok",
+    dados: {
+      nome, ativo, temInstrucoes,
+      modelo: textoOuNulo(modelo), provedor: textoOuNulo(provedor),
+      ferramentas, podeAtivar: bruto.podeAtivar, impedimentos,
+    },
+  };
+}
+
+// ─── As dez ESCRITAS ──────────────────────────────────────────────────
+
+/** Abre uma conversa vazia. POST porque CRIA. */
+export async function criarConversaDoChat(
+  agenteId: string
+): Promise<RespostaDaFactory<ConversaDoChatUI>> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(`${caminhoDoAgente(agenteId)}${ROTA_SUFIXO_CONVERSAS}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+  } catch {
+    return { estado: "falha" };
+  }
+  const corpo = await corpoDe(resposta);
+  const desfecho = desfechoDaResposta<ConversaDoChatUI>(resposta, corpo);
+  if (desfecho !== null) return desfecho;
+  const dados = conversaDaResposta((corpo as { conversa?: unknown }).conversa);
+  return dados === null ? { estado: "falha" } : { estado: "ok", dados };
+}
+
+/**
+ * Manda uma mensagem e recebe o turno inteiro de volta.
+ *
+ * O corpo leva SO o texto. Nem dono, nem modelo, nem instrucao, nem
+ * lista de ferramenta: quem compoe o contexto e o runtime no servidor, e
+ * deixar a tela mandar qualquer um desses seria deixar o navegador
+ * opinar sobre o que o agente pode fazer.
+ *
+ * O retorno traz as DUAS mensagens lidas da resposta — a do usuario
+ * tambem. A tela nao guarda a sua propria versao do que digitou: quem
+ * diz o que ficou gravado e o servidor.
+ */
+export async function enviarNaConversaDoChat(
+  agenteId: string,
+  conversaId: string,
+  texto: string
+): Promise<RespostaDaFactory<TurnoDoChatUI>> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(
+      `${caminhoDoAgente(agenteId)}${ROTA_SUFIXO_CONVERSAS}/${encodeURIComponent(conversaId)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ texto }),
+      }
+    );
+  } catch {
+    return { estado: "falha" };
+  }
+  const corpo = await corpoDe(resposta);
+  const desfecho = desfechoDaResposta<TurnoDoChatUI>(resposta, corpo);
+  if (desfecho !== null) return desfecho;
+
+  const bruto = corpo as { mensagem?: unknown; resposta?: unknown; motivo?: unknown };
+  const mensagemDoUsuario = mensagemDaResposta(bruto.mensagem);
+  const respostaDoAgente = mensagemDaResposta(bruto.resposta);
+  if (mensagemDoUsuario === null || respostaDoAgente === null) return { estado: "falha" };
+
+  return {
+    estado: "ok",
+    dados: {
+      mensagemDoUsuario,
+      resposta: respostaDoAgente,
+      // `bloqueado_por_ferramenta` e `teto_de_passos` chegam por aqui: o
+      // turno foi gravado, e a tela precisa poder explicar por que
+      // terminou assim.
+      motivo: textoOuNulo(bruto.motivo),
+    },
+  };
+}
+
+/** Escreve uma memoria. Ato do DONO, sempre — o agente nunca chega aqui. */
+export async function criarMemoriaDoAgente(
+  agenteId: string,
+  entrada: { conteudo: string; ordem: number }
+): Promise<RespostaDaFactory<MemoriaDoAgenteUI>> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(`${caminhoDoAgente(agenteId)}${ROTA_SUFIXO_MEMORIAS}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ conteudo: entrada.conteudo, ordem: entrada.ordem }),
+    });
+  } catch {
+    return { estado: "falha" };
+  }
+  const corpo = await corpoDe(resposta);
+  const desfecho = desfechoDaResposta<MemoriaDoAgenteUI>(resposta, corpo);
+  if (desfecho !== null) return desfecho;
+  const dados = memoriaDaResposta((corpo as { memoria?: unknown }).memoria);
+  return dados === null ? { estado: "falha" } : { estado: "ok", dados };
+}
+
+/** Liga ou desliga UMA memoria. PATCH porque altera o que existe. */
+export async function alterarMemoriaDoAgente(
+  agenteId: string,
+  memoriaId: string,
+  alteracao: { ativo: boolean }
+): Promise<RespostaDaFactory<MemoriaDoAgenteUI>> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(
+      `${caminhoDoAgente(agenteId)}${ROTA_SUFIXO_MEMORIAS}/${encodeURIComponent(memoriaId)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ativo: alteracao.ativo }),
+      }
+    );
+  } catch {
+    return { estado: "falha" };
+  }
+  const corpo = await corpoDe(resposta);
+  const desfecho = desfechoDaResposta<MemoriaDoAgenteUI>(resposta, corpo);
+  if (desfecho !== null) return desfecho;
+  const dados = memoriaDaResposta((corpo as { memoria?: unknown }).memoria);
+  return dados === null ? { estado: "falha" } : { estado: "ok", dados };
+}
+
+/**
+ * Apaga UMA memoria.
+ *
+ * O primeiro DELETE da area, e deliberado: memoria e texto que o dono
+ * escreveu, e quem escreve tem de poder desescrever. Nao vale para
+ * agente, que continua sem caminho de exclusao por aqui.
+ */
+export async function removerMemoriaDoAgente(
+  agenteId: string,
+  memoriaId: string
+): Promise<RespostaDaFactory<null>> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(
+      `${caminhoDoAgente(agenteId)}${ROTA_SUFIXO_MEMORIAS}/${encodeURIComponent(memoriaId)}`,
+      { method: "DELETE" }
+    );
+  } catch {
+    return { estado: "falha" };
+  }
+  const corpo = await corpoDe(resposta);
+  const desfecho = desfechoDaResposta<null>(resposta, corpo);
+  return desfecho !== null ? desfecho : { estado: "ok", dados: null };
+}
+
+/**
+ * Envia um arquivo como fonte do agente ou como anexo de UMA conversa.
+ *
+ * A UNICA escrita da area sem corpo JSON, e nao ha como ser de outro
+ * jeito: o que sobe e um arquivo, e `multipart/form-data` e o formato
+ * para isso. Duas consequencias deliberadas:
+ *
+ *   1. NAO ha `Content-Type` manual. O navegador o monta com o
+ *      `boundary`; escreve-lo a mao produz um corpo que o servidor nao
+ *      consegue separar.
+ *   2. O nome do arquivo e o unico texto que acompanha os bytes, e ele
+ *      vai dentro do `FormData` — nunca no caminho da URL, que nao e
+ *      lugar de nome escolhido por quem envia.
+ *
+ * Tipo e tamanho sao conferidos no SERVIDOR, por assinatura de bytes.
+ * Uma checagem aqui seria conveniencia de tela, nunca autoridade.
+ */
+export async function enviarFonteDoAgente(
+  agenteId: string,
+  arquivo: File,
+  escopo: "agente" | "conversa",
+  conversaId: string | null
+): Promise<RespostaDaFactory<FonteDoAgenteUI>> {
+  const formulario = new FormData();
+  formulario.append("arquivo", arquivo);
+  formulario.append("escopo", escopo);
+  // Somente no escopo de conversa: mandar `conversaId` num envio de
+  // agente pediria ao servidor uma checagem que nao muda nada.
+  if (escopo === "conversa" && conversaId !== null) {
+    formulario.append("conversaId", conversaId);
+  }
+
+  let resposta: Response;
+  try {
+    resposta = await fetch(`${caminhoDoAgente(agenteId)}${ROTA_SUFIXO_FONTES}`, {
+      method: "POST",
+      body: formulario,
+    });
+  } catch {
+    return { estado: "falha" };
+  }
+  const corpo = await corpoDe(resposta);
+  const desfecho = desfechoDaResposta<FonteDoAgenteUI>(resposta, corpo);
+  if (desfecho !== null) return desfecho;
+  const dados = fonteDaResposta((corpo as { fonte?: unknown }).fonte);
+  return dados === null ? { estado: "falha" } : { estado: "ok", dados };
+}
+
+/** Remove uma fonte. Mesmo argumento do DELETE de memoria. */
+export async function removerFonteDoAgente(
+  agenteId: string,
+  fonteId: string
+): Promise<RespostaDaFactory<null>> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(
+      `${caminhoDoAgente(agenteId)}${ROTA_SUFIXO_FONTES}/${encodeURIComponent(fonteId)}`,
+      { method: "DELETE" }
+    );
+  } catch {
+    return { estado: "falha" };
+  }
+  const corpo = await corpoDe(resposta);
+  const desfecho = desfechoDaResposta<null>(resposta, corpo);
+  return desfecho !== null ? desfecho : { estado: "ok", dados: null };
+}
+
+/**
+ * Vincula uma Skill ja existente ao agente.
+ *
+ * O corpo leva SO o `skillId`. O conteudo da Skill nao trafega: quem o
+ * resolve e o servidor, a partir do vinculo — mandar o texto daqui
+ * deixaria o navegador escolher a instrucao que o agente recebe.
+ */
+export async function vincularSkillNoAgente(
+  agenteId: string,
+  skillId: string
+): Promise<RespostaDaFactory<null>> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(`${caminhoDoAgente(agenteId)}${ROTA_SUFIXO_SKILLS}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ skillId }),
+    });
+  } catch {
+    return { estado: "falha" };
+  }
+  const corpo = await corpoDe(resposta);
+  const desfecho = desfechoDaResposta<null>(resposta, corpo);
+  return desfecho !== null ? desfecho : { estado: "ok", dados: null };
+}
+
+/**
+ * Cria uma Skill a partir dos tres campos da tela.
+ *
+ * Slug, versao, manifesto, hash e origem NAO vao no corpo, porque nao
+ * sao perguntas que se fazem a uma pessoa: quem os deriva e
+ * `lib/agentes/skills/compor.ts`, no servidor. Esta funcao manda
+ * exatamente o que foi digitado.
+ *
+ * `novaSkill` distingue criada de reaproveitada: mandar o mesmo texto
+ * duas vezes devolve a MESMA Skill, e a tela pode dizer isso em vez de
+ * fingir que criou uma segunda.
+ */
+export async function criarSkillDoDono(
+  entrada: { nome: string; quandoUsar: string; instrucoes: string }
+): Promise<RespostaDaFactory<SkillCriadaUI>> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(ROTA_SKILLS_DO_DONO, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        nome: entrada.nome,
+        quandoUsar: entrada.quandoUsar,
+        instrucoes: entrada.instrucoes,
+      }),
+    });
+  } catch {
+    return { estado: "falha" };
+  }
+  const corpo = await corpoDe(resposta);
+  const desfecho = desfechoDaResposta<SkillCriadaUI>(resposta, corpo);
+  if (desfecho !== null) return desfecho;
+
+  const bruto = corpo as { skillId?: unknown; novaSkill?: unknown };
+  if (typeof bruto.skillId !== "string" || bruto.skillId.length === 0) {
+    return { estado: "falha" };
+  }
+  return {
+    estado: "ok",
+    dados: {
+      skillId: bruto.skillId,
+      novaSkill: bruto.novaSkill === true,
+    },
+  };
+}
+
+/**
+ * Liga ou desliga o agente.
+ *
+ * PATCH, e rota propria: `/agentes/[id]` aceita so `nome` e
+ * `instrucoes`, e `ativo` NAO entrou naquela allowlist de proposito.
+ * Ativar tem regra — o servidor recusa com 409 e devolve o que falta,
+ * que chega aqui como `recusado`. Desligar nunca e recusado.
+ */
+export async function definirAtivacaoDoAgente(
+  agenteId: string,
+  ativo: boolean
+): Promise<RespostaDaFactory<{ readonly ativo: boolean }>> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(`${caminhoDoAgente(agenteId)}${ROTA_SUFIXO_ATIVACAO}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ativo }),
+    });
+  } catch {
+    return { estado: "falha" };
+  }
+  const corpo = await corpoDe(resposta);
+  const desfecho = desfechoDaResposta<{ readonly ativo: boolean }>(resposta, corpo);
+  if (desfecho !== null) return desfecho;
+  const confirmado = (corpo as { ativo?: unknown }).ativo;
+  // O estado vem LIDO da resposta, nunca ecoado do argumento: a tela nao
+  // pode mostrar "ativo" porque pediu, so porque o servidor confirmou.
+  if (typeof confirmado !== "boolean") return { estado: "falha" };
+  return { estado: "ok", dados: { ativo: confirmado } };
+}

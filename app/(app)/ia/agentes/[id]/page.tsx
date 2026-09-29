@@ -1,37 +1,36 @@
 /**
  * `/ia/agentes/[id]` — a pagina individual do agente.
  *
- * ── Uma rota, oito abas ─────────────────────────────────────────────
+ * ── Duas faces, e o que decide entre elas ───────────────────────────
  *
- * A aba vem de `?aba=`, nao de rota-filha: e a mesma pagina do mesmo
- * recurso, vista de angulos diferentes. Oito segmentos criariam oito
- * arquivos repetindo cabecalho e carregamento.
+ * Sem `?aba=`, esta rota e o WORKSPACE: clicar num agente abre a
+ * CONVERSA com ele, nao a configuracao dele. Isso e o comportamento
+ * principal, e o que a lista e o escritorio apontam.
  *
- * ── A query string nunca escolhe componente ─────────────────────────
+ * Com `?aba=`, ela continua sendo a pagina de abas que sempre foi.
  *
- * `abaSegura()` compara o valor bruto com uma allowlist de 8 ids e
- * devolve `visao-geral` para qualquer outra coisa — ausente, repetida
- * (`?aba=a&aba=b` chega como array), desconhecida ou de outro tipo.
- * Nada aqui indexa um mapa de componentes com string vinda do usuario.
+ * A bifurcacao e por PRESENCA da query, e o motivo e concreto: existem
+ * links profundos em producao que dependem de uma aba especifica — a
+ * fila de aprovacoes manda `?aba=funcoes&tarefaVendas=…` e a atividade
+ * manda `?aba=tarefas`. Fazer o workspace tomar a rota inteira
+ * quebraria os dois. Pedir uma aba e um ato explicito; nao pedir
+ * nenhuma quer dizer "me leva ao agente".
  *
- * ── Server Component fino, e cada vez mais fino ─────────────────────
+ * `abaSegura()` NAO foi alterada — ela continua devolvendo
+ * `visao-geral` para entrada ausente ou desconhecida, e continua sendo
+ * a unica coisa que traduz query em aba. A decisao daqui e anterior a
+ * ela: primeiro se a query existe, depois o que ela vale.
  *
- * Ate a SKILL-1D.ui-consumer-C esta pagina resolvia o agente na lista
- * simulada em memoria. Agora a identidade e REAL, e quem a resolve e o
- * container cliente: a pagina valida a aba e entrega o `id` da rota,
- * nada mais.
+ * ── Server Component fino ───────────────────────────────────────────
  *
- * A resolucao desceu de proposito. O agente vem da lista do dono da
- * sessao, e essa leitura e autenticada por cookie — coisa que um
- * Server Component so faria chamando a propria API por HTTP, padrao que
- * este repositorio nao usa em lugar nenhum.
- *
- * "Agente nao encontrado" continua existindo, e continua sendo uma
- * tela e nao uma excecao — so que agora a conclusao vem da lista
- * autenticada do proprio usuario, dentro do container.
+ * Continua sem resolver o agente. Quem faz isso e o container cliente,
+ * em cada um dos dois caminhos, porque a leitura e autenticada por
+ * cookie — um Server Component so a faria chamando a propria API por
+ * HTTP, padrao que este repositorio nao usa em lugar nenhum.
  */
 import { abaSegura } from "@/lib/ia/abas";
 import PaginaAgente from "@/components/ia/agente/PaginaAgente";
+import { Workspace } from "@/components/ia/factory/Workspace";
 
 export default function PaginaDoAgente({
   params,
@@ -40,5 +39,11 @@ export default function PaginaDoAgente({
   params: { id: string };
   searchParams?: { [chave: string]: string | string[] | undefined };
 }) {
+  // Repetida (`?aba=a&aba=b`) chega como array, e continua sendo um
+  // pedido de aba: `abaSegura` ja sabe recusar o valor.
+  const pediuAba = searchParams?.aba !== undefined;
+
+  if (!pediuAba) return <Workspace agenteId={params.id} />;
+
   return <PaginaAgente agenteId={params.id} aba={abaSegura(searchParams?.aba)} />;
 }
