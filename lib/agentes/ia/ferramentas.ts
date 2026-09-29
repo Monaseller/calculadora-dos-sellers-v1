@@ -313,11 +313,41 @@ export const DECLARACOES: Readonly<Record<string, { descricao: string; schemaEnt
  *
  * Tres filtros, nesta ordem, e nenhum deles substitui o guard:
  *   1. a Funcao existe no catalogo;
- *   2. o agente tem permissao `automatico` ou `aprovacao` para ela;
+ *   2. ha uma LINHA de permissao para ela (qualquer nivel conhecido);
  *   3. ha declaracao escrita para ela.
  *
- * `bloqueado` e permissao ausente nao entram — o modelo nem fica sabendo
- * que existem.
+ * ── Por que `bloqueado` E DECLARADO — revisao do F7b ────────────────
+ *
+ * Ate o F7b este filtro exigia `automatico` ou `aprovacao`, com o
+ * argumento de que declarar o que nunca sera permitido "convidaria o
+ * modelo a pedir" e transformaria negacao em rotina. O argumento era de
+ * UX, e o proprio texto admitia que "o guard e a cerca de verdade".
+ *
+ * O primeiro turno REAL contra a Anthropic mostrou o custo disso. Com a
+ * calculadora em `bloqueado`, a ferramenta nao era declarada, o modelo
+ * nunca a pedia, o guard nunca era consultado — e ele respondia
+ * "1500 - 275 = 1.225" de cabeca. O fail-closed do F4.1 nao disparava,
+ * porque ele fecha o turno quando um PEDIDO e negado, e nao havia
+ * pedido.
+ *
+ * Entao `bloqueado` volta a ser declarado, e declarado IGUAL aos outros:
+ *
+ *   modelo pede -> guard NEGA -> o laco FECHA o turno (F4.1)
+ *
+ * ── E por que a declaracao NAO avisa que esta bloqueada ─────────────
+ *
+ * Seria tentador escrever "esta ferramenta esta bloqueada" na descricao.
+ * Isso reabriria o buraco pelo outro lado: um modelo que SABE que vai
+ * ser negado desvia — e desviar, aqui, significa responder de cabeca.
+ * A ferramenta e apresentada normalmente; quem diz nao e o guard, no
+ * unico lugar onde dizer nao tem efeito.
+ *
+ * ── Permissao AUSENTE continua fora ─────────────────────────────────
+ *
+ * Nao ha linha, nao ha declaracao. E diferente de `bloqueado`: ali o
+ * dono decidiu "nao"; aqui ninguem decidiu nada, e a Funcao nao faz
+ * parte deste agente. O caso de "Tool escolhida sem permissao
+ * configurada" e barrado antes, na ativacao — e e trabalho da UI.
  */
 export function declararFerramentas(entrada: {
   readonly catalogo: Readonly<Record<string, DefinicaoParaDeclaracao>>;
@@ -325,7 +355,10 @@ export function declararFerramentas(entrada: {
 }): readonly FerramentaDeclarada[] {
   const saida: FerramentaDeclarada[] = [];
   for (const p of entrada.permissoes) {
-    if (p.nivel !== "automatico" && p.nivel !== "aprovacao") continue;
+    // Qualquer nivel CONHECIDO entra — inclusive `bloqueado`. Ver o
+    // docblock: e assim que o guard volta a ser consultado, e e a
+    // consulta que faz o F4.1 fechar o turno.
+    if (p.nivel !== "automatico" && p.nivel !== "aprovacao" && p.nivel !== "bloqueado") continue;
     if (!Object.prototype.hasOwnProperty.call(entrada.catalogo, p.funcaoId)) continue;
     const d = Object.prototype.hasOwnProperty.call(DECLARACOES, p.funcaoId)
       ? DECLARACOES[p.funcaoId]
