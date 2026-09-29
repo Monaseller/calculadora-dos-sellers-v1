@@ -203,9 +203,30 @@ async function main(): Promise<void> {
     ok("A4  a PK permite N Skills por agente, sem repetir a mesma",
       /primary key \(agente_id, skill_id\)/.test(MIG));
 
+    // ── A5 reforcado na AGENT-FACTORY-F7b.1 ──────────────────────
+    //
+    // Era `arquivos.length === 3`, e a chegada de `compor.ts` mostrou o
+    // problema: uma CONTAGEM aceita qualquer quatro arquivos. A lista de
+    // NOMES aceita exatamente estes quatro — mais estrito do que antes,
+    // e nao menos.
+    const MODULOS_DE_SKILLS: readonly string[] = [
+      // F7b.1: compoe o documento de Skill a partir dos tres campos da
+      // tela. Puro; nao grava, nao valida formato e nao deriva hash.
+      "compor.ts",
+      "escrita.ts",
+      "estado.ts",
+      "fatos.ts",
+    ];
     const arquivos = readdirSync(join(RAIZ, "lib/agentes/skills")).sort();
-    ok("A5  o servico de Skills ja existe", arquivos.length === 3,
+    ok("A5  o servico de Skills e EXATAMENTE os modulos declarados",
+      JSON.stringify(arquivos) === JSON.stringify([...MODULOS_DE_SKILLS].sort()),
       arquivos.join(","));
+    ok("A5a CONTROLE NEGATIVO: um modulo A MAIS reprovaria",
+      JSON.stringify([...MODULOS_DE_SKILLS, "_intruso.ts"].sort())
+        !== JSON.stringify([...MODULOS_DE_SKILLS].sort()));
+    ok("A5b CONTROLE NEGATIVO: um modulo FALTANDO reprovaria",
+      JSON.stringify([...MODULOS_DE_SKILLS].slice(1).sort())
+        !== JSON.stringify([...MODULOS_DE_SKILLS].sort()));
     const ESCRITA = ler("lib/agentes/skills/escrita.ts");
     for (const fn of ["importarEPersistirSkill", "associarSkillAoAgente",
                       "desassociarSkillDoAgente", "promoverSkillVigente"]) {

@@ -650,6 +650,10 @@ const ARQUIVOS_SKILL_1DG: readonly string[] = [
  * `startsWith("testar-agentes-")`, e este nome nao casa.
  */
 const ARQUIVOS_SKILLS_1DF2: readonly string[] = [
+  // AGENT-FACTORY-F7b.1: o compositor que transforma os TRES campos da
+  // tela (nome, quando usar, instrucoes) no documento de Skill. Ele e
+  // puro e nao persiste — quem grava continua sendo `escrita.ts`.
+  "compor.ts",
   "escrita.ts",
   "estado.ts",
   "fatos.ts",
@@ -1626,6 +1630,35 @@ const ARQUIVOS_F7A: readonly string[] = [
   "lib/agentes/api/porta.ts",
 ];
 
+/**
+ * AGENT-FACTORY-F7b.1 — a Factory self-service.
+ *
+ * Dois modulos PUROS, e so eles caem no escopo dos agentes:
+ *
+ *   `factory/catalogo-ui.ts`  agrupa Funcoes em pacotes com nome de
+ *                             gente ("Planilhas"), para que a tela nao
+ *                             precise nomear `funcao_id` nenhum. Nao
+ *                             decide permissao: le a que existe.
+ *   `factory/ativacao.ts`     diz o que IMPEDE ativar. Fecha o carry do
+ *                             F7b.0: permissao AUSENTE nao declara a
+ *                             Funcao, e sem declaracao nao ha o que o
+ *                             guard negue em runtime — a cerca tem de
+ *                             ser antes, na ativacao.
+ *
+ * `lib/agentes/skills/compor.ts` esta declarado em `ARQUIVOS_SKILLS_1DF2`,
+ * junto com os outros modulos da pasta de Skills.
+ *
+ * As TELAS e as ROTAS deste gate (`components/ia/factory/`,
+ * `components/ui/`, `app/api/skills/`, `app/api/agentes/[agenteId]/
+ * ativacao/`) ficam de fora por definicao: `ESCOPO_AGENTES` cobre
+ * `lib/agentes`, `app/api/internal/agentes` e `supabase/migrations`, e
+ * nenhuma delas mora ali. Quem as cobra sao as suites de UI.
+ */
+const ARQUIVOS_F7B1: readonly string[] = [
+  "lib/agentes/factory/catalogo-ui.ts",
+  "lib/agentes/factory/ativacao.ts",
+];
+
 const ARQUIVOS_F6: readonly string[] = [
   "supabase/migrations/20261017_agente_memorias.sql",
   "lib/agentes/memorias/tipos.ts",
@@ -1740,6 +1773,7 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_F41_F5,
   ...ARQUIVOS_F6,
   ...ARQUIVOS_F7A,
+  ...ARQUIVOS_F7B1,
   ...ARQUIVOS_1DD,
   ...ARQUIVOS_1DA_PERF,
   ...ARQUIVOS_1EA,
@@ -3334,7 +3368,7 @@ async function main() {
     // Sem estes asserts, declarar a forma colapsada abriria a pasta.
     const conteudoSkills = readdirSync(join(RAIZ, "lib", "agentes", "skills")).sort();
 
-    ok("G11z4 lib/agentes/skills contem exatamente os 3 modulos declarados",
+    ok("G11z4 lib/agentes/skills contem exatamente os 4 modulos declarados",
        soAutorizadosDentroDeSkills(conteudoSkills));
     ok("G11z5 ANCORA: o diretorio foi mesmo lido e nao veio vazio",
        conteudoSkills.length === ARQUIVOS_SKILLS_1DF2.length && conteudoSkills.length > 0);
