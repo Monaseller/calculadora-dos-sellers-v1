@@ -46,12 +46,13 @@ import {
 } from "@/components/ui/Primitivas";
 import { TOOL_PACKS } from "@/lib/agentes/factory/catalogo-ui";
 import { ChatDoAgente } from "@/components/ia/factory/ChatDoAgente";
+import { ArquivosDoAgente } from "@/components/ia/factory/ArquivosDoAgente";
 import {
   alterarMemoriaDoAgente, atualizarAgenteViaApi, criarAgenteViaApi,
   criarMemoriaDoAgente, criarSkillDoDono, definirAtivacaoDoAgente,
-  definirPermissaoDeFuncao, enviarFonteDoAgente, lerAtivacaoDoAgente,
+  definirPermissaoDeFuncao, lerAtivacaoDoAgente,
   listarAgentes, listarFontesDoAgente, listarMemoriasDoAgente,
-  listarSkillsDoAgente, listarSkillsDoDono, removerFonteDoAgente,
+  listarSkillsDoAgente, listarSkillsDoDono,
   removerMemoriaDoAgente, vincularSkillNoAgente,
   type AtivacaoDoAgenteUI, type FonteDoAgenteUI, type MemoriaDoAgenteUI,
   type RespostaDaFactory, type SkillDoAgenteUI,
@@ -74,7 +75,7 @@ const ETAPAS: readonly Etapa[] = Object.freeze([
   { numero: 4, titulo: "Ferramentas", obrigatoria: false },
   { numero: 5, titulo: "Skills", obrigatoria: false },
   { numero: 6, titulo: "Memória", obrigatoria: false },
-  { numero: 7, titulo: "Fontes", obrigatoria: false },
+  { numero: 7, titulo: "Arquivos", obrigatoria: false },
   { numero: 8, titulo: "Permissões", obrigatoria: true },
   { numero: 9, titulo: "Rotinas", obrigatoria: false },
   { numero: 10, titulo: "Testar", obrigatoria: false },
@@ -301,27 +302,7 @@ export function Wizard({ agenteIdInicial }: { agenteIdInicial: string | null }) 
     await recarregar(agenteId);
   }
 
-  async function subirFonte(arquivo: File) {
-    if (agenteId === null) return;
-    setErro(null);
-    const r = await enviarFonteDoAgente(agenteId, arquivo, "agente", null);
-    if (r.estado !== "ok") {
-      setErro(frasePorEstado(r, "Não foi possível enviar o arquivo."));
-      return;
-    }
-    await recarregar(agenteId);
-  }
 
-  async function removerFonte(id: string) {
-    if (agenteId === null) return;
-    setErro(null);
-    const r = await removerFonteDoAgente(agenteId, id);
-    if (r.estado !== "ok") {
-      setErro(frasePorEstado(r, "Não foi possível remover a fonte."));
-      return;
-    }
-    await recarregar(agenteId);
-  }
 
   async function vincularSkill(skillId: string) {
     if (agenteId === null) return;
@@ -708,43 +689,9 @@ export function Wizard({ agenteIdInicial }: { agenteIdInicial: string | null }) 
           )}
 
           {etapa === 7 && (
-            <>
-              <p style={{ margin: 0, fontSize: TAMANHO.corpo, color: CROMO.textoFraco }}>
-                Arquivos que este agente poderá consultar em qualquer conversa. Aceita .xlsx e .csv,
-                até 5 MB.
-              </p>
-              <Botao tom="primario" desabilitado={agenteId === null} onClick={() => {
-                const input = document.createElement("input");
-                input.type = "file";
-                input.accept = ".xlsx,.csv";
-                input.onchange = () => {
-                  const f = input.files?.[0];
-                  if (f) void subirFonte(f);
-                };
-                input.click();
-              }}>
-                + Adicionar fonte
-              </Botao>
-              {fontes.map((f) => (
-                <Cartao key={f.id}>
-                  <div style={{
-                    display: "flex", justifyContent: "space-between",
-                    gap: ESPACO.md, flexWrap: "wrap",
-                  }}>
-                    <div>
-                      <strong style={{ fontSize: TAMANHO.corpo, color: CROMO.texto }}>
-                        {f.nome}
-                      </strong>
-                      <div style={{ display: "flex", gap: ESPACO.xs, marginTop: ESPACO.xs }}>
-                        <Etiqueta>{f.tipo}</Etiqueta>
-                        {f.papel !== null && <Etiqueta tom="info">{f.papel}</Etiqueta>}
-                      </div>
-                    </div>
-                    <Botao tom="perigo" onClick={() => void removerFonte(f.id)}>Remover</Botao>
-                  </div>
-                </Cartao>
-              ))}
-            </>
+            agenteId !== null
+              ? <ArquivosDoAgente agenteId={agenteId} aoMudar={() => void recarregar(agenteId)} />
+              : <Aviso tom="info">Conclua a etapa 1 para adicionar arquivos.</Aviso>
           )}
 
           {etapa === 8 && (
@@ -828,7 +775,7 @@ export function Wizard({ agenteIdInicial }: { agenteIdInicial: string | null }) 
                     ativacao.ferramentas.map((f) => f.nome).join(", ") || "nenhuma"],
                   ["Skills", skillsDoAgente.map((s) => s.nome).join(", ") || "nenhuma"],
                   ["Memória", `${memorias.filter((m) => m.ativo).length} ativa(s)`],
-                  ["Fontes", `${fontes.length} arquivo(s)`],
+                  ["Arquivos", `${fontes.length} arquivo(s)`],
                   ["Modo", "Manual"],
                 ] as const).map(([k, v]) => (
                   <div key={k} style={{
@@ -925,7 +872,7 @@ export function Wizard({ agenteIdInicial }: { agenteIdInicial: string | null }) 
               ["Ferramentas", String(ativacao?.ferramentas.length ?? 0)],
               ["Skills", String(skillsDoAgente.length)],
               ["Memória", memorias.some((m) => m.ativo) ? "ativada" : "desativada"],
-              ["Fontes", String(fontes.length)],
+              ["Arquivos", String(fontes.length)],
               ["Permissões",
                 (ativacao?.ferramentas.length ?? 0) === 0 ? "—"
                   : ativacao?.ferramentas.every((f) => f.completo) ? "configuradas" : "atenção"],

@@ -124,6 +124,28 @@ function criarPortaMemoria(linhas: LinhaMem[], espiao?: EspiaoDaPorta): PortaDeF
       linhas.push(l);
       return soDominio(l);
     },
+    async atualizarMetadado(userId, fonteId, vinculo, campos) {
+      // Espelha a porta REAL: escopo por dono + agente + ativo, decidido
+      // na PROPRIA busca. Uma fixture mais permissiva que a producao
+      // provaria menos do que o sistema entrega — foi assim que o D8
+      // passou batido antes.
+      if (campos.nome === undefined && campos.papel === undefined &&
+          campos.descricao === undefined) {
+        return null;
+      }
+      const l = linhas.find((x) =>
+        x.userId === userId && x.id === fonteId &&
+        x.agenteId === vinculo.agenteId && x.ativo);
+      if (!l) return null;
+      if (campos.nome !== undefined) (l as { nome: string }).nome = campos.nome;
+      if (campos.papel !== undefined) {
+        (l as { papel: string | null }).papel = campos.papel;
+      }
+      if (campos.descricao !== undefined) {
+        (l as { descricao: string | null }).descricao = campos.descricao;
+      }
+      return soDominio(l);
+    },
     async desativar(userId, fonteId) {
       const l = linhas.find((x) => x.userId === userId && x.id === fonteId && x.ativo);
       if (!l) return false;

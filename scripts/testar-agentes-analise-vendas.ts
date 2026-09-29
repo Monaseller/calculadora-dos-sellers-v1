@@ -1659,6 +1659,26 @@ const ARQUIVOS_F7B1: readonly string[] = [
   "lib/agentes/factory/ativacao.ts",
 ];
 
+/**
+ * AGENT-FACTORY-F7b.3 — arquivos com proposito.
+ *
+ * UM modulo puro no escopo dos agentes: `proposito-de-arquivo.ts`, que
+ * OLHA o nome e os cabecalhos e SUGERE o que a planilha representa.
+ *
+ * Ele nao decide nada. Existe porque `papel` e o campo que o modelo le
+ * para distinguir uma planilha de entradas de uma de saidas, e responder
+ * isso de cabeca e onde a pessoa erra. Deterministico de proposito: nao
+ * ha chamada de IA aqui, e a suite propria cobra isso.
+ *
+ * A porta de fontes ganhou `atualizarMetadado`, e a rota de fonte ganhou
+ * `PATCH` + `/inspecao` — mas `lib/agentes/fontes/` e
+ * `app/api/agentes/` ja estao declarados/fora do escopo, e nao entram
+ * nesta lista.
+ */
+const ARQUIVOS_F7B3: readonly string[] = [
+  "lib/agentes/factory/proposito-de-arquivo.ts",
+];
+
 const ARQUIVOS_F6: readonly string[] = [
   "supabase/migrations/20261017_agente_memorias.sql",
   "lib/agentes/memorias/tipos.ts",
@@ -1774,6 +1794,7 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_F6,
   ...ARQUIVOS_F7A,
   ...ARQUIVOS_F7B1,
+  ...ARQUIVOS_F7B3,
   ...ARQUIVOS_1DD,
   ...ARQUIVOS_1DA_PERF,
   ...ARQUIVOS_1EA,

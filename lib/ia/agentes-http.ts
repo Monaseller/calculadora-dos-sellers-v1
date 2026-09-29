@@ -2394,11 +2394,24 @@ export async function enviarFonteDoAgente(
   agenteId: string,
   arquivo: File,
   escopo: "agente" | "conversa",
-  conversaId: string | null
+  conversaId: string | null,
+  /**
+   * O que o arquivo E e como usa-lo — F7b.3, e OPCIONAL de proposito.
+   *
+   * O chat sobe sem proposito (quem anexa no meio de uma conversa quer
+   * anexar, nao preencher formulario) e a tela de Arquivos pergunta
+   * DEPOIS de inspecionar, por `atualizarArquivoDoAgente`. Quando o
+   * proposito ja e conhecido, manda-lo aqui poupa uma escrita.
+   */
+  proposito?: { readonly papel?: string | null; readonly descricao?: string | null }
 ): Promise<RespostaDaFactory<FonteDoAgenteUI>> {
   const formulario = new FormData();
   formulario.append("arquivo", arquivo);
   formulario.append("escopo", escopo);
+  // Vazio NAO e enviado: a rota trata string vazia como ausente, e
+  // mandar campo vazio so faria o servidor decidir o que a tela ja sabe.
+  if (proposito?.papel) formulario.append("papel", proposito.papel);
+  if (proposito?.descricao) formulario.append("descricao", proposito.descricao);
   // Somente no escopo de conversa: mandar `conversaId` num envio de
   // agente pediria ao servidor uma checagem que nao muda nada.
   if (escopo === "conversa" && conversaId !== null) {
@@ -2542,4 +2555,167 @@ export async function definirAtivacaoDoAgente(
   // pode mostrar "ativo" porque pediu, so porque o servidor confirmou.
   if (typeof confirmado !== "boolean") return { estado: "falha" };
   return { estado: "ok", dados: { ativo: confirmado } };
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// AGENT-FACTORY-F7b.3 — arquivos com proposito
+//
+// Duas funcoes novas, e uma mudanca de assinatura na que ja existia.
+//
+// ── O buraco que isto fecha ─────────────────────────────────────────
+//
+// `papel` e o campo que o MODELO le para saber que uma planilha e de
+// entradas e a outra de saidas (ver `montarContextoDeFontes`). A rota de
+// upload sempre aceitou `papel`, `descricao` e `nome` — mas o transporte
+// nunca os mandou. Resultado: toda fonte subia sem papel, e o agente
+// recebia dois arquivos indistinguiveis.
+//
+// Nao era um rotulo faltando. Era a resposta errada.
+// ─────────────────────────────────────────────────────────────────────
+
+/** O que a tela mostra depois de inspecionar UMA aba. */
+export interface AbaInspecionadaUI {
+  readonly nome: string;
+  readonly linhas: number;
+  readonly colunas: number;
+  readonly cabecalhos: readonly string[];
+  readonly formulasPresentes: boolean;
+}
+
+/**
+ * O que a inspecao devolve.
+ *
+ * `avisos` vem do executor e e repassado como veio: "ha formulas, os
+ * valores sao os que o Excel gravou" e "ha texto comecando por = + - @,
+ * lido como texto" sao coisas que a pessoa tem de ler ANTES de dizer
+ * para que serve o arquivo.
+ */
+export interface InspecaoDeArquivoUI {
+  readonly id: string;
+  readonly nome: string;
+  readonly tipo: string;
+  readonly tamanhoBytes: number;
+  readonly papel: string | null;
+  readonly descricao: string | null;
+  readonly abas: readonly AbaInspecionadaUI[];
+  readonly avisos: readonly string[];
+}
+
+function abaDaResposta(bruto: unknown): AbaInspecionadaUI | null {
+  if (!ehObjeto(bruto)) return null;
+  const { nome, linhas, colunas, cabecalhos, formulasPresentes } = bruto;
+  if (typeof nome !== "string") return null;
+  if (typeof linhas !== "number" || !Number.isFinite(linhas)) return null;
+  if (typeof colunas !== "number" || !Number.isFinite(colunas)) return null;
+  const heads: string[] = [];
+  if (cabecalhos !== undefined && cabecalhos !== null) {
+    if (!Array.isArray(cabecalhos)) return null;
+    for (const c of cabecalhos) {
+      if (typeof c !== "string") return null;
+      heads.push(c);
+    }
+  }
+  return {
+    nome, linhas, colunas, cabecalhos: heads,
+    formulasPresentes: formulasPresentes === true,
+  };
+}
+
+/**
+ * O que tem dentro de um arquivo do agente.
+ *
+ * Leitura pura: inspecionar nao muda nada, e a rota nem escreve
+ * auditoria de Funcao — quem esta olhando e o dono, na propria tela.
+ */
+export async function inspecionarArquivoDoAgente(
+  agenteId: string,
+  fonteId: string,
+  signal?: AbortSignal
+): Promise<RespostaDaFactory<InspecaoDeArquivoUI>> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(
+      `${caminhoDoAgente(agenteId)}${ROTA_SUFIXO_FONTES}/${encodeURIComponent(fonteId)}/inspecao`,
+      { signal }
+    );
+  } catch {
+    return { estado: "falha" };
+  }
+  const corpo = await corpoDe(resposta);
+  const desfecho = desfechoDaResposta<InspecaoDeArquivoUI>(resposta, corpo);
+  if (desfecho !== null) return desfecho;
+
+  const bruto = corpo as { arquivo?: unknown; inspecao?: unknown };
+  if (!ehObjeto(bruto.arquivo) || !ehObjeto(bruto.inspecao)) return { estado: "falha" };
+
+  const a = bruto.arquivo;
+  if (typeof a.id !== "string" || typeof a.nome !== "string" ||
+      typeof a.tipo !== "string") {
+    return { estado: "falha" };
+  }
+
+  const abas = listaDaResposta(bruto.inspecao.abas, abaDaResposta);
+  if (abas === null) return { estado: "falha" };
+
+  const avisos: string[] = [];
+  const brutosAvisos = bruto.inspecao.avisos;
+  if (brutosAvisos !== undefined && brutosAvisos !== null) {
+    if (!Array.isArray(brutosAvisos)) return { estado: "falha" };
+    for (const v of brutosAvisos) {
+      if (typeof v !== "string") return { estado: "falha" };
+      avisos.push(v);
+    }
+  }
+
+  return {
+    estado: "ok",
+    dados: {
+      id: a.id, nome: a.nome, tipo: a.tipo,
+      tamanhoBytes: typeof a.tamanhoBytes === "number" ? a.tamanhoBytes : 0,
+      papel: textoOuNulo(a.papel), descricao: textoOuNulo(a.descricao),
+      abas, avisos,
+    },
+  };
+}
+
+/**
+ * Corrige o metadado de um arquivo: o que ele e, e como usar.
+ *
+ * PATCH porque ALTERA um registro existente. So tres campos viajam, e
+ * `null` em `papel`/`descricao` e pedido legitimo de limpar — por isso o
+ * corpo e montado chave a chave, e nao serializado do objeto recebido:
+ * `JSON.stringify(campos)` deixaria uma chave nova passar sem decisao.
+ */
+export async function atualizarArquivoDoAgente(
+  agenteId: string,
+  fonteId: string,
+  campos: {
+    readonly nome?: string;
+    readonly papel?: string | null;
+    readonly descricao?: string | null;
+  }
+): Promise<RespostaDaFactory<FonteDoAgenteUI>> {
+  const corpoEnviado: Record<string, unknown> = {};
+  if (campos.nome !== undefined) corpoEnviado.nome = campos.nome;
+  if (campos.papel !== undefined) corpoEnviado.papel = campos.papel;
+  if (campos.descricao !== undefined) corpoEnviado.descricao = campos.descricao;
+
+  let resposta: Response;
+  try {
+    resposta = await fetch(
+      `${caminhoDoAgente(agenteId)}${ROTA_SUFIXO_FONTES}/${encodeURIComponent(fonteId)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(corpoEnviado),
+      }
+    );
+  } catch {
+    return { estado: "falha" };
+  }
+  const corpo = await corpoDe(resposta);
+  const desfecho = desfechoDaResposta<FonteDoAgenteUI>(resposta, corpo);
+  if (desfecho !== null) return desfecho;
+  const dados = fonteDaResposta((corpo as { fonte?: unknown }).fonte);
+  return dados === null ? { estado: "falha" } : { estado: "ok", dados };
 }

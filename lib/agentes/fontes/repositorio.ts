@@ -72,6 +72,33 @@ export interface PortaDeFontes {
   criar(nova: NovaFonte): Promise<Fonte>;
   desativar(userId: string, fonteId: string): Promise<boolean>;
   lerBytes(caminhoObjeto: string): Promise<Uint8Array>;
+  /**
+   * Corrige o METADADO de uma fonte ativa — F7b.3.
+   *
+   * Tres campos, e so eles: `nome`, `papel` e `descricao`. Nenhum toca o
+   * arquivo, o hash, o caminho no bucket, o dono ou o vinculo.
+   *
+   * Existe porque a pergunta "o que este arquivo representa?" so pode
+   * ser feita DEPOIS de inspecionar a planilha, e inspecionar exige que
+   * os bytes ja estejam no bucket. Sem este metodo o fluxo seria subir o
+   * arquivo duas vezes, ou pedir o papel antes de a pessoa ter visto o
+   * que tem dentro — que e pedir para adivinhar.
+   *
+   * `papel` e o campo que o modelo LE para distinguir uma planilha de
+   * entradas de uma de saidas (ver `montarContextoDeFontes`). Por isso
+   * ele e editavel: um papel errado nao e um rotulo feio, e uma resposta
+   * errada.
+   */
+  atualizarMetadado(
+    userId: string,
+    fonteId: string,
+    vinculo: { readonly agenteId: string },
+    campos: {
+      readonly nome?: string;
+      readonly papel?: string | null;
+      readonly descricao?: string | null;
+    }
+  ): Promise<Fonte | null>;
 }
 
 const COLUNAS =
@@ -174,6 +201,34 @@ export function criarPortaDeFontes(supabase: SupabaseClient): PortaDeFontes {
         .select("id");
       if (error) throw new Error(`Falha ao desativar fonte: ${error.message}`);
       return (data ?? []).length === 1;
+    },
+
+    async atualizarMetadado(userId, fonteId, vinculo, campos) {
+      // Montado CAMPO A CAMPO. Um spread deixaria uma chave nova do
+      // chamador chegar ao UPDATE sem ninguem ter decidido isso.
+      const mudanca: Record<string, unknown> = {
+        atualizado_em: new Date().toISOString(),
+      };
+      if (campos.nome !== undefined) mudanca.nome = campos.nome;
+      if (campos.papel !== undefined) mudanca.papel = campos.papel;
+      if (campos.descricao !== undefined) mudanca.descricao = campos.descricao;
+      // So `atualizado_em` significa "nada a alterar": nao gasta escrita.
+      if (Object.keys(mudanca).length === 1) return null;
+
+      // O escopo vai na PROPRIA instrucao, e inclui o agente: uma fonte
+      // de outro dono, de outro agente, ou ja desativada nao e alcancada
+      // por este UPDATE — nao ha checagem antes que alguem possa pular.
+      const { data, error } = await supabase.from(TABELA)
+        .update(mudanca)
+        .eq("user_id", userId)
+        .eq("id", fonteId)
+        .eq("agente_id", vinculo.agenteId)
+        .eq("ativo", true)
+        .select(COLUNAS);
+      if (error) throw new Error(`Falha ao atualizar fonte: ${error.message}`);
+      const linhas = data ?? [];
+      if (linhas.length !== 1) return null;
+      return semCaminho(daLinha(linhas[0] as unknown as LinhaFonte));
     },
 
     async lerBytes(caminhoObjeto) {
