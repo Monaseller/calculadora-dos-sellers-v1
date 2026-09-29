@@ -48,6 +48,9 @@ import {
   CODIGOS_DE_IMPEDIMENTO, PROVEDORES_COM_FERRAMENTA, validarParaAtivacao,
 } from "../lib/agentes/factory/ativacao";
 import { FUNCOES } from "../lib/agentes/funcoes/registry";
+import {
+  fraseDaSugestao, normalizar, sugerirPapel,
+} from "../lib/agentes/factory/proposito-de-arquivo";
 
 const RAIZ = join(__dirname, "..");
 const ler = (rel: string): string => readFileSync(join(RAIZ, rel), "utf8");
@@ -498,7 +501,7 @@ secao("G. O wizard: uma etapa por vez, e nada de rede");
   const prim = codigo("components/ui/Primitivas.tsx");
 
   ok("G1  as 11 etapas estao na ordem congelada",
-    /Identidade[\s\S]{0,200}Instruções[\s\S]{0,200}IA \/ Modelo[\s\S]{0,200}Ferramentas[\s\S]{0,200}Skills[\s\S]{0,200}Memória[\s\S]{0,200}Fontes[\s\S]{0,200}Permissões[\s\S]{0,200}Rotinas[\s\S]{0,200}Testar[\s\S]{0,200}Revisar e Ativar/
+    /Identidade[\s\S]{0,200}Instruções[\s\S]{0,200}IA \/ Modelo[\s\S]{0,200}Ferramentas[\s\S]{0,200}Skills[\s\S]{0,200}Memória[\s\S]{0,200}Arquivos[\s\S]{0,200}Permissões[\s\S]{0,200}Rotinas[\s\S]{0,200}Testar[\s\S]{0,200}Revisar e Ativar/
       .test(wiz));
   ok("G2  ANCORA: sao exatamente onze",
     (wiz.match(/numero: \d+, titulo:/g) ?? []).length === 11);
@@ -512,8 +515,10 @@ secao("G. O wizard: uma etapa por vez, e nada de rede");
 
   // Zero rede nos tres componentes — a suite de fonte tambem cobra
   // isto, e aqui e cobrado nominalmente para os arquivos deste gate.
+  const arqv = codigo("components/ia/factory/ArquivosDoAgente.tsx");
   for (const [nome, src] of [["Wizard", wiz], ["ChatDoAgente", chat],
-                             ["Workspace", work], ["Primitivas", prim]] as const) {
+                             ["Workspace", work], ["Primitivas", prim],
+                             ["ArquivosDoAgente", arqv]] as const) {
     ok(`G5  ${nome} nao faz rede nem monta endereco de API`,
       !/\bfetch\s*\(|XMLHttpRequest|["'`]\/api\//.test(src));
   }
@@ -637,6 +642,265 @@ secao("H. Clicar no agente abre a conversa, nao a configuracao");
       /agenteIdInicial=\{params\.id\}/.test(conf));
   ok("H6  nao existe tela paralela de edicao",
     !/EditarAgente|FormularioDeEdicao/.test(conf));
+}
+
+
+// ─── I. A sugestao de proposito ───────────────────────────────────────
+
+secao("I. O que o arquivo PARECE ser — sugestao, nunca decisao");
+
+{
+  const fonte = codigo("lib/agentes/factory/proposito-de-arquivo.ts");
+
+  ok("I1  o nome do arquivo decide quando ha sinal",
+    sugerirPapel({ nome: "entrada.xlsx" }) === "Entradas" &&
+      sugerirPapel({ nome: "saida.xlsx" }) === "Saídas");
+  ok("I2  acento e caixa nao atrapalham",
+    sugerirPapel({ nome: "Saídas-2026.XLSX" }) === "Saídas");
+  ok("I3  sinonimos do dominio tambem valem",
+    sugerirPapel({ nome: "recebimentos.csv" }) === "Entradas" &&
+      sugerirPapel({ nome: "despesas.csv" }) === "Saídas");
+
+  // A armadilha do `includes`: "saida" dentro de "assaida".
+  ok("I4  casa por PALAVRA INTEIRA, nao por substring",
+    sugerirPapel({ nome: "assaidado.xlsx" }) === null &&
+      sugerirPapel({ nome: "vendaval.xlsx" }) === null);
+  // Para um seller, venda E entrada de dinheiro: `SINAIS` mapeia
+  // "vendas" para Entradas. O controle prova que a palavra SEPARADA casa
+  // (ao contrario de "vendaval", em I4) — e nao que ela tem rotulo
+  // proprio.
+  ok("I5  CONTROLE POSITIVO: a mesma palavra separada CASA",
+    sugerirPapel({ nome: "relatorio de vendas.xlsx" }) === "Entradas" &&
+      sugerirPapel({ nome: "controle de estoque.xlsx" }) === "Estoque");
+
+  ok("I6  sem sinal nenhum, devolve null — nao inventa",
+    sugerirPapel({ nome: "planilha1.xlsx" }) === null &&
+      sugerirPapel({ nome: "dados.csv" }) === null);
+  ok("I7  os cabecalhos so entram quando o NOME nao decide",
+    sugerirPapel({ nome: "planilha1.xlsx", cabecalhos: ["Data", "Receita"] }) === "Entradas" &&
+      // O nome manda: `entrada.xlsx` continua Entradas mesmo com
+      // cabecalho de saida, porque quem nomeou disse o que e.
+      sugerirPapel({ nome: "entrada.xlsx", cabecalhos: ["Despesa"] }) === "Entradas");
+  ok("I8  cabecalho neutro nao produz palpite",
+    sugerirPapel({ nome: "planilha1.xlsx", cabecalhos: ["Data", "Valor"] }) === null);
+
+  ok("I9  a frase diz PARECE e pede confirmacao",
+    (fraseDaSugestao("Entradas") ?? "").includes("Parece") &&
+      /[Cc]onfirme/.test(fraseDaSugestao("Entradas") ?? ""));
+  ok("I10 sem palpite, nao ha frase", fraseDaSugestao(null) === null);
+
+  // A razao de ser deste modulo: ele NAO pode chamar IA. `papel` decide
+  // qual planilha o agente soma — e isso e autoridade, um passo antes do
+  // numero que `BUSINESS_RULES` proibe vir de IA.
+  ok("I11 zero IA: sem provider, sem gateway, sem rede",
+    !/anthropic|google|openai|genai|fetch\s*\(|ai-gateway/i.test(fonte));
+  ok("I12 e zero banco",
+    !/supabase|getSupabaseServidor|createClient/i.test(fonte));
+  ok("I13 normalizar tira acento e pontuacao",
+    normalizar("Saídas / 2026!") === "saidas 2026");
+  ok("I14 ANCORA: a sonda de sugestao roda de verdade",
+    typeof sugerirPapel({ nome: "x" }) === "object" ||
+      sugerirPapel({ nome: "entrada" }) === "Entradas");
+}
+
+// ─── J. O PATCH de metadado ───────────────────────────────────────────
+
+secao("J. Corrigir o metadado e estreito, e escopado no banco");
+
+{
+  const rota = codigo("app/api/agentes/[agenteId]/fontes/[fonteId]/route.ts");
+  const repo = codigo("lib/agentes/fontes/repositorio.ts");
+
+  ok("J1  a rota tem PATCH e DELETE, e nada mais",
+    /export async function PATCH\(/.test(rota) &&
+      /export async function DELETE\(/.test(rota) &&
+      !/export async function (GET|PUT|POST)\(/.test(rota));
+  ok("J2  a allowlist e de TRES campos",
+    /CAMPOS_EDITAVEIS = new Set\(\["nome", "papel", "descricao"\]\)/.test(rota));
+  ok("J3  chave fora da allowlist condena o pedido inteiro",
+    /if \(!CAMPOS_EDITAVEIS\.has\(c\)\) return \{ ok: false, erro: "Alteração inválida\." \}/
+      .test(rota));
+  ok("J4  escopo, vinculo, hash e caminho NAO sao editaveis",
+    !/corpo\.(escopo|agente_?[Ii]d|conversa_?[Ii]d|hash\w*|caminho\w*|ativo|tipo|mime)/
+      .test(rota));
+  ok("J5  o dono e o agente vem da porta, nunca do corpo",
+    /porta\.userId/.test(rota) && /porta\.agenteId/.test(rota) &&
+      !/corpo\.userId|corpo\.agenteId/.test(rota));
+  ok("J6  nome VAZIO e recusado — o arquivo precisa de nome",
+    /if \(nome === "" \|\| nome\.length > MAX_NOME\)/.test(rota));
+  ok("J7  papel/descricao vazios viram null, explicitamente",
+    /campos\.papel = papel === "" \? null : papel/.test(rota) &&
+      /campos\.descricao = d === "" \? null : d/.test(rota));
+  ok("J8  tipo errado e RECUSADO, nao convertido",
+    /erro: "papel inválido\."/.test(rota) && /erro: "nome inválido\."/.test(rota));
+
+  // O que protege de verdade: o escopo vai na PROPRIA instrucao.
+  ok("J9  o UPDATE amarra dono, id, AGENTE e ativo na propria query",
+    /\.eq\("user_id", userId\)[\s\S]{0,200}\.eq\("agente_id", vinculo\.agenteId\)[\s\S]{0,80}\.eq\("ativo", true\)/
+      .test(repo));
+  ok("J10 e o objeto do UPDATE e montado campo a campo, sem spread",
+    /if \(campos\.nome !== undefined\) mudanca\.nome = campos\.nome/.test(repo) &&
+      !/\.update\(\{ \.\.\.campos/.test(repo));
+  ok("J11 nada a alterar nao gasta escrita",
+    /if \(Object\.keys\(mudanca\)\.length === 1\) return null/.test(repo));
+  ok("J12 a resposta nao publica caminho de storage",
+    !/caminhoObjeto|caminho_objeto/.test(
+      rota.slice(rota.indexOf("fonte: {"), rota.indexOf("}, 200)"))));
+}
+
+// ─── K. A rota de inspecao ────────────────────────────────────────────
+
+secao("K. Inspecionar e do DONO, e reusa o inspetor do modelo");
+
+{
+  const rota = codigo("app/api/agentes/[agenteId]/fontes/[fonteId]/inspecao/route.ts");
+
+  ok("K1  reusa `executarInspecionar` — nao ha segunda inspecao",
+    /executarInspecionar\(/.test(rota));
+  ok("K2  e nao reimplementa leitura de planilha",
+    !/lerXlsx|lerCsv|cabecalhos\(|larguraDaAba/.test(rota));
+  ok("K3  registra a MESMA porta de arquivo do runtime",
+    /criarFonteDeArquivoDasSources\(\{/.test(rota) &&
+      /registrarFonteDeArquivo\(/.test(rota));
+  ok("K4  com o escopo da SESSAO e do agente da rota",
+    /userId: porta\.userId/.test(rota) && /agenteId: porta\.agenteId/.test(rota));
+
+  // A decisao de nao passar pelo guard e deliberada, e o motivo importa:
+  // o guard cerca o MODELO. Exigir permissao para o dono ver o proprio
+  // upload inverteria a cerca.
+  ok("K5  NAO chama o guard nem `executarFuncao`",
+    !/autorizarFuncao|executarFuncao|resolverFuncao/.test(rota));
+  ok("K6  e NAO escreve auditoria de Funcao",
+    !/agente_funcao_chamadas|registrarChamada|abrirChamada/.test(rota));
+  ok("K7  confere que o arquivo e DESTE agente antes de abrir",
+    /obterAtiva\([\s\S]{0,80}\{ agenteId: porta\.agenteId \}\)/.test(rota));
+  ok("K8  tipo nao inspecionavel responde 415, nao estrutura vazia",
+    /TIPOS_INSPECIONAVEIS/.test(rota) && /415/.test(rota));
+  ok("K9  recusa de dominio repassa o codigo, sem inventar frase",
+    /codigo: typeof codigo === "string" \? codigo : null/.test(rota) &&
+      /422/.test(rota));
+  ok("K10 caminho de storage nao trafega",
+    !/caminhoObjeto|caminho_objeto/.test(rota));
+  ok("K11 o fileId e o id da fonte, vindo da ROTA",
+    /fileId: params\.fonteId/.test(rota));
+}
+
+// ─── L. O transporte manda o proposito ────────────────────────────────
+
+secao("L. O upload passa a levar `papel` — o buraco que isto fecha");
+
+{
+  const t = codigo("lib/ia/agentes-http.ts");
+  const corpoUpload = (() => {
+    const i = t.indexOf("export async function enviarFonteDoAgente(");
+    return t.slice(i, t.indexOf("\nexport ", i + 10));
+  })();
+
+  ok("L1  `enviarFonteDoAgente` aceita proposito",
+    /proposito\?: \{/.test(corpoUpload));
+  ok("L2  e o manda no FormData",
+    /formulario\.append\("papel", proposito\.papel\)/.test(corpoUpload) &&
+      /formulario\.append\("descricao", proposito\.descricao\)/.test(corpoUpload));
+  ok("L3  campo vazio NAO e enviado",
+    /if \(proposito\?\.papel\)/.test(corpoUpload));
+  ok("L4  e continua sem Content-Type manual (multipart)",
+    !/headers\s*:/.test(corpoUpload));
+
+  ok("L5  a leitura de inspecao existe e e GET puro",
+    /export async function inspecionarArquivoDoAgente\(/.test(t));
+  ok("L6  a escrita de metadado e PATCH, com corpo chave a chave",
+    /export async function atualizarArquivoDoAgente\(/.test(t) &&
+      /corpoEnviado\.papel = campos\.papel/.test(t) &&
+      !/JSON\.stringify\(campos\)/.test(t));
+}
+
+// ─── M. A tela de Arquivos ────────────────────────────────────────────
+
+secao("M. Subir, INSPECIONAR, e so depois perguntar");
+
+{
+  const arq = codigo("components/ia/factory/ArquivosDoAgente.tsx");
+  const wiz = codigo("components/ia/factory/Wizard.tsx");
+  const chat = codigo("components/ia/factory/ChatDoAgente.tsx");
+  // Cada `secao` e um bloco proprio: `work` da secao G nao alcanca aqui.
+  const work = codigo("components/ia/factory/Workspace.tsx");
+
+  ok("M1  a tela nao faz rede nem monta endereco de API",
+    !/\bfetch\s*\(|["'`]\/api\//.test(arq));
+  ok("M2  ela usa o transporte unico",
+    /from "@\/lib\/ia\/agentes-http"/.test(arq));
+  ok("M3  a ordem e subir -> inspecionar -> perguntar",
+    arq.indexOf("enviarFonteDoAgente") < arq.indexOf("abrirProposito(r.dados.id)"));
+  ok("M4  a pergunta do proposito existe, com essas palavras",
+    /O que este arquivo representa\?/.test(arq));
+  ok("M5  e a de COMO usar tambem",
+    /Como este agente deve usar este arquivo\?/.test(arq));
+  ok("M6  a sugestao vem do modulo puro, nao de IA",
+    /sugerirPapel\(/.test(arq) && !/anthropic|openai|gemini/i.test(arq));
+  ok("M7  o que a pessoa ja escreveu vence a sugestao",
+    /r\.dados\.papel \?\? palpite \?\? ""/.test(arq));
+  ok("M8  a inspecao mostra abas, linhas e colunas",
+    /aba\.linhas/.test(arq) && /aba\.colunas/.test(arq) && /aba\.cabecalhos/.test(arq));
+  ok("M9  e repassa os avisos do inspetor",
+    /inspecao\.avisos\.map/.test(arq));
+  ok("M10 arquivo sem papel e SINALIZADO — nao passa em silencio",
+    /o agente não saberá diferenciar/.test(arq));
+  ok("M11 instrucao de uso nao vira permissao",
+    /Não dá nem tira permissão/.test(arq));
+
+  // §30/§36: a palavra "fonte" sai da experiencia principal. No banco a
+  // tabela segue `agente_fontes`, e os IDENTIFICADORES do codigo
+  // (`listarFontesDoAgente`, `painelFontes`) seguem com ela — o que muda
+  // e o que a pessoa LE.
+  //
+  // A primeira versao deste assert varria `>...<` e casava codigo:
+  // acusou `([]);` e `(conversaId);`. Rotulo se cobra por NOME.
+  const ROTULOS_APOSENTADOS: readonly string[] = [
+    "Fontes {fontes.length}",
+    'titulo="Fontes"',
+    "Nenhuma fonte ainda.",
+    "Adicionar como fonte do agente",
+    'titulo: "Fontes"',
+    "+ Adicionar fonte",
+  ];
+  const ROTULOS_NOVOS: readonly string[] = [
+    "Arquivos {fontes.length}",
+    'titulo="Arquivos"',
+    "Nenhum arquivo ainda.",
+    "Manter neste agente",
+    'titulo: "Arquivos"',
+    "+ Adicionar arquivo",
+  ];
+  const TELAS = [arq, wiz, chat, work].join("  ");
+
+  const sobrando = ROTULOS_APOSENTADOS.filter((r) => TELAS.includes(r));
+  ok("M12 nenhum rotulo aposentado com a palavra fonte sobrou",
+    sobrando.length === 0, sobrando.join(" | "));
+  const faltando = ROTULOS_NOVOS.filter((r) => !TELAS.includes(r));
+  ok("M12a e todos os rotulos novos estao presentes",
+    faltando.length === 0, faltando.join(" | "));
+  ok("M12b CONTROLE POSITIVO: a sonda acusaria a reintroducao",
+    [...ROTULOS_APOSENTADOS].filter(
+      (r) => (TELAS + "  Fontes {fontes.length}").includes(r)).length === 1);
+  // A ancora prova que os QUATRO arquivos entraram na busca. A versao
+  // anterior afirmava que `ArquivosDoAgente` NAO aparecia — e aparece, no
+  // import do wizard. Uma ancora falsa e pior que ancora nenhuma: ela
+  // reprova codigo correto.
+  ok("M12c ANCORA: as quatro telas entraram na busca",
+    TELAS.length > 8000 &&
+      [arq, wiz, chat, work].every((f) => f.length > 500) &&
+      TELAS.includes("ArquivosDoAgente") &&
+      TELAS.includes("ChatDoAgente") &&
+      TELAS.includes("Workspace"));
+  ok("M13 a etapa 7 se chama Arquivos",
+    /numero: 7, titulo: "Arquivos"/.test(wiz));
+  ok("M14 e o wizard delega a tela, sem duplicar o fluxo",
+    /<ArquivosDoAgente/.test(wiz) && !/enviarFonteDoAgente/.test(wiz));
+  ok("M15 o chat avisa quando o arquivo fica no agente sem proposito",
+    /setPendenteDeProposito/.test(chat) &&
+      /Configurar → Arquivos/.test(chat));
+  ok("M16 anexo de conversa NAO exige proposito",
+    /if \(escopo === "agente"\) setPendenteDeProposito/.test(chat));
 }
 
 // ─── Placar ───────────────────────────────────────────────────────────

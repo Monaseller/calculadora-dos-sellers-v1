@@ -124,6 +124,7 @@ export function ChatDoAgente({
   const [fontes, setFontes] = useState<readonly FonteDoAgenteUI[]>([]);
   const [anexos, setAnexos] = useState<readonly AnexoDaConversaUI[]>([]);
   const [painelFontes, setPainelFontes] = useState(false);
+  const [pendenteDeProposito, setPendenteDeProposito] = useState<string | null>(null);
   const [provenienciaDe, setProvenienciaDe] = useState<MensagemDoChatUI | null>(null);
   const fimRef = useRef<HTMLDivElement | null>(null);
 
@@ -207,6 +208,13 @@ export function ChatDoAgente({
       setErro(frasePorEstado(r, "Não foi possível enviar o arquivo."));
       return;
     }
+    // Anexo de conversa nao precisa de proposito: ele vale para esta
+    // conversa, e o contexto dela ja diz para que serve. Arquivo que FICA
+    // no agente precisa — e sem `papel` o agente nao consegue distinguir
+    // duas planilhas parecidas. O chat nao pergunta aqui (quem anexa no
+    // meio de uma conversa quer anexar, nao preencher formulario); ele
+    // avisa onde a pergunta e feita.
+    if (escopo === "agente") setPendenteDeProposito(r.dados.nome);
     await carregarFontes(conversa);
   }
 
@@ -248,12 +256,22 @@ export function ChatDoAgente({
         marginBottom: ESPACO.md, flexWrap: "wrap",
       }}>
         <Botao tom="sutil" onClick={() => setPainelFontes(true)}>
-          Fontes {fontes.length}
+          Arquivos {fontes.length}
         </Botao>
         {anexos.length > 0 && (
           <Etiqueta tom="info">{anexos.length} nesta conversa</Etiqueta>
         )}
       </div>
+
+      {pendenteDeProposito !== null && (
+        <div style={{ marginBottom: ESPACO.md }}>
+          <Aviso tom="info">
+            <strong>{pendenteDeProposito}</strong> foi adicionado a este agente. Descreva o que
+            ele representa em <strong>Configurar → Arquivos</strong>, senão o agente não conseguirá
+            diferenciá-lo de outros arquivos parecidos.
+          </Aviso>
+        </div>
+      )}
 
       <div style={{
         flex: 1, overflowY: "auto", display: "flex", flexDirection: "column",
@@ -407,7 +425,7 @@ export function ChatDoAgente({
                 color: CROMO.texto, fontSize: TAMANHO.corpo,
               }}
             >
-              Adicionar como fonte do agente
+              Manter neste agente
               <span style={{ display: "block", fontSize: TAMANHO.miudo, color: CROMO.textoFraco }}>
                 Fica disponível também nas próximas conversas.
               </span>
@@ -441,14 +459,14 @@ export function ChatDoAgente({
         </Botao>
       </div>
 
-      <PainelLateral aberto={painelFontes} titulo="Fontes" aoFechar={() => setPainelFontes(false)}>
+      <PainelLateral aberto={painelFontes} titulo="Arquivos" aoFechar={() => setPainelFontes(false)}>
         <div>
           <h3 style={{ fontSize: TAMANHO.corpo, color: CROMO.texto, margin: `0 0 ${ESPACO.sm}px` }}>
             Do agente
           </h3>
           {fontes.length === 0 && (
             <p style={{ fontSize: TAMANHO.miudo, color: CROMO.textoFraco, margin: 0 }}>
-              Nenhuma fonte ainda.
+              Nenhum arquivo ainda.
             </p>
           )}
           {fontes.map((f) => (
