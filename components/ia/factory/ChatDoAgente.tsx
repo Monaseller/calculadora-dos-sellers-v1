@@ -45,6 +45,26 @@ import {
  * O §35/§44 pede isto, e a razao e concreta: "permissao_ausente" nao diz
  * a ninguem o que fazer, e "Configure as permissoes" diz.
  */
+/**
+ * A frase do AVISO, por categoria de bloqueio — F7b.4.8.1 §12.
+ *
+ * Cada uma indica o que a PESSOA pode fazer. A de conexao nao afirma que
+ * ela nao conectou — pode ter conectado, e o que houve foi nao termos
+ * conseguido confirmar o acesso agora.
+ *
+ * `interno` nao pede acao nenhuma: o problema nao e dela.
+ */
+const FRASES_DE_BLOQUEIO: Record<string, string> = {
+  permissao:
+    "Esta ação não está liberada para este agente. Ajuste as permissões na " +
+    "configuração dele.",
+  conexao:
+    "Não consegui usar a sua conta conectada nesta consulta. Confira a loja " +
+    "escolhida para este agente e tente de novo.",
+  fonte: "Adicione a fonte de dados que esta consulta precisa.",
+  interno: "Não foi possível concluir agora. Tente de novo em instantes.",
+};
+
 const FRASES: Record<string, string> = {
   bloqueado_por_ferramenta:
     "Não consegui concluir porque uma ferramenta ou fonte necessária não está disponível para este agente.",
@@ -490,7 +510,16 @@ export function ChatDoAgente({
     // mostrada — junto com o motivo pelo qual parou ali.
     if (r.dados.motivo !== null && r.dados.motivo !== "concluido") {
       setCodigoTecnico(r.dados.motivo);
-      setErro(frase(r.dados.motivo) ?? "O agente não conseguiu concluir.");
+      // ── §12: o aviso concorda com a mensagem do agente ────────────
+      //
+      // `bloqueado_por_ferramenta` tinha UMA frase, e ela dizia "uma
+      // ferramenta necessaria nao esta disponivel" para quem tinha a
+      // ferramenta, a permissao e a loja — foi o que o Rodrigo leu. A
+      // categoria vem do servidor e diz qual das quatro situacoes e.
+      const porCategoria = r.dados.categoriaDoBloqueio === null
+        ? null
+        : FRASES_DE_BLOQUEIO[r.dados.categoriaDoBloqueio] ?? null;
+      setErro(porCategoria ?? frase(r.dados.motivo) ?? "O agente não conseguiu concluir.");
     }
   }
 

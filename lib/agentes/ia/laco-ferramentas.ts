@@ -42,9 +42,12 @@ import type {
   PedidoDeFerramenta,
   RespostaDeFerramenta,
 } from "@/lib/agentes/ia/ferramentas";
+import { semCamposNulos } from "@/lib/agentes/ia/argumentos-do-modelo";
 import {
-  MENSAGEM_DE_BLOQUEIO,
+  MENSAGEM_POR_CATEGORIA,
+  categoriaDoBloqueio,
   classificarFalha,
+  type CategoriaDeBloqueio,
 } from "@/lib/agentes/ia/falhas-de-ferramenta";
 import type { ProvedorIA } from "@/lib/ai-gateway/tipos";
 
@@ -182,8 +185,19 @@ export interface ResultadoDoLaco {
    * nao chegou a ser chamado de novo. E essa a diferenca entre pedir ao
    * modelo que nao estime e nao lhe dar onde escrever.
    */
-  readonly bloqueio: { readonly funcaoId: string; readonly desfecho: string;
-    readonly codigo: string | null } | null;
+  readonly bloqueio: {
+    readonly funcaoId: string;
+    readonly desfecho: string;
+    readonly codigo: string | null;
+    /**
+     * POR QUE fechou, em categoria — F7b.4.8.1 §12.
+     *
+     * E o que a tela pode mostrar. `codigo` continua aqui para auditoria
+     * e log, e NAO deve subir para o usuario: ele e informacao de
+     * operador, e detalhar da pistas sobre a conta de outra pessoa.
+     */
+    readonly categoria: CategoriaDeBloqueio;
+  } | null;
   readonly uso: {
     readonly provedor: ProvedorIA | null;
     readonly modelo: string | null;
@@ -233,7 +247,17 @@ async function executarUmPedido(
     userId,
     agenteId,
     funcaoId: pedido.nome,
-    argumentos: pedido.argumentos,
+    // ── F7b.4.8.1: `null` de campo opcional nao e valor ───────────
+    //
+    // MEDIDO: a OpenAI manda `{periodo, de: null, ate: null}` para uma
+    // ferramenta com campos opcionais, em vez de omitir as chaves. Os
+    // validadores testavam presenca com `!== undefined`, entao `null`
+    // contava como preenchido e a chamada certa era recusada.
+    //
+    // Aqui, e nao dentro de cada validador: este e o unico lugar onde um
+    // pedido do MODELO vira pedido de EXECUCAO, e a convencao e do
+    // provedor, nao da Funcao. Ver `argumentos-do-modelo.ts`.
+    argumentos: semCamposNulos(pedido.argumentos),
     definicoesExternas,
     // `pedido.id` e o id que o PROVEDOR deu a esta chamada. E ele que
     // permite remontar o dialogo depois: todo provedor exige que o
@@ -260,9 +284,35 @@ async function executarUmPedido(
   }
 
   const frase = RECUSAS[r.tipo] ?? RECUSAS.indisponivel;
+  const codigoDoErro = (r as { codigo?: string }).codigo ?? null;
+
+  /**
+   * O que o MODELO le quando a ferramenta recusou.
+   *
+   * ── Por que o codigo entra, e so as vezes ─────────────────────────
+   *
+   * Marcar um codigo como "corrigivel" nao serve de nada se a recusa que
+   * chega ao modelo for "a ferramenta nao conseguiu concluir". Foi o que
+   * o Rodrigo viu acontecer duas vezes seguidas: o modelo tentava, era
+   * recusado sem saber por que, e tentava igual.
+   *
+   * Entao a recusa CORRIGIVEL nomeia o codigo — `filtro_ambiguo` diz o
+   * que mudar; "nao conseguiu concluir" nao diz nada.
+   *
+   * E a recusa que FECHA o turno continua vaga, de proposito: ali o
+   * codigo e informacao de operador (`permissao_bloqueada`,
+   * `conexao_ausente`), e detalhar daria ao modelo — e a quem estiver
+   * lendo por cima do ombro — pistas sobre o que existe na conta de
+   * outra pessoa. Mesma razao registrada em `MENSAGEM_POR_CATEGORIA`.
+   */
+  const conteudoDaRecusa =
+    codigoDoErro !== null && classificarFalha(r.tipo, codigoDoErro) === "corrigivel"
+      ? `${frase} Motivo: ${codigoDoErro}. Corrija os argumentos e chame de novo.`
+      : frase;
+
   const aprovacaoId = (r as { aprovacaoId?: unknown }).aprovacaoId;
   return {
-    resposta: { id: pedido.id, conteudo: frase, erro: true },
+    resposta: { id: pedido.id, conteudo: conteudoDaRecusa, erro: true },
     passo: {
       funcaoId: pedido.nome,
       desfecho: r.tipo,
@@ -365,13 +415,19 @@ export async function conversarComFerramentas(
       (p) => p.desfecho !== "sucesso" && classificarFalha(p.desfecho, p.codigo) === "fecha_o_turno"
     );
     if (fechou !== undefined) {
+      // §12: a frase depende da CATEGORIA. Uma frase so dizia "a
+      // ferramenta nao esta disponivel" para quem tinha a ferramenta.
+      const categoria = categoriaDoBloqueio(fechou.desfecho, fechou.codigo);
       return {
         // Escrito pelo RUNTIME. Nao veio do modelo e nao passou por ele.
-        texto: MENSAGEM_DE_BLOQUEIO,
+        texto: MENSAGEM_POR_CATEGORIA[categoria],
         passos,
         mensagens,
         motivo: "bloqueado_por_ferramenta",
-        bloqueio: { funcaoId: fechou.funcaoId, desfecho: fechou.desfecho, codigo: fechou.codigo },
+        bloqueio: {
+          funcaoId: fechou.funcaoId, desfecho: fechou.desfecho,
+          codigo: fechou.codigo, categoria,
+        },
         uso: { provedor, modelo, tokensEntrada, tokensSaida, tempoMs, turnos },
       };
     }

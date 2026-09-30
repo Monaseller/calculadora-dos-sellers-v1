@@ -108,6 +108,24 @@ export const CODIGOS_CORRIGIVEIS = Object.freeze([
   "filtros_invalidos",
   "operador_invalido",
   "file_id_ausente",
+  // ── F7b.4.8.1: os codigos de FILTRO ────────────────────────────
+  //
+  // Faltavam, e foi isso que matou o turno do Rodrigo. A Funcao existia,
+  // a permissao era `automatico`, a loja estava vinculada — e a chamada
+  // foi recusada por ARGUMENTO. Como o codigo nao estava nesta lista, o
+  // default fail-closed fechou o turno, e o modelo nunca soube o que
+  // corrigir: recebeu a recusa e nao recebeu o turno seguinte.
+  //
+  // Os cinco descrevem a MESMA coisa — "os argumentos que voce mandou
+  // nao servem" —, que e a definicao de corrigivel. Nenhum diz nada sobre
+  // permissao, credencial ou fonte, e por isso nenhum e licenca para o
+  // modelo responder de cabeca: a recusa volta para ele, e ele chama de
+  // novo com o argumento certo.
+  "filtro_ausente",
+  "filtro_ambiguo",
+  "data_invalida",
+  "periodo_invertido",
+  "status_invalido",
 ] as const);
 
 export type ClasseDeFalha = "fecha_o_turno" | "corrigivel";
@@ -144,9 +162,95 @@ export function classificarFalha(
  * sao informacao de operador, e detalhar para o usuario final daria
  * pistas sobre o que existe na conta de outra pessoa.
  */
-export const MENSAGEM_DE_BLOQUEIO =
-  "Nao consigo concluir porque a ferramenta ou fonte necessaria nao esta " +
-  "disponivel para este agente. Nao vou estimar o resultado.";
+/**
+ * POR QUE o turno fechou — F7b.4.8.1 §12.
+ *
+ * ── O problema ──────────────────────────────────────────────────────
+ *
+ * Tudo que fechava o turno recebia UMA frase: "a ferramenta ou fonte
+ * necessaria nao esta disponivel para este agente". Ela e verdadeira para
+ * permissao negada e para fonte ausente, e e FALSA para uma conta
+ * conectada que o sistema nao conseguiu conferir agora — o Rodrigo tinha
+ * a ferramenta, a permissao e a loja, e leu que nao tinha.
+ *
+ * Quatro situacoes com acoes diferentes do dono nao podem ter uma frase
+ * so:
+ *
+ *   permissao   o dono decide o nivel — e acao dele, na configuracao
+ *   conexao     a conta existe e nao serviu agora — pode ser transitorio
+ *   fonte       falta arquivo/fonte — o dono adiciona
+ *   interno     nao e do dono; e nosso
+ *
+ * `capacidade ausente` NAO esta aqui de proposito: ela nao chega a fechar
+ * turno, porque o cartao de capacidade a resolve antes (F7b.4.6).
+ *
+ * ── O que continua igual ────────────────────────────────────────────
+ *
+ * A classificacao de FECHAR nao mudou: `classificarFalha` continua sendo
+ * a autoridade e continua fail-closed. Isto aqui so escolhe a FRASE do
+ * que ja foi decidido fechar — e nenhuma delas cita codigo, `funcao_id`
+ * nem nome de coluna, pelo mesmo motivo de antes.
+ */
+export const CATEGORIAS_DE_BLOQUEIO = Object.freeze([
+  "permissao", "conexao", "fonte", "interno",
+] as const);
+export type CategoriaDeBloqueio = (typeof CATEGORIAS_DE_BLOQUEIO)[number];
+
+/** Codigos do guard que falam de PERMISSAO. */
+const CODIGOS_DE_PERMISSAO: readonly string[] = Object.freeze([
+  "permissao_ausente", "permissao_bloqueada", "funcao_inexistente",
+]);
+
+/** Codigos que falam da CONEXAO com a conta do marketplace. */
+const CODIGOS_DE_CONEXAO: readonly string[] = Object.freeze([
+  "conexao_ausente", "conexao_invalida", "credencial_ausente", "nao_autorizado",
+]);
+
+/**
+ * A categoria de UM bloqueio.
+ *
+ * `interno` e o default, e isso e deliberado: um codigo que ninguem
+ * classificou NAO deve ser apresentado como culpa do dono. Dizer "falta
+ * permissao" sobre um bug nosso faria a pessoa procurar uma configuracao
+ * que esta correta.
+ */
+export function categoriaDoBloqueio(
+  desfecho: string,
+  codigo?: string | null
+): CategoriaDeBloqueio {
+  if (codigo != null && CODIGOS_DE_CONEXAO.includes(codigo)) return "conexao";
+  if (codigo != null && CODIGOS_DE_PERMISSAO.includes(codigo)) return "permissao";
+  if (codigo != null && (CODIGOS_DE_FONTE_QUE_FECHAM as readonly string[]).includes(codigo)) {
+    return "fonte";
+  }
+  // `negado` sem codigo reconhecido ainda e decisao do GUARD, e guard so
+  // nega por permissao ou conexao. Permissao e a leitura conservadora:
+  // ela manda a pessoa para a tela onde ela de fato decide.
+  if (desfecho === "negado") return "permissao";
+  return "interno";
+}
+
+/**
+ * A frase de cada categoria.
+ *
+ * Nenhuma promete o que a CDS nao sabe. A de conexao em especial NAO diz
+ * "voce nao conectou": o dono pode ter conectado, e o que aconteceu foi
+ * nao termos conseguido confirmar o acesso agora.
+ */
+export const MENSAGEM_POR_CATEGORIA: Readonly<Record<CategoriaDeBloqueio, string>> =
+  Object.freeze({
+    permissao:
+      "Nao consigo concluir porque esta acao nao esta liberada para este agente. " +
+      "Nao vou estimar o resultado.",
+    conexao:
+      "Nao consegui usar a sua conta conectada para esta consulta agora. " +
+      "Nao vou estimar o resultado.",
+    fonte:
+      "Nao consigo concluir porque a fonte de dados necessaria nao esta " +
+      "disponivel para este agente. Nao vou estimar o resultado.",
+    interno:
+      "Nao consegui concluir esta consulta agora. Nao vou estimar o resultado.",
+  });
 
 /**
  * Instrucao acrescentada ao contexto do agente.

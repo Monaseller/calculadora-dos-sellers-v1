@@ -1037,7 +1037,20 @@ export async function executarFuncao(
   if (validacao.tipo === "invalida") {
     // `envelopeCode` preserva o codigo de DOMINIO (`janela_excedida`); a
     // categoria de infraestrutura fica so na Tool Call.
-    return erroSemExecucao(snapshot, "entrada_invalida", validacao.codigo, MSG_ENTRADA, false);
+    //
+    // ── §20: a MENSAGEM nomeia a regra que recusou ─────────────────
+    //
+    // Antes ela era generica e `codigo_desfecho` guardava so a categoria
+    // `entrada_invalida`. Diagnosticar o bug do Rodrigo exigiu ler a
+    // fonte de tres modulos para descobrir QUAL regra havia recusado —
+    // a auditoria sozinha nao dizia. Agora diz.
+    //
+    // O codigo de dominio e nosso e descreve a FORMA do argumento
+    // (`filtro_ambiguo`, `periodo_invalido`). Nao ha nele nome de conta,
+    // de loja, de coluna nem valor — nada que vaze de quem for.
+    return erroSemExecucao(
+      snapshot, "entrada_invalida", validacao.codigo,
+      `${MSG_ENTRADA} Regra: ${validacao.codigo}.`, false);
   }
 
   // ── 8. Abertura ───────────────────────────────────────────────────

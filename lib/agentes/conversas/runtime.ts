@@ -119,6 +119,13 @@ export interface EntradaDoTurno {
 export type ResultadoDoTurno =
   | {
       readonly ok: true;
+      /**
+       * POR QUE o turno fechou, quando fechou — F7b.4.8.1 §12.
+       *
+       * `null` quando nao fechou por bloqueio. Sem o codigo tecnico: ele
+       * fica na auditoria, que e o lugar dele.
+       */
+      readonly categoriaDoBloqueio: string | null;
       readonly mensagemDoUsuario: Mensagem;
       readonly resposta: Mensagem;
       readonly motivo: ResultadoDoLaco["motivo"];
@@ -515,6 +522,11 @@ export async function responderNaConversa(
 
   return {
     ok: true,
+    // §12: POR QUE o turno fechou, em categoria. `codigo` fica de fora
+    // de proposito — ele e informacao de operador, e detalhar para o
+    // usuario final da pistas sobre o que existe na conta de outra
+    // pessoa. A categoria diz o suficiente para a frase certa.
+    categoriaDoBloqueio: saida.bloqueio?.categoria ?? null,
     mensagemDoUsuario: gravadaDoUsuario,
     resposta,
     motivo: saida.motivo,
