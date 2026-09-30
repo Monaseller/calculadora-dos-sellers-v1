@@ -19,7 +19,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
-  capacidadeFaltanteDeSkill, capacidadesPedidasNoTexto,
+  capacidadeFaltanteDeSkill, capacidadesPedidasNoTexto, fonteNomeadaNoTexto,
 } from "../lib/agentes/factory/capacidade-faltante";
 import { validarParaAtivacao } from "../lib/agentes/factory/ativacao";
 import {
@@ -438,6 +438,63 @@ secao("I. `null` de campo opcional nao e valor — a causa do bug");
     JSON.stringify(semCamposNulos([1, null])) === JSON.stringify([1, null]));
   ok("I7  e o que nao e objeto tambem",
     semCamposNulos("texto") === "texto" && semCamposNulos(null) === null);
+}
+
+// ─── J. A fonte nomeada manda — F7b.4.8.2 §3/§8/§9 ──────────────────
+
+secao("J. A fonte nomeada manda — §3/§8/§9");
+
+{
+  // As cinco frases do §26. A primeira e a do Rodrigo.
+  for (const frase of [
+    "Quanto vendi esta semana no Mercado Livre?",
+    "quanto vendi hoje no mercado livre?",
+    "me fale o faturamento da semana no ML",
+    "quantos pedidos tive no Mercado Livre?",
+    "vendi algo pelo MELI ontem?",
+  ]) {
+    ok(`J1  "${frase.slice(0, 32)}..." nomeia o Mercado Livre`,
+      fonteNomeadaNoTexto(frase) === "mercadolivre-perguntas",
+      String(fonteNomeadaNoTexto(frase)));
+  }
+
+  // §15 mensagem B: sem fonte nomeada, nada e travado.
+  for (const frase of [
+    "consulte as vendas",
+    "Quanto vendi esta semana?",
+    "qual foi o faturamento do mes passado?",
+  ]) {
+    ok(`J2  "${frase.slice(0, 30)}..." NAO nomeia fonte`,
+      fonteNomeadaNoTexto(frase) === null, String(fonteNomeadaNoTexto(frase)));
+  }
+
+  // ── A fronteira de palavra, e o controle que a justifica ──────────
+  //
+  // `ml` e curto. Sem fronteira, ele casaria dentro de `html`, `xml` e
+  // `500ml` — e um gatilho de marketplace disparando em "500ml de tinta"
+  // ofereceria o Mercado Livre a quem falava de embalagem.
+  for (const frase of [
+    "exporte em html",
+    "o arquivo xml esta corrompido",
+    "comprei um frasco de 500ml",
+    "preciso de 250 ml de tinta branca",
+  ]) {
+    ok(`J3  CONTROLE: "${frase.slice(0, 28)}..." NAO nomeia marketplace`,
+      fonteNomeadaNoTexto(frase) === null, String(fonteNomeadaNoTexto(frase)));
+  }
+  ok("J4  ANCORA: `ml` isolado nomeia, entao a fronteira nao matou o gatilho",
+    fonteNomeadaNoTexto("vendas no ML") === "mercadolivre-perguntas");
+
+  // §17: prova NEGATIVA de candidatos para a frase nomeada.
+  const pedidas = capacidadesPedidasNoTexto("Quanto vendi esta semana no Mercado Livre?");
+  ok("J5  a frase nomeada resolve para UM pack",
+    pedidas.length === 1 && pedidas[0]?.packId === "mercadolivre-perguntas",
+    pedidas.map((p) => p.packId).join(","));
+  ok("J6  §17: `vendas` — ZERO candidatos",
+    !pedidas.some((p) => p.packId === "vendas"));
+  ok("J7  CONTROLE: sem a fonte nomeada, `vendas` volta a aparecer",
+    capacidadesPedidasNoTexto("Quanto vendi esta semana?")
+      .some((p) => p.packId === "vendas"));
 }
 
 console.log(`\nPASS ${pass}   FAIL ${fail}`);

@@ -348,18 +348,33 @@ export const DECLARACOES: Readonly<Record<string, { descricao: string; schemaEnt
         "Mande `periodo` com o nome do periodo (esta_semana, mes_passado...) e a CDS " +
         "resolve as datas no fuso de Sao Paulo — nao calcule datas de cabeca. Somente " +
         "leitura: nao altera anuncio, nao cancela e nao responde nada.",
+      // ── F7b.4.8.2: SO `periodo`, e OBRIGATORIO ────────────────────
+      //
+      // O schema oferecia `periodo`, `de` e `ate` com `required: []`, e
+      // dizia "use um ou o outro" apenas numa descricao. MEDIDO no agente
+      // real do Rodrigo: a OpenAI mandou os dois, e o validador recusou
+      // com `filtro_ambiguo` — a auditoria registrou
+      // "Regra: filtro_ambiguo" as 20:32 de 2026-09-30.
+      //
+      // Descricao nao e contrato. Com um caminho so, o argumento ambiguo
+      // deixa de ser possivel — e `required` fecha a outra metade: `{}`
+      // nao chega mais como `filtro_ausente`.
+      //
+      // Datas explicitas continuam valendo no VALIDADOR, para quem nao e
+      // modelo. O que saiu foi a oferta ao modelo: quem resolve periodo e
+      // a CDS, e ele nunca precisou calcular data nenhuma.
       schemaEntrada: Object.freeze({
         type: "object",
         properties: {
           periodo: {
             type: "string",
             enum: ["hoje", "ontem", "esta_semana", "semana_passada", "este_mes", "mes_passado", "este_ano"],
-            description: "Use este campo, ou o par de datas — nunca os dois.",
+            description:
+              "O periodo pedido. A CDS resolve as datas no fuso de Sao Paulo — " +
+              "nao calcule datas.",
           },
-          de: { type: "string", description: "Opcional. AAAA-MM-DD. So com `ate`." },
-          ate: { type: "string", description: "Opcional. AAAA-MM-DD, inclusivo." },
         },
-        required: [],
+        required: ["periodo"],
         additionalProperties: false,
       }),
     }),

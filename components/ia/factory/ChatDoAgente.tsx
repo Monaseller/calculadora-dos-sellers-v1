@@ -105,8 +105,11 @@ function frasePorEstado(r: RespostaDaFactory<unknown>, padrao: string): string {
  * runtime; isto e leitura.
  */
 const DESFECHOS_DE_BLOQUEIO = [
+  // F7b.4.8.2: `nome_invalido` SAIU, junto com o runtime. Pedir uma
+  // ferramenta que nao existe passou a ser erro corrigivel — o modelo
+  // escolhe outra —, e nao um fechamento que a tela precise reconhecer.
   "negado", "aguardando_aprovacao", "aprovacao_indisponivel",
-  "indisponivel", "falha_auditoria", "nome_invalido",
+  "indisponivel", "falha_auditoria",
 ];
 
 /**

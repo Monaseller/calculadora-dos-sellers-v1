@@ -64,7 +64,10 @@ const GATILHOS: Readonly<Record<string, readonly string[]>> = Object.freeze({
     "vendas", "vendi", "faturamento", "faturei", "pedidos", "receita",
   ],
   "mercadolivre-perguntas": [
-    "mercado livre", "mercadolivre", "meli",
+    // `ml` e `meli` sao como as pessoas escrevem de verdade — o §26 traz
+    // "me fale o faturamento da semana no ML" como frase obrigatoria. Os
+    // dois sao curtos, e `contemTermo` exige fronteira de palavra neles.
+    "mercado livre", "mercadolivre", "meli", "ml",
     "perguntas", "pergunta do comprador", "duvidas dos clientes",
   ],
 });
@@ -87,7 +90,7 @@ const GATILHOS: Readonly<Record<string, readonly string[]>> = Object.freeze({
  * quem NOMEIA a fonte ja escolheu a fonte.
  */
 const GATILHOS_DE_MARKETPLACE: ReadonlySet<string> = new Set([
-  "mercado livre", "mercadolivre", "meli",
+  "mercado livre", "mercadolivre", "meli", "ml",
 ]);
 
 /**
@@ -115,6 +118,63 @@ const GATILHOS_DE_MARKETPLACE: ReadonlySet<string> = new Set([
 const FONTES_EXCLUIDAS_POR: Readonly<Record<string, readonly string[]>> = Object.freeze({
   "mercadolivre-perguntas": Object.freeze(["vendas"]),
 });
+
+/**
+ * Packs que respondem a MESMA pergunta — a familia de fonte.
+ *
+ * Derivada de `FONTES_EXCLUIDAS_POR`, nos DOIS sentidos, para nao existir
+ * uma segunda lista dizendo a mesma coisa ao contrario.
+ *
+ * ── O bug que isto corrige — §10 ────────────────────────────────────
+ *
+ * MEDIDO: "consulte as vendas", num agente cuja UNICA fonte de vendas era
+ * o Mercado Livre, devolvia o cartao "Preciso de uma ferramenta" com
+ * Vendas da CDS, HubSpot e Salesforce. Foi exatamente esse cartao que o
+ * Rodrigo viu.
+ *
+ * O agente ja tinha como responder. A subtracao comparava o pack PEDIDO
+ * com os que o agente tem, e `vendas` nao estava entre eles — mas Mercado
+ * Livre estava, e ele responde a mesma pergunta por outra fonte.
+ *
+ * Oferecer uma segunda fonte de vendas a quem ja tem uma nao e ajuda: e
+ * convidar o dono a trocar de fonte sem ter pedido.
+ */
+const FAMILIA_DE_FONTE: Readonly<Record<string, readonly string[]>> = Object.freeze(
+  (() => {
+    const familia: Record<string, string[]> = {};
+    for (const [pack, excluidos] of Object.entries(FONTES_EXCLUIDAS_POR)) {
+      for (const outro of excluidos) {
+        (familia[pack] ??= []).push(outro);
+        (familia[outro] ??= []).push(pack);
+      }
+    }
+    return familia;
+  })()
+);
+
+/**
+ * O pack da fonte que a pessoa NOMEOU, ou `null` — §3/§8.
+ *
+ * "no Mercado Livre" nao e uma pista: e a fonte escolhida. Enquanto ela
+ * estiver na frase, nenhuma outra pode ser oferecida como substituta —
+ * nem a base da CDS, nem HubSpot, nem Salesforce.
+ *
+ * `null` e o caso comum ("consulte as vendas"), e ali o comportamento
+ * antigo continua valendo: a CDS oferece as fontes que conhece e quem
+ * escolhe e o dono.
+ */
+export function fonteNomeadaNoTexto(texto: string): string | null {
+  const t = normalizar(texto);
+  for (const pack of TOOL_PACKS) {
+    const gatilhos = GATILHOS[pack.id];
+    if (gatilhos === undefined) continue;
+    for (const g of gatilhos) {
+      if (!GATILHOS_DE_MARKETPLACE.has(g)) continue;
+      if (contemTermo(t, g)) return pack.id;
+    }
+  }
+  return null;
+}
 
 /**
  * O termo com que se procura o MESMO conceito no catalogo externo.
@@ -146,6 +206,60 @@ function normalizar(t: string): string {
   return t.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
 }
 
+/**
+ * O texto contem o TERMO — com fronteira de palavra quando ele e curto.
+ *
+ * ── Por que a fronteira, e so para os curtos ────────────────────────
+ *
+ * O §26 exige reconhecer "ML" em "me fale o faturamento da semana no ML".
+ * Com `includes`, "ml" casaria dentro de `html`, `xml` e `500ml` — e um
+ * gatilho de marketplace disparando em "500ml de tinta" ofereceria o
+ * Mercado Livre para quem falava de embalagem.
+ *
+ * Os gatilhos longos ficam como estavam, por decisao: "planilha" precisa
+ * casar dentro de "planilhas", e exigir fronteira ali quebraria plural,
+ * que e como as pessoas escrevem.
+ *
+ * Quatro caracteres e o corte. Acima disso a colisao acidental deixa de
+ * ser realista; abaixo, ela e a regra — `aba` casava em "trabalho".
+ */
+const TAMANHO_QUE_EXIGE_FRONTEIRA = 4;
+
+/**
+ * Termos curtos que tambem sao UNIDADE DE MEDIDA.
+ *
+ * `ml` e Mercado Livre e tambem mililitro. O controle J3 pegou: com
+ * fronteira de palavra, "preciso de 250 ml de tinta" casava e oferecia o
+ * Mercado Livre a quem falava de embalagem.
+ *
+ * O que separa os dois e a QUANTIDADE antes: ninguem escreve "250 Mercado
+ * Livre", e todo mundo escreve "250 ml". Havendo numero na frente, o termo
+ * e unidade — nao fonte.
+ *
+ * Nao resolve tudo ("vendas em ml" continua ambiguo), e nao precisa: o
+ * pior desfecho e nao reconhecer a fonte nomeada, e ai vale o
+ * comportamento antigo — a CDS oferece as fontes que conhece e quem
+ * escolhe e o dono.
+ */
+const TERMOS_QUE_TAMBEM_SAO_UNIDADE: ReadonlySet<string> = new Set(["ml"]);
+
+function contemTermo(textoNormalizado: string, termo: string): boolean {
+  const t = normalizar(termo);
+  if (t.length > TAMANHO_QUE_EXIGE_FRONTEIRA) return textoNormalizado.includes(t);
+
+  // Fronteira por classe de caractere, e nao `\b`: `normalizar` ja tirou
+  // acento, entao sobra ASCII e a classe fica previsivel.
+  const escapado = t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (!new RegExp(`(^|[^a-z0-9])${escapado}([^a-z0-9]|$)`).test(textoNormalizado)) {
+    return false;
+  }
+  if (!TERMOS_QUE_TAMBEM_SAO_UNIDADE.has(t)) return true;
+
+  // Quantidade antes — colada (`500ml`) ou com espaco (`250 ml`) — e
+  // unidade de medida, e nao a fonte.
+  return !new RegExp(`[0-9]\\s*${escapado}([^a-z0-9]|$)`).test(textoNormalizado);
+}
+
 export interface CapacidadePedida {
   /** O id do pack que os gatilhos apontaram. */
   readonly packId: string;
@@ -170,7 +284,7 @@ export function capacidadesPedidasNoTexto(texto: string): readonly CapacidadePed
   for (const pack of TOOL_PACKS) {
     const gatilhos = GATILHOS[pack.id];
     if (gatilhos === undefined) continue;
-    const casou = gatilhos.find((g) => t.includes(normalizar(g)));
+    const casou = gatilhos.find((g) => contemTermo(t, g));
     if (casou === undefined) continue;
     pedidas.push({ packId: pack.id, termo: casou });
   }
@@ -318,8 +432,18 @@ export async function detectarCapacidadeFaltante(entrada: {
 
   // A primeira pedida que o agente NAO tem. Uma de cada vez: dois cartoes
   // ao mesmo tempo viram um formulario, e a pessoa veio aqui conversar.
-  const faltando = pedidas.find(
-    (p) => !jaTem.has(normalizar(nomeDoPack(p.packId))));
+  // ── §10: ter a MESMA FONTE por outro pack conta como ter ────────
+  //
+  // Um agente com Mercado Livre nao precisa de "Vendas registradas na
+  // CDS" para responder sobre vendas. Comparar so o pack pedido fazia a
+  // CDS oferecer uma segunda fonte a quem ja tinha uma.
+  const temAFonte = (packId: string): boolean => {
+    if (jaTem.has(normalizar(nomeDoPack(packId)))) return true;
+    return (FAMILIA_DE_FONTE[packId] ?? []).some((irmao) =>
+      jaTem.has(normalizar(nomeDoPack(irmao))));
+  };
+
+  const faltando = pedidas.find((p) => !temAFonte(p.packId));
   if (faltando === undefined) return { desfecho: "nada_falta" };
 
   const opcoes: OpcaoDeCapacidade[] = [];
@@ -341,6 +465,24 @@ export async function detectarCapacidadeFaltante(entrada: {
       descricao: pack.descricao,
       exigeConexao: pack.exigeConexao,
     });
+  }
+
+  // ── §9: fonte NOMEADA nao recebe alternativa ─────────────────────
+  //
+  // "Quanto vendi esta semana no Mercado Livre?" tem uma resposta possivel
+  // e uma so. Buscar "sales" no catalogo externo e oferecer HubSpot ao
+  // lado seria propor a troca de uma fonte que a pessoa acabou de nomear.
+  //
+  // Sem fonte nomeada, a busca continua — e e ela que faz aparecer o
+  // Google Sheets para quem escreveu "planilha" (§5).
+  if (fonteNomeadaNoTexto(entrada.texto) === faltando.packId) {
+    return opcoes.length === 0
+      ? { desfecho: "sem_opcao" }
+      : {
+          desfecho: "falta_capacidade",
+          necessidade: nomeDoPack(faltando.packId),
+          opcoes,
+        };
   }
 
   // ── As ALTERNATIVAS externas, essas sim por busca — §5 ────────────

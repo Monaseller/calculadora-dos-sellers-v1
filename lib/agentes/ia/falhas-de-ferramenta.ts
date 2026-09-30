@@ -57,7 +57,18 @@ export const DESFECHOS_QUE_FECHAM = Object.freeze([
   "aprovacao_indisponivel",
   "indisponivel",
   "falha_auditoria",
-  "nome_invalido",
+  // ── F7b.4.8.2: `nome_invalido` SAIU daqui ─────────────────────────
+  //
+  // Ele fechava o turno, e foi o segundo passo do bug do Rodrigo: depois
+  // de receber a recusa corrigivel de `filtro_ambiguo`, o modelo pediu
+  // uma ferramenta que nao tinha. A cerca do laco barrou — corretamente
+  // — e o turno MORREU ali, com a frase generica de categoria `interno`,
+  // a um passo de uma chamada correta.
+  //
+  // Pedir ferramenta que nao existe e a definicao de erro corrigivel: a
+  // cerca continua barrando (ela e anterior ao guard e nao executa nada),
+  // e agora o modelo ouve "essa nao existe" e escolhe uma das declaradas.
+  // Nenhuma permissao e afrouxada — `permitidas` e a mesma lista.
 ] as const);
 
 /**
@@ -126,6 +137,10 @@ export const CODIGOS_CORRIGIVEIS = Object.freeze([
   "data_invalida",
   "periodo_invertido",
   "status_invalido",
+  // F7b.4.8.2: ver o comentario em `DESFECHOS_QUE_FECHAM`. A cerca do
+  // laco ja barrou o pedido; dizer ao modelo qual foi o erro e o que o
+  // faz escolher uma ferramenta que existe.
+  "nome_invalido",
 ] as const);
 
 export type ClasseDeFalha = "fecha_o_turno" | "corrigivel";
