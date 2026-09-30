@@ -82,9 +82,11 @@ ok("A2  fatos.ts existe", existe("lib/agentes/permissoes/fatos.ts"));
 // A pasta ganhou `escrita.ts`. Continua igualdade NOMINAL nos dois
 // sentidos, nunca contagem: uma troca de nome mantendo tres passaria por
 // `length === 3` e nao passa por aqui.
-ok("A3  a pasta tem exatamente os 3 modulos nominais",
+// A3 reconciliado na F7b.4.1: entrou `gravadas.ts`, a leitura sem filtro
+// de catalogo que descobre Function externa. Nominal como antes.
+ok("A3  a pasta tem exatamente os 4 modulos nominais",
   JSON.stringify(readdirSync(join(RAIZ, "lib/agentes/permissoes")).sort()) ===
-    JSON.stringify(["escrita.ts", "estado.ts", "fatos.ts"]),
+    JSON.stringify(["escrita.ts", "estado.ts", "fatos.ts", "gravadas.ts"]),
   readdirSync(join(RAIZ, "lib/agentes/permissoes")).sort().join(", "));
 ok("A3a ANCORA: a leitura e a escrita sao modulos DIFERENTES",
   existe("lib/agentes/permissoes/fatos.ts") &&

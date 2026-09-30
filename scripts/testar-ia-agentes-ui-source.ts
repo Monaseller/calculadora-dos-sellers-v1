@@ -174,10 +174,10 @@ secao("B. O que a UI NAO manda");
   // A invariavel NAO afrouxa: continua sendo a comparacao ENTRE as duas
   // contagens, entao um `headers:` que nao seja aquele cabecalho
   // reprova, e o veto a credencial no cabecalho segue intacto.
-  ok("B3c os UNICOS cabecalhos sao os dezesseis Content-Type do corpo JSON",
-    (CODIGO_TRANSPORTE.match(/headers\s*:/g) ?? []).length === 16 &&
+  ok("B3c os UNICOS cabecalhos sao os dezoito Content-Type do corpo JSON",
+    (CODIGO_TRANSPORTE.match(/headers\s*:/g) ?? []).length === 18 &&
       (CODIGO_TRANSPORTE.match(/headers: \{ "Content-Type": "application\/json" \}/g) ?? [])
-        .length === 16 &&
+        .length === 18 &&
       !/"X-|Cookie|Api-Key|Idempotency-Key/i.test(CODIGO_TRANSPORTE));
   ok("B3c1 o envio de arquivo NAO declara Content-Type a mao",
     /body: formulario/.test(corpoDaFuncaoAdiante("enviarFonteDoAgente")) &&
@@ -261,6 +261,16 @@ secao("B. O que a UI NAO manda");
     // O estado da memoria de longo prazo, e o que ela lembra. Leitura
     // pura: perguntar o que o agente lembra nao ensina nada a ele.
     "lerMemoriaDoAgente",
+    // ── AGENT-FACTORY-F7b.4.1: a DECIMA OITAVA e a DECIMA NONA ───
+    //
+    // A busca unificada de ferramentas (CDS + catalogo externo) e a
+    // lista das acoes externas ja vinculadas. As duas sao leitura pura.
+    //
+    // A busca NAO leva `agenteId`: procurar no catalogo e sobre o que a
+    // CDS oferece, nao sobre um agente. E a unica leitura da area que
+    // nao aponta para `/api/agentes`.
+    "buscarFerramentasDisponiveis",
+    "listarFerramentasExternas",
   ];
   /** Toda funcao exportada SEM `method:` e uma leitura. */
   const leiturasReais = [...CODIGO_TRANSPORTE.matchAll(/export async function (\w+)\(/g)]
@@ -300,7 +310,7 @@ secao("B. O que a UI NAO manda");
     JSON.stringify([...LEITURAS_AUTORIZADAS, "buscarQualquerOutraCoisa"].sort())
       !== leiturasEsperadas);
   ok("B5a4 ANCORA: a varredura enxergou leitores de verdade",
-    leiturasReais.length === 17 && corpoDaFuncao("listarPermissoesDoAgente").length > 50);
+    leiturasReais.length === 19 && corpoDaFuncao("listarPermissoesDoAgente").length > 50);
   // ── Controles NOMINAIS das leituras novas — F7b.1 ───────────────
   //
   // B5a1/B5a2/B5a3 provam que o predicado reprova generico. Estes
@@ -311,6 +321,7 @@ secao("B. O que a UI NAO manda");
     "listarConversasDoChat", "lerConversaDoChat", "listarMemoriasDoAgente",
     "listarFontesDoAgente", "listarSkillsDoAgente", "listarSkillsDoDono",
     "lerAtivacaoDoAgente", "inspecionarArquivoDoAgente", "lerMemoriaDoAgente",
+    "buscarFerramentasDisponiveis", "listarFerramentasExternas",
   ]) {
     ok(`F7b1-L1 CONTROLE: \`${nova}\` fora do esperado reprovaria`,
       JSON.stringify(LEITURAS_AUTORIZADAS.filter((f) => f !== nova).sort())
@@ -432,6 +443,23 @@ secao("B. O que a UI NAO manda");
     // Ligar memoria NAO concede nada. Ela escreve UM booleano e nao toca
     // permissao — o guard continua sendo a autoridade.
     definirMemoriaDoAgente: "PATCH",
+    // ── AGENT-FACTORY-F7b.4.1: o vinculo de ferramenta externa ───
+    //
+    // `listarAcoesDoAplicativo` entra entre as ESCRITAS porque leva
+    // `method: "POST"`, e o mapa e de verbos. Ela nao grava nada: a rota
+    // que lista as acoes de um aplicativo e a MESMA que vincula uma
+    // delas, e o corpo distingue os dois casos pela presenca de `acao`.
+    // Classificar por verbo e nao por intencao e o que mantem o
+    // predicado honesto — uma consulta que usa POST continua sendo
+    // cobrada como POST.
+    listarAcoesDoAplicativo: "POST",
+    // Vincula UMA acao. O nivel nao vem da tela: quem o decide e o
+    // servidor, pelo risco da acao. Escrita e desconhecido nascem em
+    // `aprovacao`.
+    vincularFerramentaExterna: "POST",
+    // Desvincular e BLOQUEAR no servidor, nao apagar a linha. DELETE
+    // porque e o que a pessoa esta pedindo; o registro fica.
+    desvincularFerramentaExterna: "DELETE",
   };
   const ESCRITAS_AUTORIZADAS = Object.keys(VERBOS_AUTORIZADOS);
   const verboDaFuncao = (nome: string): string | null =>
@@ -449,7 +477,7 @@ secao("B. O que a UI NAO manda");
     JSON.stringify(Object.keys(mapa).sort().map((n) => `${n}=${mapa[n]}`));
   const paresReais = JSON.stringify(escritasReais.map((n) => `${n}=${verboDaFuncao(n)}`));
 
-  ok("B5b as escritas publicadas sao EXATAMENTE as dezenove nominais",
+  ok("B5b as escritas publicadas sao EXATAMENTE as vinte e duas nominais",
     JSON.stringify(escritasReais) === esperadas, escritasReais.join(", ") || "nenhuma");
   ok("B5b0 cada escrita usa EXATAMENTE o verbo autorizado para ela",
     paresReais === pares(VERBOS_AUTORIZADOS),
@@ -460,32 +488,37 @@ secao("B. O que a UI NAO manda");
   // e afrouxar o predicado: e classificar as excecoes por NOME e cobrar
   // de cada grupo o que de fato se espera dele. Uma escrita que mude de
   // grupo sem mudar esta lista reprova.
-  const SEM_CORPO = ["removerMemoriaDoAgente", "removerFonteDoAgente"];
+  const SEM_CORPO = [
+    "removerMemoriaDoAgente", "removerFonteDoAgente",
+    // F7b.4.1: o alvo vai na QUERY, e nao no corpo — um DELETE com corpo
+    // e mal suportado por intermediarios e nao traz nada aqui.
+    "desvincularFerramentaExterna",
+  ];
   const CORPO_MULTIPART = ["enviarFonteDoAgente"];
   const CORPO_JSON = ESCRITAS_AUTORIZADAS.filter(
     (f) => !SEM_CORPO.includes(f) && !CORPO_MULTIPART.includes(f));
 
   ok("B5b1 cada escrita leva o seu verbo autorizado",
     ESCRITAS_AUTORIZADAS.every((f) => verboDaFuncao(f) === VERBOS_AUTORIZADOS[f]));
-  ok("B5b1a as dezesseis escritas de corpo JSON levam JSON.stringify",
-    CORPO_JSON.length === 16 &&
+  ok("B5b1a as dezoito escritas de corpo JSON levam JSON.stringify",
+    CORPO_JSON.length === 18 &&
       CORPO_JSON.every((f) => /body: JSON\.stringify/.test(corpoDaFuncao(f))));
   ok("B5b1b o envio de arquivo leva FormData, e NAO JSON",
     CORPO_MULTIPART.every((f) =>
       /body: formulario/.test(corpoDaFuncao(f)) &&
       !/JSON\.stringify/.test(corpoDaFuncao(f))));
-  ok("B5b1c os dois DELETE nao levam corpo NENHUM",
-    SEM_CORPO.length === 2 &&
+  ok("B5b1c os tres DELETE nao levam corpo NENHUM",
+    SEM_CORPO.length === 3 &&
       SEM_CORPO.every((f) =>
         verboDaFuncao(f) === "DELETE" && !/body\s*:/.test(corpoDaFuncao(f))));
   ok("B5b1d CONTROLE NEGATIVO: um DELETE ganhar corpo reprovaria",
     /body\s*:/.test('method: "DELETE", body: JSON.stringify({})'));
-  ok("B5b2 o transporte tem dezenove method, dezessete body e nenhum a mais",
-    (CODIGO_TRANSPORTE.match(/method\s*:/g) ?? []).length === 19 &&
-      // 16 JSON + 1 multipart. Os dois DELETE nao entram, e e a
+  ok("B5b2 o transporte tem vinte e dois method, dezenove body e nenhum a mais",
+    (CODIGO_TRANSPORTE.match(/method\s*:/g) ?? []).length === 22 &&
+      // 18 JSON + 1 multipart. Os TRES DELETE nao entram, e e a
       // diferenca entre as duas contagens que prova isso.
-      (CODIGO_TRANSPORTE.match(/body\s*:/g) ?? []).length === 17 &&
-      (CODIGO_TRANSPORTE.match(/body: JSON\.stringify/g) ?? []).length === 16 &&
+      (CODIGO_TRANSPORTE.match(/body\s*:/g) ?? []).length === 19 &&
+      (CODIGO_TRANSPORTE.match(/body: JSON\.stringify/g) ?? []).length === 18 &&
       (CODIGO_TRANSPORTE.match(/body: formulario/g) ?? []).length === 1);
   ok("B5b3 a escrita de conversa vai para a rota de conversa, com corpo so de mensagem",
     /ROTA_SUFIXO_CONVERSA/.test(CODIGO_TRANSPORTE) &&
@@ -541,7 +574,7 @@ secao("B. O que a UI NAO manda");
     JSON.stringify([...ESCRITAS_AUTORIZADAS, "definirQualquerOutraCoisa"].sort())
       !== esperadas);
   ok("B5b8 ANCORA: a varredura enxergou funcoes de verdade",
-    escritasReais.length === 19 && corpoDaFuncao("criarAgenteViaApi").length > 50);
+    escritasReais.length === 22 && corpoDaFuncao("criarAgenteViaApi").length > 50);
   // ── Controles NOMINAIS das escritas novas — F7b.1 ───────────────
   //
   // Uma entrada por funcao publicada neste gate: o par nome=verbo tem
@@ -554,6 +587,9 @@ secao("B. O que a UI NAO manda");
     ["removerMemoriaDoAgente", "POST"], ["removerFonteDoAgente", "POST"],
     ["atualizarArquivoDoAgente", "PUT"],
     ["definirMemoriaDoAgente", "POST"],
+    ["listarAcoesDoAplicativo", "PATCH"],
+    ["vincularFerramentaExterna", "PATCH"],
+    ["desvincularFerramentaExterna", "POST"],
   ] as const) {
     ok(`F7b1-E1 CONTROLE: \`${nova}\` fora do esperado reprovaria`,
       JSON.stringify(ESCRITAS_AUTORIZADAS.filter((f) => f !== nova).sort())
@@ -648,10 +684,10 @@ secao("B. O que a UI NAO manda");
   //   DELETE passa a existir para DOIS recursos — memoria e fonte —
   //   porque sao conteudo que o dono escreveu e enviou. Apagar AGENTE
   //   continua sem caminho, e o assert abaixo cobra isso pelo nome.
-  ok("B7b dez POST, sete alteracoes por PATCH, dois DELETE — e nada alem",
-    (CODIGO_TRANSPORTE.match(/method:\s*"POST"/g) ?? []).length === 10 &&
+  ok("B7b doze POST, sete alteracoes por PATCH, tres DELETE — e nada alem",
+    (CODIGO_TRANSPORTE.match(/method:\s*"POST"/g) ?? []).length === 12 &&
       (CODIGO_TRANSPORTE.match(/method:\s*"PATCH"/g) ?? []).length === 7 &&
-      (CODIGO_TRANSPORTE.match(/method:\s*"DELETE"/g) ?? []).length === 2 &&
+      (CODIGO_TRANSPORTE.match(/method:\s*"DELETE"/g) ?? []).length === 3 &&
       /export async function registrarDecisaoAprovacao\(/.test(CODIGO_TRANSPORTE) &&
       /export async function criarAgenteViaApi\(/.test(CODIGO_TRANSPORTE) &&
       /export async function enviarMensagemAoAgente\(/.test(CODIGO_TRANSPORTE) &&
@@ -663,13 +699,16 @@ secao("B. O que a UI NAO manda");
       !/"PUT"/.test(CODIGO_TRANSPORTE));
   // O que o DELETE alcanca, por NOME. Sem isto, "dois DELETE" seguiria
   // verde se um deles passasse a apagar agente.
-  ok("B7b1 os DOIS DELETE sao de memoria e de fonte, e de mais nada",
+  ok("B7b1 os TRES DELETE sao de memoria, fonte e ferramenta externa",
     /export async function removerMemoriaDoAgente\(/.test(CODIGO_TRANSPORTE) &&
       /export async function removerFonteDoAgente\(/.test(CODIGO_TRANSPORTE) &&
+      /export async function desvincularFerramentaExterna\(/.test(CODIGO_TRANSPORTE) &&
+      // Apagar AGENTE continua sem caminho por aqui.
       !/export async function (apagar|remover|excluir)Agente\w*\(/i.test(CODIGO_TRANSPORTE));
   ok("B7b2 nenhum DELETE aponta para a rota do agente, so para sub-recurso",
-    [ "removerMemoriaDoAgente", "removerFonteDoAgente" ].every((f) =>
-      /ROTA_SUFIXO_(MEMORIAS|FONTES)/.test(corpoDaFuncao(f))));
+    [ "removerMemoriaDoAgente", "removerFonteDoAgente",
+      "desvincularFerramentaExterna" ].every((f) =>
+      /ROTA_SUFIXO_(MEMORIAS|FONTES|EXTERNAS)/.test(corpoDaFuncao(f))));
   ok("B7c PUT continua vetado em TODA a area",
     AREA.filter((a) => /"PUT"/.test(codigo(ler(a)))).length === 0,
     AREA.filter((a) => /"PUT"/.test(codigo(ler(a)))).join(", ") || "nenhum");

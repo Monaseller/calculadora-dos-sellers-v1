@@ -2851,3 +2851,254 @@ export async function definirMemoriaDoAgente(
   if (typeof confirmado !== "boolean") return { estado: "falha" };
   return { estado: "ok", dados: { memoriaAtiva: confirmado } };
 }
+
+// -----------------------------------------------------------------
+// AGENT-FACTORY-F7b.4.1 - busca de ferramentas e vinculo externo
+// -----------------------------------------------------------------
+
+const ROTA_BUSCA_DE_FERRAMENTAS = "/api/ferramentas/buscar";
+const ROTA_SUFIXO_EXTERNAS = "/ferramentas-externas";
+
+export interface AchadoDeFerramentaUI {
+  /** Chave para a proxima etapa. NAO e mostrada como interface. */
+  readonly chave: string;
+  /** `cds` = Function da casa. `integracao` = catalogo externo. */
+  readonly origem: string;
+  readonly nome: string;
+  readonly descricao: string;
+  /** `null` quando a origem nao permite afirmar. Nunca chutado. */
+  readonly acesso: string | null;
+  readonly exigeConexao: boolean;
+}
+
+export interface BuscaDeFerramentasUI {
+  readonly termo: string;
+  readonly achados: readonly AchadoDeFerramentaUI[];
+  readonly externoDisponivel: boolean;
+  readonly externoDesfecho: string;
+  readonly externoTotal: number;
+}
+
+function achadoDaResposta(bruto: unknown): AchadoDeFerramentaUI | null {
+  if (!ehObjeto(bruto)) return null;
+  const { chave, origem, nome, descricao, acesso, exigeConexao } = bruto;
+  if (typeof chave !== "string" || chave === "") return null;
+  if (typeof origem !== "string" || origem === "") return null;
+  if (typeof nome !== "string" || nome === "") return null;
+  return {
+    chave, origem, nome,
+    descricao: typeof descricao === "string" ? descricao : "",
+    acesso: textoOuNulo(acesso),
+    exigeConexao: exigeConexao === true,
+  };
+}
+
+/**
+ * Busca ferramentas da CDS e do catalogo externo.
+ *
+ * Leitura pura. Termo vazio devolve SO as internas — a busca externa
+ * acontece sob demanda, e e por isso que os 1584 toolkits nunca chegam
+ * perto do browser nem de um prompt.
+ */
+export async function buscarFerramentasDisponiveis(
+  termo: string,
+  signal?: AbortSignal
+): Promise<RespostaDaFactory<BuscaDeFerramentasUI>> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(
+      `${ROTA_BUSCA_DE_FERRAMENTAS}?termo=${encodeURIComponent(termo)}`,
+      { signal }
+    );
+  } catch {
+    return { estado: "falha" };
+  }
+  const corpo = await corpoDe(resposta);
+  const desfecho = desfechoDaResposta<BuscaDeFerramentasUI>(resposta, corpo);
+  if (desfecho !== null) return desfecho;
+
+  const bruto = corpo as {
+    termo?: unknown; achados?: unknown; externoDisponivel?: unknown;
+    externoDesfecho?: unknown; externoTotal?: unknown;
+  };
+  const achados = listaDaResposta(bruto.achados, achadoDaResposta);
+  if (achados === null) return { estado: "falha" };
+  return {
+    estado: "ok",
+    dados: {
+      termo: typeof bruto.termo === "string" ? bruto.termo : termo,
+      achados,
+      externoDisponivel: bruto.externoDisponivel === true,
+      externoDesfecho: typeof bruto.externoDesfecho === "string"
+        ? bruto.externoDesfecho : "desconhecido",
+      externoTotal: typeof bruto.externoTotal === "number" ? bruto.externoTotal : 0,
+    },
+  };
+}
+
+export interface AcaoExternaUI {
+  readonly acao: string;
+  readonly nome: string;
+  readonly descricao: string | null;
+  /** `leitura`, `escrita` ou `desconhecido`. Escrita vence empate. */
+  readonly risco: string;
+  readonly nivelRecomendado: string;
+  readonly funcaoId: string | null;
+}
+
+export interface AcoesDoAplicativoUI {
+  readonly toolkit: string;
+  readonly totalDisponivel: number;
+  readonly acoes: readonly AcaoExternaUI[];
+}
+
+function acaoExternaDaResposta(bruto: unknown): AcaoExternaUI | null {
+  if (!ehObjeto(bruto)) return null;
+  const { acao, nome, descricao, risco, nivelRecomendado, funcaoId } = bruto;
+  if (typeof acao !== "string" || acao === "") return null;
+  if (typeof risco !== "string" || risco === "") return null;
+  if (typeof nivelRecomendado !== "string" || nivelRecomendado === "") return null;
+  return {
+    acao,
+    nome: typeof nome === "string" && nome !== "" ? nome : acao,
+    descricao: textoOuNulo(descricao),
+    risco, nivelRecomendado,
+    funcaoId: textoOuNulo(funcaoId),
+  };
+}
+
+/**
+ * As acoes de UM aplicativo externo.
+ *
+ * POST sem `acao` no corpo: e uma CONSULTA que usa POST porque o corpo
+ * carrega o aplicativo e porque a rota que lista e a mesma que vincula.
+ * Nada e gravado neste caminho.
+ */
+export async function listarAcoesDoAplicativo(
+  agenteId: string,
+  toolkit: string
+): Promise<RespostaDaFactory<AcoesDoAplicativoUI>> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(`${caminhoDoAgente(agenteId)}${ROTA_SUFIXO_EXTERNAS}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ toolkit }),
+    });
+  } catch {
+    return { estado: "falha" };
+  }
+  const corpo = await corpoDe(resposta);
+  const desfecho = desfechoDaResposta<AcoesDoAplicativoUI>(resposta, corpo);
+  if (desfecho !== null) return desfecho;
+
+  const bruto = corpo as { toolkit?: unknown; totalDisponivel?: unknown; acoes?: unknown };
+  const acoes = listaDaResposta(bruto.acoes, acaoExternaDaResposta);
+  if (acoes === null) return { estado: "falha" };
+  return {
+    estado: "ok",
+    dados: {
+      toolkit: typeof bruto.toolkit === "string" ? bruto.toolkit : toolkit,
+      totalDisponivel: typeof bruto.totalDisponivel === "number" ? bruto.totalDisponivel : acoes.length,
+      acoes,
+    },
+  };
+}
+
+export interface FerramentaExternaVinculadaUI {
+  readonly funcaoId: string;
+  readonly toolkit: string;
+  readonly acao: string;
+  readonly nivel: string;
+  readonly risco: string;
+}
+
+function externaDaResposta(bruto: unknown): FerramentaExternaVinculadaUI | null {
+  if (!ehObjeto(bruto)) return null;
+  const { funcaoId, toolkit, acao, nivel, risco } = bruto;
+  if (typeof funcaoId !== "string" || funcaoId === "") return null;
+  if (typeof nivel !== "string" || nivel === "") return null;
+  return {
+    funcaoId,
+    toolkit: typeof toolkit === "string" ? toolkit : "",
+    acao: typeof acao === "string" ? acao : "",
+    nivel,
+    risco: typeof risco === "string" ? risco : "desconhecido",
+  };
+}
+
+/** As acoes externas que este agente tem vinculadas. Leitura pura. */
+export async function listarFerramentasExternas(
+  agenteId: string,
+  signal?: AbortSignal
+): Promise<RespostaDaFactory<readonly FerramentaExternaVinculadaUI[]>> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(`${caminhoDoAgente(agenteId)}${ROTA_SUFIXO_EXTERNAS}`, { signal });
+  } catch {
+    return { estado: "falha" };
+  }
+  const corpo = await corpoDe(resposta);
+  const desfecho = desfechoDaResposta<readonly FerramentaExternaVinculadaUI[]>(resposta, corpo);
+  if (desfecho !== null) return desfecho;
+  const dados = listaDaResposta((corpo as { externas?: unknown }).externas, externaDaResposta);
+  return dados === null ? { estado: "falha" } : { estado: "ok", dados };
+}
+
+/**
+ * Vincula UMA acao externa ao agente.
+ *
+ * O nivel NAO vem daqui: quem o decide e o servidor, a partir do risco da
+ * acao. Escrita e desconhecido nascem em `aprovacao`, e deixar a tela
+ * escolher permitiria a ela pedir `automatico` para uma escrita.
+ */
+export async function vincularFerramentaExterna(
+  agenteId: string,
+  toolkit: string,
+  acao: string
+): Promise<RespostaDaFactory<FerramentaExternaVinculadaUI>> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(`${caminhoDoAgente(agenteId)}${ROTA_SUFIXO_EXTERNAS}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ toolkit, acao }),
+    });
+  } catch {
+    return { estado: "falha" };
+  }
+  const corpo = await corpoDe(resposta);
+  const desfecho = desfechoDaResposta<FerramentaExternaVinculadaUI>(resposta, corpo);
+  if (desfecho !== null) return desfecho;
+  const dados = externaDaResposta(corpo);
+  return dados === null ? { estado: "falha" } : { estado: "ok", dados };
+}
+
+/**
+ * Desvincula uma acao externa.
+ *
+ * DELETE, e o efeito no servidor e BLOQUEAR — a escolha fica registrada e
+ * o agente que ja rodou com aquela ferramenta continua explicavel. Para o
+ * runtime o resultado e o mesmo: o guard nega.
+ */
+export async function desvincularFerramentaExterna(
+  agenteId: string,
+  funcaoId: string
+): Promise<RespostaDaFactory<{ readonly nivel: string }>> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(
+      `${caminhoDoAgente(agenteId)}${ROTA_SUFIXO_EXTERNAS}` +
+        `?funcaoId=${encodeURIComponent(funcaoId)}`,
+      { method: "DELETE" }
+    );
+  } catch {
+    return { estado: "falha" };
+  }
+  const corpo = await corpoDe(resposta);
+  const desfecho = desfechoDaResposta<{ readonly nivel: string }>(resposta, corpo);
+  if (desfecho !== null) return desfecho;
+  const nivel = (corpo as { nivel?: unknown }).nivel;
+  if (typeof nivel !== "string" || nivel === "") return { estado: "falha" };
+  return { estado: "ok", dados: { nivel } };
+}

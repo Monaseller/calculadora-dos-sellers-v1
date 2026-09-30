@@ -47,6 +47,7 @@ import {
 import { TOOL_PACKS } from "@/lib/agentes/factory/catalogo-ui";
 import { ChatDoAgente } from "@/components/ia/factory/ChatDoAgente";
 import { ArquivosDoAgente } from "@/components/ia/factory/ArquivosDoAgente";
+import { BuscaDeFerramentas } from "@/components/ia/factory/BuscaDeFerramentas";
 import {
   alterarMemoriaDoAgente, atualizarAgenteViaApi, criarAgenteViaApi,
   criarMemoriaDoAgente, criarSkillDoDono, definirAtivacaoDoAgente,
@@ -577,77 +578,24 @@ export function Wizard({ agenteIdInicial }: { agenteIdInicial: string | null }) 
           )}
 
           {etapa === 4 && (
-            <>
-              <p style={{ margin: 0, fontSize: TAMANHO.corpo, color: CROMO.textoFraco }}>
-                Escolha o que este agente sabe usar. <em>Quando</em> ele pode usar é a etapa 8.
-              </p>
-              {TOOL_PACKS.map((p) => {
-                const noAgente = ativacao?.ferramentas.find((f) => f.id === p.id);
-                return (
-                  <Cartao key={p.id} destacado={noAgente !== undefined}>
-                    <div style={{
-                      display: "flex", justifyContent: "space-between", gap: ESPACO.md,
-                      alignItems: "flex-start", flexWrap: "wrap",
-                    }}>
-                      <div style={{ minWidth: 0 }}>
-                        <strong style={{ fontSize: TAMANHO.corpo, color: CROMO.texto }}>
-                          {p.nome}
-                        </strong>
-                        <p style={{
-                          margin: `${ESPACO.xs}px 0 ${ESPACO.sm}px`,
-                          fontSize: TAMANHO.miudo, color: CROMO.textoFraco,
-                        }}>
-                          {p.descricao}
-                        </p>
-                        <ul style={{
-                          margin: 0, paddingLeft: ESPACO.lg,
-                          fontSize: TAMANHO.miudo, color: CROMO.textoFraco, lineHeight: 1.6,
-                        }}>
-                          {p.capacidades.map((c) => <li key={c}>{c}</li>)}
-                        </ul>
-                        {p.exigeConexao && (
-                          <div style={{ marginTop: ESPACO.sm }}>
-                            <Etiqueta tom="info">Precisa de conta conectada</Etiqueta>
-                          </div>
-                        )}
-                        <details style={{ marginTop: ESPACO.sm }}>
-                          <summary style={{
-                            cursor: "pointer", fontSize: TAMANHO.miudo, color: CROMO.textoFraco,
-                          }}>
-                            Detalhes técnicos
-                          </summary>
-                          <code style={{ fontSize: TAMANHO.miudo, color: CROMO.textoFraco }}>
-                            {p.funcoes.join("  ·  ")}
-                          </code>
-                        </details>
-                      </div>
-                      <div style={{ display: "flex", flexDirection: "column", gap: ESPACO.xs }}>
-                        {noAgente !== undefined ? (
-                          <>
-                            <Etiqueta tom="ok">Adicionada</Etiqueta>
-                            {!noAgente.completo && (
-                              <Etiqueta tom="atencao">Permissões pendentes</Etiqueta>
-                            )}
-                          </>
-                        ) : (
-                          <Botao
-                            tom="primario"
-                            desabilitado={agenteId === null || salvando}
-                            // Adicionar = criar as linhas de permissao.
-                            // Nasce `aprovacao`, e nao `automatico`: dar
-                            // autonomia por default seria decidir pelo
-                            // dono numa tela que ele acabou de abrir.
-                            onClick={() => void definirNivelDoPack(p.id, "aprovacao")}
-                          >
-                            Adicionar
-                          </Botao>
-                        )}
-                      </div>
-                    </div>
-                  </Cartao>
-                );
-              })}
-            </>
+            agenteId !== null
+              ? <>
+                  <p style={{ margin: 0, fontSize: TAMANHO.corpo, color: CROMO.textoFraco }}>
+                    Escolha o que este agente sabe usar. <em>Quando</em> ele pode usar é a
+                    etapa 8.
+                  </p>
+                  {/* A busca substituiu os cartoes fixos. Manter os dois
+                      mostraria a mesma ferramenta duas vezes — a busca
+                      sem termo ja lista todas as internas. */}
+                  <BuscaDeFerramentas
+                    agenteId={agenteId}
+                    aoMudar={() => void recarregar(agenteId)}
+                    packSelecionado={(chave) =>
+                      ativacao?.ferramentas.some((f) => f.id === chave) === true}
+                    aoAdicionarPack={(chave) => void definirNivelDoPack(chave, "aprovacao")}
+                  />
+                </>
+              : <Aviso tom="info">Conclua a etapa 1 para escolher ferramentas.</Aviso>
           )}
 
           {etapa === 5 && (

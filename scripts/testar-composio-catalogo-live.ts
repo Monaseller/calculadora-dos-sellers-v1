@@ -26,6 +26,7 @@ import { join } from "node:path";
 import {
   buscarToolkits, catalogoExternoConfigurado, listarAcoesDoToolkit,
 } from "@/lib/agentes/composio/cliente";
+import { buscarFerramentas } from "@/lib/agentes/factory/busca-de-ferramentas";
 import {
   FORMATO_DO_BANCO, ehFuncaoExterna, idDaFuncaoExterna, nivelRecomendado,
   pecasDoId, riscoDaAcao,
@@ -351,6 +352,68 @@ async function main(): Promise<void> {
     if (salvo !== undefined) process.env.COMPOSIO_API_KEY = salvo;
     ok("F4  ANCORA: a chave foi restaurada para o resto da execucao",
       process.env.COMPOSIO_API_KEY === salvo);
+  }
+
+
+  // ─── G. A busca unificada, contra a rede real ──────────────────────
+
+  secao("G. A busca que a tela usa: CDS + externo, no mesmo resultado");
+  {
+    // Sem termo: SO internas, e nenhuma chamada externa.
+    const vazia = await buscarFerramentas("");
+    ok("G1  sem termo, so as internas aparecem",
+      vazia.achados.length > 0 && vazia.achados.every((a) => a.origem === "cds"),
+      vazia.achados.map((a) => a.origem).join(","));
+    ok("G2  e o catalogo externo NAO foi consultado",
+      vazia.externoDesfecho === "nao_consultado", vazia.externoDesfecho);
+
+    // Termo interno: acha o pack da casa.
+    const planilha = await buscarFerramentas("planilha");
+    ok("G3  termo interno acha o pack da casa",
+      planilha.achados.some((a) => a.origem === "cds" && a.chave === "planilhas"),
+      planilha.achados.map((a) => a.chave).join(","));
+
+    // Sinonimo: quem procura "excel" tem de achar Planilhas.
+    const excel = await buscarFerramentas("excel");
+    ok("G4  sinonimo tambem acha — `excel` encontra Planilhas",
+      excel.achados.some((a) => a.chave === "planilhas"),
+      excel.achados.map((a) => a.chave).join(","));
+
+    // Termo externo: as DUAS origens no mesmo resultado.
+    const sheets = await buscarFerramentas("sheets");
+    ok("G5  a busca externa responde",
+      sheets.externoDesfecho === "ok", sheets.externoDesfecho);
+    ok("G6  Google Sheets aparece, vindo da integracao",
+      sheets.achados.some((a) => a.origem === "integracao" && a.chave === "googlesheets"),
+      sheets.achados.filter((a) => a.origem === "integracao")
+        .map((a) => a.chave).join(","));
+    ok("G7  e vem marcado como exigindo conexao",
+      sheets.achados.find((a) => a.chave === "googlesheets")?.exigeConexao === true);
+    ok("G8  as INTERNAS vem primeiro no resultado",
+      (() => {
+        const iUltimaCds = sheets.achados.reduce(
+          (acc, a, i) => (a.origem === "cds" ? i : acc), -1);
+        const iPrimeiraExt = sheets.achados.findIndex((a) => a.origem === "integracao");
+        return iPrimeiraExt === -1 || iUltimaCds < iPrimeiraExt;
+      })());
+    ok("G9  o resultado externo e PEQUENO — nao e o catalogo inteiro",
+      sheets.achados.filter((a) => a.origem === "integracao").length <= 8,
+      String(sheets.achados.filter((a) => a.origem === "integracao").length));
+    ok("G10 e o total disponivel e reportado sem ser baixado",
+      sheets.externoTotal > 0 &&
+        sheets.externoTotal >= sheets.achados.filter((a) => a.origem === "integracao").length,
+      String(sheets.externoTotal));
+
+    // Sem chave, as internas continuam inteiras.
+    const salvo = process.env.COMPOSIO_API_KEY;
+    delete process.env.COMPOSIO_API_KEY;
+    const semChave = await buscarFerramentas("sheets");
+    ok("G11 Composio fora: as internas continuam, e o desfecho e nomeado",
+      semChave.achados.every((a) => a.origem === "cds") &&
+        semChave.externoDesfecho === "nao_configurado",
+      semChave.externoDesfecho);
+    if (salvo !== undefined) process.env.COMPOSIO_API_KEY = salvo;
+    ok("G12 ANCORA: a chave voltou", process.env.COMPOSIO_API_KEY === salvo);
   }
 
   log("\n-- placar ------------------------------------------------------");
