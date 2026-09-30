@@ -699,8 +699,12 @@ secao("G2. Aprovacao nao e erro, e o cartao nao promete o que nao cumpre");
     .exec(runtime)?.[1].match(/"([a-z_]+)"/g) ?? []).sort();
   const daTela = (/DESFECHOS_DE_BLOQUEIO = \[([\s\S]*?)\]/
     .exec(chat)?.[1].match(/"([a-z_]+)"/g) ?? []).sort();
+  // F7b.4.8.2: CINCO. `nome_invalido` saiu das duas — virou erro
+  // corrigivel, e o invariante "as duas listas sao identicas" foi o que
+  // acusou a deriva quando so uma delas mudou.
   ok("G31 ANCORA: as duas listas foram mesmo lidas",
-    doRuntime.length === 6 && daTela.length === 6);
+    doRuntime.length === 5 && daTela.length === 5,
+    `${doRuntime.length}/${daTela.length}`);
   ok("G32 e a lista da tela e IDENTICA a do runtime",
     JSON.stringify(doRuntime) === JSON.stringify(daTela),
     `runtime=${doRuntime.join(",")} tela=${daTela.join(",")}`);
