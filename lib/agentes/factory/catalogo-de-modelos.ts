@@ -111,10 +111,22 @@ export interface ModeloDoCatalogo {
 /**
  * O catalogo.
  *
- * `openai` esta AUSENTE, e nao presente-e-indisponivel: sem chave e sem
- * SDK, nao ha o que a CDS possa afirmar sobre ele. Declarar uma entrada
- * "indisponivel" seria prometer que basta ligar uma chave — e ninguem
- * mediu isso.
+ * ── Por que `openai` continua AUSENTE, mesmo com chave ──────────────
+ *
+ * Desde o F7b.4.2 existe `OPENAI_API_KEY`, e ela e valida: `GET
+ * /v1/models` responde 200 com 127 modelos, incluindo a familia `gpt-5`,
+ * que tem function calling.
+ *
+ * E toda chamada de INFERENCIA responde 429
+ * `credit_balance_exhausted` — a conta nao tem saldo. Medido em
+ * `scripts/testar-openai-disponibilidade-live.ts`, que classifica isso
+ * como `billing_necessario` e nao como "nao configurado".
+ *
+ * Uma entrada aqui faria a etapa IA / Modelo OFERECER a OpenAI, e a
+ * primeira mensagem do agente falharia. Entrada no catalogo e promessa de
+ * capacidade, e `provadoEm` existe justamente para que nenhuma promessa
+ * entre sem endereco. O dia em que houver saldo, a ordem e: rodar o
+ * roundtrip de 46719.65, e so depois acrescentar a entrada.
  */
 const CATALOGO: readonly ModeloDoCatalogo[] = Object.freeze([
   Object.freeze({
