@@ -66,7 +66,8 @@ import {
  * telas no dia em que for criada.
  */
 const COLUNAS_AGENTE =
-  "id, user_id, nome, tipo, instrucoes, ativo, memoria_ativa, criado_em, atualizado_em";
+  "id, user_id, nome, tipo, instrucoes, ativo, memoria_ativa, " +
+  "provedor_ia, modelo_ia, nivel_de_trabalho, criado_em, atualizado_em";
 const COLUNAS_TAREFA =
   "id, agente_id, user_id, tipo, entrada, status, progresso, resultado, erro_tipo, " +
   "erro_mensagem, tentativas, max_tentativas, criado_em, iniciado_em, concluido_em, heartbeat_em";
@@ -295,6 +296,37 @@ export async function atualizarAgenteDoDono(
       return { linha: null, erro: "memoria_ativa_invalida" };
     }
     alteracoes.memoria_ativa = campos.memoriaAtiva;
+  }
+  // ── F7b.4.2: a IA do agente ────────────────────────────────────────
+  //
+  // `null` passa: e o pedido de VOLTAR ao default do ambiente. Qualquer
+  // outro tipo e recusado em vez de virar `null` — apagar a escolha do
+  // dono por engano de tipo seria perda silenciosa de configuracao.
+  if (campos?.provedorIa !== undefined) {
+    if (campos.provedorIa !== null && typeof campos.provedorIa !== "string") {
+      return { linha: null, erro: "provedor_ia_invalido" };
+    }
+    const v = campos.provedorIa === null ? null : campos.provedorIa.trim();
+    if (v !== null && v === "") return { linha: null, erro: "provedor_ia_invalido" };
+    alteracoes.provedor_ia = v;
+  }
+  if (campos?.modeloIa !== undefined) {
+    if (campos.modeloIa !== null && typeof campos.modeloIa !== "string") {
+      return { linha: null, erro: "modelo_ia_invalido" };
+    }
+    const v = campos.modeloIa === null ? null : campos.modeloIa.trim();
+    if (v !== null && v === "") return { linha: null, erro: "modelo_ia_invalido" };
+    alteracoes.modelo_ia = v;
+  }
+  if (campos?.nivelDeTrabalho !== undefined) {
+    if (campos.nivelDeTrabalho !== null && typeof campos.nivelDeTrabalho !== "string") {
+      return { linha: null, erro: "nivel_de_trabalho_invalido" };
+    }
+    const v = campos.nivelDeTrabalho === null ? null : campos.nivelDeTrabalho.trim();
+    if (v !== null && v === "") {
+      return { linha: null, erro: "nivel_de_trabalho_invalido" };
+    }
+    alteracoes.nivel_de_trabalho = v;
   }
 
   if (Object.keys(alteracoes).length === 0) return { linha: null, erro: "nenhum_campo_valido" };

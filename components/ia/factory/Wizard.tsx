@@ -51,6 +51,7 @@ import { BuscaDeFerramentas } from "@/components/ia/factory/BuscaDeFerramentas";
 import {
   alterarMemoriaDoAgente, atualizarAgenteViaApi, criarAgenteViaApi,
   criarMemoriaDoAgente, criarSkillDoDono, definirAtivacaoDoAgente,
+  definirIaDoAgente, definirPermissaoDeFerramentaExterna,
   definirMemoriaDoAgente, definirPermissaoDeFuncao, lerAtivacaoDoAgente,
   listarAgentes, listarFontesDoAgente, listarMemoriasDoAgente,
   listarSkillsDoAgente, listarSkillsDoDono,
@@ -307,6 +308,56 @@ export function Wizard({ agenteIdInicial }: { agenteIdInicial: string | null }) 
     }
   }
 
+  /**
+   * Grava a DECISAO do dono sobre UMA acao externa — F7b.4.2 §11/§16.
+   *
+   * Uma acao por vez, e nao um nivel para o grupo: cada acao externa e uma
+   * capacidade distinta, e "Adicionar planilha" nao merece a mesma resposta
+   * que "Ler planilha". Pack interno agrupa porque as Funcoes dele foram
+   * desenhadas juntas; aqui nao ha esse desenho.
+   */
+  async function definirNivelExterno(funcaoId: string, nivel: NivelAutonomia) {
+    if (agenteId === null) return;
+    setErro(null);
+    setSalvando(true);
+    try {
+      const r = await definirPermissaoDeFerramentaExterna(agenteId, funcaoId, nivel);
+      if (r.estado !== "ok") {
+        setErro(frasePorEstado(r, "Não foi possível salvar a permissão."));
+        return;
+      }
+      await recarregar(agenteId);
+    } finally {
+      setSalvando(false);
+    }
+  }
+
+  /**
+   * Grava a escolha de IA — F7b.4.2 §7.
+   *
+   * O `modeloId` NAO e enviado: quem resolve o id concreto e o servidor, a
+   * partir do catalogo que le env. A tela manda o provedor e, quando ha
+   * mais de um, o nivel.
+   *
+   * Recarrega depois de gravar, e nao antes: o que a tela mostra passa a
+   * ser o que o banco tem, e nao o que ela achou que ia acontecer.
+   */
+  async function escolherIa(provedor: string, nivel: string | null) {
+    if (agenteId === null) return;
+    setErro(null);
+    setSalvando(true);
+    try {
+      const r = await definirIaDoAgente(agenteId, { provedor, nivel });
+      if (r.estado !== "ok") {
+        setErro(frasePorEstado(r, "Não foi possível escolher a IA."));
+        return;
+      }
+      await recarregar(agenteId);
+    } finally {
+      setSalvando(false);
+    }
+  }
+
   async function alternarMemoria(id: string, ativo: boolean) {
     if (agenteId === null) return;
     setErro(null);
@@ -370,7 +421,14 @@ export function Wizard({ agenteIdInicial }: { agenteIdInicial: string | null }) 
     if (ativacao === null) return "vazia";
     if (n === 1) return ativacao.nome.trim() !== "" ? "concluida" : "vazia";
     if (n === 2) return ativacao.temInstrucoes ? "concluida" : "vazia";
-    if (n === 3) return ativacao.provedor !== null ? "concluida" : "atencao";
+    if (n === 3) {
+      // F7b.4.2: escolha indisponivel NAO e etapa concluida, mesmo havendo
+      // `provedor` — ele e a propria escolha que nao vale. E agente legado,
+      // que nunca escolheu, continua concluido: o comportamento dele esta
+      // preservado, e nao ha nada a corrigir.
+      if (ativacao.iaDesfecho === "escolhida_indisponivel") return "atencao";
+      return ativacao.provedor !== null ? "concluida" : "atencao";
+    }
     if (n === 4) return ativacao.ferramentas.length > 0 ? "concluida" : "vazia";
     if (n === 5) return skillsDoAgente.length > 0 ? "concluida" : "vazia";
     // A etapa 6 esta "concluida" quando a memoria automatica esta ligada
@@ -502,14 +560,29 @@ export function Wizard({ agenteIdInicial }: { agenteIdInicial: string | null }) 
               {/* O catalogo vem do SERVIDOR, e lista so o que este
                   ambiente de fato configurou. Um provedor sem chave nao
                   aparece — a tela nao oferece o que nao sustentaria. */}
-              {(ativacao?.modelos.length ?? 0) === 0 ? (
+              {/*
+                F7b.4.2 §8: quando a escolha gravada nao esta disponivel, a
+                tela DIZ — e nao troca por outra. O impedimento vem do
+                servidor; aqui so mostramos que a escolha atual nao vale.
+              */}
+              {ativacao?.iaDesfecho === "escolhida_indisponivel" && (
                 <Aviso tom="atencao">
+                  A IA escolhida para este agente não está disponível agora. Escolha outra
+                  abaixo para continuar — nada é trocado automaticamente.
+                </Aviso>
+              )}
+
+              {(ativacao?.modelos.length ?? 0) === 0 ? (                <Aviso tom="atencao">
                   Nenhuma IA está configurada neste ambiente. Fale com o suporte antes de
                   continuar.
                 </Aviso>
               ) : (
                 ativacao?.modelos.map((m) => {
-                  const escolhido = m.provedor === ativacao.provedor;
+                  // `provedorEscolhido` e o que o dono GRAVOU. `provedor` e
+                  // quem responde. A etiqueta distingue os dois, porque um
+                  // agente legado responde por Claude sem ter escolhido.
+                  const escolhido = m.provedor === ativacao.provedorEscolhido;
+                  const emUso = m.provedor === ativacao.provedor;
                   return (
                     <Cartao key={m.provedor} destacado={escolhido}>
                       <div style={{
@@ -538,11 +611,26 @@ export function Wizard({ agenteIdInicial }: { agenteIdInicial: string | null }) 
                             </code>
                           </details>
                         </div>
-                        <div style={{ display: "flex", flexDirection: "column", gap: ESPACO.xs }}>
-                          {escolhido && <Etiqueta tom="ok">Em uso</Etiqueta>}
+                        <div style={{
+                          display: "flex", flexDirection: "column",
+                          gap: ESPACO.xs, alignItems: "flex-end",
+                        }}>
+                          {escolhido && <Etiqueta tom="ok">Escolhida</Etiqueta>}
+                          {!escolhido && emUso && <Etiqueta tom="info">Padrão</Etiqueta>}
                           {m.ferramentas
                             ? <Etiqueta tom="info">Usa ferramentas</Etiqueta>
                             : <Etiqueta tom="atencao">Sem ferramentas</Etiqueta>}
+                          {!escolhido && (
+                            <Botao tom="secundario" desabilitado={salvando}
+                              onClick={() => void escolherIa(
+                                m.provedor,
+                                // Um nivel so: nao ha escolha a fazer, e
+                                // mandar o unico disponivel e o mesmo que
+                                // nao mandar nada.
+                                m.niveis.length > 1 ? m.niveis[0] : null)}>
+                              Usar esta
+                            </Botao>
+                          )}
                         </div>
                       </div>
                     </Cartao>
@@ -550,27 +638,39 @@ export function Wizard({ agenteIdInicial }: { agenteIdInicial: string | null }) 
                 })
               )}
 
-              {/* §35/§36: o nivel de trabalho aparece SO quando o modelo
-                  em uso suporta mais de um. Um radio de uma opcao pede
+              {/* §35/§36: o nivel de trabalho aparece SO quando a IA
+                  ESCOLHIDA suporta mais de um. Um radio de uma opcao pede
                   atencao para nada — e oferecer um nivel que o provedor
                   nao tem seria prometer capacidade nao provada. */}
               {(() => {
-                const emUso = ativacao?.modelos.find((m) => m.provedor === ativacao.provedor);
-                if (emUso === undefined || emUso.niveis.length <= 1) {
+                // Pela ESCOLHIDA, e nao pela que responde: um agente
+                // legado nao escolheu nada, e nao tem nivel a ajustar.
+                const alvo = ativacao?.modelos.find(
+                  (m) => m.provedor === ativacao.provedorEscolhido);
+                if (alvo === undefined) {
                   return (
                     <p style={{ margin: 0, fontSize: TAMANHO.miudo, color: CROMO.textoFraco }}>
-                      Este modelo não oferece controle de nível de raciocínio.
+                      Escolha uma IA acima para ajustar o nível de trabalho.
+                    </p>
+                  );
+                }
+                if (alvo.niveis.length <= 1) {
+                  return (
+                    <p style={{ margin: 0, fontSize: TAMANHO.miudo, color: CROMO.textoFraco }}>
+                      Esta IA não oferece controle de nível de raciocínio.
                     </p>
                   );
                 }
                 return (
                   <EscolhaUnica
                     rotulo="Nível de trabalho"
-                    opcoes={emUso.niveis.map((n) => ({
+                    opcoes={alvo.niveis.map((n) => ({
                       valor: n, rotulo: rotuloDoNivel(n),
                     }))}
-                    valor={emUso.niveis[0]}
-                    aoMudar={() => undefined}
+                    // O gravado quando existe. Nunca um default nosso
+                    // desenhado como se fosse escolha do dono.
+                    valor={ativacao?.nivelDeTrabalho ?? alvo.niveis[0]}
+                    aoMudar={(n) => void escolherIa(alvo.provedor, n)}
                   />
                 );
               })()}
@@ -758,7 +858,8 @@ export function Wizard({ agenteIdInicial }: { agenteIdInicial: string | null }) 
                 <strong style={{ color: CROMO.texto }}>Ferramentas</strong> é o que ele sabe usar.{" "}
                 <strong style={{ color: CROMO.texto }}>Permissões</strong> é quando ele pode usar.
               </p>
-              {(ativacao?.ferramentas.length ?? 0) === 0 && (
+              {(ativacao?.ferramentas.length ?? 0) === 0 &&
+                (ativacao?.ferramentasExternas.length ?? 0) === 0 && (
                 <Aviso tom="info">
                   Nenhuma ferramenta escolhida. Volte à etapa 4 se quiser adicionar.
                 </Aviso>
@@ -794,6 +895,52 @@ export function Wizard({ agenteIdInicial }: { agenteIdInicial: string | null }) 
                   </Cartao>
                 );
               })}
+
+              {/*
+                F7b.4.2 §16: as acoes de aplicativo aparecem AQUI, uma por
+                uma, e com o nivel em branco ate o dono decidir. Foi isso
+                que o gate corrigiu: antes, adicionar a acao ja gravava um
+                nivel escolhido por nos a partir do risco.
+              */}
+              {(ativacao?.ferramentasExternas.length ?? 0) > 0 && (
+                <p style={{
+                  margin: `${ESPACO.md}px 0 0`, fontSize: TAMANHO.corpo, color: CROMO.texto,
+                }}>
+                  <strong>Ações de aplicativos</strong>
+                </p>
+              )}
+              {ativacao?.ferramentasExternas.map((e) => (
+                <Cartao key={e.funcaoId}>
+                  <div style={{ marginBottom: ESPACO.md }}>
+                    <strong style={{ fontSize: TAMANHO.corpo, color: CROMO.texto }}>
+                      {e.toolkit}
+                    </strong>
+                    <p style={{
+                      margin: `${ESPACO.xs}px 0 0`,
+                      fontSize: TAMANHO.miudo, color: CROMO.textoFraco,
+                    }}>
+                      {e.acao.replace(/_/g, " ").toLowerCase()}
+                    </p>
+                    {e.nivel === null && (
+                      <div style={{ marginTop: ESPACO.xs }}>
+                        <Etiqueta tom="atencao">Sem permissão definida</Etiqueta>
+                      </div>
+                    )}
+                  </div>
+                  <EscolhaUnica
+                    rotulo="Quando o agente pode usar esta ação?"
+                    opcoes={NIVEIS}
+                    // `null` de verdade: o radio nasce VAZIO, e a pessoa
+                    // escolhe. Pre-marcar a sugestao faria o default voltar
+                    // a ocupar o lugar da decisao.
+                    valor={(e.nivel as NivelAutonomia | null) ?? null}
+                    aoMudar={(v) => void definirNivelExterno(e.funcaoId, v)}
+                    recomendado={
+                      e.risco === "leitura" ? "automatico" : "aprovacao"
+                    }
+                  />
+                </Cartao>
+              ))}
             </>
           )}
 

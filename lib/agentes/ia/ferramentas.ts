@@ -101,6 +101,18 @@ export interface PedidoIAComFerramentas {
    */
   readonly ferramentas: readonly FerramentaDeclarada[];
   /**
+   * O nivel de trabalho escolhido pelo dono — AGENT-FACTORY-F7b.4.2.
+   *
+   * Rotulo da CDS (`rapido`, `equilibrado`, `avancado`, `maximo`), e NAO
+   * o parametro do provedor. Cada adaptador traduz para o que a sua API
+   * aceita de verdade, e ignora o campo quando nao ha controle.
+   *
+   * OPCIONAL de proposito: ausente significa "use o default do modelo".
+   * Um default nosso aqui seria uma opiniao sobre quanto o modelo deve
+   * pensar, tomada longe de quem paga a conta.
+   */
+  readonly nivelDeTrabalho?: string;
+  /**
    * Como o modelo escolhe a ferramenta — AGENT-FACTORY-F4.
    *
    * `"auto"` (o padrao) e o comportamento de producao: o modelo decide.
@@ -138,6 +150,23 @@ export interface RespostaIAComFerramentas {
  * por `executarFuncao`. Um adaptador que executasse seria um caminho
  * paralelo a cerca.
  */
+/**
+ * Uma acao externa pronta para ser declarada — F7b.4.2.
+ *
+ * `descricao` e `schemaEntrada` vem do CATALOGO do provedor externo, e nao
+ * de nos: inventar o schema de uma acao do Google Sheets faria o modelo
+ * montar argumentos que a acao recusa, e o erro apareceria como falha da
+ * ferramenta em vez de defeito nosso.
+ *
+ * Por isso quem chama fornece as duas coisas. `declararFerramentas` nao
+ * consulta catalogo externo — ela e pura, e continua sendo.
+ */
+export interface FuncaoExternaDeclaravel {
+  readonly funcaoId: string;
+  readonly descricao: string;
+  readonly schemaEntrada: Readonly<Record<string, unknown>>;
+}
+
 export type AdaptadorIAComFerramentas = (
   pedido: PedidoIAComFerramentas
 ) => Promise<RespostaIAComFerramentas>;
@@ -371,8 +400,36 @@ export const DECLARACOES: Readonly<Record<string, { descricao: string; schemaEnt
 export function declararFerramentas(entrada: {
   readonly catalogo: Readonly<Record<string, DefinicaoParaDeclaracao>>;
   readonly permissoes: readonly { funcaoId: string; nivel: string }[];
+  /**
+   * As acoes externas VINCULADAS a este agente — F7b.4.2 §13.
+   *
+   * Esta lista vem de `agente_ferramentas_externas`, e NUNCA de
+   * `agente_permissoes`. E dai que sai a garantia de que permissao
+   * historica nao ressuscita ferramenta removida: sem vinculo, a acao nao
+   * entra aqui, e nao ha permissao que a coloque de volta.
+   *
+   * O nivel continua vindo de `permissoes`, como em qualquer Funcao —
+   * inclusive `bloqueado`, que e declarado para que o guard seja
+   * consultado e o turno feche (ver o docblock acima). Permissao AUSENTE
+   * continua fora: uma acao vinculada e sem decisao nao e declarada, e a
+   * ativacao ja barra esse estado.
+   */
+  readonly externas?: readonly FuncaoExternaDeclaravel[];
 }): readonly FerramentaDeclarada[] {
   const saida: FerramentaDeclarada[] = [];
+  const nivelPorId = new Map(entrada.permissoes.map((p) => [p.funcaoId, p.nivel]));
+
+  // ── As externas, pela mesma regra de nivel que as internas ────────
+  for (const e of entrada.externas ?? []) {
+    const nivel = nivelPorId.get(e.funcaoId);
+    if (nivel !== "automatico" && nivel !== "aprovacao" && nivel !== "bloqueado") continue;
+    saida.push({
+      nome: e.funcaoId,
+      descricao: e.descricao,
+      schemaEntrada: e.schemaEntrada,
+    });
+  }
+
   for (const p of entrada.permissoes) {
     // Qualquer nivel CONHECIDO entra — inclusive `bloqueado`. Ver o
     // docblock: e assim que o guard volta a ser consultado, e e a

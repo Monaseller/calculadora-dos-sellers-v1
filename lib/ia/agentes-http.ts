@@ -1892,10 +1892,23 @@ export interface AtivacaoDoAgenteUI {
   readonly nome: string;
   readonly ativo: boolean;
   readonly temInstrucoes: boolean;
+  /** O que VAI responder. Em escolha indisponivel, e a propria escolha. */
   readonly modelo: string | null;
   readonly provedor: string | null;
+  /**
+   * O que o dono GRAVOU — F7b.4.2. `null` = nunca escolheu.
+   *
+   * Separado de `provedor` porque a diferenca entre os dois e exatamente
+   * o que a tela precisa dizer quando a escolha nao esta disponivel.
+   */
+  readonly provedorEscolhido: string | null;
+  readonly nivelDeTrabalho: string | null;
+  /** `escolhida` | `default_do_ambiente` | `escolhida_indisponivel` | `nenhuma_configurada` */
+  readonly iaDesfecho: string | null;
   readonly memoriaAtiva: boolean;
   readonly ferramentas: readonly FerramentaDaAtivacaoUI[];
+  /** As acoes externas que o agente POSSUI. `nivel: null` = sem decisao. */
+  readonly ferramentasExternas: readonly FerramentaExternaVinculadaUI[];
   readonly modelos: readonly ModeloOferecidoUI[];
   readonly podeAtivar: boolean;
   readonly impedimentos: readonly ImpedimentoUI[];
@@ -2232,12 +2245,16 @@ export async function lerAtivacaoDoAgente(
 
   const bruto = corpo as {
     resumo?: unknown; ferramentas?: unknown; modelos?: unknown;
+    ferramentasExternas?: unknown;
     podeAtivar?: unknown; impedimentos?: unknown;
   };
   if (!ehObjeto(bruto.resumo) || typeof bruto.podeAtivar !== "boolean") {
     return { estado: "falha" };
   }
-  const { nome, ativo, temInstrucoes, modelo, provedor, memoriaAtiva } = bruto.resumo;
+  const {
+    nome, ativo, temInstrucoes, modelo, provedor, memoriaAtiva,
+    provedorEscolhido, nivelDeTrabalho, iaDesfecho,
+  } = bruto.resumo;
   if (typeof nome !== "string") return { estado: "falha" };
   if (typeof ativo !== "boolean" || typeof temInstrucoes !== "boolean") {
     return { estado: "falha" };
@@ -2251,14 +2268,24 @@ export async function lerAtivacaoDoAgente(
     ? []
     : listaDaResposta(bruto.modelos, modeloDaResposta);
   if (modelos === null) return { estado: "falha" };
+  // F7b.4.2: ausente vira lista vazia, pelo mesmo motivo de `modelos` — um
+  // agente sem acao externa nao e resposta malformada.
+  const ferramentasExternas = bruto.ferramentasExternas === undefined
+    ? []
+    : listaDaResposta(bruto.ferramentasExternas, externaDaResposta);
+  if (ferramentasExternas === null) return { estado: "falha" };
 
   return {
     estado: "ok",
     dados: {
       nome, ativo, temInstrucoes,
       modelo: textoOuNulo(modelo), provedor: textoOuNulo(provedor),
+      provedorEscolhido: textoOuNulo(provedorEscolhido),
+      nivelDeTrabalho: textoOuNulo(nivelDeTrabalho),
+      iaDesfecho: textoOuNulo(iaDesfecho),
       memoriaAtiva: memoriaAtiva === true,
-      ferramentas, modelos, podeAtivar: bruto.podeAtivar, impedimentos,
+      ferramentas, ferramentasExternas, modelos,
+      podeAtivar: bruto.podeAtivar, impedimentos,
     },
   };
 }
@@ -2857,7 +2884,16 @@ export async function definirMemoriaDoAgente(
 // -----------------------------------------------------------------
 
 const ROTA_BUSCA_DE_FERRAMENTAS = "/api/ferramentas/buscar";
+/**
+ * F7b.4.2 §14: as contas externas sao do DONO, e nao de um agente.
+ *
+ * Por isso a rota nao carrega `agenteId` — e a segunda da area que aponta
+ * para fora de `/api/agentes`, pelo mesmo motivo da busca.
+ */
+const ROTA_CONEXOES_EXTERNAS = "/api/ferramentas/conexoes";
 const ROTA_SUFIXO_EXTERNAS = "/ferramentas-externas";
+/** F7b.4.2: a IA do agente tem rota propria, como `/memoria` e `/ativacao`. */
+const ROTA_SUFIXO_IA = "/ia";
 
 export interface AchadoDeFerramentaUI {
   /** Chave para a proxima etapa. NAO e mostrada como interface. */
@@ -2942,7 +2978,13 @@ export interface AcaoExternaUI {
   readonly descricao: string | null;
   /** `leitura`, `escrita` ou `desconhecido`. Escrita vence empate. */
   readonly risco: string;
-  readonly nivelRecomendado: string;
+  /**
+   * SUGESTAO, e o nome diz isso — F7b.4.2 §10.
+   *
+   * Vincular nao concede permissao. Este campo existe para a tela
+   * pre-selecionar um nivel na etapa de Permissoes, e o dono confirma.
+   */
+  readonly nivelSugerido: string;
   readonly funcaoId: string | null;
 }
 
@@ -2954,15 +2996,15 @@ export interface AcoesDoAplicativoUI {
 
 function acaoExternaDaResposta(bruto: unknown): AcaoExternaUI | null {
   if (!ehObjeto(bruto)) return null;
-  const { acao, nome, descricao, risco, nivelRecomendado, funcaoId } = bruto;
+  const { acao, nome, descricao, risco, nivelSugerido, funcaoId } = bruto;
   if (typeof acao !== "string" || acao === "") return null;
   if (typeof risco !== "string" || risco === "") return null;
-  if (typeof nivelRecomendado !== "string" || nivelRecomendado === "") return null;
+  if (typeof nivelSugerido !== "string" || nivelSugerido === "") return null;
   return {
     acao,
     nome: typeof nome === "string" && nome !== "" ? nome : acao,
     descricao: textoOuNulo(descricao),
-    risco, nivelRecomendado,
+    risco, nivelSugerido,
     funcaoId: textoOuNulo(funcaoId),
   };
 }
@@ -3009,21 +3051,32 @@ export interface FerramentaExternaVinculadaUI {
   readonly funcaoId: string;
   readonly toolkit: string;
   readonly acao: string;
-  readonly nivel: string;
+  /**
+   * `null` = VINCULADA E SEM DECISAO — F7b.4.2 §11.
+   *
+   * Este e o estado que o F7b.4.1 nao conseguia representar, porque
+   * vincular gravava permissao. Ele existe para a tela poder mostrar
+   * "falta decidir" em vez de exibir um default que ninguem escolheu.
+   */
+  readonly nivel: string | null;
   readonly risco: string;
+  /** A sugestao do servidor, para pre-selecionar. Nunca gravada por ela. */
+  readonly nivelSugerido: string | null;
 }
 
 function externaDaResposta(bruto: unknown): FerramentaExternaVinculadaUI | null {
   if (!ehObjeto(bruto)) return null;
-  const { funcaoId, toolkit, acao, nivel, risco } = bruto;
+  const { funcaoId, toolkit, acao, nivel, risco, nivelSugerido } = bruto;
   if (typeof funcaoId !== "string" || funcaoId === "") return null;
-  if (typeof nivel !== "string" || nivel === "") return null;
+  // `nivel` AUSENTE e valido, e significa "ninguem decidiu". Recusar a
+  // linha por isso esconderia justamente o estado que barra a ativacao.
   return {
     funcaoId,
     toolkit: typeof toolkit === "string" ? toolkit : "",
     acao: typeof acao === "string" ? acao : "",
-    nivel,
+    nivel: typeof nivel === "string" && nivel !== "" ? nivel : null,
     risco: typeof risco === "string" ? risco : "desconhecido",
+    nivelSugerido: textoOuNulo(nivelSugerido),
   };
 }
 
@@ -3046,11 +3099,15 @@ export async function listarFerramentasExternas(
 }
 
 /**
- * Vincula UMA acao externa ao agente.
+ * Vincula UMA acao externa ao agente — POSSUIR, e nada mais.
  *
- * O nivel NAO vem daqui: quem o decide e o servidor, a partir do risco da
- * acao. Escrita e desconhecido nascem em `aprovacao`, e deixar a tela
- * escolher permitiria a ela pedir `automatico` para uma escrita.
+ * F7b.4.2 §10: vincular NAO concede permissao. A acao passa a existir para
+ * o agente com `nivel: null`, e a ativacao fica barrada ate o dono decidir
+ * o nivel pela etapa de Permissoes.
+ *
+ * Antes desta correcao o servidor gravava o nivel recomendado pelo risco.
+ * Funcionava, e era errado: um default NOSSO ocupava o lugar de uma
+ * decisao do dono, e `aprovacao` ja e autorizacao para o modelo pedir.
  */
 export async function vincularFerramentaExterna(
   agenteId: string,
@@ -3075,16 +3132,23 @@ export async function vincularFerramentaExterna(
 }
 
 /**
- * Desvincula uma acao externa.
+ * Desvincula uma acao externa — APAGA o vinculo.
  *
- * DELETE, e o efeito no servidor e BLOQUEAR — a escolha fica registrada e
- * o agente que ja rodou com aquela ferramenta continua explicavel. Para o
- * runtime o resultado e o mesmo: o guard nega.
+ * F7b.4.2 §13. Antes isto gravava `bloqueado`, e a permissao antiga ficava
+ * como unico registro da ferramenta; como a permissao tambem provava
+ * existencia, ela podia RESSUSCITAR a ferramenta removida.
+ *
+ * Agora o vinculo e apagado e a permissao fica intacta, como registro de
+ * uma decisao tomada. Sem vinculo a acao nao e declarada ao modelo e o
+ * guard a nega por inexistencia.
+ *
+ * `removida: false` significa que ela ja nao estava la — tambem e sucesso,
+ * porque o estado pedido e o estado final.
  */
 export async function desvincularFerramentaExterna(
   agenteId: string,
   funcaoId: string
-): Promise<RespostaDaFactory<{ readonly nivel: string }>> {
+): Promise<RespostaDaFactory<{ readonly removida: boolean }>> {
   let resposta: Response;
   try {
     resposta = await fetch(
@@ -3096,9 +3160,244 @@ export async function desvincularFerramentaExterna(
     return { estado: "falha" };
   }
   const corpo = await corpoDe(resposta);
+  const desfecho = desfechoDaResposta<{ readonly removida: boolean }>(resposta, corpo);
+  if (desfecho !== null) return desfecho;
+  return { estado: "ok", dados: { removida: (corpo as { removida?: unknown }).removida === true } };
+}
+
+/**
+ * Grava a DECISAO do dono sobre UMA acao externa — F7b.4.2 §11/§16.
+ *
+ * Nao vai por `definirPermissaoDeFuncao`: aquela rota valida o id contra o
+ * registry, e acao externa nao esta la. A prova de existencia desta e o
+ * VINCULO, conferido no servidor antes de gravar.
+ */
+export async function definirPermissaoDeFerramentaExterna(
+  agenteId: string,
+  funcaoId: string,
+  nivel: string
+): Promise<RespostaDaFactory<{ readonly nivel: string }>> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(`${caminhoDoAgente(agenteId)}${ROTA_SUFIXO_EXTERNAS}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ funcaoId, nivel }),
+    });
+  } catch {
+    return { estado: "falha" };
+  }
+  const corpo = await corpoDe(resposta);
   const desfecho = desfechoDaResposta<{ readonly nivel: string }>(resposta, corpo);
   if (desfecho !== null) return desfecho;
-  const nivel = (corpo as { nivel?: unknown }).nivel;
-  if (typeof nivel !== "string" || nivel === "") return { estado: "falha" };
-  return { estado: "ok", dados: { nivel } };
+  const gravado = (corpo as { nivel?: unknown }).nivel;
+  if (typeof gravado !== "string" || gravado === "") return { estado: "falha" };
+  return { estado: "ok", dados: { nivel: gravado } };
+}
+
+// ─── As contas externas do dono — F7b.4.2 §14/§15 ───────────────────
+
+export interface ContaExternaUI {
+  readonly contaId: string;
+  readonly toolkit: string;
+  /** `aguardando_dono` | `conectada` | `com_problema` | `desconhecida` */
+  readonly estado: string;
+}
+
+function contaExternaDaResposta(bruto: unknown): ContaExternaUI | null {
+  if (!ehObjeto(bruto)) return null;
+  const { contaId, toolkit, estado } = bruto;
+  if (typeof contaId !== "string" || contaId === "") return null;
+  if (typeof estado !== "string" || estado === "") return null;
+  return { contaId, estado, toolkit: typeof toolkit === "string" ? toolkit : "" };
+}
+
+/** As contas que o DONO ja conectou. Leitura pura. */
+export async function listarConexoesExternas(
+  toolkit?: string,
+  signal?: AbortSignal
+): Promise<RespostaDaFactory<readonly ContaExternaUI[]>> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(
+      `${ROTA_CONEXOES_EXTERNAS}${toolkit ? `?toolkit=${encodeURIComponent(toolkit)}` : ""}`,
+      { signal });
+  } catch {
+    return { estado: "falha" };
+  }
+  const corpo = await corpoDe(resposta);
+  const desfecho = desfechoDaResposta<readonly ContaExternaUI[]>(resposta, corpo);
+  if (desfecho !== null) return desfecho;
+  const dados = listaDaResposta((corpo as { contas?: unknown }).contas, contaExternaDaResposta);
+  return dados === null ? { estado: "falha" } : { estado: "ok", dados };
+}
+
+export interface LinkDeConexaoUI {
+  readonly urlParaConectar: string;
+  readonly expiraEm: string | null;
+  readonly contaId: string;
+}
+
+/**
+ * Pede o link para o dono autorizar uma conta — §14.
+ *
+ * A identidade no provedor NAO viaja daqui: ela e derivada no servidor a
+ * partir da sessao. Mandar um identificador daqui deixaria a tela pedir
+ * link para a conta de outra pessoa.
+ *
+ * O que volta e a URL, o prazo e o id da conta. Nenhum token, nenhuma
+ * chave — o servidor recorta antes de responder.
+ */
+export async function iniciarConexaoExterna(
+  toolkit: string
+): Promise<RespostaDaFactory<LinkDeConexaoUI>> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(ROTA_CONEXOES_EXTERNAS, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ toolkit }),
+    });
+  } catch {
+    return { estado: "falha" };
+  }
+  const corpo = await corpoDe(resposta);
+  const desfecho = desfechoDaResposta<LinkDeConexaoUI>(resposta, corpo);
+  if (desfecho !== null) return desfecho;
+  const o = corpo as Record<string, unknown>;
+  if (typeof o.urlParaConectar !== "string" || o.urlParaConectar === "") {
+    return { estado: "falha" };
+  }
+  if (typeof o.contaId !== "string" || o.contaId === "") return { estado: "falha" };
+  return {
+    estado: "ok",
+    dados: {
+      urlParaConectar: o.urlParaConectar,
+      expiraEm: textoOuNulo(o.expiraEm),
+      contaId: o.contaId,
+    },
+  };
+}
+
+// ─── A IA do agente — F7b.4.2 §7/§9 ──────────────────────────────────
+
+export interface EscolhaDeIaUI {
+  readonly provedor: string | null;
+  readonly nivel: string | null;
+  readonly modeloDivergente: boolean;
+  readonly nivelDivergente: boolean;
+}
+
+export interface NivelOferecidoUI {
+  readonly id: string;
+  readonly rotulo: string;
+}
+
+export interface OpcaoDeIaUI {
+  readonly provedor: string;
+  readonly nome: string;
+  readonly descricao: string;
+  readonly modeloId: string;
+  readonly ferramentas: boolean;
+  readonly niveis: readonly NivelOferecidoUI[];
+}
+
+export interface EstadoDaIaUI {
+  readonly escolha: EscolhaDeIaUI;
+  /** O que VAI responder — diferente da escolha quando ela sumiu. */
+  readonly efetivo: { readonly provedor: string | null; readonly modelo: string | null;
+    readonly nivel: string | null };
+  readonly desfecho: string;
+  readonly opcoes: readonly OpcaoDeIaUI[];
+}
+
+function opcaoDeIaDaResposta(bruto: unknown): OpcaoDeIaUI | null {
+  if (!ehObjeto(bruto)) return null;
+  const { provedor, nome, descricao, modeloId, ferramentas, niveis } = bruto;
+  if (typeof provedor !== "string" || provedor === "") return null;
+  if (typeof nome !== "string" || nome === "") return null;
+  if (typeof modeloId !== "string" || modeloId === "") return null;
+  const lista: NivelOferecidoUI[] = [];
+  if (Array.isArray(niveis)) {
+    for (const n of niveis) {
+      if (!ehObjeto(n)) continue;
+      if (typeof n.id !== "string" || n.id === "") continue;
+      lista.push({ id: n.id, rotulo: typeof n.rotulo === "string" ? n.rotulo : n.id });
+    }
+  }
+  return {
+    provedor, nome, modeloId,
+    descricao: typeof descricao === "string" ? descricao : "",
+    ferramentas: ferramentas === true,
+    niveis: lista,
+  };
+}
+
+function estadoDaIaDaResposta(corpo: unknown): EstadoDaIaUI | null {
+  if (!ehObjeto(corpo)) return null;
+  const opcoes = listaDaResposta(corpo.opcoes, opcaoDeIaDaResposta);
+  if (opcoes === null) return null;
+  const escolha = ehObjeto(corpo.escolha) ? corpo.escolha : {};
+  const efetivo = ehObjeto(corpo.efetivo) ? corpo.efetivo : {};
+  return {
+    escolha: {
+      provedor: textoOuNulo(escolha.provedor),
+      nivel: textoOuNulo(escolha.nivel),
+      modeloDivergente: escolha.modeloDivergente === true,
+      nivelDivergente: escolha.nivelDivergente === true,
+    },
+    efetivo: {
+      provedor: textoOuNulo(efetivo.provedor),
+      modelo: textoOuNulo(efetivo.modelo),
+      nivel: textoOuNulo(efetivo.nivel),
+    },
+    desfecho: typeof corpo.desfecho === "string" ? corpo.desfecho : "",
+    opcoes,
+  };
+}
+
+/** Quais IAs existem, e qual este agente escolheu. Leitura pura. */
+export async function lerIaDoAgente(
+  agenteId: string,
+  signal?: AbortSignal
+): Promise<RespostaDaFactory<EstadoDaIaUI>> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(`${caminhoDoAgente(agenteId)}${ROTA_SUFIXO_IA}`, { signal });
+  } catch {
+    return { estado: "falha" };
+  }
+  const corpo = await corpoDe(resposta);
+  const desfecho = desfechoDaResposta<EstadoDaIaUI>(resposta, corpo);
+  if (desfecho !== null) return desfecho;
+  const dados = estadoDaIaDaResposta(corpo);
+  return dados === null ? { estado: "falha" } : { estado: "ok", dados };
+}
+
+/**
+ * Grava a escolha de IA, ou a limpa com `provedor: null`.
+ *
+ * O `modelo` concreto NAO e enviado: quem o resolve e o servidor, a partir
+ * do catalogo que le env. Deixar a tela mandar um model id permitiria
+ * cobrar chamada num modelo que ninguem aprovou.
+ */
+export async function definirIaDoAgente(
+  agenteId: string,
+  escolha: { readonly provedor: string | null; readonly nivel?: string | null }
+): Promise<RespostaDaFactory<EstadoDaIaUI>> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(`${caminhoDoAgente(agenteId)}${ROTA_SUFIXO_IA}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provedor: escolha.provedor, nivel: escolha.nivel ?? null }),
+    });
+  } catch {
+    return { estado: "falha" };
+  }
+  const corpo = await corpoDe(resposta);
+  const desfecho = desfechoDaResposta<EstadoDaIaUI>(resposta, corpo);
+  if (desfecho !== null) return desfecho;
+  const dados = estadoDaIaDaResposta(corpo);
+  return dados === null ? { estado: "falha" } : { estado: "ok", dados };
 }

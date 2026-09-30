@@ -89,6 +89,21 @@ export interface LinhaAgente {
    * habilita ferramenta nem muda nivel.
    */
   memoria_ativa: boolean;
+  /**
+   * AGENT-FACTORY-F7b.4.2: a IA deste agente.
+   *
+   * `null` significa "nao escolheu, usa o default do ambiente" — e o que
+   * preserva o comportamento dos agentes criados antes destas colunas.
+   *
+   * NAO ha fallback silencioso: se o agente escolheu um provedor e ele
+   * nao esta disponivel, a ativacao e BLOQUEADA em vez de trocar por
+   * outro. Ver `ia_escolhida_indisponivel` em
+   * `lib/agentes/factory/ativacao.ts`.
+   */
+  provedor_ia: string | null;
+  modelo_ia: string | null;
+  /** Rotulo da CDS, traduzido por cada adaptador. `null` = default. */
+  nivel_de_trabalho: string | null;
   criado_em: string;
   atualizado_em: string;
 }
@@ -135,6 +150,13 @@ export interface CamposAtualizacaoAgente {
   ativo?: boolean;
   /** F7b.4. `camelCase` aqui, `memoria_ativa` na coluna. */
   memoriaAtiva?: boolean;
+  /**
+   * F7b.4.2. `null` LIMPA a escolha e volta ao default do ambiente — e
+   * pedido legitimo, nao ausencia de valor.
+   */
+  provedorIa?: string | null;
+  modeloIa?: string | null;
+  nivelDeTrabalho?: string | null;
 }
 
 export interface CamposNovaTarefa {

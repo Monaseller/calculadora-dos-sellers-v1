@@ -34,6 +34,12 @@
 // import tem de vir ANTES de qualquer outro que alcance o registry.
 import "./_server-only-inerte";
 
+import {
+  DESFECHOS_DA_IA, opcaoPreferida, resolverIaDoAgente,
+} from "../lib/agentes/factory/ia-do-agente";
+import {
+  adaptadorDoProvedor, provedoresComAdaptador,
+} from "../lib/agentes/ia/adaptador-por-provedor";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -295,27 +301,50 @@ secao("C. ACTIVATION_PERMISSION_COMPLETENESS");
   ok("C8  agente SEM ferramenta nenhuma ativa",
     semFerramenta.podeAtivar && !semFerramenta.temFerramentas);
 
-  // ── O provedor incompativel, e por que ele so conta COM ferramenta ──
-  const googleComFerramenta = validarParaAtivacao({
-    ...base, provedor: "google",
+  // ── C9/C10 reconciliados na F7b.4.2 ──────────────────────────────
+  //
+  // ANTES o `google` era o exemplo de provedor incompativel, porque o
+  // roundtrip de ferramenta dele nao fechava. O F7b.4 resolveu isso
+  // (`store: false` + assinatura preservada) e o F7b.4.2 acrescentou a
+  // OpenAI — os TRES provedores configurados agora suportam ferramenta.
+  //
+  // O caso incompativel continua tendo de ser testado, porque o codigo
+  // `modelo_incompativel_com_ferramentas` continua existindo. Mas ele
+  // passa a usar um provedor SINTETICO: apontar um provedor real como
+  // exemplo de incompativel seria afirmar algo que deixou de ser verdade.
+  const PROVEDOR_SINTETICO = "provedor_de_teste_sem_ferramenta";
+  const incompativelComFerramenta = validarParaAtivacao({
+    ...base, provedor: PROVEDOR_SINTETICO,
     permissoes: planilhas.funcoes.map((f) => ({ funcaoId: f, nivel: "automatico" })),
   });
   ok("C9  provedor sem ida-e-volta de ferramenta + ferramentas: NAO ativa",
-    !googleComFerramenta.podeAtivar &&
-      googleComFerramenta.impedimentos.some(
+    !incompativelComFerramenta.podeAtivar &&
+      incompativelComFerramenta.impedimentos.some(
         (i) => i.codigo === "modelo_incompativel_com_ferramentas"));
   ok("C9a e a frase nao vaza `store`, Interactions nem nome de adaptador",
-    googleComFerramenta.impedimentos.every(
+    incompativelComFerramenta.impedimentos.every(
       (i) => !/store|interaction|adaptador|previous_interaction/i.test(i.mensagem)));
-  const googleSemFerramenta = validarParaAtivacao({
-    ...base, provedor: "google", permissoes: [],
+  const incompativelSemFerramenta = validarParaAtivacao({
+    ...base, provedor: PROVEDOR_SINTETICO, permissoes: [],
   });
   ok("C9b o MESMO provedor SEM ferramenta ativa",
-    googleSemFerramenta.podeAtivar);
+    incompativelSemFerramenta.podeAtivar);
+  ok("C9c e os TRES provedores reais passam COM ferramenta",
+    ["anthropic", "google", "openai"].every((prov) =>
+      validarParaAtivacao({
+        ...base, provedor: prov,
+        permissoes: planilhas.funcoes.map((f) => ({ funcaoId: f, nivel: "automatico" })),
+      }).podeAtivar));
 
-  ok("C10 a lista de provedores com ferramenta e a medida, nao a desejada",
-    PROVEDORES_COM_FERRAMENTA.length === 1 &&
-      PROVEDORES_COM_FERRAMENTA[0] === "anthropic");
+  ok("C10 a lista de provedores com ferramenta e a MEDIDA, nao a desejada",
+    JSON.stringify([...PROVEDORES_COM_FERRAMENTA].sort()) ===
+      JSON.stringify(["anthropic", "google", "openai"]),
+    [...PROVEDORES_COM_FERRAMENTA].join(","));
+  ok("C10a e cada um deles tem entrada no catalogo, com prova",
+    ["anthropic", "google", "openai"].every((prov) => {
+      const m = catalogoDeModelos().find((x) => x.provedor === prov);
+      return m !== undefined && m.provadoEm.startsWith("scripts/");
+    }));
 
   // Anti-vacuidade: todo codigo declarado tem de ser alcancavel por
   // ALGUMA entrada. Um codigo que nunca aparece e letra morta.
@@ -323,17 +352,28 @@ secao("C. ACTIVATION_PERMISSION_COMPLETENESS");
     ...validarParaAtivacao({ nome: "", instrucoes: "", provedor: null, permissoes: [] })
       .impedimentos.map((i) => i.codigo),
     ...incompleto.impedimentos.map((i) => i.codigo),
-    ...googleComFerramenta.impedimentos.map((i) => i.codigo),
+    ...incompativelComFerramenta.impedimentos.map((i) => i.codigo),
+    // Os dois codigos da F7b.4.2. Sem estes dois, C11 acusaria letra
+    // morta — e foi exatamente o que ele fez quando eles entraram sem
+    // teste.
+    ...validarParaAtivacao({
+      ...base, provedorEscolhido: "google", provedoresDisponiveis: ["anthropic"],
+      permissoes: [],
+    }).impedimentos.map((i) => i.codigo),
+    ...validarParaAtivacao({
+      ...base, permissoes: [],
+      funcoesExternasVinculadas: ["composio.googlesheets.googlesheets_add_sheet"],
+    }).impedimentos.map((i) => i.codigo),
   ]);
   const mortos = CODIGOS_DE_IMPEDIMENTO.filter((c) => !alcancados.has(c));
   ok("C11 TODO codigo de impedimento declarado e alcancavel",
     mortos.length === 0, mortos.join(", "));
 
   ok("C12 toda mensagem de impedimento e uma frase, e diz o que fazer",
-    [...incompleto.impedimentos, ...googleComFerramenta.impedimentos].every(
+    [...incompleto.impedimentos, ...incompativelComFerramenta.impedimentos].every(
       (i) => i.mensagem.length > 15 && /[.!]$/.test(i.mensagem)));
   ok("C13 todo impedimento aponta para uma etapa que existe",
-    [...incompleto.impedimentos, ...googleComFerramenta.impedimentos,
+    [...incompleto.impedimentos, ...incompativelComFerramenta.impedimentos,
      ...validarParaAtivacao({ nome: "", instrucoes: "", provedor: null, permissoes: [] })
        .impedimentos]
       .every((i) => i.etapa >= 1 && i.etapa <= 11));
@@ -377,9 +417,21 @@ secao("D. A rota nao decide nada por conta propria");
     /porta\.agenteId/.test(rota) && !/corpo\.agenteId/.test(rota));
   ok("D8  a recusa de ativacao devolve 409 com o que falta",
     /impedimentos: estado\.validacao\.impedimentos[\s\S]{0,40}409/.test(rota));
-  ok("D9  a lista de ferramentas nao publica `funcao_id`",
+  // D9 media a lista INTERNA, onde a pessoa escolheu PACKS e nunca viu
+  // `funcao_id`. A fatia antiga ia ate `podeAtivar:` e passou a englobar
+  // `ferramentasExternas:`, que publica `funcaoId` DE PROPOSITO — ver D9b.
+  // Corrigir a fatia e consertar o instrumento; afrouxar o regex seria
+  // perder a garantia.
+  ok("D9  a lista de ferramentas INTERNAS nao publica `funcao_id`",
     !/funcao_?[Ii]d/.test(rota.slice(rota.indexOf("ferramentas:"),
-      rota.indexOf("podeAtivar:"))));
+      rota.indexOf("ferramentasExternas:"))));
+  // E a externa publica, porque ali a pessoa escolheu A ACAO, e nao um
+  // pack: sem o id ela nao tem como decidir o nivel de cada uma (§16). O
+  // slug e publico no catalogo do Composio — nao e segredo, e a cerca
+  // continua sendo o guard, que nao confia em id vindo do browser.
+  ok("D9b a lista de EXTERNAS publica `funcaoId`, que e como a acao se chama",
+    /ferramentasExternas: estado\.vinculos\.map/.test(rota) &&
+      /funcaoId: v\.funcaoId/.test(rota));
   ok("D10 as permissoes sao pedidas para o catalogo INTEIRO",
     /funcaoIds: Object\.keys\(FUNCOES\)/.test(rota));
 }
@@ -944,9 +996,33 @@ secao("N. O catalogo de cerebros: capacidade medida, nunca prometida");
   ok("N5b ANCORA: o recorte nao apagou o arquivo",
     fonte.length > 800 && fonte.includes("modelosDisponiveis"));
 
-  ok("N6  OpenAI esta AUSENTE do catalogo — nao indisponivel",
-    !cat.some((m) => m.provedor === "openai"));
-  ok("N7  os dois provedores configurados declaram ferramentas",
+  // ── N6 reconciliado na F7b.4.2 ─────────────────────────────────
+  //
+  // ANTES: "OpenAI esta AUSENTE". Era verdade, e por um motivo: a chave
+  // existia e a conta nao tinha saldo, entao nenhuma capacidade havia
+  // sido provada. Com o saldo regularizado, o roundtrip passou e a
+  // entrada entrou — nessa ordem.
+  //
+  // O que se cobra agora e a CONDICAO que a tornou legitima: ela aponta
+  // para uma prova, e a prova existe (N2/N3 acima).
+  ok("N6  OpenAI esta no catalogo, e aponta para a prova dela",
+    (() => {
+      const o = cat.find((m) => m.provedor === "openai");
+      return o !== undefined &&
+        o.provadoEm === "scripts/testar-openai-runtime-live.ts";
+    })(), cat.map((m) => m.provedor).join(","));
+  ok("N6a e ela e o UNICO provedor com escolha de nivel — os outros tem um so",
+    (() => {
+      const comEscolha = cat.filter((m) => m.niveis.length > 1).map((m) => m.provedor);
+      return comEscolha.length === 1 && comEscolha[0] === "openai";
+    })(), cat.map((m) => `${m.provedor}:${m.niveis.length}`).join(","));
+  ok("N6b os quatro niveis dela sao os MEDIDOS",
+    (() => {
+      const o = cat.find((m) => m.provedor === "openai");
+      return JSON.stringify([...(o?.niveis ?? [])].sort()) ===
+        JSON.stringify(["avancado", "equilibrado", "maximo", "rapido"]);
+    })());
+  ok("N7  TODO provedor do catalogo declara ferramentas",
     cat.every((m) => m.ferramentas === true));
 
   // Um nivel = sem escolha. A tela nao pode oferecer o que nao existe.
@@ -1154,54 +1230,140 @@ secao("P. Busca unificada: duas origens, um resultado, nada despejado");
 
 // ─── Q. O vinculo externo ─────────────────────────────────────────────
 
-secao("Q. Vincular acao externa e gravar permissao — nao ha tabela paralela");
+secao("Q. Vincular acao externa e POSSUIR — permissao e outra coisa");
 
+/**
+ * ── Esta secao foi REVERTIDA pelo F7b.4.2, e isso e o ponto ─────────
+ *
+ * No F7b.4.1 ela cobrava, nesta ordem:
+ *
+ *   Q1   a rota grava permissao (`definirPermissaoDeFuncaoDoAgente`)
+ *   Q2   NAO existe tabela de selecionadas
+ *   Q9   desvincular BLOQUEIA, e nao apaga linha
+ *   Q14  a externa e achada filtrando `agente_permissoes` pelo id
+ *
+ * As quatro descreviam fielmente um desenho que o gate corrigiu:
+ *
+ *   §10/§11  selecionar uma Tool NAO concede permissao. O nivel era
+ *            escolhido por NOS a partir do risco — um default nosso no
+ *            lugar da decisao do dono, e `aprovacao` ja e autorizacao
+ *            para pedir.
+ *
+ *   §13      permissao servia de prova de existencia, entao permissao
+ *            HISTORICA podia ressuscitar ferramenta removida.
+ *
+ * Por isso as quatro agora cobram o OPOSTO. Inverter oraculo merece
+ * desconfianca — e a defesa aqui e que cada versao nova e MAIS forte que
+ * a que substituiu: "nao grava permissao" e verificavel por ausencia,
+ * "apaga o vinculo" por presenca, e o efeito de ponta a ponta esta
+ * provado em `scripts/testar-ferramentas-externas.ts` com par positivo.
+ */
 {
   const rota = codigo("app/api/agentes/[agenteId]/ferramentas-externas/route.ts");
   const grav = codigo("lib/agentes/permissoes/gravadas.ts");
+  const repo = codigo("lib/agentes/ferramentas-externas/repositorio.ts");
 
-  ok("Q1  a rota grava pela MESMA escrita de permissao do resto",
-    /definirPermissaoDeFuncaoDoAgente/.test(rota));
-  ok("Q2  e NAO existe tabela de selecionadas",
-    !/ferramentas_externas|agente_ferramentas|toolkits_selecionados/.test(rota));
+  // ── §10: vincular grava POSSUIR, e NADA de permissao ──────────────
+  ok("Q1  vincular NAO grava permissao — era o defeito do F7b.4.1",
+    !/definirPermissaoDeFuncaoDoAgente/.test(rota));
+  ok("Q1a e grava o VINCULO, pelo repositorio proprio",
+    /vincularFerramentaExternaNoAgente/.test(rota));
+  ok("Q2  a tabela de POSSUIR existe, e e so o repositorio que a nomeia",
+    /agente_ferramentas_externas/.test(repo) &&
+      !/agente_ferramentas_externas/.test(rota));
+  // Q2a media "o repositorio nao escreve permissao", e isso deixou de ser
+  // verdade quando a DECISAO EXPLICITA ganhou lugar aqui (§11/§16) — ela
+  // precisa do vinculo como prova de existencia, e o vinculo mora neste
+  // arquivo. O que o §10 proibe e VINCULAR conceder permissao, e e isso
+  // que passa a ser medido: a fatia da funcao de vincular.
+  ok("Q2a VINCULAR nao escreve permissao — e o §10 inteiro",
+    (() => {
+      const i = repo.indexOf("export async function vincularFerramentaExternaNoAgente");
+      const j = repo.indexOf("export type ResultadoDesvincular");
+      return i > 0 && j > i && !/agente_permissoes|permiss/i.test(repo.slice(i, j));
+    })());
+  ok("Q2b e a UNICA escrita de permissao do arquivo e a decisao do dono",
+    (repo.match(/agente_permissoes/g) ?? []).length === 1 &&
+      /export async function definirPermissaoDeFerramentaExterna/.test(repo));
+  ok("Q2c que confere o VINCULO antes de gravar — a prova de existencia",
+    (() => {
+      const i = repo.indexOf("export async function definirPermissaoDeFerramentaExterna");
+      const j = repo.indexOf("agente_permissoes", i);
+      return i > 0 && j > i && /nao_vinculada/.test(repo.slice(i, j));
+    })());
   ok("Q3  o dono e o agente vem da porta, nunca do corpo",
     /porta\.userId/.test(rota) && /porta\.agenteId/.test(rota) &&
       !/corpo\.userId|corpo\.agenteId/.test(rota));
 
-  // A prova de existencia ANTES de gravar.
-  ok("Q4  a acao tem de existir no catalogo antes de virar permissao",
+  // A prova de existencia ANTES de gravar continua valendo.
+  ok("Q4  a acao tem de existir no catalogo antes de virar vinculo",
     /listarAcoesDoToolkit\(toolkit, 50\)/.test(rota) &&
       /cat\.dados\.itens\.some\(\(a\) => a\.slug === acao\)/.test(rota));
   ok("Q5  acao inexistente responde 404, e nao grava",
     /Esta ação não existe neste aplicativo[\s\S]{0,20}404/.test(rota));
 
-  // §11/§18: escrita nunca nasce automatica.
-  ok("Q6  o nivel e decidido pelo SERVIDOR, a partir do risco",
-    /riscoDaAcao\(acao\)/.test(rota) && /nivelRecomendado\(risco\)/.test(rota));
-  ok("Q7  e a tela NAO manda nivel",
-    !/nivel: corpo\.nivel|corpo\.nivel/.test(rota));
-  ok("Q8  leitura recomenda automatico; escrita e desconhecido, aprovacao",
+  // ── §11: a acao nasce UNCONFIGURED ────────────────────────────────
+  ok("Q6  a rota devolve `nivel: null` ao vincular — ninguem decidiu ainda",
+    /nivel: null/.test(rota));
+  ok("Q6a o nivel do risco e SUGESTAO, e o nome diz isso",
+    /nivelSugerido/.test(rota) && !/nivel: nivelRecomendado/.test(rota));
+  ok("Q7  o POST de vinculo nao aceita nivel da tela",
+    (() => {
+      const i = rota.indexOf("export async function POST");
+      const j = rota.indexOf("export async function PATCH");
+      return i > 0 && j > i && !/corpo\.nivel/.test(rota.slice(i, j));
+    })());
+  ok("Q7a e o PATCH aceita, porque ALI e a decisao do dono",
+    (() => {
+      const i = rota.indexOf("export async function PATCH");
+      const j = rota.indexOf("export async function DELETE");
+      return i > 0 && j > i && /corpo\.nivel/.test(rota.slice(i, j));
+    })());
+  ok("Q8  a sugestao para escrita e desconhecido nunca e `automatico`",
     nivelRecomendado("leitura") === "automatico" &&
       nivelRecomendado("escrita") === "aprovacao" &&
       nivelRecomendado("desconhecido") === "aprovacao");
 
-  // Desvincular e bloquear, o que mantem a cerca do F7b.0.
-  ok("Q9  desvincular BLOQUEIA, e nao apaga a linha",
-    /nivel: "bloqueado"/.test(rota) && !/\.delete\(\)/.test(rota));
+  // ── §13: desvincular APAGA o vinculo ──────────────────────────────
+  ok("Q9  desvincular apaga o VINCULO, e nao grava `bloqueado`",
+    /desvincularFerramentaExternaDoAgente/.test(rota) &&
+      !/nivel: "bloqueado"/.test(rota));
+  ok("Q9a e o repositorio de fato deleta a linha do vinculo",
+    /\.delete\(\)/.test(repo));
+  ok("Q9b sem tocar a permissao — ela e registro de uma decisao tomada",
+    (() => {
+      const i = repo.indexOf("export async function desvincularFerramentaExterna");
+      // A PROXIMA export depois dela, e nao um nome fixo: a fatia antiga ia
+      // ate `fatosDeFuncaoExterna` e passou a englobar a decisao explicita,
+      // que escreve permissao de proposito.
+      const j = repo.indexOf("\nexport ", i + 10);
+      return i > 0 && j > i && !/permiss/i.test(repo.slice(i, j));
+    })());
   ok("Q10 e so aceita id EXTERNO",
     /!ehFuncaoExterna\(funcaoId\)/.test(rota));
 
-  // A leitura sem filtro, que e o que descobre as externas.
+  // A leitura de permissoes sem filtro continua existindo: e ela que
+  // encontra o NIVEL de uma acao que o registry nao conhece.
   ok("Q11 a leitura de permissoes gravadas escopa por dono E agente na query",
     /\.eq\("agente_id", agenteId\)[\s\S]{0,60}\.eq\("user_id", userId\)/.test(grav));
   ok("Q12 linha torta CONDENA a coleta — nao vira lista pela metade",
     /return \{ coleta: "falha" \}/.test(grav));
   ok("Q13 e sem dono ou agente ela nem pergunta",
     /if \(!userId \|\| !agenteId\) return \{ coleta: "entrada_invalida" \}/.test(grav));
+  ok("Q13a o repositorio do vinculo escopa igual, na propria query",
+    /\.eq\("user_id", userId\)[\s\S]{0,60}\.eq\("agente_id", agenteId\)/.test(repo));
+  ok("Q13b e linha torta CONDENA a coleta la tambem",
+    /if \(v === null\) return \{ coleta: "falha" \}/.test(repo));
 
-  // Externa e reconhecivel por inspecao — sem coluna que a marque.
-  ok("Q14 a externa e reconhecida pelo id, nao por coluna",
-    /filter\(\(p\) => ehFuncaoExterna\(p\.funcaoId\)\)/.test(rota));
+  // ── §13: a EXISTENCIA vem do vinculo, e nao da permissao ──────────
+  ok("Q14 as externas vem do VINCULO, nao de um filtro sobre permissoes",
+    /listarVinculosExternos/.test(rota) &&
+      !/filter\(\(p\) => ehFuncaoExterna\(p\.funcaoId\)\)/.test(rota));
+  ok("Q14a a permissao entra so para dizer o NIVEL de cada vinculada",
+    /nivelPorId\.get\(v\.funcaoId\) \?\? null/.test(rota));
+  ok("Q14b e os fatos do guard derivam do vinculo, por funcao pura",
+    /export function fatosDeFuncaoExterna/.test(repo) &&
+      /existe: true/.test(repo));
   ok("Q15 ida e volta do id sao consistentes",
     (() => {
       const r = idDaFuncaoExterna({ toolkit: "googlesheets", acao: "GOOGLESHEETS_ADD_SHEET" });
@@ -1219,6 +1381,266 @@ secao("Q. Vincular acao externa e gravar permissao — nao ha tabela paralela");
     !/execute|proxy|MULTI_EXECUTE/i.test(cli));
   ok("Q17 e a rota de vinculo nao executa nada",
     !/executarFuncao|execute/i.test(rota));
+}
+
+
+// ─── R. Sem fallback silencioso, e completude da externa ──────────────
+
+secao("R. A IA escolhida e do agente — e trocar por conta propria e proibido");
+
+{
+  const base = {
+    nome: "Assistente financeiro",
+    instrucoes: "Use as ferramentas para qualquer numero.",
+    provedor: "anthropic",
+    permissoes: [] as { funcaoId: string; nivel: string }[],
+  };
+
+  // ── §8: escolha indisponivel BLOQUEIA ─────────────────────────────
+  const escolhaSumiu = validarParaAtivacao({
+    ...base,
+    provedorEscolhido: "google",
+    provedoresDisponiveis: ["anthropic", "openai"],
+  });
+  ok("R1  IA escolhida fora do ambiente: NAO ativa",
+    !escolhaSumiu.podeAtivar);
+  ok("R2  e o impedimento e `ia_escolhida_indisponivel`",
+    escolhaSumiu.impedimentos.some((i) => i.codigo === "ia_escolhida_indisponivel"));
+  ok("R3  que aponta para a etapa da IA",
+    escolhaSumiu.impedimentos
+      .find((i) => i.codigo === "ia_escolhida_indisponivel")?.etapa === 3);
+  ok("R4  a frase diz para ESCOLHER outra — nao promete trocar sozinho",
+    escolhaSumiu.impedimentos.some((i) =>
+      /Escolha outra/i.test(i.mensagem) && !/automat/i.test(i.mensagem)));
+  ok("R5  e nao vaza nome de env nem detalhe de credencial",
+    escolhaSumiu.impedimentos.every((i) =>
+      !/API_KEY|MODEL_AGENTE|process\.env|credencial/i.test(i.mensagem)));
+
+  // O PAR: a mesma escolha, disponivel, ativa.
+  const escolhaPresente = validarParaAtivacao({
+    ...base,
+    provedorEscolhido: "google",
+    provedoresDisponiveis: ["anthropic", "google", "openai"],
+  });
+  ok("R6  a MESMA escolha, disponivel: ativa",
+    escolhaPresente.podeAtivar,
+    escolhaPresente.impedimentos.map((i) => i.codigo).join(","));
+
+  // Agente legado: nunca escolheu, comportamento preservado.
+  const legado = validarParaAtivacao({
+    ...base, provedorEscolhido: null, provedoresDisponiveis: ["anthropic"],
+  });
+  ok("R7  agente que NUNCA escolheu continua ativando",
+    legado.podeAtivar, legado.impedimentos.map((i) => i.codigo).join(","));
+  ok("R8  e sem lista de disponiveis tambem — o campo e opcional",
+    validarParaAtivacao({ ...base }).podeAtivar);
+
+  // ── §12: vinculada sem permissao BARRA ────────────────────────────
+  const ID_EXT = "composio.googlesheets.googlesheets_add_sheet";
+
+  const semDecisao = validarParaAtivacao({
+    ...base, funcoesExternasVinculadas: [ID_EXT],
+  });
+  ok("R9  acao externa vinculada e SEM permissao: NAO ativa",
+    !semDecisao.podeAtivar);
+  ok("R10 e o impedimento e o proprio da externa",
+    semDecisao.impedimentos.some((i) => i.codigo === "ferramenta_externa_sem_permissao"));
+  ok("R11 que aponta para a etapa de Permissoes",
+    semDecisao.impedimentos
+      .find((i) => i.codigo === "ferramenta_externa_sem_permissao")?.etapa === 8);
+  ok("R12 a frase nao mostra `funcao_id`",
+    semDecisao.impedimentos.every((i) => !/composio\.|funcao_id/.test(i.mensagem)));
+
+  // O PAR: com o nivel definido, ativa. Os TRES niveis contam como
+  // decisao — inclusive `bloqueado`, que tem cerca em runtime.
+  for (const nivel of ["automatico", "aprovacao", "bloqueado"]) {
+    const decidida = validarParaAtivacao({
+      ...base,
+      funcoesExternasVinculadas: [ID_EXT],
+      permissoes: [{ funcaoId: ID_EXT, nivel }],
+    });
+    ok(`R13 com nivel \`${nivel}\` definido: ATIVA`,
+      decidida.podeAtivar, decidida.impedimentos.map((i) => i.codigo).join(","));
+  }
+
+  // Duas vinculadas, uma decidida: continua barrando, e a frase conta.
+  const ID_EXT2 = "composio.googlesheets.googlesheets_get_spreadsheet_info";
+  const meiaDecidida = validarParaAtivacao({
+    ...base,
+    funcoesExternasVinculadas: [ID_EXT, ID_EXT2],
+    permissoes: [{ funcaoId: ID_EXT, nivel: "aprovacao" }],
+  });
+  ok("R14 uma decidida e outra nao: continua barrando",
+    !meiaDecidida.podeAtivar);
+  ok("R15 e a frase fala de UMA, no singular",
+    meiaDecidida.impedimentos.some((i) => /Uma ação de aplicativo/.test(i.mensagem)),
+    meiaDecidida.impedimentos.map((i) => i.mensagem).join(" | "));
+
+  // Externa TAMBEM conta como ferramenta para a regra de compatibilidade.
+  const soExterna = validarParaAtivacao({
+    ...base,
+    provedor: "provedor_de_teste_sem_ferramenta",
+    funcoesExternasVinculadas: [ID_EXT],
+    permissoes: [{ funcaoId: ID_EXT, nivel: "aprovacao" }],
+  });
+  ok("R16 agente com SO ferramenta externa exige provedor compativel",
+    !soExterna.podeAtivar &&
+      soExterna.impedimentos.some(
+        (i) => i.codigo === "modelo_incompativel_com_ferramentas"));
+  ok("R17 e `temFerramentas` reconhece a externa",
+    soExterna.temFerramentas);
+}
+
+
+// ─── S. A IA e do AGENTE, e ninguem troca por ela ─────────────────────
+
+secao("S. A IA e do AGENTE — e a escolha indisponivel BLOQUEIA, nao troca");
+
+{
+  const TRES = [
+    { provedor: "anthropic", modeloId: "claude-x", niveis: ["equilibrado"] },
+    { provedor: "google", modeloId: "gemini-x", niveis: ["equilibrado"] },
+    { provedor: "openai", modeloId: "gpt-x",
+      niveis: ["rapido", "equilibrado", "avancado", "maximo"] },
+  ];
+
+  // ── Agente legado: nunca escolheu ─────────────────────────────────
+  const legado = resolverIaDoAgente({
+    provedorGravado: null, modeloGravado: null, nivelGravado: null, disponiveis: TRES,
+  });
+  ok("S1  agente que nunca escolheu usa o default do ambiente",
+    legado.desfecho === "default_do_ambiente", legado.desfecho);
+  ok("S2  e o default e a Anthropic — o caminho provado desde o F4",
+    legado.provedor === "anthropic" && legado.modelo === "claude-x");
+  ok("S3  sem nivel: um rotulo sozinho pertenceria a um provedor nao escolhido",
+    legado.nivel === null);
+  // O default tem de ser ESTAVEL: dois turnos do mesmo agente nao podem
+  // responder de cerebros diferentes.
+  ok("S4  o default e o mesmo em duas chamadas",
+    resolverIaDoAgente({
+      provedorGravado: null, modeloGravado: null, nivelGravado: null, disponiveis: TRES,
+    }).provedor === legado.provedor);
+  ok("S5  e `opcaoPreferida` concorda com ele",
+    opcaoPreferida(TRES)?.provedor === legado.provedor);
+
+  // ── Escolha DISPONIVEL ────────────────────────────────────────────
+  const escolhida = resolverIaDoAgente({
+    provedorGravado: "openai", modeloGravado: "gpt-x",
+    nivelGravado: "maximo", disponiveis: TRES,
+  });
+  ok("S6  escolha disponivel vale", escolhida.desfecho === "escolhida");
+  ok("S7  e quem responde e o ESCOLHIDO, nao o default",
+    escolhida.provedor === "openai" && escolhida.provedor !== legado.provedor);
+  ok("S8  com o nivel escolhido aplicado", escolhida.nivel === "maximo");
+
+  // ── Escolha INDISPONIVEL: o coracao do §8 ─────────────────────────
+  const sumiu = resolverIaDoAgente({
+    provedorGravado: "google", modeloGravado: "gemini-x", nivelGravado: null,
+    disponiveis: TRES.filter((m) => m.provedor !== "google"),
+  });
+  ok("S9  escolha indisponivel tem desfecho proprio",
+    sumiu.desfecho === "escolhida_indisponivel", sumiu.desfecho);
+  ok("S10 NAO HA FALLBACK: `provedor` continua sendo o escolhido",
+    sumiu.provedor === "google", String(sumiu.provedor));
+  ok("S11 e em particular NAO virou a Anthropic",
+    sumiu.provedor !== "anthropic");
+  // E e isso que faz a ativacao barrar — as duas pecas conversam.
+  const barrada = validarParaAtivacao({
+    nome: "Assistente", instrucoes: "Use as ferramentas.", permissoes: [],
+    provedor: sumiu.provedor,
+    provedorEscolhido: sumiu.provedorEscolhido,
+    provedoresDisponiveis: sumiu.provedoresDisponiveis,
+  });
+  ok("S12 e a ativacao BARRA esse estado",
+    !barrada.podeAtivar &&
+      barrada.impedimentos.some((i) => i.codigo === "ia_escolhida_indisponivel"));
+
+  // ── Ambiente sem nada ─────────────────────────────────────────────
+  const nada = resolverIaDoAgente({
+    provedorGravado: "openai", modeloGravado: "gpt-x", nivelGravado: null, disponiveis: [],
+  });
+  ok("S13 ambiente sem provedor tem desfecho proprio",
+    nada.desfecho === "nenhuma_configurada", nada.desfecho);
+  ok("S14 e vem ANTES de culpar a escolha do dono",
+    nada.desfecho !== "escolhida_indisponivel");
+  ok("S15 com `provedor` nulo — nao ha quem responda", nada.provedor === null);
+
+  // ── O model id e do AMBIENTE, e a divergencia e INFORMADA ─────────
+  const modeloVelho = resolverIaDoAgente({
+    provedorGravado: "openai", modeloGravado: "gpt-ANTIGO",
+    nivelGravado: null, disponiveis: TRES,
+  });
+  ok("S16 o modelo efetivo vem do catalogo, nao do que foi gravado",
+    modeloVelho.modelo === "gpt-x");
+  ok("S17 e a divergencia e DITA, nao escondida",
+    modeloVelho.modeloEscolhidoDivergente === true);
+  ok("S18 sem divergencia quando batem",
+    escolhida.modeloEscolhidoDivergente === false);
+
+  // ── Nivel que o provedor nao oferece ──────────────────────────────
+  const nivelTorto = resolverIaDoAgente({
+    provedorGravado: "anthropic", modeloGravado: "claude-x",
+    nivelGravado: "maximo", disponiveis: TRES,
+  });
+  ok("S19 nivel inexistente no provedor NAO e enviado",
+    nivelTorto.nivel === null);
+  ok("S20 e a divergencia e dita", nivelTorto.nivelEscolhidoDivergente === true);
+  ok("S21 o escolhido continua registrado — nao foi apagado",
+    nivelTorto.nivelEscolhido === "maximo");
+
+  // ── String vazia e o mesmo que nao ter escolhido ───────────────────
+  ok("S22 provedor vazio e tratado como ausente",
+    resolverIaDoAgente({
+      provedorGravado: "   ", modeloGravado: null, nivelGravado: null, disponiveis: TRES,
+    }).desfecho === "default_do_ambiente");
+
+  // ── Anti-vacuidade: os QUATRO desfechos sao alcancaveis ───────────
+  const alcancados = new Set([
+    legado.desfecho, escolhida.desfecho, sumiu.desfecho, nada.desfecho,
+  ]);
+  ok("S23 os quatro desfechos declarados sao alcancados por este teste",
+    DESFECHOS_DA_IA.every((d) => alcancados.has(d)),
+    DESFECHOS_DA_IA.filter((d) => !alcancados.has(d)).join(","));
+
+  // ── O adaptador: a escolha com efeito ─────────────────────────────
+  ok("S24 os tres provedores provados tem adaptador",
+    ["anthropic", "google", "openai"].every((p) => adaptadorDoProvedor(p) !== null));
+  ok("S25 provedor desconhecido devolve null — quem chama RECUSA",
+    adaptadorDoProvedor("xpto") === null);
+  ok("S26 `fake` NAO tem adaptador: caminho fake nao se escolhe por coluna",
+    adaptadorDoProvedor("fake") === null);
+  ok("S27 nulo e vazio tambem",
+    adaptadorDoProvedor(null) === null && adaptadorDoProvedor("  ") === null);
+
+  // As duas listas nao podem divergir: uma diz "ativa", a outra "responde".
+  ok("S28 `PROVEDORES_COM_FERRAMENTA` e a lista de adaptadores coincidem",
+    JSON.stringify([...PROVEDORES_COM_FERRAMENTA].sort()) ===
+      JSON.stringify([...provedoresComAdaptador()]),
+    `${[...PROVEDORES_COM_FERRAMENTA].sort().join(",")} vs ${provedoresComAdaptador().join(",")}`);
+
+  // ── E o runtime tem de RECUSAR, nunca substituir ──────────────────
+  const runtime = codigo("lib/agentes/conversas/runtime.ts");
+  ok("S29 o runtime escolhe o adaptador pelo provedor do agente",
+    /adaptadorDoProvedor\(/.test(runtime));
+  ok("S30 e NAO importa mais um adaptador fixo",
+    !/chamarClaudeComFerramentas|chamarGeminiComFerramentas|chamarOpenAIComFerramentas/
+      .test(runtime));
+  ok("S31 sem adaptador o turno e RECUSADO",
+    /adaptador === null/.test(runtime) && /ia_indisponivel/.test(runtime));
+  ok("S32 e a recusa nao nomeia provedor nem env para quem esta no chat",
+    /nao esta disponivel agora/.test(runtime));
+
+  // A rota que grava NAO aceita model id do browser — §12 do F7b.4.1.
+  const rotaIa = codigo("app/api/agentes/[agenteId]/ia/route.ts");
+  ok("S33 a rota grava o modelo do CATALOGO",
+    /modeloIa: opcao\.modeloId/.test(rotaIa));
+  ok("S34 e nunca le `corpo.modelo`", !/corpo\.modelo/.test(rotaIa));
+  ok("S35 provedor indisponivel e recusado na ESCRITA, com 409",
+    /opcao === undefined/.test(rotaIa) && /\}, 409\)/.test(rotaIa));
+  ok("S36 e a rota nao toca permissao nem vinculo",
+    !/definirPermissao|agente_permissoes|vincularFerramenta/.test(rotaIa));
+  ok("S37 limpar a escolha derruba as TRES colunas juntas",
+    /provedorIa: null, modeloIa: null, nivelDeTrabalho: null/.test(rotaIa));
 }
 
 // ─── Placar ───────────────────────────────────────────────────────────

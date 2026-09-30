@@ -83,6 +83,17 @@ export interface EntradaDoLaco {
   /** Ferramentas ja filtradas por permissao — ver `declararFerramentas`. */
   readonly ferramentas: readonly FerramentaDeclarada[];
   readonly adaptador: AdaptadorIAComFerramentas;
+  /**
+   * O nivel de trabalho do agente — F7b.4.2.
+   *
+   * Atravessa o laco sem ser interpretado: e rotulo da CDS, e traduzir e
+   * trabalho do adaptador. O laco nao sabe o que `maximo` significa para
+   * a OpenAI, e nao deve saber.
+   *
+   * Vale para TODOS os passos do mesmo turno, e nao so o primeiro: o
+   * esforco e propriedade do agente, nao do passo.
+   */
+  readonly nivelDeTrabalho?: string;
   /** Historico anterior, para multi-turno. Vazio na primeira mensagem. */
   readonly historico?: readonly MensagemDoDialogo[];
   readonly maxPassos?: number;
@@ -251,6 +262,7 @@ export async function conversarComFerramentas(
       mensagens,
       ferramentas: entrada.ferramentas,
       escolhaDeFerramenta: passo === 0 ? entrada.escolhaDeFerramenta : "auto",
+      nivelDeTrabalho: entrada.nivelDeTrabalho,
     });
     turnos += 1;
     provedor = r.provedor;

@@ -30,55 +30,75 @@ import { resolverFatosPermissoes } from "@/lib/agentes/permissoes/fatos";
 import { validarParaAtivacao } from "@/lib/agentes/factory/ativacao";
 import { estadoDosPacks } from "@/lib/agentes/factory/catalogo-ui";
 import { modelosDisponiveis } from "@/lib/agentes/factory/catalogo-de-modelos";
+import { resolverIaDoAgente } from "@/lib/agentes/factory/ia-do-agente";
+import { listarVinculosExternos } from "@/lib/agentes/ferramentas-externas/repositorio";
+import { listarPermissoesGravadas } from "@/lib/agentes/permissoes/gravadas";
 
 export const dynamic = "force-dynamic";
 
 const FALHA = "Nao foi possivel carregar o estado do agente.";
 
 /**
- * Qual provedor este ambiente tem para agente com ferramenta.
+ * O estado completo que a tela Revisar e o PATCH consomem.
  *
- * Nao ha coluna de modelo em `agentes`: o provedor e resolvido pelo
- * gateway a partir de env, e hoje so a Anthropic fecha o ida-e-volta de
- * ferramenta. Guardar uma escolha por agente sem ter uma segunda opcao
- * compativel seria criar uma coluna para um seletor de um item — e o dia
- * em que houver a segunda, ela nasce junto com a decisao de como
- * persistir.
+ * ── Por que QUATRO leituras, e nao duas — F7b.4.2 ───────────────────
+ *
+ * `resolverFatosPermissoes` filtra por `funcaoIds` do registry, e isso
+ * esta certo para Function interna. Acao externa nao esta no registry, e
+ * seria invisivel ali — por isso `listarPermissoesGravadas`, que le TODAS
+ * as linhas de permissao, entra junto.
+ *
+ * E o VINCULO e leitura separada de proposito: e ele, e nao a permissao,
+ * que diz quais acoes externas o agente tem (§13). Ler as duas e o que
+ * permite distinguir "vinculada e sem decisao" de "nem vinculada".
  */
-function provedorDisponivel(): string | null {
-  // F7b.4: quem sabe o que este ambiente tem e o catalogo. A Anthropic
-  // vem primeiro quando esta disponivel porque e o caminho provado desde
-  // o F4 — nao por preferencia, e sim por ordem de evidencia.
-  const disponiveis = modelosDisponiveis();
-  if (disponiveis.length === 0) return null;
-  const anthropic = disponiveis.find((m) => m.provedor === "anthropic");
-  return (anthropic ?? disponiveis[0]).provedor;
-}
-
-function modeloDisponivel(): string | null {
-  const disponiveis = modelosDisponiveis();
-  if (disponiveis.length === 0) return null;
-  const anthropic = disponiveis.find((m) => m.provedor === "anthropic");
-  return (anthropic ?? disponiveis[0]).modeloId;
-}
-
 async function montarEstado(userId: string, agenteId: string) {
-  const [{ linha }, permissoes] = await Promise.all([
+  const [{ linha }, permissoes, gravadas, vinculos] = await Promise.all([
     lerAgenteDoDono(agenteId, userId),
     resolverFatosPermissoes({ userId, agenteId, funcaoIds: Object.keys(FUNCOES) }),
+    listarPermissoesGravadas({ userId, agenteId }),
+    listarVinculosExternos({ userId, agenteId }),
   ]);
   if (!linha) return null;
+  // Falha de leitura NUNCA vira "nao tem nada": seria apresentar um agente
+  // sem ferramenta como pronto para ativar.
   if (permissoes.coleta !== "ok") return "falha_leitura" as const;
+  if (gravadas.coleta !== "ok") return "falha_leitura" as const;
+  if (vinculos.coleta !== "ok") return "falha_leitura" as const;
 
   const fatos = permissoes.fatos.map((p) => ({ funcaoId: p.funcaoId, nivel: p.nivel }));
+
+  const ia = resolverIaDoAgente({
+    provedorGravado: linha.provedor_ia,
+    modeloGravado: linha.modelo_ia,
+    nivelGravado: linha.nivel_de_trabalho,
+    disponiveis: modelosDisponiveis(),
+  });
+
+  const funcoesExternasVinculadas = vinculos.vinculos.map((v) => v.funcaoId);
+
   return {
     linha,
     fatos,
+    ia,
+    vinculos: vinculos.vinculos,
+    // O nivel de cada acao externa, ou ausente. Montado aqui porque a
+    // validacao devolve impedimentos, e nao a tabela — a tela precisa da
+    // tabela para mostrar QUAL acao falta decidir.
+    niveisExternos: new Map(gravadas.permissoes.map((g) => [g.funcaoId, g.nivel])),
     validacao: validarParaAtivacao({
       nome: linha.nome,
       instrucoes: linha.instrucoes,
-      provedor: provedorDisponivel(),
-      permissoes: fatos,
+      // O provedor que VAI responder. Em `escolhida_indisponivel` ele e o
+      // escolhido, e a regra §8 barra — nao ha troca por conta propria.
+      provedor: ia.provedor,
+      provedorEscolhido: ia.provedorEscolhido,
+      provedoresDisponiveis: ia.provedoresDisponiveis,
+      funcoesExternasVinculadas,
+      // As permissoes aqui sao TODAS as gravadas, e nao so as do registry:
+      // a regra da externa precisa ver o nivel de uma acao que o registry
+      // nao conhece.
+      permissoes: gravadas.permissoes.map((p) => ({ funcaoId: p.funcaoId, nivel: p.nivel })),
     }),
     packs: estadoDosPacks(fatos),
   };
@@ -100,8 +120,15 @@ export async function GET(request: Request, { params }: { params: { agenteId: st
         nome: estado.linha.nome,
         ativo: estado.linha.ativo,
         temInstrucoes: (estado.linha.instrucoes ?? "").trim() !== "",
-        modelo: modeloDisponivel(),
-        provedor: provedorDisponivel(),
+        // F7b.4.2: a IA deste AGENTE, e nao a do ambiente. `provedor` e o
+        // que vai responder; `provedorEscolhido` e o que o dono gravou. As
+        // duas aparecem porque a diferenca entre elas e informacao — e em
+        // `escolhida_indisponivel` e a explicacao do impedimento.
+        modelo: estado.ia.modelo,
+        provedor: estado.ia.provedor,
+        provedorEscolhido: estado.ia.provedorEscolhido,
+        nivelDeTrabalho: estado.ia.nivel,
+        iaDesfecho: estado.ia.desfecho,
         temFerramentas: estado.validacao.temFerramentas,
         memoriaAtiva: estado.linha.memoria_ativa,
       },
@@ -124,6 +151,15 @@ export async function GET(request: Request, { params }: { params: { agenteId: st
           completo: p.completo, nivel: p.nivelUniforme,
           faltando: p.semPermissao.length,
         })),
+      // F7b.4.2: as acoes externas que o agente POSSUI, cada uma com o
+      // seu nivel ou `null`. `null` e o estado que barra a ativacao, e a
+      // tela precisa mostra-lo em vez de inventar um default.
+      ferramentasExternas: estado.vinculos.map((v) => ({
+        funcaoId: v.funcaoId,
+        toolkit: v.toolkit,
+        acao: v.acao,
+        nivel: estado.niveisExternos.get(v.funcaoId) ?? null,
+      })),
       podeAtivar: estado.validacao.podeAtivar,
       impedimentos: estado.validacao.impedimentos,
     }, 200);

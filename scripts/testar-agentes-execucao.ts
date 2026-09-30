@@ -1965,6 +1965,11 @@ async function main() {
       // banco — uma fixture com memoria ligada afirmaria um estado que
       // nenhum agente existente tem.
       memoria_ativa: false,
+      // F7b.4.2: `null` nas tres = agente que nao escolheu IA, que e o
+      // estado de todo agente anterior a estas colunas.
+      provedor_ia: null,
+      modelo_ia: null,
+      nivel_de_trabalho: null,
       criado_em: "2026-09-01T00:00:00Z",
       atualizado_em: "2026-09-01T00:00:00Z",
     });

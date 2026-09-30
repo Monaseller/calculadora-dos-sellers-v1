@@ -7,7 +7,7 @@
  *          -> Skills + memorias + fontes + permissoes (estado de AGORA)
  *          -> contexto (F6)
  *          -> historico da CONVERSA
- *          -> provedor real
+ *          -> a IA DO AGENTE (F7b.4.2) -> provedor real
  *          -> laco de ferramentas (F2)
  *          -> executarFuncao -> guard -> Funcao -> auditoria
  *          -> persistencia da conversa
@@ -30,6 +30,19 @@
  * Guarda: o que foi dito, em ordem, com a proveniencia das ferramentas.
  * NAO guarda: instrucao, Skill, memoria, fonte — nada disso vira linha
  * de mensagem. Historico e assunto; configuracao e do agente.
+ *
+ * ── Quem responde, e por que nunca e um substituto — F7b.4.2 ────────
+ *
+ * O adaptador vem da coluna `provedor_ia` do AGENTE, e nao de uma
+ * constante importada no topo. Isso e o §7.
+ *
+ * E quando a escolha nao esta disponivel, o turno e RECUSADO — §8. Nao ha
+ * "tenta a Anthropic": a resposta viria de outro cerebro, com outro
+ * comportamento diante das mesmas instrucoes, e ninguem teria pedido. O
+ * dono ve `ia_indisponivel` e escolhe outra IA, que e uma decisao dele.
+ *
+ * Agente que nunca escolheu segue com o default do ambiente — e o
+ * comportamento que ele sempre teve, preservado de proposito.
  */
 import "server-only";
 
@@ -40,7 +53,9 @@ import {
   conversarComFerramentas, type ResultadoDoLaco,
 } from "@/lib/agentes/ia/laco-ferramentas";
 import { montarContextoDoAgente } from "@/lib/agentes/ia/contexto-do-agente";
-import { chamarClaudeComFerramentas } from "@/lib/ai-gateway/provedores/anthropic-ferramentas";
+import { adaptadorDoProvedor } from "@/lib/agentes/ia/adaptador-por-provedor";
+import { modelosDisponiveis } from "@/lib/agentes/factory/catalogo-de-modelos";
+import { resolverIaDoAgente } from "@/lib/agentes/factory/ia-do-agente";
 import { FUNCOES } from "@/lib/agentes/funcoes/registry";
 import { resolverFatosPermissoes } from "@/lib/agentes/permissoes/fatos";
 import { resolverSkillsDoAgente } from "@/lib/agentes/skills/fatos";
@@ -105,6 +120,29 @@ export async function responderNaConversa(
     return falha("conversa_nao_encontrada", "Conversa nao encontrada.");
   }
 
+  // ── Qual IA responde por ESTE agente — F7b.4.2 §7/§8 ──────────────
+  //
+  // Resolvido ANTES de ler Skills, memorias e historico: recusar por IA
+  // indisponivel nao precisa de nenhuma dessas leituras, e fazer quatro
+  // consultas para depois desistir seria cobrar pelo proprio impedimento.
+  const ia = resolverIaDoAgente({
+    provedorGravado: agente.provedor_ia,
+    modeloGravado: agente.modelo_ia,
+    nivelGravado: agente.nivel_de_trabalho,
+    disponiveis: modelosDisponiveis(),
+  });
+  const adaptador = adaptadorDoProvedor(ia.provedor);
+  if (adaptador === null) {
+    // Uma mensagem so para os dois casos, porque para quem esta no chat a
+    // situacao e a mesma: a IA deste agente nao esta respondendo. O
+    // detalhe de QUAL esta na tela de configuracao, via `iaDesfecho`.
+    //
+    // Sem nome de env e sem nome de provedor: o chat nao e o lugar de
+    // ensinar como o ambiente e montado.
+    return falha("ia_indisponivel",
+      "A IA configurada para este agente nao esta disponivel agora.");
+  }
+
   // ── Estado de AGORA ────────────────────────────────────────────────
   const db = getSupabaseServidor();
   const portaFontes = criarPortaDeFontes(db);
@@ -142,9 +180,31 @@ export async function responderNaConversa(
     fontes: fontes.map(paraModelo),
   });
 
+  // ── As acoes EXTERNAS ainda nao sao declaradas — F7b.4.2 ──────────
+  //
+  // `declararFerramentas` ja aceita `externas`, e o filtro que sustenta o
+  // §13 esta pronto e provado (`scripts/testar-ferramentas-externas.ts`:
+  // vinculo removido + permissao historica => NAO declarada). O que falta
+  // para ligar aqui nao e o filtro:
+  //
+  //   1. NAO HA EXECUTOR. Uma acao do Composio nao tem entrada em
+  //      `FUNCOES`, e portanto nao tem `executor`. Declarar uma ferramenta
+  //      que o modelo pede e que ninguem sabe executar transformaria toda
+  //      chamada numa falha de ferramenta.
+  //   2. NAO HA CONTA CONECTADA. Sem o OAuth concluido pelo dono, a acao
+  //      nao teria credencial para rodar nem se houvesse executor.
+  //
+  // Declarar antes disso seria prometer ao modelo uma capacidade que o
+  // sistema nao tem — o oposto de "nunca inventar dado".
+  //
+  // O comportamento de HOJE, e por que ele e seguro: uma acao externa nao
+  // esta em `FUNCOES`, entao `resolverFatosPermissoes` a devolve com
+  // `existe: false`, e o guard NEGA qualquer pedido dela. Fail-closed, sem
+  // caminho de execucao, mesmo que um id externo apareca numa permissao.
   const ferramentas = declararFerramentas({
     catalogo: FUNCOES,
     permissoes: permissoes.fatos.map((p) => ({ funcaoId: p.funcaoId, nivel: p.nivel })),
+    externas: [],
   });
 
   // O resolvedor de arquivo vive por CHAMADA e carrega dono e agente
@@ -180,7 +240,11 @@ export async function responderNaConversa(
       mensagemDoUsuario: entrada.texto.trim(),
       historico: dialogo,
       ferramentas,
-      adaptador: chamarClaudeComFerramentas,
+      // `null` = o default do adaptador. Ver `resolverIaDoAgente`: um
+      // nivel gravado que o provedor nao oferece vira `null` em vez de
+      // ser enviado e recusado pela API.
+      nivelDeTrabalho: ia.nivel ?? undefined,
+      adaptador,
     });
   } catch (e) {
     // Mensagem de provedor NAO sobe crua: ela pode citar cabecalho,

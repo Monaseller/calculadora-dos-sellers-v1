@@ -212,28 +212,39 @@ async function main(): Promise<void> {
 
   // ─── D. Nada foi prometido sem prova ───────────────────────────────
 
-  secao("D. O catalogo nao oferece o que nao foi provado");
+  // ── Secao D reconciliada na F7b.4.2 ────────────────────────────
+  //
+  // ANTES ela cobrava a AUSENCIA de adaptador e de entrada no catalogo,
+  // porque a conta nao tinha saldo e nada havia sido provado. Com a prova
+  // feita, o adaptador existe e a entrada entrou.
+  //
+  // O que continua sendo cobrado e o que nunca mudou: a entrada tem de
+  // apontar para uma prova QUE EXISTE, e o diagnostico nao pode virar
+  // runtime.
+  secao("D. O catalogo so oferece o que tem endereco de prova");
   {
     const cat = readFileSync(join(__dirname, "..", "lib", "agentes", "factory",
       "catalogo-de-modelos.ts"), "utf-8");
     const semCom = cat.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
 
-    ok("D1  NAO ha entrada de OpenAI no catalogo",
-      !/provedor:\s*"openai"/.test(semCom));
-    ok("D2  e portanto a tela nao pode oferecer OpenAI",
-      !/OPENAI_API_KEY|OPENAI_MODEL_AGENTE/.test(semCom));
-
-    // Nenhum adaptador de OpenAI foi escrito. Escrever a conversao de
-    // dialogo sem nunca ter visto resposta real seria repetir o F4, que
-    // concluiu algo sobre o protocolo do Gemini sem isolar a forma real.
-    ok("D3  nao existe adaptador de runtime de OpenAI", (() => {
+    ok("D1  ha entrada de OpenAI no catalogo",
+      /provedor:\s*"openai"/.test(semCom));
+    ok("D2  e ela aponta para a suite que a provou",
+      /provadoEm:\s*"scripts\/testar-openai-runtime-live\.ts"/.test(semCom));
+    ok("D2a e essa suite EXISTE no disco", (() => {
       try {
-        readFileSync(join(__dirname, "..", "lib", "ai-gateway", "provedores",
-          "openai-ferramentas.ts"), "utf-8");
-        return false;
-      } catch { return true; }
+        return readFileSync(join(__dirname, "testar-openai-runtime-live.ts"),
+          "utf-8").length > 2000;
+      } catch { return false; }
     })());
-    ok("D4  e o SDK da OpenAI nao foi instalado",
+    ok("D2b o catalogo nao carrega id de modelo em literal",
+      !/gpt-[a-z0-9.-]+/.test(semCom.replace(/"scripts\/[^"]*"/g, '""')));
+
+    const ad = readFileSync(join(__dirname, "..", "lib", "ai-gateway", "provedores",
+      "openai-ferramentas.ts"), "utf-8");
+    ok("D3  o adaptador existe e e server-only",
+      /^import "server-only";/m.test(ad));
+    ok("D4  e o SDK da OpenAI continua NAO instalado — REST basta",
       !/"openai"/.test(readFileSync(join("C:", "Users", "USER", "Desktop",
         "calculadora-dos-sellers-v1", "package.json"), "utf-8")));
 
@@ -241,9 +252,10 @@ async function main(): Promise<void> {
       "openai-disponibilidade.ts"), "utf-8");
     ok("D5  o diagnostico e server-only",
       /^import "server-only";/m.test(diag));
-    ok("D6  e a chave e lida de UM lugar so",
-      (diag.match(/process\.env\.OPENAI_API_KEY/g) ?? []).length === 1);
-    ok("D7  ele nao participa do runtime do agente",
+    ok("D6  e a chave e lida de UM lugar so, em cada arquivo",
+      (diag.match(/process\.env\.OPENAI_API_KEY/g) ?? []).length === 1 &&
+        (ad.match(/process\.env\.OPENAI_API_KEY/g) ?? []).length === 1);
+    ok("D7  o diagnostico nao participa do runtime do agente",
       !/conversarComFerramentas|AdaptadorIAComFerramentas|declararFerramentas/.test(diag));
   }
 
