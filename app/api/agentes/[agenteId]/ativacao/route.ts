@@ -29,6 +29,7 @@ import { FUNCOES } from "@/lib/agentes/funcoes/registry";
 import { resolverFatosPermissoes } from "@/lib/agentes/permissoes/fatos";
 import { validarParaAtivacao } from "@/lib/agentes/factory/ativacao";
 import { estadoDosPacks } from "@/lib/agentes/factory/catalogo-ui";
+import { modelosDisponiveis } from "@/lib/agentes/factory/catalogo-de-modelos";
 
 export const dynamic = "force-dynamic";
 
@@ -45,12 +46,20 @@ const FALHA = "Nao foi possivel carregar o estado do agente.";
  * persistir.
  */
 function provedorDisponivel(): string | null {
-  return process.env.ANTHROPIC_API_KEY && process.env.ANTHROPIC_MODEL_AGENTE?.trim()
-    ? "anthropic" : null;
+  // F7b.4: quem sabe o que este ambiente tem e o catalogo. A Anthropic
+  // vem primeiro quando esta disponivel porque e o caminho provado desde
+  // o F4 — nao por preferencia, e sim por ordem de evidencia.
+  const disponiveis = modelosDisponiveis();
+  if (disponiveis.length === 0) return null;
+  const anthropic = disponiveis.find((m) => m.provedor === "anthropic");
+  return (anthropic ?? disponiveis[0]).provedor;
 }
 
 function modeloDisponivel(): string | null {
-  return process.env.ANTHROPIC_MODEL_AGENTE?.trim() || null;
+  const disponiveis = modelosDisponiveis();
+  if (disponiveis.length === 0) return null;
+  const anthropic = disponiveis.find((m) => m.provedor === "anthropic");
+  return (anthropic ?? disponiveis[0]).modeloId;
 }
 
 async function montarEstado(userId: string, agenteId: string) {
@@ -94,7 +103,19 @@ export async function GET(request: Request, { params }: { params: { agenteId: st
         modelo: modeloDisponivel(),
         provedor: provedorDisponivel(),
         temFerramentas: estado.validacao.temFerramentas,
+        memoriaAtiva: estado.linha.memoria_ativa,
       },
+      // F7b.4: a tela NAO tem lista de modelos propria. Ela mostra o que
+      // este ambiente de fato configurou, com as capacidades que foram
+      // medidas — §36. Sem chave, o provedor simplesmente nao aparece.
+      modelos: modelosDisponiveis().map((m) => ({
+        provedor: m.provedor,
+        nome: m.nomeVisivel,
+        descricao: m.descricao,
+        modeloId: m.modeloId,
+        ferramentas: m.ferramentas,
+        niveis: m.niveis,
+      })),
       // Sem `funcao_id` na superficie: a pessoa escolheu packs.
       ferramentas: estado.packs
         .filter((p) => p.selecionado)

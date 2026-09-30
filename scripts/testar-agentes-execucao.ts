@@ -1961,6 +1961,10 @@ async function main() {
       tipo: "mensagens",
       instrucoes,
       ativo,
+      // F7b.4: a fixture espelha a linha REAL. Default `false`, como no
+      // banco — uma fixture com memoria ligada afirmaria um estado que
+      // nenhum agente existente tem.
+      memoria_ativa: false,
       criado_em: "2026-09-01T00:00:00Z",
       atualizado_em: "2026-09-01T00:00:00Z",
     });

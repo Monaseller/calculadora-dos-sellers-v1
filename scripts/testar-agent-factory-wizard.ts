@@ -51,6 +51,10 @@ import { FUNCOES } from "../lib/agentes/funcoes/registry";
 import {
   fraseDaSugestao, normalizar, sugerirPapel,
 } from "../lib/agentes/factory/proposito-de-arquivo";
+import {
+  NIVEIS_DE_TRABALHO, catalogoDeModelos, envsFaltando, modelosDisponiveis,
+  nivelEfetivo, ofereceEscolhaDeNivel, rotuloDoNivel,
+} from "../lib/agentes/factory/catalogo-de-modelos";
 
 const RAIZ = join(__dirname, "..");
 const ler = (rel: string): string => readFileSync(join(RAIZ, rel), "utf8");
@@ -901,6 +905,187 @@ secao("M. Subir, INSPECIONAR, e so depois perguntar");
       /Configurar → Arquivos/.test(chat));
   ok("M16 anexo de conversa NAO exige proposito",
     /if \(escopo === "agente"\) setPendenteDeProposito/.test(chat));
+}
+
+
+// ─── N. O catalogo de cerebros ────────────────────────────────────────
+
+secao("N. O catalogo de cerebros: capacidade medida, nunca prometida");
+
+{
+  const cat = catalogoDeModelos();
+
+  ok("N1  ANCORA: ha entradas no catalogo", cat.length >= 2, String(cat.length));
+  ok("N2  cada entrada aponta ONDE a capacidade foi provada",
+    cat.every((m) => m.provadoEm.startsWith("scripts/") && m.provadoEm.endsWith(".ts")),
+    cat.map((m) => m.provadoEm).join(","));
+  ok("N3  e o arquivo de prova EXISTE de verdade",
+    cat.every((m) => {
+      try { return ler(m.provadoEm).length > 200; } catch { return false; }
+    }),
+    cat.map((m) => m.provadoEm).join(","));
+
+  ok("N4  o id do modelo NAO e hardcoded — vem de env nomeada",
+    cat.every((m) => m.envDoModelo.length > 5 && m.envDaChave.length > 5));
+  // A sonda anterior varria o arquivo inteiro e casava
+  // `testar-gemini-stateless-live.ts` no campo `provadoEm` — um caminho
+  // de suite, nao uma versao de modelo. Tirar os caminhos antes de medir
+  // e a correcao: o que se cobra e que NENHUM id de modelo esteja
+  // escrito no codigo, porque quem escolhe a geracao e o ambiente.
+  const fonte = codigo("lib/agentes/factory/catalogo-de-modelos.ts")
+    .replace(/"scripts\/[^"]*"/g, '""');
+  ok("N5  e o catalogo nao carrega versao de modelo em literal",
+    !/claude-[a-z0-9-]+|gemini-[a-z0-9.-]+|gpt-[a-z0-9.-]+/.test(fonte));
+  ok("N5a CONTROLE: a sonda ACUSA quando um id de modelo aparece",
+    /claude-[a-z0-9-]+/.test('const m = "claude-haiku-4-5";'));
+  ok("N5b ANCORA: o recorte nao apagou o arquivo",
+    fonte.length > 800 && fonte.includes("modelosDisponiveis"));
+
+  ok("N6  OpenAI esta AUSENTE do catalogo — nao indisponivel",
+    !cat.some((m) => m.provedor === "openai"));
+  ok("N7  os dois provedores configurados declaram ferramentas",
+    cat.every((m) => m.ferramentas === true));
+
+  // Um nivel = sem escolha. A tela nao pode oferecer o que nao existe.
+  ok("N8  todo modelo declara pelo menos UM nivel",
+    cat.every((m) => m.niveis.length >= 1));
+  ok("N9  e todo nivel declarado e um nivel conhecido",
+    cat.every((m) => m.niveis.every(
+      (n) => (NIVEIS_DE_TRABALHO as readonly string[]).includes(n))));
+  ok("N10 com um nivel so, a tela NAO oferece escolha",
+    !ofereceEscolhaDeNivel(["equilibrado"]));
+  ok("N11 CONTROLE: com dois, oferece",
+    ofereceEscolhaDeNivel(["rapido", "maximo"]));
+
+  // O rotulo da CDS nunca vai cru para a API — ele so existe na tela.
+  ok("N12 pedir nivel nao suportado NAO erra: cai no mais proximo",
+    (() => {
+      const r = nivelEfetivo("maximo", ["equilibrado"]);
+      return r.nivel === "equilibrado" && r.ajustado === true;
+    })());
+  ok("N13 pedir nivel suportado nao ajusta nada",
+    (() => {
+      const r = nivelEfetivo("rapido", ["rapido", "maximo"]);
+      return r.nivel === "rapido" && r.ajustado === false;
+    })());
+  ok("N14 pedido ilegivel cai no primeiro suportado, e AVISA",
+    (() => {
+      const r = nivelEfetivo(42, ["equilibrado", "maximo"]);
+      return r.nivel === "equilibrado" && r.ajustado === true;
+    })());
+  ok("N15 `maximo` pedido com {rapido,avancado} escolhe `avancado`",
+    nivelEfetivo("maximo", ["rapido", "avancado"]).nivel === "avancado");
+  ok("N16 o rotulo de nivel desconhecido devolve o proprio valor",
+    rotuloDoNivel("xyz") === "xyz" && rotuloDoNivel("maximo") === "Máximo");
+
+  // Disponibilidade depende do AMBIENTE, e nao do catalogo.
+  {
+    const salvos = {
+      ak: process.env.ANTHROPIC_API_KEY, am: process.env.ANTHROPIC_MODEL_AGENTE,
+      gk: process.env.GOOGLE_AI_API_KEY, gm: process.env.GOOGLE_AI_MODEL_AGENTE,
+    };
+    delete process.env.ANTHROPIC_API_KEY; delete process.env.ANTHROPIC_MODEL_AGENTE;
+    delete process.env.GOOGLE_AI_API_KEY; delete process.env.GOOGLE_AI_MODEL_AGENTE;
+    ok("N17 ambiente sem chave nenhuma NAO oferece modelo",
+      modelosDisponiveis().length === 0);
+    ok("N18 e diz PELO NOME o que falta, nunca o valor",
+      (() => {
+        const f = envsFaltando("anthropic");
+        return f.includes("ANTHROPIC_API_KEY") && f.includes("ANTHROPIC_MODEL_AGENTE");
+      })());
+
+    // Chave SEM modelo nao e provedor meio pronto: nao aparece.
+    process.env.ANTHROPIC_API_KEY = "sintetico-de-teste";
+    ok("N19 chave sem modelo configurado ainda NAO oferece",
+      modelosDisponiveis().length === 0);
+    process.env.ANTHROPIC_MODEL_AGENTE = "modelo-sintetico";
+    const comAmbos = modelosDisponiveis();
+    ok("N20 com chave E modelo, o provedor aparece",
+      comAmbos.length === 1 && comAmbos[0].provedor === "anthropic",
+      comAmbos.map((m) => m.provedor).join(","));
+    ok("N21 e o id exposto e o do AMBIENTE, nao um literal do codigo",
+      comAmbos[0]?.modeloId === "modelo-sintetico");
+
+    for (const [k, v] of Object.entries({
+      ANTHROPIC_API_KEY: salvos.ak, ANTHROPIC_MODEL_AGENTE: salvos.am,
+      GOOGLE_AI_API_KEY: salvos.gk, GOOGLE_AI_MODEL_AGENTE: salvos.gm,
+    })) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    ok("N22 ANCORA: o ambiente foi restaurado",
+      process.env.ANTHROPIC_API_KEY === salvos.ak);
+  }
+
+  // A rota publica o catalogo; a tela nao tem lista propria.
+  const rota = codigo("app/api/agentes/[agenteId]/ativacao/route.ts");
+  ok("N23 a rota publica o catalogo do servidor",
+    /modelosDisponiveis\(\)/.test(rota) && /modelos:/.test(rota));
+  const wiz = codigo("components/ia/factory/Wizard.tsx");
+  ok("N24 e a tela NAO tem lista de modelo hardcoded",
+    !/claude-|gemini-|gpt-/.test(wiz) &&
+      !/"Claude"|"Gemini"|"OpenAI"/.test(wiz));
+  ok("N25 a tela le os modelos que o servidor mandou",
+    /ativacao\?\.modelos\.map|ativacao\.modelos/.test(wiz));
+  ok("N26 e so oferece nivel quando ha mais de um",
+    /niveis\.length <= 1/.test(wiz));
+}
+
+// ─── O. A memoria automatica na Factory ───────────────────────────────
+
+secao("O. Memoria: um interruptor, e nenhuma autoridade");
+
+{
+  const rota = codigo("app/api/agentes/[agenteId]/memoria/route.ts");
+  const wiz = codigo("components/ia/factory/Wizard.tsx");
+
+  ok("O1  a rota tem GET e PATCH, e nada mais",
+    /export async function GET\(/.test(rota) &&
+      /export async function PATCH\(/.test(rota) &&
+      !/export async function (POST|PUT|DELETE)\(/.test(rota));
+  ok("O2  o PATCH aceita UM campo so",
+    /Object\.keys\(corpo\)\.length !== 1/.test(rota) &&
+      /typeof corpo\.memoriaAtiva !== "boolean"/.test(rota));
+  ok("O3  o dono e o agente vem da porta, nunca do corpo",
+    /porta\.userId/.test(rota) && /porta\.agenteId/.test(rota) &&
+      !/corpo\.userId|corpo\.agenteId/.test(rota));
+  ok("O4  o estado devolvido e LIDO da linha, nao ecoado do pedido",
+    /memoriaAtiva: linha\.memoria_ativa/.test(rota));
+
+  // §25: ligar memoria NAO concede nada.
+  ok("O5  a rota de memoria nao toca permissao",
+    !/agente_permissoes|definirPermissao|autorizarFuncao|declararFerramentas/.test(rota));
+  ok("O6  e nao revela nada da credencial — so se o motor existe",
+    /motorConfigurado/.test(rota) && !/ZEP_API_KEY/.test(rota));
+
+  ok("O7  a tela liga o interruptor pelo transporte",
+    /definirMemoriaDoAgente\(agenteId, ligado\)/.test(wiz));
+  ok("O8  e o estado exibido vem do servidor",
+    /ativacao\?\.memoriaAtiva === true/.test(wiz));
+  ok("O9  o texto da tela explica o que a memoria faz",
+    /lembrar informações úteis de conversas anteriores/.test(wiz));
+  ok("O10 a memoria manual da F6 NAO foi apagada — desceu para avancado",
+    /Avançado: memórias fixadas/.test(wiz) &&
+      /criarMemoriaDoAgente/.test(wiz) && /removerMemoriaDoAgente/.test(wiz));
+  ok("O11 e a etapa principal nao exige textarea",
+    wiz.indexOf("Alternador") < wiz.indexOf("Avançado: memórias fixadas"));
+
+  // O modulo de memoria e separado do de permissao, por construcao.
+  const auto = codigo("lib/agentes/memoria/automatica.ts");
+  ok("O12 o runtime de memoria nao importa guard nem registry",
+    !/autorizarFuncao|resolverFuncao|FUNCOES|declararFerramentas/.test(auto));
+  ok("O13 memoria DESLIGADA retorna antes de tocar rede",
+    /if \(!escopo\.memoriaAtiva\) return \{ desfecho: "desligada"/.test(auto));
+  ok("O14 e sem motor configurado tambem",
+    /memoriaConfigurada\(\)/.test(auto));
+
+  const ident = codigo("lib/agentes/memoria/identidade.ts");
+  ok("O15 o principal e derivado de dono E agente",
+    /principalDeMemoria\(userId: unknown, agenteId: unknown\)/.test(ident));
+  ok("O16 com comprimento declarado — sem colisao entre pares",
+    /entradaCanonica/.test(ident) && /userId\.length/.test(ident));
+  ok("O17 e sem segredo rotacionavel na entrada do hash",
+    !/SECRET|process\.env/.test(ident));
 }
 
 // ─── Placar ───────────────────────────────────────────────────────────

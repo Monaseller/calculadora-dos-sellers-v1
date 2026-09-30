@@ -65,7 +65,8 @@ import {
  * coluna — e o que faz uma coluna nova nao vazar sozinha para todas as
  * telas no dia em que for criada.
  */
-const COLUNAS_AGENTE = "id, user_id, nome, tipo, instrucoes, ativo, criado_em, atualizado_em";
+const COLUNAS_AGENTE =
+  "id, user_id, nome, tipo, instrucoes, ativo, memoria_ativa, criado_em, atualizado_em";
 const COLUNAS_TAREFA =
   "id, agente_id, user_id, tipo, entrada, status, progresso, resultado, erro_tipo, " +
   "erro_mensagem, tentativas, max_tentativas, criado_em, iniciado_em, concluido_em, heartbeat_em";
@@ -285,6 +286,15 @@ export async function atualizarAgenteDoDono(
   if (campos?.ativo !== undefined) {
     if (typeof campos.ativo !== "boolean") return { linha: null, erro: "ativo_invalido" };
     alteracoes.ativo = campos.ativo;
+  }
+  // F7b.4. Booleano estrito: um valor de outro tipo NAO vira `false` em
+  // silencio — desligar memoria por engano de tipo faria o agente
+  // esquecer sem ninguem ter pedido.
+  if (campos?.memoriaAtiva !== undefined) {
+    if (typeof campos.memoriaAtiva !== "boolean") {
+      return { linha: null, erro: "memoria_ativa_invalida" };
+    }
+    alteracoes.memoria_ativa = campos.memoriaAtiva;
   }
 
   if (Object.keys(alteracoes).length === 0) return { linha: null, erro: "nenhum_campo_valido" };

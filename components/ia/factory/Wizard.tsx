@@ -50,7 +50,7 @@ import { ArquivosDoAgente } from "@/components/ia/factory/ArquivosDoAgente";
 import {
   alterarMemoriaDoAgente, atualizarAgenteViaApi, criarAgenteViaApi,
   criarMemoriaDoAgente, criarSkillDoDono, definirAtivacaoDoAgente,
-  definirPermissaoDeFuncao, lerAtivacaoDoAgente,
+  definirMemoriaDoAgente, definirPermissaoDeFuncao, lerAtivacaoDoAgente,
   listarAgentes, listarFontesDoAgente, listarMemoriasDoAgente,
   listarSkillsDoAgente, listarSkillsDoDono,
   removerMemoriaDoAgente, vincularSkillNoAgente,
@@ -58,6 +58,9 @@ import {
   type RespostaDaFactory, type SkillDoAgenteUI,
 } from "@/lib/ia/agentes-http";
 import type { NivelAutonomia } from "@/lib/ia/conceitos";
+// Os rotulos do nivel de trabalho vivem no catalogo, nao aqui: a tela
+// nao pode ter a sua propria opiniao sobre o que cada nivel significa.
+import { rotuloDoNivel } from "@/lib/agentes/factory/catalogo-de-modelos";
 
 // ─── As etapas ────────────────────────────────────────────────────────
 
@@ -280,6 +283,29 @@ export function Wizard({ agenteIdInicial }: { agenteIdInicial: string | null }) 
     await recarregar(agenteId);
   }
 
+  /**
+   * Liga ou desliga a memoria AUTOMATICA do agente.
+   *
+   * Nao confundir com `alternarMemoria`, que liga uma memoria FIXADA
+   * especifica. Sao coisas diferentes: uma e o motor, a outra e um
+   * bilhete que a pessoa escreveu.
+   */
+  async function alternarMemoriaLonga(ligado: boolean) {
+    if (agenteId === null) return;
+    setErro(null);
+    setSalvando(true);
+    try {
+      const r = await definirMemoriaDoAgente(agenteId, ligado);
+      if (r.estado !== "ok") {
+        setErro(frasePorEstado(r, "Não foi possível alterar a memória."));
+        return;
+      }
+      await recarregar(agenteId);
+    } finally {
+      setSalvando(false);
+    }
+  }
+
   async function alternarMemoria(id: string, ativo: boolean) {
     if (agenteId === null) return;
     setErro(null);
@@ -346,7 +372,13 @@ export function Wizard({ agenteIdInicial }: { agenteIdInicial: string | null }) 
     if (n === 3) return ativacao.provedor !== null ? "concluida" : "atencao";
     if (n === 4) return ativacao.ferramentas.length > 0 ? "concluida" : "vazia";
     if (n === 5) return skillsDoAgente.length > 0 ? "concluida" : "vazia";
-    if (n === 6) return memorias.some((m) => m.ativo) ? "concluida" : "vazia";
+    // A etapa 6 esta "concluida" quando a memoria automatica esta ligada
+    // OU quando ha memoria fixada: as duas sao formas de o agente
+    // lembrar, e nenhuma e obrigatoria.
+    if (n === 6) {
+      return ativacao.memoriaAtiva || memorias.some((m) => m.ativo)
+        ? "concluida" : "vazia";
+    }
     if (n === 7) return fontes.length > 0 ? "concluida" : "vazia";
     if (n === 8) {
       if (ativacao.ferramentas.length === 0) return "vazia";
@@ -466,27 +498,81 @@ export function Wizard({ agenteIdInicial }: { agenteIdInicial: string | null }) 
 
           {etapa === 3 && (
             <>
-              {/* O modelo nao e escolhido aqui: quem o resolve e o
-                  gateway, por ambiente. A tela MOSTRA o que existe, e
-                  diz quando nada existe — nunca oferece uma opcao que
-                  nao sustentaria. */}
-              {ativacao !== null && ativacao.provedor !== null ? (
-                <Cartao destacado>
-                  <strong style={{ fontSize: TAMANHO.corpo, color: CROMO.texto }}>
-                    IA configurada
-                  </strong>
-                  <p style={{
-                    margin: `${ESPACO.xs}px 0 0`, fontSize: TAMANHO.miudo, color: CROMO.textoFraco,
-                  }}>
-                    Compatível com todas as ferramentas.
-                    {ativacao.modelo !== null && ` Modelo: ${ativacao.modelo}.`}
-                  </p>
-                </Cartao>
-              ) : (
+              {/* O catalogo vem do SERVIDOR, e lista so o que este
+                  ambiente de fato configurou. Um provedor sem chave nao
+                  aparece — a tela nao oferece o que nao sustentaria. */}
+              {(ativacao?.modelos.length ?? 0) === 0 ? (
                 <Aviso tom="atencao">
-                  Nenhuma IA está configurada neste ambiente. Fale com o suporte antes de continuar.
+                  Nenhuma IA está configurada neste ambiente. Fale com o suporte antes de
+                  continuar.
                 </Aviso>
+              ) : (
+                ativacao?.modelos.map((m) => {
+                  const escolhido = m.provedor === ativacao.provedor;
+                  return (
+                    <Cartao key={m.provedor} destacado={escolhido}>
+                      <div style={{
+                        display: "flex", justifyContent: "space-between",
+                        gap: ESPACO.md, flexWrap: "wrap", alignItems: "flex-start",
+                      }}>
+                        <div style={{ minWidth: 0 }}>
+                          <strong style={{ fontSize: TAMANHO.corpo, color: CROMO.texto }}>
+                            {m.nome}
+                          </strong>
+                          <p style={{
+                            margin: `${ESPACO.xs}px 0 0`,
+                            fontSize: TAMANHO.miudo, color: CROMO.textoFraco,
+                          }}>
+                            {m.descricao}
+                          </p>
+                          <details style={{ marginTop: ESPACO.sm }}>
+                            <summary style={{
+                              cursor: "pointer", fontSize: TAMANHO.miudo,
+                              color: CROMO.textoFraco,
+                            }}>
+                              Detalhes técnicos
+                            </summary>
+                            <code style={{ fontSize: TAMANHO.miudo, color: CROMO.textoFraco }}>
+                              {m.modeloId}
+                            </code>
+                          </details>
+                        </div>
+                        <div style={{ display: "flex", flexDirection: "column", gap: ESPACO.xs }}>
+                          {escolhido && <Etiqueta tom="ok">Em uso</Etiqueta>}
+                          {m.ferramentas
+                            ? <Etiqueta tom="info">Usa ferramentas</Etiqueta>
+                            : <Etiqueta tom="atencao">Sem ferramentas</Etiqueta>}
+                        </div>
+                      </div>
+                    </Cartao>
+                  );
+                })
               )}
+
+              {/* §35/§36: o nivel de trabalho aparece SO quando o modelo
+                  em uso suporta mais de um. Um radio de uma opcao pede
+                  atencao para nada — e oferecer um nivel que o provedor
+                  nao tem seria prometer capacidade nao provada. */}
+              {(() => {
+                const emUso = ativacao?.modelos.find((m) => m.provedor === ativacao.provedor);
+                if (emUso === undefined || emUso.niveis.length <= 1) {
+                  return (
+                    <p style={{ margin: 0, fontSize: TAMANHO.miudo, color: CROMO.textoFraco }}>
+                      Este modelo não oferece controle de nível de raciocínio.
+                    </p>
+                  );
+                }
+                return (
+                  <EscolhaUnica
+                    rotulo="Nível de trabalho"
+                    opcoes={emUso.niveis.map((n) => ({
+                      valor: n, rotulo: rotuloDoNivel(n),
+                    }))}
+                    valor={emUso.niveis[0]}
+                    aoMudar={() => undefined}
+                  />
+                );
+              })()}
             </>
           )}
 
@@ -644,17 +730,40 @@ export function Wizard({ agenteIdInicial }: { agenteIdInicial: string | null }) 
 
           {etapa === 6 && (
             <>
+              {/* §20/§28: a experiencia principal e UM interruptor. O que
+                  ele liga e a memoria AUTOMATICA: o agente passa a
+                  lembrar do que foi conversado, sem ninguem digitar
+                  nada. */}
               <Alternador
                 rotulo="Memória do agente"
-                ligado={memorias.some((m) => m.ativo)}
-                aoMudar={(v) => {
-                  // Atalho para ligar/desligar TODAS. Criar memoria
-                  // continua sendo ato explicito — e o agente nunca cria
-                  // nenhuma por conta propria.
-                  for (const m of memorias) void alternarMemoria(m.id, v);
-                }}
-                descricao="Preferências e informações que este agente deve lembrar entre conversas. Você escreve cada uma; o agente nunca cria memória sozinho."
+                ligado={ativacao?.memoriaAtiva === true}
+                aoMudar={(v) => void alternarMemoriaLonga(v)}
+                descricao="Quando ativada, este agente poderá lembrar informações úteis de conversas anteriores e adaptar respostas ao longo do tempo."
               />
+
+              {ativacao?.memoriaAtiva === true && (
+                <Aviso tom="ok">
+                  Ativa — aprendendo com as conversas deste agente. A memória de um agente
+                  nunca é vista por outro.
+                </Aviso>
+              )}
+
+              {/* §23/§27: a memoria manual da F6 nao foi apagada. Ela
+                  deixou de ser o fluxo principal e virou correcao —
+                  aquilo que a pessoa quer FIXAR, em vez de esperar que o
+                  agente aprenda. */}
+              <details>
+                <summary style={{
+                  cursor: "pointer", fontSize: TAMANHO.corpo, color: CROMO.texto,
+                }}>
+                  Avançado: memórias fixadas ({memorias.filter((m) => m.ativo).length})
+                </summary>
+                <p style={{
+                  margin: `${ESPACO.sm}px 0`, fontSize: TAMANHO.miudo, color: CROMO.textoFraco,
+                }}>
+                  Instruções que você escreve à mão e o agente sempre considera. Use para
+                  corrigir algo que ele entendeu errado.
+                </p>
               <AreaTexto
                 rotulo="Nova memória" valor={novaMemoria} aoMudar={setNovaMemoria} linhas={3}
                 placeholder="Ex.: Quando eu pedir resumo financeiro, mostre o saldo primeiro."
@@ -685,6 +794,7 @@ export function Wizard({ agenteIdInicial }: { agenteIdInicial: string | null }) 
                   </div>
                 </Cartao>
               ))}
+              </details>
             </>
           )}
 
@@ -774,7 +884,12 @@ export function Wizard({ agenteIdInicial }: { agenteIdInicial: string | null }) 
                   ["Ferramentas",
                     ativacao.ferramentas.map((f) => f.nome).join(", ") || "nenhuma"],
                   ["Skills", skillsDoAgente.map((s) => s.nome).join(", ") || "nenhuma"],
-                  ["Memória", `${memorias.filter((m) => m.ativo).length} ativa(s)`],
+                  ["Memória", ativacao.memoriaAtiva
+                ? `automática${memorias.filter((m) => m.ativo).length > 0
+                    ? ` + ${memorias.filter((m) => m.ativo).length} fixada(s)` : ""}`
+                : memorias.filter((m) => m.ativo).length > 0
+                  ? `${memorias.filter((m) => m.ativo).length} fixada(s)`
+                  : "desligada"],
                   ["Arquivos", `${fontes.length} arquivo(s)`],
                   ["Modo", "Manual"],
                 ] as const).map(([k, v]) => (
@@ -871,7 +986,9 @@ export function Wizard({ agenteIdInicial }: { agenteIdInicial: string | null }) 
               ["IA", ativacao?.modelo ?? "—"],
               ["Ferramentas", String(ativacao?.ferramentas.length ?? 0)],
               ["Skills", String(skillsDoAgente.length)],
-              ["Memória", memorias.some((m) => m.ativo) ? "ativada" : "desativada"],
+              ["Memória", ativacao?.memoriaAtiva === true
+                ? "automática"
+                : memorias.some((m) => m.ativo) ? "fixadas" : "desligada"],
               ["Arquivos", String(fontes.length)],
               ["Permissões",
                 (ativacao?.ferramentas.length ?? 0) === 0 ? "—"
