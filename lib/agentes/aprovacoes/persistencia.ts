@@ -160,6 +160,23 @@ export interface EntradaCriarAprovacao {
    * "2" seria executar outra acao sob a mesma autorizacao.
    */
   definicoesExternas?: Readonly<Record<string, DefinicaoFuncao>>;
+  /**
+   * De onde esta aprovacao veio, quando veio de um CHAT — F7b.4.4 §6.
+   *
+   * Os dois andam juntos ou nenhum anda: sem `pedidoId` o dialogo nao
+   * remonta, e o CHECK do banco recusa o par incompleto. Aprovacao de
+   * Tarefa continua sem nada disso, e e por isso que sao opcionais.
+   *
+   * Nao e o cliente que os fornece: quem chama e o runtime da conversa,
+   * que ja tem `conversaId` da sessao e `pedidoId` do provedor.
+   */
+  origem?: {
+    readonly conversaId: string;
+    /** O id do `tool_use`/`function_call` que ficou pendente. */
+    readonly pedidoId: string;
+    /** O que o modelo disse junto do pedido. `null` e comum e valido. */
+    readonly textoAssistente: string | null;
+  };
 }
 
 export interface EntradaDecidirAprovacao {
@@ -172,6 +189,20 @@ export interface EntradaDecidirAprovacao {
 export interface EntradaConsumirAprovacao {
   userId: string;
   aprovacaoId: string;
+  /**
+   * As Funcoes EXTERNAS do agente — F7b.4.4 §24.
+   *
+   * A MESMA costura de `executarFuncao` e `criarAprovacao`, e ela precisa
+   * existir aqui pelo terceiro e ultimo motivo: sem ela, `funcaoExiste`
+   * recusa na RETOMADA, e uma acao externa aprovada nunca executaria.
+   *
+   * Quem monta este mapa e `retomarTurnoAprovado`, a partir dos VINCULOS
+   * de AGORA. Isso tem um efeito que vale nomear: uma ferramenta removida
+   * entre a aprovacao e o clique nao esta mais no mapa, e a retomada
+   * recusa. Permissao aprovada nao ressuscita ferramenta removida —
+   * a mesma regra do §6, agora tambem no caminho da aprovacao.
+   */
+  definicoesExternas?: Readonly<Record<string, DefinicaoFuncao>>;
 }
 
 // ─── Auxiliares ───────────────────────────────────────────────────────
@@ -430,9 +461,183 @@ export async function criarAprovacao(entrada: EntradaCriarAprovacao): Promise<Re
   if (codigo === null) return { codigo: "falha_persistencia" };
   if (codigo === "criada" || codigo === "reutilizada") {
     if (typeof id !== "string" || id.length === 0) return { codigo: "falha_persistencia" };
+
+    // ── A origem vai num UPDATE proprio, e nao dentro da RPC ────────
+    //
+    // A RPC de criacao carrega a deduplicacao pelo indice unico parcial e
+    // a revalidacao de posse; mexer na assinatura dela para acrescentar
+    // tres campos de UI arriscaria a parte que protege. O UPDATE e
+    // escopado por `(id, user_id)` — o mesmo par que a RPC ja validou.
+    //
+    // `reutilizada` TAMBEM atualiza: a mesma acao pedida de outra conversa
+    // deve retomar na conversa de AGORA, e nao naquela em que o pedido
+    // nasceu. O indice unico garante que ha uma aprovacao viva so.
+    //
+    // Falhar aqui NAO derruba a aprovacao: ela continua valida e visivel
+    // na fila de `/ia/aprovacoes`, que e exatamente o comportamento
+    // anterior a este gate. A degradacao e para o estado antigo, nunca
+    // para um estado pior.
+    if (entrada.origem !== undefined) {
+      const { error } = await getSupabaseServidor()
+        .from(TABELA)
+        .update({
+          conversa_id: entrada.origem.conversaId,
+          pedido_id: entrada.origem.pedidoId,
+          texto_assistente: entrada.origem.textoAssistente,
+        })
+        .eq("id", id)
+        .eq("user_id", userId);
+      if (error) {
+        // O SQLSTATE entra, a mensagem nao: o codigo diz o que aconteceu
+        // sem nomear coluna nem constraint.
+        console.error(
+          `[aprovacoes] falha ao gravar a origem da conversa (sqlstate ${
+            (error as { code?: string }).code ?? "desconhecido"})`);
+      }
+    }
+
     return { codigo, aprovacaoId: id };
   }
   return { codigo: codigo as Exclude<CodigoAprovacao, "criada" | "reutilizada"> };
+}
+
+// ─── O que a RETOMADA DE CONVERSA precisa — F7b.4.4 ──────────────────
+//
+// Nomes proprios de proposito. `AprovacaoParaRetomada` e
+// `lerAprovacaoParaRetomada` ja existem mais abaixo e servem ao CONSUMO:
+// elas carregam requisito de conexao, revisao e alvo, que e o que a RPC
+// atomica revalida. O que esta secao le e outra coisa — de qual CONVERSA
+// a aprovacao veio e qual pedido do modelo ficou pendente.
+//
+// Fundir as duas faria uma leitura carregar campos que a outra nao usa, e
+// e justamente a lista curta que torna cada uma auditavel.
+
+export interface AprovacaoDaConversa {
+  readonly aprovacaoId: string;
+  readonly agenteId: string;
+  readonly conversaId: string;
+  readonly pedidoId: string;
+  readonly textoAssistente: string | null;
+  readonly funcaoId: string;
+  readonly argumentos: unknown;
+  readonly estado: string;
+}
+
+export type ResultadoLeituraDaConversa =
+  | { readonly leitura: "ok"; readonly aprovacao: AprovacaoDaConversa }
+  /** Nao existe, nao e desta pessoa, ou nao veio de uma conversa. */
+  | { readonly leitura: "nao_encontrada" }
+  | { readonly leitura: "falha" };
+
+/**
+ * A aprovacao, para remontar o turno.
+ *
+ * Escopada por `user_id` na PROPRIA consulta: "nao existe" e "e de outra
+ * pessoa" devolvem o mesmo resultado, pela mesma razao de sempre —
+ * distingui-los seria um oraculo de existencia de recurso alheio (§23).
+ *
+ * `argumentos` vem da linha CONGELADA, e nao de quem chama. E isso que
+ * impede trocar `funcaoId` ou argumento depois de a aprovacao existir.
+ */
+export async function lerAprovacaoDaConversaParaRetomada(entrada: {
+  readonly userId: string;
+  readonly aprovacaoId: string;
+}): Promise<ResultadoLeituraDaConversa> {
+  const { userId, aprovacaoId } = entrada;
+  if (!userId || !aprovacaoId) return { leitura: "nao_encontrada" };
+
+  const { data, error } = await getSupabaseServidor()
+    .from(TABELA)
+    .select("id, agente_id, conversa_id, pedido_id, texto_assistente, funcao_id, argumentos, estado")
+    .eq("id", aprovacaoId)
+    .eq("user_id", userId)
+    .limit(1);
+
+  if (error) {
+    console.error("[aprovacoes] falha ao ler aprovacao para retomada");
+    return { leitura: "falha" };
+  }
+  const linha = (data ?? [])[0] as Record<string, unknown> | undefined;
+  if (linha === undefined) return { leitura: "nao_encontrada" };
+
+  // Sem conversa nao ha turno para retomar. Aprovacao de Tarefa cai aqui,
+  // e cair aqui e o certo: ela tem a fila propria dela.
+  if (typeof linha.conversa_id !== "string" || typeof linha.pedido_id !== "string") {
+    return { leitura: "nao_encontrada" };
+  }
+  if (typeof linha.agente_id !== "string" || typeof linha.funcao_id !== "string") {
+    return { leitura: "falha" };
+  }
+
+  return {
+    leitura: "ok",
+    aprovacao: {
+      aprovacaoId,
+      agenteId: linha.agente_id,
+      conversaId: linha.conversa_id,
+      pedidoId: linha.pedido_id,
+      textoAssistente:
+        typeof linha.texto_assistente === "string" ? linha.texto_assistente : null,
+      funcaoId: linha.funcao_id,
+      argumentos: linha.argumentos,
+      estado: typeof linha.estado === "string" ? linha.estado : "",
+    },
+  };
+}
+
+/**
+ * A aprovacao ainda VIVA de uma conversa, se houver.
+ *
+ * E o que faz o cartao reaparecer depois de um refresh (§11): o estado
+ * mora no banco, e nao na memoria da tela.
+ *
+ * `consumida`, `rejeitada`, `expirada` e `cancelada` nao voltam — o
+ * indice parcial do banco cobre os mesmos dois estados, e as duas
+ * definicoes de "viva" precisam concordar.
+ */
+export async function lerAprovacaoVivaDaConversa(entrada: {
+  readonly userId: string;
+  readonly conversaId: string;
+}): Promise<
+  | { readonly leitura: "ok"; readonly aprovacao: AprovacaoDaConversa | null }
+  | { readonly leitura: "falha" }
+> {
+  const { userId, conversaId } = entrada;
+  if (!userId || !conversaId) return { leitura: "ok", aprovacao: null };
+
+  const { data, error } = await getSupabaseServidor()
+    .from(TABELA)
+    .select("id, agente_id, conversa_id, pedido_id, texto_assistente, funcao_id, argumentos, estado")
+    .eq("user_id", userId)
+    .eq("conversa_id", conversaId)
+    .in("estado", ["pendente", "aprovada"])
+    .order("criado_em", { ascending: false })
+    .limit(1);
+
+  if (error) {
+    console.error("[aprovacoes] falha ao ler aprovacao viva da conversa");
+    return { leitura: "falha" };
+  }
+  const linha = (data ?? [])[0] as Record<string, unknown> | undefined;
+  if (linha === undefined) return { leitura: "ok", aprovacao: null };
+  if (typeof linha.id !== "string" || typeof linha.pedido_id !== "string") {
+    return { leitura: "falha" };
+  }
+
+  return {
+    leitura: "ok",
+    aprovacao: {
+      aprovacaoId: linha.id,
+      agenteId: String(linha.agente_id ?? ""),
+      conversaId,
+      pedidoId: linha.pedido_id,
+      textoAssistente:
+        typeof linha.texto_assistente === "string" ? linha.texto_assistente : null,
+      funcaoId: String(linha.funcao_id ?? ""),
+      argumentos: linha.argumentos,
+      estado: typeof linha.estado === "string" ? linha.estado : "",
+    },
+  };
 }
 
 // ─── Decidir ──────────────────────────────────────────────────────────
@@ -490,6 +695,8 @@ export interface AprovacaoParaRetomada {
   readonly agenteId: string;
   readonly tarefaId: string | null;
   readonly funcaoId: string;
+  /** A definicao ja resolvida — do registry OU do mapa de externas. */
+  readonly definicao: DefinicaoFuncao;
   readonly acesso: "leitura" | "escrita";
   readonly plataforma: string | null;
   readonly recurso: string | null;
@@ -599,10 +806,26 @@ export async function lerAprovacaoParaRetomada(
   }
 
   const funcaoId = ap.funcao_id;
-  if (typeof funcaoId !== "string" || !funcaoExiste(funcaoId)) {
+  if (typeof funcaoId !== "string") {
     return { ok: false, codigo: "aprovacao_desatualizada", detalhe: "funcao_desconhecida" };
   }
-  const definicao: DefinicaoFuncao = FUNCOES[funcaoId];
+  // O registry PRIMEIRO, e o mapa de externas depois — mesma ordem e mesmo
+  // motivo dos outros dois pontos: uma externa nunca sombreia uma Funcao
+  // da CDS.
+  const externasAqui = entrada.definicoesExternas;
+  const resolvida: DefinicaoFuncao | undefined = funcaoExiste(funcaoId)
+    ? FUNCOES[funcaoId]
+    : externasAqui !== undefined &&
+        Object.prototype.hasOwnProperty.call(externasAqui, funcaoId)
+      ? externasAqui[funcaoId]
+      : undefined;
+  if (resolvida === undefined) {
+    // Cai aqui tambem quando a ferramenta foi REMOVIDA do agente depois de
+    // a aprovacao ter sido criada. Recusar e o certo: a autorizacao era
+    // para uma ferramenta que o agente nao tem mais.
+    return { ok: false, codigo: "aprovacao_desatualizada", detalhe: "funcao_desconhecida" };
+  }
+  const definicao: DefinicaoFuncao = resolvida;
 
   // A definicao precisa ser a MESMA que o humano aprovou.
   if (ap.revisao_funcao !== definicao.revisao) {
@@ -662,6 +885,13 @@ export async function lerAprovacaoParaRetomada(
       lojaId,
       argumentos: ap.argumentos,
       revisao: definicao.revisao,
+      // A definicao RESOLVIDA vai junto — F7b.4.4.
+      //
+      // Quem consome precisava dela e a buscava de novo em `FUNCOES`, o
+      // que quebrava toda Funcao EXTERNA (o mapa de externas nao chega
+      // la). Publicar a que ja foi conferida contra a revisao aprovada
+      // elimina a segunda resolucao e a chance de as duas divergirem.
+      definicao,
     },
   };
 }
@@ -719,7 +949,6 @@ export async function consumirAprovacaoEAbrir(
   if (!pre.ok) return { codigo: pre.codigo };
 
   const ap = pre.aprovacao;
-  const definicao: DefinicaoFuncao = FUNCOES[ap.funcaoId];
   const cliente = getSupabaseServidor();
 
   const requestId = randomUUID();
@@ -728,7 +957,14 @@ export async function consumirAprovacaoEAbrir(
     p_user_id: userId,
     p_aprovacao_id: aprovacaoId,
     p_request_id: requestId,
-    p_revisao_atual: definicao.revisao,
+    // Do que `lerAprovacaoParaRetomada` JA resolveu, e nao de `FUNCOES`
+    // outra vez. Reresolver aqui quebrava toda Funcao EXTERNA — o mapa de
+    // externas nao chega a esta linha, e `FUNCOES[id]` vinha `undefined`.
+    //
+    // E mesmo para Funcao interna a releitura era ruim: duas resolucoes da
+    // mesma definicao no mesmo fluxo podem divergir, e a que vale e a que
+    // foi conferida contra a revisao aprovada logo acima.
+    p_revisao_atual: ap.revisao,
   });
 
   if (r.error) return falha(RPC_CONSUMIR, r.error);
@@ -753,7 +989,7 @@ export async function consumirAprovacaoEAbrir(
       agenteId: ap.agenteId,
       tarefaId: ap.tarefaId,
       funcaoId: ap.funcaoId,
-      definicao,
+      definicao: ap.definicao,
       acesso: ap.acesso,
       plataforma: ap.plataforma,
       recurso: ap.recurso,

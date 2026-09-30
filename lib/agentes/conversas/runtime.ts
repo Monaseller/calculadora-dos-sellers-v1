@@ -294,6 +294,9 @@ export async function responderNaConversa(
       // permissao — e por isso que permissao historica nao ressuscita
       // ferramenta removida nem aqui.
       definicoesExternas: externas.definicoes,
+      // F7b.4.4: sem isto, uma aprovacao criada neste turno nasce sem
+      // saber a qual conversa voltar — e era esse o defeito.
+      conversaId: entrada.conversaId,
       adaptador,
     });
   } catch (e) {
@@ -306,6 +309,7 @@ export async function responderNaConversa(
 
   const passos: PassoRegistrado[] = saida.passos.map((p) => ({
     funcaoId: p.funcaoId, desfecho: p.desfecho, executou: p.executou, requestId: p.requestId,
+    ...(p.aprovacaoId === undefined ? {} : { aprovacaoId: p.aprovacaoId }),
   }));
 
   const resposta = await portaConversas.anexarMensagem({

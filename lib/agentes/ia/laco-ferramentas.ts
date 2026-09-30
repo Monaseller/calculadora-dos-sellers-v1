@@ -103,6 +103,14 @@ export interface EntradaDoLaco {
    * `executarFuncao`. O laco nao decide o que existe — ele so entrega.
    */
   readonly definicoesExternas?: Readonly<Record<string, DefinicaoFuncao>>;
+  /**
+   * A conversa deste turno — F7b.4.4.
+   *
+   * O laco nao a usa para nada seu: ele so a repassa, junto do id do
+   * pedido que o provedor gerou, para que uma aprovacao criada aqui saiba
+   * onde voltar.
+   */
+  readonly conversaId?: string;
   /** Historico anterior, para multi-turno. Vazio na primeira mensagem. */
   readonly historico?: readonly MensagemDoDialogo[];
   readonly maxPassos?: number;
@@ -138,7 +146,13 @@ export interface EntradaDoLaco {
   readonly executar?: typeof executarFuncao;
 }
 
-/** Uma ferramenta que rodou (ou foi recusada), para auditoria e UI. */
+/**
+ * Uma ferramenta que rodou (ou foi recusada), para auditoria e UI.
+ *
+ * `aprovacaoId` so aparece quando o guard pediu decisao humana — F7b.4.4.
+ * Sem ele, a tela sabia que "algo precisa de aprovacao" mas nao QUAL
+ * aprovacao, e por isso mandava a pessoa para a fila em outra pagina.
+ */
 export interface PassoDeFerramenta {
   readonly funcaoId: string;
   readonly desfecho: string;
@@ -146,6 +160,14 @@ export interface PassoDeFerramenta {
   readonly executou: boolean;
   /** Codigo de dominio, quando a Funcao devolveu um. F4.1 classifica por ele. */
   readonly codigo: string | null;
+  /**
+   * A aprovacao criada por ESTE pedido — F7b.4.4.
+   *
+   * Presente so quando `desfecho === "aguardando_aprovacao"`. E o que
+   * permite a tela mostrar Aprovar/Negar no proprio chat, em vez de
+   * mandar a pessoa para outra pagina e perder o turno.
+   */
+  readonly aprovacaoId?: string;
 }
 
 export interface ResultadoDoLaco {
@@ -193,7 +215,8 @@ async function executarUmPedido(
   pedido: PedidoDeFerramenta,
   permitidas: ReadonlySet<string>,
   porta: typeof executarFuncao,
-  definicoesExternas?: Readonly<Record<string, DefinicaoFuncao>>
+  definicoesExternas?: Readonly<Record<string, DefinicaoFuncao>>,
+  origem?: { conversaId: string; textoAssistente: string | null }
 ): Promise<{ resposta: RespostaDeFerramenta; passo: PassoDeFerramenta }> {
   // Cerca previa: o modelo so pode pedir o que foi DECLARADO a ele. Nao
   // substitui o guard — `executarFuncao` continua sendo a autoridade —,
@@ -212,6 +235,16 @@ async function executarUmPedido(
     funcaoId: pedido.nome,
     argumentos: pedido.argumentos,
     definicoesExternas,
+    // `pedido.id` e o id que o PROVEDOR deu a esta chamada. E ele que
+    // permite remontar o dialogo depois: todo provedor exige que o
+    // resultado da ferramenta cite o id do pedido que o originou.
+    ...(origem === undefined ? {} : {
+      origemDaConversa: {
+        conversaId: origem.conversaId,
+        pedidoId: pedido.id,
+        textoAssistente: origem.textoAssistente,
+      },
+    }),
   } as Parameters<typeof executarFuncao>[0]);
 
   if (r.tipo === "sucesso") {
@@ -227,6 +260,7 @@ async function executarUmPedido(
   }
 
   const frase = RECUSAS[r.tipo] ?? RECUSAS.indisponivel;
+  const aprovacaoId = (r as { aprovacaoId?: unknown }).aprovacaoId;
   return {
     resposta: { id: pedido.id, conteudo: frase, erro: true },
     passo: {
@@ -235,6 +269,11 @@ async function executarUmPedido(
       requestId: (r as { requestId?: string }).requestId ?? null,
       executou: false,
       codigo: (r as { codigo?: string }).codigo ?? null,
+      // So quando existe. Um campo sempre presente e sempre nulo diria
+      // que toda recusa tem aprovacao, e nao tem.
+      ...(typeof aprovacaoId === "string" && aprovacaoId !== ""
+        ? { aprovacaoId }
+        : {}),
     },
   };
 }
@@ -300,7 +339,12 @@ export async function conversarComFerramentas(
     for (const pedido of r.pedidos) {
       const { resposta, passo: p } = await executarUmPedido(
         entrada.userId, entrada.agenteId, pedido, permitidas, porta,
-        entrada.definicoesExternas);
+        entrada.definicoesExternas,
+        entrada.conversaId === undefined
+          ? undefined
+          // `r.texto` e o que o modelo disse JUNTO do pedido, e faz parte
+          // do turno que sera remontado. Perde-lo mudaria o dialogo.
+          : { conversaId: entrada.conversaId, textoAssistente: r.texto });
       respostas.push(resposta);
       passos.push(p);
       passosDesteTurno.push(p);

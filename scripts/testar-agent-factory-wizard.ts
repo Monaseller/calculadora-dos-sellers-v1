@@ -642,25 +642,42 @@ secao("G2. Aprovacao nao e erro, e o cartao nao promete o que nao cumpre");
   ok("G23 e a distincao vem do `desfecho` do passo, nao do `motivo`",
     /p\.desfecho|barrado\.desfecho/.test(chat) &&
       /DESFECHOS_DE_BLOQUEIO/.test(chat));
-  ok("G24 `aguardando_aprovacao` tem cartao proprio",
-    /barrado\.desfecho === "aguardando_aprovacao"/.test(chat) &&
+  // ── G24/G26/G27 REVERTIDOS no F7b.4.4 ──────────────────────────
+  //
+  // A versao anterior cobrava que o cartao NAO tivesse aprovar/rejeitar e
+  // que mandasse para `/ia/aprovacoes`. Era a decisao certa naquele
+  // momento, e o codigo dizia por que: sem retomada, um "Aprovar" aqui
+  // gravaria uma decisao que nenhuma conversa continuaria.
+  //
+  // O F7b.4.4 construiu a retomada — e ai o `Link` virou o defeito. Sair
+  // da pagina para decidir desmontava o chat, e foi isso que o Rodrigo
+  // viu como "as mensagens sumiram".
+  //
+  // O cartao agora aparece pela APROVACAO VIVA lida do servidor, e nao
+  // pelo passo que barrou: assim ele sobrevive a um refresh.
+  ok("G24 a aprovacao viva tem cartao proprio",
+    /\{aprovacao !== null && \(/.test(chat) &&
       /precisa da sua aprovação/i.test(chat));
   ok("G25 e NAO cai tambem no aviso de erro generico",
     /erro !== null && barrado\?\.desfecho !== "aguardando_aprovacao"/.test(chat));
 
-  // A parte que mais importa: o cartao nao tem botao de aprovar. A
-  // aprovacao de hoje e de TAREFA, com fila e retomada proprias; um
-  // "Aprovar" aqui gravaria decisao que nenhuma conversa retomaria.
-  ok("G26 o cartao NAO tem aprovar/rejeitar inline",
-    !/registrarDecisaoAprovacao|>Aprovar<|>Rejeitar</.test(chat));
-  ok("G27 ele manda para a fila de aprovacoes que ja existe",
-    /href="\/ia\/aprovacoes"/.test(chat));
+  // A parte que mais importa agora e a oposta: o cartao DECIDE aqui, e a
+  // decisao vai pela rota do chat — que aprova E retoma. A fila continua
+  // existindo para aprovacao de TAREFA, que e outra coisa.
+  ok("G26 o cartao decide pela rota do CHAT",
+    /decidirAprovacaoNoChat\(agenteId, aprovacao\.aprovacaoId, decisao\)/.test(chat));
+  ok("G26a e NAO usa a escrita da fila de tarefas",
+    !/registrarDecisaoAprovacao/.test(chat));
+  ok("G27 e NAO manda a pessoa para outra pagina",
+    !/href="\/ia\/aprovacoes"/.test(chat));
   ok("G28 o nome do pack vem do catalogo, e nao e inventado",
     /packDaFuncao\(funcaoId\)\?\.nome \?\? null/.test(chat));
   ok("G29 sem pack conhecido, o cartao nao inventa nome",
     /nomeDoPack\(barrado\.funcaoId\) === null/.test(chat));
-  ok("G30 `funcao_id` do bloqueio fica em detalhes tecnicos",
-    chat.indexOf("Ver aprovações pendentes") < chat.indexOf("{barrado.funcaoId}"));
+  // O `funcao_id` continua atras de "Detalhes tecnicos" — o que mudou e
+  // que a ancora agora e o botao de aprovar, e nao o link que saiu.
+  ok("G30 `funcao_id` fica depois dos botoes, em detalhes tecnicos",
+    chat.indexOf("Aprovar e continuar") < chat.indexOf("Detalhes técnicos"));
 
   // A lista espelhada tem de bater com a do runtime — uma divergencia
   // faria a tela deixar de reconhecer um bloqueio que o runtime criou.
@@ -1641,6 +1658,120 @@ secao("S. A IA e do AGENTE — e a escolha indisponivel BLOQUEIA, nao troca");
     !/definirPermissao|agente_permissoes|vincularFerramenta/.test(rotaIa));
   ok("S37 limpar a escolha derruba as TRES colunas juntas",
     /provedorIa: null, modeloIa: null, nivelDeTrabalho: null/.test(rotaIa));
+}
+
+
+// ─── T. O bug do Rodrigo, cercado por dentro ─────────────────────────
+
+secao("T. Aprovar acontece NO chat — e adicionar pergunta o nivel");
+
+{
+  const chat = codigo("components/ia/factory/ChatDoAgente.tsx");
+  const chatCru = ler("components/ia/factory/ChatDoAgente.tsx");
+  const busca = codigo("components/ia/factory/BuscaDeFerramentas.tsx");
+  const retomada = codigo("lib/agentes/conversas/retomada.ts");
+  const rota = codigo("app/api/agentes/[agenteId]/aprovacoes/[aprovacaoId]/route.ts");
+
+  // ── §21: a causa real era NAVEGACAO, e ela tem de sumir ───────────
+  //
+  // O cartao antigo tinha um `Link` para `/ia/aprovacoes`. A pessoa saia
+  // da pagina, o componente desmontava e o estado local ia junto — era
+  // isso que parecia "o chat resetou".
+  ok("T1  o chat NAO importa `next/link`",
+    !/from "next\/link"/.test(chatCru));
+  ok("T2  e nao navega de jeito nenhum ao decidir",
+    !/router\.(refresh|replace|push)|window\.location|<Link/.test(chat));
+  ok("T3  CONTROLE NEGATIVO: a sonda acharia uma navegacao",
+    /router\.(refresh|replace|push)/.test("router.refresh();"));
+
+  // ── §10: as mensagens nao sao apagadas ────────────────────────────
+  ok("T4  decidir ACRESCENTA a conversa, nunca substitui",
+    /setMensagens\(\(atual\) => \[\.\.\.atual, r\.dados\.mensagem/.test(chat));
+  ok("T5  e nao ha nenhum `setMensagens([])` no caminho de decisao",
+    (() => {
+      const i = chat.indexOf("async function decidir(");
+      const j = chat.indexOf("\n  async function", i + 10);
+      const fatia = chat.slice(i, j > i ? j : undefined);
+      return i > 0 && !/setMensagens\(\[\]\)/.test(fatia);
+    })());
+
+  // ── §10: os dois botoes, no proprio cartao ────────────────────────
+  ok("T6  o cartao tem Aprovar e Nao autorizar",
+    /Aprovar e continuar/.test(chat) && /Não autorizar/.test(chat));
+  ok("T7  os dois travam enquanto a decisao esta em voo",
+    (chat.match(/desabilitado=\{decidindo !== null\}/g) ?? []).length === 2);
+  ok("T8  e a frase diz que a pergunta nao precisa ser repetida",
+    /não precisa repetir a pergunta/.test(chat));
+
+  // ── §11: o cartao vem do SERVIDOR, e nao da memoria da tela ───────
+  ok("T9  a aprovacao viva e carregada junto das mensagens",
+    /setAprovacao\(r\.dados\.aprovacaoPendente\)/.test(chat));
+  ok("T10 e o cartao aparece por ela, nao por um estado adivinhado",
+    /\{aprovacao !== null && \(/.test(chat));
+
+  // ── §8/§23: o cliente manda UMA palavra ───────────────────────────
+  ok("T11 a rota so aceita `aprovar` ou `rejeitar`",
+    /decisao !== "aprovar" && decisao !== "rejeitar"/.test(rota));
+  ok("T12 e nao le funcaoId, argumentos nem agente do CORPO",
+    !/corpo\.(funcaoId|argumentos|agenteId|userId)/.test(rota));
+  ok("T13 o agente vem da porta, e a aprovacao e conferida contra ele",
+    /leitura\.aprovacao\.agenteId !== porta\.agenteId/.test(rota));
+
+  // ── §7: a retomada nao reenvia a pergunta ─────────────────────────
+  ok("T14 a retomada NAO chama `responderNaConversa`",
+    !/responderNaConversa/.test(retomada));
+  // T15 media a string errada: `papel: "usuario"` tambem aparece na
+  // REMONTAGEM do dialogo para o modelo, que e legitima e necessaria. O
+  // que nao pode acontecer e PERSISTIR uma mensagem de usuario nova — e
+  // isso se ve em `anexarMensagem`, que e a unica escrita de conversa.
+  ok("T15 a retomada so grava mensagem de ASSISTENTE",
+    (() => {
+      const anexos = [...retomada.matchAll(/anexarMensagem\(\{[\s\S]{0,240}?\}\)/g)]
+        .map((m) => m[0]);
+      return anexos.length === 1 &&
+        /papel: "assistente"/.test(anexos[0]) && !/papel: "usuario"/.test(anexos[0]);
+    })());
+  ok("T15a CONTROLE NEGATIVO: a sonda acharia uma gravacao de usuario",
+    /papel: "usuario"/.test('anexarMensagem({ papel: "usuario" })'));
+  ok("T16 ela executa a Funcao CONGELADA, pela porta atomica",
+    /retomarAprovacao\(\{ userId, aprovacaoId, definicoesExternas \}\)/.test(retomada));
+  ok("T16a e o mapa de externas vem dos VINCULOS de AGORA",
+    /listarVinculosExternos\(\{ userId, agenteId: aprovacao\.agenteId \}\)/.test(retomada) &&
+      /prepararFuncoesExternas/.test(retomada));
+  ok("T16b ferramenta interna nao consulta catalogo externo nenhum",
+    /aprovacao\.funcaoId\.startsWith\("composio\."\)/.test(retomada));
+  ok("T17 e chama o modelo SEM declarar ferramentas — nao ha pedido novo",
+    /ferramentas: \[\]/.test(retomada));
+  ok("T18 os argumentos vem da aprovacao, nunca de quem chamou",
+    /argumentos: aprovacao\.argumentos/.test(retomada) &&
+      !/argumentos: entrada\./.test(retomada));
+
+  // ── §9: a idempotencia e do BANCO, e nao um contador nosso ────────
+  ok("T19 `consumida` tem codigo proprio, e nao vira erro generico",
+    /aprovacao\.estado === "consumida"/.test(retomada) &&
+      /ja_executada/.test(retomada));
+  ok("T20 e a rota trata isso como sucesso do segundo clique",
+    /retomada\.codigo === "ja_executada"/.test(rota) && /jaExecutada: true/.test(rota));
+
+  // ── §12: negar mantem a conversa ──────────────────────────────────
+  ok("T21 negar grava uma resposta na MESMA conversa",
+    /conversaId: aprovacao\.conversaId/.test(rota) && /TEXTO_NEGADO/.test(rota));
+  ok("T22 e a frase nao promete nova tentativa automatica",
+    !/tentaremos|automaticamente|de novo em/i.test(rota));
+
+  // ── §3/§13: adicionar PERGUNTA o nivel ────────────────────────────
+  ok("T23 adicionar abre a escolha de nivel, e nao vincula direto",
+    /setEscolhendoNivel\(a\.acao\)/.test(busca) &&
+      !/onClick=\{\(\) => void vincular\(a\.acao\)\}/.test(busca));
+  ok("T24 os TRES niveis sao oferecidos",
+    /\["automatico", "aprovacao", "bloqueado"\] as const/.test(busca));
+  ok("T25 a sugestao e rotulada como sugestao — nao e decisao",
+    /\(sugerido\)/.test(busca));
+  ok("T26 e vincular grava as DUAS coisas, em duas chamadas",
+    /vincularFerramentaExterna\(agenteId, aplicativo, acao\)/.test(busca) &&
+      /definirPermissaoDeFerramentaExterna\(agenteId, r\.dados\.funcaoId, nivel\)/.test(busca));
+  ok("T27 e a falha da segunda NAO inventa permissao",
+    /a permissão não pôde ser salva/.test(busca));
 }
 
 // ─── Placar ───────────────────────────────────────────────────────────

@@ -23,18 +23,16 @@
  * tecnicos" — escondê-lo do operador seria a outra metade do erro.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import Link from "next/link";
-
 import { CROMO, ESPACO, RAIO } from "@/lib/ia/design";
 import { packDaFuncao } from "@/lib/agentes/factory/catalogo-ui";
 import {
   Aviso, Botao, Etiqueta, PainelLateral, TAMANHO,
 } from "@/components/ui/Primitivas";
 import {
-  criarConversaDoChat, enviarFonteDoAgente, enviarNaConversaDoChat,
-  lerConversaDoChat, listarFontesDoAgente,
-  type AnexoDaConversaUI, type FonteDoAgenteUI, type MensagemDoChatUI,
-  type PassoDoChatUI, type RespostaDaFactory,
+  criarConversaDoChat, decidirAprovacaoNoChat, enviarFonteDoAgente,
+  enviarNaConversaDoChat, lerConversaDoChat, listarFontesDoAgente,
+  type AnexoDaConversaUI, type AprovacaoPendenteUI, type FonteDoAgenteUI,
+  type MensagemDoChatUI, type PassoDoChatUI, type RespostaDaFactory,
 } from "@/lib/ia/agentes-http";
 
 /**
@@ -126,6 +124,16 @@ export function ChatDoAgente({
   const [painelFontes, setPainelFontes] = useState(false);
   const [pendenteDeProposito, setPendenteDeProposito] = useState<string | null>(null);
   const [provenienciaDe, setProvenienciaDe] = useState<MensagemDoChatUI | null>(null);
+  /**
+   * A aprovacao viva desta conversa — F7b.4.4 §11.
+   *
+   * Vem do SERVIDOR a cada carregamento. Guardar isto so na memoria da
+   * tela faria o cartao sumir num refresh, e o chat voltaria a parecer
+   * travado sem explicacao.
+   */
+  const [aprovacao, setAprovacao] = useState<AprovacaoPendenteUI | null>(null);
+  /** `aprovar` | `rejeitar` enquanto a decisao esta em voo. */
+  const [decidindo, setDecidindo] = useState<string | null>(null);
   const fimRef = useRef<HTMLDivElement | null>(null);
 
   const carregarFontes = useCallback(async (cid: string | null) => {
@@ -137,8 +145,54 @@ export function ChatDoAgente({
 
   const carregarMensagens = useCallback(async (cid: string) => {
     const r = await lerConversaDoChat(agenteId, cid);
-    if (r.estado === "ok") setMensagens(r.dados);
+    if (r.estado !== "ok") return;
+    setMensagens(r.dados.mensagens);
+    setAprovacao(r.dados.aprovacaoPendente);
   }, [agenteId]);
+
+  /**
+   * Decide a aprovacao SEM sair da tela — F7b.4.4 §10/§21.
+   *
+   * ── O que este fluxo NAO faz, e por que ──────────────────────────
+   *
+   * Nao navega, nao recarrega a rota, nao refaz a conversa do zero e nao
+   * limpa `mensagens`. A causa do "chat resetou" que o Rodrigo viu era um
+   * `Link` para `/ia/aprovacoes`: a pessoa saia da pagina, o componente
+   * desmontava, e ao voltar o estado local tinha ido junto. Nada apagou
+   * as mensagens — a tela foi embora.
+   *
+   * Aqui a resposta do servidor e ACRESCENTADA ao que ja esta na tela. As
+   * mensagens anteriores nao sao tocadas.
+   */
+  async function decidir(decisao: "aprovar" | "rejeitar") {
+    if (aprovacao === null || decidindo !== null) return;
+    setErro(null);
+    setCodigoTecnico(null);
+    // A trava e o proprio estado: enquanto ha decisao em voo, o segundo
+    // clique nao chega ao servidor. E defesa de UX, nao de correcao — a
+    // correcao esta no banco, que consome a aprovacao atomicamente.
+    setDecidindo(decisao);
+    try {
+      const r = await decidirAprovacaoNoChat(agenteId, aprovacao.aprovacaoId, decisao);
+      if (r.estado !== "ok") {
+        setErro(frasePorEstado(r, "Não foi possível registrar a decisão."));
+        return;
+      }
+      // A aprovacao sai do ar porque foi decidida — e nao porque a tela
+      // adivinhou. O `null` aqui casa com o que o servidor devolveria num
+      // refresh agora.
+      setAprovacao(null);
+      if (r.dados.mensagem !== null) {
+        setMensagens((atual) => [...atual, r.dados.mensagem as MensagemDoChatUI]);
+      } else if (r.dados.jaExecutada) {
+        // Segundo clique: a acao ja rodou e a resposta ja esta na
+        // conversa. Recarregar e o jeito honesto de mostrar o que existe.
+        if (conversa !== null) await carregarMensagens(conversa);
+      }
+    } finally {
+      setDecidindo(null);
+    }
+  }
 
   // Abre conversa se ainda nao houver. Uma conversa vazia nao custa
   // nada e evita o estado "digitei e nao tinha onde gravar".
@@ -327,7 +381,7 @@ export function ChatDoAgente({
           proprias (`/ia/aprovacoes`); um botao nesta tela gravaria uma
           decisao que nenhuma conversa retomaria — pareceria ter
           funcionado e nao teria. O caminho e o de verdade. */}
-      {barrado !== null && barrado.desfecho === "aguardando_aprovacao" && (
+      {aprovacao !== null && (
         <div style={{
           marginTop: ESPACO.md, padding: ESPACO.md,
           border: `1px solid ${CROMO.acentoBorda}`, borderRadius: RAIO.card,
@@ -340,14 +394,20 @@ export function ChatDoAgente({
             margin: `${ESPACO.xs}px 0 ${ESPACO.sm}px`,
             fontSize: TAMANHO.miudo, color: CROMO.textoFraco,
           }}>
-            {nomeDoPack(barrado.funcaoId) === null
+            {barrado === null || nomeDoPack(barrado.funcaoId) === null
               ? "O agente parou antes de executar, como você configurou."
               : `O agente precisou de ${nomeDoPack(barrado.funcaoId)} e parou antes de usar, como você configurou.`}
+            {" "}Ao aprovar, ele continua daqui — você não precisa repetir a pergunta.
           </p>
           <div style={{ display: "flex", gap: ESPACO.sm, flexWrap: "wrap" }}>
-            <Link href="/ia/aprovacoes" style={{ textDecoration: "none" }}>
-              <Botao tom="primario">Ver aprovações pendentes</Botao>
-            </Link>
+            <Botao tom="primario" desabilitado={decidindo !== null}
+              onClick={() => void decidir("aprovar")}>
+              {decidindo === "aprovar" ? "Executando..." : "Aprovar e continuar"}
+            </Botao>
+            <Botao tom="secundario" desabilitado={decidindo !== null}
+              onClick={() => void decidir("rejeitar")}>
+              {decidindo === "rejeitar" ? "Registrando..." : "Não autorizar"}
+            </Botao>
           </div>
           <details style={{ marginTop: ESPACO.sm }}>
             <summary style={{
@@ -356,7 +416,7 @@ export function ChatDoAgente({
               Detalhes técnicos
             </summary>
             <code style={{ fontSize: TAMANHO.miudo, color: CROMO.textoFraco }}>
-              {barrado.funcaoId} · {barrado.desfecho}
+              {barrado === null ? aprovacao.estado : `${barrado.funcaoId} · ${aprovacao.estado}`}
             </code>
           </details>
         </div>

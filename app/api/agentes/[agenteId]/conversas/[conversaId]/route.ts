@@ -19,6 +19,7 @@
  */
 import { atravessarPorta, lerCorpo, responder, UUID_REGEX } from "@/lib/agentes/api/porta";
 import { criarPortaDeConversas } from "@/lib/agentes/conversas/repositorio";
+import { lerAprovacaoVivaDaConversa } from "@/lib/agentes/aprovacoes/persistencia";
 import { responderNaConversa } from "@/lib/agentes/conversas/runtime";
 import type { Mensagem } from "@/lib/agentes/conversas/tipos";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
@@ -81,7 +82,28 @@ export async function GET(
     const mensagens = await criarPortaDeConversas(getSupabaseServidor())
       .listarMensagens(porta.userId, c.conversaId);
 
-    return responder({ ok: true, mensagens: mensagens.map(paraUI) }, 200);
+    // ── §11: o cartao de aprovacao sobrevive a um refresh ────────────
+    //
+    // O estado mora no BANCO, e nao na memoria da tela. Sem isto, recarregar
+    // a pagina com uma aprovacao pendente mostrava a conversa parada e nada
+    // que explicasse por que — que e metade do que o Rodrigo relatou.
+    //
+    // `consumida`, `rejeitada` e `expirada` nao voltam: a leitura so
+    // considera `pendente` e `aprovada`, os mesmos dois estados do indice
+    // parcial do banco.
+    const viva = await lerAprovacaoVivaDaConversa({
+      userId: porta.userId, conversaId: c.conversaId,
+    });
+
+    return responder({
+      ok: true,
+      mensagens: mensagens.map(paraUI),
+      // `null` quando nao ha nenhuma. Sem `funcao_id` na superficie: a tela
+      // ja recebe o nome do pack pelo passo da mensagem.
+      aprovacaoPendente: viva.leitura === "ok" && viva.aprovacao !== null
+        ? { aprovacaoId: viva.aprovacao.aprovacaoId, estado: viva.aprovacao.estado }
+        : null,
+    }, 200);
   } catch {
     return responder({ ok: false, erro: FALHA }, 500);
   }

@@ -152,6 +152,21 @@ export interface EntradaExecucaoFuncao {
    */
   definicoesExternas?: Readonly<Record<string, DefinicaoFuncao>>;
   /**
+   * De onde veio este pedido, quando veio de um CHAT — F7b.4.4.
+   *
+   * Atravessa sem ser interpretado: este modulo nao sabe o que e uma
+   * conversa, e nao deve saber. Ele so entrega a quem cria a aprovacao,
+   * para que ela possa ser retomada no turno certo.
+   *
+   * Omitir mantem o comportamento anterior — aprovacao sem conversa, como
+   * toda aprovacao de Tarefa.
+   */
+  origemDaConversa?: {
+    readonly conversaId: string;
+    readonly pedidoId: string;
+    readonly textoAssistente: string | null;
+  };
+  /**
    * O controle de tempo da ACAO — OPCIONAL e INTERNO. I4B3.
    *
    * Quem nao o passa se comporta exatamente como antes: sem limite
@@ -964,6 +979,9 @@ export async function executarFuncao(
       const pedido = await criarAprovacao({
         userId, agenteId, tarefaId, funcaoId, argumentos,
         definicoesExternas: entrada.definicoesExternas,
+        // Sem isto a aprovacao nasce sem saber a qual conversa voltar, e
+        // era exatamente esse o defeito que o Rodrigo encontrou.
+        origem: entrada.origemDaConversa,
       });
 
       if (pedido.codigo === "criada" || pedido.codigo === "reutilizada") {
@@ -1071,6 +1089,8 @@ export async function executarFuncao(
 export interface EntradaRetomadaAprovacao {
   userId: string;
   aprovacaoId: string;
+  /** As Funcoes externas do agente — F7b.4.4 §24. Ver `EntradaConsumirAprovacao`. */
+  definicoesExternas?: Readonly<Record<string, DefinicaoFuncao>>;
 }
 
 /**
@@ -1115,7 +1135,9 @@ export async function retomarAprovacao(
 
   if (!userId || !aprovacaoId) return { tipo: "indisponivel", requestId: correlacao };
 
-  const consumo = await consumirAprovacaoEAbrir({ userId, aprovacaoId });
+  const consumo = await consumirAprovacaoEAbrir({
+    userId, aprovacaoId, definicoesExternas: entrada.definicoesExternas,
+  });
 
   if (consumo.codigo === "abertura_ilegivel") {
     // A aprovacao foi gasta e a chamada esta aberta, mas nao sabemos o
