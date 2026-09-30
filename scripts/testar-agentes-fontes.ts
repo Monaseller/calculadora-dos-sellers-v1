@@ -37,7 +37,8 @@ import {
   CODIGOS_CORRIGIVEIS,
   CODIGOS_DE_FONTE_QUE_FECHAM,
   DESFECHOS_QUE_FECHAM,
-  MENSAGEM_DE_BLOQUEIO,
+  MENSAGEM_POR_CATEGORIA,
+  categoriaDoBloqueio,
   classificarFalha,
 } from "@/lib/agentes/ia/falhas-de-ferramenta";
 import type { FonteComCaminho, NovaFonte, PortaDeFontes } from "@/lib/agentes/fontes/repositorio";
@@ -271,8 +272,13 @@ async function main(): Promise<void> {
       ok(`B3  ${rotulo}: ${PROIBIDO} NAO aparece em lugar nenhum`,
         !JSON.stringify(r.mensagens).includes(PROIBIDO) && !(r.texto ?? "").includes(PROIBIDO),
         String(r.texto).slice(0, 90));
-      ok(`B4  ${rotulo}: o texto e do RUNTIME, nao do modelo`,
-        r.texto === MENSAGEM_DE_BLOQUEIO);
+      // Ver a nota da F7b.4.8.1 no topo deste arquivo: o texto do runtime
+      // passou a ter uma versao por CATEGORIA, e o assert cobra a certa.
+      ok(`B4  ${rotulo}: o texto e do RUNTIME, na categoria certa`,
+        r.bloqueio !== null &&
+          r.texto === MENSAGEM_POR_CATEGORIA[
+            categoriaDoBloqueio(r.bloqueio.desfecho, r.bloqueio.codigo)],
+        `${String(r.bloqueio?.categoria)} / ${String(r.texto).slice(0, 60)}`);
       ok(`B5  ${rotulo}: o bloqueio diz qual Funcao e qual desfecho`,
         r.bloqueio !== null && r.bloqueio.funcaoId === ID_CALC);
     }
@@ -321,7 +327,15 @@ async function main(): Promise<void> {
       ok("B9  FONTE ausente tambem fecha o turno",
         r.motivo === "bloqueado_por_ferramenta", r.motivo);
       ok("B10 e nenhum total fabricado sai",
-        !(r.texto ?? "").includes("99.999,99") && r.texto === MENSAGEM_DE_BLOQUEIO);
+        !(r.texto ?? "").includes("99.999,99") &&
+          r.bloqueio !== null &&
+          r.texto === MENSAGEM_POR_CATEGORIA[
+            categoriaDoBloqueio(r.bloqueio.desfecho, r.bloqueio.codigo)],
+        `${String(r.bloqueio?.categoria)} / ${String(r.texto).slice(0, 60)}`);
+      ok("B10a e a categoria dela e FONTE — e nao falta de permissao",
+        r.bloqueio !== null &&
+          categoriaDoBloqueio(r.bloqueio.desfecho, r.bloqueio.codigo) === "fonte",
+        String(r.bloqueio?.categoria));
       ok("B11 a Funcao chegou a ser chamada, mas nao produziu dado",
         execucoes === 1, String(execucoes));
     }
@@ -359,8 +373,10 @@ async function main(): Promise<void> {
     }
 
     const FALHAS = semComentarios(ler("lib/agentes/ia/falhas-de-ferramenta.ts"));
-    ok("B14 a mensagem de bloqueio nao vaza causa tecnica ao usuario",
-      !/permissao_|fonte_|auditoria/.test(MENSAGEM_DE_BLOQUEIO));
+    ok("B14 NENHUMA das frases de bloqueio vaza causa tecnica ao usuario",
+      Object.values(MENSAGEM_POR_CATEGORIA).every((m) =>
+        !/permissao_|fonte_|auditoria/.test(m)),
+      Object.values(MENSAGEM_POR_CATEGORIA).join(" | ").slice(0, 120));
     ok("B15 e o modulo diz que PROMPT nao e a cerca",
       /INSTRUCAO_SEM_ESTIMATIVA/.test(FALHAS));
   }

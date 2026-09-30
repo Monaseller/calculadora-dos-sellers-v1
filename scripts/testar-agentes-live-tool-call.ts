@@ -41,7 +41,14 @@ import { declararFerramentas } from "@/lib/agentes/ia/ferramentas";
 import { conversarComFerramentas } from "@/lib/agentes/ia/laco-ferramentas";
 import type { AdaptadorIAComFerramentas, MensagemDoDialogo } from "@/lib/agentes/ia/ferramentas";
 import { chamarClaudeComFerramentas } from "@/lib/ai-gateway/provedores/anthropic-ferramentas";
-import { MENSAGEM_DE_BLOQUEIO } from "@/lib/agentes/ia/falhas-de-ferramenta";
+// F7b.4.8.1: o texto do runtime passou a ter uma versao por CATEGORIA.
+// Uma frase so dizia "a ferramenta nao esta disponivel" tambem para
+// conexao e para fonte, e o Rodrigo leu isso sobre um agente que tinha as
+// tres coisas. O assert cobra a frase da categoria certa — mais forte que
+// antes, porque agora uma categoria trocada tambem reprova.
+import {
+  MENSAGEM_POR_CATEGORIA, categoriaDoBloqueio,
+} from "@/lib/agentes/ia/falhas-de-ferramenta";
 import { chamarGeminiComFerramentas } from "@/lib/ai-gateway/provedores/google-ferramentas";
 import type { FatoConexao, FatoFuncao, FatoPermissao } from "@/lib/ia/skills/diagnostico";
 
@@ -469,7 +476,11 @@ async function main(): Promise<void> {
         saida.motivo === "bloqueado_por_ferramenta", String(saida.motivo));
       ok("7.6 a recusa viajou no dialogo, para auditoria",
         saida.mensagens.some((m) => m.papel === "ferramenta"));
-      ok("7.7 o texto final e do RUNTIME", saida.texto === MENSAGEM_DE_BLOQUEIO);
+      ok("7.7 o texto final e do RUNTIME, na categoria certa",
+        saida.bloqueio !== null &&
+          saida.texto === MENSAGEM_POR_CATEGORIA[
+            categoriaDoBloqueio(saida.bloqueio.desfecho, saida.bloqueio.codigo)],
+        `${String(saida.bloqueio?.categoria)} / ${String(saida.texto).slice(0, 60)}`);
       ok(`7.8 e ${ESPERADO} NAO aparece em lugar nenhum da conversa`,
         !JSON.stringify(saida.mensagens).includes(ESPERADO) &&
           !(saida.texto ?? "").includes(ESPERADO),

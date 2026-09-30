@@ -231,6 +231,10 @@ export async function POST(
       // pode explicar que faltou permissao ou fonte, em vez de mostrar
       // a recusa como se fosse a opiniao do agente.
       motivo: r.motivo,
+      // §12: a tela precisa saber a CATEGORIA para nao dizer "falta
+      // ferramenta" a quem tem a ferramenta. `null` quando o turno nao
+      // fechou por bloqueio.
+      categoriaDoBloqueio: r.categoriaDoBloqueio,
       historicoTruncado: r.historicoTruncado,
     }, 200);
   } catch {

@@ -28,6 +28,11 @@ import {
 import { TOOL_PACKS, packDaFuncao } from "../lib/agentes/factory/catalogo-ui";
 import { nomeDaPlataforma, NOME_DA_PLATAFORMA } from "../lib/agentes/conexoes/estado";
 import { efeitoDaFuncaoInterna, exigeConfirmacao } from "../lib/agentes/factory/efeito";
+import {
+  CATEGORIAS_DE_BLOQUEIO, CODIGOS_CORRIGIVEIS, MENSAGEM_POR_CATEGORIA,
+  categoriaDoBloqueio, classificarFalha,
+} from "../lib/agentes/ia/falhas-de-ferramenta";
+import { semCamposNulos } from "../lib/agentes/ia/argumentos-do-modelo";
 
 let pass = 0;
 let fail = 0;
@@ -342,6 +347,97 @@ secao("F. Shopee — nao se finge suporte — §32");
       !p.capacidades.some((c) => /shopee/i.test(c)) && !/shopee/i.test(p.nome)));
   ok("F3  ANCORA: a traducao de plataforma CONHECE a Shopee — o contrato serve",
     NOME_DA_PLATAFORMA.shopee === "Shopee");
+}
+
+// ─── G. §13: Testar e o chat sao o MESMO caminho ─────────────────────
+
+secao("G. Testar e o chat real nao podem divergir — §13");
+
+{
+  const WIZARD = semComentarios(fonte("components/ia/factory/Wizard.tsx"));
+  const WORKSPACE = semComentarios(fonte("components/ia/factory/Workspace.tsx"));
+  const CHAT = semComentarios(fonte("components/ia/factory/ChatDoAgente.tsx"));
+
+  // A paridade nao e uma regra a manter: e uma consequencia de haver UM
+  // componente. Dois componentes divergiriam, e o bug do Rodrigo ja
+  // mostrou o custo de "no teste funciona, no chat nao".
+  ok("G1  a etapa Testar usa o MESMO componente de chat",
+    /<ChatDoAgente/.test(WIZARD) && /<ChatDoAgente/.test(WORKSPACE));
+  ok("G2  e o wizard nao tem chat proprio",
+    !/conversarComFerramentas|responderNaConversa/.test(WIZARD));
+  ok("G3  o chat fala com UMA rota de conversa, e nao duas",
+    /enviarNaConversaDoChat/.test(CHAT) &&
+      !/modoTeste \?.*rota|rotaDeTeste/.test(CHAT));
+  ok("G4  `modoTeste` muda a MOLDURA, e nao o caminho",
+    /modoTeste/.test(CHAT) &&
+      !/modoTeste[^\n]*(fetch|caminhoDoAgente|\/api\/)/.test(CHAT));
+  ok("G5  ANCORA: as tres fontes foram lidas",
+    WIZARD.length > 1000 && WORKSPACE.length > 500 && CHAT.length > 1000);
+}
+
+// ─── H. §12: quatro categorias, quatro frases ───────────────────────
+
+secao("H. Bloqueio nao colapsa numa frase so — §12");
+
+{
+  ok("H1  ha exatamente QUATRO categorias",
+    CATEGORIAS_DE_BLOQUEIO.length === 4, CATEGORIAS_DE_BLOQUEIO.join(","));
+  ok("H2  e cada uma tem frase propria",
+    CATEGORIAS_DE_BLOQUEIO.every((c) => (MENSAGEM_POR_CATEGORIA[c] ?? "").length > 20));
+  ok("H3  as quatro frases sao diferentes entre si",
+    new Set(Object.values(MENSAGEM_POR_CATEGORIA)).size === 4);
+  ok("H4  nenhuma vaza codigo tecnico ao usuario",
+    Object.values(MENSAGEM_POR_CATEGORIA).every((m) =>
+      !/_|funcao_id|slug|http/i.test(m)));
+
+  // O caso do Rodrigo: conexao NAO pode falar de ferramenta faltando.
+  ok("H5  conexao e conexao, e nao `ferramenta indisponivel`",
+    categoriaDoBloqueio("negado", "conexao_ausente") === "conexao" &&
+      !/ferramenta/i.test(MENSAGEM_POR_CATEGORIA.conexao));
+  ok("H6  permissao e permissao",
+    categoriaDoBloqueio("negado", "permissao_ausente") === "permissao");
+  ok("H7  fonte e fonte",
+    categoriaDoBloqueio("erro", "arquivo_nao_encontrado") === "fonte");
+  ok("H8  e o desconhecido e INTERNO — nao culpa o dono",
+    categoriaDoBloqueio("erro", "xpto") === "interno" &&
+      categoriaDoBloqueio("erro", null) === "interno");
+
+  // Erro de ARGUMENTO nao fecha o turno: o modelo corrige.
+  for (const codigo of [
+    "filtro_ausente", "filtro_ambiguo", "data_invalida",
+    "periodo_invertido", "status_invalido", "campo_desconhecido", "periodo_invalido",
+  ]) {
+    ok(`H9  \`${codigo}\` e corrigivel — o modelo tenta de novo`,
+      (CODIGOS_CORRIGIVEIS as readonly string[]).includes(codigo) &&
+        classificarFalha("erro", codigo) === "corrigivel");
+  }
+  ok("H10 CONTROLE: seguranca continua fechando o turno",
+    classificarFalha("negado", "permissao_bloqueada") === "fecha_o_turno" &&
+      classificarFalha("erro", "fonte_indisponivel") === "fecha_o_turno");
+  ok("H11 CONTROLE: codigo novo sem classificacao continua fechando",
+    classificarFalha("erro", "codigo_inventado_agora") === "fecha_o_turno");
+}
+
+// ─── I. O `null` do provedor ────────────────────────────────────────
+
+secao("I. `null` de campo opcional nao e valor — a causa do bug");
+
+{
+  ok("I1  chave nula de primeiro nivel sai",
+    JSON.stringify(semCamposNulos({ a: 1, b: null })) === JSON.stringify({ a: 1 }));
+  ok("I2  `undefined` tambem sai",
+    JSON.stringify(semCamposNulos({ a: 1, b: undefined })) === JSON.stringify({ a: 1 }));
+  ok("I3  tudo nulo vira objeto vazio — e nao um default inventado",
+    JSON.stringify(semCamposNulos({ a: null })) === "{}");
+  ok("I4  nada a remover devolve o MESMO objeto",
+    (() => { const o = { a: 1 }; return semCamposNulos(o) === o; })());
+  ok("I5  NAO desce dentro de objeto — `null` ali pode ser dado",
+    JSON.stringify(semCamposNulos({ a: { b: null } })) ===
+      JSON.stringify({ a: { b: null } }));
+  ok("I6  array atravessa intacto",
+    JSON.stringify(semCamposNulos([1, null])) === JSON.stringify([1, null]));
+  ok("I7  e o que nao e objeto tambem",
+    semCamposNulos("texto") === "texto" && semCamposNulos(null) === null);
 }
 
 console.log(`\nPASS ${pass}   FAIL ${fail}`);

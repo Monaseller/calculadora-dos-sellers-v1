@@ -1840,6 +1840,13 @@ export interface TurnoDoChatUI {
   readonly mensagemDoUsuario: MensagemDoChatUI;
   readonly resposta: MensagemDoChatUI;
   readonly motivo: string | null;
+  /**
+   * POR QUE o turno fechou — `permissao` | `conexao` | `fonte` | `interno`.
+   *
+   * `null` quando nao fechou por bloqueio. Sem o codigo tecnico: ele e
+   * informacao de operador, e a tela nao tem o que fazer com ele.
+   */
+  readonly categoriaDoBloqueio: string | null;
 }
 
 export interface MemoriaDoAgenteUI {
@@ -2735,7 +2742,10 @@ export async function enviarNaConversaDoChat(
   const desfecho = desfechoDaResposta<TurnoDoChatUI>(resposta, corpo);
   if (desfecho !== null) return desfecho;
 
-  const bruto = corpo as { mensagem?: unknown; resposta?: unknown; motivo?: unknown };
+  const bruto = corpo as {
+    mensagem?: unknown; resposta?: unknown; motivo?: unknown;
+    categoriaDoBloqueio?: unknown;
+  };
   const mensagemDoUsuario = mensagemDaResposta(bruto.mensagem);
   const respostaDoAgente = mensagemDaResposta(bruto.resposta);
   if (mensagemDoUsuario === null || respostaDoAgente === null) return { estado: "falha" };
@@ -2745,6 +2755,7 @@ export async function enviarNaConversaDoChat(
     dados: {
       mensagemDoUsuario,
       resposta: respostaDoAgente,
+      categoriaDoBloqueio: textoOuNulo(bruto.categoriaDoBloqueio),
       // `bloqueado_por_ferramenta` e `teto_de_passos` chegam por aqui: o
       // turno foi gravado, e a tela precisa poder explicar por que
       // terminou assim.

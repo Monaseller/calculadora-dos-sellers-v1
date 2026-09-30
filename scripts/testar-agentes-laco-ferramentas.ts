@@ -28,7 +28,18 @@ import {
   type FerramentaDeclarada,
 } from "@/lib/agentes/ia/ferramentas";
 import { criarAdaptadorFakeComFerramentas, type EspiaoDoFake } from "@/lib/agentes/ia/ferramentas-fake";
-import { MENSAGEM_DE_BLOQUEIO } from "@/lib/agentes/ia/falhas-de-ferramenta";
+// ── F7b.4.8.1: o texto do runtime passou a ter QUATRO versoes ──────
+//
+// Uma frase so dizia "a ferramenta ou fonte necessaria nao esta
+// disponivel" para permissao, para conexao e para fonte. O Rodrigo leu
+// isso sobre um agente que TINHA a ferramenta, a permissao e a loja.
+//
+// A intencao destes asserts nao muda — "o texto e do RUNTIME, e nao do
+// modelo". Ela fica mais forte: agora eles cobram a frase da CATEGORIA
+// certa, entao uma categoria trocada tambem reprova.
+import {
+  MENSAGEM_POR_CATEGORIA, categoriaDoBloqueio,
+} from "@/lib/agentes/ia/falhas-de-ferramenta";
 import {
   conversarComFerramentas,
   MAX_PASSOS_DE_FERRAMENTA,
@@ -236,8 +247,12 @@ async function main(): Promise<void> {
       ok(`${rotulo.slice(0, 2)}f o turno FECHOU — o modelo nao foi chamado de novo`,
         r.motivo === "bloqueado_por_ferramenta" && espiaoFake.chamadas.length === 1,
         `${r.motivo}/${espiaoFake.chamadas.length}`);
-      ok(`${rotulo.slice(0, 2)}g e o texto final e do RUNTIME`,
-        r.texto === MENSAGEM_DE_BLOQUEIO && r.texto !== "ok");
+      ok(`${rotulo.slice(0, 2)}g e o texto final e do RUNTIME, na categoria certa`,
+        r.bloqueio !== null &&
+          r.texto === MENSAGEM_POR_CATEGORIA[
+            categoriaDoBloqueio(r.bloqueio.desfecho, r.bloqueio.codigo)] &&
+          r.texto !== "ok",
+        `${String(r.bloqueio?.categoria)} / ${String(r.texto).slice(0, 60)}`);
     }
 
     // O modelo pede uma ferramenta que NAO lhe foi declarada.
