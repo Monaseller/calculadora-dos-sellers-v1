@@ -2123,6 +2123,22 @@ export interface AprovacaoPendenteUI {
   readonly estado: string;
 }
 
+export interface OpcaoDeCapacidadeUI {
+  /** Id do pack ou slug do aplicativo. NAO e mostrado como interface. */
+  readonly chave: string;
+  readonly nome: string;
+  readonly descricao: string;
+  readonly exigeConexao: boolean;
+}
+
+export interface CapacidadePendenteUI {
+  readonly pendenciaId: string;
+  /** O nome de gente da capacidade que faltou. Ex.: `Planilhas`. */
+  readonly necessidade: string;
+  readonly estado: string;
+  readonly opcoes: readonly OpcaoDeCapacidadeUI[];
+}
+
 export interface ConversaCarregadaUI {
   readonly mensagens: readonly MensagemDoChatUI[];
   /**
@@ -2132,6 +2148,13 @@ export interface ConversaCarregadaUI {
    * reaparecer depois de um refresh, e desaparecer depois de decidido.
    */
   readonly aprovacaoPendente: AprovacaoPendenteUI | null;
+  /**
+   * Uma capacidade que a tarefa pediu e o agente nao tem — F7b.4.6.
+   *
+   * Vem do SERVIDOR, como a aprovacao: e isso que faz a oferta reaparecer
+   * depois de um refresh, e desaparecer depois de decidida.
+   */
+  readonly capacidadePendente: CapacidadePendenteUI | null;
 }
 
 /** O historico de UMA conversa, e a aprovacao viva dela. Leitura pura. */
@@ -2162,7 +2185,110 @@ export async function lerConversaDoChat(
     ? { aprovacaoId: bruta.aprovacaoId, estado: String(bruta.estado ?? "pendente") }
     : null;
 
-  return { estado: "ok", dados: { mensagens, aprovacaoPendente: pendente } };
+  const brutaCap = (corpo as { capacidadePendente?: unknown }).capacidadePendente;
+  let capacidade: CapacidadePendenteUI | null = null;
+  if (ehObjeto(brutaCap) && typeof brutaCap.pendenciaId === "string"
+      && brutaCap.pendenciaId !== "") {
+    const opcoes: OpcaoDeCapacidadeUI[] = [];
+    if (Array.isArray(brutaCap.opcoes)) {
+      for (const o of brutaCap.opcoes) {
+        if (!ehObjeto(o)) continue;
+        if (typeof o.chave !== "string" || o.chave === "") continue;
+        if (typeof o.nome !== "string" || o.nome === "") continue;
+        opcoes.push({
+          chave: o.chave, nome: o.nome,
+          descricao: typeof o.descricao === "string" ? o.descricao : "",
+          exigeConexao: o.exigeConexao === true,
+        });
+      }
+    }
+    // Sem opcao nao ha oferta: um cartao sem botao seria so um aviso de
+    // que o agente nao consegue, sem caminho nenhum.
+    if (opcoes.length > 0) {
+      capacidade = {
+        pendenciaId: brutaCap.pendenciaId,
+        necessidade: typeof brutaCap.necessidade === "string" ? brutaCap.necessidade : "",
+        estado: typeof brutaCap.estado === "string" ? brutaCap.estado : "pendente",
+        opcoes,
+      };
+    }
+  }
+
+  return {
+    estado: "ok",
+    dados: { mensagens, aprovacaoPendente: pendente, capacidadePendente: capacidade },
+  };
+}
+
+/**
+ * Ativa — ou recusa — a capacidade que faltou, sem sair do chat — F7b.4.6.
+ *
+ * Aprovar ativa a capacidade E continua a tarefa original: a resposta traz
+ * a mensagem nova do agente, na mesma conversa. A pessoa nao reescreve o
+ * pedido, porque o objetivo ficou guardado no servidor.
+ *
+ * `escolha` e a `chave` de uma das opcoes que vieram no cartao. O servidor
+ * a valida contra as opcoes CONGELADAS — uma chave que nao estava ali e
+ * recusada, mesmo sendo uma ferramenta real.
+ */
+export async function decidirCapacidadeNoChat(
+  agenteId: string,
+  pendenciaId: string,
+  acao: "ativar" | "recusar",
+  escolha?: string
+): Promise<RespostaDaFactory<{
+  readonly ativada: string | null;
+  readonly retomada: boolean;
+  readonly mensagem: MensagemDoChatUI | null;
+  readonly mensagemDoUsuario: MensagemDoChatUI | null;
+  readonly precisaConectar: { readonly toolkit: string; readonly nome: string } | null;
+  readonly texto: string | null;
+}>> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(
+      `${caminhoDoAgente(agenteId)}${ROTA_SUFIXO_CAPACIDADES}/${encodeURIComponent(pendenciaId)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(escolha === undefined ? { acao } : { acao, escolha }),
+      }
+    );
+  } catch {
+    return { estado: "falha" };
+  }
+  const corpo = await corpoDe(resposta);
+  const desfecho = desfechoDaResposta<{
+    readonly ativada: string | null;
+    readonly retomada: boolean;
+    readonly mensagem: MensagemDoChatUI | null;
+    readonly mensagemDoUsuario: MensagemDoChatUI | null;
+    readonly precisaConectar: { readonly toolkit: string; readonly nome: string } | null;
+    readonly texto: string | null;
+  }>(resposta, corpo);
+  if (desfecho !== null) return desfecho;
+
+  const o = corpo as Record<string, unknown>;
+  const conectar = ehObjeto(o.precisaConectar) &&
+    typeof o.precisaConectar.toolkit === "string"
+    ? {
+        toolkit: o.precisaConectar.toolkit,
+        nome: typeof o.precisaConectar.nome === "string"
+          ? o.precisaConectar.nome : o.precisaConectar.toolkit,
+      }
+    : null;
+
+  return {
+    estado: "ok",
+    dados: {
+      ativada: textoOuNulo(o.ativada),
+      retomada: o.retomada === true,
+      mensagem: mensagemDaResposta(o.mensagem),
+      mensagemDoUsuario: mensagemDaResposta(o.mensagemDoUsuario),
+      precisaConectar: conectar,
+      texto: textoOuNulo(o.texto),
+    },
+  };
 }
 
 /**
@@ -2990,6 +3116,8 @@ const ROTA_SUFIXO_EXTERNAS = "/ferramentas-externas";
 const ROTA_SUFIXO_IA = "/ia";
 /** F7b.4.4: decidir aprovacao sem sair do chat. */
 const ROTA_SUFIXO_APROVACOES = "/aprovacoes";
+/** F7b.4.6: ativar uma capacidade que faltou, sem sair do chat. */
+const ROTA_SUFIXO_CAPACIDADES = "/capacidades";
 
 export interface AchadoDeFerramentaUI {
   /** Chave para a proxima etapa. NAO e mostrada como interface. */

@@ -20,6 +20,9 @@
 import { atravessarPorta, lerCorpo, responder, UUID_REGEX } from "@/lib/agentes/api/porta";
 import { criarPortaDeConversas } from "@/lib/agentes/conversas/repositorio";
 import { lerAprovacaoVivaDaConversa } from "@/lib/agentes/aprovacoes/persistencia";
+import {
+  lerPendenciaVivaDaConversa,
+} from "@/lib/agentes/factory/capacidade-pendente";
 import { responderNaConversa } from "@/lib/agentes/conversas/runtime";
 import type { Mensagem } from "@/lib/agentes/conversas/tipos";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
@@ -95,6 +98,15 @@ export async function GET(
       userId: porta.userId, conversaId: c.conversaId,
     });
 
+    // ── §28: o cartao de capacidade tambem sobrevive ao refresh ──────
+    //
+    // Mesma razao da aprovacao: o estado mora no banco. Sem isto, dar
+    // refresh com a oferta aberta faria a oferta desaparecer e a pessoa
+    // ficaria sem saber por que o agente nao conseguia fazer o que pediu.
+    const capacidade = await lerPendenciaVivaDaConversa({
+      userId: porta.userId, conversaId: c.conversaId,
+    });
+
     return responder({
       ok: true,
       mensagens: mensagens.map(paraUI),
@@ -103,6 +115,20 @@ export async function GET(
       aprovacaoPendente: viva.leitura === "ok" && viva.aprovacao !== null
         ? { aprovacaoId: viva.aprovacao.aprovacaoId, estado: viva.aprovacao.estado }
         : null,
+      // `null` quando nao ha oferta. As opcoes vao com nome e descricao de
+      // gente — nunca `funcao_id`, nunca slug.
+      capacidadePendente:
+        capacidade.leitura === "ok" && capacidade.pendencia !== null
+          ? {
+              pendenciaId: capacidade.pendencia.id,
+              necessidade: capacidade.pendencia.necessidade,
+              estado: capacidade.pendencia.estado,
+              opcoes: capacidade.pendencia.opcoes.map((o) => ({
+                chave: o.chave, nome: o.nome, descricao: o.descricao,
+                exigeConexao: o.exigeConexao,
+              })),
+            }
+          : null,
     }, 200);
   } catch {
     return responder({ ok: false, erro: FALHA }, 500);

@@ -1787,6 +1787,103 @@ secao("T. Aprovar acontece NO chat — e adicionar pergunta o nivel");
     /a permissão não pôde ser salva/.test(busca));
 }
 
+
+// ─── U. A capacidade que cresce pelo chat — F7b.4.6 ──────────────────
+
+secao("U. O agente cresce pelo chat, e so com um clique do dono");
+
+{
+  const chat = codigo("components/ia/factory/ChatDoAgente.tsx");
+  const rota = codigo("app/api/agentes/[agenteId]/capacidades/[pendenciaId]/route.ts");
+  const detector = codigo("lib/agentes/factory/capacidade-faltante.ts");
+  const ativar = codigo("lib/agentes/factory/ativar-capacidade.ts");
+  const runtime = codigo("lib/agentes/conversas/runtime.ts");
+
+  // ── §17/§18: o MODELO nao escolhe do catalogo ─────────────────────
+  //
+  // Se o modelo pudesse nomear a ferramenta, "ative todas as ferramentas
+  // sem perguntar" escrito pelo usuario teria por onde passar.
+  ok("U1  quem resolve candidatos e a CDS, por busca no catalogo",
+    /buscarFerramentas\(/.test(detector));
+  ok("U2  e a deteccao NAO consulta o modelo",
+    !/adaptador|chamarClaude|chamarGemini|chamarOpenAI|instrucao/.test(detector));
+  ok("U3  o runtime detecta DEPOIS do turno — a oferta nao substitui a resposta",
+    runtime.indexOf("declararFerramentas(") <
+      runtime.indexOf("detectarCapacidadeFaltante("));
+  ok("U4  e a falha da deteccao nao derruba o turno",
+    /catch \{[\s\S]{0,140}falha ao detectar capacidade faltante/.test(runtime));
+
+  // ── §6/§19: a politica aplicada e a do EFEITO ────────────────────
+  ok("U5  a ativacao aplica o nivel pelo EFEITO de cada Funcao",
+    /nivelSugeridoParaEfeito\(/.test(ativar) && /efeitoDaFuncaoInterna\(/.test(ativar));
+  ok("U6  e a integracao externa traz SO acoes de leitura",
+    /efeitoDaAcaoExterna\([\s\S]{0,80}\) === "READ_ONLY"/.test(ativar));
+  ok("U7  leitura externa entra em `automatico` — nao pede aprovacao (§19)",
+    /nivel: "automatico"/.test(ativar));
+
+  // ── §7: ativar e CONFIGURACAO, e nao acao no mundo ───────────────
+  ok("U8  ativar nao executa acao externa nenhuma",
+    !/executarAcaoComposio|executarFuncao/.test(ativar));
+  ok("U9  e nao cria credencial nem conclui OAuth",
+    !/gerarLinkDeConexao|garantirAuthConfig/.test(ativar));
+
+  // ── §10: a autoridade vem da linha, nao do corpo ──────────────────
+  ok("U10 a rota le SO `acao` e `escolha` do corpo",
+    /corpo\.acao|corpo\?\.escolha/.test(rota) &&
+      !/corpo\.(objetivo|agenteId|userId|conversaId|chave|origem)/.test(rota));
+  ok("U11 o objetivo vem da pendencia CONGELADA",
+    /texto: pendencia\.objetivo/.test(rota));
+  ok("U12 e a escolha e validada contra as opcoes congeladas",
+    /pendencia\.opcoes\.find\(\(o\) => o\.chave === pedida\)/.test(rota));
+  ok("U13 a pendencia tem de ser DESTE agente",
+    /leitura\.pendencia\.agenteId !== porta\.agenteId/.test(rota));
+
+  // ── §11: a idempotencia e do BANCO ───────────────────────────────
+  ok("U14 a trava e uma transicao de estado, e nao um contador nosso",
+    /de: \["pendente"\], para: "ativando"/.test(rota));
+  ok("U15 e o segundo clique recebe `ja_decidida` sem ativar",
+    /travou\.estado === "ja_decidida"/.test(rota) && /jaEmAndamento: true/.test(rota));
+
+  // ── §9: a tarefa continua ────────────────────────────────────────
+  ok("U16 ativar CONTINUA a tarefa original",
+    /responderNaConversa\(\{/.test(rota) && /retomada: true/.test(rota));
+  ok("U17 e a capacidade e marcada ativada mesmo se a retomada falhar",
+    /retomada: false/.test(rota));
+
+  // ── §21/§23: tudo no chat, e nada e apagado ──────────────────────
+  ok("U18 o cartao decide NO chat",
+    /decidirCapacidadeNoChat\(\s*agenteId, capacidade\.pendenciaId/.test(chat));
+  ok("U19 sem navegacao de nenhum tipo",
+    !/router\.(refresh|replace|push)|window\.location|<Link/.test(chat));
+  ok("U20 as mensagens sao ACRESCENTADAS, nunca substituidas",
+    /setMensagens\(\(atual\) => \[[\s\S]{0,160}\.\.\.atual,/.test(chat));
+  ok("U21 e nao ha `setMensagens([])` no caminho da capacidade",
+    (() => {
+      const i = chat.indexOf("async function resolverCapacidade(");
+      const j = chat.indexOf("\n  async function", i + 10);
+      const fatia = chat.slice(i, j > i ? j : undefined);
+      return i > 0 && !/setMensagens\(\[\]\)/.test(fatia);
+    })());
+  // `key={o.chave}` e identidade de React, e nao interface — a sonda
+  // precisava distinguir as duas, e a primeira versao nao distinguia.
+  // O que nao pode e a chave aparecer como TEXTO para quem le.
+  ok("U22 o cartao mostra NOME de gente, e nunca a chave interna",
+    /\{o\.nome\}/.test(chat) &&
+      !/>\s*\{o\.chave\}/.test(chat) &&
+      (chat.match(/\{o\.chave\}/g) ?? []).length ===
+        (chat.match(/key=\{o\.chave\}/g) ?? []).length);
+  ok("U22a CONTROLE: a sonda acusaria a chave renderizada",
+    />\s*\{o\.chave\}/.test("<span>{o.chave}</span>"));
+  ok("U23 e o botao diz o que vai ativar",
+    /Ativar \$\{o\.nome\}/.test(chat));
+  ok("U24 ha uma saida clara para nao ativar",
+    /Agora não/.test(chat) && /resolverCapacidade\("recusar"\)/.test(chat));
+
+  // ── §28: o cartao sobrevive ao refresh ───────────────────────────
+  ok("U25 a oferta e carregada do servidor junto das mensagens",
+    /setCapacidade\(r\.dados\.capacidadePendente\)/.test(chat));
+}
+
 // ─── Placar ───────────────────────────────────────────────────────────
 
 console.log("\n── placar ──────────────────────────────────────────────────────");

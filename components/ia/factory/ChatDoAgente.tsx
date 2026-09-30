@@ -29,10 +29,12 @@ import {
   Aviso, Botao, Etiqueta, PainelLateral, TAMANHO,
 } from "@/components/ui/Primitivas";
 import {
-  criarConversaDoChat, decidirAprovacaoNoChat, enviarFonteDoAgente,
+  criarConversaDoChat, decidirAprovacaoNoChat, decidirCapacidadeNoChat,
+  enviarFonteDoAgente,
   enviarNaConversaDoChat, lerConversaDoChat, listarConversasDoChat,
   listarFontesDoAgente,
-  type AnexoDaConversaUI, type AprovacaoPendenteUI, type FonteDoAgenteUI,
+  type AnexoDaConversaUI, type AprovacaoPendenteUI, type CapacidadePendenteUI,
+  type FonteDoAgenteUI,
   type MensagemDoChatUI, type PassoDoChatUI, type RespostaDaFactory,
 } from "@/lib/ia/agentes-http";
 
@@ -135,6 +137,20 @@ export function ChatDoAgente({
   const [aprovacao, setAprovacao] = useState<AprovacaoPendenteUI | null>(null);
   /** `aprovar` | `rejeitar` enquanto a decisao esta em voo. */
   const [decidindo, setDecidindo] = useState<string | null>(null);
+
+  /**
+   * A capacidade que faltou nesta conversa — F7b.4.6 §21.
+   *
+   * Vem do servidor, como a aprovacao. O cartao aparece NO chat e a
+   * decisao acontece aqui: nao ha navegacao para Ferramentas, Configurar
+   * nem Aprovacoes.
+   */
+  const [capacidade, setCapacidade] = useState<CapacidadePendenteUI | null>(null);
+  /** A `chave` em voo, ou `recusar`. Trava os botoes e mostra progresso. */
+  const [ativando, setAtivando] = useState<string | null>(null);
+  /** O aplicativo que ainda precisa de conta conectada, se houver. */
+  const [precisaConectar, setPrecisaConectar] =
+    useState<{ toolkit: string; nome: string } | null>(null);
   const fimRef = useRef<HTMLDivElement | null>(null);
 
   const carregarFontes = useCallback(async (cid: string | null) => {
@@ -149,7 +165,53 @@ export function ChatDoAgente({
     if (r.estado !== "ok") return;
     setMensagens(r.dados.mensagens);
     setAprovacao(r.dados.aprovacaoPendente);
+    setCapacidade(r.dados.capacidadePendente);
   }, [agenteId]);
+
+  /**
+   * Ativa — ou recusa — a capacidade que faltou, sem sair da tela.
+   *
+   * ── §23: nada e apagado ───────────────────────────────────────────
+   *
+   * A resposta do servidor e ACRESCENTADA. Nao ha navegacao, nao ha
+   * conversa nova, nao ha `setMensagens([])`. E a tarefa continua: quando
+   * `retomada` vem `true`, a mensagem nova do agente ja e a resposta ao
+   * pedido original — a pessoa nao reescreveu nada (§9).
+   */
+  async function resolverCapacidade(acao: "ativar" | "recusar", chave?: string) {
+    if (capacidade === null || ativando !== null) return;
+    setErro(null);
+    setCodigoTecnico(null);
+    setAtivando(acao === "recusar" ? "recusar" : (chave ?? ""));
+    try {
+      const r = await decidirCapacidadeNoChat(
+        agenteId, capacidade.pendenciaId, acao, chave);
+      if (r.estado !== "ok") {
+        setErro(frasePorEstado(r, "Não foi possível ativar esta ferramenta."));
+        return;
+      }
+      // A oferta sai do ar porque foi decidida — e nao porque a tela
+      // adivinhou. O `null` casa com o que um refresh devolveria agora.
+      setCapacidade(null);
+      setPrecisaConectar(r.dados.precisaConectar);
+
+      if (r.dados.mensagemDoUsuario !== null && r.dados.mensagem !== null) {
+        // A tarefa foi retomada: o par (pedido retomado, resposta) entra
+        // no fim da conversa, sem tocar no que ja estava.
+        setMensagens((atual) => [
+          ...atual,
+          r.dados.mensagemDoUsuario as MensagemDoChatUI,
+          r.dados.mensagem as MensagemDoChatUI,
+        ]);
+      } else if (conversa !== null) {
+        // Recusa, ou ativacao que ficou esperando conexao: releitura e o
+        // jeito honesto de mostrar o que existe.
+        await carregarMensagens(conversa);
+      }
+    } finally {
+      setAtivando(null);
+    }
+  }
 
   /**
    * Decide a aprovacao SEM sair da tela — F7b.4.4 §10/§21.
@@ -408,6 +470,76 @@ export function ChatDoAgente({
           proprias (`/ia/aprovacoes`); um botao nesta tela gravaria uma
           decisao que nenhuma conversa retomaria — pareceria ter
           funcionado e nao teria. O caminho e o de verdade. */}
+      {/*
+        ── O cartao de CAPACIDADE — F7b.4.6 §21/§22 ──────────────────
+        Vem ANTES do de aprovacao porque e uma pergunta anterior: sem a
+        ferramenta, nao ha o que aprovar.
+      */}
+      {capacidade !== null && (
+        <div style={{
+          marginTop: ESPACO.md, padding: ESPACO.md,
+          border: `1px solid ${CROMO.acentoBorda}`, borderRadius: RAIO.card,
+          background: CROMO.acentoFundo,
+        }}>
+          <strong style={{ fontSize: TAMANHO.corpo, color: CROMO.texto }}>
+            Preciso de uma ferramenta
+          </strong>
+          <p style={{
+            margin: `${ESPACO.xs}px 0 ${ESPACO.sm}px`,
+            fontSize: TAMANHO.miudo, color: CROMO.textoFraco,
+          }}>
+            Para fazer o que você pediu eu preciso de{" "}
+            <strong style={{ color: CROMO.texto }}>{capacidade.necessidade}</strong>.
+            {capacidade.opcoes.length > 1
+              ? " Posso usar uma destas — escolha a que faz sentido para você:"
+              : " Se você ativar, eu continuo de onde paramos."}
+          </p>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: ESPACO.sm }}>
+            {capacidade.opcoes.map((o) => (
+              <div key={o.chave} style={{
+                display: "flex", justifyContent: "space-between",
+                gap: ESPACO.md, flexWrap: "wrap", alignItems: "center",
+              }}>
+                <div style={{ minWidth: 0 }}>
+                  <strong style={{ fontSize: TAMANHO.miudo, color: CROMO.texto }}>
+                    {o.nome}
+                  </strong>
+                  <p style={{
+                    margin: "2px 0 0", fontSize: TAMANHO.miudo, color: CROMO.textoFraco,
+                  }}>
+                    {o.descricao}
+                    {o.exigeConexao ? " Precisa conectar sua conta." : ""}
+                  </p>
+                </div>
+                <Botao tom="primario" desabilitado={ativando !== null}
+                  onClick={() => void resolverCapacidade("ativar", o.chave)}>
+                  {ativando === o.chave
+                    ? "Ativando..."
+                    : `Ativar ${o.nome}`}
+                </Botao>
+              </div>
+            ))}
+            <div>
+              <Botao tom="secundario" desabilitado={ativando !== null}
+                onClick={() => void resolverCapacidade("recusar")}>
+                {ativando === "recusar" ? "Registrando..." : "Agora não"}
+              </Botao>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* §22: quando a ativacao depende de uma conta, o passo seguinte
+          aparece aqui mesmo — e nao na tela de Conexoes. */}
+      {precisaConectar !== null && (
+        <Aviso tom="atencao">
+          {precisaConectar.nome} foi adicionado. Agora falta conectar sua conta —
+          abra Ferramentas na configuração do agente para autorizar, e eu continuo
+          de onde paramos.
+        </Aviso>
+      )}
+
       {aprovacao !== null && (
         <div style={{
           marginTop: ESPACO.md, padding: ESPACO.md,

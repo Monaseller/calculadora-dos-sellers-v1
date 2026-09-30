@@ -83,6 +83,8 @@ import {
   ingerirTurno, recuperarMemoriaDoDono,
 } from "@/lib/agentes/memoria/automatica";
 import { capacidadesDoAgente } from "@/lib/agentes/factory/capacidades";
+import { detectarCapacidadeFaltante } from "@/lib/agentes/factory/capacidade-faltante";
+import { abrirCapacidadePendente } from "@/lib/agentes/factory/capacidade-pendente";
 import { listarVinculosExternos } from "@/lib/agentes/ferramentas-externas/repositorio";
 import { listarPermissoesGravadas } from "@/lib/agentes/permissoes/gravadas";
 import { modelosDisponiveis } from "@/lib/agentes/factory/catalogo-de-modelos";
@@ -118,6 +120,13 @@ export type ResultadoDoTurno =
       readonly resposta: Mensagem;
       readonly motivo: ResultadoDoLaco["motivo"];
       readonly historicoTruncado: number;
+      /**
+       * Uma capacidade que a tarefa pediu e o agente nao tem — F7b.4.6.
+       *
+       * Presente so quando ha o que oferecer. A tela mostra o cartao; o
+       * turno ja aconteceu e a resposta ja esta gravada.
+       */
+      readonly capacidadePendente?: { readonly id: string; readonly necessidade: string };
     }
   | { readonly ok: false; readonly codigo: string; readonly mensagem: string };
 
@@ -388,6 +397,45 @@ export async function responderNaConversa(
     tempoMs: saida.uso.tempoMs,
   });
 
+  // ── A capacidade que FALTA — F7b.4.6 §2/§3 ────────────────────────
+  //
+  // Depois do turno, e nao antes: o agente responde primeiro, com o que
+  // ele tem. A deteccao so ACRESCENTA uma oferta — ela nunca substitui a
+  // resposta, nunca bloqueia o turno e nunca ativa nada sozinha.
+  //
+  // Quem resolve os candidatos e a CDS, por busca no catalogo real. O
+  // modelo nao nomeia ferramenta e nao participa desta decisao (§17) —
+  // por isso "ative todas as ferramentas" escrito pelo usuario nao ativa
+  // coisa nenhuma (§18).
+  //
+  // A falha aqui NAO derruba o turno: a resposta do agente ja esta
+  // gravada, e uma oferta que nao apareceu e menos grave que um turno
+  // perdido.
+  let capacidadePendente: { id: string; necessidade: string } | null = null;
+  try {
+    const falta = await detectarCapacidadeFaltante({
+      texto: entrada.texto,
+      nomesQueJaTem: capacidades.map((c) => c.nome),
+    });
+    if (falta.desfecho === "falta_capacidade") {
+      const pendencia = await abrirCapacidadePendente({
+        userId: entrada.userId,
+        agenteId: entrada.agenteId,
+        conversaId: entrada.conversaId,
+        // O OBJETIVO e o que a pessoa escreveu. E ele que sera retomado,
+        // e e por isso que ela nao precisa repetir depois.
+        objetivo: entrada.texto.trim(),
+        necessidade: falta.necessidade,
+        opcoes: falta.opcoes,
+      });
+      if (pendencia !== null) {
+        capacidadePendente = { id: pendencia.id, necessidade: pendencia.necessidade };
+      }
+    }
+  } catch {
+    console.error("[conversas/runtime] falha ao detectar capacidade faltante");
+  }
+
   // ── A INGESTAO — F7b.4.5 ──────────────────────────────────────────
   //
   // DEPOIS de a conversa estar persistida, e de proposito: memoria e
@@ -424,5 +472,6 @@ export async function responderNaConversa(
     resposta,
     motivo: saida.motivo,
     historicoTruncado: recorte.excluidasPorTeto,
+    ...(capacidadePendente === null ? {} : { capacidadePendente }),
   };
 }
