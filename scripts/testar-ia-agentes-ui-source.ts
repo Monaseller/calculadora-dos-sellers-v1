@@ -174,10 +174,10 @@ secao("B. O que a UI NAO manda");
   // A invariavel NAO afrouxa: continua sendo a comparacao ENTRE as duas
   // contagens, entao um `headers:` que nao seja aquele cabecalho
   // reprova, e o veto a credencial no cabecalho segue intacto.
-  ok("B3c os UNICOS cabecalhos sao os vinte e dois Content-Type do corpo JSON",
-    (CODIGO_TRANSPORTE.match(/headers\s*:/g) ?? []).length === 22 &&
+  ok("B3c os UNICOS cabecalhos sao os vinte e tres Content-Type do corpo JSON",
+    (CODIGO_TRANSPORTE.match(/headers\s*:/g) ?? []).length === 23 &&
       (CODIGO_TRANSPORTE.match(/headers: \{ "Content-Type": "application\/json" \}/g) ?? [])
-        .length === 22 &&
+        .length === 23 &&
       !/"X-|Cookie|Api-Key|Idempotency-Key/i.test(CODIGO_TRANSPORTE));
   ok("B3c1 o envio de arquivo NAO declara Content-Type a mao",
     /body: formulario/.test(corpoDaFuncaoAdiante("enviarFonteDoAgente")) &&
@@ -502,6 +502,12 @@ secao("B. O que a UI NAO manda");
     // Aprovar tambem RETOMA o turno, e isso e do servidor: o cliente manda
     // uma palavra e recebe a resposta final do agente.
     decidirAprovacaoNoChat: "PATCH",
+    // F7b.4.6: ativar — ou recusar — a capacidade que faltou, sem sair do
+    // chat. PATCH porque altera uma pendencia que ja existe.
+    //
+    // Ativar tambem CONTINUA a tarefa original: o objetivo ficou guardado
+    // no servidor, e o cliente manda uma palavra e a escolha.
+    decidirCapacidadeNoChat: "PATCH",
     // Pede o link para o dono autorizar uma conta externa. POST porque
     // cria uma conexao pendente no provedor.
     //
@@ -526,7 +532,7 @@ secao("B. O que a UI NAO manda");
     JSON.stringify(Object.keys(mapa).sort().map((n) => `${n}=${mapa[n]}`));
   const paresReais = JSON.stringify(escritasReais.map((n) => `${n}=${verboDaFuncao(n)}`));
 
-  ok("B5b as escritas publicadas sao EXATAMENTE as vinte e seis nominais",
+  ok("B5b as escritas publicadas sao EXATAMENTE as vinte e sete nominais",
     JSON.stringify(escritasReais) === esperadas, escritasReais.join(", ") || "nenhuma");
   ok("B5b0 cada escrita usa EXATAMENTE o verbo autorizado para ela",
     paresReais === pares(VERBOS_AUTORIZADOS),
@@ -549,8 +555,8 @@ secao("B. O que a UI NAO manda");
 
   ok("B5b1 cada escrita leva o seu verbo autorizado",
     ESCRITAS_AUTORIZADAS.every((f) => verboDaFuncao(f) === VERBOS_AUTORIZADOS[f]));
-  ok("B5b1a as vinte e duas escritas de corpo JSON levam JSON.stringify",
-    CORPO_JSON.length === 22 &&
+  ok("B5b1a as vinte e tres escritas de corpo JSON levam JSON.stringify",
+    CORPO_JSON.length === 23 &&
       CORPO_JSON.every((f) => /body: JSON\.stringify/.test(corpoDaFuncao(f))));
   ok("B5b1b o envio de arquivo leva FormData, e NAO JSON",
     CORPO_MULTIPART.every((f) =>
@@ -562,12 +568,12 @@ secao("B. O que a UI NAO manda");
         verboDaFuncao(f) === "DELETE" && !/body\s*:/.test(corpoDaFuncao(f))));
   ok("B5b1d CONTROLE NEGATIVO: um DELETE ganhar corpo reprovaria",
     /body\s*:/.test('method: "DELETE", body: JSON.stringify({})'));
-  ok("B5b2 o transporte tem vinte e seis method, vinte e tres body e nenhum a mais",
-    (CODIGO_TRANSPORTE.match(/method\s*:/g) ?? []).length === 26 &&
-      // 22 JSON + 1 multipart. Os TRES DELETE nao entram, e e a
+  ok("B5b2 o transporte tem vinte e sete method, vinte e quatro body e nenhum a mais",
+    (CODIGO_TRANSPORTE.match(/method\s*:/g) ?? []).length === 27 &&
+      // 23 JSON + 1 multipart. Os TRES DELETE nao entram, e e a
       // diferenca entre as duas contagens que prova isso.
-      (CODIGO_TRANSPORTE.match(/body\s*:/g) ?? []).length === 23 &&
-      (CODIGO_TRANSPORTE.match(/body: JSON\.stringify/g) ?? []).length === 22 &&
+      (CODIGO_TRANSPORTE.match(/body\s*:/g) ?? []).length === 24 &&
+      (CODIGO_TRANSPORTE.match(/body: JSON\.stringify/g) ?? []).length === 23 &&
       (CODIGO_TRANSPORTE.match(/body: formulario/g) ?? []).length === 1);
   ok("B5b3 a escrita de conversa vai para a rota de conversa, com corpo so de mensagem",
     /ROTA_SUFIXO_CONVERSA/.test(CODIGO_TRANSPORTE) &&
@@ -623,7 +629,7 @@ secao("B. O que a UI NAO manda");
     JSON.stringify([...ESCRITAS_AUTORIZADAS, "definirQualquerOutraCoisa"].sort())
       !== esperadas);
   ok("B5b8 ANCORA: a varredura enxergou funcoes de verdade",
-    escritasReais.length === 26 && corpoDaFuncao("criarAgenteViaApi").length > 50);
+    escritasReais.length === 27 && corpoDaFuncao("criarAgenteViaApi").length > 50);
   // ── Controles NOMINAIS das escritas novas — F7b.1 ───────────────
   //
   // Uma entrada por funcao publicada neste gate: o par nome=verbo tem
@@ -733,12 +739,12 @@ secao("B. O que a UI NAO manda");
   //   DELETE passa a existir para DOIS recursos — memoria e fonte —
   //   porque sao conteudo que o dono escreveu e enviou. Apagar AGENTE
   //   continua sem caminho, e o assert abaixo cobra isso pelo nome.
-  ok("B7b treze POST, dez alteracoes por PATCH, tres DELETE — e nada alem",
+  ok("B7b treze POST, onze alteracoes por PATCH, tres DELETE — e nada alem",
     (CODIGO_TRANSPORTE.match(/method:\s*"POST"/g) ?? []).length === 13 &&
-      // F7b.4.4: mais UM PATCH — a decisao de aprovacao no chat. Continua
+      // F7b.4.6: mais UM PATCH — ativar a capacidade que faltou. Continua
       // sem POST e sem DELETE novos: a area nao ganhou recurso para criar
       // nem para apagar.
-      (CODIGO_TRANSPORTE.match(/method:\s*"PATCH"/g) ?? []).length === 10 &&
+      (CODIGO_TRANSPORTE.match(/method:\s*"PATCH"/g) ?? []).length === 11 &&
       (CODIGO_TRANSPORTE.match(/method:\s*"DELETE"/g) ?? []).length === 3 &&
       /export async function registrarDecisaoAprovacao\(/.test(CODIGO_TRANSPORTE) &&
       /export async function criarAgenteViaApi\(/.test(CODIGO_TRANSPORTE) &&
