@@ -26,6 +26,7 @@ import {
   lerCapacidadePendente, moverPendencia,
 } from "@/lib/agentes/factory/capacidade-pendente";
 import { ativarCapacidade } from "@/lib/agentes/factory/ativar-capacidade";
+import { faltaParaCompletar } from "@/lib/agentes/factory/completar-capacidade";
 import { responderNaConversa } from "@/lib/agentes/conversas/runtime";
 
 export const dynamic = "force-dynamic";
@@ -123,20 +124,59 @@ export async function PATCH(
       }, r.estado === "catalogo_indisponivel" ? 502 : 409);
     }
 
-    // ── Falta conectar a conta: a tarefa espera ──────────────────────
+    // ── Falta conectar a conta EXTERNA: a tarefa espera ──────────────
     if (r.estado === "aguardando_conexao") {
       await moverPendencia({
         userId: porta.userId, pendenciaId: pendencia.id,
         de: ["ativando"], para: "aguardando_conexao",
+        conexao: { toolkit: r.toolkit, contaId: null },
       });
       return responder({
         ok: true,
         acao: "ativar",
         conversaId: pendencia.conversaId,
         ativada: r.nome,
-        // A tela mostra o botao de conectar. O objetivo continua guardado
-        // na pendencia, e a retomada acontece depois do OAuth.
-        precisaConectar: { toolkit: r.toolkit, nome: r.nome },
+        // A tela mostra o botao de conectar NO CHAT — F7b.4.7. O objetivo
+        // continua guardado na pendencia, e a retomada acontece quando a
+        // conexao for verificada.
+        precisaConectar: {
+          toolkit: r.toolkit, nome: r.nome, reconectar: r.reconectar,
+        },
+      }, 200);
+    }
+
+    // ── §12/§13: capacidade NATIVA pode faltar loja, e nao conexao ───
+    //
+    // Mercado Livre e Shopee tem infraestrutura propria na CDS. Se o dono
+    // JA tem conta, o que falta e dizer QUAL loja — e mandar autenticar de
+    // novo seria pedir duas vezes o que ele ja deu (§13).
+    const faltaAinda = await faltaParaCompletar({
+      userId: porta.userId, chave: opcao.chave, origem: opcao.origem,
+    });
+    if (faltaAinda.falta === "escolher_loja") {
+      await moverPendencia({
+        userId: porta.userId, pendenciaId: pendencia.id,
+        de: ["ativando"], para: "escolhendo_loja",
+      });
+      return responder({
+        ok: true, acao: "ativar", conversaId: pendencia.conversaId, ativada: r.nome,
+        escolherLoja: {
+          marketplace: faltaAinda.marketplace,
+          nome: faltaAinda.nomeDoMarketplace,
+          lojas: faltaAinda.lojas,
+        },
+      }, 200);
+    }
+    if (faltaAinda.falta === "conectar_marketplace") {
+      await moverPendencia({
+        userId: porta.userId, pendenciaId: pendencia.id,
+        de: ["ativando"], para: "aguardando_conexao",
+      });
+      return responder({
+        ok: true, acao: "ativar", conversaId: pendencia.conversaId, ativada: r.nome,
+        precisaConectarMarketplace: {
+          marketplace: faltaAinda.marketplace, nome: faltaAinda.nomeDoMarketplace,
+        },
       }, 200);
     }
 
