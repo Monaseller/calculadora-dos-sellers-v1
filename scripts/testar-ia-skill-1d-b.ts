@@ -227,6 +227,11 @@ secao("G. O catalogo real — duas Funcoes, nenhuma por posicao");
 // Lista EXATA, como sempre: uma Funcao a mais ou a menos reprova.
 const IDS_ESPERADOS = [
   "mercadolivre.perguntas.listar",
+  // F7b.4.8: a consulta de vendas pela API OFICIAL do Mercado Livre.
+  // Ela NAO substitui `vendas.consultar`: aquela le a tabela `pedidos`
+  // da CDS, e esta le a conta do dono. As duas respondem perguntas
+  // diferentes, e colapsa-las apagaria a diferenca entre elas.
+  "mercadolivre.vendas.consultar",
   "vendas.consultar",
   "planilha.inspecionar",
   "planilha.ler",
@@ -374,8 +379,11 @@ ok("H11 nenhum arquivo novo em lib/ia/skills", readdirSync(join(RAIZ, "lib/ia/sk
 // criterio de sempre: implementacao concreta mora ao lado, o mapa fica
 // em `registry.ts`. Continua sendo lista EXATA: um nono modulo sem gate
 // proprio reprova.
-const MODULOS_FUNCOES = ["calculadora.ts", "calendario.ts", "guard.ts", "mercadolivre-perguntas.ts", "planilha.ts", "registry.ts", "sanitizar.ts", "vendas.ts"];
-ok("H12 a pasta de funcoes tem exatamente os 8 modulos autorizados",
+// F7b.4.8 autoriza o NONO: `mercadolivre-vendas.ts`, com os tres
+// wrappers da consulta oficial de vendas. Mesmo criterio de sempre — a
+// implementacao mora ao lado, e `registry.ts` fica sendo o mapa.
+const MODULOS_FUNCOES = ["calculadora.ts", "calendario.ts", "guard.ts", "mercadolivre-perguntas.ts", "mercadolivre-vendas.ts", "planilha.ts", "registry.ts", "sanitizar.ts", "vendas.ts"];
+ok("H12 a pasta de funcoes tem exatamente os 9 modulos autorizados",
   JSON.stringify(readdirSync(join(RAIZ, "lib/agentes/funcoes")).sort()) ===
     JSON.stringify(MODULOS_FUNCOES),
   readdirSync(join(RAIZ, "lib/agentes/funcoes")).sort().join(", "));
@@ -429,7 +437,22 @@ secao("J. Tripwire de tamanho");
 // conectada precisa do vinculo e por que ele nao e credencial. A folga
 // volta a ser curta de proposito: a primeira Funcao de marketplace tera
 // de fazer alguem decidir de novo.
-const LIMITE = 560;
+//
+// F7b.4.8: 560 -> 580. O comentario acima previu este momento — "a
+// primeira Funcao de marketplace tera de fazer alguem decidir de novo" —
+// e a decisao e subir 20 linhas, nao remover o guarda.
+//
+// A razao: o tripwire existe para manter IMPLEMENTACAO fora do registry,
+// e isso foi conseguido. `vendas`, `calculadora`, `calendario`,
+// `planilha`, `mercadolivre-perguntas` e agora `mercadolivre-vendas` tem
+// modulo proprio; o que restou aqui e o MAPA. Um mapa cresce quando o
+// produto ganha capacidade, e recusar a entrada obrigaria a esconder a
+// Funcao nova em algum outro lugar — o oposto de "a existencia de uma
+// Funcao e a presenca dela em `FUNCOES`".
+//
+// 20 linhas cabem UMA entrada com o comentario dela, e nao cabem um
+// executor. A folga continua curta de proposito.
+const LIMITE = 580;
 const linhas = FONTE.split("\n").length;
 ok(`J1  registry abaixo de ${LIMITE} linhas (hoje ${linhas})`, linhas < LIMITE, String(linhas));
 ok("J2  controle: a contagem le o arquivo real", linhas > 50);

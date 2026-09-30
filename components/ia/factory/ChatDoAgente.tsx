@@ -108,10 +108,19 @@ function passoQueBarrou(m: MensagemDoChatUI | undefined): PassoDoChatUI | null {
 }
 
 export function ChatDoAgente({
-  agenteId, conversaId, modoTeste = false, aoTrocarConversa,
+  agenteId, conversaId, modoTeste = false, abrirNova = false, aoTrocarConversa,
 }: {
   agenteId: string;
   conversaId: string | null;
+  /**
+   * `true` quando a pessoa PEDIU uma conversa nova — F7b.4.8 §14.
+   *
+   * Sem este sinal, "sem conversa selecionada" e ambiguo: e o mesmo
+   * estado de quem acabou de abrir a tela (e deve RETOMAR a ultima, §13)
+   * e de quem clicou "Nova conversa" (e deve receber uma nova). Eram
+   * tratados igual, e o botao reabria a conversa mais recente.
+   */
+  abrirNova?: boolean;
   /** Na etapa Testar: deixa claro que nada aqui ativa o agente. */
   modoTeste?: boolean;
   aoTrocarConversa?: (id: string) => void;
@@ -160,6 +169,8 @@ export function ChatDoAgente({
     useState<{ nome: string; lojas: readonly { lojaId: string; nome: string }[] } | null>(null);
   /** `conectar` | `verificar` | `<lojaId>` | `recusar` enquanto em voo. */
   const [conectando, setConectando] = useState<string | null>(null);
+  /** A linha curta que diz de onde pararam — §15. Vem do servidor. */
+  const [retomada, setRetomada] = useState<string | null>(null);
   const fimRef = useRef<HTMLDivElement | null>(null);
 
   const carregarFontes = useCallback(async (cid: string | null) => {
@@ -173,6 +184,10 @@ export function ChatDoAgente({
     const r = await lerConversaDoChat(agenteId, cid);
     if (r.estado !== "ok") return;
     setMensagens(r.dados.mensagens);
+    // §19: o servidor manda `null` quando a conversa ja tem mensagens.
+    // A tela nao decide isso — ela mostra o que vier, e por isso um
+    // refresh na mesma conversa nao repete saudacao.
+    setRetomada(r.dados.retomada);
     setAprovacao(r.dados.aprovacaoPendente);
     setCapacidade(r.dados.capacidadePendente);
 
@@ -413,8 +428,16 @@ export function ChatDoAgente({
         // A rota devolve ordenado por `atualizado_em` desc — a primeira e
         // a mais recente. A tela nao reordena: ordenar em dois lugares e
         // como as duas ordens discordarem um dia.
-        const existentes = await listarConversasDoChat(agenteId);
-        if (existentes.estado === "ok" && existentes.dados.length > 0) {
+        // ── §14: pedir uma nova NAO e o mesmo que voltar ───────────
+        //
+        // `abrirNova` distingue os dois. Sem ele, o botao "Nova conversa"
+        // caia no ramo de retomada e reabria a conversa mais recente —
+        // a pessoa clicava e nada acontecia.
+        const existentes = abrirNova
+          ? null
+          : await listarConversasDoChat(agenteId);
+        if (existentes !== null && existentes.estado === "ok" &&
+            existentes.dados.length > 0) {
           cid = existentes.dados[0].id;
         } else {
           const r = await criarConversaDoChat(agenteId);
@@ -423,6 +446,9 @@ export function ChatDoAgente({
             return;
           }
           cid = r.dados.id;
+          // A retomada vem JUNTO da criacao: ela e o primeiro conteudo da
+          // tela, e esperar o GET mostraria a conversa vazia antes.
+          if (vivo) setRetomada(r.dados.retomada ?? null);
         }
         if (vivo && cid !== null) { setConversa(cid); aoTrocarConversa?.(cid); }
       }
@@ -432,7 +458,7 @@ export function ChatDoAgente({
       }
     })();
     return () => { vivo = false; };
-  }, [agenteId, conversa, carregarMensagens, carregarFontes, aoTrocarConversa]);
+  }, [agenteId, conversa, abrirNova, carregarMensagens, carregarFontes, aoTrocarConversa]);
 
   useEffect(() => { fimRef.current?.scrollIntoView({ behavior: "smooth" }); }, [mensagens]);
 
@@ -548,7 +574,24 @@ export function ChatDoAgente({
         flex: 1, overflowY: "auto", display: "flex", flexDirection: "column",
         gap: ESPACO.md, paddingRight: ESPACO.xs,
       }}>
-        {mensagens.length === 0 && (
+        {/*
+          ── A retomada, §15 ───────────────────────────────────────────
+          Nao e uma mensagem do assistente, e nao e desenhada como uma: o
+          modelo nao a escreveu, e dar a ela a mesma bolha faria a trilha
+          afirmar um turno que nao aconteceu. Ela e uma linha de tela, e
+          desaparece no primeiro turno de verdade.
+        */}
+        {mensagens.length === 0 && retomada !== null && (
+          <p style={{
+            margin: 0, padding: ESPACO.md,
+            border: `1px solid ${CROMO.acentoBorda}`, borderRadius: RAIO.card,
+            background: CROMO.acentoFundo,
+            fontSize: TAMANHO.corpo, color: CROMO.texto,
+          }}>
+            {retomada}
+          </p>
+        )}
+        {mensagens.length === 0 && retomada === null && (
           <p style={{ color: CROMO.textoFraco, fontSize: TAMANHO.corpo, margin: 0 }}>
             Nenhuma mensagem ainda. Escreva abaixo para começar.
           </p>

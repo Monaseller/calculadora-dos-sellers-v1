@@ -33,6 +33,11 @@ import { modelosDisponiveis } from "@/lib/agentes/factory/catalogo-de-modelos";
 import { resolverIaDoAgente } from "@/lib/agentes/factory/ia-do-agente";
 import { listarVinculosExternos } from "@/lib/agentes/ferramentas-externas/repositorio";
 import { listarPermissoesGravadas } from "@/lib/agentes/permissoes/gravadas";
+import { diagnosticarAgente } from "@/lib/agentes/diagnostico/compositor";
+import { resolverSelecoesDoAgente } from "@/lib/agentes/conexoes/selecao-fatos";
+import { packDaFuncao } from "@/lib/agentes/factory/catalogo-ui";
+import { nomeDaPlataforma, MARKETPLACE_POR_PLATAFORMA } from "@/lib/agentes/conexoes/estado";
+import { listarLojasConectadasDoDono } from "@/lib/marketplace/credenciais";
 
 export const dynamic = "force-dynamic";
 
@@ -53,18 +58,31 @@ const FALHA = "Nao foi possivel carregar o estado do agente.";
  * permite distinguir "vinculada e sem decisao" de "nem vinculada".
  */
 async function montarEstado(userId: string, agenteId: string) {
-  const [{ linha }, permissoes, gravadas, vinculos] = await Promise.all([
-    lerAgenteDoDono(agenteId, userId),
-    resolverFatosPermissoes({ userId, agenteId, funcaoIds: Object.keys(FUNCOES) }),
-    listarPermissoesGravadas({ userId, agenteId }),
-    listarVinculosExternos({ userId, agenteId }),
-  ]);
+  const agoraMs = Date.now();
+  const [{ linha }, permissoes, gravadas, vinculos, diagnostico, selecoes] =
+    await Promise.all([
+      lerAgenteDoDono(agenteId, userId),
+      resolverFatosPermissoes({ userId, agenteId, funcaoIds: Object.keys(FUNCOES) }),
+      listarPermissoesGravadas({ userId, agenteId }),
+      listarVinculosExternos({ userId, agenteId }),
+      // F7b.4.8 §3: o que as Skills DECLARAM precisar. O motor ja existia
+      // e tinha rota propria de leitura; o que faltava era a prontidao
+      // consultar-lo — uma Skill entrava no prompt pedindo um trabalho
+      // que o agente nao conseguia fazer.
+      diagnosticarAgente({ userId, agenteId, agoraMs }),
+      // F7b.4.8 §9: o vinculo de loja. Sem isto um agente com a
+      // ferramenta do Mercado Livre e sem loja escolhida ativava, e
+      // falhava no primeiro turno com "conexao ausente".
+      resolverSelecoesDoAgente({ userId, agenteId }),
+    ]);
   if (!linha) return null;
   // Falha de leitura NUNCA vira "nao tem nada": seria apresentar um agente
   // sem ferramenta como pronto para ativar.
   if (permissoes.coleta !== "ok") return "falha_leitura" as const;
   if (gravadas.coleta !== "ok") return "falha_leitura" as const;
   if (vinculos.coleta !== "ok") return "falha_leitura" as const;
+  if (diagnostico.coleta !== "ok") return "falha_leitura" as const;
+  if (selecoes.coleta !== "ok") return "falha_leitura" as const;
 
   const fatos = permissoes.fatos.map((p) => ({ funcaoId: p.funcaoId, nivel: p.nivel }));
 
@@ -76,6 +94,81 @@ async function montarEstado(userId: string, agenteId: string) {
   });
 
   const funcoesExternasVinculadas = vinculos.vinculos.map((v) => v.funcaoId);
+
+  // ── §3/§5: dependencia declarada por Skill, em nome de gente ─────
+  //
+  // `alvo` e `funcao_id` ou `plataforma/recurso`. Nenhum dos dois entra
+  // na frase: a pessoa escolheu "Mercado Livre", e e disso que ela
+  // precisa ser avisada.
+  const dependenciasDeSkill = diagnostico.diagnosticos.flatMap((d) =>
+    [...d.diagnostico.bloqueios, ...d.diagnostico.limitacoes]
+      .filter((pend) => pend.tipo === "funcao" || pend.tipo === "conexao")
+      .map((pend) => ({
+        skillId: d.skillId,
+        nome: pend.tipo === "funcao"
+          ? (packDaFuncao(pend.alvo)?.nome ?? pend.alvo)
+          : nomeDaPlataforma(pend.alvo.split("/")[0] ?? pend.alvo),
+        // O pack que RESOLVE — para a tela poder oferecer o botao sem
+        // ter de adivinhar o pack pelo nome. `null` quando o que falta
+        // nao e uma Funcao de pack (uma conexao, por exemplo).
+        packId: pend.tipo === "funcao" ? (packDaFuncao(pend.alvo)?.id ?? null) : null,
+        tipo: pend.tipo as "funcao" | "conexao",
+        bloqueia: pend.bloqueia,
+      })));
+
+  // ── §9: requisito de conexao SEM loja escolhida ─────────────────
+  //
+  // Duas origens, unidas por `(plataforma, recurso)`:
+  //
+  //   as Funcoes que o agente PODE usar e declaram `conexaoNecessaria`
+  //   os requisitos que as Skills declaram (`semSelecao` do diagnostico)
+  //
+  // A primeira cobre a ferramenta adicionada direto, que e o caminho do
+  // §30. A segunda cobre a Skill. Usar so uma deixaria metade dos
+  // agentes ativarem sem loja.
+  const jaVinculado = new Set(
+    selecoes.selecoes.map((sel) => `${sel.plataforma}/${sel.recurso}`));
+  const requisitosAbertos = new Map<string, { plataforma: string; recurso: string }>();
+  for (const f of gravadas.permissoes) {
+    // `bloqueado` nao precisa de loja: ele nunca vai executar.
+    if (f.nivel === "bloqueado") continue;
+    const def = Object.prototype.hasOwnProperty.call(FUNCOES, f.funcaoId)
+      ? FUNCOES[f.funcaoId] : undefined;
+    const req = def?.conexaoNecessaria;
+    if (!req) continue;
+    const chave = `${req.plataforma}/${req.recurso}`;
+    if (jaVinculado.has(chave)) continue;
+    requisitosAbertos.set(chave, { plataforma: req.plataforma, recurso: req.recurso });
+  }
+  for (const req of diagnostico.semSelecao) {
+    const chave = `${req.plataforma}/${req.recurso}`;
+    if (jaVinculado.has(chave)) continue;
+    requisitosAbertos.set(chave, { plataforma: req.plataforma, recurso: req.recurso });
+  }
+  const conexoesSemLoja = [...requisitosAbertos.values()].map((req) => ({
+    plataforma: req.plataforma,
+    recurso: req.recurso,
+    nome: nomeDaPlataforma(req.plataforma),
+  }));
+
+  // ── §10: "Integracoes — Mercado Livre — Monamor" ────────────────
+  //
+  // O nome da LOJA, e nunca `seller_id` nem o uuid: o dono reconhece
+  // "Monamor". Uma consulta por plataforma distinta, e nao uma por
+  // vinculo — cinco requisitos de Mercado Livre compartilham a lista.
+  const nomesDeLoja = new Map<string, string>();
+  for (const plataforma of new Set(selecoes.selecoes.map((sel) => sel.plataforma))) {
+    const valorNoBanco = MARKETPLACE_POR_PLATAFORMA[plataforma];
+    if (valorNoBanco === undefined) continue;
+    const { linhas } = await listarLojasConectadasDoDono(userId, valorNoBanco);
+    for (const l of linhas) nomesDeLoja.set(l.id, l.nome ?? l.nickname ?? "Loja");
+  }
+  const integracoes = selecoes.selecoes.map((sel) => ({
+    plataforma: sel.plataforma,
+    recurso: sel.recurso,
+    nome: nomeDaPlataforma(sel.plataforma),
+    loja: nomesDeLoja.get(sel.lojaId) ?? null,
+  }));
 
   return {
     linha,
@@ -95,12 +188,17 @@ async function montarEstado(userId: string, agenteId: string) {
       provedorEscolhido: ia.provedorEscolhido,
       provedoresDisponiveis: ia.provedoresDisponiveis,
       funcoesExternasVinculadas,
+      dependenciasDeSkill,
+      conexoesSemLoja,
       // As permissoes aqui sao TODAS as gravadas, e nao so as do registry:
       // a regra da externa precisa ver o nivel de uma acao que o registry
       // nao conhece.
       permissoes: gravadas.permissoes.map((p) => ({ funcaoId: p.funcaoId, nivel: p.nivel })),
     }),
     packs: estadoDosPacks(fatos),
+    dependenciasDeSkill,
+    conexoesSemLoja,
+    integracoes,
   };
 }
 
@@ -160,6 +258,15 @@ export async function GET(request: Request, { params }: { params: { agenteId: st
         acao: v.acao,
         nivel: estado.niveisExternos.get(v.funcaoId) ?? null,
       })),
+      // F7b.4.8 §10: a coluna "Integracoes" do resumo. Nome da
+      // plataforma e nome da LOJA — nunca uuid, nunca `seller_id`.
+      integracoes: estado.integracoes,
+      // O que falta de loja, para a tela poder resolver ALI — §11.
+      conexoesSemLoja: estado.conexoesSemLoja,
+      // O que as Skills pedem e o agente nao tem. `bloqueia` distingue
+      // requisito obrigatorio de opcional: o segundo aparece como aviso,
+      // e nao como impedimento.
+      dependenciasDeSkill: estado.dependenciasDeSkill,
       podeAtivar: estado.validacao.podeAtivar,
       impedimentos: estado.validacao.impedimentos,
     }, 200);

@@ -32,7 +32,9 @@ import { TOOL_PACKS } from "@/lib/agentes/factory/catalogo-ui";
 import { FUNCOES } from "@/lib/agentes/funcoes/registry";
 import { listarLojasConectadasDoDono } from "@/lib/marketplace/credenciais";
 import { listarContasDoDono } from "@/lib/agentes/composio/conexao";
-import { MARKETPLACE_POR_PLATAFORMA } from "@/lib/agentes/conexoes/estado";
+import {
+  MARKETPLACE_POR_PLATAFORMA, nomeDaPlataforma,
+} from "@/lib/agentes/conexoes/estado";
 import { nomeDoAplicativo } from "@/lib/agentes/factory/capacidades";
 
 /**
@@ -65,7 +67,11 @@ function plataformaDoPack(packId: string): string | null {
 }
 
 /**
- * O nome que o dono conhece, por plataforma da Skill.
+ * Onde mora o nome de gente da plataforma, e o §10 no caminho NATIVO.
+ *
+ * O mapa de nomes saiu daqui para `conexoes/estado.ts`: ele e o mesmo
+ * que a tela de prontidao usa, e duas copias divergiriam no dia em que
+ * uma plataforma nova entrasse em uma so.
  *
  * ── §10 no caminho NATIVO: por que nao ha `reconectar` aqui ─────────
  *
@@ -85,11 +91,6 @@ function plataformaDoPack(packId: string): string | null {
  * `listarLojasConectadasDoDono` ja exclui, e a falta cai em
  * `conectar_marketplace`. Nao ha terceiro caso a afirmar daqui.
  */
-const NOME_DO_MARKETPLACE: Readonly<Record<string, string>> = Object.freeze({
-  mercado_livre: "Mercado Livre",
-  shopee: "Shopee",
-});
-
 export interface LojaOferecida {
   readonly lojaId: string;
   /** O nome que o dono reconhece. Nunca o `seller_id`. */
@@ -186,7 +187,7 @@ export async function faltaParaCompletar(entrada: {
   const valorNoBanco = MARKETPLACE_POR_PLATAFORMA[marketplace];
   if (valorNoBanco === undefined) return { falta: "indefinida" };
 
-  const nomeDoMarketplace = NOME_DO_MARKETPLACE[marketplace] ?? marketplace;
+  const nomeDoMarketplace = nomeDaPlataforma(marketplace);
   const { linhas, erro } = await listarLojasConectadasDoDono(entrada.userId, valorNoBanco);
   if (erro !== null) return { falta: "falha" };
 

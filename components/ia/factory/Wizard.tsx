@@ -45,6 +45,13 @@ import {
   PainelLateral, TAMANHO,
 } from "@/components/ui/Primitivas";
 import { TOOL_PACKS } from "@/lib/agentes/factory/catalogo-ui";
+import {
+  efeitoDaFuncaoInterna, nivelSugeridoParaEfeito,
+} from "@/lib/agentes/factory/efeito";
+// §6: "resolver inline usando o fluxo JA EXISTENTE". Este componente e o
+// fluxo de escolher loja da area de Conexoes, montado aqui dentro. Uma
+// segunda tela de escolha de loja divergiria da primeira.
+import ConexoesAgente from "@/components/ia/agente/ConexoesAgente";
 import { ChatDoAgente } from "@/components/ia/factory/ChatDoAgente";
 import { ArquivosDoAgente } from "@/components/ia/factory/ArquivosDoAgente";
 import { BuscaDeFerramentas } from "@/components/ia/factory/BuscaDeFerramentas";
@@ -249,7 +256,7 @@ export function Wizard({ agenteIdInicial }: { agenteIdInicial: string | null }) 
    * Para no primeiro erro, de proposito: seguir gravando depois de uma
    * recusa deixaria o pack meio configurado sem ninguem avisado.
    */
-  async function definirNivelDoPack(packId: string, nivel: NivelAutonomia) {
+  async function definirNivelDoPack(packId: string, nivel: NivelAutonomia | null) {
     if (agenteId === null) return;
     const pack = TOOL_PACKS.find((p) => p.id === packId);
     if (pack === undefined) return;
@@ -257,7 +264,22 @@ export function Wizard({ agenteIdInicial }: { agenteIdInicial: string | null }) 
     setSalvando(true);
     try {
       for (const funcaoId of pack.funcoes) {
-        const r = await definirPermissaoDeFuncao(agenteId, { funcaoId, nivel });
+        // ── §28: o nivel vem do EFEITO quando ninguem o escolheu ────
+        //
+        // Antes era o literal "aprovacao" para todo pack adicionado
+        // aqui. Isso punha confirmacao em CIMA de uma leitura: adicionar
+        // "Mercado Livre" fazia o dono aprovar cada consulta de vendas,
+        // que o §28 diz explicitamente para nao pedir.
+        //
+        // `nivelSugeridoParaEfeito` e a mesma regra que o caminho inline
+        // do chat ja usava (`ativarCapacidade`) — nao e regra nova, e
+        // sim a MESMA regra, agora nos dois caminhos.
+        //
+        // `nivel` explicito continua vencendo: a etapa 8 e o lugar onde
+        // o dono decide, e ela nao passa `null`.
+        const efetivo = nivel ?? nivelSugeridoParaEfeito(
+          efeitoDaFuncaoInterna({ funcaoId, acesso: pack.acesso }));
+        const r = await definirPermissaoDeFuncao(agenteId, { funcaoId, nivel: efetivo });
         if (r.estado !== "ok") {
           setErro(r.estado === "dados_invalidos"
             ? r.mensagem
@@ -697,7 +719,7 @@ export function Wizard({ agenteIdInicial }: { agenteIdInicial: string | null }) 
                     aoMudar={() => void recarregar(agenteId)}
                     packSelecionado={(chave) =>
                       ativacao?.ferramentas.some((f) => f.id === chave) === true}
-                    aoAdicionarPack={(chave) => void definirNivelDoPack(chave, "aprovacao")}
+                    aoAdicionarPack={(chave) => void definirNivelDoPack(chave, null)}
                   />
                 </>
               : <Aviso tom="info">Conclua a etapa 1 para escolher ferramentas.</Aviso>
@@ -991,6 +1013,16 @@ export function Wizard({ agenteIdInicial }: { agenteIdInicial: string | null }) 
                   ? `${memorias.filter((m) => m.ativo).length} fixada(s)`
                   : "desligada"],
                   ["Arquivos", `${fontes.length} arquivo(s)`],
+                  // §10: a linha que faltava. "Mercado Livre — Monamor"
+                  // diz o que o dono precisa conferir; "1 conexao" nao.
+                  ["Integrações", ativacao.integracoes.length === 0
+                    ? "nenhuma necessária"
+                    : ativacao.integracoes
+                        .map((i) => `${i.nome}${i.loja === null ? "" : ` — ${i.loja}`}`)
+                        .join(", ")],
+                  ["Pendências", ativacao.impedimentos.length === 0
+                    ? "nenhuma"
+                    : `${ativacao.impedimentos.length} a resolver`],
                   ["Modo", "Manual"],
                 ] as const).map(([k, v]) => (
                   <div key={k} style={{
@@ -1006,6 +1038,92 @@ export function Wizard({ agenteIdInicial }: { agenteIdInicial: string | null }) 
                   </div>
                 ))}
               </Cartao>
+
+              {/*
+                ── §5: a Skill pediu, e o botao esta aqui ──────────────
+                A dependencia e DECLARADA pela Skill (`requer.funcoes`),
+                e nao adivinhada do texto dela — §4. O que aparece e o
+                nome do pack; `funcao_id` nao entra em frase nenhuma.
+              */}
+              {ativacao.dependenciasDeSkill
+                .filter((d) => d.bloqueia && d.packId !== null)
+                .map((d) => (
+                  <div key={`${d.skillId}-${d.packId}`} style={{
+                    marginTop: ESPACO.md, padding: ESPACO.md,
+                    border: `1px solid ${CROMO.acentoBorda}`,
+                    borderRadius: RAIO.card, background: CROMO.acentoFundo,
+                  }}>
+                    <strong style={{ fontSize: TAMANHO.corpo, color: CROMO.texto }}>
+                      Esta Skill precisa de {d.nome}
+                    </strong>
+                    <p style={{
+                      margin: `${ESPACO.xs}px 0 ${ESPACO.sm}px`,
+                      fontSize: TAMANHO.miudo, color: CROMO.textoFraco,
+                    }}>
+                      A Skill <strong style={{ color: CROMO.texto }}>{d.skillId}</strong>{" "}
+                      declara precisar desta capacidade. Sem ela, ela entra no agente
+                      pedindo um trabalho que ele não consegue fazer.
+                    </p>
+                    <div style={{ display: "flex", gap: ESPACO.sm, flexWrap: "wrap" }}>
+                      <Botao tom="primario" desabilitado={salvando}
+                        onClick={() => void definirNivelDoPack(d.packId as string, null)}>
+                        Adicionar {d.nome}
+                      </Botao>
+                      {/* A outra saida e remover a Skill, e ela vive na
+                          etapa 5 — levar para la e voltar e o fluxo, e
+                          nao um desvio para tela tecnica. */}
+                      <Botao tom="secundario" desabilitado={salvando}
+                        onClick={() => setEtapa(5)}>
+                        Rever as Skills
+                      </Botao>
+                    </div>
+                  </div>
+                ))}
+
+              {/* Requisito opcional NAO bloqueia — o contrato de Skill
+                  separa `funcoes` de `funcoes_opcionais`, e reprovar por
+                  uma opcional barraria um agente util. Vira aviso. */}
+              {ativacao.dependenciasDeSkill.some((d) => !d.bloqueia) && (
+                <Aviso tom="info">
+                  Uma Skill deste agente menciona capacidades opcionais que ele não tem:{" "}
+                  {[...new Set(ativacao.dependenciasDeSkill
+                    .filter((d) => !d.bloqueia).map((d) => d.nome))].join(", ")}.
+                  Ele funciona sem elas, com alcance menor.
+                </Aviso>
+              )}
+
+              {/*
+                ── §6/§11: escolher a loja AQUI ────────────────────────
+                A ferramenta ja esta no agente e falta dizer de qual loja.
+                A tela de Conexoes continua existindo para auditoria (§12),
+                mas nao e requisito do fluxo normal.
+              */}
+              {ativacao.conexoesSemLoja.length > 0 && agenteId !== null && (
+                <div style={{
+                  marginTop: ESPACO.md, padding: ESPACO.md,
+                  border: `1px solid ${CROMO.acentoBorda}`,
+                  borderRadius: RAIO.card, background: CROMO.acentoFundo,
+                }}>
+                  <strong style={{ fontSize: TAMANHO.corpo, color: CROMO.texto }}>
+                    Falta escolher a loja
+                  </strong>
+                  <p style={{
+                    margin: `${ESPACO.xs}px 0 ${ESPACO.sm}px`,
+                    fontSize: TAMANHO.miudo, color: CROMO.textoFraco,
+                  }}>
+                    {ativacao.conexoesSemLoja.map((c) => c.nome).join(", ")}:
+                    sua conta já está conectada na CDS. Só preciso saber de qual
+                    loja este agente deve falar.
+                  </p>
+                  <ConexoesAgente agenteId={agenteId} />
+                  <div style={{ marginTop: ESPACO.sm }}>
+                    <Botao tom="secundario" desabilitado={salvando}
+                      onClick={() => void recarregar(agenteId)}>
+                      Já escolhi — conferir
+                    </Botao>
+                  </div>
+                </div>
+              )}
 
               {ativacao.impedimentos.length > 0 && (
                 <Aviso tom="atencao">

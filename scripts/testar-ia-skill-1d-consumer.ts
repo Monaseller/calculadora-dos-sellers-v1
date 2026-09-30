@@ -710,10 +710,39 @@ async function principal(): Promise<void> {
   // Vale nos dois sentidos: um segundo consumidor reprova, a rota sumir
   // reprova, e uma copia sob `app/api/internal/` — que autentica por
   // segredo de worker, nao por sessao — reprova por nao estar na lista.
+  // ── F7b.4.8: o SEGUNDO consumidor legitimo ───────────────────────
+  //
+  // A rota de ATIVACAO passa a consumir o diagnostico, e isso e o
+  // conserto de um defeito de produto: uma Skill que declara precisar de
+  // uma Funcao ausente entrava no prompt do agente pedindo um trabalho
+  // que ele nao conseguia fazer, e o dono descobria pela resposta ruim.
+  // A prontidao precisa saber disso ANTES de deixar ativar.
+  //
+  // Recompor o diagnostico dentro da rota seria exatamente a duplicacao
+  // que esta guarda existe para impedir — e seria pior, porque
+  // `semSelecao` so existe no envelope do compositor.
+  //
+  // A exigencia NAO afrouxa: continua igualdade de conjunto, nos dois
+  // sentidos, por caminho nominal. Um terceiro consumidor reprova, e
+  // qualquer uma das duas rotas sumir tambem reprova.
+  // A rota que EXPOE o diagnostico por HTTP continua sendo uma so — o J3
+  // abaixo mede isso, e e outra pergunta: a rota de ativacao consome o
+  // motor, mas nao publica diagnostico nenhum na sua resposta.
   const ROTA_AUTORIZADA = "app/api/agentes/[agenteId]/diagnostico/route.ts";
+  const ROTAS_AUTORIZADAS = [
+    "app/api/agentes/[agenteId]/ativacao/route.ts",
+    ROTA_AUTORIZADA,
+  ];
   const acima = consumidoresDe("diagnosticarAgente", "lib/agentes/diagnostico/compositor.ts");
-  ok("J1  so a rota autorizada consome diagnosticarAgente",
-    JSON.stringify(acima) === JSON.stringify([ROTA_AUTORIZADA]), acima.join(", "));
+  ok("J1  so as rotas autorizadas consomem diagnosticarAgente",
+    JSON.stringify([...acima].sort()) === JSON.stringify([...ROTAS_AUTORIZADAS].sort()),
+    acima.join(", "));
+  ok("J1a CONTROLE: um terceiro consumidor reprovaria",
+    JSON.stringify([...acima, "app/api/intrusa/route.ts"].sort()) !==
+      JSON.stringify([...ROTAS_AUTORIZADAS].sort()));
+  ok("J1b CONTROLE: e uma delas sumir tambem reprovaria",
+    JSON.stringify([...acima].sort().slice(1)) !==
+      JSON.stringify([...ROTAS_AUTORIZADAS].sort()));
   ok("J2  a pasta do compositor tem exatamente 1 modulo",
     JSON.stringify(readdirSync(join(RAIZ, "lib/agentes/diagnostico")).sort()) ===
       JSON.stringify(["compositor.ts"]),

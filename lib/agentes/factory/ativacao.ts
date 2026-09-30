@@ -49,6 +49,28 @@ export const CODIGOS_DE_IMPEDIMENTO = Object.freeze([
    * mandaria a pessoa para o lugar errado.
    */
   "ferramenta_externa_sem_permissao",
+  /**
+   * F7b.4.8 §3/§5 — uma Skill do agente DECLARA precisar de uma Funcao
+   * que o agente nao tem.
+   *
+   * A declaracao e estruturada: `manifesto.requer.funcoes`, validada por
+   * `formato.ts`. Nao e keyword parsing do corpo da Skill — §4 e
+   * explicito de que texto livre pode SUGERIR, e nunca virar binding.
+   *
+   * Sem este codigo, a Skill entrava no prompt pedindo um trabalho que o
+   * agente nao conseguia fazer, e o dono descobria pela resposta ruim.
+   */
+  "skill_sem_ferramenta",
+  /**
+   * F7b.4.8 §6 — a Funcao existe e falta a CONTA/LOJA dela.
+   *
+   * Separado de `skill_sem_ferramenta` porque resolve-se em outro lugar:
+   * lá se adiciona uma ferramenta, aqui se escolhe uma loja que o dono
+   * provavelmente ja conectou. Um codigo so mandaria a pessoa ao lugar
+   * errado — a mesma razao que separou `ferramenta_externa_sem_permissao`
+   * de `permissao_incompleta`.
+   */
+  "conexao_sem_loja",
 ] as const);
 export type CodigoDeImpedimento = (typeof CODIGOS_DE_IMPEDIMENTO)[number];
 
@@ -110,6 +132,32 @@ export interface EstadoParaAtivacao {
    * tem" e "o agente pode".
    */
   readonly funcoesExternasVinculadas?: readonly string[];
+  /**
+   * O que as Skills do agente DECLARAM precisar e nao esta atendido.
+   *
+   * Vem do diagnostico que a rota compoe — `diagnosticarAgente` —, e nao
+   * de uma segunda leitura aqui: este modulo e puro e nao le banco.
+   *
+   * `bloqueia: false` existe porque o contrato de Skill distingue
+   * `funcoes` de `funcoes_opcionais`: faltar uma obrigatoria impede o
+   * trabalho; faltar uma opcional so reduz o alcance, e reprovar a
+   * ativacao por isso seria barrar um agente util.
+   */
+  readonly dependenciasDeSkill?: readonly {
+    readonly skillId: string;
+    /** O nome de gente do que falta. Nunca `funcao_id`. */
+    readonly nome: string;
+    readonly tipo: "funcao" | "conexao";
+    readonly bloqueia: boolean;
+  }[];
+  /**
+   * Requisitos de conexao que EXISTEM e ainda nao tem loja escolhida.
+   *
+   * Sao `(plataforma, recurso)` sem linha em `agente_conexoes`. O dono
+   * pode ja ter a conta: o que falta e dizer QUAL loja — e e por isso que
+   * isto nao e "conecte sua conta".
+   */
+  readonly conexoesSemLoja?: readonly { readonly nome: string }[];
 }
 
 export interface ResultadoDaValidacao {
@@ -202,6 +250,33 @@ export function validarParaAtivacao(estado: EstadoParaAtivacao): ResultadoDaVali
           : `${semDecisao.length} ações de aplicativos ainda não têm permissão definida.`,
       });
     }
+  }
+
+  // ── §3/§5: a Skill declarou, e o agente nao tem ─────────────────
+  //
+  // Uma frase por Skill, nomeando o que falta. A etapa 4 e Ferramentas:
+  // e la que se adiciona, e o cartao do §5 aparece nela.
+  const dependencias = (estado.dependenciasDeSkill ?? []).filter((d) => d.bloqueia);
+  if (dependencias.length > 0) {
+    const nomes = [...new Set(dependencias.map((d) => d.nome))].join(", ");
+    impedimentos.push({
+      codigo: "skill_sem_ferramenta", etapa: 4,
+      mensagem: dependencias.length === 1
+        ? `Uma Skill deste agente precisa de ${nomes}.`
+        : `As Skills deste agente precisam de: ${nomes}.`,
+    });
+  }
+
+  // ── §6: a ferramenta esta la, e falta dizer de qual loja ────────
+  const semLoja = estado.conexoesSemLoja ?? [];
+  if (semLoja.length > 0) {
+    const nomes = [...new Set(semLoja.map((c) => c.nome))].join(", ");
+    impedimentos.push({
+      codigo: "conexao_sem_loja", etapa: 4,
+      mensagem: semLoja.length === 1
+        ? `Escolha a loja que este agente vai usar em ${nomes}.`
+        : `Escolha as lojas que este agente vai usar em: ${nomes}.`,
+    });
   }
 
   if (temFerramentas && estado.provedor !== null &&

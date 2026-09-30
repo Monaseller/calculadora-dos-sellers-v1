@@ -1786,6 +1786,14 @@ export interface ConversaDoChatUI {
   readonly id: string;
   readonly titulo: string | null;
   readonly criadoEm: string | null;
+  /**
+   * A linha de retomada, quando a conversa nasce depois de outra.
+   *
+   * OPCIONAL porque `conversaDaResposta` monta este tipo em dois lugares
+   * — criar e listar — e uma conversa LISTADA nao tem retomada: a linha
+   * pertence ao momento de abrir, e nao a conversa.
+   */
+  readonly retomada?: string | null;
 }
 
 /**
@@ -1896,6 +1904,39 @@ export interface ModeloOferecidoUI {
   readonly niveis: readonly string[];
 }
 
+/**
+ * Uma integracao JA vinculada — F7b.4.8 §10.
+ *
+ * `loja` e o nome que o dono reconhece ("Monamor"), e nunca o uuid nem o
+ * `seller_id`. `null` quando a loja vinculada nao aparece mais entre as
+ * conectadas — que e informacao, e nao um espaco em branco a preencher.
+ */
+export interface IntegracaoDaAtivacaoUI {
+  readonly plataforma: string;
+  readonly recurso: string;
+  readonly nome: string;
+  readonly loja: string | null;
+}
+
+/** Um requisito de conexao que existe e ainda nao tem loja — §11. */
+export interface ConexaoSemLojaUI {
+  readonly plataforma: string;
+  readonly recurso: string;
+  readonly nome: string;
+}
+
+/** O que uma Skill do agente declara precisar e nao esta atendido — §3. */
+export interface DependenciaDeSkillUI {
+  readonly skillId: string;
+  /** Nome de gente do que falta. Nunca `funcao_id`. */
+  readonly nome: string;
+  /** O pack que resolve, quando ha um. `null` para conexao. */
+  readonly packId: string | null;
+  readonly tipo: string;
+  /** `false` = requisito OPCIONAL: limita o alcance, nao impede ativar. */
+  readonly bloqueia: boolean;
+}
+
 export interface AtivacaoDoAgenteUI {
   readonly nome: string;
   readonly ativo: boolean;
@@ -1918,8 +1959,48 @@ export interface AtivacaoDoAgenteUI {
   /** As acoes externas que o agente POSSUI. `nivel: null` = sem decisao. */
   readonly ferramentasExternas: readonly FerramentaExternaVinculadaUI[];
   readonly modelos: readonly ModeloOferecidoUI[];
+  readonly integracoes: readonly IntegracaoDaAtivacaoUI[];
+  readonly conexoesSemLoja: readonly ConexaoSemLojaUI[];
+  readonly dependenciasDeSkill: readonly DependenciaDeSkillUI[];
   readonly podeAtivar: boolean;
   readonly impedimentos: readonly ImpedimentoUI[];
+}
+
+function integracaoDaResposta(bruto: unknown): IntegracaoDaAtivacaoUI | null {
+  if (!ehObjeto(bruto)) return null;
+  if (typeof bruto.plataforma !== "string" || bruto.plataforma === "") return null;
+  return {
+    plataforma: bruto.plataforma,
+    recurso: typeof bruto.recurso === "string" ? bruto.recurso : "",
+    nome: typeof bruto.nome === "string" && bruto.nome !== ""
+      ? bruto.nome : bruto.plataforma,
+    loja: textoOuNulo(bruto.loja),
+  };
+}
+
+function conexaoSemLojaDaResposta(bruto: unknown): ConexaoSemLojaUI | null {
+  if (!ehObjeto(bruto)) return null;
+  if (typeof bruto.plataforma !== "string" || bruto.plataforma === "") return null;
+  return {
+    plataforma: bruto.plataforma,
+    recurso: typeof bruto.recurso === "string" ? bruto.recurso : "",
+    nome: typeof bruto.nome === "string" && bruto.nome !== ""
+      ? bruto.nome : bruto.plataforma,
+  };
+}
+
+function dependenciaDaResposta(bruto: unknown): DependenciaDeSkillUI | null {
+  if (!ehObjeto(bruto)) return null;
+  if (typeof bruto.nome !== "string" || bruto.nome === "") return null;
+  return {
+    skillId: typeof bruto.skillId === "string" ? bruto.skillId : "",
+    nome: bruto.nome,
+    packId: textoOuNulo(bruto.packId),
+    tipo: typeof bruto.tipo === "string" ? bruto.tipo : "",
+    // Ausente vira `true`: um requisito sem classificacao tratado como
+    // opcional passaria calado, e o §3 existe para nao passar calado.
+    bloqueia: bruto.bloqueia !== false,
+  };
 }
 
 function modeloDaResposta(bruto: unknown): ModeloOferecidoUI | null {
@@ -2198,6 +2279,14 @@ export interface ConversaCarregadaUI {
    * depois de um refresh, e desaparecer depois de decidida.
    */
   readonly capacidadePendente: CapacidadePendenteUI | null;
+  /**
+   * A linha curta que diz de onde pararam — F7b.4.8 §15.
+   *
+   * `null` quando nao ha o que retomar, E quando a conversa ja tem
+   * mensagens: voltar a mesma conversa nao gera saudacao (§19). Quem
+   * decide isso e o servidor; a tela so mostra o que vier.
+   */
+  readonly retomada: string | null;
 }
 
 /** O historico de UMA conversa, e a aprovacao viva dela. Leitura pura. */
@@ -2276,7 +2365,10 @@ export async function lerConversaDoChat(
 
   return {
     estado: "ok",
-    dados: { mensagens, aprovacaoPendente: pendente, capacidadePendente: capacidade },
+    dados: {
+      mensagens, aprovacaoPendente: pendente, capacidadePendente: capacidade,
+      retomada: textoOuNulo((corpo as Record<string, unknown>).retomada),
+    },
   };
 }
 
@@ -2528,6 +2620,7 @@ export async function lerAtivacaoDoAgente(
     resumo?: unknown; ferramentas?: unknown; modelos?: unknown;
     ferramentasExternas?: unknown;
     podeAtivar?: unknown; impedimentos?: unknown;
+    integracoes?: unknown; conexoesSemLoja?: unknown; dependenciasDeSkill?: unknown;
   };
   if (!ehObjeto(bruto.resumo) || typeof bruto.podeAtivar !== "boolean") {
     return { estado: "falha" };
@@ -2566,6 +2659,13 @@ export async function lerAtivacaoDoAgente(
       iaDesfecho: textoOuNulo(iaDesfecho),
       memoriaAtiva: memoriaAtiva === true,
       ferramentas, ferramentasExternas, modelos,
+      // Lista ausente vira lista VAZIA, e nao falha: os tres campos sao
+      // aditivos, e uma resposta de antes deste gate continua valendo.
+      integracoes: listaDaResposta(bruto.integracoes ?? [], integracaoDaResposta) ?? [],
+      conexoesSemLoja:
+        listaDaResposta(bruto.conexoesSemLoja ?? [], conexaoSemLojaDaResposta) ?? [],
+      dependenciasDeSkill:
+        listaDaResposta(bruto.dependenciasDeSkill ?? [], dependenciaDaResposta) ?? [],
       podeAtivar: bruto.podeAtivar, impedimentos,
     },
   };
@@ -2591,7 +2691,14 @@ export async function criarConversaDoChat(
   const desfecho = desfechoDaResposta<ConversaDoChatUI>(resposta, corpo);
   if (desfecho !== null) return desfecho;
   const dados = conversaDaResposta((corpo as { conversa?: unknown }).conversa);
-  return dados === null ? { estado: "falha" } : { estado: "ok", dados };
+  if (dados === null) return { estado: "falha" };
+  // A retomada viaja junto da conversa nova: ela e o primeiro conteudo
+  // da tela, e buscar de novo num segundo pedido mostraria a conversa
+  // vazia por um instante antes de a linha aparecer.
+  return {
+    estado: "ok",
+    dados: { ...dados, retomada: textoOuNulo((corpo as Record<string, unknown>).retomada) },
+  };
 }
 
 /**

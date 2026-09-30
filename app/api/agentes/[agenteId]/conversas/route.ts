@@ -18,6 +18,7 @@
 import { atravessarPorta, lerCorpo, responder } from "@/lib/agentes/api/porta";
 import { criarPortaDeConversas } from "@/lib/agentes/conversas/repositorio";
 import { validarTitulo } from "@/lib/agentes/conversas/tipos";
+import { retomadaDaConversaAnterior } from "@/lib/agentes/conversas/retomada-anterior";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 
 export const dynamic = "force-dynamic";
@@ -58,9 +59,23 @@ export async function POST(request: Request, { params }: { params: { agenteId: s
       typeof titulo === "string" ? titulo.trim() : null
     );
 
+    // ── §15: a conversa nova abre dizendo de onde vieram ──────────
+    //
+    // Calculada DEPOIS da criacao e com o id novo em maos, para que a
+    // propria conversa recem-criada nao seja escolhida como "a anterior".
+    //
+    // Nao e gravada como mensagem do assistente: o modelo nao a produziu,
+    // e por-la na trilha faria o registro afirmar um turno que nao
+    // aconteceu. Ela e uma linha de tela, e o GET a recalcula enquanto a
+    // conversa estiver vazia.
+    const retomada = await retomadaDaConversaAnterior({
+      userId: porta.userId, agenteId: porta.agenteId, conversaAtualId: conversa.id,
+    });
+
     return responder({
       ok: true,
       conversa: { id: conversa.id, titulo: conversa.titulo, criadoEm: conversa.criadoEm },
+      retomada,
     }, 201);
   } catch {
     return responder({ ok: false, erro: "Nao foi possivel abrir a conversa." }, 500);

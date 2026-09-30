@@ -82,25 +82,48 @@ export const TOOL_PACKS: readonly ToolPack[] = Object.freeze([
   }),
   Object.freeze({
     id: "vendas",
-    nome: "Vendas da CDS",
-    descricao: "Consultar as vendas pagas da sua loja.",
+    // O nome diz a FONTE, e isso e deliberado — F7b.4.8 §20/§26.
+    //
+    // Este pack le a tabela `pedidos`, que o sync da CDS preenche. Nao e
+    // a API do marketplace: e o registro que a CDS ja tem. As duas coisas
+    // podem discordar, e chamar as duas de "vendas" faria a diferenca
+    // desaparecer justamente quando ela importa.
+    //
+    // Quem pergunta "quanto vendi no Mercado Livre" deve receber o pack
+    // Mercado Livre, e nao este — ver `GATILHOS_DE_MARKETPLACE` em
+    // `capacidade-faltante.ts`.
+    nome: "Vendas registradas na CDS",
+    descricao: "Consultar as vendas pagas já registradas na sua base da CDS.",
     capacidades: Object.freeze([
-      "Ler as vendas de um período",
+      "Ler as vendas de um período a partir da base da CDS",
       "Devolve as linhas, nunca um total já calculado",
+      "Não consulta o marketplace: usa o que o sync já trouxe",
     ]),
     funcoes: Object.freeze(["vendas.consultar"]),
     acesso: "leitura",
     exigeConexao: false,
   }),
   Object.freeze({
+    // ── O id NAO muda, e o nome muda — F7b.4.8 §26 ────────────────
+    //
+    // O id e identidade persistida: ele esta em `agente_permissoes` por
+    // Funcao, em `agente_capacidades_pendentes.escolha_chave` e em
+    // qualquer oferta que um dono ja tenha visto. Renomea-lo orfanaria
+    // tudo isso para arrumar uma etiqueta.
+    //
+    // O NOME e o que a pessoa le, e "Perguntas do Mercado Livre" deixou
+    // de descrever o pack quando ele passou a consultar vendas tambem.
     id: "mercadolivre-perguntas",
-    nome: "Perguntas do Mercado Livre",
-    descricao: "Ler as perguntas recebidas na sua conta do Mercado Livre.",
+    nome: "Mercado Livre",
+    descricao: "Consultar a sua conta do Mercado Livre pela API oficial.",
     capacidades: Object.freeze([
-      "Listar perguntas por status",
-      "Somente leitura: não responde nem altera anúncio",
+      "Consultar vendas e faturamento de um período, direto do Mercado Livre",
+      "Listar perguntas recebidas, por status",
+      "Somente leitura: não responde, não altera anúncio e não cancela",
     ]),
-    funcoes: Object.freeze(["mercadolivre.perguntas.listar"]),
+    funcoes: Object.freeze([
+      "mercadolivre.perguntas.listar", "mercadolivre.vendas.consultar",
+    ]),
     acesso: "leitura",
     exigeConexao: true,
   }),

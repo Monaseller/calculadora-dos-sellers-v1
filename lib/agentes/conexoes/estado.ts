@@ -52,6 +52,28 @@ export const MARKETPLACE_POR_PLATAFORMA: Readonly<Record<string, string>> = Obje
   // essa consulta que decide se ela e conhecida.
 } satisfies Record<PlataformaConexao, string>);
 
+/**
+ * O nome que o DONO reconhece, por plataforma.
+ *
+ * Mora aqui, ao lado de `MARKETPLACE_POR_PLATAFORMA`, porque e a mesma
+ * classe de conhecimento: a traducao entre como o codigo chama a
+ * plataforma e como o mundo a chama. Estava duplicado em
+ * `factory/completar-capacidade.ts`, e duas copias de um mapa de nomes
+ * divergem no dia em que uma plataforma nova entra em uma so.
+ *
+ * `slug` desconhecido devolve o proprio slug em `nomeDaPlataforma` — feio
+ * e verdadeiro, em vez de bonito e inventado.
+ */
+export const NOME_DA_PLATAFORMA: Readonly<Record<string, string>> = Object.freeze({
+  mercado_livre: "Mercado Livre",
+  shopee: "Shopee",
+});
+
+/** O nome de gente da plataforma, ou o proprio slug. */
+export function nomeDaPlataforma(plataforma: string): string {
+  return NOME_DA_PLATAFORMA[plataforma] ?? plataforma;
+}
+
 /** A plataforma correspondente ao valor do banco, ou `null`. */
 export function plataformaDeMarketplace(marketplace: unknown): string | null {
   if (typeof marketplace !== "string") return null;

@@ -37,6 +37,14 @@ export function Workspace({ agenteId }: { agenteId: string }) {
   const [naoEncontrado, setNaoEncontrado] = useState(false);
   // Trocar de conversa remonta o chat: `key` muda, estado nasce limpo.
   const [conversa, setConversa] = useState<string | null>(null);
+  /**
+   * A pessoa pediu uma conversa NOVA — §14.
+   *
+   * Guardado aqui, e nao no chat, porque e o botao desta tela que o
+   * produz. Ele volta a `false` assim que a conversa nova existe: o
+   * proximo refresh deve RETOMAR essa conversa, e nao criar outra.
+   */
+  const [abrirNova, setAbrirNova] = useState(false);
   const [geracao, setGeracao] = useState(0);
 
   useEffect(() => {
@@ -109,7 +117,9 @@ export function Workspace({ agenteId }: { agenteId: string }) {
         </div>
 
         <div style={{ display: "flex", gap: ESPACO.sm, flexWrap: "wrap" }}>
-          <Botao tom="secundario" onClick={() => { setConversa(null); setGeracao((g) => g + 1); }}>
+          <Botao tom="secundario" onClick={() => {
+            setConversa(null); setAbrirNova(true); setGeracao((g) => g + 1);
+          }}>
             Nova conversa
           </Botao>
           <Link href={`/ia/agentes/${agenteId}/configurar`} style={{ textDecoration: "none" }}>
@@ -139,7 +149,8 @@ export function Workspace({ agenteId }: { agenteId: string }) {
           key={`${agenteId}:${geracao}`}
           agenteId={agenteId}
           conversaId={conversa}
-          aoTrocarConversa={setConversa}
+          abrirNova={abrirNova}
+          aoTrocarConversa={(id) => { setConversa(id); setAbrirNova(false); }}
         />
       </div>
     </div>
