@@ -5,6 +5,7 @@
  *
  *   sessao -> dono -> agente do dono
  *          -> Skills + memorias + fontes + permissoes (estado de AGORA)
+ *          -> MEMORIA DO DONO, do grafo do Zep (F7b.4.5)
  *          -> contexto (F6)
  *          -> historico da CONVERSA
  *          -> a IA DO AGENTE (F7b.4.2) -> provedor real
@@ -31,6 +32,29 @@
  * NAO guarda: instrucao, Skill, memoria, fonte — nada disso vira linha
  * de mensagem. Historico e assunto; configuracao e do agente.
  *
+ * ── A memoria de longo prazo, e por que ela nao funcionava ─────────
+ *
+ * Ate o F7b.4.5 este runtime lia SO `portaMemorias.listarAtivas` — a
+ * memoria MANUAL, que o dono escreve a mao. O modulo de memoria
+ * automatica existia, estava provado na suite dele, e NAO TINHA CHAMADOR
+ * NENHUM em producao.
+ *
+ * Resultado para quem usava: `memoria_ativa` ligada, nada ingerido, nada
+ * recuperado. O Rodrigo disse o nome num chat e o agente nao soube no
+ * seguinte — e a suite continuava verde, porque media o modulo e nao o
+ * caminho do usuario.
+ *
+ * Duas coisas foram ligadas aqui, e as duas sao necessarias:
+ *
+ *   RECUPERAR  `recuperarMemoriaDoDono` busca no GRAFO do principal, e
+ *              nao no contexto da thread. Medicao em
+ *              `scripts/medir-zep-cross-chat.ts`: thread nova NAO herda
+ *              nada de thread anterior, nem depois de 150 s. O grafo, sim.
+ *
+ *   INGERIR    sem gravar o turno, nao ha o que lembrar depois. A
+ *              ingestao acontece DEPOIS de a conversa estar persistida:
+ *              se ela falhar, a conversa nao se perde.
+ *
  * ── Quem responde, e por que nunca e um substituto — F7b.4.2 ────────
  *
  * O adaptador vem da coluna `provedor_ia` do AGENTE, e nao de uma
@@ -55,6 +79,10 @@ import {
 import { montarContextoDoAgente } from "@/lib/agentes/ia/contexto-do-agente";
 import { adaptadorDoProvedor } from "@/lib/agentes/ia/adaptador-por-provedor";
 import { prepararFuncoesExternas } from "@/lib/agentes/composio/preparar-externas";
+import {
+  ingerirTurno, recuperarMemoriaDoDono,
+} from "@/lib/agentes/memoria/automatica";
+import { capacidadesDoAgente } from "@/lib/agentes/factory/capacidades";
 import { listarVinculosExternos } from "@/lib/agentes/ferramentas-externas/repositorio";
 import { listarPermissoesGravadas } from "@/lib/agentes/permissoes/gravadas";
 import { modelosDisponiveis } from "@/lib/agentes/factory/catalogo-de-modelos";
@@ -153,7 +181,7 @@ export async function responderNaConversa(
 
   const [
     permissoes, skills, memorias, fontes, historico,
-    permissoesGravadas, vinculosExternos,
+    permissoesGravadas, vinculosExternos, memoriaDoDono,
   ] = await Promise.all([
     // `funcaoIds` = o CATALOGO INTEIRO, e nao um subconjunto: a
     // pergunta e "o que este agente pode", e perguntar so sobre
@@ -172,6 +200,18 @@ export async function responderNaConversa(
     // em serie custaria um round trip antes de o modelo comecar a falar.
     listarPermissoesGravadas({ userId: entrada.userId, agenteId: entrada.agenteId }),
     listarVinculosExternos({ userId: entrada.userId, agenteId: entrada.agenteId }),
+    // F7b.4.5: a memoria do DONO, buscada pela pergunta deste turno. Vai
+    // no mesmo `Promise.all` porque e mais uma ida a rede, e em serie ela
+    // atrasaria a primeira palavra do agente.
+    recuperarMemoriaDoDono(
+      {
+        userId: entrada.userId,
+        agenteId: entrada.agenteId,
+        conversaId: entrada.conversaId,
+        memoriaAtiva: agente.memoria_ativa,
+      },
+      entrada.texto.trim()
+    ),
   ]);
 
   // Falha de leitura NAO vira "este agente nao tem permissao nenhuma":
@@ -184,11 +224,33 @@ export async function responderNaConversa(
     return falha("indisponivel", "Nao foi possivel carregar as Skills do agente.");
   }
 
+  // As capacidades em linguagem de gente, montadas dos vinculos REAIS.
+  // Sem isto o modelo so conhecia os nomes das Functions declaradas, e
+  // respondia `planilha_inspecionar` quando perguntado o que sabia fazer.
+  const capacidades = capacidadesDoAgente({
+    permissoes: permissoesGravadas.coleta === "ok"
+      ? permissoesGravadas.permissoes.map((g) => ({ funcaoId: g.funcaoId, nivel: g.nivel }))
+      : [],
+    vinculosExternos: vinculosExternos.coleta === "ok"
+      ? vinculosExternos.vinculos.map((v) => ({ toolkit: v.toolkit }))
+      : [],
+    memoriaAtiva: agente.memoria_ativa,
+    temArquivos: fontes.length > 0,
+    temSkills: skills.coleta === "ok" && skills.skills.length > 0,
+  });
+
   const contexto = montarContextoDoAgente({
     instrucoesDoAgente: agente.instrucoes,
     skills: skills.skills,
     memorias,
     fontes: fontes.map(paraModelo),
+    capacidades,
+    lembrancasDoDono: memoriaDoDono.lembrancas.map((l) => l.fato),
+    // `desligada` e `ligada mas vazia` produzem frases DIFERENTES — era
+    // justamente isso que faltava (§11).
+    estadoDaMemoria: !agente.memoria_ativa
+      ? "desligada"
+      : memoriaDoDono.desfecho === "ok" ? "ligada" : "indisponivel",
   });
 
   // ── As acoes EXTERNAS, declaradas e executaveis — F7b.4.3 ─────────
@@ -325,6 +387,36 @@ export async function responderNaConversa(
     tokensSaida: saida.uso.tokensSaida,
     tempoMs: saida.uso.tempoMs,
   });
+
+  // ── A INGESTAO — F7b.4.5 ──────────────────────────────────────────
+  //
+  // DEPOIS de a conversa estar persistida, e de proposito: memoria e
+  // servico de terceiro, e uma falha la nao pode custar o que o usuario
+  // acabou de dizer. A ordem certa e gravar primeiro, lembrar depois.
+  //
+  // Sem `await` no caminho de resposta? Nao: o `await` fica, porque em
+  // serverless uma promessa solta pode morrer com a invocacao, e ai a
+  // memoria falharia de forma invisivel. O custo e alguns milissegundos
+  // ao fim de um turno que ja levou segundos.
+  //
+  // `ingerirTurno` ja devolve cedo quando a memoria esta desligada — sem
+  // rede nenhuma. Agente sem memoria nao paga por isto.
+  const ingestao = await ingerirTurno(
+    {
+      userId: entrada.userId,
+      agenteId: entrada.agenteId,
+      conversaId: entrada.conversaId,
+      memoriaAtiva: agente.memoria_ativa,
+    },
+    [
+      { papel: "usuario", conteudo: gravadaDoUsuario.conteudo ?? "" },
+      { papel: "assistente", conteudo: resposta.conteudo ?? "" },
+    ]
+  );
+  if (ingestao.desfecho === "falha") {
+    // Sem conteudo no log: a mensagem e do usuario. So o fato.
+    console.error("[conversas/runtime] falha ao ingerir o turno na memoria");
+  }
 
   return {
     ok: true,

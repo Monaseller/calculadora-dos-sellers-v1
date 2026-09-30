@@ -3081,6 +3081,16 @@ export interface AcaoExternaUI {
    * pre-selecionar um nivel na etapa de Permissoes, e o dono confirma.
    */
   readonly nivelSugerido: string;
+  /**
+   * O EFEITO da acao — F7b.4.5 §2/§4.
+   *
+   * `READ_ONLY`, `WRITE`, `SEND`… Classificado no servidor a partir das
+   * tags do catalogo, e nao do nome. `exigeConfirmacao` e o que a tela
+   * usa: leitura entra num clique, efeito pergunta.
+   */
+  readonly efeito: string;
+  readonly efeitoTexto: string;
+  readonly exigeConfirmacao: boolean;
   readonly funcaoId: string | null;
 }
 
@@ -3092,7 +3102,10 @@ export interface AcoesDoAplicativoUI {
 
 function acaoExternaDaResposta(bruto: unknown): AcaoExternaUI | null {
   if (!ehObjeto(bruto)) return null;
-  const { acao, nome, descricao, risco, nivelSugerido, funcaoId } = bruto;
+  const {
+    acao, nome, descricao, risco, nivelSugerido, funcaoId,
+    efeito, efeitoTexto, exigeConfirmacao,
+  } = bruto;
   if (typeof acao !== "string" || acao === "") return null;
   if (typeof risco !== "string" || risco === "") return null;
   if (typeof nivelSugerido !== "string" || nivelSugerido === "") return null;
@@ -3101,6 +3114,11 @@ function acaoExternaDaResposta(bruto: unknown): AcaoExternaUI | null {
     nome: typeof nome === "string" && nome !== "" ? nome : acao,
     descricao: textoOuNulo(descricao),
     risco, nivelSugerido,
+    efeito: typeof efeito === "string" ? efeito : "UNKNOWN",
+    efeitoTexto: typeof efeitoTexto === "string" ? efeitoTexto : "",
+    // AUSENTE conta como "exige": o padrao seguro nunca vem de um campo
+    // que o servidor pode ter deixado de mandar.
+    exigeConfirmacao: exigeConfirmacao !== false,
     funcaoId: textoOuNulo(funcaoId),
   };
 }

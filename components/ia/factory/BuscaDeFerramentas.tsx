@@ -459,7 +459,8 @@ export function BuscaDeFerramentas({
         {!carregandoAcoes && acoes.length > 0 && (
           <p style={{ margin: 0, fontSize: TAMANHO.miudo, color: CROMO.textoFraco }}>
             Escolha só o que este agente precisa. Mostrando {acoes.length} de {totalDeAcoes}.
-            Adicionar não dá permissão — você decide o nível na etapa Permissões.
+            Ações que só consultam entram direto; as que alteram algo pedem sua
+            confirmação antes de rodar.
           </p>
         )}
 
@@ -488,9 +489,13 @@ export function BuscaDeFerramentas({
                     <Etiqueta tom={a.risco === "leitura" ? "ok" : "atencao"}>
                       {ROTULO_DO_RISCO[a.risco] ?? a.risco}
                     </Etiqueta>
-                    {/* SUGESTAO, e o texto diz isso. Adicionar nao concede. */}
-                    <Etiqueta tom="info">
-                      Sugerido: {ROTULO_DO_NIVEL[a.nivelSugerido] ?? a.nivelSugerido}
+                    {/*
+                      A etiqueta fala do EFEITO — o que a acao faz no
+                      mundo —, e nao de nivel de permissao. "Só consulta
+                      dados" diz mais a quem escolhe do que "aprovacao".
+                    */}
+                    <Etiqueta tom={a.exigeConfirmacao ? "atencao" : "ok"}>
+                      {a.efeitoTexto}
                     </Etiqueta>
                   </div>
                 </div>
@@ -501,10 +506,21 @@ export function BuscaDeFerramentas({
                       ? <Etiqueta tom="atencao">Indisponível</Etiqueta>
                       : escolhendoNivel === a.acao
                         ? null
-                        : <Botao tom="primario"
-                            onClick={() => setEscolhendoNivel(a.acao)}>
-                            Adicionar
-                          </Botao>}
+                        // §2/§5: LER nao pede aprovacao. Uma acao
+                        // somente-leitura entra num clique, no nivel
+                        // `automatico`; so o que tem EFEITO abre a
+                        // pergunta. Pedir permissao para ler gasta a
+                        // atencao que deveria sobrar para o momento em
+                        // que algo muda de verdade.
+                        : !a.exigeConfirmacao
+                          ? <Botao tom="primario" desabilitado={salvandoNivel}
+                              onClick={() => void vincular(a.acao, "automatico")}>
+                              Adicionar
+                            </Botao>
+                          : <Botao tom="primario"
+                              onClick={() => setEscolhendoNivel(a.acao)}>
+                              Adicionar
+                            </Botao>}
                 </div>
               </div>
 

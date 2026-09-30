@@ -64,8 +64,11 @@ import {
   vincularFerramentaExternaNoAgente,
 } from "@/lib/agentes/ferramentas-externas/repositorio";
 import {
-  ehFuncaoExterna, idDaFuncaoExterna, nivelRecomendado, riscoDaAcao,
+  ehFuncaoExterna, idDaFuncaoExterna, riscoDaAcao,
 } from "@/lib/agentes/composio/identidade-de-funcao";
+import {
+  efeitoDaAcaoExterna, exigeConfirmacao, fraseDoEfeito, nivelSugeridoParaEfeito,
+} from "@/lib/agentes/factory/efeito";
 
 export const dynamic = "force-dynamic";
 
@@ -103,7 +106,8 @@ export async function GET(request: Request, { params }: { params: { agenteId: st
         // ainda sem decisao. Nao ha default aqui de proposito.
         nivel: nivelPorId.get(v.funcaoId) ?? null,
         risco,
-        nivelSugerido: nivelRecomendado(risco),
+        nivelSugerido: nivelSugeridoParaEfeito(
+          efeitoDaAcaoExterna({ slug: v.acao, tags: [] })),
       };
     });
 
@@ -147,15 +151,24 @@ export async function POST(request: Request, { params }: { params: { agenteId: s
         toolkit,
         totalDisponivel: r.dados.totalDisponivel,
         acoes: r.dados.itens.map((a) => {
-          const risco = riscoDaAcao(a.slug);
+          // F7b.4.5 §4: o EFEITO vem das tags do catalogo — `readOnlyHint`
+          // e sinal legivel por maquina —, e nao do nome da acao. O slug
+          // so entra para AGRAVAR (enviar, apagar, cobrar), nunca para
+          // aliviar.
+          const efeito = efeitoDaAcaoExterna({ slug: a.slug, tags: a.tags });
           const id = idDaFuncaoExterna({ toolkit, acao: a.slug });
           return {
             acao: a.slug,
             nome: a.nome,
             descricao: a.descricao,
-            risco,
-            // SUGESTAO para a tela pre-selecionar. Nao e gravada.
-            nivelSugerido: nivelRecomendado(risco),
+            // `risco` continua saindo para nao quebrar quem ja o lia.
+            risco: riscoDaAcao(a.slug),
+            efeito,
+            efeitoTexto: fraseDoEfeito(efeito),
+            // §2/§5: leitura NAO pede confirmacao. A tela usa isto para
+            // adicionar num clique em vez de perguntar o nivel.
+            exigeConfirmacao: exigeConfirmacao(efeito),
+            nivelSugerido: nivelSugeridoParaEfeito(efeito),
             // `null` quando a acao nao produz id valido: a tela nao pode
             // oferecer algo que o banco recusaria ao gravar.
             funcaoId: id.ok ? id.funcaoId : null,
@@ -207,16 +220,21 @@ export async function POST(request: Request, { params }: { params: { agenteId: s
     }
 
     const risco = riscoDaAcao(acao);
+    const daLista = cat.dados.itens.find((a) => a.slug === acao);
+    const efeito = efeitoDaAcaoExterna({ slug: acao, tags: daLista?.tags ?? [] });
     return responder({
       ok: true,
       funcaoId: r.funcaoId,
       toolkit,
       acao,
       risco,
+      efeito,
+      efeitoTexto: fraseDoEfeito(efeito),
+      exigeConfirmacao: exigeConfirmacao(efeito),
       // Sempre `null`: a acao acabou de ser vinculada e ninguem decidiu
       // ainda. A tela le isto e manda a pessoa para a etapa de permissoes.
       nivel: null,
-      nivelSugerido: nivelRecomendado(risco),
+      nivelSugerido: nivelSugeridoParaEfeito(efeito),
       jaVinculada: r.estado === "ja_vinculada",
     }, r.estado === "ja_vinculada" ? 200 : 201);
   } catch {

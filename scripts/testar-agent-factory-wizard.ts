@@ -1740,8 +1740,21 @@ secao("T. Aprovar acontece NO chat — e adicionar pergunta o nivel");
       /prepararFuncoesExternas/.test(retomada));
   ok("T16b ferramenta interna nao consulta catalogo externo nenhum",
     /aprovacao\.funcaoId\.startsWith\("composio\."\)/.test(retomada));
-  ok("T17 e chama o modelo SEM declarar ferramentas — nao ha pedido novo",
-    /ferramentas: \[\]/.test(retomada));
+  // ── T17 REVISADO no F7b.4.5 §7 ─────────────────────────────────
+  //
+  // ANTES: "chama o modelo SEM declarar ferramentas". Era o jeito mais
+  // simples de impedir a "aprovacao Y", e era estreito demais: depois de
+  // alterar um valor, o agente nao conseguia CONSULTAR o resultado para
+  // confirmar ao usuario — a tarefa ficava pela metade.
+  //
+  // Agora ele recebe as ferramentas do agente MENOS a que acabou de ser
+  // consumida. A garantia que importa continua: aquela chamada especifica
+  // nao pode pedir aprovacao de novo.
+  ok("T17 a conclusao declara as OUTRAS ferramentas, menos a consumida",
+    /filter\(\(g\) => g\.funcaoId !== aprovacao\.funcaoId\)/.test(retomada) &&
+      /filter\(\(e\) => e\.funcaoId !== aprovacao\.funcaoId\)/.test(retomada));
+  ok("T17a e a mensagem do usuario NAO e reenviada no turno de conclusao",
+    /mensagemDoUsuario: ""/.test(retomada));
   ok("T18 os argumentos vem da aprovacao, nunca de quem chamou",
     /argumentos: aprovacao\.argumentos/.test(retomada) &&
       !/argumentos: entrada\./.test(retomada));

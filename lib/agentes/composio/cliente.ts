@@ -156,6 +156,17 @@ export interface AcaoExterna {
   readonly semAutenticacao: boolean;
   /** Schema de entrada, quando o catalogo o publica. */
   readonly schemaEntrada: object | null;
+  /**
+   * As tags do catalogo — F7b.4.5 §4.
+   *
+   * `readOnlyHint` e o sinal LEGIVEL POR MAQUINA de que a acao so
+   * consulta. MEDIDO: `GOOGLESHEETS_GET_SPREADSHEET_INFO` e
+   * `HACKERNEWS_GET_ITEM_WITH_ID` a tem; `GOOGLESHEETS_ADD_SHEET` e
+   * `GMAIL_SEND_EMAIL` nao.
+   *
+   * E ela que permite classificar o efeito sem adivinhar pelo nome.
+   */
+  readonly tags: readonly string[];
 }
 
 function acaoDaResposta(bruto: unknown): AcaoExterna | null {
@@ -172,6 +183,9 @@ function acaoDaResposta(bruto: unknown): AcaoExterna | null {
       typeof schema === "object" && schema !== null && !Array.isArray(schema)
         ? (schema as object)
         : null,
+    tags: Array.isArray(o.tags)
+      ? o.tags.filter((t): t is string => typeof t === "string")
+      : [],
   };
 }
 
@@ -225,6 +239,8 @@ export interface DetalheDaAcao {
   /** `true` quando a action roda sem conta conectada. MEDIDO. */
   readonly semAutenticacao: boolean;
   readonly depreciada: boolean;
+  /** Ver `AcaoExterna.tags`. `readOnlyHint` classifica o efeito. */
+  readonly tags: readonly string[];
 }
 
 /**
@@ -265,6 +281,9 @@ export async function detalharAcao(
       versao: typeof o.version === "string" ? o.version : "",
       semAutenticacao: o.no_auth === true,
       depreciada: o.is_deprecated === true,
+      tags: Array.isArray(o.tags)
+        ? o.tags.filter((t): t is string => typeof t === "string")
+        : [],
     },
   };
 }

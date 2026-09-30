@@ -58,8 +58,13 @@ import {
   lerAprovacaoDaConversaParaRetomada,
 } from "@/lib/agentes/aprovacoes/persistencia";
 import { retomarAprovacao } from "@/lib/agentes/execucao-funcoes/executar";
+import { conversarComFerramentas } from "@/lib/agentes/ia/laco-ferramentas";
+import { declararFerramentas } from "@/lib/agentes/ia/ferramentas";
+import { FUNCOES } from "@/lib/agentes/funcoes/registry";
 import type { DefinicaoFuncao } from "@/lib/agentes/funcoes/registry";
-import { prepararFuncoesExternas } from "@/lib/agentes/composio/preparar-externas";
+import {
+  prepararFuncoesExternas, type ExternasPreparadas,
+} from "@/lib/agentes/composio/preparar-externas";
 import { listarVinculosExternos } from "@/lib/agentes/ferramentas-externas/repositorio";
 import { listarPermissoesGravadas } from "@/lib/agentes/permissoes/gravadas";
 import { adaptadorDoProvedor } from "@/lib/agentes/ia/adaptador-por-provedor";
@@ -199,20 +204,29 @@ export async function retomarTurnoAprovado(
   //
   // Para Funcao interna nada disso roda: nenhuma consulta ao catalogo
   // externo acontece para quem nao precisa dela.
+  // As permissoes saem do escopo do `if` de proposito: elas servem tanto
+  // para resolver a acao externa quanto para declarar o que o modelo
+  // podera usar DEPOIS, no turno de conclusao (§7).
+  const [vinculos, gravadas] = await Promise.all([
+    listarVinculosExternos({ userId, agenteId: aprovacao.agenteId }),
+    listarPermissoesGravadas({ userId, agenteId: aprovacao.agenteId }),
+  ]);
+  if (gravadas.coleta !== "ok") {
+    return falha("indisponivel", "Nao foi possivel carregar as permissoes do agente.");
+  }
+
   let definicoesExternas: Readonly<Record<string, DefinicaoFuncao>> | undefined;
-  if (aprovacao.funcaoId.startsWith("composio.")) {
-    const [vinculos, gravadas] = await Promise.all([
-      listarVinculosExternos({ userId, agenteId: aprovacao.agenteId }),
-      listarPermissoesGravadas({ userId, agenteId: aprovacao.agenteId }),
-    ]);
-    if (vinculos.coleta !== "ok" || gravadas.coleta !== "ok") {
-      return falha("indisponivel", "Nao foi possivel carregar as ferramentas do agente.");
-    }
+  let externasPreparadas: ExternasPreparadas | undefined;
+  if (vinculos.coleta === "ok" && vinculos.vinculos.length > 0) {
     const preparadas = await prepararFuncoesExternas({
       vinculos: vinculos.vinculos,
       permissoes: gravadas.permissoes.map((g) => ({ funcaoId: g.funcaoId, nivel: g.nivel })),
     });
     definicoesExternas = preparadas.definicoes;
+    externasPreparadas = preparadas;
+  }
+  if (aprovacao.funcaoId.startsWith("composio.") && definicoesExternas === undefined) {
+    return falha("indisponivel", "Nao foi possivel carregar as ferramentas do agente.");
   }
 
   const execucao = await retomarAprovacao({ userId, aprovacaoId, definicoesExternas });
@@ -285,19 +299,49 @@ export async function retomarTurnoAprovado(
     }],
   });
 
-  // ── 5. UMA ida ao modelo, para a resposta final ───────────────────
+  // ── 5. O modelo conclui — e PODE usar outras ferramentas ──────────
   //
-  // Sem `ferramentas` declaradas de proposito: este turno existe para
-  // CONCLUIR, e oferecer o catalogo de novo convidaria a um segundo
-  // pedido — que precisaria de outra aprovacao, e seria a "aprovacao Y"
-  // que o §8 proibe.
+  // ── A revisao do F7b.4.5 §7 ──────────────────────────────────────
+  //
+  // O F7b.4.4 chamava o modelo com `ferramentas: []`, para que ele nao
+  // pedisse nada de novo e nao nascesse a "aprovacao Y". Funcionava, e
+  // era estreito demais: depois de alterar um valor, o agente nao
+  // conseguia CONSULTAR o resultado para confirmar ao usuario. A tarefa
+  // ficava pela metade.
+  //
+  // Agora ele recebe as ferramentas do agente MENOS uma: a que acabou de
+  // ser consumida. Isso preserva a garantia — aquela chamada especifica
+  // nao pode pedir aprovacao outra vez — e devolve a capacidade de
+  // terminar o trabalho.
+  //
+  // E com a politica por EFEITO (§2), o que sobra e majoritariamente
+  // leitura, que roda sem confirmacao nenhuma.
+  const ferramentasParaConcluir = declararFerramentas({
+    catalogo: FUNCOES,
+    permissoes: gravadas.coleta === "ok"
+      ? gravadas.permissoes
+          .filter((g) => g.funcaoId !== aprovacao.funcaoId)
+          .map((g) => ({ funcaoId: g.funcaoId, nivel: g.nivel }))
+      : [],
+    externas: (externasPreparadas?.declaraveis ?? [])
+      .filter((e) => e.funcaoId !== aprovacao.funcaoId),
+  });
+
   let texto: string | null = null;
   try {
-    const r = await adaptador({
+    const r = await conversarComFerramentas({
+      userId,
+      agenteId: aprovacao.agenteId,
       instrucao: contexto.instrucao,
-      mensagens: dialogo,
-      ferramentas: [],
+      // A mensagem do usuario NAO e reenviada: ela ja esta no dialogo
+      // remontado, e repeti-la duplicaria o turno.
+      mensagemDoUsuario: "",
+      historico: dialogo,
+      ferramentas: ferramentasParaConcluir,
+      definicoesExternas: definicoesExternas,
+      conversaId: aprovacao.conversaId,
       nivelDeTrabalho: ia.nivel ?? undefined,
+      adaptador,
     });
     texto = r.texto;
   } catch (e) {

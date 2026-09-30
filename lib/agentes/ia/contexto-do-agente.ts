@@ -46,6 +46,23 @@ export const CONFIANCA_POR_BLOCO = Object.freeze({
   INSTRUCOES_DO_AGENTE: "confiavel",
   SKILL: "confiavel",
   MEMORIA_DO_USUARIO: "confiavel",
+  /**
+   * O que o agente LEMBRA do dono, entre conversas — F7b.4.5.
+   *
+   * `confiavel` porque o conteudo e derivado das proprias conversas do
+   * dono, ja filtrado pela politica de ingestao (que recusa papeis que
+   * nao sejam `usuario`/`assistente` e redige sete formas de segredo).
+   * Nao e texto de terceiro, e nao e conteudo de arquivo.
+   */
+  MEMORIA_DO_DONO: "confiavel",
+  /**
+   * O que este agente SABE FAZER, em linguagem de gente — F7b.4.5.
+   *
+   * Montado dos vinculos REAIS. Existe porque o agente respondia com
+   * `planilha_inspecionar` quando perguntado sobre suas ferramentas —
+   * vazamento de implementacao na cara do dono.
+   */
+  CAPACIDADES_DO_AGENTE: "confiavel",
   FONTES_DISPONIVEIS: "confiavel",
   CONTEUDO_DE_FONTE: "nao_confiavel",
   MENSAGEM_DO_USUARIO: "nao_confiavel",
@@ -102,6 +119,27 @@ export interface EntradaDoContexto {
   readonly memorias: readonly Memoria[];
   /** METADADO das fontes. Nunca o conteudo. */
   readonly fontes: readonly FonteParaModelo[];
+  /**
+   * O que o agente lembra do dono — F7b.4.5 §12.
+   *
+   * Frases ja prontas, vindas do grafo do Zep. Omitir mantem o
+   * comportamento anterior (nenhum bloco de memoria de dono).
+   */
+  readonly lembrancasDoDono?: readonly string[];
+  /**
+   * O estado da memoria: `ligada`, `desligada` ou `indisponivel`.
+   *
+   * Entra no contexto porque o agente precisa saber a propria capacidade
+   * (§11). Sem isso ele dizia "nao tenho memoria" com a memoria ligada e
+   * apenas vazia — duas situacoes diferentes com a mesma frase errada.
+   */
+  readonly estadoDaMemoria?: "ligada" | "desligada" | "indisponivel";
+  /**
+   * As capacidades deste agente, em linguagem de gente — F7b.4.5 §20/§21.
+   *
+   * Nome e descricao vem do catalogo de PACKS, e nao do `funcao_id`.
+   */
+  readonly capacidades?: readonly { readonly nome: string; readonly descricao: string }[];
 }
 
 export interface ContextoDoAgente {
@@ -109,8 +147,73 @@ export interface ContextoDoAgente {
   readonly instrucao: string;
   readonly blocos: readonly { readonly nome: NomeDeBloco; readonly conteudo: string }[];
   readonly memoriasIncluidas: number;
+  /** Quantas lembrancas do dono entraram — F7b.4.5. Para observabilidade. */
+  readonly lembrancasDoDonoIncluidas: number;
   readonly memoriasExcluidasPorTeto: number;
   readonly skillsIncluidas: number;
+}
+
+/**
+ * O bloco de memoria do dono, e o que ele diz quando esta VAZIO.
+ *
+ * ── A frase do vazio e o ponto ──────────────────────────────────────
+ *
+ * "Memoria ligada, sem lembrancas ainda" NAO e a mesma coisa que "nao
+ * tenho memoria", e o agente dizia a segunda nas duas situacoes. Pior:
+ * o Zep processa o grafo de forma ASSINCRONA, entao um fato dito ha
+ * segundos ainda nao aparece — e responder "nao tenho memoria" ali e
+ * simplesmente falso.
+ *
+ * A instrucao proibe inventar lembranca. Sem fato, o agente diz que nao
+ * lembra DAQUILO — nunca que nao tem memoria.
+ */
+function blocoDeMemoriaDoDono(
+  lembrancas: readonly string[],
+  estado: "ligada" | "desligada" | "indisponivel"
+): string {
+  if (estado === "desligada") {
+    return "A memoria de longo prazo deste agente esta DESLIGADA. " +
+      "Se o usuario perguntar por que voce nao lembra de conversas anteriores, " +
+      "explique que a memoria esta desligada e que ele pode liga-la na configuracao.";
+  }
+  if (estado === "indisponivel") {
+    return "A memoria de longo prazo esta ligada, mas nao pode ser consultada agora. " +
+      "Nao afirme que nao tem memoria; diga que nao conseguiu consultar desta vez.";
+  }
+  if (lembrancas.length === 0) {
+    return "Sua memoria de longo prazo esta ATIVA, e nao ha lembranca relevante " +
+      "para esta pergunta ainda. Isso NAO significa que voce nao tem memoria: " +
+      "se o usuario perguntar, diga que a memoria esta ativa mas que voce ainda " +
+      "nao tem essa informacao guardada. NUNCA invente uma lembranca.";
+  }
+  return "Sua memoria de longo prazo esta ATIVA. Voce lembra do seguinte " +
+    "sobre este usuario, de conversas anteriores:\n" +
+    lembrancas.map((l) => `- ${l}`).join("\n") +
+    "\n\nUse isso naturalmente. NUNCA invente uma lembranca que nao esteja acima.";
+}
+
+/**
+ * O bloco de capacidades, em linguagem de gente.
+ *
+ * ── O defeito que ele corrige ───────────────────────────────────────
+ *
+ * O Rodrigo adicionou "Planilhas" e o agente respondeu que tinha
+ * `planilha_inspecionar`. O modelo so conhecia os nomes das Functions
+ * declaradas, entao era isso mesmo que ele tinha para falar.
+ *
+ * Aqui ele recebe o nome que o DONO escolheu na tela, com a descricao do
+ * catalogo — e a instrucao de nao recitar id interno.
+ */
+function blocoDeCapacidades(
+  capacidades: readonly { readonly nome: string; readonly descricao: string }[]
+): string {
+  return "Estas sao as suas capacidades, com os nomes que o usuario conhece:\n" +
+    capacidades.map((c) => `- ${c.nome}: ${c.descricao}`).join("\n") +
+    "\n\nAo falar do que voce sabe fazer, use ESTES nomes. NUNCA cite " +
+    "identificadores internos de ferramenta (como `planilha.ler` ou " +
+    "`planilha_inspecionar`) como se fossem o nome da capacidade — eles sao " +
+    "detalhe de implementacao e nao dizem nada ao usuario. " +
+    "E NUNCA afirme ter uma capacidade que nao esteja nesta lista.";
 }
 
 function blocoDeSkills(skills: readonly Skill[]): string {
@@ -168,6 +271,25 @@ export function montarContextoDoAgente(entrada: EntradaDoContexto): ContextoDoAg
   if (selecao.incluidas.length > 0) {
     blocos.push({ nome: "MEMORIA_DO_USUARIO", conteudo: blocoDeMemorias(selecao.incluidas) });
   }
+  // As capacidades vem ANTES da memoria de proposito: quando o usuario
+  // pergunta "o que voce sabe fazer", a resposta esta aqui, e o modelo le
+  // na ordem em que recebe.
+  if ((entrada.capacidades?.length ?? 0) > 0) {
+    blocos.push({
+      nome: "CAPACIDADES_DO_AGENTE",
+      conteudo: blocoDeCapacidades(entrada.capacidades ?? []),
+    });
+  }
+  // O bloco de memoria do dono entra mesmo VAZIO quando a memoria esta
+  // ligada: e ele que carrega a diferenca entre "desligada" e "ligada e
+  // ainda sem lembranca", que era justamente o que o agente errava.
+  if (entrada.estadoDaMemoria !== undefined) {
+    blocos.push({
+      nome: "MEMORIA_DO_DONO",
+      conteudo: blocoDeMemoriaDoDono(
+        entrada.lembrancasDoDono ?? [], entrada.estadoDaMemoria),
+    });
+  }
   if (entrada.fontes.length > 0) {
     blocos.push({ nome: "FONTES_DISPONIVEIS", conteudo: blocoDeFontes(entrada.fontes) });
   }
@@ -175,6 +297,7 @@ export function montarContextoDoAgente(entrada: EntradaDoContexto): ContextoDoAg
   return {
     instrucao: blocos.map((b) => `${ABRE(b.nome)}\n${b.conteudo}\n${FECHA(b.nome)}`).join("\n\n"),
     blocos,
+    lembrancasDoDonoIncluidas: entrada.lembrancasDoDono?.length ?? 0,
     memoriasIncluidas: selecao.incluidas.length,
     memoriasExcluidasPorTeto: selecao.excluidasPorTeto,
     skillsIncluidas: entrada.skills.length,

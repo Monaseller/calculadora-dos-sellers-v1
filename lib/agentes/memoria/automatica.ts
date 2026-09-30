@@ -35,6 +35,7 @@ import "server-only";
  */
 import { principalDeMemoria, threadDeConversa } from "@/lib/agentes/memoria/identidade";
 import {
+  buscarFatosDoPrincipal,
   adicionarMensagens, garantirPrincipal, garantirThread, lerContexto,
   memoriaConfigurada,
 } from "@/lib/agentes/memoria/zep";
@@ -75,11 +76,29 @@ export interface ContextoRecuperado {
 export const MAX_CARACTERES_DE_CONTEXTO = 4000;
 
 /**
- * O contexto relevante daquele dono+agente para esta conversa.
+ * O contexto DESTA conversa. Nao e memoria cross-chat.
  *
- * O `thread` e da conversa, mas o Zep responde com o contexto do
- * PRINCIPAL — e por isso que a preferencia dita no Chat A aparece no Chat
- * B do mesmo agente, e e por isso que o Agente B nao a ve.
+ * ── A correcao de uma afirmacao errada — F7b.4.5 ────────────────────
+ *
+ * Este docblock dizia: "o Zep responde com o contexto do PRINCIPAL — e
+ * por isso que a preferencia dita no Chat A aparece no Chat B". Isso era
+ * SUPOSICAO, e era falsa.
+ *
+ * MEDIDO em `scripts/medir-zep-cross-chat.ts`, contra a API real:
+ *
+ *   thread A, depois de ingerir "Meu nome e Douglas":
+ *     `/threads/A/context` cita Douglas apos ~15 s.
+ *
+ *   thread B, NOVA, do MESMO principal:
+ *     `/threads/B/context` continua VAZIO apos 15 s, 45 s, 90 s e 150 s.
+ *
+ * Ou seja: contexto de thread e memoria DA CONVERSA. Foi essa suposicao
+ * que fez o Rodrigo dizer o nome num chat e o agente nao saber no
+ * seguinte — e ela sobreviveu a uma suite inteira porque a suite media o
+ * modulo, e nao o caminho do usuario.
+ *
+ * O recall entre conversas esta em `recuperarMemoriaDoDono`, que consulta
+ * o GRAFO do principal.
  */
 export async function recuperarContexto(
   escopo: EscopoDeMemoria
@@ -94,6 +113,70 @@ export async function recuperarContexto(
 
   const texto = r.dados === null ? null : r.dados.slice(0, MAX_CARACTERES_DE_CONTEXTO);
   return { desfecho: "ok", texto };
+}
+
+/** Um fato lembrado, ja em frase. */
+export interface LembrancaDoDono {
+  readonly fato: string;
+}
+
+export interface MemoriaDoDono {
+  readonly desfecho: DesfechoDeMemoria;
+  readonly lembrancas: readonly LembrancaDoDono[];
+}
+
+/**
+ * Quantos fatos entram por turno.
+ *
+ * Poucos de proposito: o grafo cresce sem limite, e despejar tudo faria a
+ * memoria ocupar a janela que pertence as instrucoes e as fontes.
+ */
+export const MAX_LEMBRANCAS = 6;
+
+/**
+ * O que o agente lembra DO DONO — a memoria que atravessa conversas.
+ *
+ * ── Por que `pergunta` entra aqui ───────────────────────────────────
+ *
+ * O grafo e buscado por relevancia. Mandar a pergunta do turno e o que
+ * traz "qual e meu nome?" -> o fato do nome, em vez dos seis fatos mais
+ * recentes sobre qualquer coisa.
+ *
+ * ── E por que o resultado distingue VAZIO de DESLIGADO ──────────────
+ *
+ * Sao situacoes diferentes e pedem frases diferentes (§11):
+ *
+ *   `desligada`  o dono nao ligou memoria. O agente deve dizer isso.
+ *   `ok` + zero  a memoria esta ligada e ainda nao ha o que lembrar —
+ *                inclusive porque o Zep processa o grafo de forma
+ *                ASSINCRONA, e um fato dito ha segundos pode nao estar
+ *                indexado. Dizer "nao tenho memoria" aqui seria errado.
+ *
+ * Nunca inventar lembranca: sem fato, a lista volta vazia.
+ */
+export async function recuperarMemoriaDoDono(
+  escopo: EscopoDeMemoria,
+  pergunta: string
+): Promise<MemoriaDoDono> {
+  if (!escopo.memoriaAtiva) return { desfecho: "desligada", lembrancas: [] };
+  if (!memoriaConfigurada()) return { desfecho: "nao_configurada", lembrancas: [] };
+
+  const principal = principalDeMemoria(escopo.userId, escopo.agenteId);
+  const r = await buscarFatosDoPrincipal(principal, pergunta, MAX_LEMBRANCAS);
+  if (r.estado === "nao_configurado") return { desfecho: "nao_configurada", lembrancas: [] };
+  if (r.estado === "falha") return { desfecho: "falha", lembrancas: [] };
+
+  // Deduplicado por frase: o grafo pode devolver o mesmo fato por mais de
+  // uma aresta, e repetir a mesma linha tres vezes so gasta janela.
+  const vistas = new Set<string>();
+  const lembrancas: LembrancaDoDono[] = [];
+  for (const f of r.dados) {
+    const chave = f.fato.toLowerCase();
+    if (vistas.has(chave)) continue;
+    vistas.add(chave);
+    lembrancas.push({ fato: f.fato });
+  }
+  return { desfecho: "ok", lembrancas };
 }
 
 export interface ResultadoDaIngestao {
