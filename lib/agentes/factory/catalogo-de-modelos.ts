@@ -111,22 +111,20 @@ export interface ModeloDoCatalogo {
 /**
  * O catalogo.
  *
- * ── Por que `openai` continua AUSENTE, mesmo com chave ──────────────
+ * ── A OpenAI entrou, e a ordem importou ────────────────────────────
  *
- * Desde o F7b.4.2 existe `OPENAI_API_KEY`, e ela e valida: `GET
- * /v1/models` responde 200 com 127 modelos, incluindo a familia `gpt-5`,
- * que tem function calling.
+ * Ela ficou FORA do catalogo por um gate inteiro, com a chave ja
+ * existindo: a conta nao tinha saldo, toda inferencia respondia 429
+ * `credit_balance_exhausted`, e uma entrada aqui faria a tela OFERECER um
+ * provedor cuja primeira mensagem falharia.
  *
- * E toda chamada de INFERENCIA responde 429
- * `credit_balance_exhausted` — a conta nao tem saldo. Medido em
- * `scripts/testar-openai-disponibilidade-live.ts`, que classifica isso
- * como `billing_necessario` e nao como "nao configurado".
+ * Com o saldo regularizado, a ordem foi a do gate: provar primeiro,
+ * catalogar depois. O roundtrip de 46719.65 passou pelo laco e pelo
+ * guard, o multi-turno levou o resultado adiante, e o fail-closed fechou
+ * o turno sem improviso — `scripts/testar-openai-runtime-live.ts`.
  *
- * Uma entrada aqui faria a etapa IA / Modelo OFERECER a OpenAI, e a
- * primeira mensagem do agente falharia. Entrada no catalogo e promessa de
- * capacidade, e `provadoEm` existe justamente para que nenhuma promessa
- * entre sem endereco. O dia em que houver saldo, a ordem e: rodar o
- * roundtrip de 46719.65, e so depois acrescentar a entrada.
+ * `provadoEm` existe para isto: nenhuma promessa de capacidade entra aqui
+ * sem endereco, e o teste confere que o endereco existe.
  */
 const CATALOGO: readonly ModeloDoCatalogo[] = Object.freeze([
   Object.freeze({
@@ -154,6 +152,28 @@ const CATALOGO: readonly ModeloDoCatalogo[] = Object.freeze([
     visao: false,
     niveis: Object.freeze(["equilibrado"] as const),
     provadoEm: "scripts/testar-gemini-stateless-live.ts",
+  }),
+  Object.freeze({
+    provedor: "openai" as const,
+    envDoModelo: "OPENAI_MODEL_AGENTE",
+    envDaChave: "OPENAI_API_KEY",
+    nomeVisivel: "OpenAI",
+    descricao: "Compatível com ferramentas. É o único que permite escolher o nível de trabalho.",
+    chat: true,
+    ferramentas: true,
+    visao: false,
+    /**
+     * QUATRO niveis, e os quatro foram medidos um por um em gpt-5.2:
+     *
+     *   none -> 200    low -> 200    medium -> 200    high -> 200
+     *   minimal -> 400 "Unsupported value ... with the 'gpt-5.2' model"
+     *
+     * Por isso `minimal` nao aparece em `ESFORCO_POR_NIVEL`, e por isso
+     * este e o unico provedor do catalogo em que a tela mostra o seletor:
+     * `ofereceEscolhaDeNivel` fica true quando ha mais de um.
+     */
+    niveis: Object.freeze(["rapido", "equilibrado", "avancado", "maximo"] as const),
+    provadoEm: "scripts/testar-openai-runtime-live.ts",
   }),
 ]);
 

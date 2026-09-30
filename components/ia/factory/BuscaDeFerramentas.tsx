@@ -41,10 +41,25 @@ import {
 } from "@/components/ui/Primitivas";
 import {
   buscarFerramentasDisponiveis, desvincularFerramentaExterna,
-  listarAcoesDoAplicativo, listarFerramentasExternas, vincularFerramentaExterna,
-  type AcaoExternaUI, type AchadoDeFerramentaUI,
+  iniciarConexaoExterna, listarAcoesDoAplicativo, listarConexoesExternas,
+  listarFerramentasExternas, vincularFerramentaExterna,
+  type AcaoExternaUI, type AchadoDeFerramentaUI, type ContaExternaUI,
   type FerramentaExternaVinculadaUI, type RespostaDaFactory,
 } from "@/lib/ia/agentes-http";
+
+/**
+ * O que cada estado de conta significa para quem esta olhando — F7b.4.2.
+ *
+ * A frase fala do que a PESSOA precisa fazer, e nao do que o provedor
+ * respondeu. `INITIALIZING` nao diz nada a ninguem; "falta você autorizar"
+ * diz.
+ */
+const FRASE_DA_CONTA: Readonly<Record<string, string>> = Object.freeze({
+  conectada: "Conta conectada.",
+  aguardando_dono: "Falta você autorizar no aplicativo.",
+  com_problema: "A conexão parou de funcionar. Conecte de novo.",
+  desconhecida: "Não foi possível saber o estado desta conexão.",
+});
 
 /** Espera antes de buscar, para nao chamar a cada tecla. */
 const ESPERA_MS = 350;
@@ -93,6 +108,11 @@ export function BuscaDeFerramentas({
   const [totalDeAcoes, setTotalDeAcoes] = useState(0);
   const [carregandoAcoes, setCarregandoAcoes] = useState(false);
 
+  // F7b.4.2 §14: as contas do DONO. Nao pertencem ao agente, e por isso
+  // nao entram no estado de ativacao dele.
+  const [contas, setContas] = useState<readonly ContaExternaUI[]>([]);
+  const [conectando, setConectando] = useState(false);
+
   const relogio = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const recarregarVinculadas = useCallback(async () => {
@@ -122,11 +142,45 @@ export function BuscaDeFerramentas({
     return () => { if (relogio.current !== null) clearTimeout(relogio.current); };
   }, [termo]);
 
+  /**
+   * Pede o link e leva a pessoa ate o provedor.
+   *
+   * Aba NOVA, de proposito: a configuracao do agente fica aberta atras, e
+   * ao voltar a pessoa nao perde onde estava. `noopener` porque a pagina de
+   * destino nao tem nada que fazer com esta janela.
+   *
+   * Nenhum token viaja: o servidor devolve a URL ja pronta.
+   */
+  async function conectarConta(toolkit: string) {
+    setErro(null);
+    setConectando(true);
+    try {
+      const r = await iniciarConexaoExterna(toolkit);
+      if (r.estado !== "ok") {
+        setErro(frasePorEstado(r, "Não foi possível iniciar a conexão."));
+        return;
+      }
+      window.open(r.dados.urlParaConectar, "_blank", "noopener,noreferrer");
+      // Recarrega o estado: ao voltar, a pessoa ve `conectada` sem
+      // precisar recarregar a pagina inteira.
+      const c = await listarConexoesExternas(toolkit);
+      if (c.estado === "ok") setContas(c.dados);
+    } finally {
+      setConectando(false);
+    }
+  }
+
   async function abrirAplicativo(chave: string) {
     setErro(null);
     setAplicativo(chave);
     setAcoes([]);
+    setContas([]);
     setCarregandoAcoes(true);
+    // A conta e consultada junto das acoes: sem ela, a pessoa escolheria
+    // ferramentas sem saber que ainda falta autorizar o aplicativo.
+    void listarConexoesExternas(chave).then((c) => {
+      if (c.estado === "ok") setContas(c.dados);
+    });
     try {
       const r = await listarAcoesDoAplicativo(agenteId, chave);
       if (r.estado !== "ok") {
@@ -278,9 +332,17 @@ export function BuscaDeFerramentas({
                     <Etiqueta tom={v.risco === "leitura" ? "ok" : "atencao"}>
                       {ROTULO_DO_RISCO[v.risco] ?? v.risco}
                     </Etiqueta>
-                    <Etiqueta tom={v.nivel === "automatico" ? "ok" : "info"}>
-                      {ROTULO_DO_NIVEL[v.nivel] ?? v.nivel}
-                    </Etiqueta>
+                    {/*
+                      F7b.4.2 §11: `nivel: null` e VINCULADA E SEM DECISAO.
+                      A etiqueta diz isso em vez de mostrar a sugestao como
+                      se fosse escolha — era exatamente o que o desenho
+                      anterior fazia, e o que o gate corrigiu.
+                    */}
+                    {v.nivel === null
+                      ? <Etiqueta tom="atencao">Falta definir a permissão</Etiqueta>
+                      : <Etiqueta tom={v.nivel === "automatico" ? "ok" : "info"}>
+                          {ROTULO_DO_NIVEL[v.nivel] ?? v.nivel}
+                        </Etiqueta>}
                   </div>
                   <details style={{ marginTop: ESPACO.sm }}>
                     <summary style={{
@@ -314,10 +376,49 @@ export function BuscaDeFerramentas({
           </p>
         )}
 
+        {/*
+          F7b.4.2 §14: a conta vem ANTES da lista de acoes, porque sem ela
+          nenhuma acao executaria. E conectar NAO concede nada ao agente —
+          o que permite continua sendo a permissao, na etapa seguinte.
+        */}
+        {aplicativo !== null && !carregandoAcoes && (
+          <Cartao>
+            {(() => {
+              const conta = contas.find((c) => c.toolkit === aplicativo);
+              const conectada = conta?.estado === "conectada";
+              return (
+                <div style={{
+                  display: "flex", justifyContent: "space-between",
+                  gap: ESPACO.md, flexWrap: "wrap", alignItems: "center",
+                }}>
+                  <div style={{ minWidth: 0 }}>
+                    <Etiqueta tom={conectada ? "ok" : "atencao"}>
+                      {conta === undefined
+                        ? "Conta não conectada"
+                        : FRASE_DA_CONTA[conta.estado] ?? "Estado desconhecido"}
+                    </Etiqueta>
+                    <p style={{
+                      margin: `${ESPACO.xs}px 0 0`,
+                      fontSize: TAMANHO.miudo, color: CROMO.textoFraco,
+                    }}>
+                      Conectar a conta não dá permissão a este agente. Você decide o que
+                      ele pode fazer na etapa Permissões.
+                    </p>
+                  </div>
+                  <Botao tom={conectada ? "secundario" : "primario"} desabilitado={conectando}
+                    onClick={() => void conectarConta(aplicativo)}>
+                    {conectando ? "Abrindo…" : conectada ? "Conectar outra" : "Conectar conta"}
+                  </Botao>
+                </div>
+              );
+            })()}
+          </Cartao>
+        )}
+
         {!carregandoAcoes && acoes.length > 0 && (
           <p style={{ margin: 0, fontSize: TAMANHO.miudo, color: CROMO.textoFraco }}>
             Escolha só o que este agente precisa. Mostrando {acoes.length} de {totalDeAcoes}.
-            Ações que escrevem nascem pedindo aprovação.
+            Adicionar não dá permissão — você decide o nível na etapa Permissões.
           </p>
         )}
 
@@ -346,8 +447,9 @@ export function BuscaDeFerramentas({
                     <Etiqueta tom={a.risco === "leitura" ? "ok" : "atencao"}>
                       {ROTULO_DO_RISCO[a.risco] ?? a.risco}
                     </Etiqueta>
+                    {/* SUGESTAO, e o texto diz isso. Adicionar nao concede. */}
                     <Etiqueta tom="info">
-                      {ROTULO_DO_NIVEL[a.nivelRecomendado] ?? a.nivelRecomendado}
+                      Sugerido: {ROTULO_DO_NIVEL[a.nivelSugerido] ?? a.nivelSugerido}
                     </Etiqueta>
                   </div>
                 </div>
