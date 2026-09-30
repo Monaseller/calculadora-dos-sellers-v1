@@ -47,8 +47,25 @@ import {
 export type ResultadoDaAtivacao =
   /** Pronta para usar agora. */
   | { readonly estado: "ativada"; readonly nome: string }
-  /** Ativada, e falta o dono conectar a conta do provedor. */
-  | { readonly estado: "aguardando_conexao"; readonly nome: string; readonly toolkit: string }
+  /**
+    * Ativada, e falta o dono conectar a conta do provedor.
+    *
+    * `reconectar` distingue duas situacoes que a mesma tela resolve com o
+    * mesmo botao, mas que NAO sao a mesma frase — §10:
+    *
+    *   false  nunca houve conta deste aplicativo
+    *   true   houve, e ela deixou de servir (expirou, foi revogada ou
+    *          desativada no provedor)
+    *
+    * Dizer "conecte sua conta" a quem ja conectou faz a pessoa procurar o
+    * que fez de errado. A acao e a mesma; a explicacao nao.
+    */
+  | {
+      readonly estado: "aguardando_conexao";
+      readonly nome: string;
+      readonly toolkit: string;
+      readonly reconectar: boolean;
+    }
   | { readonly estado: "opcao_invalida" }
   | { readonly estado: "catalogo_indisponivel" }
   | { readonly estado: "falha" };
@@ -158,9 +175,23 @@ async function ativarIntegracao(entrada: {
   const conectada = contas.estado === "ok" &&
     contas.dados.some((c) => c.estado === "conectada");
 
+  // §10: a MESMA leitura ja diz se houve conta antes, sem chamada extra.
+  //
+  // `com_problema` sozinho NAO basta, e isso foi medido: um link emitido e
+  // abandonado tambem termina `EXPIRED`. `autorizouAntes` e a evidencia de
+  // que a autorizacao chegou a comecar — sem ela nao se afirma nada.
+  //
+  // `aguardando_dono` tambem nao conta: ali a conexao foi comecada e nao
+  // terminada, e o caminho e concluir, nao reconectar.
+  const houveConta = contas.estado === "ok" &&
+    contas.dados.some((c) => c.estado === "com_problema" && c.autorizouAntes);
+
   return conectada
     ? { estado: "ativada", nome }
-    : { estado: "aguardando_conexao", nome, toolkit: entrada.toolkit };
+    : {
+        estado: "aguardando_conexao", nome, toolkit: entrada.toolkit,
+        reconectar: houveConta,
+      };
 }
 
 /**

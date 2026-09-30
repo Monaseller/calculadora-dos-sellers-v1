@@ -174,10 +174,15 @@ secao("B. O que a UI NAO manda");
   // A invariavel NAO afrouxa: continua sendo a comparacao ENTRE as duas
   // contagens, entao um `headers:` que nao seja aquele cabecalho
   // reprova, e o veto a credencial no cabecalho segue intacto.
-  ok("B3c os UNICOS cabecalhos sao os vinte e tres Content-Type do corpo JSON",
-    (CODIGO_TRANSPORTE.match(/headers\s*:/g) ?? []).length === 23 &&
+  // F7b.4.7: passou a VINTE E QUATRO. `resolverConexaoDaCapacidade` leva
+  // corpo JSON e declara o cabecalho; `iniciarConexaoDaCapacidade` e POST
+  // SEM corpo e nao declara nenhum — se declarasse, a igualdade entre as
+  // duas contagens continuaria valendo e a invariavel nao acusaria, mas
+  // estaria descrevendo um corpo inexistente. Ela fica de fora por isso.
+  ok("B3c os UNICOS cabecalhos sao os vinte e quatro Content-Type do corpo JSON",
+    (CODIGO_TRANSPORTE.match(/headers\s*:/g) ?? []).length === 24 &&
       (CODIGO_TRANSPORTE.match(/headers: \{ "Content-Type": "application\/json" \}/g) ?? [])
-        .length === 23 &&
+        .length === 24 &&
       !/"X-|Cookie|Api-Key|Idempotency-Key/i.test(CODIGO_TRANSPORTE));
   ok("B3c1 o envio de arquivo NAO declara Content-Type a mao",
     /body: formulario/.test(corpoDaFuncaoAdiante("enviarFonteDoAgente")) &&
@@ -515,6 +520,24 @@ secao("B. O que a UI NAO manda");
     // continua sendo vinculo + permissao, conferidos pelo guard. Mesma
     // regra do §10.
     iniciarConexaoExterna: "POST",
+    // ── AGENT-FACTORY-F7b.4.7: conectar SEM sair do chat ─────────
+    //
+    // Pede o link de autorizacao para a capacidade que ficou pendente.
+    // POST porque CRIA uma conexao pendente no provedor — e a unica
+    // escrita da area que nao leva corpo NENHUM sendo POST: o agente e a
+    // pendencia vao no caminho, e nao ha terceiro parametro.
+    //
+    // A resposta publica so `urlParaConectar` e `expiraEm`. Nem
+    // `link_token`, nem conta, nem chave: o §2 proibe, e a suite live
+    // confere as chaves publicadas uma por uma.
+    iniciarConexaoDaCapacidade: "POST",
+    // Confere a conexao, escolhe a loja ou recusa — e, quando ja da,
+    // RETOMA a tarefa. PATCH porque altera uma pendencia existente.
+    //
+    // Retomar e do servidor: o cliente manda uma palavra e recebe a
+    // resposta final do agente ao pedido ORIGINAL. E a transicao de
+    // estado e que garante uma retomada so.
+    resolverConexaoDaCapacidade: "PATCH",
   };
   const ESCRITAS_AUTORIZADAS = Object.keys(VERBOS_AUTORIZADOS);
   const verboDaFuncao = (nome: string): string | null =>
@@ -532,7 +555,7 @@ secao("B. O que a UI NAO manda");
     JSON.stringify(Object.keys(mapa).sort().map((n) => `${n}=${mapa[n]}`));
   const paresReais = JSON.stringify(escritasReais.map((n) => `${n}=${verboDaFuncao(n)}`));
 
-  ok("B5b as escritas publicadas sao EXATAMENTE as vinte e sete nominais",
+  ok("B5b as escritas publicadas sao EXATAMENTE as vinte e nove nominais",
     JSON.stringify(escritasReais) === esperadas, escritasReais.join(", ") || "nenhuma");
   ok("B5b0 cada escrita usa EXATAMENTE o verbo autorizado para ela",
     paresReais === pares(VERBOS_AUTORIZADOS),
@@ -550,13 +573,19 @@ secao("B. O que a UI NAO manda");
     "desvincularFerramentaExterna",
   ];
   const CORPO_MULTIPART = ["enviarFonteDoAgente"];
+  // F7b.4.7: o primeiro POST sem corpo da area. Grupo PROPRIO, e nao uma
+  // excecao dentro de `SEM_CORPO`: aquele grupo cobra `verbo === DELETE`,
+  // e afrouxar aquela checagem para caber esta funcao apagaria a regra
+  // "DELETE nao leva corpo" junto.
+  const SEM_CORPO_POST = ["iniciarConexaoDaCapacidade"];
   const CORPO_JSON = ESCRITAS_AUTORIZADAS.filter(
-    (f) => !SEM_CORPO.includes(f) && !CORPO_MULTIPART.includes(f));
+    (f) => !SEM_CORPO.includes(f) && !CORPO_MULTIPART.includes(f) &&
+      !SEM_CORPO_POST.includes(f));
 
   ok("B5b1 cada escrita leva o seu verbo autorizado",
     ESCRITAS_AUTORIZADAS.every((f) => verboDaFuncao(f) === VERBOS_AUTORIZADOS[f]));
-  ok("B5b1a as vinte e tres escritas de corpo JSON levam JSON.stringify",
-    CORPO_JSON.length === 23 &&
+  ok("B5b1a as vinte e quatro escritas de corpo JSON levam JSON.stringify",
+    CORPO_JSON.length === 24 &&
       CORPO_JSON.every((f) => /body: JSON\.stringify/.test(corpoDaFuncao(f))));
   ok("B5b1b o envio de arquivo leva FormData, e NAO JSON",
     CORPO_MULTIPART.every((f) =>
@@ -566,14 +595,21 @@ secao("B. O que a UI NAO manda");
     SEM_CORPO.length === 3 &&
       SEM_CORPO.every((f) =>
         verboDaFuncao(f) === "DELETE" && !/body\s*:/.test(corpoDaFuncao(f))));
+  ok("B5b1c1 o POST sem corpo e POST, e nao leva corpo nenhum",
+    SEM_CORPO_POST.length === 1 &&
+      SEM_CORPO_POST.every((f) =>
+        verboDaFuncao(f) === "POST" && !/body\s*:/.test(corpoDaFuncao(f)) &&
+        !/headers\s*:/.test(corpoDaFuncao(f))));
+  ok("B5b1c2 CONTROLE NEGATIVO: a sonda de corpo acusa quando o corpo existe",
+    /body\s*:/.test('method: "POST", body: JSON.stringify({})'));
   ok("B5b1d CONTROLE NEGATIVO: um DELETE ganhar corpo reprovaria",
     /body\s*:/.test('method: "DELETE", body: JSON.stringify({})'));
-  ok("B5b2 o transporte tem vinte e sete method, vinte e quatro body e nenhum a mais",
-    (CODIGO_TRANSPORTE.match(/method\s*:/g) ?? []).length === 27 &&
-      // 23 JSON + 1 multipart. Os TRES DELETE nao entram, e e a
-      // diferenca entre as duas contagens que prova isso.
-      (CODIGO_TRANSPORTE.match(/body\s*:/g) ?? []).length === 24 &&
-      (CODIGO_TRANSPORTE.match(/body: JSON\.stringify/g) ?? []).length === 23 &&
+  ok("B5b2 o transporte tem vinte e nove method, vinte e cinco body e nenhum a mais",
+    (CODIGO_TRANSPORTE.match(/method\s*:/g) ?? []).length === 29 &&
+      // 24 JSON + 1 multipart. Os TRES DELETE e o POST sem corpo nao
+      // entram, e e a diferenca entre as duas contagens que prova isso.
+      (CODIGO_TRANSPORTE.match(/body\s*:/g) ?? []).length === 25 &&
+      (CODIGO_TRANSPORTE.match(/body: JSON\.stringify/g) ?? []).length === 24 &&
       (CODIGO_TRANSPORTE.match(/body: formulario/g) ?? []).length === 1);
   ok("B5b3 a escrita de conversa vai para a rota de conversa, com corpo so de mensagem",
     /ROTA_SUFIXO_CONVERSA/.test(CODIGO_TRANSPORTE) &&
@@ -629,7 +665,7 @@ secao("B. O que a UI NAO manda");
     JSON.stringify([...ESCRITAS_AUTORIZADAS, "definirQualquerOutraCoisa"].sort())
       !== esperadas);
   ok("B5b8 ANCORA: a varredura enxergou funcoes de verdade",
-    escritasReais.length === 27 && corpoDaFuncao("criarAgenteViaApi").length > 50);
+    escritasReais.length === 29 && corpoDaFuncao("criarAgenteViaApi").length > 50);
   // ── Controles NOMINAIS das escritas novas — F7b.1 ───────────────
   //
   // Uma entrada por funcao publicada neste gate: o par nome=verbo tem
@@ -645,6 +681,9 @@ secao("B. O que a UI NAO manda");
     ["listarAcoesDoAplicativo", "PATCH"],
     ["vincularFerramentaExterna", "PATCH"],
     ["desvincularFerramentaExterna", "POST"],
+    // F7b.4.7: conectar viraria alteracao, e resolver viraria criacao.
+    ["iniciarConexaoDaCapacidade", "PATCH"],
+    ["resolverConexaoDaCapacidade", "POST"],
   ] as const) {
     ok(`F7b1-E1 CONTROLE: \`${nova}\` fora do esperado reprovaria`,
       JSON.stringify(ESCRITAS_AUTORIZADAS.filter((f) => f !== nova).sort())
@@ -739,12 +778,14 @@ secao("B. O que a UI NAO manda");
   //   DELETE passa a existir para DOIS recursos — memoria e fonte —
   //   porque sao conteudo que o dono escreveu e enviou. Apagar AGENTE
   //   continua sem caminho, e o assert abaixo cobra isso pelo nome.
-  ok("B7b treze POST, onze alteracoes por PATCH, tres DELETE — e nada alem",
-    (CODIGO_TRANSPORTE.match(/method:\s*"POST"/g) ?? []).length === 13 &&
+  ok("B7b quatorze POST, doze alteracoes por PATCH, tres DELETE — e nada alem",
+    // F7b.4.7: mais UM POST e mais UM PATCH — pedir o link da conexao e
+    // resolve-la. DELETE segue em TRES: a area nao ganhou como apagar.
+    (CODIGO_TRANSPORTE.match(/method:\s*"POST"/g) ?? []).length === 14 &&
       // F7b.4.6: mais UM PATCH — ativar a capacidade que faltou. Continua
       // sem POST e sem DELETE novos: a area nao ganhou recurso para criar
       // nem para apagar.
-      (CODIGO_TRANSPORTE.match(/method:\s*"PATCH"/g) ?? []).length === 11 &&
+      (CODIGO_TRANSPORTE.match(/method:\s*"PATCH"/g) ?? []).length === 12 &&
       (CODIGO_TRANSPORTE.match(/method:\s*"DELETE"/g) ?? []).length === 3 &&
       /export async function registrarDecisaoAprovacao\(/.test(CODIGO_TRANSPORTE) &&
       /export async function criarAgenteViaApi\(/.test(CODIGO_TRANSPORTE) &&

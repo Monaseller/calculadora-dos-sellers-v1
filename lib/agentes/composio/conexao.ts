@@ -261,6 +261,51 @@ export interface ContaExterna {
   readonly estado: EstadoDaConta;
   /** `true` quando a conta pertence ao principal DESTE dono. */
   readonly doDono: boolean;
+  /**
+   * `true` SO quando ha evidencia de que a autorizacao chegou a comecar.
+   *
+   * Existe por causa de um FAIL medido — ver `autorizacaoChegouAComecar`.
+   */
+  readonly autorizouAntes: boolean;
+}
+
+/**
+ * Houve, de fato, uma autorizacao — ou apenas um link abandonado?
+ *
+ * ── O FAIL que obrigou esta funcao a existir ────────────────────────
+ *
+ * O §10 pede distinguir "conecte sua conta" de "sua conexao expirou". A
+ * primeira regra foi: existe conta em `com_problema` -> expirou. A suite
+ * live reprovou para um dono que NUNCA concluiu conexao nenhuma: os
+ * links emitidos e abandonados ficam `EXPIRED` depois de alguns minutos,
+ * e `com_problema` os pegava junto.
+ *
+ * Dizer "sua conexao expirou" a quem nunca conectou faz a pessoa procurar
+ * um erro que nao e dela — que e exatamente o problema que o §10 aponta,
+ * so do outro lado.
+ *
+ * ── MEDIDO em `/connected_accounts` ────────────────────────────────
+ *
+ * O provedor publica `status_reason`, e para o link abandonado ele diz,
+ * literalmente: "Connection expired before authorization was started".
+ * Ou seja: ele mesmo informa que nao houve autorizacao.
+ *
+ * ── Por que a regra exige evidencia POSITIVA ───────────────────────
+ *
+ * `reconectar: true` e uma AFIRMACAO sobre o passado do dono — "voce
+ * conectou isto antes". Nenhum campo publicado prova que uma conta
+ * esteve ativa: nao ha `activated_at`, e `updated_at` tambem se move
+ * quando o proprio vencimento e gravado.
+ *
+ * Entao: sem razao publicada, NAO se afirma nada. O pior caso desta
+ * regra e mostrar a frase neutra ("falta conectar") para uma conexao que
+ * de fato expirou — chato, e verdadeiro. O contrario seria inventar uma
+ * conexao que nunca houve.
+ */
+function autorizacaoChegouAComecar(razao: unknown): boolean {
+  if (typeof razao !== "string" || razao.trim() === "") return false;
+  // A razao MEDIDA do link abandonado. Sem ela, nao ha o que afirmar.
+  return !/before authorization was started/i.test(razao);
 }
 
 /**
@@ -312,6 +357,7 @@ export async function estadoDaConta(entrada: {
         ? "com_problema"
         : estadoTraduzido(r.dados.status),
       doDono: r.dados.user_id === esperado,
+      autorizouAntes: autorizacaoChegouAComecar(r.dados.status_reason),
     },
   };
 }
@@ -351,6 +397,7 @@ export async function listarContasDoDono(entrada: {
         : typeof tk === "string" ? tk : "",
       estado: it.is_disabled === true ? "com_problema" : estadoTraduzido(it.status),
       doDono: true,
+      autorizouAntes: autorizacaoChegouAComecar(it.status_reason),
     });
   }
   return { estado: "ok", dados: contas };

@@ -30,12 +30,13 @@ import {
 } from "@/components/ui/Primitivas";
 import {
   criarConversaDoChat, decidirAprovacaoNoChat, decidirCapacidadeNoChat,
-  enviarFonteDoAgente,
+  enviarFonteDoAgente, iniciarConexaoDaCapacidade,
   enviarNaConversaDoChat, lerConversaDoChat, listarConversasDoChat,
-  listarFontesDoAgente,
+  listarFontesDoAgente, resolverConexaoDaCapacidade,
   type AnexoDaConversaUI, type AprovacaoPendenteUI, type CapacidadePendenteUI,
   type FonteDoAgenteUI,
-  type MensagemDoChatUI, type PassoDoChatUI, type RespostaDaFactory,
+  type MensagemDoChatUI, type PassoDoChatUI, type PrecisaConectarUI,
+  type RespostaDaFactory,
 } from "@/lib/ia/agentes-http";
 
 /**
@@ -150,7 +151,15 @@ export function ChatDoAgente({
   const [ativando, setAtivando] = useState<string | null>(null);
   /** O aplicativo que ainda precisa de conta conectada, se houver. */
   const [precisaConectar, setPrecisaConectar] =
-    useState<{ toolkit: string; nome: string } | null>(null);
+    useState<PrecisaConectarUI | null>(null);
+  /** O marketplace nativo que falta conectar — outro caminho. */
+  const [precisaConectarMkt, setPrecisaConectarMkt] =
+    useState<{ marketplace: string; nome: string } | null>(null);
+  /** As lojas a escolher, quando a conta ja existe — §13/§14. */
+  const [escolherLoja, setEscolherLoja] =
+    useState<{ nome: string; lojas: readonly { lojaId: string; nome: string }[] } | null>(null);
+  /** `conectar` | `verificar` | `<lojaId>` | `recusar` enquanto em voo. */
+  const [conectando, setConectando] = useState<string | null>(null);
   const fimRef = useRef<HTMLDivElement | null>(null);
 
   const carregarFontes = useCallback(async (cid: string | null) => {
@@ -166,7 +175,126 @@ export function ChatDoAgente({
     setMensagens(r.dados.mensagens);
     setAprovacao(r.dados.aprovacaoPendente);
     setCapacidade(r.dados.capacidadePendente);
+
+    // §23: o cartao certo volta depois de um refresh. O estado mora no
+    // banco, e a tela so o le — inclusive QUAL pergunta fazer.
+    const cap = r.dados.capacidadePendente;
+    setPrecisaConectar(
+      cap !== null && cap.conexaoToolkit !== null &&
+        (cap.estado === "aguardando_conexao" || cap.estado === "conectando")
+        ? {
+            toolkit: cap.conexaoToolkit,
+            nome: cap.conexaoNome ?? cap.conexaoToolkit,
+            reconectar: cap.reconectar,
+          }
+        : null);
+    setEscolherLoja(
+      cap !== null && cap.estado === "escolhendo_loja" && cap.lojas.length > 0
+        ? { nome: cap.necessidade, lojas: cap.lojas }
+        : null);
   }, [agenteId]);
+
+  /**
+   * Abre o consentimento do provedor — F7b.4.7 §4.
+   *
+   * Aba NOVA de proposito: o chat fica aberto atras, e ao voltar a pessoa
+   * nao perde onde estava. `noopener` porque a pagina de destino nao tem
+   * nada que fazer com esta janela.
+   *
+   * Nenhum token viaja: o servidor devolve a URL pronta.
+   */
+  async function conectarConta() {
+    if (capacidade === null || conectando !== null) return;
+    setErro(null);
+    setConectando("conectar");
+    try {
+      const r = await iniciarConexaoDaCapacidade(agenteId, capacidade.pendenciaId);
+      if (r.estado !== "ok") {
+        setErro(frasePorEstado(r, "Não foi possível iniciar a conexão."));
+        return;
+      }
+      window.open(r.dados.urlParaConectar, "_blank", "noopener,noreferrer");
+    } finally {
+      setConectando(null);
+    }
+  }
+
+  /**
+   * Confere se a conexao ficou pronta — e, se sim, CONTINUA a tarefa.
+   *
+   * ── Por que conferir, e nao esperar callback — §6 ─────────────────
+   *
+   * MEDIDO: o endpoint de link do Composio aceita `callback_url` e nao o
+   * reflete na URL devolvida; nao da para afirmar que o provedor volta
+   * para a CDS, e conferir isso exigiria concluir um OAuth real.
+   *
+   * Entao a tela pergunta. Funciona com callback, sem callback, com a aba
+   * trocada e no dia seguinte.
+   *
+   * ── §26: nada e apagado ──────────────────────────────────────────
+   *
+   * Quando a tarefa e retomada, o par (pedido original, resposta) e
+   * ACRESCENTADO. Sem navegacao, sem conversa nova, sem limpar mensagens.
+   */
+  async function resolverConexao(
+    acao: "verificar" | "escolher_loja" | "recusar", lojaId?: string
+  ) {
+    if (capacidade === null || conectando !== null) return;
+    setErro(null);
+    setConectando(acao === "escolher_loja" ? (lojaId ?? "") : acao);
+    try {
+      const r = await resolverConexaoDaCapacidade(
+        agenteId, capacidade.pendenciaId, acao, lojaId);
+      if (r.estado !== "ok") {
+        setErro(frasePorEstado(r, "Não foi possível concluir a conexão."));
+        return;
+      }
+      // O que ainda falta vem do SERVIDOR — a tela nao adivinha.
+      setPrecisaConectar(r.dados.precisaConectar);
+      setPrecisaConectarMkt(r.dados.precisaConectarMarketplace);
+      setEscolherLoja(r.dados.escolherLoja);
+
+      if (r.dados.mensagemDoUsuario !== null && r.dados.mensagem !== null) {
+        setCapacidade(null);
+        setMensagens((atual) => [
+          ...atual,
+          r.dados.mensagemDoUsuario as MensagemDoChatUI,
+          r.dados.mensagem as MensagemDoChatUI,
+        ]);
+      } else if (acao === "recusar" || r.dados.jaRetomada) {
+        setCapacidade(null);
+        if (conversa !== null) await carregarMensagens(conversa);
+      }
+    } finally {
+      setConectando(null);
+    }
+  }
+
+  /**
+   * Ao VOLTAR do consentimento, a tela confere sozinha — uma vez.
+   *
+   * `conectando` quer dizer que o link foi aberto. Quando a pessoa volta
+   * — outra aba, refresh, ou no dia seguinte — a pergunta "ja conectei?"
+   * pode ser respondida sem clique: quem responde e o provedor, nao o
+   * clique.
+   *
+   * O ref guarda a pendencia JA conferida automaticamente. Sem ele, uma
+   * conexao que ainda nao existe viraria um laco: cada render tentaria de
+   * novo, e o estado continuaria `conectando` para sempre. Por isso a
+   * conferencia automatica acontece UMA vez por pendencia, e depois dela
+   * quem decide e o botao "Já autorizei".
+   */
+  const conferidaAoVoltar = useRef<string | null>(null);
+  useEffect(() => {
+    if (capacidade === null || capacidade.estado !== "conectando") return;
+    if (conferidaAoVoltar.current === capacidade.pendenciaId) return;
+    conferidaAoVoltar.current = capacidade.pendenciaId;
+    void resolverConexao("verificar");
+    // `resolverConexao` e declaracao de funcao, entao esta definida aqui;
+    // ela nao entra nas dependencias de proposito — o gatilho e a
+    // pendencia, e nao a identidade da funcao a cada render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [capacidade]);
 
   /**
    * Ativa — ou recusa — a capacidade que faltou, sem sair da tela.
@@ -475,7 +603,13 @@ export function ChatDoAgente({
         Vem ANTES do de aprovacao porque e uma pergunta anterior: sem a
         ferramenta, nao ha o que aprovar.
       */}
-      {capacidade !== null && (
+      {/*
+        `pendente` e so: escolher a ferramenta. Quando a escolha ja foi
+        feita e falta conta ou loja, a pergunta e outra e quem a faz sao os
+        cartoes abaixo — dois cartoes ao mesmo tempo perguntariam duas
+        coisas, e a pessoa responderia a errada.
+      */}
+      {capacidade !== null && capacidade.estado === "pendente" && (
         <div style={{
           marginTop: ESPACO.md, padding: ESPACO.md,
           border: `1px solid ${CROMO.acentoBorda}`, borderRadius: RAIO.card,
@@ -530,13 +664,97 @@ export function ChatDoAgente({
         </div>
       )}
 
-      {/* §22: quando a ativacao depende de uma conta, o passo seguinte
-          aparece aqui mesmo — e nao na tela de Conexoes. */}
-      {precisaConectar !== null && (
+      {/*
+        ── Conectar a conta, NO chat — F7b.4.7 §3/§24 ─────────────────
+        Antes isto era um aviso que mandava a pessoa para Ferramentas. Sair
+        do chat para completar a capacidade e o que este gate fechou.
+      */}
+      {precisaConectar !== null && capacidade !== null && (
+        <div style={{
+          marginTop: ESPACO.md, padding: ESPACO.md,
+          border: `1px solid ${CROMO.acentoBorda}`, borderRadius: RAIO.card,
+          background: CROMO.acentoFundo,
+        }}>
+          <strong style={{ fontSize: TAMANHO.corpo, color: CROMO.texto }}>
+            {precisaConectar.reconectar
+              ? `A conexão com ${precisaConectar.nome} expirou`
+              : "Falta conectar sua conta"}
+          </strong>
+          <p style={{
+            margin: `${ESPACO.xs}px 0 ${ESPACO.sm}px`,
+            fontSize: TAMANHO.miudo, color: CROMO.textoFraco,
+          }}>
+            {/* §10: quem ja conectou nao precisa ouvir "conecte sua conta".
+                Ouvir isso faz a pessoa procurar o que ela fez de errado. */}
+            {precisaConectar.reconectar
+              ? `Você já tinha conectado o ${precisaConectar.nome}, mas o acesso não vale mais. Autorize de novo e eu continuo de onde paramos.`
+              : `${capacidade.necessidade} já está no agente. Para eu conseguir usar, autorize o acesso na sua conta — depois volte aqui e eu continuo de onde paramos.`}
+          </p>
+          <div style={{ display: "flex", gap: ESPACO.sm, flexWrap: "wrap" }}>
+            <Botao tom="primario" desabilitado={conectando !== null}
+              onClick={() => void conectarConta()}>
+              {conectando === "conectar"
+                ? "Abrindo..."
+                : precisaConectar.reconectar ? "Reconectar" : "Conectar minha conta"}
+            </Botao>
+            {/* §25: depois de autorizar, a pessoa volta e confirma. A CDS
+                confere no provedor — ela nao acredita no clique. */}
+            <Botao tom="secundario" desabilitado={conectando !== null}
+              onClick={() => void resolverConexao("verificar")}>
+              {conectando === "verificar" ? "Verificando..." : "Já autorizei"}
+            </Botao>
+            <Botao tom="secundario" desabilitado={conectando !== null}
+              onClick={() => void resolverConexao("recusar")}>
+              Agora não
+            </Botao>
+          </div>
+        </div>
+      )}
+
+      {/*
+        ── Escolher a LOJA — §13/§14 ──────────────────────────────────
+        A conta já existe: o que falta é dizer qual loja. Pedir OAuth aqui
+        seria pedir duas vezes o que o dono já deu.
+      */}
+      {escolherLoja !== null && (
+        <div style={{
+          marginTop: ESPACO.md, padding: ESPACO.md,
+          border: `1px solid ${CROMO.acentoBorda}`, borderRadius: RAIO.card,
+          background: CROMO.acentoFundo,
+        }}>
+          <strong style={{ fontSize: TAMANHO.corpo, color: CROMO.texto }}>
+            {escolherLoja.lojas.length === 1
+              ? "Confirma a loja?"
+              : "Qual loja eu devo consultar?"}
+          </strong>
+          <p style={{
+            margin: `${ESPACO.xs}px 0 ${ESPACO.sm}px`,
+            fontSize: TAMANHO.miudo, color: CROMO.textoFraco,
+          }}>
+            Sua conta já está conectada. Só preciso saber de qual loja falar —
+            depois eu continuo de onde paramos.
+          </p>
+          <div style={{ display: "flex", gap: ESPACO.sm, flexWrap: "wrap" }}>
+            {escolherLoja.lojas.map((l) => (
+              <Botao key={l.lojaId} tom="primario" desabilitado={conectando !== null}
+                onClick={() => void resolverConexao("escolher_loja", l.lojaId)}>
+                {conectando === l.lojaId ? "Vinculando..." : l.nome}
+              </Botao>
+            ))}
+            <Botao tom="secundario" desabilitado={conectando !== null}
+              onClick={() => void resolverConexao("recusar")}>
+              Agora não
+            </Botao>
+          </div>
+        </div>
+      )}
+
+      {/* Marketplace nativo sem conta nenhuma: o consentimento dele mora
+          na tela de Conexões, que e o fluxo oficial da CDS. */}
+      {precisaConectarMkt !== null && (
         <Aviso tom="atencao">
-          {precisaConectar.nome} foi adicionado. Agora falta conectar sua conta —
-          abra Ferramentas na configuração do agente para autorizar, e eu continuo
-          de onde paramos.
+          Para isso eu preciso que o {precisaConectarMkt.nome} esteja conectado na
+          sua conta. Depois de conectar, volte aqui e eu continuo de onde paramos.
         </Aviso>
       )}
 

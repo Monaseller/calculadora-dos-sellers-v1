@@ -23,6 +23,8 @@ import { lerAprovacaoVivaDaConversa } from "@/lib/agentes/aprovacoes/persistenci
 import {
   lerPendenciaVivaDaConversa,
 } from "@/lib/agentes/factory/capacidade-pendente";
+import { faltaParaCompletar } from "@/lib/agentes/factory/completar-capacidade";
+import { nomeDoAplicativo } from "@/lib/agentes/factory/capacidades";
 import { responderNaConversa } from "@/lib/agentes/conversas/runtime";
 import type { Mensagem } from "@/lib/agentes/conversas/tipos";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
@@ -107,6 +109,34 @@ export async function GET(
       userId: porta.userId, conversaId: c.conversaId,
     });
 
+    // ── As lojas, SO quando e delas que se esta falando ──────────────
+    //
+    // Consultar as lojas do dono em todo carregamento de conversa seria
+    // uma ida ao banco por mensagem lida, para uma lista que quase nunca
+    // e usada. Ela e buscada no estado que a pede.
+    //
+    // Nos estados de conexao a consulta tambem acontece, por causa do §10:
+    // "conecte sua conta" e "sua conexao expirou" sao frases diferentes, e
+    // qual das duas dizer nao esta gravado na pendencia — quem sabe e o
+    // provedor. O custo e uma consulta enquanto a pendencia esta viva, que
+    // e um estado de passagem; guardar a resposta na linha seria guardar um
+    // fato que envelhece sozinho.
+    const pend = capacidade.leitura === "ok" ? capacidade.pendencia : null;
+    const EM_CONEXAO = ["escolhendo_loja", "aguardando_conexao", "conectando"];
+
+    let lojasParaEscolher: readonly { lojaId: string; nome: string }[] = [];
+    let reconectarConta = false;
+    if (pend !== null && EM_CONEXAO.includes(pend.estado) &&
+        pend.escolhaChave !== null && pend.escolhaOrigem !== null) {
+      const falta = await faltaParaCompletar({
+        userId: porta.userId,
+        chave: pend.escolhaChave,
+        origem: pend.escolhaOrigem,
+      });
+      if (falta.falta === "escolher_loja") lojasParaEscolher = falta.lojas;
+      if (falta.falta === "conta_externa") reconectarConta = falta.reconectar;
+    }
+
     return responder({
       ok: true,
       mensagens: mensagens.map(paraUI),
@@ -127,6 +157,18 @@ export async function GET(
                 chave: o.chave, nome: o.nome, descricao: o.descricao,
                 exigeConexao: o.exigeConexao,
               })),
+              // F7b.4.7: o que ainda falta. `conexaoToolkit` diz QUAL
+              // aplicativo, para a tela poder dizer "conectar Google" em
+              // vez de "conectar". As lojas so vem no estado que as pede.
+              conexaoToolkit: capacidade.pendencia.conexaoToolkit,
+              // O NOME do aplicativo, e nao o slug: "Google Sheets" e o que
+              // o dono reconhece; "googlesheets" e identificador de
+              // catalogo e nao pertence a uma frase.
+              conexaoNome: capacidade.pendencia.conexaoToolkit === null
+                ? null
+                : nomeDoAplicativo(capacidade.pendencia.conexaoToolkit),
+              reconectar: reconectarConta,
+              lojas: lojasParaEscolher,
             }
           : null,
     }, 200);

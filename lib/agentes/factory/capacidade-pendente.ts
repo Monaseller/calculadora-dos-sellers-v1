@@ -29,11 +29,11 @@ import type { OpcaoDeCapacidade } from "@/lib/agentes/factory/capacidade-faltant
 const TABELA = "agente_capacidades_pendentes";
 const COLUNAS =
   "id, agente_id, conversa_id, objetivo, necessidade, opcoes, " +
-  "escolha_chave, escolha_origem, estado";
+  "escolha_chave, escolha_origem, estado, conexao_conta_id, conexao_toolkit";
 
 /** Os estados em que a pendencia ainda pode virar alguma coisa. */
 export const ESTADOS_VIVOS = Object.freeze([
-  "pendente", "ativando", "aguardando_conexao",
+  "pendente", "ativando", "aguardando_conexao", "conectando", "escolhendo_loja",
 ] as const);
 
 export interface CapacidadePendente {
@@ -47,6 +47,10 @@ export interface CapacidadePendente {
   readonly escolhaChave: string | null;
   readonly escolhaOrigem: "cds" | "integracao" | null;
   readonly estado: string;
+  /** O aplicativo que precisa de conta. `null` quando nao ha. F7b.4.7. */
+  readonly conexaoToolkit: string | null;
+  /** A conta criada no provedor, para CONFERIR o status. Nao e credencial. */
+  readonly conexaoContaId: string | null;
 }
 
 function daLinha(bruta: unknown): CapacidadePendente | null {
@@ -82,6 +86,8 @@ function daLinha(bruta: unknown): CapacidadePendente | null {
     escolhaOrigem: l.escolha_origem === "cds" || l.escolha_origem === "integracao"
       ? l.escolha_origem : null,
     estado: typeof l.estado === "string" ? l.estado : "",
+    conexaoToolkit: typeof l.conexao_toolkit === "string" ? l.conexao_toolkit : null,
+    conexaoContaId: typeof l.conexao_conta_id === "string" ? l.conexao_conta_id : null,
   };
 }
 
@@ -225,6 +231,8 @@ export async function moverPendencia(entrada: {
   readonly de: readonly string[];
   readonly para: string;
   readonly escolha?: { readonly chave: string; readonly origem: "cds" | "integracao" };
+  /** O aplicativo e a conta da conexao pendente — F7b.4.7. */
+  readonly conexao?: { readonly toolkit: string; readonly contaId: string | null };
 }): Promise<ResultadoDeTransicao> {
   const { userId, pendenciaId, de, para } = entrada;
   if (!userId || !pendenciaId) return { estado: "falha" };
@@ -235,6 +243,10 @@ export async function moverPendencia(entrada: {
     alteracoes.escolha_chave = entrada.escolha.chave;
     alteracoes.escolha_origem = entrada.escolha.origem;
     alteracoes.decidido_em = agora;
+  }
+  if (entrada.conexao !== undefined) {
+    alteracoes.conexao_toolkit = entrada.conexao.toolkit;
+    alteracoes.conexao_conta_id = entrada.conexao.contaId;
   }
   if (para === "concluida" || para === "recusada" || para === "falhou") {
     alteracoes.concluido_em = agora;

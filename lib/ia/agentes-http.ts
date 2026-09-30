@@ -2131,12 +2131,55 @@ export interface OpcaoDeCapacidadeUI {
   readonly exigeConexao: boolean;
 }
 
+export interface LojaParaEscolherUI {
+  readonly lojaId: string;
+  /** O nome que o dono reconhece. Nunca `seller_id`. */
+  readonly nome: string;
+}
+
+/**
+ * "Falta conectar a conta deste aplicativo."
+ *
+ * Um tipo para os DOIS caminhos que produzem esta situacao — ativar uma
+ * integracao e conferir a conexao depois. Eram duas formas identicas
+ * declaradas em lugares diferentes; um campo novo em uma delas so
+ * apareceria na outra por coincidencia, e a tela leria os dois.
+ */
+export interface PrecisaConectarUI {
+  readonly toolkit: string;
+  /** O nome que o dono reconhece. Nunca o slug do catalogo. */
+  readonly nome: string;
+  /**
+   * `true` quando havia conta e ela deixou de servir — F7b.4.7 §10.
+   *
+   * Muda a FRASE, nao o botao: reconectar e conectar sao a mesma acao no
+   * provedor. Dizer "conecte sua conta" a quem ja conectou faz a pessoa
+   * procurar um erro que nao e dela.
+   */
+  readonly reconectar: boolean;
+}
+
 export interface CapacidadePendenteUI {
   readonly pendenciaId: string;
   /** O nome de gente da capacidade que faltou. Ex.: `Planilhas`. */
   readonly necessidade: string;
+  /**
+   * `pendente` | `ativando` | `aguardando_conexao` | `conectando`
+   * | `escolhendo_loja` — F7b.4.7.
+   *
+   * E ele que decide QUAL cartao a tela mostra: escolher ferramenta,
+   * conectar conta, ou escolher loja. Sao tres perguntas diferentes.
+   */
   readonly estado: string;
   readonly opcoes: readonly OpcaoDeCapacidadeUI[];
+  /** O aplicativo que ainda precisa de conta. `null` quando nao ha. */
+  readonly conexaoToolkit: string | null;
+  /** O NOME desse aplicativo, para entrar numa frase. */
+  readonly conexaoNome: string | null;
+  /** Havia conta e ela deixou de servir — §10. Outra frase, mesmo botao. */
+  readonly reconectar: boolean;
+  /** As lojas a escolher, quando o estado e `escolhendo_loja`. */
+  readonly lojas: readonly LojaParaEscolherUI[];
 }
 
 export interface ConversaCarregadaUI {
@@ -2202,14 +2245,31 @@ export async function lerConversaDoChat(
         });
       }
     }
-    // Sem opcao nao ha oferta: um cartao sem botao seria so um aviso de
-    // que o agente nao consegue, sem caminho nenhum.
-    if (opcoes.length > 0) {
+    // Sem opcao NAO significa sem cartao — F7b.4.7. Quando a ferramenta ja
+    // foi escolhida e falta conta ou loja, a pergunta e outra e o cartao
+    // continua tendo botao. So `pendente` depende de haver opcoes.
+    const precisaDeOpcoes = brutaCap.estado === "pendente";
+    if (!precisaDeOpcoes || opcoes.length > 0) {
+      const lojas: LojaParaEscolherUI[] = [];
+      if (Array.isArray(brutaCap.lojas)) {
+        for (const l of brutaCap.lojas) {
+          if (!ehObjeto(l)) continue;
+          if (typeof l.lojaId !== "string" || l.lojaId === "") continue;
+          lojas.push({
+            lojaId: l.lojaId,
+            nome: typeof l.nome === "string" && l.nome !== "" ? l.nome : "Loja",
+          });
+        }
+      }
       capacidade = {
         pendenciaId: brutaCap.pendenciaId,
         necessidade: typeof brutaCap.necessidade === "string" ? brutaCap.necessidade : "",
         estado: typeof brutaCap.estado === "string" ? brutaCap.estado : "pendente",
         opcoes,
+        conexaoToolkit: textoOuNulo(brutaCap.conexaoToolkit),
+        conexaoNome: textoOuNulo(brutaCap.conexaoNome),
+        reconectar: brutaCap.reconectar === true,
+        lojas,
       };
     }
   }
@@ -2241,7 +2301,7 @@ export async function decidirCapacidadeNoChat(
   readonly retomada: boolean;
   readonly mensagem: MensagemDoChatUI | null;
   readonly mensagemDoUsuario: MensagemDoChatUI | null;
-  readonly precisaConectar: { readonly toolkit: string; readonly nome: string } | null;
+  readonly precisaConectar: PrecisaConectarUI | null;
   readonly texto: string | null;
 }>> {
   let resposta: Response;
@@ -2263,7 +2323,7 @@ export async function decidirCapacidadeNoChat(
     readonly retomada: boolean;
     readonly mensagem: MensagemDoChatUI | null;
     readonly mensagemDoUsuario: MensagemDoChatUI | null;
-    readonly precisaConectar: { readonly toolkit: string; readonly nome: string } | null;
+    readonly precisaConectar: PrecisaConectarUI | null;
     readonly texto: string | null;
   }>(resposta, corpo);
   if (desfecho !== null) return desfecho;
@@ -2275,6 +2335,7 @@ export async function decidirCapacidadeNoChat(
         toolkit: o.precisaConectar.toolkit,
         nome: typeof o.precisaConectar.nome === "string"
           ? o.precisaConectar.nome : o.precisaConectar.toolkit,
+        reconectar: o.precisaConectar.reconectar === true,
       }
     : null;
 
@@ -3517,6 +3578,159 @@ export async function iniciarConexaoExterna(
       urlParaConectar: o.urlParaConectar,
       expiraEm: textoOuNulo(o.expiraEm),
       contaId: o.contaId,
+    },
+  };
+}
+
+/**
+ * Pede o link para conectar a conta do aplicativo — F7b.4.7 §4.
+ *
+ * A identidade no provedor e derivada no SERVIDOR, a partir da sessao.
+ * Daqui sobe apenas a URL e o prazo: nem `link_token`, nem chave, nem
+ * token — provado em `testar-conexao-inline-live` (E7–E10).
+ */
+export async function iniciarConexaoDaCapacidade(
+  agenteId: string,
+  pendenciaId: string
+): Promise<RespostaDaFactory<{
+  readonly urlParaConectar: string;
+  readonly expiraEm: string | null;
+}>> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(
+      `${caminhoDoAgente(agenteId)}${ROTA_SUFIXO_CAPACIDADES}/` +
+      // Sem corpo, e por isso sem `Content-Type`: os unicos parametros
+      // sao o agente e a pendencia, e os dois vao no CAMINHO. Declarar o
+      // tipo de um corpo que nao existe seria descrever nada.
+      `${encodeURIComponent(pendenciaId)}/conexao`,
+      { method: "POST" }
+    );
+  } catch {
+    return { estado: "falha" };
+  }
+  const corpo = await corpoDe(resposta);
+  const desfecho = desfechoDaResposta<{
+    readonly urlParaConectar: string; readonly expiraEm: string | null;
+  }>(resposta, corpo);
+  if (desfecho !== null) return desfecho;
+  const o = corpo as Record<string, unknown>;
+  if (typeof o.urlParaConectar !== "string" || o.urlParaConectar === "") {
+    return { estado: "falha" };
+  }
+  return {
+    estado: "ok",
+    dados: { urlParaConectar: o.urlParaConectar, expiraEm: textoOuNulo(o.expiraEm) },
+  };
+}
+
+export interface DesfechoDaConexaoUI {
+  readonly conectado: boolean;
+  readonly retomada: boolean;
+  readonly jaRetomada: boolean;
+  readonly mensagem: MensagemDoChatUI | null;
+  readonly mensagemDoUsuario: MensagemDoChatUI | null;
+  /** Ainda falta conta neste aplicativo. */
+  readonly precisaConectar: PrecisaConectarUI | null;
+  /** Falta conectar o marketplace nativo — outro caminho, outra tela. */
+  readonly precisaConectarMarketplace:
+    { readonly marketplace: string; readonly nome: string } | null;
+  /** A conta existe e falta dizer QUAL loja. */
+  readonly escolherLoja: {
+    readonly nome: string;
+    readonly lojas: readonly LojaParaEscolherUI[];
+  } | null;
+  readonly texto: string | null;
+}
+
+/**
+ * Confere a conexao — ou escolhe a loja — e RETOMA a tarefa — F7b.4.7.
+ *
+ * ── Por que CONFERIR, e nao esperar um callback ─────────────────────
+ *
+ * MEDIDO: o endpoint de link do Composio aceita `callback_url` e nao o
+ * reflete na URL devolvida. Nao da para afirmar que o provedor volta para
+ * a CDS, e conferir exigiria concluir um OAuth real.
+ *
+ * Entao a tela PERGUNTA. Funciona com callback, sem callback, com a aba
+ * trocada e no dia seguinte — e nao depende de comportamento nao
+ * verificado.
+ *
+ * `conectado: true` com `retomada: true` traz a resposta do agente ao
+ * pedido ORIGINAL: a pessoa nao reescreve nada.
+ */
+export async function resolverConexaoDaCapacidade(
+  agenteId: string,
+  pendenciaId: string,
+  acao: "verificar" | "escolher_loja" | "recusar",
+  lojaId?: string
+): Promise<RespostaDaFactory<DesfechoDaConexaoUI>> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(
+      `${caminhoDoAgente(agenteId)}${ROTA_SUFIXO_CAPACIDADES}/` +
+        `${encodeURIComponent(pendenciaId)}/conexao`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(lojaId === undefined ? { acao } : { acao, lojaId }),
+      }
+    );
+  } catch {
+    return { estado: "falha" };
+  }
+  const corpo = await corpoDe(resposta);
+  const desfecho = desfechoDaResposta<DesfechoDaConexaoUI>(resposta, corpo);
+  if (desfecho !== null) return desfecho;
+
+  const o = corpo as Record<string, unknown>;
+  const conectar = ehObjeto(o.precisaConectar) && typeof o.precisaConectar.toolkit === "string"
+    ? {
+        toolkit: o.precisaConectar.toolkit,
+        nome: typeof o.precisaConectar.nome === "string"
+          ? o.precisaConectar.nome : o.precisaConectar.toolkit,
+        reconectar: o.precisaConectar.reconectar === true,
+      }
+    : null;
+  const mkt = ehObjeto(o.precisaConectarMarketplace) &&
+    typeof o.precisaConectarMarketplace.marketplace === "string"
+    ? {
+        marketplace: o.precisaConectarMarketplace.marketplace,
+        nome: typeof o.precisaConectarMarketplace.nome === "string"
+          ? o.precisaConectarMarketplace.nome
+          : o.precisaConectarMarketplace.marketplace,
+      }
+    : null;
+
+  let escolher: DesfechoDaConexaoUI["escolherLoja"] = null;
+  if (ehObjeto(o.escolherLoja) && Array.isArray(o.escolherLoja.lojas)) {
+    const lojas: LojaParaEscolherUI[] = [];
+    for (const l of o.escolherLoja.lojas) {
+      if (!ehObjeto(l)) continue;
+      if (typeof l.lojaId !== "string" || l.lojaId === "") continue;
+      lojas.push({
+        lojaId: l.lojaId,
+        nome: typeof l.nome === "string" && l.nome !== "" ? l.nome : "Loja",
+      });
+    }
+    escolher = {
+      nome: typeof o.escolherLoja.nome === "string" ? o.escolherLoja.nome : "",
+      lojas,
+    };
+  }
+
+  return {
+    estado: "ok",
+    dados: {
+      conectado: o.conectado === true,
+      retomada: o.retomada === true,
+      jaRetomada: o.jaRetomada === true,
+      mensagem: mensagemDaResposta(o.mensagem),
+      mensagemDoUsuario: mensagemDaResposta(o.mensagemDoUsuario),
+      precisaConectar: conectar,
+      precisaConectarMarketplace: mkt,
+      escolherLoja: escolher,
+      texto: textoOuNulo(o.texto),
     },
   };
 }
