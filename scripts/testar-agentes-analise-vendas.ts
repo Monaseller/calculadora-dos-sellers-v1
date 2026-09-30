@@ -722,6 +722,18 @@ const ARQUIVOS_SKILL_1DD1: readonly string[] = [
  * NAO foi aplicada ao banco — a aplicacao depende de autorizacao
  * explicita, e o proprio cabecalho do arquivo diz isso.
  */
+/**
+ * AGENT-FACTORY-F7b.4 — a coluna `memoria_ativa`.
+ *
+ * APLICADA no projeto remoto por `apply_migration`, nunca por `db push`.
+ * Default `false` e `not null`: nenhum agente existente ganhou memoria
+ * automatica, porque ligar isso por omissao seria decidir pelo dono uma
+ * questao de privacidade que e dele.
+ */
+const MIGRATIONS_DA_F7B4: readonly string[] = [
+  "20261019_agente_memoria_ativa.sql",
+];
+
 const MIGRATIONS_NO_DISCO_NAO_COMMITADAS: readonly string[] = [
   // AGENT-FACTORY-F7a — `agente_conversas` + `agente_mensagens`.
   // APLICADA no proprio gate F7a via `apply_migration` (nunca db push),
@@ -1679,6 +1691,49 @@ const ARQUIVOS_F7B3: readonly string[] = [
   "lib/agentes/factory/proposito-de-arquivo.ts",
 ];
 
+/**
+ * AGENT-FACTORY-F7b.4 — memoria automatica, catalogo externo e modelos.
+ *
+ * Tres frentes, e todas de dominio puro ou cliente HTTP — nenhuma toca
+ * executor de Function nem o guard:
+ *
+ *   memoria/identidade.ts   deriva o principal de memoria de
+ *                           (userId, agenteId). PURO. E o que impede a
+ *                           memoria de um agente de alcancar a de outro:
+ *                           nao existe nome que ele possa formar.
+ *   memoria/politica.ts     decide o que SAI da CDS para o motor
+ *                           externo. PURO. Allowlist de papel + redacao
+ *                           de segredo por forma.
+ *   memoria/zep.ts          o cliente REST. `server-only`.
+ *   memoria/automatica.ts   orquestra recuperar/ingerir. `server-only`.
+ *
+ *   composio/cliente.ts     catalogo externo, SO leitura. `server-only`.
+ *                           Nao tem executor de tool de proposito.
+ *   composio/identidade-de-funcao.ts
+ *                           traduz acao externa para `funcao_id` que o
+ *                           CHECK do banco aceita, e classifica risco.
+ *                           PURO.
+ *
+ *   factory/catalogo-de-modelos.ts
+ *                           quais cerebros ESTE ambiente configurou, e
+ *                           quais niveis cada um de fato suporta. PURO.
+ *
+ * Nenhum deles entra em `FUNCOES`: Function externa e um FATO para o
+ * guard, nao um executor no registry — ver o cabecalho de
+ * `identidade-de-funcao.ts`.
+ */
+const ARQUIVOS_F7B4: readonly string[] = [
+  "lib/agentes/memoria/identidade.ts",
+  "lib/agentes/memoria/politica.ts",
+  "lib/agentes/memoria/zep.ts",
+  "lib/agentes/memoria/automatica.ts",
+  "lib/agentes/composio/cliente.ts",
+  "lib/agentes/composio/identidade-de-funcao.ts",
+  "lib/agentes/factory/catalogo-de-modelos.ts",
+  // A escolha de memoria do dono, como coluna de `agentes`.
+  "supabase/migrations/20261019_agente_memoria_ativa.sql",
+];
+
 const ARQUIVOS_F6: readonly string[] = [
   "supabase/migrations/20261017_agente_memorias.sql",
   "lib/agentes/memorias/tipos.ts",
@@ -1795,6 +1850,7 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_F7A,
   ...ARQUIVOS_F7B1,
   ...ARQUIVOS_F7B3,
+  ...ARQUIVOS_F7B4,
   ...ARQUIVOS_1DD,
   ...ARQUIVOS_1DA_PERF,
   ...ARQUIVOS_1EA,
@@ -3513,7 +3569,8 @@ async function main() {
       MIGRATIONS_DO_APPROVAL_PAUSE_D3_CLEANUP.includes(m) ||
       MIGRATIONS_DO_APPROVAL_DECISION_D4.includes(m) ||
       MIGRATIONS_DO_RESUME_D5_C3_I2.includes(m) ||
-      MIGRATIONS_DO_POLLING_A7.includes(m);
+      MIGRATIONS_DO_POLLING_A7.includes(m) ||
+      MIGRATIONS_DA_F7B4.includes(m);
 
     ok(`G12b nenhuma migration nao declarada no disco (${novasNoDisco.join(", ") || "nenhuma"})`,
        novasNoDisco.every(declarada));

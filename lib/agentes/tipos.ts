@@ -80,6 +80,15 @@ export interface LinhaAgente {
   tipo: string;
   instrucoes: string | null;
   ativo: boolean;
+  /**
+   * AGENT-FACTORY-F7b.4: memoria automatica de longo prazo.
+   *
+   * Default `false` no banco. Quando `true`, o runtime recupera contexto
+   * antes de responder e ingere o turno depois — ver
+   * `lib/agentes/memoria/automatica.ts`. NAO e permissao: memoria nao
+   * habilita ferramenta nem muda nivel.
+   */
+  memoria_ativa: boolean;
   criado_em: string;
   atualizado_em: string;
 }
@@ -124,6 +133,8 @@ export interface CamposAtualizacaoAgente {
   tipo?: TipoAgente;
   instrucoes?: string | null;
   ativo?: boolean;
+  /** F7b.4. `camelCase` aqui, `memoria_ativa` na coluna. */
+  memoriaAtiva?: boolean;
 }
 
 export interface CamposNovaTarefa {

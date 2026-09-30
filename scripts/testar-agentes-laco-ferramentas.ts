@@ -598,9 +598,27 @@ async function main(): Promise<void> {
     const GOOG = ler("lib/ai-gateway/provedores/google-ferramentas.ts");
     ok("J14 o Gemini continua com store:false — a regra nao foi trocada por um verde",
       /store:\s*false/.test(GOOG) && !/store:\s*true,/.test(GOOG));
-    ok("J15 e devolver resultado ao Gemini falha com codigo proprio",
-      /CODIGO_RETORNO_BLOQUEADO/.test(GOOG) &&
-        /papel === "ferramenta"/.test(semComentarios(GOOG)));
+    // ── J15 reconciliado na AGENT-FACTORY-F7b.4 ────────────────────
+    //
+    // ANTES: "devolver resultado ao Gemini falha com codigo proprio". Era
+    // verdade, e a causa estava mal diagnosticada. O F4 concluiu que a
+    // API exigia `store: true`; o F7b.4 mediu de novo e achou o campo que
+    // faltava — `function_call.signature`, opaco, que precisa voltar
+    // verbatim.
+    //
+    // O portao caiu porque o ciclo passou a fechar, nao porque a regra
+    // afrouxou: J14 acima continua exigindo `store: false`. O que se
+    // cobra aqui agora e a CONDICAO que fez o ciclo funcionar.
+    const GOOG_SC = semComentarios(GOOG);
+    ok("J15 o segundo turno NAO e mais barrado por codigo proprio",
+      !/throw new ErroProvedorIA\([\s\S]{0,120}CODIGO_RETORNO_BLOQUEADO/.test(GOOG_SC));
+    ok("J15a a assinatura opaca do `function_call` e PRESERVADA",
+      /signature: p\.assinatura/.test(GOOG_SC) &&
+        /assinatura: s\.signature/.test(GOOG_SC));
+    ok("J15b e o `function_result` leva `name` — sem ele a API recusa",
+      /name: nomePorId\.get\(r\.id\)/.test(GOOG_SC));
+    ok("J15c CONTROLE: a assinatura nao e inventada quando nao existe",
+      /p\.assinatura !== undefined/.test(GOOG_SC));
 
     const LACO_F4 = semComentarios(ler("lib/agentes/ia/laco-ferramentas.ts"));
     ok("J16 forcar ferramenta vale SO no primeiro turno",

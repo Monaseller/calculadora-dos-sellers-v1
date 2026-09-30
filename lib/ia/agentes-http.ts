@@ -1877,15 +1877,46 @@ export interface ImpedimentoUI {
   readonly etapa: number;
 }
 
+/** Um cerebro que ESTE ambiente configurou — F7b.4. */
+export interface ModeloOferecidoUI {
+  readonly provedor: string;
+  readonly nome: string;
+  readonly descricao: string;
+  readonly modeloId: string;
+  readonly ferramentas: boolean;
+  /** Niveis de trabalho REALMENTE suportados. Um item = sem escolha. */
+  readonly niveis: readonly string[];
+}
+
 export interface AtivacaoDoAgenteUI {
   readonly nome: string;
   readonly ativo: boolean;
   readonly temInstrucoes: boolean;
   readonly modelo: string | null;
   readonly provedor: string | null;
+  readonly memoriaAtiva: boolean;
   readonly ferramentas: readonly FerramentaDaAtivacaoUI[];
+  readonly modelos: readonly ModeloOferecidoUI[];
   readonly podeAtivar: boolean;
   readonly impedimentos: readonly ImpedimentoUI[];
+}
+
+function modeloDaResposta(bruto: unknown): ModeloOferecidoUI | null {
+  if (!ehObjeto(bruto)) return null;
+  const { provedor, nome, descricao, modeloId, ferramentas, niveis } = bruto;
+  if (typeof provedor !== "string" || provedor === "") return null;
+  if (typeof nome !== "string" || nome === "") return null;
+  if (typeof modeloId !== "string" || modeloId === "") return null;
+  const lista: string[] = [];
+  if (Array.isArray(niveis)) {
+    for (const n of niveis) if (typeof n === "string") lista.push(n);
+  }
+  return {
+    provedor, nome, modeloId,
+    descricao: typeof descricao === "string" ? descricao : "",
+    ferramentas: ferramentas === true,
+    niveis: lista,
+  };
 }
 
 /** O que a criacao de Skill devolve: o id, e se ela nasceu agora. */
@@ -2200,13 +2231,13 @@ export async function lerAtivacaoDoAgente(
   if (desfecho !== null) return desfecho;
 
   const bruto = corpo as {
-    resumo?: unknown; ferramentas?: unknown;
+    resumo?: unknown; ferramentas?: unknown; modelos?: unknown;
     podeAtivar?: unknown; impedimentos?: unknown;
   };
   if (!ehObjeto(bruto.resumo) || typeof bruto.podeAtivar !== "boolean") {
     return { estado: "falha" };
   }
-  const { nome, ativo, temInstrucoes, modelo, provedor } = bruto.resumo;
+  const { nome, ativo, temInstrucoes, modelo, provedor, memoriaAtiva } = bruto.resumo;
   if (typeof nome !== "string") return { estado: "falha" };
   if (typeof ativo !== "boolean" || typeof temInstrucoes !== "boolean") {
     return { estado: "falha" };
@@ -2214,13 +2245,20 @@ export async function lerAtivacaoDoAgente(
   const ferramentas = listaDaResposta(bruto.ferramentas, ferramentaDaResposta);
   const impedimentos = listaDaResposta(bruto.impedimentos, impedimentoDaResposta);
   if (ferramentas === null || impedimentos === null) return { estado: "falha" };
+  // Ausente vira lista vazia: um ambiente sem provedor configurado nao e
+  // resposta malformada, e a tela precisa poder dizer "nenhuma IA".
+  const modelos = bruto.modelos === undefined
+    ? []
+    : listaDaResposta(bruto.modelos, modeloDaResposta);
+  if (modelos === null) return { estado: "falha" };
 
   return {
     estado: "ok",
     dados: {
       nome, ativo, temInstrucoes,
       modelo: textoOuNulo(modelo), provedor: textoOuNulo(provedor),
-      ferramentas, podeAtivar: bruto.podeAtivar, impedimentos,
+      memoriaAtiva: memoriaAtiva === true,
+      ferramentas, modelos, podeAtivar: bruto.podeAtivar, impedimentos,
     },
   };
 }
@@ -2718,4 +2756,98 @@ export async function atualizarArquivoDoAgente(
   if (desfecho !== null) return desfecho;
   const dados = fonteDaResposta((corpo as { fonte?: unknown }).fonte);
   return dados === null ? { estado: "falha" } : { estado: "ok", dados };
+}
+
+// -----------------------------------------------------------------
+// AGENT-FACTORY-F7b.4 - a memoria de longo prazo
+// -----------------------------------------------------------------
+
+const ROTA_SUFIXO_MEMORIA_LONGA = "/memoria";
+
+export interface EstadoDaMemoriaUI {
+  readonly memoriaAtiva: boolean;
+  /** O AMBIENTE tem o motor? Nada sobre a credencial em si. */
+  readonly motorConfigurado: boolean;
+  readonly desfecho: string;
+  /** O que o agente lembra, como texto. `null` quando nao ha. */
+  readonly contexto: string | null;
+}
+
+/**
+ * O estado da memoria de longo prazo.
+ *
+ * `conversaId` e opcional: sem ela a rota devolve so o estado, sem
+ * consultar o motor. A tela de configuracao nao precisa do contexto para
+ * desenhar o interruptor.
+ */
+export async function lerMemoriaDoAgente(
+  agenteId: string,
+  conversaId: string | null,
+  signal?: AbortSignal
+): Promise<RespostaDaFactory<EstadoDaMemoriaUI>> {
+  const base = `${caminhoDoAgente(agenteId)}${ROTA_SUFIXO_MEMORIA_LONGA}`;
+  const alvo = conversaId === null
+    ? base
+    : `${base}?conversaId=${encodeURIComponent(conversaId)}`;
+
+  let resposta: Response;
+  try {
+    resposta = await fetch(alvo, { signal });
+  } catch {
+    return { estado: "falha" };
+  }
+  const corpo = await corpoDe(resposta);
+  const desfecho = desfechoDaResposta<EstadoDaMemoriaUI>(resposta, corpo);
+  if (desfecho !== null) return desfecho;
+
+  const bruto = corpo as {
+    memoriaAtiva?: unknown; motorConfigurado?: unknown;
+    desfecho?: unknown; contexto?: unknown;
+  };
+  if (typeof bruto.memoriaAtiva !== "boolean") return { estado: "falha" };
+  return {
+    estado: "ok",
+    dados: {
+      memoriaAtiva: bruto.memoriaAtiva,
+      motorConfigurado: bruto.motorConfigurado === true,
+      desfecho: typeof bruto.desfecho === "string" ? bruto.desfecho : "desconhecido",
+      contexto: textoOuNulo(bruto.contexto),
+    },
+  };
+}
+
+/**
+ * Liga ou desliga a memoria de longo prazo.
+ *
+ * PATCH, e em rota propria: `/agentes/[id]` aceita so `nome` e
+ * `instrucoes`, e alargar aquela allowlist tiraria a prova de que `ativo`
+ * e `tipo` nao tem caminho de escrita por ali.
+ *
+ * Ligar memoria NAO concede nada: e um booleano, e o guard continua sendo
+ * a autoridade sobre o que o agente pode fazer.
+ */
+export async function definirMemoriaDoAgente(
+  agenteId: string,
+  memoriaAtiva: boolean
+): Promise<RespostaDaFactory<{ readonly memoriaAtiva: boolean }>> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(
+      `${caminhoDoAgente(agenteId)}${ROTA_SUFIXO_MEMORIA_LONGA}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ memoriaAtiva }),
+      }
+    );
+  } catch {
+    return { estado: "falha" };
+  }
+  const corpo = await corpoDe(resposta);
+  const desfecho = desfechoDaResposta<{ readonly memoriaAtiva: boolean }>(resposta, corpo);
+  if (desfecho !== null) return desfecho;
+  const confirmado = (corpo as { memoriaAtiva?: unknown }).memoriaAtiva;
+  // LIDO da resposta, nunca ecoado do argumento.
+  if (typeof confirmado !== "boolean") return { estado: "falha" };
+  return { estado: "ok", dados: { memoriaAtiva: confirmado } };
 }

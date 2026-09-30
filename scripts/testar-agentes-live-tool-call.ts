@@ -42,7 +42,7 @@ import { conversarComFerramentas } from "@/lib/agentes/ia/laco-ferramentas";
 import type { AdaptadorIAComFerramentas, MensagemDoDialogo } from "@/lib/agentes/ia/ferramentas";
 import { chamarClaudeComFerramentas } from "@/lib/ai-gateway/provedores/anthropic-ferramentas";
 import { MENSAGEM_DE_BLOQUEIO } from "@/lib/agentes/ia/falhas-de-ferramenta";
-import { CODIGO_RETORNO_BLOQUEADO, chamarGeminiComFerramentas } from "@/lib/ai-gateway/provedores/google-ferramentas";
+import { chamarGeminiComFerramentas } from "@/lib/ai-gateway/provedores/google-ferramentas";
 import type { FatoConexao, FatoFuncao, FatoPermissao } from "@/lib/ia/skills/diagnostico";
 
 const ID_CALC = "calculadora.calcular";
@@ -376,28 +376,47 @@ async function main(): Promise<void> {
       log(`  FAIL  5.x Google turno 1 lancou: ${String((e as Error).message).slice(0, 300)}`);
     }
 
-    // O limite, cobrado explicitamente: devolver resultado tem de
-    // FALHAR COM MOTIVO, e nao com um 400 sem explicacao.
+    // ── 5.7 reconciliado na AGENT-FACTORY-F7b.4 ──────────────────────
+    //
+    // ANTES este bloco exigia que o segundo turno LANCASSE, porque o F4
+    // concluiu que a Interactions API nao fechava o ciclo sem
+    // `store: true`. O diagnostico estava errado: faltava devolver a
+    // `signature` do `function_call`.
+    //
+    // Agora cobra-se o oposto — o ciclo FECHA — e mantem-se a exigencia
+    // que nunca mudou: `store: false`. A prova completa, com guard e
+    // multi-turno, vive em `testar-gemini-stateless-live.ts`; aqui fica o
+    // caso minimo, para que esta suite nao volte a afirmar o contrario.
+    //
+    // O `id` e a `assinatura` sao SINTETICOS de proposito: eles provam
+    // que a forma do corpo e aceita. Uma assinatura falsa e recusada pela
+    // API, entao este caso usa um pedido SEM assinatura — que a API
+    // aceita quando o `function_call` nao veio de um turno anterior real.
     try {
-      await chamarGeminiComFerramentas({
-        instrucao: "x",
+      const r = await chamarGeminiComFerramentas({
+        instrucao: "Responda curto, em portugues.",
         mensagens: [
-          { papel: "usuario", texto: "quanto e 2-1?" },
+          { papel: "usuario", texto: "quanto e 2-1? Use a ferramenta." },
           { papel: "assistente", texto: null,
-            pedidos: [{ id: "c1", nome: ID_CALC, argumentos: {} }] },
-          { papel: "ferramenta", respostas: [{ id: "c1", conteudo: "{}", erro: false }] },
+            pedidos: [{ id: "c1", nome: ID_CALC, argumentos: { expressao: "2-1" } }] },
+          { papel: "ferramenta", respostas: [{ id: "c1", conteudo: "1", erro: false }] },
         ],
         ferramentas: declararFerramentas({
           catalogo: FUNCOES, permissoes: [{ funcaoId: ID_CALC, nivel: "automatico" }],
         }).filter((f) => f.nome === ID_CALC),
       });
-      ok("5.7 devolver resultado ao Gemini falha com motivo", false, "nao lancou");
+      ok("5.7 devolver resultado ao Gemini NAO e mais barrado",
+        r.texto !== null || r.pedidos.length > 0,
+        `texto=${JSON.stringify((r.texto ?? "").slice(0, 80))}`);
+      ok("5.8 e o provedor devolveu uso, sem exigir store:true",
+        r.provedor === "google" && r.tokensEntrada > 0,
+        `in=${r.tokensEntrada}`);
     } catch (e) {
       const m = String((e as Error).message);
-      ok("5.7 devolver resultado ao Gemini falha com MOTIVO, nao com 400 opaco",
-        m.includes(CODIGO_RETORNO_BLOQUEADO), m.slice(0, 140));
-      ok("5.8 e a mensagem nomeia a regra de privacidade que bloqueia",
-        /store:\s*true|store:false|privacidade/i.test(m), m.slice(0, 140));
+      // Uma falha aqui NAO deve ser silenciada: se voltar a ser
+      // impossivel, o relatorio tem de dizer, com a mensagem real.
+      ok("5.7 devolver resultado ao Gemini NAO e mais barrado", false, m.slice(0, 180));
+      ok("5.8 e o provedor devolveu uso, sem exigir store:true", false, "nao houve resposta");
     }
   }
 

@@ -46,6 +46,25 @@ export interface PedidoDeFerramenta {
   readonly id: string;
   readonly nome: string;
   readonly argumentos: unknown;
+  /**
+   * Estado OPACO do provedor, devolvido verbatim no turno seguinte —
+   * F7b.4.
+   *
+   * O Gemini emite no `function_call` um campo `signature` de algumas
+   * centenas de caracteres. Ele NAO e legivel e NAO e interpretado aqui:
+   * e devolvido exatamente como veio.
+   *
+   * Existe porque sem ele o segundo turno e recusado. Foi medido: um
+   * `function_call` RECONSTRUIDO com `{id, name, arguments}` leva 400
+   * "Request contains an invalid argument"; o MESMO objeto com a
+   * assinatura preservada fecha o ciclo com `store: false`. Era isso que
+   * o F4 nao tinha isolado, e e por isso que ele concluiu que so havia
+   * caminho com `store: true`.
+   *
+   * A Anthropic nao usa este campo e o ignora. Nada do dominio depende
+   * dele, e ele nunca chega ao guard nem a auditoria.
+   */
+  readonly assinatura?: string;
 }
 
 /** O que devolvemos ao modelo depois de executar (ou recusar). */
