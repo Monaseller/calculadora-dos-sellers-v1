@@ -194,6 +194,14 @@ export function ChatDoAgente({
   const [conectando, setConectando] = useState<string | null>(null);
   /** A linha curta que diz de onde pararam — §15. Vem do servidor. */
   const [retomada, setRetomada] = useState<string | null>(null);
+  /**
+   * O envio que o servidor aceitou e ainda esta processando — §27.
+   *
+   * Quando ele existe, a tela diz "ainda em andamento" — e NAO "nao foi
+   * possivel enviar". A diferenca importa porque a segunda frase convida a
+   * reenviar, e reenviar uma consulta pesada custa a consulta de novo.
+   */
+  const [envioEmCurso, setEnvioEmCurso] = useState<string | null>(null);
   const fimRef = useRef<HTMLDivElement | null>(null);
 
   const carregarFontes = useCallback(async (cid: string | null) => {
@@ -485,6 +493,21 @@ export function ChatDoAgente({
 
   useEffect(() => { fimRef.current?.scrollIntoView({ behavior: "smooth" }); }, [mensagens]);
 
+  /**
+   * O id deste ENVIO — F7b.4.8.3 §29.
+   *
+   * Um por submissao. `crypto.randomUUID` existe em todo navegador que
+   * roda esta tela; o fallback nao e elegancia, e a garantia de que um
+   * ambiente sem ele nao perca a reconciliacao inteira.
+   */
+  function novoEnvioId(): string {
+    try {
+      return crypto.randomUUID();
+    } catch {
+      return `e-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    }
+  }
+
   async function enviar() {
     const texto = rascunho.trim();
     if (texto === "" || enviando || conversa === null) return;
@@ -492,22 +515,62 @@ export function ChatDoAgente({
     setErro(null);
     setCodigoTecnico(null);
     setRascunho("");
+    setEnvioEmCurso(null);
 
-    const r = await enviarNaConversaDoChat(agenteId, conversa, texto);
-    setEnviando(false);
+    const envioId = novoEnvioId();
+    const r = await enviarNaConversaDoChat(agenteId, conversa, texto, envioId);
 
     if (r.estado !== "ok") {
+      // ── §27: falha de TRANSPORTE nao e falha de ENVIO ─────────────
+      //
+      // O servidor grava a fala do usuario ANTES de chamar o modelo. Se o
+      // pedido chegou, o turno existe — e dizer "nao foi possivel enviar"
+      // e falso, alem de convidar a reenviar uma consulta que esta
+      // rodando.
+      //
+      // Entao a tela PERGUNTA, com o mesmo `envioId`: o servidor devolve o
+      // turno que ja existe (sem rodar de novo) ou diz que segue em curso.
+      const reconciliado = await enviarNaConversaDoChat(
+        agenteId, conversa, texto, envioId);
+      setEnviando(false);
+
+      if (reconciliado.estado === "ok") {
+        if (reconciliado.dados.resposta !== null) {
+          setMensagens((atual) => [
+            ...atual, reconciliado.dados.mensagemDoUsuario,
+            reconciliado.dados.resposta as MensagemDoChatUI,
+          ]);
+          return;
+        }
+        // Aceito e rodando. A mensagem da pessoa aparece; a resposta vem
+        // quando vier, e `conferirEnvio` a busca.
+        setMensagens((atual) => [...atual, reconciliado.dados.mensagemDoUsuario]);
+        setEnvioEmCurso(envioId);
+        void conferirEnvio(conversa, texto, envioId);
+        return;
+      }
+
       setCodigoTecnico(r.estado === "recusado" ? r.codigo : null);
       setErro(frasePorEstado(r, "Não foi possível enviar."));
       // O texto volta para o campo: ninguem perde o que escreveu porque
-      // a rede caiu.
+      // a rede caiu — e aqui a rede de fato nao entregou nada.
       setRascunho(texto);
+      return;
+    }
+
+    setEnviando(false);
+
+    if (r.dados.resposta === null) {
+      // §27: aceito e em curso. Sem erro, e sem o rascunho de volta.
+      setMensagens((atual) => [...atual, r.dados.mensagemDoUsuario]);
+      setEnvioEmCurso(envioId);
+      void conferirEnvio(conversa, texto, envioId);
       return;
     }
 
     // As DUAS mensagens vem do servidor. A tela nao inventa a sua
     // propria versao do que foi gravado.
-    setMensagens((atual) => [...atual, r.dados.mensagemDoUsuario, r.dados.resposta]);
+    setMensagens((atual) => [...atual, r.dados.mensagemDoUsuario, r.dados.resposta as MensagemDoChatUI]);
 
     // Turno gravado, mas interrompido: a resposta existe e merece ser
     // mostrada — junto com o motivo pelo qual parou ali.
@@ -524,6 +587,39 @@ export function ChatDoAgente({
         : FRASES_DE_BLOQUEIO[r.dados.categoriaDoBloqueio] ?? null;
       setErro(porCategoria ?? frase(r.dados.motivo) ?? "O agente não conseguiu concluir.");
     }
+  }
+
+  /**
+   * Pergunta ao servidor se o envio terminou — §27/§31.
+   *
+   * ── Por que PERGUNTAR, e nao esperar ─────────────────────────────
+   *
+   * A resposta HTTP pode ter se perdido por rede, por aba trocada ou pelo
+   * corte de tempo da plataforma. O turno, do lado do servidor, continua —
+   * e foi por isso que o agente do Rodrigo respondeu sozinho depois.
+   *
+   * Cada tentativa reenvia o MESMO `envioId`, entao ela nunca inicia um
+   * segundo turno: o servidor devolve o que existe.
+   *
+   * Um teto de tentativas, e nao um laco eterno: se o turno morreu de
+   * verdade, insistir para sempre deixaria a tela mentindo do outro lado.
+   */
+  async function conferirEnvio(conversaId: string, texto: string, envioId: string) {
+    for (let tentativa = 0; tentativa < 40; tentativa += 1) {
+      await new Promise((r) => setTimeout(r, 3000));
+      const r = await enviarNaConversaDoChat(agenteId, conversaId, texto, envioId);
+      if (r.estado !== "ok") continue;
+      if (r.dados.resposta === null) continue;
+
+      setEnvioEmCurso(null);
+      // O historico inteiro vem do servidor: acrescentar so a resposta
+      // arriscaria duplicar a fala do usuario que ja esta na tela.
+      await carregarMensagens(conversaId);
+      return;
+    }
+    // Acabaram as tentativas. A tela para de afirmar que esta em curso —
+    // e nao afirma o contrario tambem.
+    setEnvioEmCurso(null);
   }
 
   async function subirArquivo(escopo: "agente" | "conversa", arquivo: File) {
@@ -613,7 +709,14 @@ export function ChatDoAgente({
           afirmar um turno que nao aconteceu. Ela e uma linha de tela, e
           desaparece no primeiro turno de verdade.
         */}
-        {mensagens.length === 0 && retomada !== null && (
+        {/* §27: aceito e rodando. A frase NAO diz falha. */}
+      {envioEmCurso !== null && (
+        <Aviso tom="info">
+          Consulta em andamento. Ela pode levar alguns segundos em períodos
+          grandes — não precisa enviar de novo.
+        </Aviso>
+      )}
+      {mensagens.length === 0 && retomada !== null && (
           <p style={{
             margin: 0, padding: ESPACO.md,
             border: `1px solid ${CROMO.acentoBorda}`, borderRadius: RAIO.card,

@@ -238,3 +238,46 @@ futuro, inclusive no cenário em que o projeto adote Supabase Auth sem revisar p
 
 **Resíduo conhecido:** `authenticated` mantém os defaults de **sequences** (`SELECT, UPDATE,
 USAGE`), deliberadamente fora deste escopo — gate próprio.
+
+---
+
+## F7b.4.8.3 — o que fica para depois, e por quê
+
+Dois pontos foram levantados no gate da precisão financeira do Mercado
+Livre e **não** foram resolvidos nele. Ficam registrados com nome, para que
+não voltem como surpresa.
+
+### `CDS_SALES_MIRROR_RECONCILIATION = DEFERRED`
+
+O agente passou a responder faturamento direto da API oficial do Mercado
+Livre. O espelho da CDS — tabela `pedidos`, Dashboard, página Vendas — **não
+foi tocado**, e as duas leituras podem divergir.
+
+Duas causas já conhecidas e medidas:
+
+- **Pedido com mais de um pagamento aprovado.** O espelho usa `.find()` em
+  `lib/sync-ml.ts`, ou seja a primeira posição do array; a leitura oficial
+  passou a usar o pagamento **mais antigo**. Medido em 01/08–07/08/2026:
+  10 pedidos com mais de um pagamento aprovado, e em 3 deles a ordem do
+  array não começa pelo mais antigo.
+- **Pedido `partially_refunded`.** A leitura oficial deixou de filtrar
+  `order.status=paid` e passou a incluí-los, como a regra de pagamento
+  sempre disse. Medido em 10/09–20/09/2026: 9 pedidos, R$ 293,29.
+
+Reconciliar exige decidir **qual das duas** é a regra da casa e migrar
+dado histórico — frente própria, com gate próprio. Até lá vale o que o gate
+declarou: `CDS_SALES_MIRROR_ACCURACY = KNOWN_UNRELIABLE`.
+
+A semântica completa da leitura oficial, caso por caso e com o que ficou
+aberto, está em `docs/SEMANTICA_FATURAMENTO_ML.md`.
+
+### `MARKDOWN_RENDERING = DEFERRED`
+
+O agente responde em Markdown — negrito, tabela, lista — e o chat da
+Factory mostra o texto cru. Funciona e é legível, mas `**R$ 325.697,95**`
+aparece com os asteriscos.
+
+Não foi corrigido aqui porque renderizar Markdown de saída de modelo é
+superfície de injeção (HTML, link, imagem remota) e pede decisão de
+sanitização própria, não um `dangerouslySetInnerHTML` de passagem no meio
+de um gate sobre número financeiro.

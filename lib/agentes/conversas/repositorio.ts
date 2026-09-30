@@ -32,7 +32,7 @@ const TAB_MENSAGENS = "agente_mensagens";
 const COL_CONVERSA = "id,user_id,agente_id,titulo,arquivada,criado_em,atualizado_em";
 const COL_MENSAGEM =
   "id,user_id,conversa_id,papel,conteudo,ordem,passos,provedor,modelo," +
-  "tokens_entrada,tokens_saida,tempo_ms,criado_em";
+  "tokens_entrada,tokens_saida,tempo_ms,envio_id,criado_em";
 
 interface LinhaConversa {
   id: string; user_id: string; agente_id: string; titulo: string | null;
@@ -62,6 +62,15 @@ function daMensagem(l: LinhaMensagem): Mensagem {
 }
 
 export interface NovaMensagem {
+  /**
+   * A identidade do ENVIO — F7b.4.8.3 §29.
+   *
+   * Vem do navegador, e por isso NAO e autoridade de nada: ela so serve
+   * para reconhecer um reenvio do MESMO envio. O dono continua saindo da
+   * sessao, e o indice unico inclui `user_id` justamente porque um id
+   * gerado no cliente nao pode colidir entre pessoas.
+   */
+  readonly envioId?: string | null;
   readonly userId: string;
   readonly conversaId: string;
   readonly papel: PapelDeMensagem;
@@ -99,6 +108,33 @@ export interface PortaDeConversas {
   ): Promise<boolean>;
   listarMensagens(userId: string, conversaId: string): Promise<readonly Mensagem[]>;
   anexarMensagem(nova: NovaMensagem): Promise<Mensagem>;
+  /**
+   * O turno de um ENVIO, se ele ja existe — F7b.4.8.3 §29/§30.
+   *
+   * Devolve a fala do usuario e, quando ja houver, a resposta do agente.
+   * `usuario: null` significa que este envio nunca chegou.
+   *
+   * E o que permite reenviar sem duplicar: o mesmo `envioId` encontra o
+   * turno em vez de criar um segundo.
+   */
+  lerTurnoDoEnvio(
+    userId: string, conversaId: string, envioId: string
+  ): Promise<{ usuario: Mensagem | null; assistente: Mensagem | null }>;
+}
+
+/**
+ * O MESMO envio chegou duas vezes — F7b.4.8.3 §30.
+ *
+ * Classe propria, e nao um `Error` com texto: quem trata precisa decidir
+ * por identidade, e comparar mensagem de erro seria contrato por string.
+ */
+export class ErroEnvioDuplicado extends Error {
+  readonly envioId: string;
+  constructor(envioId: string) {
+    super("Este envio ja criou um turno.");
+    this.name = "ErroEnvioDuplicado";
+    this.envioId = envioId;
+  }
 }
 
 export function criarPortaDeConversas(supabase: SupabaseClient): PortaDeConversas {
@@ -165,6 +201,48 @@ export function criarPortaDeConversas(supabase: SupabaseClient): PortaDeConversa
       return ((data ?? []) as unknown as LinhaMensagem[]).map(daMensagem);
     },
 
+    async lerTurnoDoEnvio(userId, conversaId, envioId) {
+      if (!userId || !conversaId || !envioId) return { usuario: null, assistente: null };
+      // O `envio_id` marca UMA linha, e so pode marcar uma: o indice unico
+      // parcial `(user_id, conversa_id, envio_id)` existe justamente para
+      // que dois pedidos do mesmo envio nao virem dois turnos. Ele fica na
+      // fala do usuario, que e gravada primeiro.
+      const { data, error } = await supabase.from(TAB_MENSAGENS).select(COL_MENSAGEM)
+        .eq("user_id", userId).eq("conversa_id", conversaId).eq("envio_id", envioId)
+        .order("ordem", { ascending: true }).limit(1).maybeSingle();
+      // Falha de leitura NAO e ausencia: dizer "este envio nao existe"
+      // sobre um banco que nao respondeu faria o turno rodar de novo — e
+      // rodar de novo e exatamente o que este caminho existe para evitar.
+      if (error) throw new Error(`Falha ao ler o envio: ${error.message}`);
+      if (data === null) return { usuario: null, assistente: null };
+      const usuario = daMensagem(data as unknown as LinhaMensagem);
+      if (usuario.papel !== "usuario") return { usuario: null, assistente: null };
+
+      // ── A resposta NAO carrega o envio, e nao pode ──────────────────
+      //
+      // Ela e a linha seguinte. `agente_mensagens` e append-only e a ordem
+      // e estritamente crescente, entao "a resposta deste envio" e a
+      // primeira mensagem depois dele — se for do assistente.
+      //
+      // Se a proxima for do usuario, este turno nao produziu resposta: ele
+      // morreu, e herdar a resposta de outro turno seria pior que admitir
+      // a ausencia.
+      const seguinte = await supabase.from(TAB_MENSAGENS).select(COL_MENSAGEM)
+        .eq("user_id", userId).eq("conversa_id", conversaId)
+        .gt("ordem", usuario.ordem)
+        .order("ordem", { ascending: true }).limit(1).maybeSingle();
+      if (seguinte.error) {
+        throw new Error(`Falha ao ler a resposta do envio: ${seguinte.error.message}`);
+      }
+      const proxima = seguinte.data === null
+        ? null
+        : daMensagem(seguinte.data as unknown as LinhaMensagem);
+      return {
+        usuario,
+        assistente: proxima !== null && proxima.papel === "assistente" ? proxima : null,
+      };
+    },
+
     async anexarMensagem(nova) {
       const ordem = await proximaOrdem(nova.userId, nova.conversaId);
       const { data, error } = await supabase.from(TAB_MENSAGENS).insert({
@@ -175,7 +253,23 @@ export function criarPortaDeConversas(supabase: SupabaseClient): PortaDeConversa
         tokens_entrada: nova.tokensEntrada ?? null,
         tokens_saida: nova.tokensSaida ?? null,
         tempo_ms: nova.tempoMs ?? null,
+        envio_id: nova.envioId ?? null,
       }).select(COL_MENSAGEM).single();
+      // ── O envio repetido nao e erro de gravacao ───────────────────
+      //
+      // `23505` no indice parcial de `envio_id` significa uma coisa so:
+      // OUTRO pedido do MESMO envio ja criou este turno. Quem chamou
+      // precisa reconciliar, e nao ver "falha ao gravar" — que e a frase
+      // que este gate existe para nao dizer mais.
+      //
+      // A corrida e estreita e real: a tela reenvia o mesmo `envioId`
+      // depois de uma falha de transporte, e esse reenvio pode chegar
+      // antes de o primeiro pedido ter gravado a fala do usuario. O indice
+      // e que impede o turno duplo; este erro tipado e o que permite a
+      // rota responder direito quando ele age.
+      if (error !== null && error.code === "23505" && nova.envioId) {
+        throw new ErroEnvioDuplicado(nova.envioId);
+      }
       if (error) throw new Error(`Falha ao gravar mensagem: ${error.message}`);
 
       // A conversa sobe na lista. Sem trigger: o projeto nao tem esse

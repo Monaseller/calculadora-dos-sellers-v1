@@ -70,14 +70,19 @@ export async function executarVendasML(
     // Mesma forma de saida do caminho de sucesso, com `erro` preenchido:
     // `interpretarSaida` precisa reconhecer o objeto para poder traduzir.
     return {
-      totais: { faturamento: 0, pedidos: 0, ticketMedio: 0 },
+      // `totais: null`, e nao zero — F7b.4.8.3 §11. Sem conexao nao houve
+      // consulta, e zero apresentado como total seria a resposta errada
+      // com cara de resposta.
+      totais: null,
       porDia: [],
       periodo: { de: "", ate: "", rotulo: "", fuso: "America/Sao_Paulo" },
       fonte: "mercadolivre_api",
-      truncado: false,
+      completo: false,
+      truncado: true,
+      parcial: null,
       diagnostico: {
-        paginasLidas: 0, recebidosDoProvider: 0,
-        foraDaJanelaFinanceira: 0, margemDeCriacaoDias: 0,
+        paginasLidas: 0, recebidosDoProvider: 0, foraDaJanelaFinanceira: 0,
+        duplicadosDescartados: 0, margemDeCriacaoDias: 0,
       },
       erro: "credencial_ausente",
     };
@@ -110,6 +115,10 @@ const MENSAGENS_ERRO: Readonly<Record<string, string>> = Object.freeze({
   limite_excedido: "O Mercado Livre limitou as consultas agora. Tente mais tarde.",
   indisponivel: "Não foi possível falar com o Mercado Livre agora.",
   resposta_invalida: "O Mercado Livre respondeu num formato que não reconhecemos.",
+  // F7b.4.8.3: a frase diz o que o modelo pode fazer — trocar as palavras.
+  periodo_nao_entendido:
+    "Não entendi o período pedido. Diga de outra forma, por exemplo " +
+    "\"últimos 7 dias\", \"agosto de 2026\" ou \"de 10/09/2026 até 20/09/2026\".",
 });
 
 const MENSAGEM_GENERICA = "Não foi possível consultar as vendas do Mercado Livre.";
@@ -120,7 +129,11 @@ const MENSAGEM_GENERICA = "Não foi possível consultar as vendas do Mercado Liv
  * Reconectar conta e acesso recusado nao mudam sozinhos; rede, limite e
  * 5xx, sim. Isto NAO pede retry — nao existe retry neste sistema.
  */
-const REPETIVEIS: ReadonlySet<string> = new Set(["limite_excedido", "indisponivel"]);
+const REPETIVEIS: ReadonlySet<string> = new Set([
+  "limite_excedido", "indisponivel",
+  // Repetir com OUTRAS palavras muda o resultado — e por isso ele entra.
+  "periodo_nao_entendido",
+]);
 
 /**
  * `interpretarSaida` — checagem de runtime de verdade.
@@ -140,17 +153,30 @@ export function interpretarSaidaVendasML(saida: unknown): ResultadoInterpretacao
   const bruto = saida as Record<string, unknown>;
   if (bruto.fonte !== "mercadolivre_api") return { tipo: "invalida" };
   if (typeof bruto.truncado !== "boolean") return { tipo: "invalida" };
+  if (typeof bruto.completo !== "boolean") return { tipo: "invalida" };
   if (!Array.isArray(bruto.porDia)) return { tipo: "invalida" };
 
-  const totais = bruto.totais;
-  if (typeof totais !== "object" || totais === null) return { tipo: "invalida" };
-  const t = totais as Record<string, unknown>;
+  // ── §11: completude e total andam JUNTOS ────────────────────────
+  //
+  // Completo exige total; incompleto exige a AUSENCIA dele. As duas
+  // metades sao cobradas, e nao uma: uma saida `completo: false` com
+  // numeros seria exatamente a que produziu a comparacao errada, e uma
+  // `completo: true` sem numeros nao teria o que dizer.
   const numero = (v: unknown): number | null =>
     typeof v === "number" && Number.isFinite(v) ? v : null;
-  if (numero(t.faturamento) === null || numero(t.ticketMedio) === null) {
-    return { tipo: "invalida" };
-  }
-  if (typeof t.pedidos !== "number" || !Number.isInteger(t.pedidos) || t.pedidos < 0) {
+
+  if (bruto.completo === true) {
+    const totais = bruto.totais;
+    if (typeof totais !== "object" || totais === null) return { tipo: "invalida" };
+    const t = totais as Record<string, unknown>;
+    if (numero(t.faturamento) === null || numero(t.ticketMedio) === null) {
+      return { tipo: "invalida" };
+    }
+    if (typeof t.pedidos !== "number" || !Number.isInteger(t.pedidos) || t.pedidos < 0) {
+      return { tipo: "invalida" };
+    }
+  } else if (bruto.totais !== null && bruto.erro === null) {
+    // Incompleto COM total e contradicao: quem consome leria o numero.
     return { tipo: "invalida" };
   }
 
@@ -168,8 +194,11 @@ export function interpretarSaidaVendasML(saida: unknown): ResultadoInterpretacao
         // §27: a procedencia atravessa. Sem ela o agente teria os numeros
         // e nao saberia dizer de onde vieram.
         fonte: bruto.fonte,
-        // `truncado` atravessa: silencia-lo entregaria um total parcial
-        // com cara de total.
+        // §11: a completude atravessa, e e ela que o agente tem de citar
+        // antes de comparar dois periodos.
+        completo: bruto.completo,
+        parcial: bruto.parcial ?? null,
+        // `truncado` continua atravessando para quem ja o lia.
         truncado: bruto.truncado,
         diagnostico: bruto.diagnostico,
       },

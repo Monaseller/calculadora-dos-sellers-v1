@@ -68,7 +68,15 @@ export type ErroVendasML =
   | "nao_autorizado"
   | "limite_excedido"
   | "indisponivel"
-  | "resposta_invalida";
+  | "resposta_invalida"
+  /**
+   * F7b.4.8.3: a expressao de periodo nao foi entendida.
+   *
+   * Separado de `resposta_invalida` porque a acao e outra e o culpado e
+   * outro: aqui o provedor nem foi chamado, e quem pode corrigir e o
+   * MODELO — trocando as palavras. E por isso que o codigo e corrigivel.
+   */
+  | "periodo_nao_entendido";
 
 /** O endereco oficial. Uma constante, num lugar. */
 const ENDPOINT = "https://api.mercadolibre.com/orders/search";
@@ -84,17 +92,88 @@ export const LIMITE_POR_PAGINA = 51;
 export const MARGEM_CRIACAO_DIAS = 5;
 
 /**
- * Teto de paginas por consulta.
+ * Teto de paginas por SUBJANELA de um dia.
  *
- * 60 paginas x 51 = 3060 pedidos. Nao e arbitrario: a janela de uma
- * semana da loja medida tem ~3000 pedidos pagos, e esse e o tamanho de
- * pergunta que este gate existe para responder.
+ * ── Por que o teto antigo truncava — MEDIDO ────────────────────────
  *
- * Estourar o teto NAO vira silencio: `truncado` sobe `true`, e a Funcao
- * diz que olhou uma parte. Um total parcial apresentado como total seria
- * o pior desfecho possivel aqui.
+ * Era `MAX_PAGINAS = 60` para a consulta INTEIRA: 60 x 51 = 3060 pedidos.
+ * E a janela buscada e maior que a financeira, por causa da margem de
+ * boleto — 7 dias pedidos viram 12 dias lidos.
+ *
+ * Medido em `scripts/medir-ml-paginacao-profunda.ts`, loja real:
+ *
+ *   financeiro 28/09–04/10  ->  criacao 23/09–04/10  ->  2197  cabia
+ *   financeiro 21/09–27/09  ->  criacao 16/09–27/09  ->  3572  ESTOUROU
+ *   financeiro 24/09–30/09  ->  criacao 19/09–30/09  ->  3444  ESTOUROU
+ *   agosto/2026             ->  criacao 27/07–31/08  -> 10218  ESTOUROU
+ *
+ * Era exatamente essa a assimetria que o Rodrigo viu: "esta semana"
+ * completa e "semana passada" truncada, com a comparacao percentual sendo
+ * apresentada como se as duas valessem.
+ *
+ * ── E por que o teto tambem nao podia so subir ─────────────────────
+ *
+ * MEDIDO: `offset` acima de 10000 devolve HTTP 400 ("Limit must be a
+ * lower or equal than 10000"). Agosto tem 10218 na janela de criacao —
+ * mais que o teto do proprio provedor. Paginacao linear nao alcanca.
+ *
+ * A saida e subdividir: cada DIA e uma consulta propria, e o maior dia
+ * medido tem 477 pedidos (10 paginas). O orcamento e por dia e vale para
+ * TODAS as passadas: uma releitura de dia curto (ver `TENTATIVAS_POR_DIA`)
+ * consome do mesmo teto, e tres passadas de um dia pesado cabem aqui.
  */
-export const MAX_PAGINAS = 60;
+export const MAX_PAGINAS_POR_DIA = 60;
+
+/**
+ * Quantas vezes um dia pode ser RELIDO quando a contagem vem curta.
+ *
+ * ── MEDIDO: a paginacao por offset nao e estavel ───────────────────
+ *
+ * `medir-ml-empate-e-total.ts`, em ondas de 3 sobre os 16 dias de
+ * 05/09..20/09:
+ *
+ *   2026-09-07   unicos=476   paging.total=477   duplicadas=1
+ *
+ * Uma linha veio duas vezes e outra nao veio nenhuma. E o comportamento
+ * classico de offset sobre chave com empate: `sort=date_asc` ordena por
+ * `date_created`, pedidos do mesmo instante nao tem ordem definida entre
+ * si, e na fronteira de pagina a ordem relativa muda entre chamadas.
+ *
+ * Intermitente: apareceu em 2 de 4 varreduras, e nunca nas 32 leituras
+ * SEQUENCIAIS dos mesmos dias. Foi essa perda que fez a janela
+ * 10/09..20/09 dar 3304 onde o oraculo deu 3305.
+ *
+ * Reler resolve porque cada passada sorteia os empates de novo, e a UNIAO
+ * cresce monotonicamente em direcao ao total. Nao e retry cego: a passada
+ * nova so acontece quando a contagem provou estar curta, e para no
+ * instante em que alcanca o total.
+ */
+export const TENTATIVAS_POR_DIA = 3;
+
+/**
+ * Quantas vezes uma pagina com 429 e tentada de novo, com espera.
+ *
+ * MEDIDO: em ondas de 6, a varredura de 16 dias levou 429 em 3 dias de
+ * uma passada — e 429 dizia "sua conta e invalida" no desenho antigo,
+ * abortando a consulta inteira. Nao e isso que ele diz: ele diz devagar.
+ */
+export const TENTATIVAS_APOS_429 = 3;
+
+/**
+ * Quantas subjanelas sao lidas ao mesmo tempo.
+ *
+ * ── Por que TRES, e nao seis ────────────────────────────────────────
+ *
+ * Seis foi escolhido a partir de uma medicao de 8 chamadas simultaneas
+ * que responderam 200 em 403 ms. Essa medicao era de um INSTANTE, e nao
+ * de uma varredura: em ondas de 6 sobre 128 paginas, o provedor devolveu
+ * **429** em 3 dias de uma unica passada (medido). Em ondas de 3, nenhum
+ * 429 em 4 varreduras completas da mesma janela.
+ *
+ * Custo: agosto passa de ~9 s para ~18 s — ainda dentro do corte de 60 s.
+ * Um numero errado rapido nao vale mais que um numero certo.
+ */
+export const CONCORRENCIA_DE_SUBJANELAS = 3;
 
 /** Orcamento proprio de UMA chamada, quando nao ha orcamento de acao. */
 const TIMEOUT_MS = 20_000;
@@ -118,14 +197,39 @@ export interface PedidoOficialML {
 export interface ResultadoBrutoVendasML {
   readonly pedidos: readonly PedidoOficialML[];
   readonly erro: ErroVendasML | null;
-  /** Quantas paginas a consulta chegou a ler. */
+  /** Quantas paginas a consulta chegou a ler, somando as subjanelas. */
   readonly paginasLidas: number;
   /** Quantos pedidos a API devolveu, ANTES do recorte financeiro. */
   readonly recebidosDoProvider: number;
+  /**
+   * Quantos ids REPETIDOS a varredura encontrou — §8.
+   *
+   * Zero e o esperado: as subjanelas de criacao sao disjuntas. Ele existe
+   * porque "deduplicamos" sem medir seria uma afirmacao sem prova, e um
+   * numero maior que zero aqui diria que a fronteira entre dias nao e o
+   * que este codigo supoe.
+   */
+  readonly duplicadosDescartados: number;
   /** Quantos cairam por nao ter pagamento aprovado na janela. */
   readonly foraDaJanelaFinanceira: number;
-  /** `true` quando o teto de paginas interrompeu a leitura. */
+  /**
+   * `true` quando TODAS as subjanelas foram lidas ate o fim — §11.
+   *
+   * E este campo, e nao `truncado`, que autoriza apresentar um total.
+   *
+   * A pagina curta PARA a subjanela; quem afirma completude e a contagem
+   * conferida contra o `paging.total` DAQUELE DIA. A distincao e medida:
+   * o total de uma janela larga (3572) nao bate com a soma dos totais
+   * diarios (3642), mas o total de UM dia bateu com os ids contados em
+   * 48/48 leituras, com e sem filtro de status. A pagina curta sozinha nao
+   * percebe uma linha perdida no meio — e uma foi perdida, na prova do
+   * §39. Ver o comentario em `lerSubjanela`.
+   */
+  readonly completo: boolean;
+  /** Negacao de `completo`. Mantido para quem ja o consumia. */
   readonly truncado: boolean;
+  /** Quantas subjanelas nao chegaram ao fim. Zero quando completo. */
+  readonly subjanelasIncompletas: number;
   /** A janela de CRIACAO que foi de fato pedida a API. */
   readonly janelaDeCriacao: { readonly de: string; readonly ate: string };
 }
@@ -156,7 +260,11 @@ function falha(
 ): ResultadoBrutoVendasML {
   return {
     pedidos: [], erro, paginasLidas: 0, recebidosDoProvider: 0,
-    foraDaJanelaFinanceira: 0, truncado: false, janelaDeCriacao: janela,
+    duplicadosDescartados: 0, foraDaJanelaFinanceira: 0,
+    // Falha NAO e completude. Um erro com `completo: true` autorizaria
+    // apresentar zero como se fosse a resposta.
+    completo: false, truncado: true, subjanelasIncompletas: 0,
+    janelaDeCriacao: janela,
   };
 }
 
@@ -199,24 +307,50 @@ function diaBRT(iso: string): string | null {
 }
 
 /**
- * O pagamento que conta.
+ * O pagamento que conta, e a data dele.
  *
  * `approved` e `partially_refunded` — exatamente o critério de
  * `sync-ml.ts`. Um pedido estornado em parte foi pago; a venda aconteceu
  * financeiramente, e `BUSINESS_RULES.md` e explicito de que a data
  * permanece.
+ *
+ * ── Mais de um pagamento aprovado: o MAIS ANTIGO ────────────────────
+ *
+ * MEDIDO em 01/08..07/08 (`medir-ml-semantica-pagamento.ts`): 36 dos 2042
+ * pedidos da semana tem mais de um pagamento, 10 deles tem mais de um
+ * pagamento APROVADO, e em 3 desses a ordem do array NAO comeca pelo mais
+ * antigo.
+ *
+ * `sync-ml.ts` usa `.find()` — a primeira posicao do array — e por isso o
+ * espelho da CDS pode atribuir a venda a outro dia. Este gate declara o
+ * espelho `KNOWN_UNRELIABLE / DEFERRED` e nao o corrige; aqui a regra e
+ * dita, e nao herdada:
+ *
+ *   a venda foi paga no PRIMEIRO instante em que houve pagamento
+ *   aprovado; um segundo pagamento aprovado depois nao empurra a venda
+ *   para a frente no tempo.
+ *
+ * Sem isso, a ordem de um array do provedor decidiria em que dia — e, na
+ * fronteira do mes, em que MES — a venda entra.
  */
 function pagamentoQueConta(pedido: Record<string, unknown>): string | null {
   const pagamentos = pedido.payments;
   if (!Array.isArray(pagamentos)) return null;
+  let maisAntigo: string | null = null;
   for (const p of pagamentos) {
     if (typeof p !== "object" || p === null) continue;
     const pg = p as Record<string, unknown>;
     if (pg.status !== "approved" && pg.status !== "partially_refunded") continue;
     if (typeof pg.date_approved !== "string" || pg.date_approved === "") continue;
-    return pg.date_approved;
+    // Comparacao por INSTANTE, e nao por texto: dois ISO da mesma hora
+    // podem vir com offsets diferentes, e ai ordenar string mente.
+    const t = new Date(pg.date_approved).getTime();
+    if (!Number.isFinite(t)) continue;
+    if (maisAntigo === null || t < new Date(maisAntigo).getTime()) {
+      maisAntigo = pg.date_approved;
+    }
   }
-  return null;
+  return maisAntigo;
 }
 
 /** Somente `number` finito. Nunca `Number(...)`, nunca `+`. */
@@ -266,110 +400,333 @@ export async function buscarVendasPagasML(
     return falha("credencial_ausente", janela);
   }
 
+  // ── A varredura, subjanela por subjanela ─────────────────────────
+  //
+  // Cada DIA da janela de criacao e uma consulta propria, paginada ate a
+  // pagina curta. O motivo esta no docblock de `MAX_PAGINAS_POR_DIA`: a
+  // janela inteira nao cabe no teto de offset do proprio provedor.
+  const dias: string[] = [];
+  for (let d = criacaoDe; d <= ate; d = somarDias(d, 1)) dias.push(d);
+
+  /** O resultado de UMA subjanela. `completa` e o que autoriza o total. */
+  interface Subjanela {
+    readonly brutos: readonly Record<string, unknown>[];
+    readonly paginas: number;
+    readonly completa: boolean;
+    readonly erroFatal: ErroVendasML | null;
+  }
+
+  const lerSubjanela = async (dia: string): Promise<Subjanela> => {
+    const brutos: Record<string, unknown>[] = [];
+    let paginas = 0;
+    /** Os ids DESTE dia — a contagem que se confere contra o provedor. */
+    const idsDoDia = new Set<string>();
+    /** Todo `paging.total` visto neste dia. Mais de um = o conjunto mexeu. */
+    const totaisRelatados = new Set<number>();
+
+    /**
+     * UMA passada pelo dia, do offset zero ao fim.
+     *
+     * Acumula em `brutos`, `idsDoDia` e `totaisRelatados`, que sao da
+     * subjanela e nao da passada — e isso e o ponto: uma segunda passada
+     * soma a UNIAO, e nao recomeca a contagem.
+     */
+    const passada = async (): Promise<Subjanela> => {
+      // ── O offset anda pelo que VEIO, e nao pelo que se pediu ──────
+      //
+      // Uma pagina pode voltar com menos de 51 linhas SEM ser a ultima.
+      // Somar 51 nesse caso pularia as linhas que ficaram faltando — e
+      // era esse o jeito antigo. Andar pelo tamanho real do lote cobre a
+      // lacuna: pedi 51, vieram 40, o proximo pedido comeca em 40.
+      let offset = 0;
+      /** Quantas vezes esta pagina levou 429. Zera a cada pagina nova. */
+      let esperas = 0;
+      for (;;) {
+      if (paginas >= MAX_PAGINAS_POR_DIA) {
+        return { brutos, paginas, completa: false, erroFatal: null };
+      }
+
+      const url = new URL(ENDPOINT);
+      url.searchParams.set("seller", credencial.sellerId);
+      // ── SEM `order.status` — a autoridade e o PAGAMENTO ───────────
+      //
+      // `order.status=paid` estava aqui, e escondia dinheiro real.
+      //
+      // MEDIDO em 10/09..20/09 (`medir-ml-janela-divergente.ts`): com o
+      // filtro, 3305 pedidos e 125845.26; sem ele, 3314 e 126138.55. Os 9
+      // pedidos de diferenca tem `order.status = partially_refunded` com
+      // pagamento `approved` — ou seja, exatamente o caso que a regra
+      // deste arquivo diz contar, e que o filtro removia antes de a regra
+      // ser aplicada. Duas autoridades sobre o mesmo numero, discordando.
+      //
+      // Custo medido da remocao: 128 paginas contra 123 na mesma janela de
+      // 16 dias (+4%). Nada do que entra passa a contar sozinho — pedido
+      // cancelado tem pagamento `refunded`, e `pagamentoQueConta` continua
+      // recusando (e, medido, o `paid_amount` desses e 0.00).
+      //
+      // Um dia civil INTEIRO no fuso de Sao Paulo. Cortar a meia-noite
+      // perderia o dia que a pessoa pediu.
+      url.searchParams.set("order.date_created.from", `${dia}T00:00:00.000-03:00`);
+      url.searchParams.set("order.date_created.to", `${dia}T23:59:59.999-03:00`);
+      url.searchParams.set("sort", "date_asc");
+      url.searchParams.set("limit", String(LIMITE_POR_PAGINA));
+      url.searchParams.set("offset", String(offset));
+
+      const teto = limiteExterno === undefined
+        ? TIMEOUT_MS
+        : Math.min(TIMEOUT_MS, limiteExterno.restanteMs());
+      // Orcamento esgotado NAO e falha: o que ja foi lido vale, e a
+      // subjanela volta INCOMPLETA. Descartar desperdicaria trabalho real;
+      // mentir que esta completa daria um total errado.
+      if (teto <= 0) return { brutos, paginas, completa: false, erroFatal: null };
+
+      const controlador = new AbortController();
+      const relogio = setTimeout(() => controlador.abort(), teto);
+      const propagar = () => controlador.abort();
+      const doOrcamento = limiteExterno?.signal;
+      if (doOrcamento?.aborted) controlador.abort();
+      else doOrcamento?.addEventListener("abort", propagar, { once: true });
+
+      let resposta: Response;
+      try {
+        resposta = await buscar(url.toString(), {
+          headers: { Authorization: `Bearer ${credencial.accessToken}` },
+          signal: controlador.signal,
+        });
+      } catch {
+        // Falha de rede na PRIMEIRA pagina do PRIMEIRO dia e falha da
+        // consulta. Aqui ela e so uma subjanela incompleta — quem decide
+        // se ha resposta e o agregador, olhando o conjunto.
+        return { brutos, paginas, completa: false, erroFatal: null };
+      } finally {
+        clearTimeout(relogio);
+        doOrcamento?.removeEventListener("abort", propagar);
+      }
+
+      // ── 429 nao condena a conta; ele pede espera ──────────────────
+      //
+      // No desenho antigo 429 era fatal, ao lado de 401 e 403. MEDIDO que
+      // isso estava errado em dois sentidos: em ondas de 6 o provedor
+      // devolveu 429 em 3 dias de uma passada — e um 429 abortava a
+      // consulta inteira, transformando uma pedida de calma em "nao foi
+      // possivel". A mesma pagina, pedida de novo depois de uma espera,
+      // responde.
+      if (resposta.status === 429 && esperas < TENTATIVAS_APOS_429) {
+        esperas += 1;
+        const espera = 400 * Math.pow(3, esperas - 1);
+        const teto429 = limiteExterno === undefined
+          ? espera
+          : Math.min(espera, limiteExterno.restanteMs());
+        // Sem orcamento para esperar, nao ha o que esperar.
+        if (teto429 <= 0) {
+          return { brutos, paginas, completa: false, erroFatal: null };
+        }
+        await new Promise((r) => setTimeout(r, teto429));
+        continue;
+      }
+
+      if (!resposta.ok) {
+        return {
+          brutos, paginas, completa: false,
+          // 401/403 falam da CONTA, e nao deste dia: eles condenam a
+          // consulta inteira, e nao ha por que varrer os outros 35 dias
+          // para receber o mesmo 401. 429 ja foi tratado acima, e se
+          // chegou aqui e porque as esperas acabaram — dia incompleto,
+          // nao consulta perdida.
+          erroFatal: resposta.status === 401 || resposta.status === 403
+            ? codigoDoStatus(resposta.status) : null,
+        };
+      }
+      esperas = 0;
+
+      let corpo: unknown;
+      try { corpo = await resposta.json(); } catch {
+        return { brutos, paginas, completa: false, erroFatal: null };
+      }
+      if (typeof corpo !== "object" || corpo === null) {
+        return { brutos, paginas, completa: false, erroFatal: null };
+      }
+      const resultados = (corpo as Record<string, unknown>).results;
+      if (!Array.isArray(resultados)) {
+        return { brutos, paginas, completa: false, erroFatal: null };
+      }
+
+      paginas += 1;
+      const totalDaPagina = (corpo as { paging?: { total?: unknown } }).paging?.total;
+      if (typeof totalDaPagina === "number" && Number.isFinite(totalDaPagina)) {
+        totaisRelatados.add(totalDaPagina);
+      }
+      for (const item of resultados) {
+        if (typeof item === "object" && item === null) continue;
+        if (typeof item !== "object") continue;
+        const linha = item as Record<string, unknown>;
+        const id = linha.id;
+        if (typeof id !== "string" && typeof id !== "number") {
+          // Sem id nao ha como saber se repete. Entra, e o agregador
+          // decide — perder uma venda por falta de id seria pior.
+          brutos.push(linha);
+          continue;
+        }
+        // So o que e NOVO no dia. A segunda passada existe para achar a
+        // linha que faltou, e nao para reentregar as 476 que ja vieram:
+        // sem isto, `duplicadosDescartados` deixaria de medir sobreposicao
+        // do provedor e passaria a medir a nossa propria releitura.
+        if (idsDoDia.has(String(id))) continue;
+        idsDoDia.add(String(id));
+        brutos.push(linha);
+      }
+
+      // ── O fim do dia e a CONTAGEM, e nao a pagina curta ──────────
+      //
+      // MEDIDO na prova do §39: a janela 10/09..20/09 deu 3305 pedidos no
+      // oraculo, 3304 na leitura do agente quatro minutos depois, e 3305
+      // outra vez em duas releituras — com soma identica, logo o mesmo
+      // conjunto. Um pedido, 42.90, sumiu de uma varredura que se
+      // declarou COMPLETA.
+      //
+      // Tres hipoteses foram testadas e REFUTADAS:
+      //
+      //   deriva de paginacao      estavel em varredura rapida, em lenta
+      //                            com 2s entre paginas, com e sem filtro
+      //   erro transitorio engolido  todo caminho de falha aqui devolve
+      //                            `completa: false` — nao sai total
+      //   empate em `date_created`   0 duplicadas em 48 leituras, e
+      //                            unicos == paging.total em 48/48
+      //
+      // E 32/32 leituras SEQUENCIAIS dos 16 dias da janela bateram exato.
+      // O que a producao faz de diferente e ler 6 subjanelas ao mesmo
+      // tempo — e foi sob concorrencia que a perda apareceu.
+      //
+      // Dai a regra nova: uma pagina curta NAO e prova de fim. Ela pode
+      // ser uma resposta parcial no meio. O fim e um destes:
+      //
+      //   lote vazio            nao ha mais o que ler
+      //   contagem alcancada    ja se leu o total que o provedor relatou
+      //   teto de paginas       e ai a subjanela volta INCOMPLETA
+      //
+      // `paging.total` por DIA serve para isso, e por janela larga nao:
+      // medido em 48 leituras de 8 dias, com e sem filtro de status, a
+      // contagem unica bateu com o total do dia em 48/48 — enquanto o
+      // total de uma janela larga (3572) discorda da soma dos dias (3642).
+      //
+      // ── Por que ">=" e nao "==" ──────────────────────────────────
+      //
+      // O dia de HOJE ainda recebe pedido. Exigir contagem congelada
+      // marcaria "esta semana" como incompleta sempre que uma venda
+      // entrasse no meio da varredura — trocaria um numero certo por um
+      // "nao consegui" falso, que e o defeito que este gate veio corrigir.
+      //
+      // Crescer e inofensivo, e isso depende de ter removido
+      // `order.status`: `date_created` e imutavel e pedido nao e apagado,
+      // entao o conjunto de um dia so RECEBE linha. Com `sort=date_asc` a
+      // linha nova entra no fim, depois da posicao ja lida — nunca
+      // empurra o que ja passou. Era o filtro de status que tornava o
+      // conjunto mutavel nos dois sentidos, porque um pedido podia SAIR
+      // dele.
+      //
+      // Total ausente = nao ha o que conferir, e sem conferencia nao se
+      // afirma completude.
+      const menorTotal = totaisRelatados.size === 0
+        ? null
+        : Math.min(...totaisRelatados);
+      if (resultados.length === 0 ||
+        (menorTotal !== null && idsDoDia.size >= menorTotal)) {
+        return {
+          brutos, paginas,
+          completa: menorTotal !== null && idsDoDia.size >= menorTotal,
+          erroFatal: null,
+        };
+      }
+      offset += resultados.length;
+      }
+    };
+
+    // ── A releitura do dia curto ────────────────────────────────────
+    //
+    // Contagem menor que o total do dia significa que a paginacao perdeu
+    // linha — medido em 09/07: 476 lidas contra 477 relatadas, com uma
+    // duplicada no meio. Outra passada sorteia os empates de novo, e a
+    // uniao cresce. Para no instante em que alcanca; nunca insiste em dia
+    // que ja fechou, e nunca insiste alem do orcamento de paginas.
+    let ultima: Subjanela = { brutos, paginas: 0, completa: false, erroFatal: null };
+    for (let tentativa = 1; tentativa <= TENTATIVAS_POR_DIA; tentativa += 1) {
+      ultima = await passada();
+      if (ultima.erroFatal !== null || ultima.completa) return ultima;
+      if (paginas >= MAX_PAGINAS_POR_DIA) return ultima;
+    }
+    return ultima;
+  };
+
+  // ── Concorrencia limitada, em ondas ──────────────────────────────
+  //
+  // `Promise.all` sobre 36 dias abriria 36 conexoes de uma vez. Ondas de
+  // tres: MEDIDO que seis produz 429 numa varredura de 128 paginas, e que
+  // tres nao produziu nenhum em 4 varreduras da mesma janela.
+  const subjanelas: Subjanela[] = [];
+  for (let i = 0; i < dias.length; i += CONCORRENCIA_DE_SUBJANELAS) {
+    const onda = dias.slice(i, i + CONCORRENCIA_DE_SUBJANELAS);
+    const lidas = await Promise.all(onda.map(lerSubjanela));
+    subjanelas.push(...lidas);
+    const fatal = lidas.find((x) => x.erroFatal !== null);
+    // Erro de CONTA interrompe: os dias restantes receberiam o mesmo.
+    if (fatal !== undefined) {
+      return falha(fatal.erroFatal as ErroVendasML, janela);
+    }
+  }
+
+  // Nenhum dia leu nada e nenhum completou: nao ha resposta a dar.
+  if (subjanelas.every((x) => x.paginas === 0)) {
+    return falha("indisponivel", janela);
+  }
+
+  // ── Dedupe por id do pedido — §8 ────────────────────────────────
+  //
+  // As subjanelas de criacao sao disjuntas, entao o esperado e zero
+  // repetido. A contagem existe porque afirmar "deduplicamos" sem medir
+  // nao e prova: um numero acima de zero diria que a fronteira entre dias
+  // nao e o que este codigo supoe.
   const pedidos: PedidoOficialML[] = [];
+  const vistos = new Set<string>();
   let recebidos = 0;
   let fora = 0;
+  let duplicados = 0;
   let paginas = 0;
-  let truncado = false;
+  let incompletas = 0;
 
-  for (let offset = 0; ; offset += LIMITE_POR_PAGINA) {
-    if (paginas >= MAX_PAGINAS) { truncado = true; break; }
+  for (const sub of subjanelas) {
+    paginas += sub.paginas;
+    if (!sub.completa) incompletas += 1;
+    recebidos += sub.brutos.length;
 
-    const url = new URL(ENDPOINT);
-    url.searchParams.set("seller", credencial.sellerId);
-    url.searchParams.set("order.status", "paid");
-    // Fim do dia no fuso de Sao Paulo: `ate` e INCLUSIVO, e cortar a
-    // meia-noite perderia o dia inteiro que a pessoa pediu.
-    url.searchParams.set("order.date_created.from", `${criacaoDe}T00:00:00.000-03:00`);
-    url.searchParams.set("order.date_created.to", `${ate}T23:59:59.999-03:00`);
-    url.searchParams.set("sort", "date_asc");
-    url.searchParams.set("limit", String(LIMITE_POR_PAGINA));
-    url.searchParams.set("offset", String(offset));
+    for (const o of sub.brutos) {
+      const id = String(o.id ?? "");
+      if (id !== "" && vistos.has(id)) { duplicados += 1; continue; }
+      if (id !== "") vistos.add(id);
 
-    const teto = limiteExterno === undefined
-      ? TIMEOUT_MS
-      : Math.min(TIMEOUT_MS, limiteExterno.restanteMs());
-    // Orcamento esgotado no meio da paginacao NAO e falha: o que ja foi
-    // lido vale, e `truncado` diz que falta. Descartar tudo desperdicaria
-    // trabalho real e daria uma resposta pior.
-    if (teto <= 0) { truncado = true; break; }
-
-    const controlador = new AbortController();
-    const relogio = setTimeout(() => controlador.abort(), teto);
-    const propagar = () => controlador.abort();
-    const doOrcamento = limiteExterno?.signal;
-    if (doOrcamento?.aborted) controlador.abort();
-    else doOrcamento?.addEventListener("abort", propagar, { once: true });
-
-    let resposta: Response;
-    try {
-      resposta = await buscar(url.toString(), {
-        headers: { Authorization: `Bearer ${credencial.accessToken}` },
-        signal: controlador.signal,
-      });
-    } catch {
-      // Primeira pagina falhou: nao ha nada, e a falha e a resposta.
-      // Falhou no meio: o que ja veio continua valendo, truncado.
-      if (paginas === 0) return falha("indisponivel", janela);
-      truncado = true;
-      break;
-    } finally {
-      clearTimeout(relogio);
-      doOrcamento?.removeEventListener("abort", propagar);
-    }
-
-    if (!resposta.ok) {
-      if (paginas === 0) return falha(codigoDoStatus(resposta.status), janela);
-      truncado = true;
-      break;
-    }
-
-    let corpo: unknown;
-    try { corpo = await resposta.json(); } catch {
-      if (paginas === 0) return falha("resposta_invalida", janela);
-      truncado = true;
-      break;
-    }
-    if (typeof corpo !== "object" || corpo === null) {
-      if (paginas === 0) return falha("resposta_invalida", janela);
-      truncado = true;
-      break;
-    }
-    const resultados = (corpo as Record<string, unknown>).results;
-    if (!Array.isArray(resultados)) {
-      if (paginas === 0) return falha("resposta_invalida", janela);
-      truncado = true;
-      break;
-    }
-
-    paginas += 1;
-    recebidos += resultados.length;
-
-    for (const bruto of resultados) {
-      if (typeof bruto !== "object" || bruto === null) { fora += 1; continue; }
-      const o = bruto as Record<string, unknown>;
       const aprovado = pagamentoQueConta(o);
       if (aprovado === null) { fora += 1; continue; }
       const dia = diaBRT(aprovado);
-      // ── O RECORTE FINANCEIRO ───────────────────────────────────────
-      // A janela de criacao e mais larga de proposito. Pedido pago fora
-      // do periodo pedido nao e venda do periodo, e entra aqui so para
-      // ser descartado — e contado, para a Funcao poder explicar.
+      // ── O RECORTE FINANCEIRO ─────────────────────────────────────
+      // A janela de criacao e mais larga de proposito. Pedido pago fora do
+      // periodo pedido nao e venda do periodo, e entra aqui so para ser
+      // descartado — e contado, para a Funcao poder explicar.
       if (dia === null || dia < de || dia > ate) { fora += 1; continue; }
 
       pedidos.push({
-        pedidoId: String(o.id ?? ""),
+        pedidoId: id,
         dataPagamento: dia,
         valorPago: numeroOuZero(o.paid_amount),
         status: typeof o.status === "string" ? o.status : "",
       });
     }
-
-    if (resultados.length < LIMITE_POR_PAGINA) break;
   }
+
+  const completo = incompletas === 0;
 
   return {
     pedidos, erro: null, paginasLidas: paginas, recebidosDoProvider: recebidos,
-    foraDaJanelaFinanceira: fora, truncado, janelaDeCriacao: janela,
+    duplicadosDescartados: duplicados, foraDaJanelaFinanceira: fora,
+    completo, truncado: !completo, subjanelasIncompletas: incompletas,
+    janelaDeCriacao: janela,
   };
 }

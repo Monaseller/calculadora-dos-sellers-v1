@@ -36,9 +36,8 @@ import {
   type ErroVendasML,
   type PortasVendasML,
 } from "@/lib/mercado-livre-vendas";
-import {
-  PERIODOS, resolverPeriodo, FUSO_CDS, type NomeDePeriodo,
-} from "@/lib/agentes/funcoes/calendario";
+import { FUSO_CDS } from "@/lib/agentes/funcoes/calendario";
+import { resolverExpressaoDePeriodo } from "@/lib/agentes/funcoes/periodo-em-texto";
 import type { LimiteExterno } from "@/lib/controle-tempo";
 
 /**
@@ -49,7 +48,26 @@ import type { LimiteExterno } from "@/lib/controle-tempo";
  * binding que o guard autorizou; o resto nao e assunto de quem pergunta.
  */
 export interface FiltroVendasML {
-  readonly periodo?: NomeDePeriodo;
+  /**
+   * O periodo em PALAVRAS — F7b.4.8.3 §13.
+   *
+   * "esta semana", "ultimos 7 dias", "agosto de 2026", "de 10/09/2026 ate
+   * 20/09/2026", "no dia 15/08/2026". Quem transforma isso em datas e
+   * `periodo-em-texto.ts`, deterministicamente.
+   *
+   * Era um enum de sete valores, e o enum nao cobria data antiga nem
+   * intervalo livre — o modelo nao tinha como expressar "agosto de 2026" e
+   * a pergunta morria. Texto NAO afrouxa nada: o resolvedor recusa o que
+   * nao entende, e a recusa e corrigivel.
+   */
+  readonly periodo?: string;
+  /**
+   * O par de datas, para quem NAO e modelo.
+   *
+   * Fica no contrato porque o dono pode escolher um intervalo numa tela, e
+   * ali nao ha texto a interpretar. O modelo nao o recebe: a declaracao de
+   * ferramenta publica so `periodo` (F7b.4.8.2 §5).
+   */
   readonly de?: string;
   readonly ate?: string;
 }
@@ -62,7 +80,21 @@ export interface TotaisVendasML {
 }
 
 export interface ResultadoVendasML {
-  readonly totais: TotaisVendasML;
+  /**
+   * `null` quando a varredura NAO completou — F7b.4.8.3 §11/§21.
+   *
+   * ── Por que ausente, e nao "parcial" ──────────────────────────────
+   *
+   * O Rodrigo recebeu uma comparacao percentual entre uma semana completa
+   * e uma truncada, apresentada como conclusao. O erro nao foi o modelo
+   * ter comparado: foi ele ter recebido dois numeros que pareciam
+   * comparaveis.
+   *
+   * Sem total, nao ha o que comparar. O que sobra e `parcial`, que diz o
+   * tamanho do que faltou — e a unica resposta possivel passa a ser "nao
+   * consegui recuperar tudo".
+   */
+  readonly totais: TotaisVendasML | null;
   /** Um item por DIA com venda, em ordem crescente. */
   readonly porDia: readonly { readonly dia: string; readonly faturamento: number; readonly pedidos: number }[];
   /** O periodo que a CDS resolveu, para a resposta poder cita-lo. */
@@ -75,11 +107,24 @@ export interface ResultadoVendasML {
    * adivinhar, e a suite consegue reprovar uma troca de fonte.
    */
   readonly fonte: "mercadolivre_api";
+  /**
+   * `true` quando TODAS as subjanelas foram lidas ate o fim — §11.
+   *
+   * E ele, e nao `truncado`, que autoriza um total fechado.
+   */
+  readonly completo: boolean;
+  /** Negacao de `completo`. Mantido para quem ja o consumia. */
   readonly truncado: boolean;
+  /** O que se sabe sobre a falta, quando `completo` e `false`. */
+  readonly parcial: {
+    readonly pedidosLidos: number;
+    readonly subjanelasIncompletas: number;
+  } | null;
   readonly diagnostico: {
     readonly paginasLidas: number;
     readonly recebidosDoProvider: number;
     readonly foraDaJanelaFinanceira: number;
+    readonly duplicadosDescartados: number;
     readonly margemDeCriacaoDias: number;
   };
   readonly erro: ErroVendasML | null;
@@ -126,10 +171,13 @@ export function validarFiltroVendasML(filtro: unknown): ValidacaoFiltroVendasML 
   if (!temPeriodo && !temDatas) return { erro: "filtro_ausente" };
 
   if (temPeriodo) {
-    if (typeof f.periodo !== "string" ||
-        !(PERIODOS as readonly string[]).includes(f.periodo)) {
+    if (typeof f.periodo !== "string" || f.periodo.trim() === "") {
       return { erro: "periodo_invalido" };
     }
+    // A forma e conferida aqui; o VALOR depende do relogio, e por isso a
+    // resolucao acontece na leitura. Um texto que o resolvedor nao
+    // entender volta como `periodo_invalido` de la — que e corrigivel, e o
+    // modelo tenta com outras palavras.
     return { erro: null };
   }
 
@@ -147,10 +195,13 @@ function comErro(
   periodo: ResultadoVendasML["periodo"]
 ): ResultadoVendasML {
   return {
-    totais: VAZIO, porDia: [], periodo, fonte: "mercadolivre_api", truncado: false,
+    // Erro NAO tem total. Zero apresentado como total seria a resposta
+    // errada com cara de resposta.
+    totais: null, porDia: [], periodo, fonte: "mercadolivre_api",
+    completo: false, truncado: true, parcial: null,
     diagnostico: {
       paginasLidas: 0, recebidosDoProvider: 0, foraDaJanelaFinanceira: 0,
-      margemDeCriacaoDias: MARGEM_CRIACAO_DIAS,
+      duplicadosDescartados: 0, margemDeCriacaoDias: MARGEM_CRIACAO_DIAS,
     },
     erro,
   };
@@ -178,16 +229,22 @@ export function criarLeiturasDeVendasML(
     const semJanela = { de: "", ate: "", rotulo: "", fuso: FUSO_CDS };
     if (validacao.erro !== null) return comErro("resposta_invalida", semJanela);
 
-    // ── §23: a CDS resolve, e o rotulo acompanha ──────────────────
-    const janela = filtro.periodo !== undefined
-      ? (() => {
-          const p = resolverPeriodo(filtro.periodo as NomeDePeriodo, agoraMs);
-          return { de: p.inicio, ate: p.fim, rotulo: p.rotulo, fuso: p.fuso };
-        })()
-      : {
-          de: filtro.de as string, ate: filtro.ate as string,
-          rotulo: `${filtro.de} a ${filtro.ate}`, fuso: FUSO_CDS,
-        };
+    // ── A CDS resolve, e o rotulo acompanha — §13 ─────────────────
+    //
+    // O texto vem do modelo; as DATAS vem daqui. Se o resolvedor nao
+    // entender a expressao, a resposta e `periodo_invalido` — corrigivel,
+    // entao o modelo tenta com outras palavras em vez de o turno morrer.
+    let janela: ResultadoVendasML["periodo"];
+    if (filtro.periodo !== undefined) {
+      const p = resolverExpressaoDePeriodo(filtro.periodo, agoraMs);
+      if (p === null) return comErro("periodo_nao_entendido", semJanela);
+      janela = { de: p.de, ate: p.ate, rotulo: p.rotulo, fuso: p.fuso };
+    } else {
+      janela = {
+        de: filtro.de as string, ate: filtro.ate as string,
+        rotulo: `${filtro.de} a ${filtro.ate}`, fuso: FUSO_CDS,
+      };
+    }
 
     const bruto = await buscarVendasPagasML(
       { userId, lojaId, de: janela.de, ate: janela.ate }, limiteExterno, portas);
@@ -208,6 +265,40 @@ export function criarLeiturasDeVendasML(
     const pedidos = bruto.pedidos.length;
     const faturamentoFinal = centavos(faturamento);
 
+    const diagnostico = {
+      paginasLidas: bruto.paginasLidas,
+      recebidosDoProvider: bruto.recebidosDoProvider,
+      foraDaJanelaFinanceira: bruto.foraDaJanelaFinanceira,
+      duplicadosDescartados: bruto.duplicadosDescartados,
+      margemDeCriacaoDias: MARGEM_CRIACAO_DIAS,
+    };
+
+    // ── §11/§21: varredura incompleta NAO produz total ────────────
+    //
+    // O Rodrigo recebeu -55,00% entre uma semana completa e uma truncada.
+    // O modelo nao errou a conta: ele recebeu dois numeros que pareciam
+    // comparaveis. Sem total, nao ha o que comparar — e a unica resposta
+    // possivel passa a ser "nao consegui recuperar tudo".
+    //
+    // `porDia` sai junto: um recorte diario de um conjunto incompleto
+    // tambem e parcial, e seria lido como se fosse o dia inteiro.
+    if (!bruto.completo) {
+      return {
+        totais: null,
+        porDia: [],
+        periodo: janela,
+        fonte: "mercadolivre_api",
+        completo: false,
+        truncado: true,
+        parcial: {
+          pedidosLidos: pedidos,
+          subjanelasIncompletas: bruto.subjanelasIncompletas,
+        },
+        diagnostico,
+        erro: null,
+      };
+    }
+
     return {
       totais: {
         faturamento: faturamentoFinal,
@@ -223,13 +314,10 @@ export function criarLeiturasDeVendasML(
         })),
       periodo: janela,
       fonte: "mercadolivre_api",
-      truncado: bruto.truncado,
-      diagnostico: {
-        paginasLidas: bruto.paginasLidas,
-        recebidosDoProvider: bruto.recebidosDoProvider,
-        foraDaJanelaFinanceira: bruto.foraDaJanelaFinanceira,
-        margemDeCriacaoDias: MARGEM_CRIACAO_DIAS,
-      },
+      completo: true,
+      truncado: false,
+      parcial: null,
+      diagnostico,
       erro: null,
     };
   };

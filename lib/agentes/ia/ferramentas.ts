@@ -342,12 +342,43 @@ export const DECLARACOES: Readonly<Record<string, { descricao: string; schemaEnt
     "mercadolivre.vendas.consultar": Object.freeze({
       descricao:
         "Consulta as vendas PAGAS na conta do Mercado Livre ligada a este agente, direto " +
-        "na API oficial do Mercado Livre. Devolve faturamento, numero de pedidos, ticket " +
-        "medio e o total por dia — ja somados. Use esta ferramenta quando a pergunta for " +
-        "sobre vendas, faturamento ou pedidos DO MERCADO LIVRE: ela e a fonte oficial. " +
-        "Mande `periodo` com o nome do periodo (esta_semana, mes_passado...) e a CDS " +
-        "resolve as datas no fuso de Sao Paulo — nao calcule datas de cabeca. Somente " +
-        "leitura: nao altera anuncio, nao cancela e nao responde nada.",
+        "na API oficial do Mercado Livre. Use esta ferramenta quando a pergunta for sobre " +
+        "vendas, faturamento ou pedidos DO MERCADO LIVRE: ela e a fonte oficial. " +
+        "Em `periodo`, repita o periodo COM AS PALAVRAS DA PESSOA — 'esta semana', " +
+        "'ultimos 7 dias', 'agosto de 2026', 'de 10/09/2026 ate 20/09/2026', " +
+        "'no dia 15/08/2026'. A CDS converte em datas no fuso de Sao Paulo; nao calcule " +
+        "datas de cabeca e nao mande data que a pessoa nao disse. " +
+        // ── F7b.4.8.3 §39: mes sem ano NAO e ambiguidade ────────────
+        //
+        // MEDIDO na rota real: em "compare agosto com setembro" a OpenAI
+        // parou e perguntou "de qual ano?" em vez de consultar. A CDS
+        // resolve isso por regra escrita e testada (§19), entao a pergunta
+        // gastava um turno para saber algo que o sistema ja sabia.
+        //
+        // A saida nao e obrigar uma resposta: e a ferramenta DIZER o
+        // periodo que resolveu, no `rotulo`, para a pessoa poder corrigir.
+        "Mes sem ano — 'agosto', 'compare agosto com setembro' — NAO e ambiguo: a CDS " +
+        "resolve como o ano corrente se o mes ja comecou, senao o ano anterior. " +
+        "NAO pergunte de que ano e; consulte, e diga na resposta o periodo que a " +
+        "ferramenta devolveu, para a pessoa corrigir se nao for o que ela queria. " +
+        "Para COMPARAR dois periodos, chame a ferramenta DUAS vezes, uma por periodo. " +
+        "A resposta traz `completo`: quando ele for false, a varredura nao recuperou " +
+        "todos os pedidos e NAO ha totais — nesse caso diga que nao foi possivel " +
+        "recuperar tudo e NAO apresente comparacao nem porcentagem como conclusao. " +
+        // ── F7b.4.8.3 §10: o que o numero E, dito ao modelo ─────────
+        //
+        // A auditoria de semantica (docs/SEMANTICA_FATURAMENTO_ML.md)
+        // mediu o que entra e o que nao entra. Duas dessas conclusoes
+        // mudam a RESPOSTA, e nao so o calculo: o faturamento e bruto, e
+        // periodo passado nao e imutavel. Se o modelo nao souber, ele
+        // apresenta um numero bruto como se fosse o que a pessoa ganhou,
+        // e um mes fechado como se nunca mais fosse mudar.
+        "O `faturamento` e BRUTO — e o que o comprador pagou, sem descontar tarifa " +
+        "do Mercado Livre, frete do vendedor, imposto nem custo. Nao o chame de lucro " +
+        "nem de liquido. Estorno, chargeback e mediacao mudam o numero de um periodo " +
+        "JA PASSADO, entao nao apresente periodo fechado como definitivo: e o que a " +
+        "conta do Mercado Livre diz agora sobre aquele periodo. " +
+        "Somente leitura: nao altera anuncio, nao cancela e nao responde nada.",
       // ── F7b.4.8.2: SO `periodo`, e OBRIGATORIO ────────────────────
       //
       // O schema oferecia `periodo`, `de` e `ate` com `required: []`, e
@@ -366,12 +397,22 @@ export const DECLARACOES: Readonly<Record<string, { descricao: string; schemaEnt
       schemaEntrada: Object.freeze({
         type: "object",
         properties: {
+          // ── F7b.4.8.3: texto livre, e nao `enum` ──────────────────
+          //
+          // O enum de sete valores nao tinha como expressar "agosto de
+          // 2026", "de 10/09 ate 20/09" nem "no dia 15/08" — e sem isso a
+          // pergunta sobre data antiga nao tinha caminho nenhum.
+          //
+          // Texto NAO afrouxa: `periodo-em-texto.ts` resolve
+          // deterministicamente e RECUSA o que nao entende, e a recusa e
+          // corrigivel. O modelo continua sem calcular data.
           periodo: {
             type: "string",
-            enum: ["hoje", "ontem", "esta_semana", "semana_passada", "este_mes", "mes_passado", "este_ano"],
             description:
-              "O periodo pedido. A CDS resolve as datas no fuso de Sao Paulo — " +
-              "nao calcule datas.",
+              "O periodo, nas palavras da pessoa. Ex.: 'esta semana', " +
+              "'semana passada', 'ultimos 7 dias', 'ultimos 30 dias', " +
+              "'agosto de 2026', 'no dia 15/08/2026', " +
+              "'de 10/09/2026 ate 20/09/2026'. A CDS resolve as datas.",
           },
         },
         required: ["periodo"],
