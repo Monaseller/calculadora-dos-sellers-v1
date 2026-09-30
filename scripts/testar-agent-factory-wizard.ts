@@ -55,6 +55,9 @@ import {
   NIVEIS_DE_TRABALHO, catalogoDeModelos, envsFaltando, modelosDisponiveis,
   nivelEfetivo, ofereceEscolhaDeNivel, rotuloDoNivel,
 } from "../lib/agentes/factory/catalogo-de-modelos";
+import {
+  ehFuncaoExterna, idDaFuncaoExterna, nivelRecomendado, pecasDoId, riscoDaAcao,
+} from "../lib/agentes/composio/identidade-de-funcao";
 
 const RAIZ = join(__dirname, "..");
 const ler = (rel: string): string => readFileSync(join(RAIZ, rel), "utf8");
@@ -1086,6 +1089,136 @@ secao("O. Memoria: um interruptor, e nenhuma autoridade");
     /entradaCanonica/.test(ident) && /userId\.length/.test(ident));
   ok("O17 e sem segredo rotacionavel na entrada do hash",
     !/SECRET|process\.env/.test(ident));
+}
+
+
+// ─── P. A busca de ferramentas ────────────────────────────────────────
+
+secao("P. Busca unificada: duas origens, um resultado, nada despejado");
+
+{
+  const busca = codigo("lib/agentes/factory/busca-de-ferramentas.ts");
+  const rota = codigo("app/api/ferramentas/buscar/route.ts");
+  const tela = codigo("components/ia/factory/BuscaDeFerramentas.tsx");
+  const wiz = codigo("components/ia/factory/Wizard.tsx");
+
+  // O que impede os 1584 toolkits de chegarem perto de um prompt.
+  ok("P1  sem termo, o catalogo externo NAO e consultado",
+    /if \(alvo === ""\)/.test(busca) &&
+      busca.indexOf('externoDesfecho: "nao_consultado"') > 0);
+  ok("P2  a busca externa e paginada, com limite",
+    /limiteExterno/.test(busca) && /buscarToolkits\(termo, limiteExterno\)/.test(busca));
+  ok("P3  as internas vem do catalogo REAL de packs, nao de lista propria",
+    /TOOL_PACKS/.test(busca) && !/"Planilhas"|"Calculadora"|"Calendário"/.test(busca));
+
+  // §4: ML/Shopee e qualquer pack novo aparecem sem este arquivo mudar.
+  ok("P4  todo pack do catalogo e pesquisavel, e nenhum e omitido",
+    /TOOL_PACKS\.map\(packComoAchado\)/.test(busca) &&
+      /TOOL_PACKS\.filter\(/.test(busca));
+
+  ok("P5  falha do externo NAO derruba as internas",
+    /externo\.estado !== "ok"/.test(busca) &&
+      /achados: internas,[\s\S]{0,120}externoDisponivel: false/.test(busca));
+  ok("P6  e a tela diz qual foi o desfecho externo",
+    /externoDesfecho === "nao_configurado"/.test(tela) &&
+      /externoDesfecho === "falha"/.test(tela));
+
+  ok("P7  toolkit DEPRECIADO nao e oferecido para escolha nova",
+    /!t\.depreciado/.test(busca));
+  ok("P8  o acesso de um toolkit e `null` — nao se chuta leitura/escrita",
+    /acesso: null/.test(busca));
+
+  ok("P9  a rota de busca exige sessao",
+    /autenticarRequisicao/.test(rota) && /Não autenticado/.test(rota));
+  ok("P10 e nao exige agenteId — buscar nao e sobre um agente",
+    !/agenteId/.test(rota));
+  ok("P11 o termo tem teto",
+    /MAX_TERMO/.test(rota) && /slice\(0, MAX_TERMO\)/.test(rota));
+
+  // A tela nao fala com rede e nao mostra id tecnico como interface.
+  ok("P12 a tela nao faz rede nem monta endereco de API",
+    !/\bfetch\s*\(|["\'`]\/api\//.test(tela));
+  ok("P13 a origem aparece em PALAVRA, nao em slug",
+    /"Da CDS" : "Integração"/.test(tela));
+  ok("P14 e o funcao_id fica em detalhes tecnicos",
+    tela.indexOf("Detalhes técnicos") < tela.lastIndexOf("{v.funcaoId}"));
+  ok("P15 a busca tem espera — nao chama a cada tecla",
+    /ESPERA_MS/.test(tela) && /setTimeout/.test(tela));
+
+  ok("P16 a etapa 4 usa a busca, e nao cartoes fixos",
+    /<BuscaDeFerramentas/.test(wiz) &&
+      !/TOOL_PACKS\.map\(\(p\) =>/.test(wiz));
+  ok("P17 e a etapa 8 continua lendo os packs para as permissoes",
+    /TOOL_PACKS\.find/.test(wiz));
+}
+
+// ─── Q. O vinculo externo ─────────────────────────────────────────────
+
+secao("Q. Vincular acao externa e gravar permissao — nao ha tabela paralela");
+
+{
+  const rota = codigo("app/api/agentes/[agenteId]/ferramentas-externas/route.ts");
+  const grav = codigo("lib/agentes/permissoes/gravadas.ts");
+
+  ok("Q1  a rota grava pela MESMA escrita de permissao do resto",
+    /definirPermissaoDeFuncaoDoAgente/.test(rota));
+  ok("Q2  e NAO existe tabela de selecionadas",
+    !/ferramentas_externas|agente_ferramentas|toolkits_selecionados/.test(rota));
+  ok("Q3  o dono e o agente vem da porta, nunca do corpo",
+    /porta\.userId/.test(rota) && /porta\.agenteId/.test(rota) &&
+      !/corpo\.userId|corpo\.agenteId/.test(rota));
+
+  // A prova de existencia ANTES de gravar.
+  ok("Q4  a acao tem de existir no catalogo antes de virar permissao",
+    /listarAcoesDoToolkit\(toolkit, 50\)/.test(rota) &&
+      /cat\.dados\.itens\.some\(\(a\) => a\.slug === acao\)/.test(rota));
+  ok("Q5  acao inexistente responde 404, e nao grava",
+    /Esta ação não existe neste aplicativo[\s\S]{0,20}404/.test(rota));
+
+  // §11/§18: escrita nunca nasce automatica.
+  ok("Q6  o nivel e decidido pelo SERVIDOR, a partir do risco",
+    /riscoDaAcao\(acao\)/.test(rota) && /nivelRecomendado\(risco\)/.test(rota));
+  ok("Q7  e a tela NAO manda nivel",
+    !/nivel: corpo\.nivel|corpo\.nivel/.test(rota));
+  ok("Q8  leitura recomenda automatico; escrita e desconhecido, aprovacao",
+    nivelRecomendado("leitura") === "automatico" &&
+      nivelRecomendado("escrita") === "aprovacao" &&
+      nivelRecomendado("desconhecido") === "aprovacao");
+
+  // Desvincular e bloquear, o que mantem a cerca do F7b.0.
+  ok("Q9  desvincular BLOQUEIA, e nao apaga a linha",
+    /nivel: "bloqueado"/.test(rota) && !/\.delete\(\)/.test(rota));
+  ok("Q10 e so aceita id EXTERNO",
+    /!ehFuncaoExterna\(funcaoId\)/.test(rota));
+
+  // A leitura sem filtro, que e o que descobre as externas.
+  ok("Q11 a leitura de permissoes gravadas escopa por dono E agente na query",
+    /\.eq\("agente_id", agenteId\)[\s\S]{0,60}\.eq\("user_id", userId\)/.test(grav));
+  ok("Q12 linha torta CONDENA a coleta — nao vira lista pela metade",
+    /return \{ coleta: "falha" \}/.test(grav));
+  ok("Q13 e sem dono ou agente ela nem pergunta",
+    /if \(!userId \|\| !agenteId\) return \{ coleta: "entrada_invalida" \}/.test(grav));
+
+  // Externa e reconhecivel por inspecao — sem coluna que a marque.
+  ok("Q14 a externa e reconhecida pelo id, nao por coluna",
+    /filter\(\(p\) => ehFuncaoExterna\(p\.funcaoId\)\)/.test(rota));
+  ok("Q15 ida e volta do id sao consistentes",
+    (() => {
+      const r = idDaFuncaoExterna({ toolkit: "googlesheets", acao: "GOOGLESHEETS_ADD_SHEET" });
+      if (!r.ok) return false;
+      const pecas = pecasDoId(r.funcaoId);
+      return ehFuncaoExterna(r.funcaoId) &&
+        pecas?.toolkit === "googlesheets" &&
+        pecas.acao === "googlesheets_add_sheet" &&
+        riscoDaAcao(pecas.acao) === "escrita";
+    })());
+
+  // §23: nenhum executor universal chega ao modelo.
+  const cli = codigo("lib/agentes/composio/cliente.ts");
+  ok("Q16 o cliente continua sem executor de tool",
+    !/execute|proxy|MULTI_EXECUTE/i.test(cli));
+  ok("Q17 e a rota de vinculo nao executa nada",
+    !/executarFuncao|execute/i.test(rota));
 }
 
 // ─── Placar ───────────────────────────────────────────────────────────

@@ -672,6 +672,10 @@ const ARQUIVOS_PERMISSOES_1DD2: readonly string[] = [
   "escrita.ts",
   "estado.ts",
   "fatos.ts",
+  // AGENT-FACTORY-F7b.4.1: le TODAS as permissoes gravadas, sem filtrar
+  // por catalogo. Necessario porque Function EXTERNA nao esta no
+  // registry — e justamente a pergunta "o que o dono escolheu?".
+  "gravadas.ts",
 ];
 
 /**
@@ -1722,6 +1726,22 @@ const ARQUIVOS_F7B3: readonly string[] = [
  * guard, nao um executor no registry — ver o cabecalho de
  * `identidade-de-funcao.ts`.
  */
+/**
+ * AGENT-FACTORY-F7b.4.1 — expor o que o F7b.4 provou.
+ *
+ *   permissoes/gravadas.ts   le TODAS as permissoes do agente, sem
+ *                            filtrar por catalogo. Necessario porque
+ *                            Function EXTERNA nao esta no registry.
+ *   factory/busca-de-ferramentas.ts
+ *                            une a busca interna (packs) com a externa
+ *                            (Composio). `server-only`, e a externa so
+ *                            e consultada quando ha termo.
+ */
+const ARQUIVOS_F741: readonly string[] = [
+  "lib/agentes/permissoes/gravadas.ts",
+  "lib/agentes/factory/busca-de-ferramentas.ts",
+];
+
 const ARQUIVOS_F7B4: readonly string[] = [
   "lib/agentes/memoria/identidade.ts",
   "lib/agentes/memoria/politica.ts",
@@ -1851,6 +1871,7 @@ const ARQUIVOS_ESPERADOS: readonly string[] = [
   ...ARQUIVOS_F7B1,
   ...ARQUIVOS_F7B3,
   ...ARQUIVOS_F7B4,
+  ...ARQUIVOS_F741,
   ...ARQUIVOS_1DD,
   ...ARQUIVOS_1DA_PERF,
   ...ARQUIVOS_1EA,

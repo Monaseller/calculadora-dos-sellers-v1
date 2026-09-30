@@ -329,19 +329,29 @@ ok("N1  a leitura da 1D.d.2 existe e continua SEM escrita",
 // inspecionar o escritor REAL — o que a 1D.d.1 precisa continuar
 // provando nao e a ausencia de escrita, e sim que ELA nao a trouxe e que
 // a escrita, quando veio, veio fechada.
-ok("N2  a pasta de permissoes tem exatamente os 3 modulos previstos",
+// ── N2 reconciliado na AGENT-FACTORY-F7b.4.1 ────────────────────────
+//
+// Entrou `gravadas.ts`: a leitura de TODAS as permissoes do agente, sem
+// filtrar por catalogo. Ela existe porque `resolverFatosPermissoes` exige
+// `funcaoIds` — o que esta certo para o guard e nao serve para descobrir
+// Function EXTERNA, que por definicao nao esta em lista nenhuma.
+//
+// A lista continua NOMINAL e os controles continuam reprovando um modulo
+// a mais, a menos ou trocado. O que mudou foi o conjunto esperado.
+const MODULOS_DE_PERMISSOES = ["escrita.ts", "estado.ts", "fatos.ts", "gravadas.ts"];
+ok("N2  a pasta de permissoes tem exatamente os 4 modulos previstos",
   JSON.stringify(readdirSync(join(RAIZ, "lib/agentes/permissoes")).sort()) ===
-    JSON.stringify(["escrita.ts", "estado.ts", "fatos.ts"]),
+    JSON.stringify([...MODULOS_DE_PERMISSOES].sort()),
   readdirSync(join(RAIZ, "lib/agentes/permissoes")).sort().join(", "));
 ok("N2a CONTROLE NEGATIVO: um modulo A MAIS na pasta reprovaria",
-  JSON.stringify(["escrita.ts", "estado.ts", "fatos.ts", "_intruso.ts"].sort()) !==
-    JSON.stringify(["escrita.ts", "estado.ts", "fatos.ts"]));
+  JSON.stringify([...MODULOS_DE_PERMISSOES, "_intruso.ts"].sort()) !==
+    JSON.stringify([...MODULOS_DE_PERMISSOES].sort()));
 ok("N2b CONTROLE NEGATIVO: um modulo A MENOS reprovaria",
-  JSON.stringify(["estado.ts", "fatos.ts"]) !==
-    JSON.stringify(["escrita.ts", "estado.ts", "fatos.ts"]));
-ok("N2c CONTROLE NEGATIVO: TROCA mantendo o total de tres reprovaria",
-  JSON.stringify(["escrita.ts", "estado.ts", "gravacao.ts"].sort()) !==
-    JSON.stringify(["escrita.ts", "estado.ts", "fatos.ts"]));
+  JSON.stringify([...MODULOS_DE_PERMISSOES].slice(1).sort()) !==
+    JSON.stringify([...MODULOS_DE_PERMISSOES].sort()));
+ok("N2c CONTROLE NEGATIVO: TROCA mantendo o total reprovaria",
+  JSON.stringify(["escrita.ts", "estado.ts", "gravacao.ts", "gravadas.ts"].sort()) !==
+    JSON.stringify([...MODULOS_DE_PERMISSOES].sort()));
 {
   // O docblock de `escrita.ts` NOMEIA o que o modulo nao faz — "nao
   // chama `executarFuncao`", "sem `toLowerCase`", "nao ha `...entrada`".
