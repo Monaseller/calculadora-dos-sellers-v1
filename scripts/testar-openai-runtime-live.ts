@@ -227,8 +227,12 @@ async function main(): Promise<void> {
     ok("B2  e os valores sao os MEDIDOS: none/low/medium/high",
       ESFORCO_POR_NIVEL.rapido === "none" &&
         ESFORCO_POR_NIVEL.equilibrado === "low" &&
-        ESFORCO_POR_NIVEL.avancado === "medium" &&
-        ESFORCO_POR_NIVEL.maximo === "high");
+        ESFORCO_POR_NIVEL.avancado === "high" &&
+        // F7b.4.3: `maximo` era `high` e havia `xhigh` acima dele — o
+        // rotulo prometia o teto e entregava o penultimo degrau.
+        ESFORCO_POR_NIVEL.maximo === "xhigh");
+    ok("B2a os EXTREMOS sao literalmente verdadeiros",
+      ESFORCO_POR_NIVEL.rapido === "none" && ESFORCO_POR_NIVEL.maximo === "xhigh");
     // `minimal` responde 400 neste modelo. Nao pode aparecer.
     ok("B3  `minimal` NAO e oferecido — a API o recusa em gpt-5.2",
       !Object.values(ESFORCO_POR_NIVEL).includes("minimal"));
@@ -236,7 +240,7 @@ async function main(): Promise<void> {
       JSON.stringify(montarEsforco("inventado")) === "{}" &&
         JSON.stringify(montarEsforco(undefined)) === "{}");
     ok("B5  e nivel conhecido manda o valor certo",
-      JSON.stringify(montarEsforco("maximo")) === '{"reasoning":{"effort":"high"}}');
+      JSON.stringify(montarEsforco("maximo")) === '{"reasoning":{"effort":"xhigh"}}');
   }
 
   // ─── C. O ciclo REAL ───────────────────────────────────────────────

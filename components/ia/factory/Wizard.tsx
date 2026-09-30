@@ -655,9 +655,14 @@ export function Wizard({ agenteIdInicial }: { agenteIdInicial: string | null }) 
                   );
                 }
                 if (alvo.niveis.length <= 1) {
+                  // F7b.4.3 §22: a frase diz o que e VERDADE do ponto de
+                  // vista de quem usa — esta IA roda num nivel so aqui —,
+                  // sem afirmar que o provedor nao tem controle nenhum. A
+                  // medicao mostrou que a Anthropic TEM, e que o Gemini
+                  // NAO; uma frase so, honesta nos dois casos.
                   return (
                     <p style={{ margin: 0, fontSize: TAMANHO.miudo, color: CROMO.textoFraco }}>
-                      Esta IA não oferece controle de nível de raciocínio.
+                      Esta IA trabalha em um nível único. Não há nada a ajustar aqui.
                     </p>
                   );
                 }

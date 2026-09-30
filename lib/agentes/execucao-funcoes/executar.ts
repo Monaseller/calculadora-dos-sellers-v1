@@ -126,6 +126,32 @@ export interface EntradaExecucaoFuncao {
   userId: string;
   agenteId: string;
   /**
+   * As Funcoes EXTERNAS deste agente — AGENT-FACTORY-F7b.4.3.
+   *
+   * ── Por que um mapa injetado, e nao um segundo registry ──────────
+   *
+   * `FUNCOES` e estatico e congelado de proposito: e a lista do que a
+   * CDS implementa, e ela nao pode crescer em tempo de execucao. Acao
+   * externa nao e implementada por nos — ela vem do catalogo do
+   * provedor, e QUAIS existem para um agente depende dos vinculos dele.
+   *
+   * Entao a definicao chega por aqui, montada por quem ja sabe os
+   * vinculos (o runtime), e o resto deste modulo NAO MUDA: mesmo guard,
+   * mesma abertura de auditoria, mesma aprovacao, mesmo envelope. A
+   * alternativa — um caminho paralelo para externa — seria uma segunda
+   * implementacao da autorizacao.
+   *
+   * ── E por que isso nao e uma porta de entrada ────────────────────
+   *
+   * Quem monta este mapa e server-side e parte do VINCULO gravado
+   * (`agente_ferramentas_externas`). O modelo nao o preenche: ele so
+   * escolhe um `funcaoId` entre os que foram DECLARADOS, e um id que nao
+   * esteja aqui nem no registry continua caindo em `funcao_inexistente`.
+   *
+   * Omitir o campo mantem o comportamento anterior, exatamente.
+   */
+  definicoesExternas?: Readonly<Record<string, DefinicaoFuncao>>;
+  /**
    * O controle de tempo da ACAO — OPCIONAL e INTERNO. I4B3.
    *
    * Quem nao o passa se comporta exatamente como antes: sem limite
@@ -289,10 +315,20 @@ type SnapshotChamada = Omit<
  * `toString` nao "existem" no catalogo.
  */
 function classificarFuncaoId(
-  bruto: unknown
+  bruto: unknown,
+  externas?: Readonly<Record<string, DefinicaoFuncao>>
 ): { forma: "canonico"; id: string } | { forma: "desconhecido"; id: string } | { forma: "malformado" } {
   if (typeof bruto !== "string" || !FORMA_FUNCAO_ID.test(bruto)) return { forma: "malformado" };
-  return funcaoExiste(bruto) ? { forma: "canonico", id: bruto } : { forma: "desconhecido", id: bruto };
+  // F7b.4.3: `canonico` passa a significar "ha definicao para este id",
+  // e a definicao pode vir do registry OU do mapa de externas do agente.
+  // `hasOwnProperty` pelo mesmo motivo de `funcaoExiste`: `constructor` e
+  // `toString` nao existem em mapa nenhum.
+  if (funcaoExiste(bruto)) return { forma: "canonico", id: bruto };
+  if (externas !== undefined &&
+      Object.prototype.hasOwnProperty.call(externas, bruto)) {
+    return { forma: "canonico", id: bruto };
+  }
+  return { forma: "desconhecido", id: bruto };
 }
 
 /** Mensagem estavel e propria da CDS. Nunca deriva de erro de driver,
@@ -742,7 +778,7 @@ export async function executarFuncao(
   const base = { userId, agenteId, requestId, tarefaId, signal: sinalDoBanco };
 
   // ── 3. Catalogo ───────────────────────────────────────────────────
-  const classificacao = classificarFuncaoId(entrada.funcaoId);
+  const classificacao = classificarFuncaoId(entrada.funcaoId, entrada.definicoesExternas);
   if (classificacao.forma !== "canonico") {
     // `acesso` fica NULL porque nao houve Funcao a resolver — e o CHECK
     // do banco amarra exatamente essa condicao.
@@ -757,7 +793,13 @@ export async function executarFuncao(
   }
 
   const funcaoId = classificacao.id;
-  const definicao: DefinicaoFuncao = FUNCOES[funcaoId];
+  // O registry PRIMEIRO, sempre. Uma externa nunca pode sombrear uma
+  // Funcao da CDS: os ids tem formas distintas (`composio.*` contra
+  // `dominio.acao`), mas depender disso seria depender de um acidente.
+  const definicao: DefinicaoFuncao =
+    funcaoExiste(funcaoId)
+      ? FUNCOES[funcaoId]
+      : (entrada.definicoesExternas as Readonly<Record<string, DefinicaoFuncao>>)[funcaoId];
   const comFuncao = { ...base, funcaoId, acesso: definicao.acesso };
 
   // ── 4a. Permissao ─────────────────────────────────────────────────
@@ -916,7 +958,13 @@ export async function executarFuncao(
         return erroSemExecucao(snapshot, "entrada_invalida", antesDeCongelar.codigo, MSG_ENTRADA, false);
       }
 
-      const pedido = await criarAprovacao({ userId, agenteId, tarefaId, funcaoId, argumentos });
+      // As externas seguem junto: sem elas, `criarAprovacao` recusaria
+      // por `funcao_inexistente` e o nivel `aprovacao` seria inalcancavel
+      // para acao externa. Medido em `testar-composio-execucao-live`.
+      const pedido = await criarAprovacao({
+        userId, agenteId, tarefaId, funcaoId, argumentos,
+        definicoesExternas: entrada.definicoesExternas,
+      });
 
       if (pedido.codigo === "criada" || pedido.codigo === "reutilizada") {
         // ── E aqui a Tool Call NAO nasce ──────────────────────────

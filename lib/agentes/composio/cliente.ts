@@ -205,3 +205,66 @@ export async function listarAcoesDoToolkit(
   const total = typeof r.dados.total_items === "number" ? r.dados.total_items : itens.length;
   return { estado: "ok", dados: { itens, totalDisponivel: total } };
 }
+
+// ─── O DETALHE de uma action — AGENT-FACTORY-F7b.4.3 ──────────────────
+
+/**
+ * Tudo que e preciso para DECLARAR e EXECUTAR uma action.
+ *
+ * `parametros` e o JSON Schema do PROVEDOR, repassado inteiro. Nao e
+ * reescrito nem resumido por nos: inventar schema de acao alheia faria o
+ * modelo montar argumentos que a acao recusa, e o erro apareceria como
+ * falha de ferramenta em vez de defeito nosso.
+ */
+export interface DetalheDaAcao {
+  readonly slug: string;
+  readonly nome: string;
+  readonly descricao: string;
+  readonly parametros: Readonly<Record<string, unknown>>;
+  readonly versao: string;
+  /** `true` quando a action roda sem conta conectada. MEDIDO. */
+  readonly semAutenticacao: boolean;
+  readonly depreciada: boolean;
+}
+
+/**
+ * UMA action, pelo slug.
+ *
+ * `GET /tools/{ACTION_SLUG}` — MEDIDO em
+ * `scripts/medir-composio-execucao.ts`: devolve `slug`, `name`,
+ * `description`, `input_parameters`, `output_parameters`, `version`,
+ * `no_auth`, `is_deprecated`.
+ *
+ * Esta e tambem a prova de EXISTENCIA que o §5 exige: uma action que saiu
+ * do catalogo devolve falha aqui e, por isso, nao e declarada ao modelo —
+ * mesmo que o vinculo e a permissao continuem gravados.
+ */
+export async function detalharAcao(
+  slug: string
+): Promise<ResultadoComposio<DetalheDaAcao>> {
+  const limpo = slug.trim().toUpperCase();
+  if (limpo === "") return { estado: "falha", codigo: "slug_vazio" };
+
+  const r = await obter<Record<string, unknown>>(`/tools/${encodeURIComponent(limpo)}`, {});
+  if (r.estado !== "ok") return r;
+
+  const o = r.dados;
+  if (typeof o.slug !== "string" || o.slug === "") {
+    return { estado: "falha", codigo: "resposta_sem_slug" };
+  }
+  const params = o.input_parameters;
+  return {
+    estado: "ok",
+    dados: {
+      slug: o.slug,
+      nome: typeof o.name === "string" && o.name !== "" ? o.name : o.slug,
+      descricao: typeof o.description === "string" ? o.description : "",
+      parametros: (typeof params === "object" && params !== null
+        ? params
+        : { type: "object", properties: {} }) as Readonly<Record<string, unknown>>,
+      versao: typeof o.version === "string" ? o.version : "",
+      semAutenticacao: o.no_auth === true,
+      depreciada: o.is_deprecated === true,
+    },
+  };
+}

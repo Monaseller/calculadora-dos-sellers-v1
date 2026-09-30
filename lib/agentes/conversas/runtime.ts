@@ -54,6 +54,9 @@ import {
 } from "@/lib/agentes/ia/laco-ferramentas";
 import { montarContextoDoAgente } from "@/lib/agentes/ia/contexto-do-agente";
 import { adaptadorDoProvedor } from "@/lib/agentes/ia/adaptador-por-provedor";
+import { prepararFuncoesExternas } from "@/lib/agentes/composio/preparar-externas";
+import { listarVinculosExternos } from "@/lib/agentes/ferramentas-externas/repositorio";
+import { listarPermissoesGravadas } from "@/lib/agentes/permissoes/gravadas";
 import { modelosDisponiveis } from "@/lib/agentes/factory/catalogo-de-modelos";
 import { resolverIaDoAgente } from "@/lib/agentes/factory/ia-do-agente";
 import { FUNCOES } from "@/lib/agentes/funcoes/registry";
@@ -148,7 +151,10 @@ export async function responderNaConversa(
   const portaFontes = criarPortaDeFontes(db);
   const portaMemorias = criarPortaDeMemorias(db);
 
-  const [permissoes, skills, memorias, fontes, historico] = await Promise.all([
+  const [
+    permissoes, skills, memorias, fontes, historico,
+    permissoesGravadas, vinculosExternos,
+  ] = await Promise.all([
     // `funcaoIds` = o CATALOGO INTEIRO, e nao um subconjunto: a
     // pergunta e "o que este agente pode", e perguntar so sobre
     // algumas Funcoes devolveria uma resposta que parece completa.
@@ -161,6 +167,11 @@ export async function responderNaConversa(
     portaMemorias.listarAtivas(entrada.userId, entrada.agenteId),
     portaFontes.listarDoAgente(entrada.userId, entrada.agenteId),
     portaConversas.listarMensagens(entrada.userId, entrada.conversaId),
+    // F7b.4.3: as duas leituras que sustentam a ferramenta externa. Vao
+    // no MESMO `Promise.all` do resto do estado de agora — uma ida a mais
+    // em serie custaria um round trip antes de o modelo comecar a falar.
+    listarPermissoesGravadas({ userId: entrada.userId, agenteId: entrada.agenteId }),
+    listarVinculosExternos({ userId: entrada.userId, agenteId: entrada.agenteId }),
   ]);
 
   // Falha de leitura NAO vira "este agente nao tem permissao nenhuma":
@@ -180,31 +191,66 @@ export async function responderNaConversa(
     fontes: fontes.map(paraModelo),
   });
 
-  // ── As acoes EXTERNAS ainda nao sao declaradas — F7b.4.2 ──────────
+  // ── As acoes EXTERNAS, declaradas e executaveis — F7b.4.3 ─────────
   //
-  // `declararFerramentas` ja aceita `externas`, e o filtro que sustenta o
-  // §13 esta pronto e provado (`scripts/testar-ferramentas-externas.ts`:
-  // vinculo removido + permissao historica => NAO declarada). O que falta
-  // para ligar aqui nao e o filtro:
+  // O F7b.4.2 deixou isto explicitamente em aberto: o filtro existia e
+  // estava provado, mas nao havia executor nem prova de execucao real, e
+  // declarar o que nao se pode executar seria prometer capacidade que o
+  // sistema nao tem. As duas coisas existem agora.
   //
-  //   1. NAO HA EXECUTOR. Uma acao do Composio nao tem entrada em
-  //      `FUNCOES`, e portanto nao tem `executor`. Declarar uma ferramenta
-  //      que o modelo pede e que ninguem sabe executar transformaria toda
-  //      chamada numa falha de ferramenta.
-  //   2. NAO HA CONTA CONECTADA. Sem o OAuth concluido pelo dono, a acao
-  //      nao teria credencial para rodar nem se houvesse executor.
+  // `prepararFuncoesExternas` aplica as TRES condicoes do §5 — vinculo
+  // atual, action ainda no catalogo, permissao explicita — e devolve as
+  // duas metades: o que DECLARAR ao modelo e o que EXECUTAR depois do
+  // guard. Nenhuma das duas parte da permissao: a autoridade sobre
+  // presenca e o vinculo (§6).
   //
-  // Declarar antes disso seria prometer ao modelo uma capacidade que o
-  // sistema nao tem — o oposto de "nunca inventar dado".
+  // Falha do catalogo externo NAO derruba o turno: as ferramentas
+  // internas continuam declaradas, e o agente continua funcionando com o
+  // que e nosso (§13).
+  const externas = await prepararFuncoesExternas({
+    vinculos: vinculosExternos.coleta === "ok" ? vinculosExternos.vinculos : [],
+    permissoes: permissoesGravadas.coleta === "ok"
+      // TODAS as gravadas, e nao so as do registry: o nivel de uma acao
+      // externa nao aparece em `resolverFatosPermissoes`, que filtra por
+      // `Object.keys(FUNCOES)`.
+      ? permissoesGravadas.permissoes.map((g) => ({ funcaoId: g.funcaoId, nivel: g.nivel }))
+      : [],
+  });
+
+  if (externas.sumiramDoCatalogo > 0) {
+    // Sem `funcao_id` no log: ele nomeia a ferramenta de um dono.
+    console.warn(
+      `[conversas/runtime] ${externas.sumiramDoCatalogo} acao(oes) externa(s) ` +
+      "nao estao mais no catalogo e nao foram declaradas");
+  }
+
+  // ── As permissoes que chegam aqui precisam ser as DUAS ────────────
   //
-  // O comportamento de HOJE, e por que ele e seguro: uma acao externa nao
-  // esta em `FUNCOES`, entao `resolverFatosPermissoes` a devolve com
-  // `existe: false`, e o guard NEGA qualquer pedido dela. Fail-closed, sem
-  // caminho de execucao, mesmo que um id externo apareca numa permissao.
+  // `permissoes.fatos` vem de `resolverFatosPermissoes`, que filtra por
+  // `Object.keys(FUNCOES)` — e uma acao externa nunca esta la. Passar so
+  // isso fazia `declararFerramentas` nao achar o nivel da externa e nao
+  // declarar NENHUMA delas, mesmo com vinculo e permissao gravados.
+  //
+  // Foi o que `testar-runtime-externo-live` acusou: o modelo respondia
+  // "nao tenho acesso a uma ferramenta". O filtro estava certo; o dado que
+  // chegava nele e que estava incompleto.
+  //
+  // A uniao e segura nos dois sentidos: id externo nao esta em `FUNCOES`,
+  // entao o laco das internas o ignora; e id interno nao esta em
+  // `externas.declaraveis`, entao o laco das externas o ignora.
+  const permissoesParaDeclarar = [
+    ...permissoes.fatos.map((p) => ({ funcaoId: p.funcaoId, nivel: p.nivel })),
+    ...(permissoesGravadas.coleta === "ok"
+      ? permissoesGravadas.permissoes
+          .filter((g) => !Object.prototype.hasOwnProperty.call(FUNCOES, g.funcaoId))
+          .map((g) => ({ funcaoId: g.funcaoId, nivel: g.nivel }))
+      : []),
+  ];
+
   const ferramentas = declararFerramentas({
     catalogo: FUNCOES,
-    permissoes: permissoes.fatos.map((p) => ({ funcaoId: p.funcaoId, nivel: p.nivel })),
-    externas: [],
+    permissoes: permissoesParaDeclarar,
+    externas: externas.declaraveis,
   });
 
   // O resolvedor de arquivo vive por CHAMADA e carrega dono e agente
@@ -244,6 +290,10 @@ export async function responderNaConversa(
       // nivel gravado que o provedor nao oferece vira `null` em vez de
       // ser enviado e recusado pela API.
       nivelDeTrabalho: ia.nivel ?? undefined,
+      // O que o guard vai poder resolver. Montado do VINCULO, nunca da
+      // permissao — e por isso que permissao historica nao ressuscita
+      // ferramenta removida nem aqui.
+      definicoesExternas: externas.definicoes,
       adaptador,
     });
   } catch (e) {
