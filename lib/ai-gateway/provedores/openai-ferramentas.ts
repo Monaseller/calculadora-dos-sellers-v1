@@ -105,18 +105,44 @@ function chave(): string {
 // ─── Nivel de trabalho -> `reasoning.effort` ──────────────────────────
 
 /**
- * Os valores que gpt-5.2 ACEITA, medidos um por um.
+ * Os valores que gpt-5.2 ACEITA, medidos um por um — F7b.4.3 §20.
  *
- * `minimal` responde 400 "Unsupported value: 'minimal' is not supported
- * with the 'gpt-5.2' model" — por isso ele NAO esta aqui. Oferecer um
- * nivel que a API recusa seria prometer capacidade nao provada, e a tela
- * le este mapa justamente para nao fazer isso.
+ * ── A medicao completa ──────────────────────────────────────────────
+ *
+ * `scripts/medir-niveis-de-trabalho.ts`, com ferramenta declarada:
+ *
+ *   none    -> 200
+ *   low     -> 200
+ *   medium  -> 200
+ *   high    -> 200
+ *   xhigh   -> 200, itens [reasoning, function_call]
+ *   minimal -> 400 "Unsupported value: 'minimal' is not supported with
+ *              the 'gpt-5.2' model. Supported values are: 'none', 'low',
+ *              'medium', 'high', and 'xhigh'."
+ *
+ * ── O defeito que o `minimal` denunciou ─────────────────────────────
+ *
+ * A frase do 400 listou os suportados, e apareceu um QUINTO valor que o
+ * mapa nao conhecia: `xhigh`. Ou seja, "Maximo" estava apontando para
+ * `high` enquanto existia algo acima dele — o rotulo prometia o teto e
+ * entregava o penultimo degrau. Isso e dado errado na cara do dono.
+ *
+ * `xhigh` foi entao MEDIDO antes de entrar (200, com `function_call`
+ * presente), pela mesma regra de sempre: a mensagem de erro da API e
+ * documentacao, e documentacao nao e prova.
+ *
+ * ── Cinco valores, quatro rotulos ───────────────────────────────────
+ *
+ * Um tem de ficar de fora, e o escolhido foi `medium`: os EXTREMOS sao o
+ * que um rotulo promete literalmente. "Rapido" tem de ser o mais rapido
+ * (`none`, sem raciocinio) e "Maximo" tem de ser o teto (`xhigh`). O meio
+ * e ordenacao, e dois degraus intermediarios bastam para haver escolha.
  */
 export const ESFORCO_POR_NIVEL: Readonly<Record<string, string>> = Object.freeze({
   rapido: "none",
   equilibrado: "low",
-  avancado: "medium",
-  maximo: "high",
+  avancado: "high",
+  maximo: "xhigh",
 });
 
 /**

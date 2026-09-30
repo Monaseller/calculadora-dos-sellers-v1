@@ -145,6 +145,21 @@ export interface EntradaCriarAprovacao {
   tarefaId?: string | null;
   funcaoId: string;
   argumentos: unknown;
+  /**
+   * As Funcoes EXTERNAS do agente — AGENT-FACTORY-F7b.4.3.
+   *
+   * A MESMA costura de `executarFuncao`, e ela precisa existir aqui pelo
+   * mesmo motivo: sem isto, `funcaoExiste` recusa toda acao externa e o
+   * nivel `aprovacao` fica inalcancavel para elas — o guard mandaria
+   * pedir aprovacao e a criacao do pedido responderia `funcao_inexistente`.
+   *
+   * Foi exatamente o que o teste live acusou antes desta correcao.
+   *
+   * `revisao` da definicao externa e a versao do catalogo do provedor, e e
+   * ela que entra na impressao da acao: aprovar a versao "1" e executar a
+   * "2" seria executar outra acao sob a mesma autorizacao.
+   */
+  definicoesExternas?: Readonly<Record<string, DefinicaoFuncao>>;
 }
 
 export interface EntradaDecidirAprovacao {
@@ -340,9 +355,20 @@ export async function criarAprovacao(entrada: EntradaCriarAprovacao): Promise<Re
   const tarefaId = entrada.tarefaId ?? null;
 
   if (!userId || !agenteId || !funcaoId) return { codigo: "entrada_invalida" };
-  if (!funcaoExiste(funcaoId)) return { codigo: "funcao_inexistente" };
 
-  const definicao: DefinicaoFuncao = FUNCOES[funcaoId];
+  // O registry PRIMEIRO, e o mapa de externas depois. Mesma ordem e mesmo
+  // motivo de `executarFuncao`: uma externa nunca pode sombrear uma Funcao
+  // da CDS.
+  const externas = entrada.definicoesExternas;
+  const definicaoResolvida: DefinicaoFuncao | undefined = funcaoExiste(funcaoId)
+    ? FUNCOES[funcaoId]
+    : externas !== undefined &&
+        Object.prototype.hasOwnProperty.call(externas, funcaoId)
+      ? externas[funcaoId]
+      : undefined;
+  if (definicaoResolvida === undefined) return { codigo: "funcao_inexistente" };
+
+  const definicao: DefinicaoFuncao = definicaoResolvida;
 
   let validacao;
   try {

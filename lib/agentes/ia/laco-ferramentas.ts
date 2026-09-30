@@ -34,6 +34,7 @@
  */
 import "server-only";
 import { executarFuncao } from "@/lib/agentes/execucao-funcoes/executar";
+import type { DefinicaoFuncao } from "@/lib/agentes/funcoes/registry";
 import type {
   AdaptadorIAComFerramentas,
   FerramentaDeclarada,
@@ -94,6 +95,14 @@ export interface EntradaDoLaco {
    * esforco e propriedade do agente, nao do passo.
    */
   readonly nivelDeTrabalho?: string;
+  /**
+   * As Funcoes EXTERNAS deste agente — F7b.4.3.
+   *
+   * Atravessa o laco sem ser interpretada, como `nivelDeTrabalho`: quem
+   * monta e o runtime, a partir dos VINCULOS, e quem usa e
+   * `executarFuncao`. O laco nao decide o que existe — ele so entrega.
+   */
+  readonly definicoesExternas?: Readonly<Record<string, DefinicaoFuncao>>;
   /** Historico anterior, para multi-turno. Vazio na primeira mensagem. */
   readonly historico?: readonly MensagemDoDialogo[];
   readonly maxPassos?: number;
@@ -183,7 +192,8 @@ async function executarUmPedido(
   agenteId: string,
   pedido: PedidoDeFerramenta,
   permitidas: ReadonlySet<string>,
-  porta: typeof executarFuncao
+  porta: typeof executarFuncao,
+  definicoesExternas?: Readonly<Record<string, DefinicaoFuncao>>
 ): Promise<{ resposta: RespostaDeFerramenta; passo: PassoDeFerramenta }> {
   // Cerca previa: o modelo so pode pedir o que foi DECLARADO a ele. Nao
   // substitui o guard — `executarFuncao` continua sendo a autoridade —,
@@ -201,6 +211,7 @@ async function executarUmPedido(
     agenteId,
     funcaoId: pedido.nome,
     argumentos: pedido.argumentos,
+    definicoesExternas,
   } as Parameters<typeof executarFuncao>[0]);
 
   if (r.tipo === "sucesso") {
@@ -288,7 +299,8 @@ export async function conversarComFerramentas(
     const passosDesteTurno: PassoDeFerramenta[] = [];
     for (const pedido of r.pedidos) {
       const { resposta, passo: p } = await executarUmPedido(
-        entrada.userId, entrada.agenteId, pedido, permitidas, porta);
+        entrada.userId, entrada.agenteId, pedido, permitidas, porta,
+        entrada.definicoesExternas);
       respostas.push(resposta);
       passos.push(p);
       passosDesteTurno.push(p);

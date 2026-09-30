@@ -28,6 +28,9 @@
  */
 import "./_server-only-inerte";
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { declararFerramentas } from "../lib/agentes/ia/ferramentas";
 import type { FuncaoExternaDeclaravel } from "../lib/agentes/ia/ferramentas";
 import { fatosDeFuncaoExterna } from "../lib/agentes/ferramentas-externas/repositorio";
@@ -280,6 +283,94 @@ secao("E. O id externo continua atravessando o CHECK do banco");
   const outra = idDaFuncaoExterna({ toolkit: "GoogleSheets", acao: "googlesheets_add_sheet" });
   ok("E2  e nao depende da caixa do que veio do catalogo",
     outra.ok && id.ok && outra.funcaoId === id.funcaoId);
+}
+
+
+// ─── F. Nenhum executor universal, e nenhuma autoridade do cliente ────
+
+secao("F. O modelo nao ganha executor universal, nem fala com o Composio");
+
+{
+  const RAIZ = join(__dirname, "..");
+  const ler = (rel: string): string => readFileSync(join(RAIZ, rel), "utf8");
+  /** Sem comentario: um oraculo nunca deve casar com a prosa. */
+  const codigo = (rel: string): string =>
+    ler(rel).replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ 	]*\/\/.*$/gm, "");
+
+  const executor = codigo("lib/agentes/composio/executor.ts");
+  const definicao = codigo("lib/agentes/composio/definicao-externa.ts");
+  const preparar = codigo("lib/agentes/composio/preparar-externas.ts");
+  const cliente = codigo("lib/agentes/composio/cliente.ts");
+
+  // ── §4: a meta-tool existe no catalogo do Composio, e NAO e nossa ──
+  //
+  // `COMPOSIO_EXECUTE_TOOL` e `COMPOSIO_EXECUTE_AGENT` sao actions reais
+  // do toolkit `composio`. Declarar qualquer uma delas daria ao modelo um
+  // executor universal, e a cerca inteira viraria decoracao.
+  // O nome carrega o ARQUIVO: quatro linhas iguais nao diriam qual deles
+  // quebrou, e o oraculo existe para apontar o culpado.
+  for (const [nome, arquivo] of [
+    ["executor", executor], ["definicao-externa", definicao],
+    ["preparar-externas", preparar], ["cliente", cliente],
+  ] as const) {
+    ok(`F1  \`${nome}\` nao nomeia a meta-tool universal`,
+      !/COMPOSIO_EXECUTE_TOOL|COMPOSIO_EXECUTE_AGENT|execute_any/i.test(arquivo));
+  }
+  // ANTI-VACUIDADE: a sonda precisa ser capaz de acusar.
+  ok("F2  ANCORA: a sonda acusaria a meta-tool se ela aparecesse",
+    /COMPOSIO_EXECUTE_TOOL/i.test("const x = \"COMPOSIO_EXECUTE_TOOL\";"));
+
+  // ── §7: autoridade nunca vem do cliente nem do modelo ─────────────
+  ok("F3  o executor NAO aceita id de conta conectada de ninguem",
+    !/connectedAccountId|connected_account_id|externalUserId|credentialId/.test(executor));
+  ok("F4  e a identidade e DERIVADA, pelo mesmo hash da conexao",
+    /principalDeConexao\(entrada\.userId\)/.test(executor));
+  ok("F5  nunca o userId cru da CDS no corpo enviado",
+    !/user_id: entrada\.userId/.test(executor));
+
+  // ── §7: fail-closed quando falta conexao ──────────────────────────
+  ok("F6  o codigo 1810 do provedor e reconhecido por CODIGO, nao por frase",
+    /CODIGO_SEM_CONEXAO = 1810/.test(executor) &&
+      /e\?\.code === CODIGO_SEM_CONEXAO/.test(executor));
+  ok("F7  e ele vira `conexao_necessaria`, nunca um resultado",
+    /estado: "conexao_necessaria"/.test(executor));
+
+  // ── A armadilha do HTTP 200 ───────────────────────────────────────
+  ok("F8  sucesso e cobrado por `successful === true`, e nao por `r.ok`",
+    /o\.successful !== true/.test(executor));
+
+  // ── §13: erro do provedor nao vaza para o modelo ──────────────────
+  ok("F9  o corpo do erro do provedor NAO e propagado",
+    !/message: .*texto|mensagem: .*texto/.test(executor));
+  ok("F10 e o codigo de erro e um rotulo NOSSO, curto e estavel",
+    /function codigoDoErro/.test(executor) &&
+      /return "erro_externo"/.test(executor));
+
+  // ── §3: o adaptador nao decide autorizacao ────────────────────────
+  ok("F11 o executor nao importa o guard nem o registry",
+    !/autorizarFuncao|agente_permissoes|FUNCOES/.test(executor));
+  ok("F12 e a definicao externa tambem nao",
+    !/autorizarFuncao|agente_permissoes/.test(definicao));
+
+  // ── §5: as tres condicoes estao no codigo, e a ordem importa ──────
+  ok("F13 a preparacao parte do VINCULO, e nao da permissao",
+    /entrada\.vinculos\.filter/.test(preparar) &&
+      !/entrada\.permissoes\.filter\(\(p\) => /.test(preparar));
+  ok("F14 e so os TRES niveis decididos entram",
+    /NIVEIS_DECIDIDOS = new Set\(\["automatico", "aprovacao", "bloqueado"\]\)/.test(preparar));
+  ok("F15 a existencia no catalogo e conferida antes de declarar",
+    /detalharAcao/.test(preparar) && /sumiram \+= 1/.test(preparar));
+
+  // ── §13: falha externa nao derruba o interno ──────────────────────
+  ok("F16 falha de UMA acao nao condena a coleta inteira",
+    /continue;/.test(preparar));
+
+  // ── escrita externa continua fail-closed ──────────────────────────
+  ok("F17 acao de escrita nasce com `acesso: \"escrita\"`",
+    /acesso: "leitura" \| "escrita" = risco === "leitura" \? "leitura" : "escrita"/
+      .test(definicao));
+  ok("F18 e `idempotente` so para leitura",
+    /idempotente: risco === "leitura"/.test(definicao));
 }
 
 // ─── Placar ───────────────────────────────────────────────────────────

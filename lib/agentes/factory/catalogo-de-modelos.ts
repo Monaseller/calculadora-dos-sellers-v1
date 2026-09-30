@@ -136,7 +136,30 @@ const CATALOGO: readonly ModeloDoCatalogo[] = Object.freeze([
     chat: true,
     ferramentas: true,
     visao: false,
-    // Um nivel so: o caminho da CDS nao expoe controle de esforco hoje.
+    /**
+     * UM nivel — e agora com medicao, nao com suposicao — F7b.4.3 §21.
+     *
+     * MEDIDO em `scripts/medir-niveis-de-trabalho.ts` contra
+     * `claude-haiku-4-5`, com ferramenta declarada:
+     *
+     *   sem `thinking`                       -> 200
+     *   `thinking` enabled budget 1024/4096  -> 200, blocos [thinking, tool_use]
+     *   `thinking` disabled                  -> 200
+     *
+     * Ou seja: a Anthropic TEM controle real de esforco, e ele NAO quebra o
+     * pedido de ferramenta. O parametro existe e e testavel.
+     *
+     * Mesmo assim o nivel continua UM so, de proposito. Ligar `thinking`
+     * obriga a PRESERVAR o bloco de pensamento (com a assinatura dele) no
+     * turno do assistente ao devolver o resultado da ferramenta — e a mesma
+     * classe de defeito da assinatura do Gemini no F7b.4, que custou um
+     * gate inteiro e uma conclusao errada.
+     *
+     * Expor antes de provar o ida-e-volta em cada nivel seria prometer
+     * capacidade nao provada, e a Anthropic e o provedor padrao: quebra-la
+     * quebra o caminho critico. Quando a preservacao do bloco estiver
+     * provada, os niveis entram aqui — nao antes.
+     */
     niveis: Object.freeze(["equilibrado"] as const),
     provadoEm: "scripts/testar-agentes-live-tool-call.ts",
   }),
@@ -150,6 +173,21 @@ const CATALOGO: readonly ModeloDoCatalogo[] = Object.freeze([
     // PROVADO no F7b.4: `store: false` + assinatura preservada.
     ferramentas: true,
     visao: false,
+    /**
+     * UM nivel, e aqui por AUSENCIA de parametro — F7b.4.3 §21.
+     *
+     * MEDIDO em `scripts/medir-niveis-de-trabalho.ts`, pelo MESMO caminho
+     * do adaptador (`interactions.create`, `store: false`), com o caso base
+     * passando (`steps=2`) para a medicao nao ser vacua:
+     *
+     *   sem parametro          -> 200
+     *   `thinking_level`       -> 400 "Unknown parameter 'thinking_level'"
+     *   `thinking_config`      -> 400 "Unknown parameter 'thinking_config'"
+     *   `reasoning`            -> 400 "Unknown parameter 'reasoning'"
+     *
+     * A Interactions API simplesmente nao aceita controle de raciocinio.
+     * Nivel unico fixo nao e escolha conservadora aqui — e o unico fato.
+     */
     niveis: Object.freeze(["equilibrado"] as const),
     provadoEm: "scripts/testar-gemini-stateless-live.ts",
   }),

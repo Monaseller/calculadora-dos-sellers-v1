@@ -324,9 +324,39 @@ async function main(): Promise<void> {
     ok("Z5  e ele continua INATIVO — nao roda, nao aparece",
       (ag ?? []).every((a) => (a as { ativo: boolean }).ativo === false),
       JSON.stringify(ag));
-    ok("Z6  nenhuma fixture de OUTRO prefixo ficou para tras",
-      ((await db.from("agentes").select("id", { count: "exact", head: true })
-        .like("user_id", "FIXTURE-%").not("user_id", "like", `${PREFIXO}%`)).count ?? 0) === 0);
+    // ── Z6 generalizado na F7b.4.3 ─────────────────────────────────
+    //
+    // ANTES: "nenhuma fixture de OUTRO prefixo ficou para tras". Era uma
+    // invariante verdadeira enquanto esta era a UNICA suite que executava
+    // Funcao — e portanto a unica cujo agente a FK RESTRICT da auditoria
+    // impede de apagar.
+    //
+    // O F7b.4.3 acrescentou duas (`FIXTURE-EXEC-F743`, `FIXTURE-RTEXT-F743`)
+    // pelo MESMO motivo, e a assercao passou a reprovar por existirem —
+    // nao por nada estar errado.
+    //
+    // A propriedade que importa nunca foi "so uma fixture existe". E
+    // "nenhuma fixture RODA": inativa, sem permissao e sem ferramenta
+    // externa. Isso cobre TODAS as fixtures, e nao so a ausencia das
+    // outras — e portanto cobra mais, e nao menos.
+    const fixtures = await db.from("agentes")
+      .select("user_id, ativo").like("user_id", "FIXTURE-%");
+    const linhas = (fixtures.data ?? []) as { user_id: string; ativo: boolean }[];
+    ok("Z6  TODA fixture que sobrevive esta INATIVA",
+      linhas.every((a) => a.ativo === false),
+      linhas.filter((a) => a.ativo !== false).map((a) => a.user_id).join(", "));
+    const permFix = await db.from("agente_permissoes")
+      .select("funcao_id", { count: "exact", head: true }).like("user_id", "FIXTURE-%");
+    const extFix = await db.from("agente_ferramentas_externas")
+      .select("id", { count: "exact", head: true }).like("user_id", "FIXTURE-%");
+    ok("Z6a e nenhuma delas guarda permissao", (permFix.count ?? 0) === 0,
+      String(permFix.count));
+    ok("Z6b nem ferramenta externa vinculada", (extFix.count ?? 0) === 0,
+      String(extFix.count));
+    // ANCORA: a varredura precisa estar ENXERGANDO fixtures. Sem isto, as
+    // tres assercoes acima passariam com zero linhas lidas.
+    ok("Z6c ANCORA: a varredura de fato encontrou fixtures",
+      linhas.length >= 1, `${linhas.length}`);
   }
 
   log(`\n── placar ${"─".repeat(48)}`);
