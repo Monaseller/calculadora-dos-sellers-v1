@@ -57,6 +57,14 @@ export interface PassoRegistrado {
   readonly desfecho: string;
   readonly executou: boolean;
   readonly requestId: string | null;
+  /**
+   * A aprovacao que este passo criou — F7b.4.4.
+   *
+   * Gravada na mensagem de proposito: depois de um refresh, e ela que
+   * permite a tela reencontrar o cartao sem inventar estado. O que a
+   * pessoa ve vem do banco, e nao da memoria do browser (§11).
+   */
+  readonly aprovacaoId?: string;
 }
 
 export interface Mensagem {

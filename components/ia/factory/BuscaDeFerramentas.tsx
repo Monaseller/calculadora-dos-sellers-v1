@@ -40,7 +40,8 @@ import {
   Aviso, Botao, Campo, Cartao, Etiqueta, PainelLateral, TAMANHO,
 } from "@/components/ui/Primitivas";
 import {
-  buscarFerramentasDisponiveis, desvincularFerramentaExterna,
+  buscarFerramentasDisponiveis, definirPermissaoDeFerramentaExterna,
+  desvincularFerramentaExterna,
   iniciarConexaoExterna, listarAcoesDoAplicativo, listarConexoesExternas,
   listarFerramentasExternas, vincularFerramentaExterna,
   type AcaoExternaUI, type AchadoDeFerramentaUI, type ContaExternaUI,
@@ -112,6 +113,21 @@ export function BuscaDeFerramentas({
   // nao entram no estado de ativacao dele.
   const [contas, setContas] = useState<readonly ContaExternaUI[]>([]);
   const [conectando, setConectando] = useState(false);
+
+  /**
+   * A acao cujo nivel a pessoa esta escolhendo AGORA — F7b.4.4 §3.
+   *
+   * Adicionar deixou de ser um clique so. O gate pediu isso depois de o
+   * Rodrigo ser surpreendido no chat: ele adicionou ferramentas, foi
+   * conversar, e so ali descobriu que faltava decidir a permissao.
+   *
+   * A separacao do backend NAO muda — vincular e permitir continuam sendo
+   * duas escritas, em duas tabelas, com dois significados. O que mudou e
+   * que a UX coleta as duas no mesmo lugar, para nao empurrar a surpresa
+   * para o chat.
+   */
+  const [escolhendoNivel, setEscolhendoNivel] = useState<string | null>(null);
+  const [salvandoNivel, setSalvandoNivel] = useState(false);
 
   const relogio = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -194,16 +210,41 @@ export function BuscaDeFerramentas({
     }
   }
 
-  async function vincular(acao: string) {
+  /**
+   * Adiciona a acao COM a permissao que a pessoa escolheu.
+   *
+   * Duas chamadas, e duas de proposito: `POST` grava o VINCULO (o agente
+   * passa a ter a acao) e `PATCH` grava a PERMISSAO (como ele pode usa-la).
+   * Sao tabelas diferentes com significados diferentes, e juntar as duas
+   * num endpoint so recriaria exatamente o defeito que o F7b.4.2 corrigiu.
+   *
+   * Se a segunda falhar, a acao fica vinculada e SEM permissao — que e um
+   * estado legitimo e visivel: a etapa Permissoes mostra "falta definir", e
+   * a ativacao barra. A degradacao e para um estado honesto, nunca para um
+   * default nosso.
+   */
+  async function vincular(acao: string, nivel: string) {
     if (aplicativo === null) return;
     setErro(null);
-    const r = await vincularFerramentaExterna(agenteId, aplicativo, acao);
-    if (r.estado !== "ok") {
-      setErro(frasePorEstado(r, "Não foi possível adicionar esta ação."));
-      return;
+    setSalvandoNivel(true);
+    try {
+      const r = await vincularFerramentaExterna(agenteId, aplicativo, acao);
+      if (r.estado !== "ok") {
+        setErro(frasePorEstado(r, "Não foi possível adicionar esta ação."));
+        return;
+      }
+      const p = await definirPermissaoDeFerramentaExterna(agenteId, r.dados.funcaoId, nivel);
+      if (p.estado !== "ok") {
+        setErro(frasePorEstado(p,
+          "A ação foi adicionada, mas a permissão não pôde ser salva. " +
+          "Defina na etapa Permissões."));
+      }
+      setEscolhendoNivel(null);
+      await recarregarVinculadas();
+      aoMudar?.();
+    } finally {
+      setSalvandoNivel(false);
     }
-    await recarregarVinculadas();
-    aoMudar?.();
   }
 
   async function desvincular(funcaoId: string) {
@@ -458,11 +499,57 @@ export function BuscaDeFerramentas({
                     ? <Etiqueta tom="ok">Adicionada</Etiqueta>
                     : a.funcaoId === null
                       ? <Etiqueta tom="atencao">Indisponível</Etiqueta>
-                      : <Botao tom="primario" onClick={() => void vincular(a.acao)}>
-                          Adicionar
-                        </Botao>}
+                      : escolhendoNivel === a.acao
+                        ? null
+                        : <Botao tom="primario"
+                            onClick={() => setEscolhendoNivel(a.acao)}>
+                            Adicionar
+                          </Botao>}
                 </div>
               </div>
+
+              {/*
+                §3/§13: adicionar PERGUNTA o nivel. A sugestao aparece
+                marcada como sugestao — e nao pre-selecionada —, porque
+                sugestao nao e decisao. Quem confirma e a pessoa.
+              */}
+              {escolhendoNivel === a.acao && a.funcaoId !== null && (
+                <div style={{
+                  marginTop: ESPACO.sm, paddingTop: ESPACO.sm,
+                  borderTop: `1px solid ${CROMO.borda}`,
+                }}>
+                  <p style={{
+                    margin: `0 0 ${ESPACO.xs}px`,
+                    fontSize: TAMANHO.miudo, color: CROMO.texto,
+                  }}>
+                    Quando o agente pode usar esta ação?
+                  </p>
+                  <div style={{ display: "flex", gap: ESPACO.xs, flexWrap: "wrap" }}>
+                    {(["automatico", "aprovacao", "bloqueado"] as const).map((n) => (
+                      <Botao key={n}
+                        tom={n === a.nivelSugerido ? "primario" : "secundario"}
+                        desabilitado={salvandoNivel}
+                        onClick={() => void vincular(a.acao, n)}>
+                        {ROTULO_DO_NIVEL[n] ?? n}
+                        {n === a.nivelSugerido ? " (sugerido)" : ""}
+                      </Botao>
+                    ))}
+                    <Botao tom="secundario" desabilitado={salvandoNivel}
+                      onClick={() => setEscolhendoNivel(null)}>
+                      Cancelar
+                    </Botao>
+                  </div>
+                  <p style={{
+                    margin: `${ESPACO.xs}px 0 0`,
+                    fontSize: TAMANHO.miudo, color: CROMO.textoFraco,
+                  }}>
+                    {a.risco === "leitura"
+                      ? "Esta ação só lê dados."
+                      : "Esta ação altera dados no aplicativo."}
+                    {" "}Você pode mudar depois, na etapa Permissões.
+                  </p>
+                </div>
+              )}
             </div>
           );
         })}

@@ -785,9 +785,40 @@ secao("M. Quem pode escrever, e apenas quem");
     /aprovacao_criar|aprovacao_decidir|aprovacao_consumir_e_abrir/.test(semComentariosTs(ler(f))));
   ok("M2  so persistencia.ts chama as RPCs", conjuntosIguais(chamamRpc, [PERSISTENCIA]));
 
-  ok("M3  persistencia.ts nao faz INSERT nem UPDATE direto",
-    !/\.from\(TABELA\)[\s\S]{0,60}\.(insert|update|upsert|delete)\(/.test(PERS) &&
-      !/\.insert\(|\.update\(|\.upsert\(|\.delete\(/.test(PERS));
+  // ── M3 ajustado no F7b.4.4, e o limite ficou NOMINAL ───────────
+  //
+  // ANTES: "nao faz INSERT nem UPDATE direto". O que a invariante protege
+  // e que o LIFECYCLE da aprovacao — criar, decidir, consumir — passe
+  // inteiro pelas RPCs, que sao quem roda em transacao.
+  //
+  // O F7b.4.4 acrescentou UMA escrita direta, e so uma: a ORIGEM da
+  // conversa (`conversa_id`, `pedido_id`, `texto_assistente`). Ela nao
+  // participa de transicao de estado nenhuma — e roteamento, nao
+  // autoridade —, e o banco garante o limite por GRANT DE COLUNA: o
+  // `service_role` nao tem UPDATE em `funcao_id`, `argumentos`,
+  // `revisao_funcao` nem em nenhum dos 16 campos congelados.
+  //
+  // Entao a versao nova cobra o que importa: nenhum INSERT, nenhum DELETE,
+  // e EXATAMENTE um UPDATE, que toca so as tres colunas de roteamento.
+  ok("M3  persistencia.ts nao faz INSERT nem DELETE direto",
+    !/\.insert\(|\.upsert\(|\.delete\(/.test(PERS));
+  ok("M3a e faz EXATAMENTE um UPDATE direto",
+    (PERS.match(/\.update\(/g) ?? []).length === 1);
+  ok("M3b que grava SO as tres colunas de origem da conversa",
+    (() => {
+      const i = PERS.indexOf(".update({");
+      if (i < 0) return false;
+      const bloco = PERS.slice(i, PERS.indexOf("})", i) + 2);
+      const campos = [...bloco.matchAll(/(\w+):/g)].map((m) => m[1]).sort();
+      return JSON.stringify(campos) ===
+        JSON.stringify(["conversa_id", "pedido_id", "texto_assistente"]);
+    })());
+  ok("M3c e NENHUM campo congelado aparece num update",
+    !/\.update\(\{[\s\S]{0,300}?(funcao_id|argumentos|revisao_funcao|fingerprint|acesso)\s*:/
+      .test(PERS));
+  ok("M3d CONTROLE: a sonda acusaria um update de campo congelado",
+    /\.update\(\{[\s\S]{0,300}?(funcao_id|argumentos)\s*:/
+      .test('.update({ argumentos: {} })'));
   ok("M4  e le a tabela apenas por select", /\.from\(TABELA\)\s*\.select\(/.test(PERS));
   ok("M5  as tres RPCs sao constantes fechadas",
     /const RPC_CRIAR = "aprovacao_criar"/.test(PERS) &&
@@ -946,10 +977,29 @@ secao("O. Nada no runtime consome a fundacao ainda");
   // retomada. Conjunto NOMINAL — um terceiro arquivo reprova, e o
   // desaparecimento de qualquer um dos dois tambem.
   const DECISION_ROUTE = "app/api/aprovacoes/[aprovacaoId]/decidir/route.ts";
-  const CONSUMIDORES_AUTORIZADOS = [EXECUTOR_FUNCOES, DECISION_ROUTE];
+  // F7b.4.4: DOIS consumidores novos, e os dois sao do chat.
+  //
+  //   `conversas/retomada.ts`  aprova e CONTINUA o turno — e a peca que
+  //                            faltava e que causava o bug do Rodrigo.
+  //   a rota `/agentes/[id]/aprovacoes/[id]`  decide e chama a retomada.
+  //
+  // A fila de TAREFA continua com a rota dela; as duas coexistem porque
+  // resolvem coisas diferentes.
+  const ROTA_APROVACAO_CHAT = "app/api/agentes/[agenteId]/aprovacoes/[aprovacaoId]/route.ts";
+  const RETOMADA_CHAT = "lib/agentes/conversas/retomada.ts";
+  //
+  // `retomada.ts` NAO entra: ela nao chama nenhum dos tres simbolos. Ela
+  // usa `retomarAprovacao`, que tem sonda propria em R20.
+  const CONSUMIDORES_AUTORIZADOS = [
+    EXECUTOR_FUNCOES, DECISION_ROUTE, ROTA_APROVACAO_CHAT,
+  ];
 
+  // A fronteira de PALAVRA importa: sem ela, `decidirAprovacaoNoChat` do
+  // transporte do cliente casava com `decidirAprovacao` e aparecia como
+  // consumidor de servidor. Sao simbolos diferentes, com lados diferentes.
   const consumidores = outros.filter((f) =>
-    /criarAprovacao|decidirAprovacao|consumirAprovacaoEAbrir/.test(semComentariosTs(ler(f))));
+    /(?<![\w])(criarAprovacao|decidirAprovacao|consumirAprovacaoEAbrir)(?![\w])/
+      .test(semComentariosTs(ler(f))));
   ok(`O1  os consumidores de producao sao exatamente os declarados (${consumidores.join(", ") || "nenhum"})`,
     conjuntosIguais(consumidores, CONSUMIDORES_AUTORIZADOS));
   // ── A3: a topologia rota -> wrapper, contada nominalmente ────────
@@ -967,8 +1017,21 @@ secao("O. Nada no runtime consome a fundacao ainda");
       !/aprovacao_consumir_e_abrir|consumirAprovacaoEAbrir/.test(fonteRota) &&
       !/reivindicarProximaTarefa|executarTarefa|executarFuncao/.test(fonteRota) &&
       !/internal\/agentes\/worker/.test(fonteRota));
-    ok("O1h o transporte do cliente NAO usa o simbolo do servidor",
-      !/decidirAprovacao/.test(semComentariosTs(ler("lib/ia/agentes-http.ts"))) &&
+    // O1h REVERTIDO em parte: o transporte AGORA tem uma funcao de
+    // decisao — `decidirAprovacaoNoChat` —, porque decidir sem sair do
+    // chat e o ponto do F7b.4.4. O que ele continua NAO tendo e o simbolo
+    // de SERVIDOR: `decidirAprovacao` (a escrita de dominio) e
+    // `retomarAprovacao` (a execucao atomica) nunca cruzam para o cliente.
+    ok("O1h o transporte nao usa os simbolos de SERVIDOR",
+      (() => {
+        const t = semComentariosTs(ler("lib/ia/agentes-http.ts"));
+        return !/(?<![\w])decidirAprovacao\(/.test(t) &&
+          !/retomarAprovacao|consumirAprovacaoEAbrir|retomarTurnoAprovado/.test(t);
+      })());
+    ok("O1h1 e tem exatamente UMA funcao de decisao, a do chat",
+      (semComentariosTs(ler("lib/ia/agentes-http.ts"))
+        .match(/export async function decidirAprovacaoNoChat\(/g) ?? []).length === 1);
+    ok("O1h2 a escrita da fila de TAREFA continua existindo, separada",
       /registrarDecisaoAprovacao/.test(ler("lib/ia/agentes-http.ts")));
     ok("O1i CONTROLE: a sonda de chamada acha uma chamada de verdade",
       nOcc("await decidirAprovacao({ userId });", /(?<![.\w])decidirAprovacao\(/g) === 1);
@@ -1016,16 +1079,35 @@ secao("P. O consumo entrega contexto, e nao autoridade");
   ok("P1  o SELECT da aprovacao inclui tarefa_id",
     /\.select\("id, funcao_id, revisao_funcao, acesso, conexao_plataforma, conexao_recurso, conexao_loja_id, argumentos, agente_id, tarefa_id"\)/
       .test(PERS));
-  ok("P2  e continua sendo UM select so, nao um paralelo",
-    (PERS.match(/\.from\(TABELA\)/g) ?? []).length === 1);
+  // P2 ajustado: o F7b.4.4 acrescentou DUAS leituras, e nenhuma delas
+  // participa do consumo. Uma le a aprovacao para RETOMAR o chat; a outra
+  // encontra a aprovacao viva de uma conversa, que e o que faz o cartao
+  // reaparecer depois de um refresh.
+  //
+  // O que P2 protegia continua protegido: o CONSUMO le uma vez so. Por
+  // isso a contagem passa a ser da fatia do consumo, e nao do arquivo.
+  ok("P2  o consumo continua fazendo UM select so",
+    (CONSUMO.match(/\.from\(TABELA\)/g) ?? []).length <= 1);
+  ok("P2a e o arquivo tem quatro acessos a tabela, todos nominais",
+    (PERS.match(/\.from\(TABELA\)/g) ?? []).length === 4,
+    String((PERS.match(/\.from\(TABELA\)/g) ?? []).length));
 
   ok("P3  os argumentos do contexto vem da linha congelada",
     /argumentos: ap\.argumentos/.test(CONSUMO));
-  ok("P4  a definicao vai resolvida no contexto, nao o id sozinho",
-    /definicao,/.test(CONSUMO) && /const definicao: DefinicaoFuncao = FUNCOES\[funcaoId\]/.test(PERS));
-  ok("P5  a definicao e resolvida ANTES da RPC de consumo",
-    PERS.indexOf("const definicao: DefinicaoFuncao = FUNCOES[funcaoId]") <
+  // P4/P5 no F7b.4.4: a definicao continua indo RESOLVIDA no contexto, e
+  // agora ela e resolvida UMA vez so — no leitor, que ja a confere contra
+  // a revisao aprovada. Antes o consumo a buscava de novo em `FUNCOES`, e
+  // isso quebrava toda Funcao EXTERNA: o mapa de externas nao chega la, e
+  // `FUNCOES[id]` vinha `undefined`. O teste live pegou como um 500.
+  ok("P4  a definicao vai RESOLVIDA no contexto, e vem do leitor",
+    /definicao: ap\.definicao/.test(CONSUMO));
+  ok("P4a e o consumo NAO reresolve pelo registry",
+    !/FUNCOES\[/.test(CONSUMO));
+  ok("P5  a resolucao acontece ANTES da RPC de consumo",
+    PERS.indexOf("const definicao: DefinicaoFuncao = resolvida") <
       PERS.indexOf("cliente.rpc(RPC_CONSUMIR"));
+  ok("P5a e ela aceita registry OU o mapa de externas do agente",
+    /funcaoExiste\(funcaoId\)[\s\S]{0,200}externasAqui/.test(PERS));
   // ── P6 — O ALVO DE CONEXAO VEM DO CATALOGO ───────────────────────
   //
   // Esta sonda ficou VERMELHA sobre codigo correto: ela procurava
@@ -2107,8 +2189,31 @@ async function principalStale(): Promise<void> {
       (f) => f !== "lib/agentes/execucao-funcoes/executar.ts" &&
         /retomarAprovacao/.test(semComentariosTs(ler(f)))
     );
-    ok(`R20 retomarAprovacao continua SEM consumidor de producao (${consumidoresResume.join(", ") || "nenhum"})`,
-      consumidoresResume.length === 0);
+    // ── R20 REVERTIDO no F7b.4.4 ──────────────────────────────────
+    //
+    // ANTES: "retomarAprovacao continua SEM consumidor de producao". Era
+    // verdade, e o docblock dela explicava a divida: ligar uma rota exigia
+    // resolver a janela entre consumir e executar.
+    //
+    // O F7b.4.4 ligou — e teve de ligar, porque era JUSTAMENTE a ausencia
+    // de retomada que fazia o Rodrigo aprovar e o chat nao continuar.
+    //
+    // O consumidor e UM so, e nomeado: `conversas/retomada.ts`. A
+    // invariante que sobrevive e essa — a execucao nao ganhou superficie
+    // difusa, ganhou uma porta.
+    // Os dois caminhos, nomeados aqui: as constantes de O1 vivem em outra
+    // funcao, e reaproveita-las por escopo foi um erro que o proprio teste
+    // acusou com `ReferenceError`.
+    const RETOMADA_DO_CHAT = "lib/agentes/conversas/retomada.ts";
+    const ROTA_DO_CHAT =
+      "app/api/agentes/[agenteId]/aprovacoes/[aprovacaoId]/route.ts";
+    ok(`R20 retomarAprovacao tem UM consumidor, e e o do chat (${consumidoresResume.join(", ") || "nenhum"})`,
+      conjuntosIguais(consumidoresResume, [RETOMADA_DO_CHAT]));
+    ok("R20a CONTROLE: um segundo consumidor reprovaria",
+      !conjuntosIguais([RETOMADA_DO_CHAT, "lib/x.ts"], [RETOMADA_DO_CHAT]));
+    ok("R20b e a rota do chat NAO executa direto — ela passa pela retomada",
+      !/retomarAprovacao/.test(semComentariosTs(ler(ROTA_DO_CHAT))) &&
+        /retomarTurnoAprovado/.test(semComentariosTs(ler(ROTA_DO_CHAT))));
 
     // ── R21..R24 — a fronteira da FUNCTION-RUNTIME-P0 ───────────────
     //

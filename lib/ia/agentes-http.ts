@@ -1800,6 +1800,14 @@ export interface PassoDoChatUI {
   readonly desfecho: string;
   readonly executou: boolean;
   readonly requestId: string | null;
+  /**
+   * A aprovacao que este passo criou — F7b.4.4.
+   *
+   * Presente so quando `desfecho === "aguardando_aprovacao"`. Sem ele a
+   * tela sabia que algo precisava de aprovacao mas nao QUAL, e por isso
+   * mandava a pessoa para outra pagina — que e onde o turno se perdia.
+   */
+  readonly aprovacaoId: string | null;
 }
 
 /** O custo de um turno. So mensagem de assistente tem. */
@@ -1960,11 +1968,15 @@ function conversaDaResposta(bruto: unknown): ConversaDoChatUI | null {
 
 function passoDaResposta(bruto: unknown): PassoDoChatUI | null {
   if (!ehObjeto(bruto)) return null;
-  const { funcaoId, desfecho, executou, requestId } = bruto;
+  const { funcaoId, desfecho, executou, requestId, aprovacaoId } = bruto;
   if (typeof funcaoId !== "string" || funcaoId.length === 0) return null;
   if (typeof desfecho !== "string" || desfecho.length === 0) return null;
   if (typeof executou !== "boolean") return null;
-  return { funcaoId, desfecho, executou, requestId: textoOuNulo(requestId) };
+  return {
+    funcaoId, desfecho, executou,
+    requestId: textoOuNulo(requestId),
+    aprovacaoId: textoOuNulo(aprovacaoId),
+  };
 }
 
 function usoDaResposta(bruto: unknown): UsoDoTurnoUI | null {
@@ -2105,12 +2117,29 @@ export async function listarConversasDoChat(
   return dados === null ? { estado: "falha" } : { estado: "ok", dados };
 }
 
-/** O historico de UMA conversa. Leitura pura: nao cria, nao responde. */
+export interface AprovacaoPendenteUI {
+  readonly aprovacaoId: string;
+  /** `pendente` ou `aprovada`. Os dois ainda podem ser retomados. */
+  readonly estado: string;
+}
+
+export interface ConversaCarregadaUI {
+  readonly mensagens: readonly MensagemDoChatUI[];
+  /**
+   * A aprovacao ainda viva desta conversa — F7b.4.4 §11.
+   *
+   * Vem do SERVIDOR, e nao da memoria da tela: e isso que faz o cartao
+   * reaparecer depois de um refresh, e desaparecer depois de decidido.
+   */
+  readonly aprovacaoPendente: AprovacaoPendenteUI | null;
+}
+
+/** O historico de UMA conversa, e a aprovacao viva dela. Leitura pura. */
 export async function lerConversaDoChat(
   agenteId: string,
   conversaId: string,
   signal?: AbortSignal
-): Promise<RespostaDaFactory<readonly MensagemDoChatUI[]>> {
+): Promise<RespostaDaFactory<ConversaCarregadaUI>> {
   let resposta: Response;
   try {
     resposta = await fetch(
@@ -2121,11 +2150,76 @@ export async function lerConversaDoChat(
     return { estado: "falha" };
   }
   const corpo = await corpoDe(resposta);
-  const desfecho = desfechoDaResposta<readonly MensagemDoChatUI[]>(resposta, corpo);
+  const desfecho = desfechoDaResposta<ConversaCarregadaUI>(resposta, corpo);
   if (desfecho !== null) return desfecho;
-  const dados = listaDaResposta(
+  const mensagens = listaDaResposta(
     (corpo as { mensagens?: unknown }).mensagens, mensagemDaResposta);
-  return dados === null ? { estado: "falha" } : { estado: "ok", dados };
+  if (mensagens === null) return { estado: "falha" };
+
+  const bruta = (corpo as { aprovacaoPendente?: unknown }).aprovacaoPendente;
+  const pendente = ehObjeto(bruta) && typeof bruta.aprovacaoId === "string"
+    && bruta.aprovacaoId !== ""
+    ? { aprovacaoId: bruta.aprovacaoId, estado: String(bruta.estado ?? "pendente") }
+    : null;
+
+  return { estado: "ok", dados: { mensagens, aprovacaoPendente: pendente } };
+}
+
+/**
+ * Decide uma aprovacao SEM sair do chat — F7b.4.4 §10.
+ *
+ * Aprovar executa a Funcao congelada e devolve a resposta final do agente,
+ * na MESMA conversa. Negar grava a recusa e devolve a mensagem que explica
+ * — a conversa continua nos dois casos.
+ *
+ * O corpo leva UMA palavra. `funcaoId`, `argumentos` e o agente saem todos
+ * da linha congelada no servidor: nao ha por onde trocar o que sera
+ * executado depois de a aprovacao existir.
+ *
+ * `jaExecutada` chega quando um segundo clique perdeu a corrida. Nao e
+ * erro: a acao rodou uma vez, que e o estado pedido.
+ */
+export async function decidirAprovacaoNoChat(
+  agenteId: string,
+  aprovacaoId: string,
+  decisao: "aprovar" | "rejeitar"
+): Promise<RespostaDaFactory<{
+  readonly mensagem: MensagemDoChatUI | null;
+  readonly executou: boolean;
+  readonly jaExecutada: boolean;
+}>> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(
+      `${caminhoDoAgente(agenteId)}${ROTA_SUFIXO_APROVACOES}/${encodeURIComponent(aprovacaoId)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ decisao }),
+      }
+    );
+  } catch {
+    return { estado: "falha" };
+  }
+  const corpo = await corpoDe(resposta);
+  const desfecho = desfechoDaResposta<{
+    readonly mensagem: MensagemDoChatUI | null;
+    readonly executou: boolean;
+    readonly jaExecutada: boolean;
+  }>(resposta, corpo);
+  if (desfecho !== null) return desfecho;
+
+  const o = corpo as Record<string, unknown>;
+  return {
+    estado: "ok",
+    dados: {
+      // `null` quando o segundo clique chegou: nao ha mensagem nova, e
+      // inventar uma duplicaria a resposta na tela.
+      mensagem: mensagemDaResposta(o.mensagem),
+      executou: o.executou === true,
+      jaExecutada: o.jaExecutada === true,
+    },
+  };
 }
 
 /** As memorias que o DONO escreveu para este agente. */
@@ -2894,6 +2988,8 @@ const ROTA_CONEXOES_EXTERNAS = "/api/ferramentas/conexoes";
 const ROTA_SUFIXO_EXTERNAS = "/ferramentas-externas";
 /** F7b.4.2: a IA do agente tem rota propria, como `/memoria` e `/ativacao`. */
 const ROTA_SUFIXO_IA = "/ia";
+/** F7b.4.4: decidir aprovacao sem sair do chat. */
+const ROTA_SUFIXO_APROVACOES = "/aprovacoes";
 
 export interface AchadoDeFerramentaUI {
   /** Chave para a proxima etapa. NAO e mostrada como interface. */
