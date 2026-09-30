@@ -86,6 +86,17 @@ export interface PortaDeConversas {
   obterConversa(userId: string, conversaId: string): Promise<Conversa | null>;
   listarConversas(userId: string, agenteId: string): Promise<readonly Conversa[]>;
   arquivarConversa(userId: string, conversaId: string): Promise<boolean>;
+  /**
+   * Grava o ASSUNTO — e SO se a conversa ainda nao tiver um — F7b.4.8.
+   *
+   * `is("titulo", null)` no WHERE e a idempotencia: a segunda mensagem da
+   * conversa nao reescreve o assunto, e duas mensagens simultaneas nao
+   * disputam. O assunto de uma conversa e o que a abriu; deixar a decima
+   * mensagem redefini-lo faria a retomada citar um trecho do meio.
+   */
+  definirAssuntoSeVazio(
+    userId: string, conversaId: string, assunto: string
+  ): Promise<boolean>;
   listarMensagens(userId: string, conversaId: string): Promise<readonly Mensagem[]>;
   anexarMensagem(nova: NovaMensagem): Promise<Mensagem>;
 }
@@ -121,6 +132,18 @@ export function criarPortaDeConversas(supabase: SupabaseClient): PortaDeConversa
         .order("atualizado_em", { ascending: false });
       if (error) throw new Error(`Falha ao listar conversas: ${error.message}`);
       return ((data ?? []) as unknown as LinhaConversa[]).map(daConversa);
+    },
+
+    async definirAssuntoSeVazio(userId, conversaId, assunto) {
+      if (assunto.trim() === "") return false;
+      const { data, error } = await supabase.from(TAB_CONVERSAS)
+        .update({ titulo: assunto })
+        .eq("user_id", userId).eq("id", conversaId).is("titulo", null)
+        .select("id");
+      // Falha aqui NAO derruba o turno: o assunto e conforto de
+      // retomada, e a conversa vale sem ele.
+      if (error) return false;
+      return (data ?? []).length === 1;
     },
 
     async arquivarConversa(userId, conversaId) {

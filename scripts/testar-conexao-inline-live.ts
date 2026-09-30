@@ -289,7 +289,7 @@ async function main(): Promise<void> {
       // palavras dispara `vendas` primeiro (ordem do catalogo), e o cartao
       // ofereceria Vendas. A rota recusou corretamente uma escolha fora das
       // opcoes congeladas — o teste estava ambiguo, nao o sistema.
-      ok("C1  a falta de Perguntas do Mercado Livre e detectada",
+      ok("C1  a falta do Mercado Livre e detectada",
         t.ok && t.capacidadePendente !== undefined,
         JSON.stringify(t.ok ? t.capacidadePendente : null));
       pendML = t.ok ? (t.capacidadePendente?.id ?? "") : "";

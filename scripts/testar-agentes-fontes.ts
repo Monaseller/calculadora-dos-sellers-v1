@@ -685,14 +685,28 @@ async function main(): Promise<void> {
     ok("H7a CONTROLE: o detector veria a chamada se ela existisse",
       /createBucket/.test(`${ARM} supabase.storage.createBucket(x)`));
 
-    // §32: F5 nao acrescentou Function.
+    // §32: F5 nao acrescentou Function — e continua nao tendo
+    // acrescentado. O que mudou foi o catalogo INTEIRO: a F7b.4.8
+    // publicou `mercadolivre.vendas.consultar`, com gate proprio, prova
+    // propria e suite propria.
+    //
+    // A assercao conta o catalogo, e nao "o que a F5 fez". Por isso ela
+    // volta a ser exata num numero novo, em vez de virar `>= 7` — um
+    // limite inferior deixaria de acusar a Function que entra sem gate,
+    // que e o que ela existe para acusar.
     const ids = Object.keys(FUNCOES);
-    ok("H8  §32: NENHUMA Function nova — o catalogo segue com 7", ids.length === 7,
-      String(ids.length));
+    ok("H8  o catalogo segue EXATO — oito Funcoes, todas com gate proprio",
+      ids.length === 8, String(ids.length));
+    ok("H8a e `source.*` continua nao existindo — era o risco desta fase",
+      !ids.some((i) => i.startsWith("source.")));
     ok("H9  e nao existe `source.ler` — planilha.ler + resolvedor bastam",
       !ids.some((i) => i.startsWith("source.")));
     const linhasReg = ler("lib/agentes/funcoes/registry.ts").split("\n").length;
-    ok("H10 J1 intacto", linhasReg < 560 && linhasReg === 548, String(linhasReg));
+    // F7b.4.8: 560 -> 580, e 548 -> 568. A razao esta registrada em
+    // `testar-ia-skill-1d-b.ts` (J1), que e o dono do tripwire: ele
+    // existe para manter implementacao FORA do registry, e o que sobrou
+    // la e o mapa. A entrada nova cabe; um executor nao caberia.
+    ok("H10 J1 intacto", linhasReg < 580 && linhasReg === 568, String(linhasReg));
   }
 
   console.log(`\n── placar ${"─".repeat(54)}`);

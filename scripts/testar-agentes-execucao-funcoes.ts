@@ -6166,8 +6166,13 @@ async function principal(): Promise<void> {
     const IDS = listarFuncoesRegistradas();
     // AGENT-FACTORY-F3 acrescentou cinco Tools deterministicas. A lista
     // segue NOMINAL e EXATA — e o que o assert sempre quis dizer.
+    // F7b.4.8 acrescentou `mercadolivre.vendas.consultar` — a consulta de
+    // vendas pela API OFICIAL do Mercado Livre. `vendas.consultar` segue
+    // na lista e segue lendo a tabela `pedidos` da CDS: as duas ficam
+    // porque respondem perguntas diferentes.
     const IDS_PUBLICADOS = [
   "vendas.consultar", "mercadolivre.perguntas.listar",
+  "mercadolivre.vendas.consultar",
   "planilha.inspecionar", "planilha.ler", "planilha.agregar",
   "calculadora.calcular", "calendario.periodo",
 ];

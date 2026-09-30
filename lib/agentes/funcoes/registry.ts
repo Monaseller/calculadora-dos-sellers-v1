@@ -73,6 +73,10 @@ import {
   interpretarSaidaPerguntasML,
   validarEntradaPerguntasML,
 } from "@/lib/agentes/funcoes/mercadolivre-perguntas";
+import {
+  CONEXAO_VENDAS_ML, executarVendasML, interpretarSaidaVendasML,
+  validarEntradaVendasML,
+} from "@/lib/agentes/funcoes/mercadolivre-vendas";
 
 // ─── Contexto de autoridade ───────────────────────────────────────────
 
@@ -420,6 +424,22 @@ export const FUNCOES: Readonly<Record<string, DefinicaoFuncao>> = Object.freeze(
     acesso: "leitura",
     idempotente: true,
     conexaoNecessaria: CONEXAO_PERGUNTAS_ML,
+  }),
+
+  // F7b.4.8: as vendas pela API OFICIAL, e nao pelo espelho da CDS.
+  // `vendas.consultar` continua existindo e continua lendo `pedidos` —
+  // as duas respondem perguntas diferentes. Implementacao inteira em
+  // `funcoes/mercadolivre-vendas.ts`; aqui fica a ENTRADA.
+  "mercadolivre.vendas.consultar": Object.freeze({
+    executor: executarVendasML,
+    validarEntrada: validarEntradaVendasML,
+    interpretarSaida: interpretarSaidaVendasML,
+    revisao: "1",
+    // Leitura: consulta pedidos pagos. Nao altera anuncio, nao responde,
+    // nao cancela, nao envia nada.
+    acesso: "leitura",
+    idempotente: true,
+    conexaoNecessaria: CONEXAO_VENDAS_ML,
   }),
 
   // ─── AGENT-FACTORY-F3: as Tools DETERMINISTICAS ───────────────────

@@ -339,6 +339,30 @@ export const DECLARACOES: Readonly<Record<string, { descricao: string; schemaEnt
         additionalProperties: false,
       }),
     }),
+    "mercadolivre.vendas.consultar": Object.freeze({
+      descricao:
+        "Consulta as vendas PAGAS na conta do Mercado Livre ligada a este agente, direto " +
+        "na API oficial do Mercado Livre. Devolve faturamento, numero de pedidos, ticket " +
+        "medio e o total por dia — ja somados. Use esta ferramenta quando a pergunta for " +
+        "sobre vendas, faturamento ou pedidos DO MERCADO LIVRE: ela e a fonte oficial. " +
+        "Mande `periodo` com o nome do periodo (esta_semana, mes_passado...) e a CDS " +
+        "resolve as datas no fuso de Sao Paulo — nao calcule datas de cabeca. Somente " +
+        "leitura: nao altera anuncio, nao cancela e nao responde nada.",
+      schemaEntrada: Object.freeze({
+        type: "object",
+        properties: {
+          periodo: {
+            type: "string",
+            enum: ["hoje", "ontem", "esta_semana", "semana_passada", "este_mes", "mes_passado", "este_ano"],
+            description: "Use este campo, ou o par de datas — nunca os dois.",
+          },
+          de: { type: "string", description: "Opcional. AAAA-MM-DD. So com `ate`." },
+          ate: { type: "string", description: "Opcional. AAAA-MM-DD, inclusivo." },
+        },
+        required: [],
+        additionalProperties: false,
+      }),
+    }),
     "mercadolivre.perguntas.listar": Object.freeze({
       descricao:
         "Lista as perguntas recebidas na conta do Mercado Livre ligada a este agente. " +

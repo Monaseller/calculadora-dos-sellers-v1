@@ -184,7 +184,11 @@ async function main(): Promise<void> {
   {
     const FONTE_REG = ler("lib/agentes/funcoes/registry.ts");
     const linhas = FONTE_REG.split("\n").length;
-    ok(`A1  J1: registry abaixo de 560 linhas (hoje ${linhas})`, linhas < 560, String(linhas));
+    // F7b.4.8: 560 -> 580, pela mesma razao registrada em
+    // `testar-ia-skill-1d-b.ts` (J1): o guarda existe para manter
+    // implementacao fora do registry, e o que sobrou aqui e o mapa.
+    // Cabe uma entrada nova; nao cabe um executor.
+    ok(`A1  J1: registry abaixo de 580 linhas (hoje ${linhas})`, linhas < 580, String(linhas));
     ok("A2  CONTROLE: a contagem leu o arquivo real", linhas > 100);
 
     const ids = Object.keys(FUNCOES);

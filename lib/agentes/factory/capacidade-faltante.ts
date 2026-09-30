@@ -54,11 +54,66 @@ const GATILHOS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   ],
   calculadora: ["calcular", "calculo", "somar", "subtrair", "multiplicar", "media"],
   calendario: ["prazo", "vencimento", "periodo", "datas"],
+  // ── F7b.4.8 §20/§26: os nomes de marketplace SAIRAM daqui ─────
+  //
+  // Estavam aqui, e era um defeito de produto: "quanto vendi no Mercado
+  // Livre" casava com o pack `vendas`, que le a base da CDS. A pessoa
+  // pedia a fonte oficial e recebia o espelho, com o nome errado no
+  // cartao.
   vendas: [
     "vendas", "vendi", "faturamento", "faturei", "pedidos", "receita",
-    "mercado livre", "mercadolivre", "shopee", "marketplace", "anuncio", "anuncios",
   ],
-  "mercadolivre-perguntas": ["perguntas", "pergunta do comprador", "duvidas dos clientes"],
+  "mercadolivre-perguntas": [
+    "mercado livre", "mercadolivre", "meli",
+    "perguntas", "pergunta do comprador", "duvidas dos clientes",
+  ],
+});
+
+/**
+ * Gatilhos que NOMEIAM a fonte, e por isso tem precedencia.
+ *
+ * ── O problema que isto resolve — §30 ───────────────────────────────
+ *
+ * "Quanto vendi esta semana no Mercado Livre?" dispara DOIS packs:
+ * `vendas` por "vendi", e `mercadolivre-perguntas` por "mercado livre".
+ * A ordem de `TOOL_PACKS` colocava `vendas` na frente, e a pessoa
+ * recebia a base da CDS depois de ter dito de onde queria o numero.
+ *
+ * ── Por que uma lista explicita, e nao o gatilho mais longo ─────────
+ *
+ * Ordenar pelo tamanho do termo funcionaria por acidente hoje
+ * ("mercado livre" tem 13 caracteres e "faturamento" tem 11) e quebraria
+ * no primeiro termo novo. A regra de verdade nao e o tamanho: e que
+ * quem NOMEIA a fonte ja escolheu a fonte.
+ */
+const GATILHOS_DE_MARKETPLACE: ReadonlySet<string> = new Set([
+  "mercado livre", "mercadolivre", "meli",
+]);
+
+/**
+ * Packs que respondem a MESMA pergunta por FONTES diferentes.
+ *
+ * ── O defeito que isto corrige ──────────────────────────────────────
+ *
+ * "Quanto vendi esta semana no Mercado Livre?" dispara os dois packs. A
+ * precedencia resolvia a primeira oferta: Mercado Livre. Mas depois de o
+ * dono ADICIONAR o Mercado Livre, a mesma frase voltava a casar com
+ * `vendas` — o agente ja tinha a fonte oficial, e a CDS oferecia a base
+ * interna como se faltasse algo.
+ *
+ * O teste do §30 pegou: a pendencia renascia no turno retomado, e o
+ * cartao reaparecia oferecendo "Vendas registradas na CDS" para uma
+ * pergunta que acabara de ser respondida.
+ *
+ * Nao e precedencia, e EXCLUSAO: quem nomeou a fonte escolheu a fonte, e
+ * a outra deixa de ser uma oferta — passa a ser uma resposta diferente
+ * para a mesma pergunta.
+ *
+ * O mapa e do pack VENCEDOR para os que ele exclui. Um pack sem entrada
+ * aqui nao exclui ninguem, que e o comportamento de todos os outros.
+ */
+const FONTES_EXCLUIDAS_POR: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  "mercadolivre-perguntas": Object.freeze(["vendas"]),
 });
 
 /**
@@ -119,7 +174,23 @@ export function capacidadesPedidasNoTexto(texto: string): readonly CapacidadePed
     if (casou === undefined) continue;
     pedidas.push({ packId: pack.id, termo: casou });
   }
-  return pedidas;
+  // Quem nomeou a fonte vence. `sort` estavel preserva a ordem de
+  // `TOOL_PACKS` entre os que empatam, entao o resto do comportamento
+  // fica exatamente como era.
+  const ordenadas = pedidas.sort((a, b) =>
+    Number(GATILHOS_DE_MARKETPLACE.has(b.termo)) -
+    Number(GATILHOS_DE_MARKETPLACE.has(a.termo)));
+
+  // E a fonte alternativa sai de cena. Sem isto, a oferta reaparecia
+  // depois de a pessoa ja ter escolhido de onde queria o numero.
+  const excluidos = new Set<string>();
+  for (const p of ordenadas) {
+    if (!GATILHOS_DE_MARKETPLACE.has(p.termo)) continue;
+    for (const outro of FONTES_EXCLUIDAS_POR[p.packId] ?? []) excluidos.add(outro);
+  }
+  return excluidos.size === 0
+    ? ordenadas
+    : ordenadas.filter((p) => !excluidos.has(p.packId));
 }
 
 export interface OpcaoDeCapacidade {
@@ -174,6 +245,68 @@ function comoOpcao(a: AchadoDeFerramenta): OpcaoDeCapacidade {
  * legitimas, e quem escolhe e a pessoa. A CDS nunca escolhe o servico
  * externo sozinha.
  */
+/**
+ * A capacidade que uma SKILL declara e o agente nao tem — §3/§7.
+ *
+ * ── Em que isto difere da deteccao por texto ────────────────────────
+ *
+ * `detectarCapacidadeFaltante` le o que a PESSOA escreveu. Esta le o que
+ * a SKILL declarou em `manifesto.requer.funcoes` — estrutura validada
+ * por `formato.ts`, e nao palavra achada no corpo dela (§4: texto pode
+ * sugerir, binding e contra capability real).
+ *
+ * As duas existem porque cobrem faltas diferentes. "Analise minha
+ * planilha" sem Planilhas e a primeira. Uma Skill Financeiro que declara
+ * precisar de Mercado Livre, num agente sem Mercado Livre, e a segunda —
+ * e ela apareceria em QUALQUER pergunta, inclusive numa que nao cita
+ * marketplace nenhum.
+ *
+ * ── PURA, e sem leitura nova ───────────────────────────────────────
+ *
+ * Recebe as Skills e as Funcoes permitidas, que o runtime ja carregou
+ * para montar o prompt. Uma consulta a mais por turno para um dado que
+ * ja esta em memoria seria custo sem informacao.
+ *
+ * `null` quando nada falta, quando a Funcao exigida nao pertence a pack
+ * nenhum (nao ha o que oferecer) ou quando o requisito e opcional.
+ */
+export function capacidadeFaltanteDeSkill(entrada: {
+  readonly skills: readonly {
+    readonly manifesto: {
+      readonly id: string;
+      readonly requer?: { readonly funcoes?: readonly string[] };
+    };
+  }[];
+  /** As Funcoes que o agente PODE usar. `bloqueado` nao entra. */
+  readonly funcoesPermitidas: readonly string[];
+}): { readonly skillId: string; readonly opcao: OpcaoDeCapacidade } | null {
+  const tem = new Set(entrada.funcoesPermitidas);
+
+  for (const s of entrada.skills) {
+    // `funcoes_opcionais` fica de FORA de proposito: faltar uma opcional
+    // reduz o alcance e nao impede o trabalho, e abrir um cartao por ela
+    // interromperia a conversa para oferecer o que ninguem precisa.
+    for (const funcaoId of s.manifesto.requer?.funcoes ?? []) {
+      if (tem.has(funcaoId)) continue;
+      const pack = TOOL_PACKS.find((p) => p.funcoes.includes(funcaoId));
+      // Funcao exigida que nao pertence a pack nenhum nao tem oferta
+      // possivel: oferecer nada seria um cartao sem botao.
+      if (pack === undefined) continue;
+      return {
+        skillId: s.manifesto.id,
+        opcao: {
+          chave: pack.id,
+          origem: "cds",
+          nome: pack.nome,
+          descricao: pack.descricao,
+          exigeConexao: pack.exigeConexao,
+        },
+      };
+    }
+  }
+  return null;
+}
+
 export async function detectarCapacidadeFaltante(entrada: {
   readonly texto: string;
   readonly nomesQueJaTem: readonly string[];

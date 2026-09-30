@@ -88,6 +88,17 @@ function criarPortaDeConversasFake(
       return conversas.filter((c) =>
         c.userId === userId && c.agenteId === agenteId && !c.arquivada);
     },
+    // F7b.4.8: a MESMA condicao da porta real — so grava com titulo nulo.
+    // Uma fake permissiva faria a suite aprovar uma reescrita que a real
+    // recusa, e o oraculo passaria a descrever outro sistema.
+    async definirAssuntoSeVazio(userId, conversaId, assunto) {
+      if (assunto.trim() === "") return false;
+      const c = conversas.find((x) =>
+        x.userId === userId && x.id === conversaId && x.titulo === null);
+      if (!c) return false;
+      (c as { titulo: string | null }).titulo = assunto;
+      return true;
+    },
     async arquivarConversa(userId, conversaId) {
       const c = conversas.find((x) => x.userId === userId && x.id === conversaId && !x.arquivada);
       if (!c) return false;

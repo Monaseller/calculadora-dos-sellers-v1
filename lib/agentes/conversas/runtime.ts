@@ -83,7 +83,10 @@ import {
   ingerirTurno, recuperarMemoriaDoDono,
 } from "@/lib/agentes/memoria/automatica";
 import { capacidadesDoAgente } from "@/lib/agentes/factory/capacidades";
-import { detectarCapacidadeFaltante } from "@/lib/agentes/factory/capacidade-faltante";
+import { assuntoDaMensagem } from "@/lib/agentes/conversas/retomada-resumo";
+import {
+  capacidadeFaltanteDeSkill, detectarCapacidadeFaltante,
+} from "@/lib/agentes/factory/capacidade-faltante";
 import { abrirCapacidadePendente } from "@/lib/agentes/factory/capacidade-pendente";
 import { listarVinculosExternos } from "@/lib/agentes/ferramentas-externas/repositorio";
 import { listarPermissoesGravadas } from "@/lib/agentes/permissoes/gravadas";
@@ -348,6 +351,23 @@ export async function responderNaConversa(
     papel: "usuario", conteudo: entrada.texto.trim(),
   });
 
+  // ── O ASSUNTO da conversa — F7b.4.8 §17 ─────────────────────────
+  //
+  // Gravado aqui porque e aqui que a primeira frase da pessoa existe. A
+  // escrita e condicional a `titulo` nulo, entao a partir da segunda
+  // mensagem ela nao faz nada.
+  //
+  // Sem `await` bloqueante no caminho critico? Nao: `definirAssuntoSeVazio`
+  // engole o proprio erro e devolve boolean, e uma escrita de uma coluna
+  // custa menos que a chamada de modelo que vem a seguir. Enfileirar sem
+  // esperar deixaria o turno terminar antes da gravacao, e a retomada da
+  // conversa seguinte poderia nao encontrar o assunto.
+  const assunto = assuntoDaMensagem(gravadaDoUsuario.conteudo);
+  if (assunto !== null) {
+    await portaConversas.definirAssuntoSeVazio(
+      entrada.userId, entrada.conversaId, assunto);
+  }
+
   let saida: ResultadoDoLaco;
   try {
     saida = await conversarComFerramentas({
@@ -417,7 +437,34 @@ export async function responderNaConversa(
       texto: entrada.texto,
       nomesQueJaTem: capacidades.map((c) => c.nome),
     });
-    if (falta.desfecho === "falta_capacidade") {
+    // ── §7: DUAS fontes de falta, nesta ordem ─────────────────────
+    //
+    // O que a pessoa escreveu vence: ela acabou de dizer o que quer, e a
+    // oferta mais util e a do assunto dela. A declaracao da Skill entra
+    // quando o texto nao pediu nada que falte — ela nao e menos
+    // importante, e sim menos urgente.
+    //
+    // Um cartao por turno, como no F7b.4.6: dois ao mesmo tempo viram
+    // formulario, e a pessoa veio aqui conversar.
+    const daSkill = falta.desfecho === "falta_capacidade"
+      ? null
+      : capacidadeFaltanteDeSkill({
+          skills: skills.skills,
+          // As Funcoes que o agente PODE usar. `bloqueado` nao entra: o
+          // dono decidiu "nao", e reoferecer seria desfazer a decisao
+          // dele por baixo.
+          funcoesPermitidas: permissoes.fatos
+            .filter((pp) => pp.nivel !== "bloqueado")
+            .map((pp) => pp.funcaoId),
+        });
+
+    const oferta = falta.desfecho === "falta_capacidade"
+      ? { necessidade: falta.necessidade, opcoes: falta.opcoes }
+      : daSkill !== null
+        ? { necessidade: daSkill.opcao.nome, opcoes: [daSkill.opcao] }
+        : null;
+
+    if (oferta !== null) {
       const pendencia = await abrirCapacidadePendente({
         userId: entrada.userId,
         agenteId: entrada.agenteId,
@@ -425,8 +472,8 @@ export async function responderNaConversa(
         // O OBJETIVO e o que a pessoa escreveu. E ele que sera retomado,
         // e e por isso que ela nao precisa repetir depois.
         objetivo: entrada.texto.trim(),
-        necessidade: falta.necessidade,
-        opcoes: falta.opcoes,
+        necessidade: oferta.necessidade,
+        opcoes: oferta.opcoes,
       });
       if (pendencia !== null) {
         capacidadePendente = { id: pendencia.id, necessidade: pendencia.necessidade };

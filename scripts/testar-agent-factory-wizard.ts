@@ -364,6 +364,19 @@ secao("C. ACTIVATION_PERMISSION_COMPLETENESS");
       ...base, permissoes: [],
       funcoesExternasVinculadas: ["composio.googlesheets.googlesheets_add_sheet"],
     }).impedimentos.map((i) => i.codigo),
+    // Os dois codigos da F7b.4.8. Mesma historia dos de cima: C11 os
+    // acusou de letra morta no minuto em que entraram sem teste, e e
+    // exatamente para isso que ele existe.
+    ...validarParaAtivacao({
+      ...base, permissoes: [],
+      dependenciasDeSkill: [
+        { skillId: "financeiro", nome: "Mercado Livre", tipo: "funcao", bloqueia: true },
+      ],
+    }).impedimentos.map((i) => i.codigo),
+    ...validarParaAtivacao({
+      ...base, permissoes: [],
+      conexoesSemLoja: [{ nome: "Mercado Livre" }],
+    }).impedimentos.map((i) => i.codigo),
   ]);
   const mortos = CODIGOS_DE_IMPEDIMENTO.filter((c) => !alcancados.has(c));
   ok("C11 TODO codigo de impedimento declarado e alcancavel",

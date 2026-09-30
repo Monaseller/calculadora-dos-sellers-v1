@@ -25,6 +25,7 @@ import {
 } from "@/lib/agentes/factory/capacidade-pendente";
 import { faltaParaCompletar } from "@/lib/agentes/factory/completar-capacidade";
 import { nomeDoAplicativo } from "@/lib/agentes/factory/capacidades";
+import { retomadaDaConversaAnterior } from "@/lib/agentes/conversas/retomada-anterior";
 import { responderNaConversa } from "@/lib/agentes/conversas/runtime";
 import type { Mensagem } from "@/lib/agentes/conversas/tipos";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
@@ -137,9 +138,24 @@ export async function GET(
       if (falta.falta === "conta_externa") reconectarConta = falta.reconectar;
     }
 
+    // ── §19: mesma conversa NAO ganha saudacao nova ───────────────
+    //
+    // A linha de retomada existe SO enquanto a conversa esta vazia. Quem
+    // volta a uma conversa com historico recebe o historico, e nada mais
+    // — uma saudacao repetida a cada refresh faria o agente parecer sem
+    // memoria do que acabou de dizer.
+    //
+    // A consulta tambem NAO acontece nesse caso: a condicao vem antes.
+    const retomada = mensagens.length === 0
+      ? await retomadaDaConversaAnterior({
+          userId: porta.userId, agenteId: porta.agenteId, conversaAtualId: c.conversaId,
+        })
+      : null;
+
     return responder({
       ok: true,
       mensagens: mensagens.map(paraUI),
+      retomada,
       // `null` quando nao ha nenhuma. Sem `funcao_id` na superficie: a tela
       // ja recebe o nome do pack pelo passo da mensagem.
       aprovacaoPendente: viva.leitura === "ok" && viva.aprovacao !== null
