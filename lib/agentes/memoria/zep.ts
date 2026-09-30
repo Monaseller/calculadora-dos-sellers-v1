@@ -243,3 +243,93 @@ export async function listarThreadsDoPrincipal(
   }
   return { estado: "ok", dados: ids };
 }
+
+// ─── A busca no GRAFO do principal — AGENT-FACTORY-F7b.4.5 ────────────
+
+/**
+ * Um fato que o Zep extraiu das conversas deste principal.
+ *
+ * `fato` e a frase que o Zep montou (ele ja resume; nao somos nos que
+ * resumimos). `nome` e o tipo de relacao — `PREFERS`, `IS_NAMED` e afins.
+ */
+export interface FatoDoGrafo {
+  readonly fato: string;
+  readonly nome: string;
+}
+
+/**
+ * Busca fatos no grafo do PRINCIPAL — a fonte do recall CROSS-CHAT.
+ *
+ * ── Por que esta funcao existe, e por que `lerContexto` nao bastava ──
+ *
+ * MEDIDO em `scripts/medir-zep-cross-chat.ts`, contra a API real:
+ *
+ *   thread A, depois de ingerir "Meu nome e Douglas":
+ *     `GET /threads/A/context` -> cita Douglas apos ~15 s, e cresce ate
+ *     ~2,6 KB. Dentro da MESMA conversa, funciona.
+ *
+ *   thread B, NOVA, do MESMO principal:
+ *     `GET /threads/B/context` -> vazio. Depois de 15 s, 45 s, 90 s e
+ *     150 s: continua vazio. A thread nova NAO herda nada.
+ *
+ *   `POST /graph/search` com `user_id`:
+ *     -> devolve os fatos, inclusive
+ *        "O usuário prefere ver o saldo primeiro nos resumos financeiros."
+ *
+ * Ou seja: contexto de thread e memoria DA CONVERSA; o grafo do principal
+ * e a memoria DO DONO. Sao coisas diferentes, e o cross-chat so existe
+ * pela segunda. Ligar so a primeira — que era o que o modulo tinha —
+ * nunca faria "qual e meu nome?" funcionar numa conversa nova.
+ *
+ * ── O processamento e ASSINCRONO, e isso e informacao de produto ─────
+ *
+ * O grafo leva dezenas de segundos para incorporar um turno. Uma pergunta
+ * feita logo depois pode nao achar o fato ainda. Isso nao e falha, e nao
+ * deve virar "nao tenho memoria" — ver o composer do contexto.
+ */
+export async function buscarFatosDoPrincipal(
+  principal: string,
+  pergunta: string,
+  limite = 8
+): Promise<ResultadoZep<readonly FatoDoGrafo[]>> {
+  const termo = pergunta.trim();
+  if (termo === "") return { estado: "ok", dados: [] };
+
+  // ── 404 aqui e VAZIO, nao falha ──────────────────────────────────
+  //
+  // MEDIDO: um principal que nunca ingeriu nada responde
+  // `404 {"message":"not found"}`. Classificar isso como falha fazia o
+  // agente dizer "nao consegui consultar minha memoria" — quando a
+  // verdade e "ainda nao ha nada guardado".
+  //
+  // A diferenca importa (§11): uma e um problema para relatar, a outra e
+  // o estado normal de um agente novo.
+  const r = await chamar<{ edges?: unknown }>("POST", "/graph/search", {
+    user_id: principal,
+    query: termo.slice(0, 400),
+    // `edges` sao os FATOS. `nodes` sao entidades soltas, e episodios sao
+    // trechos crus de conversa — nenhum dos dois e frase pronta, e mandar
+    // trecho cru ao modelo traria de volta o texto que a politica filtrou.
+    scope: "edges",
+    limit: Math.min(Math.max(limite, 1), 20),
+  });
+  if (r.estado !== "ok") {
+    // `http_404` = principal sem grafo ainda. Vazio, e nao falha.
+    if (r.estado === "falha" && r.codigo === "http_404") {
+      return { estado: "ok", dados: [] };
+    }
+    return r;
+  }
+
+  const lista = Array.isArray(r.dados?.edges) ? r.dados.edges : [];
+  const fatos: FatoDoGrafo[] = [];
+  for (const e of lista) {
+    const o = e as { fact?: unknown; name?: unknown };
+    if (typeof o.fact !== "string" || o.fact.trim() === "") continue;
+    fatos.push({
+      fato: o.fact.trim(),
+      nome: typeof o.name === "string" ? o.name : "",
+    });
+  }
+  return { estado: "ok", dados: fatos };
+}

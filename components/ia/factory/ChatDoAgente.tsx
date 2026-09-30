@@ -30,7 +30,8 @@ import {
 } from "@/components/ui/Primitivas";
 import {
   criarConversaDoChat, decidirAprovacaoNoChat, enviarFonteDoAgente,
-  enviarNaConversaDoChat, lerConversaDoChat, listarFontesDoAgente,
+  enviarNaConversaDoChat, lerConversaDoChat, listarConversasDoChat,
+  listarFontesDoAgente,
   type AnexoDaConversaUI, type AprovacaoPendenteUI, type FonteDoAgenteUI,
   type MensagemDoChatUI, type PassoDoChatUI, type RespostaDaFactory,
 } from "@/lib/ia/agentes-http";
@@ -194,20 +195,46 @@ export function ChatDoAgente({
     }
   }
 
-  // Abre conversa se ainda nao houver. Uma conversa vazia nao custa
-  // nada e evita o estado "digitei e nao tinha onde gravar".
+  /**
+   * Abre a conversa certa ao montar — F7b.4.5 §13/§14.
+   *
+   * ── O bug que isto corrige ────────────────────────────────────────
+   *
+   * Antes, sem `conversaId`, este efeito CRIAVA uma conversa nova. Sempre.
+   * Entao o Rodrigo conversava, saia para o Escritorio, voltava ao agente
+   * e via "Nenhuma mensagem ainda" — com todo o historico intacto no
+   * banco, numa conversa que a tela tinha acabado de abandonar.
+   *
+   * Pior que o vazio: cada volta ao agente criava mais uma conversa vazia.
+   *
+   * ── A regra ───────────────────────────────────────────────────────
+   *
+   *   ja existe conversa  -> abre a MAIS RECENTE, com as mensagens dela
+   *   nao existe nenhuma  -> ai sim cria uma
+   *
+   * Criar so quando nao ha nada e o que faz "voltar" significar voltar.
+   * Conversa nova passa a ser um ato explicito, do botao Nova conversa.
+   */
   useEffect(() => {
     let vivo = true;
     (async () => {
       let cid = conversa;
       if (cid === null) {
-        const r = await criarConversaDoChat(agenteId);
-        if (r.estado !== "ok") {
-          if (vivo) setErro(frasePorEstado(r, "Não foi possível abrir a conversa."));
-          return;
+        // A rota devolve ordenado por `atualizado_em` desc — a primeira e
+        // a mais recente. A tela nao reordena: ordenar em dois lugares e
+        // como as duas ordens discordarem um dia.
+        const existentes = await listarConversasDoChat(agenteId);
+        if (existentes.estado === "ok" && existentes.dados.length > 0) {
+          cid = existentes.dados[0].id;
+        } else {
+          const r = await criarConversaDoChat(agenteId);
+          if (r.estado !== "ok") {
+            if (vivo) setErro(frasePorEstado(r, "Não foi possível abrir a conversa."));
+            return;
+          }
+          cid = r.dados.id;
         }
-        cid = r.dados.id;
-        if (vivo) { setConversa(cid); aoTrocarConversa?.(cid); }
+        if (vivo && cid !== null) { setConversa(cid); aoTrocarConversa?.(cid); }
       }
       if (vivo && cid !== null) {
         await carregarMensagens(cid);
