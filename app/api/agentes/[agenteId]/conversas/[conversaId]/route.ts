@@ -18,7 +18,9 @@
  * usados" e so: qual Funcao, qual desfecho, se executou.
  */
 import { atravessarPorta, lerCorpo, responder, UUID_REGEX } from "@/lib/agentes/api/porta";
-import { criarPortaDeConversas } from "@/lib/agentes/conversas/repositorio";
+import {
+  criarPortaDeConversas, ErroEnvioDuplicado,
+} from "@/lib/agentes/conversas/repositorio";
 import { lerAprovacaoVivaDaConversa } from "@/lib/agentes/aprovacoes/persistencia";
 import {
   lerPendenciaVivaDaConversa,
@@ -207,13 +209,92 @@ export async function POST(
     const corpo = await lerCorpo(request);
     if (corpo === null) return responder({ ok: false, erro: "Corpo inválido." }, 400);
 
-    const r = await responderNaConversa({
-      // Da SESSAO. O corpo NAO pode dizer quem e o dono.
-      userId: porta.userId,
-      agenteId: porta.agenteId,
-      conversaId: c.conversaId,
-      texto: typeof corpo.texto === "string" ? corpo.texto : "",
-    });
+    // ── §29/§30: o ENVIO tem identidade, e ela reconcilia ───────────
+    //
+    // O Rodrigo mandou uma consulta pesada, a tela disse "Nao foi possivel
+    // enviar", ele NAO reenviou, e depois o agente respondeu sozinho. A
+    // mensagem dele ja estava gravada — `responderNaConversa` persiste a
+    // fala do usuario ANTES de chamar o modelo. Quem desistiu foi o
+    // cliente, e a tela afirmou uma falha que nao houve.
+    //
+    // Com `envioId`, um reenvio do MESMO envio nao roda de novo: ele
+    // ENCONTRA o turno. Tres situacoes, e a resposta certa para cada uma:
+    //
+    //   turno completo    -> 200 com as duas mensagens (a resposta atrasada
+    //                        chega, sem o usuario fazer nada)
+    //   turno em curso    -> 202, e a tela diz "ainda em andamento"
+    //   envio novo        -> roda, como sempre rodou
+    //
+    // Sem `envioId` o comportamento e o de antes: um POST, um turno.
+    const envioId = typeof corpo.envioId === "string" && corpo.envioId.trim() !== ""
+      ? corpo.envioId.trim().slice(0, 64)
+      : null;
+
+    if (envioId !== null) {
+      const jaExiste = await criarPortaDeConversas(getSupabaseServidor())
+        .lerTurnoDoEnvio(porta.userId, c.conversaId, envioId);
+
+      if (jaExiste.usuario !== null && jaExiste.assistente !== null) {
+        return responder({
+          ok: true,
+          mensagem: paraUI(jaExiste.usuario),
+          resposta: paraUI(jaExiste.assistente),
+          // O turno terminou antes; nao ha motivo novo a apurar.
+          motivo: "concluido",
+          categoriaDoBloqueio: null,
+          historicoTruncado: 0,
+          // §30: a tela precisa saber que NAO rodou de novo, para nao
+          // contar duas consultas onde houve uma.
+          reconciliado: true,
+        }, 200);
+      }
+      if (jaExiste.usuario !== null) {
+        // §27: a UI NAO pode dizer "nao foi possivel enviar" sobre isto.
+        return responder({
+          ok: true,
+          mensagem: paraUI(jaExiste.usuario),
+          resposta: null,
+          motivo: "em_andamento",
+          categoriaDoBloqueio: null,
+          historicoTruncado: 0,
+          emAndamento: true,
+        }, 202);
+      }
+    }
+
+    let r: Awaited<ReturnType<typeof responderNaConversa>>;
+    try {
+      r = await responderNaConversa({
+        // Da SESSAO. O corpo NAO pode dizer quem e o dono.
+        userId: porta.userId,
+        agenteId: porta.agenteId,
+        conversaId: c.conversaId,
+        texto: typeof corpo.texto === "string" ? corpo.texto : "",
+        envioId,
+      });
+    } catch (erro) {
+      // ── A corrida que a leitura de cima nao pega ──────────────────
+      //
+      // `lerTurnoDoEnvio` acontece antes; entre ela e a gravacao cabe o
+      // outro pedido do MESMO envio. Quando cabe, o indice unico recusa a
+      // segunda gravacao — e essa recusa significa "o turno existe", nao
+      // "falhou". Responder 500 aqui devolveria a tela ao "nao foi
+      // possivel enviar" que este gate veio tirar do caminho.
+      if (!(erro instanceof ErroEnvioDuplicado)) throw erro;
+      const doOutro = await criarPortaDeConversas(getSupabaseServidor())
+        .lerTurnoDoEnvio(porta.userId, c.conversaId, erro.envioId);
+      if (doOutro.usuario === null) throw erro;
+      const assistente = doOutro.assistente;
+      return responder({
+        ok: true,
+        mensagem: paraUI(doOutro.usuario),
+        resposta: assistente === null ? null : paraUI(assistente),
+        motivo: assistente === null ? "em_andamento" : "concluido",
+        categoriaDoBloqueio: null,
+        historicoTruncado: 0,
+        ...(assistente === null ? { emAndamento: true } : { reconciliado: true }),
+      }, assistente === null ? 202 : 200);
+    }
 
     if (!r.ok) {
       // `agente_nao_encontrado`/`conversa_nao_encontrada` ja foram

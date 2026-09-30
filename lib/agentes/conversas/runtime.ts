@@ -114,6 +114,13 @@ export interface EntradaDoTurno {
   readonly agenteId: string;
   readonly conversaId: string;
   readonly texto: string;
+  /**
+   * A identidade do ENVIO — F7b.4.8.3 §29. OPCIONAL.
+   *
+   * Vem do navegador e NAO e autoridade de nada: serve para reconhecer um
+   * reenvio do MESMO envio. Ausente, o comportamento e o de antes.
+   */
+  readonly envioId?: string | null;
 }
 
 export type ResultadoDoTurno =
@@ -356,6 +363,9 @@ export async function responderNaConversa(
   const gravadaDoUsuario = await portaConversas.anexarMensagem({
     userId: entrada.userId, conversaId: entrada.conversaId,
     papel: "usuario", conteudo: entrada.texto.trim(),
+    // F7b.4.8.3 §29: a identidade do ENVIO viaja com a fala do usuario. E
+    // por ela que um reenvio encontra este turno em vez de comecar outro.
+    envioId: entrada.envioId ?? null,
   });
 
   // ── O ASSUNTO da conversa — F7b.4.8 §17 ─────────────────────────

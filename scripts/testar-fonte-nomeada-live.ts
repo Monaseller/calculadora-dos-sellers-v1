@@ -424,9 +424,18 @@ async function main(): Promise<void> {
       ok("F3  e `periodo` e OBRIGATORIO — `{}` deixa de ser possivel",
         JSON.stringify(schema.required ?? []) === JSON.stringify(["periodo"]),
         JSON.stringify(schema.required));
-      ok("F4  ANCORA: o enum de periodos continua la",
-        Array.isArray((schema.properties as { periodo?: { enum?: unknown[] } })
-          ?.periodo?.enum));
+      // ── F7b.4.8.3: o enum SAIU, e de proposito ────────────────────
+      //
+      // Enquanto `periodo` era um enum de sete nomes, "me traz os ultimos
+      // 7 dias" e "de 10/09 a 20/09" nao caberiam nele. Agora e texto
+      // livre, e quem resolve e `periodo-em-texto.ts`. A ancora passa a
+      // cobrar o contrato novo: existe, e string, e NAO restringe.
+      const p = (schema.properties as
+        { periodo?: { type?: unknown; enum?: unknown[] } })?.periodo;
+      ok("F4  ANCORA: `periodo` existe e e string", p?.type === "string",
+        String(p?.type));
+      ok("F4a e NAO tem enum — a pessoa fala como quiser",
+        !Array.isArray(p?.enum), JSON.stringify(p?.enum));
 
       // O segundo passo do bug: o modelo pediu ferramenta que nao tinha, a
       // cerca barrou, e o TURNO MORREU — com a frase de categoria
@@ -482,8 +491,11 @@ async function main(): Promise<void> {
           !destinos.some((d) => d.includes("supabase")));
         ok("G5  a fonte declarada e a API do Mercado Livre",
           r.fonte === "mercadolivre_api", r.fonte);
+        ok("G5a a varredura COMPLETOU — §11",
+          r.completo === true && r.totais !== null,
+          `completo=${String(r.completo)} parcial=${JSON.stringify(r.parcial)}`);
         ok("G6  houve pedido pago no periodo — resposta real",
-          r.totais.pedidos > 0, String(r.totais.pedidos));
+          (r.totais?.pedidos ?? 0) > 0, String(r.totais?.pedidos));
         ok("G7  e o periodo foi resolvido pela CDS",
           r.periodo.de !== "" && r.periodo.de < r.periodo.ate,
           `${r.periodo.de}..${r.periodo.ate}`);

@@ -379,9 +379,9 @@ async function main(): Promise<void> {
       ok("E4  sem credencial de verdade, a consulta oficial FALHA",
         r.erro !== null, String(r.erro));
       ok("E5  e NAO cai para a base da CDS como plano B",
-        r.totais.pedidos === 0 && r.totais.faturamento === 0 &&
-          r.fonte === "mercadolivre_api",
-        `${r.totais.pedidos}/${r.fonte}`);
+        // F7b.4.8.3: erro nao tem total NENHUM — nem zero.
+        r.totais === null && r.fonte === "mercadolivre_api",
+        `${JSON.stringify(r.totais)}/${r.fonte}`);
       ok("E6  ANCORA: a fonte declarada continua sendo a API oficial",
         r.fonte === "mercadolivre_api");
     }

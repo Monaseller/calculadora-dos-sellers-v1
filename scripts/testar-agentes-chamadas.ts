@@ -568,9 +568,40 @@ secao("E5. Snapshot nao e autoridade");
 
 secao("F. As tres pastas vizinhas continuam intocadas");
 {
-  ok("F1  lib/agentes/funcoes segue com os 3 modulos autorizados",
-    JSON.stringify(readdirSync(join(RAIZ, "lib/agentes/funcoes")).sort()) ===
-      JSON.stringify(["guard.ts", "registry.ts", "sanitizar.ts"]));
+  // ── Um inventario que envelheceu, e o que ele existia para guardar ──
+  //
+  // Escrito na F3, quando a pasta tinha `guard`, `registry` e `sanitizar`.
+  // Ela cresceu em gates posteriores — `calculadora`, `calendario`,
+  // `planilha`, `vendas`, as duas de Mercado Livre — e ja estava com 9
+  // arquivos em `e720fd6`, antes deste gate. A F7b.4.8.3 acrescenta
+  // `periodo-em-texto.ts`.
+  //
+  // A lista sozinha nao guardava nada: ela reprovava crescimento legitimo
+  // e passaria por um modulo que trouxesse banco para dentro da pasta. O
+  // que importa e a PROPRIEDADE — nenhuma Funcao aqui abre conexao,
+  // credencial nem rede por conta propria. Ela e cobrada abaixo, por
+  // arquivo, e a lista fica como inventario declarado.
+  const NA_PASTA_DE_FUNCOES = [
+    "calculadora.ts", "calendario.ts", "guard.ts", "mercadolivre-perguntas.ts",
+    "mercadolivre-vendas.ts", "periodo-em-texto.ts", "planilha.ts",
+    "registry.ts", "sanitizar.ts", "vendas.ts",
+  ];
+  const naPasta = readdirSync(join(RAIZ, "lib/agentes/funcoes")).sort();
+  ok("F1  lib/agentes/funcoes tem exatamente o inventario declarado",
+    JSON.stringify(naPasta) === JSON.stringify(NA_PASTA_DE_FUNCOES),
+    naPasta.join(" "));
+  ok("F1a e nenhum modulo dela resolve credencial ou abre conexao sozinho",
+    naPasta.every((arquivo) => {
+      const codigo = fonte(`lib/agentes/funcoes/${arquivo}`);
+      return !/createClient\(|getMLLojaById|SUPABASE_SERVICE_ROLE_KEY|accessToken/
+        .test(codigo);
+    }),
+    naPasta.filter((arquivo) =>
+      /createClient\(|getMLLojaById|SUPABASE_SERVICE_ROLE_KEY|accessToken/
+        .test(fonte(`lib/agentes/funcoes/${arquivo}`))).join(" "));
+  ok("F1b ANCORA: a sonda F1a leu codigo de verdade",
+    naPasta.length >= 9 &&
+      fonte(`lib/agentes/funcoes/${naPasta[0]}`).length > 200);
 
   // A divida do trust boundary (`autorizarFuncao` recebe
   // `conexaoNecessaria` de fora) e do gate do EXECUTOR. Fecha-la aqui

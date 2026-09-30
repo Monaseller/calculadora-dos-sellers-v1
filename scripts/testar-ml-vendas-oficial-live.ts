@@ -121,14 +121,32 @@ async function main(): Promise<void> {
       validarFiltroVendasML({ periodo: "hoje", userId: "x" }).erro === "campo_desconhecido");
     ok("A7  RECUSA periodo E datas ao mesmo tempo",
       validarFiltroVendasML({ periodo: "hoje", de: DE, ate: ATE }).erro === "filtro_ambiguo");
-    ok("A8  RECUSA periodo inventado",
-      validarFiltroVendasML({ periodo: "trimestre" }).erro === "periodo_invalido");
+    // ── F7b.4.8.3: quem recusa periodo inventado mudou de lugar ─────
+    //
+    // Enquanto `periodo` era um enum de sete nomes, o validador podia
+    // recusar "trimestre" na hora. Agora ele e TEXTO LIVRE — a pessoa fala
+    // como quiser, e a CDS resolve — entao o validador so exige que haja
+    // texto. A recusa nao desapareceu: ela passou para a resolucao, com
+    // nome proprio (`periodo_nao_entendido`), e e cobrada em A8b/A8c.
+    ok("A8  o validador ACEITA texto que ele nao conhece",
+      validarFiltroVendasML({ periodo: "trimestre" }).erro === null);
+    ok("A8a mas continua recusando `periodo` vazio",
+      validarFiltroVendasML({ periodo: "" }).erro === "periodo_invalido");
     ok("A9  RECUSA data invertida",
       validarFiltroVendasML({ de: ATE, ate: DE }).erro === "periodo_invertido");
     ok("A10 ANCORA: um filtro VALIDO passa",
       validarFiltroVendasML({ periodo: "esta_semana" }).erro === null);
     ok("A11 e o par de datas tambem",
       validarFiltroVendasML({ de: DE, ate: ATE }).erro === null);
+
+    // A recusa que saiu do validador, no lugar onde ela vive agora.
+    // Sem rede: a resolucao falha ANTES de qualquer chamada.
+    const inventado = await criarLeiturasDeVendasML(dono, LOJA, Date.now())(
+      { periodo: "trimestre" });
+    ok("A8b §35: periodo que a CDS nao entende vira recusa NOMEADA",
+      inventado.erro === "periodo_nao_entendido", String(inventado.erro));
+    ok("A8c e sem total — recusa nao se apresenta como resposta",
+      inventado.totais === null && inventado.porDia.length === 0);
   }
 
   // ═══ B. A chamada REAL, e para QUEM ela vai (§24/§36) ════════════
@@ -171,14 +189,20 @@ async function main(): Promise<void> {
       String(r.diagnostico.paginasLidas));
     ok("B10 o periodo devolvido e o pedido", r.periodo.de === DE && r.periodo.ate === ATE,
       `${r.periodo.de}..${r.periodo.ate}`);
-    ok("B11 houve venda paga na janela", r.totais.pedidos > 0, String(r.totais.pedidos));
+    // F7b.4.8.3: `totais` so existe quando a varredura COMPLETOU. Ler o
+    // total sem antes afirmar a completude era o que permitia comparar uma
+    // semana inteira com uma truncada.
+    ok("B10a a varredura COMPLETOU — sem isso nao ha total",
+      r.completo === true && r.totais !== null,
+      `completo=${String(r.completo)} parcial=${JSON.stringify(r.parcial)}`);
+    const t = r.totais ?? { faturamento: 0, pedidos: 0, ticketMedio: 0 };
+    ok("B11 houve venda paga na janela", t.pedidos > 0, String(t.pedidos));
     ok("B12 e o faturamento e positivo — sem imprimir o valor",
-      r.totais.faturamento > 0);
+      t.faturamento > 0);
     ok("B13 o ticket medio e derivado, nao inventado",
-      r.totais.pedidos > 0 &&
-        Math.abs(r.totais.ticketMedio - r.totais.faturamento / r.totais.pedidos) < 0.02);
+      t.pedidos > 0 && Math.abs(t.ticketMedio - t.faturamento / t.pedidos) < 0.02);
     ok("B14 o total por dia soma o total geral",
-      Math.abs(r.porDia.reduce((s, d) => s + d.faturamento, 0) - r.totais.faturamento) < 0.05);
+      Math.abs(r.porDia.reduce((s, d) => s + d.faturamento, 0) - t.faturamento) < 0.05);
     ok("B15 e cada dia esta DENTRO do periodo",
       r.porDia.every((d) => d.dia >= DE && d.dia <= ATE),
       r.porDia.map((d) => d.dia).join(","));
@@ -193,8 +217,8 @@ async function main(): Promise<void> {
         !texto.includes(proibido));
     }
 
-    oficialFaturamento = r.totais.faturamento;
-    oficialPedidos = r.totais.pedidos;
+    oficialFaturamento = t.faturamento;
+    oficialPedidos = t.pedidos;
   }
 
   // ═══ C. CONTROLE: oficial != espelho (§36) ═══════════════════════
@@ -331,8 +355,8 @@ async function main(): Promise<void> {
       { userId: dono, conexao: null }, { periodo: "hoje" });
     ok("E1  sem binding, a Funcao RECUSA", semConexao.erro === "credencial_ausente",
       String(semConexao.erro));
-    ok("E2  e nao inventa numero",
-      semConexao.totais.pedidos === 0 && semConexao.totais.faturamento === 0);
+    ok("E2  e nao inventa numero — nao ha total nenhum",
+      semConexao.totais === null, JSON.stringify(semConexao.totais));
 
     // Binding de OUTRO recurso nao serve: conexao de perguntas nao
     // autoriza vendas, mesmo sendo a mesma loja e a mesma plataforma.
@@ -368,15 +392,41 @@ async function main(): Promise<void> {
     // `interpretarSaida` e a cerca de forma.
     ok("E11 saida sem `fonte` e INVALIDA",
       interpretarSaidaVendasML({ totais: { faturamento: 1, pedidos: 1, ticketMedio: 1 },
-        porDia: [], periodo: {}, truncado: false, erro: null }).tipo === "invalida");
+        porDia: [], periodo: {}, completo: true, truncado: false,
+        erro: null }).tipo === "invalida");
     ok("E12 saida com fonte TROCADA e invalida",
       interpretarSaidaVendasML({ fonte: "cds_database", totais: {}, porDia: [],
-        periodo: {}, truncado: false, erro: null }).tipo === "invalida");
+        periodo: {}, completo: true, truncado: false, erro: null }).tipo === "invalida");
     ok("E13 ANCORA: a saida real e aceita",
       interpretarSaidaVendasML({
         fonte: "mercadolivre_api",
         totais: { faturamento: 10, pedidos: 2, ticketMedio: 5 },
-        porDia: [], periodo: { de: DE, ate: ATE }, truncado: false,
+        porDia: [], periodo: { de: DE, ate: ATE },
+        completo: true, truncado: false, parcial: null,
+        diagnostico: {}, erro: null,
+      }).tipo === "sucesso");
+    // §11: as duas metades do contrato de completude.
+    ok("E13a incompleto COM total e INVALIDO — era a comparacao errada",
+      interpretarSaidaVendasML({
+        fonte: "mercadolivre_api",
+        totais: { faturamento: 10, pedidos: 2, ticketMedio: 5 },
+        porDia: [], periodo: { de: DE, ate: ATE },
+        completo: false, truncado: true, parcial: { pedidosLidos: 2 },
+        diagnostico: {}, erro: null,
+      }).tipo === "invalida");
+    ok("E13b e completo SEM total tambem e invalido",
+      interpretarSaidaVendasML({
+        fonte: "mercadolivre_api", totais: null,
+        porDia: [], periodo: { de: DE, ate: ATE },
+        completo: true, truncado: false, parcial: null,
+        diagnostico: {}, erro: null,
+      }).tipo === "invalida");
+    ok("E13c incompleto SEM total e aceito, e diz que e parcial",
+      interpretarSaidaVendasML({
+        fonte: "mercadolivre_api", totais: null,
+        porDia: [], periodo: { de: DE, ate: ATE },
+        completo: false, truncado: true,
+        parcial: { pedidosLidos: 2, subjanelasIncompletas: 1 },
         diagnostico: {}, erro: null,
       }).tipo === "sucesso");
     ok("E14 e a procedencia atravessa para quem responde",
@@ -385,6 +435,10 @@ async function main(): Promise<void> {
           fonte: "mercadolivre_api",
           totais: { faturamento: 10, pedidos: 2, ticketMedio: 5 },
           porDia: [], periodo: { de: DE, ate: ATE }, truncado: false,
+          // F7b.4.8.3: total exige `completo: true`. A fixture antiga
+          // omitia o campo e por isso passou a ser recusada — o que E o
+          // comportamento novo, cobrado em E13/E13a/E13b.
+          completo: true, parcial: null,
           diagnostico: {}, erro: null,
         });
         return i.tipo === "sucesso" &&

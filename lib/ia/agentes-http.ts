@@ -1838,7 +1838,15 @@ export interface MensagemDoChatUI {
 /** O turno inteiro: a sua mensagem, a resposta, e por que ela terminou. */
 export interface TurnoDoChatUI {
   readonly mensagemDoUsuario: MensagemDoChatUI;
-  readonly resposta: MensagemDoChatUI;
+  /**
+   * `null` SO quando o turno esta em andamento — F7b.4.8.3 §27.
+   *
+   * A fala do usuario existe sempre que o servidor aceitou o envio; a
+   * resposta pode ainda nao existir. Tratar essas duas ausencias como a
+   * mesma coisa era o que fazia a tela dizer "nao foi possivel enviar"
+   * sobre um turno que estava apenas demorando.
+   */
+  readonly resposta: MensagemDoChatUI | null;
   readonly motivo: string | null;
   /**
    * POR QUE o turno fechou — `permissao` | `conexao` | `fonte` | `interno`.
@@ -1847,6 +1855,21 @@ export interface TurnoDoChatUI {
    * informacao de operador, e a tela nao tem o que fazer com ele.
    */
   readonly categoriaDoBloqueio: string | null;
+  /**
+   * `true` quando o turno JA estava rodando — F7b.4.8.3 §27.
+   *
+   * O servidor encontrou o envio e ainda nao ha resposta. A tela NAO pode
+   * dizer "nao foi possivel enviar" nisto: a mensagem foi aceita e
+   * gravada, e dizer o contrario convida a reenviar.
+   */
+  readonly emAndamento: boolean;
+  /**
+   * `true` quando o servidor devolveu um turno que JA existia — §30.
+   *
+   * Nada rodou de novo: nenhuma segunda consulta ao Mercado Livre, nenhuma
+   * segunda resposta.
+   */
+  readonly reconciliado: boolean;
 }
 
 export interface MemoriaDoAgenteUI {
@@ -2723,7 +2746,15 @@ export async function criarConversaDoChat(
 export async function enviarNaConversaDoChat(
   agenteId: string,
   conversaId: string,
-  texto: string
+  texto: string,
+  /**
+   * A identidade deste ENVIO — §29/§30. OPCIONAL.
+   *
+   * Reenviar com o MESMO id nao roda outro turno: o servidor devolve o que
+   * ja existe. E o que permite reconciliar depois de a resposta HTTP se
+   * perder, sem duplicar a consulta.
+   */
+  envioId?: string
 ): Promise<RespostaDaFactory<TurnoDoChatUI>> {
   let resposta: Response;
   try {
@@ -2732,7 +2763,7 @@ export async function enviarNaConversaDoChat(
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ texto }),
+        body: JSON.stringify(envioId === undefined ? { texto } : { texto, envioId }),
       }
     );
   } catch {
@@ -2744,11 +2775,16 @@ export async function enviarNaConversaDoChat(
 
   const bruto = corpo as {
     mensagem?: unknown; resposta?: unknown; motivo?: unknown;
-    categoriaDoBloqueio?: unknown;
+    categoriaDoBloqueio?: unknown; emAndamento?: unknown; reconciliado?: unknown;
   };
   const mensagemDoUsuario = mensagemDaResposta(bruto.mensagem);
   const respostaDoAgente = mensagemDaResposta(bruto.resposta);
-  if (mensagemDoUsuario === null || respostaDoAgente === null) return { estado: "falha" };
+  // §27: turno EM ANDAMENTO chega sem resposta, e isso nao e falha. Sem a
+  // fala do usuario, sim: ela e gravada antes de tudo, e a ausencia dela
+  // significaria que nada foi aceito.
+  const emAndamento = bruto.emAndamento === true;
+  if (mensagemDoUsuario === null) return { estado: "falha" };
+  if (respostaDoAgente === null && !emAndamento) return { estado: "falha" };
 
   return {
     estado: "ok",
@@ -2756,6 +2792,8 @@ export async function enviarNaConversaDoChat(
       mensagemDoUsuario,
       resposta: respostaDoAgente,
       categoriaDoBloqueio: textoOuNulo(bruto.categoriaDoBloqueio),
+      emAndamento,
+      reconciliado: bruto.reconciliado === true,
       // `bloqueado_por_ferramenta` e `teto_de_passos` chegam por aqui: o
       // turno foi gravado, e a tela precisa poder explicar por que
       // terminou assim.

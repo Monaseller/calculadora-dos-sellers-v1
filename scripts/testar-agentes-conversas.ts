@@ -110,6 +110,26 @@ function criarPortaDeConversasFake(
         .filter((m) => m.userId === userId && m.conversaId === conversaId)
         .sort((a, b) => a.ordem - b.ordem);
     },
+    // F7b.4.8.3: a MESMA condicao da porta real — o envio identifica o
+    // turno, e o mesmo `envioId` tem de encontrar o que ja existe.
+    async lerTurnoDoEnvio(userId: string, conversaId: string, envioId: string) {
+      const daConversa = mensagens
+        .filter((m) => m.userId === userId && m.conversaId === conversaId)
+        .sort((a, b) => a.ordem - b.ordem);
+      // O envio marca UMA linha — a fala do usuario. A resposta e a
+      // seguinte, como na porta real: o indice unico parcial nao admite
+      // duas linhas com o mesmo envio.
+      const usuario = daConversa.find((m) =>
+        (m as { envioId?: string | null }).envioId === envioId) ?? null;
+      if (usuario === null || usuario.papel !== "usuario") {
+        return { usuario: null, assistente: null };
+      }
+      const proxima = daConversa.find((m) => m.ordem > usuario.ordem) ?? null;
+      return {
+        usuario,
+        assistente: proxima !== null && proxima.papel === "assistente" ? proxima : null,
+      };
+    },
     async anexarMensagem(n: NovaMensagem) {
       const ordem = mensagens.filter((m) =>
         m.userId === n.userId && m.conversaId === n.conversaId).length;
@@ -119,7 +139,8 @@ function criarPortaDeConversasFake(
         passos: n.passos ?? null, provedor: n.provedor ?? null, modelo: n.modelo ?? null,
         tokensEntrada: n.tokensEntrada ?? null, tokensSaida: n.tokensSaida ?? null,
         tempoMs: n.tempoMs ?? null, criadoEm: new Date().toISOString(),
-      };
+        ...(n.envioId === undefined ? {} : { envioId: n.envioId }),
+      } as Mensagem & { envioId?: string | null };
       mensagens.push(m);
       return m;
     },
