@@ -1,5 +1,5 @@
 /**
- * Escritor minimo de XLSX — F7b.4.8.4.
+ * Escritor minimo de XLSX — F7b.4.8.4, em TypeScript desde a R2.
  *
  * ── Por que escrever isto a mao ─────────────────────────────────────
  *
@@ -29,14 +29,14 @@ const TABELA_CRC = (() => {
   return t;
 })();
 
-function crc32(buf) {
+function crc32(buf: Buffer): number {
   let c = -1;
   for (let i = 0; i < buf.length; i += 1) c = TABELA_CRC[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
   return (c ^ -1) >>> 0;
 }
 
 /** O que o XML nao aceita no meio do texto. */
-function esc(v) {
+function esc(v: unknown): string {
   return String(v)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
@@ -46,7 +46,7 @@ function esc(v) {
 }
 
 /** A1, B1, ... Z1, AA1. Mais de 26 colunas e o caso normal aqui. */
-function coluna(i) {
+function coluna(i: number): string {
   let s = "";
   let n = i;
   for (;;) {
@@ -57,7 +57,7 @@ function coluna(i) {
   return s;
 }
 
-function celula(ref, valor) {
+function celula(ref: string, valor: unknown): string {
   if (valor === null || valor === undefined || valor === "") return "";
   if (typeof valor === "number" && Number.isFinite(valor)) {
     return `<c r="${ref}"><v>${valor}</v></c>`;
@@ -68,7 +68,14 @@ function celula(ref, valor) {
   return `<c r="${ref}" t="inlineStr"><is><t xml:space="preserve">${esc(valor)}</t></is></c>`;
 }
 
-function folha(aba) {
+/** Uma aba: o cabecalho e a ORDEM das colunas, e nao o que o objeto tiver. */
+export interface AbaParaEscrever {
+  readonly nome: string;
+  readonly colunas: readonly string[];
+  readonly linhas: readonly Record<string, unknown>[];
+}
+
+function folha(aba: AbaParaEscrever): string {
   const partes = [
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
     '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">',
@@ -93,7 +100,7 @@ function folha(aba) {
 }
 
 /** Nome de aba: 31 caracteres, sem os proibidos pelo Excel. */
-function nomeDeAba(nome) {
+function nomeDeAba(nome: string): string {
   return nome.replace(/[[\]:*?/\\]/g, "-").slice(0, 31);
 }
 
@@ -102,11 +109,15 @@ function nomeDeAba(nome) {
  *
  * `abas`: [{ nome, colunas: [string], linhas: [{coluna: valor}] }]
  */
-export function escreverXlsx(caminho, abas) {
-  const arquivos = [];
-  const add = (nome, texto) => arquivos.push({ nome, dados: Buffer.from(texto, "utf8") });
+export function escreverXlsx(
+  caminho: string, abas: readonly AbaParaEscrever[]
+): { abas: number; bytes: number } {
+  const arquivos: { nome: string; dados: Buffer }[] = [];
+  const add = (nome: string, texto: string): void => {
+    arquivos.push({ nome, dados: Buffer.from(texto, "utf8") });
+  };
 
-  const nomes = abas.map((a) => nomeDeAba(a.nome));
+  const nomes: string[] = abas.map((a) => nomeDeAba(a.nome));
   const vistos = new Set();
   for (let i = 0; i < nomes.length; i += 1) {
     // Duas abas com o mesmo nome fazem o Excel recusar o arquivo inteiro.
@@ -155,8 +166,8 @@ export function escreverXlsx(caminho, abas) {
   }
 
   // ── O zip ──────────────────────────────────────────────────────────
-  const locais = [];
-  const central = [];
+  const locais: Buffer[] = [];
+  const central: Buffer[] = [];
   let offset = 0;
   for (const f of arquivos) {
     const nome = Buffer.from(f.nome, "utf8");
