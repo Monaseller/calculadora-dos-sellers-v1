@@ -146,7 +146,7 @@ async function main(): Promise<void> {
     ok("A8b §35: periodo que a CDS nao entende vira recusa NOMEADA",
       inventado.erro === "periodo_nao_entendido", String(inventado.erro));
     ok("A8c e sem total — recusa nao se apresenta como resposta",
-      inventado.totais === null && inventado.porDia.length === 0);
+      inventado.vendasBrutas === null && inventado.porDia.length === 0);
   }
 
   // ═══ B. A chamada REAL, e para QUEM ela vai (§24/§36) ════════════
@@ -180,9 +180,20 @@ async function main(): Promise<void> {
       ["https://exemplo.invalido/x"].every((d) =>
         !d.startsWith("https://api.mercadolibre.com/orders/search")));
 
-    ok("B7  a janela pedida a API recua a margem de criacao",
-      r.diagnostico.margemDeCriacaoDias === MARGEM_CRIACAO_DIAS &&
-        MARGEM_CRIACAO_DIAS > 0, String(r.diagnostico.margemDeCriacaoDias));
+    // ── F7b.4.8.5: a margem de criacao SAIU, e de proposito ──────
+    //
+    // A regra de vendas brutas recorta por `order.date_closed`, e esse
+    // campo FILTRA de verdade na API (medido). Entao a consulta pede
+    // exatamente os dias do periodo, e nao ha margem a adivinhar.
+    //
+    // A margem existia para a regra de PAGAMENTO, que busca por criacao e
+    // precisa alcancar o boleto pago dias depois. Ela continua lá, em
+    // `buscarVendasPagasML`, que este gate nao mexeu.
+    ok("B7  o recorte e pelo campo de FECHAMENTO, sem margem de criacao",
+      r.diagnostico.campoDeData === "order.date_closed",
+      r.diagnostico.campoDeData);
+    ok("B7a e a margem de criacao segue existindo para a regra de PAGAMENTO",
+      MARGEM_CRIACAO_DIAS > 0, String(MARGEM_CRIACAO_DIAS));
     ok("B8  o provedor devolveu pedidos", r.diagnostico.recebidosDoProvider > 0,
       String(r.diagnostico.recebidosDoProvider));
     ok("B9  e pelo menos uma pagina foi lida", r.diagnostico.paginasLidas >= 1,
@@ -193,22 +204,34 @@ async function main(): Promise<void> {
     // total sem antes afirmar a completude era o que permitia comparar uma
     // semana inteira com uma truncada.
     ok("B10a a varredura COMPLETOU — sem isso nao ha total",
-      r.completo === true && r.totais !== null,
+      r.completo === true && r.vendasBrutas !== null,
       `completo=${String(r.completo)} parcial=${JSON.stringify(r.parcial)}`);
-    const t = r.totais ?? { faturamento: 0, pedidos: 0, ticketMedio: 0 };
-    ok("B11 houve venda paga na janela", t.pedidos > 0, String(t.pedidos));
-    ok("B12 e o faturamento e positivo — sem imprimir o valor",
-      t.faturamento > 0);
+    const t = r.vendasBrutas ?? { valor: 0, vendas: 0, unidades: 0, ticketMedio: 0 };
+    ok("B11 houve venda na janela", t.vendas > 0, String(t.vendas));
+    ok("B11a e unidades — que NAO sao a contagem de vendas",
+      t.unidades >= t.vendas, `${t.unidades} un para ${t.vendas} vendas`);
+    ok("B12 e o valor e positivo — sem imprimir o valor",
+      t.valor > 0);
     ok("B13 o ticket medio e derivado, nao inventado",
-      t.pedidos > 0 && Math.abs(t.ticketMedio - t.faturamento / t.pedidos) < 0.02);
+      t.vendas > 0 && Math.abs(t.ticketMedio - t.valor / t.vendas) < 0.02);
     ok("B14 o total por dia soma o total geral",
-      Math.abs(r.porDia.reduce((s, d) => s + d.faturamento, 0) - t.faturamento) < 0.05);
+      Math.abs(r.porDia.reduce((s, d) => s + d.valor, 0) - t.valor) < 0.05);
     ok("B15 e cada dia esta DENTRO do periodo",
       r.porDia.every((d) => d.dia >= DE && d.dia <= ATE),
       r.porDia.map((d) => d.dia).join(","));
-    ok("B16 a margem de criacao trouxe pedidos que o recorte descartou",
-      r.diagnostico.foraDaJanelaFinanceira > 0,
-      String(r.diagnostico.foraDaJanelaFinanceira));
+    // MEDIDO: o filtro da API vaza pedido do dia SEGUINTE na borda, e e
+    // por isso que o recorte local existe. Zero aqui significaria que o
+    // recorte nao esta sendo exercitado.
+    ok("B16 o recorte local descartou o que o filtro vazou da borda",
+      r.diagnostico.foraDoPeriodo > 0,
+      String(r.diagnostico.foraDoPeriodo));
+    ok("B17 §7: `total_amount` e `soma(unit_price x qtd)` NAO divergiram",
+      r.diagnostico.divergenciasDeValor === 0,
+      String(r.diagnostico.divergenciasDeValor));
+    ok("B18 e a contagem de pack_splitted excluidos e reportada",
+      typeof r.diagnostico.excluidosPackSplitted === "number" &&
+        r.diagnostico.excluidosPackSplitted >= 0,
+      String(r.diagnostico.excluidosPackSplitted));
 
     // Nada de credencial na saida. A sonda olha o JSON inteiro.
     const texto = JSON.stringify(r);
@@ -217,8 +240,8 @@ async function main(): Promise<void> {
         !texto.includes(proibido));
     }
 
-    oficialFaturamento = t.faturamento;
-    oficialPedidos = t.pedidos;
+    oficialFaturamento = t.valor;
+    oficialPedidos = t.vendas;
   }
 
   // ═══ C. CONTROLE: oficial != espelho (§36) ═══════════════════════
@@ -356,7 +379,7 @@ async function main(): Promise<void> {
     ok("E1  sem binding, a Funcao RECUSA", semConexao.erro === "credencial_ausente",
       String(semConexao.erro));
     ok("E2  e nao inventa numero — nao ha total nenhum",
-      semConexao.totais === null, JSON.stringify(semConexao.totais));
+      semConexao.vendasBrutas === null, JSON.stringify(semConexao.vendasBrutas));
 
     // Binding de OUTRO recurso nao serve: conexao de perguntas nao
     // autoriza vendas, mesmo sendo a mesma loja e a mesma plataforma.
@@ -391,16 +414,16 @@ async function main(): Promise<void> {
 
     // `interpretarSaida` e a cerca de forma.
     ok("E11 saida sem `fonte` e INVALIDA",
-      interpretarSaidaVendasML({ totais: { faturamento: 1, pedidos: 1, ticketMedio: 1 },
+      interpretarSaidaVendasML({ vendasBrutas: { valor: 1, vendas: 1, unidades: 1, ticketMedio: 1 },
         porDia: [], periodo: {}, completo: true, truncado: false,
         erro: null }).tipo === "invalida");
     ok("E12 saida com fonte TROCADA e invalida",
-      interpretarSaidaVendasML({ fonte: "cds_database", totais: {}, porDia: [],
+      interpretarSaidaVendasML({ fonte: "cds_database", vendasBrutas: {}, porDia: [],
         periodo: {}, completo: true, truncado: false, erro: null }).tipo === "invalida");
     ok("E13 ANCORA: a saida real e aceita",
       interpretarSaidaVendasML({
         fonte: "mercadolivre_api",
-        totais: { faturamento: 10, pedidos: 2, ticketMedio: 5 },
+        vendasBrutas: { valor: 10, vendas: 2, unidades: 3, ticketMedio: 5 },
         porDia: [], periodo: { de: DE, ate: ATE },
         completo: true, truncado: false, parcial: null,
         diagnostico: {}, erro: null,
@@ -409,21 +432,21 @@ async function main(): Promise<void> {
     ok("E13a incompleto COM total e INVALIDO — era a comparacao errada",
       interpretarSaidaVendasML({
         fonte: "mercadolivre_api",
-        totais: { faturamento: 10, pedidos: 2, ticketMedio: 5 },
+        vendasBrutas: { valor: 10, vendas: 2, unidades: 3, ticketMedio: 5 },
         porDia: [], periodo: { de: DE, ate: ATE },
         completo: false, truncado: true, parcial: { pedidosLidos: 2 },
         diagnostico: {}, erro: null,
       }).tipo === "invalida");
     ok("E13b e completo SEM total tambem e invalido",
       interpretarSaidaVendasML({
-        fonte: "mercadolivre_api", totais: null,
+        fonte: "mercadolivre_api", vendasBrutas: null,
         porDia: [], periodo: { de: DE, ate: ATE },
         completo: true, truncado: false, parcial: null,
         diagnostico: {}, erro: null,
       }).tipo === "invalida");
     ok("E13c incompleto SEM total e aceito, e diz que e parcial",
       interpretarSaidaVendasML({
-        fonte: "mercadolivre_api", totais: null,
+        fonte: "mercadolivre_api", vendasBrutas: null,
         porDia: [], periodo: { de: DE, ate: ATE },
         completo: false, truncado: true,
         parcial: { pedidosLidos: 2, subjanelasIncompletas: 1 },
@@ -433,7 +456,7 @@ async function main(): Promise<void> {
       (() => {
         const i = interpretarSaidaVendasML({
           fonte: "mercadolivre_api",
-          totais: { faturamento: 10, pedidos: 2, ticketMedio: 5 },
+          vendasBrutas: { valor: 10, vendas: 2, unidades: 3, ticketMedio: 5 },
           porDia: [], periodo: { de: DE, ate: ATE }, truncado: false,
           // F7b.4.8.3: total exige `completo: true`. A fixture antiga
           // omitia o campo e por isso passou a ser recusada — o que E o

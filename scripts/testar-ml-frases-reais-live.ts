@@ -63,7 +63,12 @@ const LOJA_REAL = "50165b6f-5185-4da7-991a-07c0c6bc8f39";
 const FUNCAO_ML = "mercadolivre.vendas.consultar";
 
 /** As sete frases do §39, na ordem em que o gate as escreve. */
-const FRASES: readonly { readonly texto: string; readonly janelas: readonly string[] }[] = [
+const FRASES: readonly {
+  readonly texto: string;
+  readonly janelas: readonly string[];
+  /** F7b.4.8.5 §14: a resposta precisa trazer valor, vendas E unidades. */
+  readonly exigeOsTres?: boolean;
+}[] = [
   { texto: "Quanto vendi esta semana no Mercado Livre?", janelas: ["esta semana"] },
   {
     texto: "Compare esta semana com a semana passada e me fale a diferença em reais e em porcentagem.",
@@ -74,6 +79,11 @@ const FRASES: readonly { readonly texto: string; readonly janelas: readonly stri
   { texto: "quanto vendi em agosto de 2026?", janelas: ["agosto de 2026"] },
   { texto: "quanto vendi no dia 15/08/2026?", janelas: ["dia 15/08/2026"] },
   { texto: "compare agosto com setembro", janelas: ["agosto de 2026", "setembro de 2026"] },
+  // F7b.4.8.5 §14/§20: a frase que o dono vai digitar no teste manual.
+  {
+    texto: "Quanto vendi em setembro de 2026 no Mercado Livre?",
+    janelas: ["setembro de 2026"], exigeOsTres: true,
+  },
 ];
 
 let pass = 0;
@@ -223,7 +233,9 @@ async function main(): Promise<void> {
     // ── B. O oraculo: cada janela, pela fonte oficial ───────────────
 
     secao("B. As janelas, pela fonte deterministica");
-    const esperado = new Map<string, { total: number; pedidos: number; de: string; ate: string }>();
+    const esperado = new Map<string, {
+      total: number; pedidos: number; unidades: number; de: string; ate: string;
+    }>();
       // So as janelas das frases que vao rodar: medir uma janela de mes
     // que ninguem vai perguntar e custo sem prova.
     const janelas = [...new Set(FRASES
@@ -232,16 +244,17 @@ async function main(): Promise<void> {
     for (const j of janelas) {
       const alvo = resolverExpressaoDePeriodo(j, Date.now());
       const r = await totalDa(j);
-      const bom = r.erro === null && r.completo === true && r.totais !== null
+      const bom = r.erro === null && r.completo === true && r.vendasBrutas !== null
         && alvo !== null;
       ok(`B  "${j}" -> ${alvo?.de}..${alvo?.ate}`, bom,
         `erro=${String(r.erro)} completo=${String(r.completo)}`);
-      if (bom && r.totais !== null && alvo !== null) {
+      if (bom && r.vendasBrutas !== null && alvo !== null) {
         esperado.set(j, {
-          total: r.totais.faturamento, pedidos: r.totais.pedidos,
-          de: alvo.de, ate: alvo.ate,
+          total: r.vendasBrutas.valor, pedidos: r.vendasBrutas.vendas,
+          unidades: r.vendasBrutas.unidades, de: alvo.de, ate: alvo.ate,
         });
-        console.log(`       ${r.totais.pedidos} pedidos pagos, faturamento ${r.totais.faturamento.toFixed(2)}`);
+        console.log(`       ${r.vendasBrutas.vendas} vendas, ${r.vendasBrutas.unidades} unidades, ` +
+          `vendas brutas ${r.vendasBrutas.valor.toFixed(2)}`);
       }
     }
 
@@ -308,9 +321,9 @@ async function main(): Promise<void> {
         let max = e.total;
         if (e.ate >= hojeBRT) {
           const agora = await totalDa(j);
-          if (agora.erro === null && agora.completo === true && agora.totais !== null) {
-            min = Math.min(min, agora.totais.faturamento);
-            max = Math.max(max, agora.totais.faturamento);
+          if (agora.erro === null && agora.completo === true && agora.vendasBrutas !== null) {
+            min = Math.min(min, agora.vendasBrutas.valor);
+            max = Math.max(max, agora.vendasBrutas.valor);
           }
         }
         faixas.set(j, { min, max });
@@ -318,6 +331,24 @@ async function main(): Promise<void> {
         ok(`C${i + 1}f §38: o faturamento de "${j}" aparece no texto`,
           contemNoIntervalo(texto, min, max),
           `esperado ${min.toFixed(2)}..${max.toFixed(2)}${viva}`);
+
+        // ── F7b.4.8.5 §14: os TRES numeros, e nao so o dinheiro ─────
+        //
+        // Venda e unidade sao contagens diferentes, e o painel do Mercado
+        // Livre mostra as duas. Uma resposta que diga "11.361 vendas" num
+        // mes de 10.898 esta errada sem parecer errada.
+        if (frase.exigeOsTres === true) {
+          ok(`C${i + 1}f1 §14: a QUANTIDADE de vendas aparece`,
+            contemNoIntervalo(texto, e.pedidos, e.pedidos),
+            `esperado ${e.pedidos}`);
+          ok(`C${i + 1}f2 §14: e a de UNIDADES tambem`,
+            contemNoIntervalo(texto, e.unidades, e.unidades),
+            `esperado ${e.unidades}`);
+          ok(`C${i + 1}f3 ANCORA: as duas contagens sao DIFERENTES`,
+            e.unidades !== e.pedidos, `${e.unidades} vs ${e.pedidos}`);
+          ok(`C${i + 1}f4 §14: e a resposta NAO cita o Dashboard nem a tabela da CDS`,
+            !/dashboard|tabela de pedidos|vendas registradas na cds/i.test(texto));
+        }
       }
 
       // §38: comparacao exige a diferenca, e ela tambem vem da fonte.

@@ -119,7 +119,7 @@ async function main(): Promise<void> {
     ok("A5  nenhuma subjanela ficou pela metade",
       r.parcial === null, JSON.stringify(r.parcial));
     ok("A6  ha totais — completude e o que os autoriza",
-      r.totais !== null);
+      r.vendasBrutas !== null);
     // ── §8: o invariante e o CONJUNTO FINAL ───────────────────────
     //
     // A primeira versao deste assert exigia `duplicadosDescartados === 0`,
@@ -143,9 +143,26 @@ async function main(): Promise<void> {
         const ids = cru.pedidos.map((x) => x.pedidoId);
         return new Set(ids).size === ids.length;
       })());
-    ok("A8  a varredura leu MAIS que o teto antigo de 3060",
-      r.diagnostico.recebidosDoProvider > 3060,
-      String(r.diagnostico.recebidosDoProvider));
+    // ── F7b.4.8.5: esta sonda media o desenho ANTIGO ──────────────
+    //
+    // Ela existia para provar que o teto unico de 3060 (60 paginas x 51)
+    // truncava: a busca por CRIACAO alargava a janela em 5 dias, e uma
+    // semana pedida virava doze dias lidos, passando de 3060.
+    //
+    // A regra de vendas brutas busca por `order.date_closed`, que FILTRA
+    // de verdade — entao nao ha margem, e a varredura le MENOS bruto para
+    // o mesmo periodo. Medir "leu mais que 3060" agora mediria o
+    // desperdicio que acabou.
+    //
+    // O que importa continua sendo cobrado, e de duas formas: a leitura
+    // atravessa o periodo em VARIAS paginas (impossivel num unico offset
+    // com teto de 10000) e a cobertura e conferida dia a dia.
+    ok("A8  a varredura atravessou o periodo em muitas paginas",
+      r.diagnostico.paginasLidas > 20,
+      `${r.diagnostico.paginasLidas} paginas, ${r.diagnostico.recebidosDoProvider} pedidos`);
+    ok("A8a e sem margem de criacao: o recorte e pelo FECHAMENTO",
+      r.diagnostico.campoDeData === "order.date_closed",
+      r.diagnostico.campoDeData);
     ok("A9  §33: toda chamada foi para api.mercadolibre.com",
       destinos.length > 0 &&
         destinos.every((d) => d.startsWith("https://api.mercadolibre.com/orders/search")),
@@ -154,24 +171,24 @@ async function main(): Promise<void> {
       !destinos.some((d) => d.includes("supabase")));
 
     // §23: consistencia interna.
-    const t = r.totais ?? { faturamento: 0, pedidos: 0, ticketMedio: 0 };
+    const t = r.vendasBrutas ?? { valor: 0, vendas: 0, unidades: 0, ticketMedio: 0 };
     ok("A11 §23: a soma dos dias e o faturamento total",
-      Math.abs(r.porDia.reduce((s, d) => s + d.faturamento, 0) - t.faturamento) < 0.05);
+      Math.abs(r.porDia.reduce((s, d) => s + d.valor, 0) - t.valor) < 0.05);
     ok("A12 §23: a soma dos pedidos por dia e o total",
-      r.porDia.reduce((s, d) => s + d.pedidos, 0) === t.pedidos,
-      `${r.porDia.reduce((s, d) => s + d.pedidos, 0)} vs ${t.pedidos}`);
+      r.porDia.reduce((s, d) => s + d.vendas, 0) === t.vendas,
+      `${r.porDia.reduce((s, d) => s + d.vendas, 0)} vs ${t.vendas}`);
     ok("A13 §23: ticket medio = faturamento / pedidos",
-      t.pedidos > 0 && Math.abs(t.ticketMedio - t.faturamento / t.pedidos) < 0.02);
+      t.vendas > 0 && Math.abs(t.ticketMedio - t.valor / t.vendas) < 0.02);
     ok("A14 todos os dias caem DENTRO do periodo",
       r.porDia.every((d) => d.dia >= r.periodo.de && d.dia <= r.periodo.ate),
       r.porDia.map((d) => d.dia).join(","));
-    ok("A15 e houve venda de verdade no periodo", t.pedidos > 0, String(t.pedidos));
+    ok("A15 e houve venda de verdade no periodo", t.vendas > 0, String(t.vendas));
 
-    anteriorPedidos = t.pedidos;
-    anteriorFaturamento = t.faturamento;
-    console.log(`    pedidos=${t.pedidos}  paginas=${r.diagnostico.paginasLidas}  ` +
+    anteriorPedidos = t.vendas;
+    anteriorFaturamento = t.valor;
+    console.log(`    pedidos=${t.vendas}  paginas=${r.diagnostico.paginasLidas}  ` +
       `recebidos=${r.diagnostico.recebidosDoProvider}  ` +
-      `fora da janela=${r.diagnostico.foraDaJanelaFinanceira}`);
+      `fora da janela=${r.diagnostico.foraDoPeriodo}`);
   }
 
   // ═══ B. E o lado que ja vinha completo ══════════════════════════
@@ -190,11 +207,11 @@ async function main(): Promise<void> {
     ok("B4  §8: o descarte de repetidos foi contado, e nao presumido",
       Number.isInteger(r.diagnostico.duplicadosDescartados),
       String(r.diagnostico.duplicadosDescartados));
-    const t = r.totais ?? { faturamento: 0, pedidos: 0, ticketMedio: 0 };
-    atualPedidos = t.pedidos;
-    atualFaturamento = t.faturamento;
-    ok("B5  com venda no periodo", t.pedidos > 0, String(t.pedidos));
-    console.log(`    pedidos=${t.pedidos}  paginas=${r.diagnostico.paginasLidas}`);
+    const t = r.vendasBrutas ?? { valor: 0, vendas: 0, unidades: 0, ticketMedio: 0 };
+    atualPedidos = t.vendas;
+    atualFaturamento = t.valor;
+    ok("B5  com venda no periodo", t.vendas > 0, String(t.vendas));
+    console.log(`    pedidos=${t.vendas}  paginas=${r.diagnostico.paginasLidas}`);
   }
 
   // ═══ C. §21/§22: comparar SO com os dois completos ══════════════
@@ -248,16 +265,16 @@ async function main(): Promise<void> {
     ok("D5  leu MUITO mais que o teto antigo",
       r.diagnostico.recebidosDoProvider > 9000,
       String(r.diagnostico.recebidosDoProvider));
-    const t = r.totais ?? { faturamento: 0, pedidos: 0, ticketMedio: 0 };
+    const t = r.vendasBrutas ?? { valor: 0, vendas: 0, unidades: 0, ticketMedio: 0 };
     ok("D6  §23: a soma dos dias fecha o total",
-      Math.abs(r.porDia.reduce((s, d) => s + d.faturamento, 0) - t.faturamento) < 0.1);
+      Math.abs(r.porDia.reduce((s, d) => s + d.valor, 0) - t.valor) < 0.1);
     ok("D7  e os dias sao de agosto, todos",
       r.porDia.length > 0 &&
         r.porDia.every((d) => d.dia >= "2026-08-01" && d.dia <= "2026-08-31"),
       r.porDia.map((d) => d.dia).slice(0, 3).join(","));
     ok("D8  §33: nenhuma leitura do Supabase como fonte",
       !destinos.some((d) => d.includes("supabase")));
-    console.log(`    pedidos=${t.pedidos}  paginas=${r.diagnostico.paginasLidas}  ` +
+    console.log(`    pedidos=${t.vendas}  paginas=${r.diagnostico.paginasLidas}  ` +
       `recebidos=${r.diagnostico.recebidosDoProvider}`);
   }
 
@@ -274,11 +291,11 @@ async function main(): Promise<void> {
       `${String(r.erro)}/${String(r.completo)}`);
     ok("E3  com recorte diario", r.porDia.length > 0, String(r.porDia.length));
     ok("E4  §23: a soma diaria fecha",
-      r.totais !== null &&
-        r.porDia.reduce((s, d) => s + d.pedidos, 0) === r.totais.pedidos);
+      r.vendasBrutas !== null &&
+        r.porDia.reduce((s, d) => s + d.vendas, 0) === r.vendasBrutas.vendas);
     ok("E5  §33: API oficial",
       destinos.every((d) => d.startsWith("https://api.mercadolibre.com/")));
-    console.log(`    pedidos=${String(r.totais?.pedidos)}  ` +
+    console.log(`    pedidos=${String(r.vendasBrutas?.vendas)}  ` +
       `chamadas=${destinos.length}`);
   }
 
@@ -300,7 +317,7 @@ async function main(): Promise<void> {
         String(r.erro));
       ok(`F3  COMPLETA`, r.completo === true,
         `${String(r.completo)} ${JSON.stringify(r.parcial)}`);
-      console.log(`    "${expressao}": pedidos=${String(r.totais?.pedidos)} ` +
+      console.log(`    "${expressao}": pedidos=${String(r.vendasBrutas?.vendas)} ` +
         `chamadas=${destinos.length}`);
     }
   }
@@ -343,7 +360,7 @@ async function main(): Promise<void> {
     const lido = await criarLeiturasDeVendasML(
       dono, LOJA, AGORA, orcamentoQueVence(10))({ periodo: "semana passada" });
     ok("G4  §11: sem totais quando incompleto",
-      lido.totais === null, JSON.stringify(lido.totais));
+      lido.vendasBrutas === null, JSON.stringify(lido.vendasBrutas));
     ok("G5  e sem recorte diario — parcial nao se apresenta como total",
       lido.porDia.length === 0, String(lido.porDia.length));
     ok("G6  mas diz o TAMANHO do que faltou",
