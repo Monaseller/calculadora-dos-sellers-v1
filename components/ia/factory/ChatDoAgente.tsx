@@ -28,6 +28,7 @@ import { packDaFuncao } from "@/lib/agentes/factory/catalogo-ui";
 import {
   Aviso, Botao, Etiqueta, PainelLateral, TAMANHO,
 } from "@/components/ui/Primitivas";
+import { TextoDoAgente } from "@/components/ui/TextoDoAgente";
 import {
   criarConversaDoChat, decidirAprovacaoNoChat, decidirCapacidadeNoChat,
   enviarFonteDoAgente, iniciarConexaoDaCapacidade,
@@ -748,12 +749,23 @@ export function ChatDoAgente({
             }}>
               {m.papel === "usuario" ? "Você" : "Agente"}
             </div>
-            <div style={{
-              fontSize: TAMANHO.corpo, color: CROMO.texto, whiteSpace: "pre-wrap",
-              lineHeight: 1.55,
-            }}>
-              {m.conteudo}
-            </div>
+            {/* ── F7b.4.8.5-R1: o Markdown do modelo era mostrado cru ───
+              *
+              * Era `{m.conteudo}` dentro de um `pre-wrap`: o texto saia
+              * certo e a leitura saia quebrada, com `**` a vista. A fala
+              * do USUARIO continua texto puro — ela nao e Markdown, e
+              * interpretar o que a pessoa digitou mudaria o que ela
+              * escreveu. */}
+            {m.papel === "assistente" ? (
+              <TextoDoAgente texto={m.conteudo} />
+            ) : (
+              <div style={{
+                fontSize: TAMANHO.corpo, color: CROMO.texto, whiteSpace: "pre-wrap",
+                lineHeight: 1.55,
+              }}>
+                {m.conteudo}
+              </div>
+            )}
             {m.passos.length > 0 && (
               <div style={{ marginTop: ESPACO.sm }}>
                 <Botao tom="sutil" onClick={() => setProvenienciaDe(m)}>
