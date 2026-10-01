@@ -198,8 +198,12 @@ secao("E. O modelo nao calcula data");
     /PALAVRAS DA PESSOA/.test(decl?.descricao ?? ""));
   ok("E5  e proibe calcular data de cabeca",
     /nao calcule[\s\S]{0,40}datas de cabeca/.test(decl?.descricao ?? ""));
-  ok("E6  §10: e diz que o faturamento e BRUTO",
-    /BRUTO/.test(decl?.descricao ?? ""));
+  // F7b.4.8.5-R1: a descricao parou de usar a palavra "BRUTO" solta e
+  // passou a DIZER o que o numero e — "o valor dos PRODUTOS ... antes de
+  // descontar tarifas". A sonda acompanha o sentido, nao a palavra.
+  ok("E6  §10: e diz que o numero e antes de descontar tarifas",
+    /antes de descontar tarifas/.test(decl?.descricao ?? ""),
+    (decl?.descricao ?? "").slice(0, 80));
   ok("E7  e que periodo passado nao e definitivo",
     /nao apresente periodo fechado como definitivo/.test(decl?.descricao ?? ""));
 
@@ -238,6 +242,54 @@ secao("F. A completude e a condicao do total");
     /status === 401 \|\| resposta\.status === 403/.test(BRUTO));
   ok("F7  e o pagamento que conta e o MAIS ANTIGO aprovado",
     /maisAntigo/.test(BRUTO));
+}
+
+// ═══ G. F7b.4.8.5-R1: a tela mostra o texto formatado ═════════════
+
+secao("G. O Markdown do modelo nao volta a aparecer cru");
+{
+  ok("G1  a bolha do ASSISTENTE usa o renderer",
+    /m\.papel === "assistente" \? \(/.test(CHAT) &&
+      /<TextoDoAgente texto=\{m\.conteudo\} \/>/.test(CHAT));
+  ok("G2  e a fala do USUARIO continua texto puro",
+    /\{m\.conteudo\}/.test(CHAT));
+  ok("G3  ANCORA: o chat de fato importa o renderer",
+    /from "@\/components\/ui\/TextoDoAgente"/.test(CHAT));
+
+  const componente = semComentario(fonte("components/ui/TextoDoAgente.tsx"));
+  ok("G4  o renderer NAO usa `dangerouslySetInnerHTML`",
+    !componente.includes("dangerouslySetInnerHTML"));
+  ok("G5  nem monta HTML por string", !/innerHTML|outerHTML/.test(componente));
+  // A lista de esquemas e lida da fonte CRUA: `semComentario` nao entende
+  // string, e corta o `//` de dentro de `"http://"` como se fosse
+  // comentario de linha. Para esta sonda, o literal importa.
+  const componenteCru = fonte("components/ui/TextoDoAgente.tsx");
+  ok("G6  e so transforma em link o que comeca por http/https",
+    /ESQUEMAS_PERMITIDOS = \["http:\/\/", "https:\/\/"\]/.test(componenteCru),
+    componenteCru.slice(componenteCru.indexOf("ESQUEMAS_PERMITIDOS"),
+      componenteCru.indexOf("ESQUEMAS_PERMITIDOS") + 70));
+  ok("G7  com `rel` seguro", /noopener/.test(componente));
+}
+
+// ═══ H. F7b.4.8.5-R1: a definicao de vendas brutas ════════════════
+
+secao("H. O que o modelo e instruido a DIZER");
+{
+  const d = DECLARACOES["mercadolivre.vendas.consultar"]?.descricao ?? "";
+  ok("H1  define venda bruta pelo valor dos PRODUTOS",
+    /valor dos PRODUTOS das vendas fechadas/.test(d), d.slice(0, 80));
+  ok("H2  e PROIBE a frase que o Rodrigo leu na tela",
+    /NAO diga que e o valor pago pelos compradores/.test(d));
+  ok("H3  proibe afirmar que inclui frete", /NAO diga que inclui frete/.test(d));
+  // A DEFINICAO errada, e nao as palavras dela: a descricao nova cita "o
+  // que o comprador pagou" de proposito, para dizer que e OUTRO campo.
+  // Proibir a palavra proibiria a propria correcao.
+  ok("H4  a definicao errada nao e mais afirmada",
+    !/e o que o comprador pagou pelos produtos/.test(d), d.slice(0, 120));
+  ok("H4a e a mencao que resta diz que aquilo e OUTRO campo",
+    /o que o comprador pagou e outro campo/.test(d));
+  ok("H5  segue proibindo chamar de lucro, liquido ou recebido",
+    /chame de lucro, de liquido nem de recebido/.test(d));
 }
 
 console.log(`\nPASS ${pass}   FAIL ${fail}`);

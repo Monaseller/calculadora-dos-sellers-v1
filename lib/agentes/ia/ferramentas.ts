@@ -396,9 +396,22 @@ export const DECLARACOES: Readonly<Record<string, { descricao: string; schemaEnt
         // devolvia R$ 383.829,43 onde o oficial diz R$ 393.838,47 — dez mil
         // reais e 568 vendas a menos, porque venda cancelada depois tem
         // `paid_amount` zero e ainda assim e venda do mes.
-        "`vendasBrutas.valor` e BRUTO: e o que o comprador pagou pelos produtos, sem " +
-        "descontar tarifa do Mercado Livre, frete do vendedor, imposto nem custo. Nao o " +
-        "chame de lucro, de liquido nem de recebido. " +
+        // ── F7b.4.8.5-R1: a frase que o Rodrigo leu estava errada ───
+        //
+        // Esta descricao dizia "o que o comprador pagou pelos produtos", e
+        // o modelo repetiu: "vendas brutas = valor pago pelos compradores".
+        // Isso descreve `paid_amount`, que e OUTRA coisa — pode incluir
+        // frete e vira ZERO depois de um estorno. `total_amount` e o valor
+        // dos PRODUTOS da venda fechada, e e ele que a regra soma.
+        //
+        // Dizer ao modelo o que NAO falar importa tanto quanto dizer o que
+        // e: sem a proibicao explicita ele volta a frase antiga, que soa
+        // natural e descreve o campo errado.
+        "`vendasBrutas.valor` e o valor dos PRODUTOS das vendas fechadas no periodo, " +
+        "antes de descontar tarifas e outros custos. " +
+        "NAO diga que e o valor pago pelos compradores, NAO diga que inclui frete e " +
+        "NAO o chame de lucro, de liquido nem de recebido — o que o comprador pagou e " +
+        "outro campo, que esta ferramenta nao devolve. " +
         "A venda conta no mes em que foi FECHADA, mesmo que depois tenha sido cancelada " +
         "ou estornada — e assim que o proprio Mercado Livre conta. " +
         "Estorno, chargeback e mediacao podem mudar o numero de um periodo JA PASSADO, " +
