@@ -31,8 +31,8 @@
  */
 import "server-only";
 import {
-  buscarVendasPagasML,
-  MARGEM_CRIACAO_DIAS,
+  buscarVendasBrutasML,
+  CAMPO_DE_FECHAMENTO,
   type ErroVendasML,
   type PortasVendasML,
 } from "@/lib/mercado-livre-vendas";
@@ -72,10 +72,36 @@ export interface FiltroVendasML {
   readonly ate?: string;
 }
 
-export interface TotaisVendasML {
-  /** Soma de `paid_amount` dos pedidos pagos no periodo. */
-  readonly faturamento: number;
-  readonly pedidos: number;
+/**
+ * VENDAS BRUTAS — a metrica que o painel do Mercado Livre chama assim.
+ *
+ * ── Por que este contrato substituiu o anterior ─────────────────────
+ *
+ * O contrato antigo tinha `faturamento`, e ele era a soma de
+ * `paid_amount` dos pedidos com pagamento aprovado no periodo. MEDIDO
+ * contra o relatorio detalhado da propria loja em setembro de 2026:
+ *
+ *   regra antiga   R$ 383.829,43   10.330 vendas   10.766 unidades
+ *   oficial        R$ 393.838,47   10.898 vendas   11.361 unidades
+ *
+ * Nao era arredondamento: eram R$ 10 mil e 568 vendas. A regra antiga
+ * media FLUXO DE PAGAMENTO e respondia como se fosse venda.
+ *
+ * ── Pagamento nao virou lixo ────────────────────────────────────────
+ *
+ * `buscarVendasPagasML` continua exportada e testada: ela responde sobre
+ * recebimento, cuja semantica segue PARCIAL em
+ * `docs/SEMANTICA_FATURAMENTO_ML.md`. O que mudou e qual das duas
+ * responde "quanto vendi".
+ */
+export interface VendasBrutasML {
+  /** Soma de `order.total_amount` — provado 10.898/10.898 contra o oficial. */
+  readonly valor: number;
+  /** Quantas VENDAS (pedidos) ha na populacao. */
+  readonly vendas: number;
+  /** Soma de `order_items[].quantity`. Nunca a contagem de pedidos. */
+  readonly unidades: number;
+  /** `valor / vendas`. */
   readonly ticketMedio: number;
 }
 
@@ -94,9 +120,12 @@ export interface ResultadoVendasML {
    * tamanho do que faltou — e a unica resposta possivel passa a ser "nao
    * consegui recuperar tudo".
    */
-  readonly totais: TotaisVendasML | null;
+  readonly vendasBrutas: VendasBrutasML | null;
   /** Um item por DIA com venda, em ordem crescente. */
-  readonly porDia: readonly { readonly dia: string; readonly faturamento: number; readonly pedidos: number }[];
+  readonly porDia: readonly {
+    readonly dia: string; readonly valor: number;
+    readonly vendas: number; readonly unidades: number;
+  }[];
   /** O periodo que a CDS resolveu, para a resposta poder cita-lo. */
   readonly periodo: { readonly de: string; readonly ate: string; readonly rotulo: string; readonly fuso: string };
   /**
@@ -123,9 +152,20 @@ export interface ResultadoVendasML {
   readonly diagnostico: {
     readonly paginasLidas: number;
     readonly recebidosDoProvider: number;
-    readonly foraDaJanelaFinanceira: number;
+    /** Vieram pelo filtro mas o fechamento cai fora do periodo (borda). */
+    readonly foraDoPeriodo: number;
     readonly duplicadosDescartados: number;
-    readonly margemDeCriacaoDias: number;
+    /** Pedidos que o proprio ML desfez e recriou — §6. */
+    readonly excluidosPackSplitted: number;
+    /**
+     * `total_amount` discordou de `soma(unit_price x quantity)` — §7.
+     *
+     * Esperado ZERO: medido igual em 10.898 de 10.898. Se subir, o valor
+     * NAO e trocado em silencio; a anomalia aparece aqui.
+     */
+    readonly divergenciasDeValor: number;
+    /** O campo de data que recortou o periodo. */
+    readonly campoDeData: string;
   };
   readonly erro: ErroVendasML | null;
 }
@@ -186,8 +226,10 @@ export function validarFiltroVendasML(filtro: unknown): ValidacaoFiltroVendasML 
   return { erro: null };
 }
 
-const VAZIO: TotaisVendasML = Object.freeze({
-  faturamento: 0, pedidos: 0, ticketMedio: 0,
+const DIAGNOSTICO_VAZIO: ResultadoVendasML["diagnostico"] = Object.freeze({
+  paginasLidas: 0, recebidosDoProvider: 0, foraDoPeriodo: 0,
+  duplicadosDescartados: 0, excluidosPackSplitted: 0, divergenciasDeValor: 0,
+  campoDeData: CAMPO_DE_FECHAMENTO,
 });
 
 function comErro(
@@ -197,12 +239,9 @@ function comErro(
   return {
     // Erro NAO tem total. Zero apresentado como total seria a resposta
     // errada com cara de resposta.
-    totais: null, porDia: [], periodo, fonte: "mercadolivre_api",
+    vendasBrutas: null, porDia: [], periodo, fonte: "mercadolivre_api",
     completo: false, truncado: true, parcial: null,
-    diagnostico: {
-      paginasLidas: 0, recebidosDoProvider: 0, foraDaJanelaFinanceira: 0,
-      duplicadosDescartados: 0, margemDeCriacaoDias: MARGEM_CRIACAO_DIAS,
-    },
+    diagnostico: DIAGNOSTICO_VAZIO,
     erro,
   };
 }
@@ -246,32 +285,64 @@ export function criarLeiturasDeVendasML(
       };
     }
 
-    const bruto = await buscarVendasPagasML(
+    const bruto = await buscarVendasBrutasML(
       { userId, lojaId, de: janela.de, ate: janela.ate }, limiteExterno, portas);
 
     if (bruto.erro !== null) return comErro(bruto.erro, janela);
 
     // ── A conta, em cima do retorno OFICIAL ───────────────────────
-    let faturamento = 0;
-    const porDia = new Map<string, { faturamento: number; pedidos: number }>();
+    //
+    // Soma de `total_amount`, contagem de pedidos e soma de quantidades.
+    // Nada aqui olha pagamento: quem decide o periodo e o FECHAMENTO, e
+    // quem decide o valor e o pedido.
+    let valor = 0;
+    let unidades = 0;
+    const porDia = new Map<string, { valor: number; vendas: number; unidades: number }>();
     for (const p of bruto.pedidos) {
-      faturamento += p.valorPago;
-      const atual = porDia.get(p.dataPagamento) ?? { faturamento: 0, pedidos: 0 };
-      atual.faturamento += p.valorPago;
-      atual.pedidos += 1;
-      porDia.set(p.dataPagamento, atual);
+      valor += p.valor;
+      unidades += p.unidades;
+      const atual = porDia.get(p.diaFechamento) ?? { valor: 0, vendas: 0, unidades: 0 };
+      atual.valor += p.valor;
+      atual.vendas += 1;
+      atual.unidades += p.unidades;
+      porDia.set(p.diaFechamento, atual);
     }
 
-    const pedidos = bruto.pedidos.length;
-    const faturamentoFinal = centavos(faturamento);
+    const vendas = bruto.pedidos.length;
+    const valorFinal = centavos(valor);
 
     const diagnostico = {
       paginasLidas: bruto.paginasLidas,
       recebidosDoProvider: bruto.recebidosDoProvider,
-      foraDaJanelaFinanceira: bruto.foraDaJanelaFinanceira,
+      foraDoPeriodo: bruto.foraDoPeriodo,
       duplicadosDescartados: bruto.duplicadosDescartados,
-      margemDeCriacaoDias: MARGEM_CRIACAO_DIAS,
+      excluidosPackSplitted: bruto.excluidosPackSplitted,
+      divergenciasDeValor: bruto.divergenciasDeValor,
+      campoDeData: CAMPO_DE_FECHAMENTO,
     };
+
+    // ── §17: observabilidade sanitizada ───────────────────────────
+    //
+    // Uma linha por consulta, com o que permite diagnosticar sem expor
+    // ninguem: nenhum token, nenhum id de loja, nenhum comprador, nenhum
+    // id de pedido. So a metrica, a janela e os contadores de cobertura.
+    console.log(JSON.stringify({
+      metrica: "gross_sales",
+      periodo_inicio: janela.de,
+      periodo_fim: janela.ate,
+      fuso: janela.fuso,
+      vendas,
+      unidades,
+      valor: valorFinal,
+      excluidos_pack_splitted: bruto.excluidosPackSplitted,
+      fora_do_periodo: bruto.foraDoPeriodo,
+      duplicados: bruto.duplicadosDescartados,
+      divergencias_de_valor: bruto.divergenciasDeValor,
+      paginas: bruto.paginasLidas,
+      recebidos: bruto.recebidosDoProvider,
+      completo: bruto.completo,
+      subjanelas_incompletas: bruto.subjanelasIncompletas,
+    }));
 
     // ── §11/§21: varredura incompleta NAO produz total ────────────
     //
@@ -284,14 +355,14 @@ export function criarLeiturasDeVendasML(
     // tambem e parcial, e seria lido como se fosse o dia inteiro.
     if (!bruto.completo) {
       return {
-        totais: null,
+        vendasBrutas: null,
         porDia: [],
         periodo: janela,
         fonte: "mercadolivre_api",
         completo: false,
         truncado: true,
         parcial: {
-          pedidosLidos: pedidos,
+          pedidosLidos: vendas,
           subjanelasIncompletas: bruto.subjanelasIncompletas,
         },
         diagnostico,
@@ -300,17 +371,18 @@ export function criarLeiturasDeVendasML(
     }
 
     return {
-      totais: {
-        faturamento: faturamentoFinal,
-        pedidos,
-        // Divisao por zero nao vira `NaN` nem `Infinity`: sem pedido nao
+      vendasBrutas: {
+        valor: valorFinal,
+        vendas,
+        unidades,
+        // Divisao por zero nao vira `NaN` nem `Infinity`: sem venda nao
         // existe ticket, e zero e a unica resposta que nao inventa um.
-        ticketMedio: pedidos > 0 ? centavos(faturamento / pedidos) : 0,
+        ticketMedio: vendas > 0 ? centavos(valor / vendas) : 0,
       },
       porDia: [...porDia.entries()]
         .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
         .map(([dia, v]) => ({
-          dia, faturamento: centavos(v.faturamento), pedidos: v.pedidos,
+          dia, valor: centavos(v.valor), vendas: v.vendas, unidades: v.unidades,
         })),
       periodo: janela,
       fonte: "mercadolivre_api",

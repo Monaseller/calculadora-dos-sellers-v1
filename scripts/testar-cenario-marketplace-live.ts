@@ -380,8 +380,8 @@ async function main(): Promise<void> {
         r.erro !== null, String(r.erro));
       ok("E5  e NAO cai para a base da CDS como plano B",
         // F7b.4.8.3: erro nao tem total NENHUM — nem zero.
-        r.totais === null && r.fonte === "mercadolivre_api",
-        `${JSON.stringify(r.totais)}/${r.fonte}`);
+        r.vendasBrutas === null && r.fonte === "mercadolivre_api",
+        `${JSON.stringify(r.vendasBrutas)}/${r.fonte}`);
       ok("E6  ANCORA: a fonte declarada continua sendo a API oficial",
         r.fonte === "mercadolivre_api");
     }

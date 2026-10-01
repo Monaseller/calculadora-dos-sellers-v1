@@ -70,10 +70,10 @@ export async function executarVendasML(
     // Mesma forma de saida do caminho de sucesso, com `erro` preenchido:
     // `interpretarSaida` precisa reconhecer o objeto para poder traduzir.
     return {
-      // `totais: null`, e nao zero — F7b.4.8.3 §11. Sem conexao nao houve
-      // consulta, e zero apresentado como total seria a resposta errada
-      // com cara de resposta.
-      totais: null,
+      // `vendasBrutas: null`, e nao zero — F7b.4.8.3 §11. Sem conexao nao
+      // houve consulta, e zero apresentado como total seria a resposta
+      // errada com cara de resposta.
+      vendasBrutas: null,
       porDia: [],
       periodo: { de: "", ate: "", rotulo: "", fuso: "America/Sao_Paulo" },
       fonte: "mercadolivre_api",
@@ -81,8 +81,9 @@ export async function executarVendasML(
       truncado: true,
       parcial: null,
       diagnostico: {
-        paginasLidas: 0, recebidosDoProvider: 0, foraDaJanelaFinanceira: 0,
-        duplicadosDescartados: 0, margemDeCriacaoDias: 0,
+        paginasLidas: 0, recebidosDoProvider: 0, foraDoPeriodo: 0,
+        duplicadosDescartados: 0, excluidosPackSplitted: 0,
+        divergenciasDeValor: 0, campoDeData: "order.date_closed",
       },
       erro: "credencial_ausente",
     };
@@ -166,16 +167,22 @@ export function interpretarSaidaVendasML(saida: unknown): ResultadoInterpretacao
     typeof v === "number" && Number.isFinite(v) ? v : null;
 
   if (bruto.completo === true) {
-    const totais = bruto.totais;
-    if (typeof totais !== "object" || totais === null) return { tipo: "invalida" };
-    const t = totais as Record<string, unknown>;
-    if (numero(t.faturamento) === null || numero(t.ticketMedio) === null) {
+    const vendasBrutas = bruto.vendasBrutas;
+    if (typeof vendasBrutas !== "object" || vendasBrutas === null) {
       return { tipo: "invalida" };
     }
-    if (typeof t.pedidos !== "number" || !Number.isInteger(t.pedidos) || t.pedidos < 0) {
+    const t = vendasBrutas as Record<string, unknown>;
+    if (numero(t.valor) === null || numero(t.ticketMedio) === null) {
       return { tipo: "invalida" };
     }
-  } else if (bruto.totais !== null && bruto.erro === null) {
+    // Venda e unidade sao CONTAGENS: inteiro, nao negativo. Um float aqui
+    // seria sinal de que alguem somou dinheiro na coluna errada.
+    for (const contagem of [t.vendas, t.unidades]) {
+      if (typeof contagem !== "number" || !Number.isInteger(contagem) || contagem < 0) {
+        return { tipo: "invalida" };
+      }
+    }
+  } else if (bruto.vendasBrutas !== null && bruto.erro === null) {
     // Incompleto COM total e contradicao: quem consome leria o numero.
     return { tipo: "invalida" };
   }
@@ -188,7 +195,7 @@ export function interpretarSaidaVendasML(saida: unknown): ResultadoInterpretacao
     return {
       tipo: "sucesso",
       data: {
-        totais: bruto.totais,
+        vendasBrutas: bruto.vendasBrutas,
         porDia: bruto.porDia,
         periodo: bruto.periodo,
         // §27: a procedencia atravessa. Sem ela o agente teria os numeros

@@ -4,9 +4,23 @@ Auditoria do gate F7b.4.8.3 §10. Tudo aqui foi **medido** contra a API
 oficial na loja autorizada, em leitura apenas. Onde a medição não fechou,
 o caso está marcado `ABERTO` — não há suposição preenchendo lacuna.
 
-Vale para a resposta do agente (`mercadolivre.vendas.consultar`), cuja
-fonte é `lib/mercado-livre-vendas.ts`. **Não** descreve o espelho da CDS
-(tabela `pedidos`, Dashboard, página Vendas), declarado neste gate como
+> **Atualização F7b.4.8.5.** Este documento descreve a dimensão de
+> **PAGAMENTO**, que é `buscarVendasPagasML`. Ela **não é mais** o que o
+> agente responde quando alguém pergunta "quanto vendi".
+>
+> Desde a F7b.4.8.5 o agente responde **VENDAS BRUTAS**:
+> `order.date_closed` convertido para America/Sao_Paulo, soma de
+> `order.total_amount`, unidades por `Σ order_items[].quantity`, excluindo
+> apenas `cancel_code = pack_splitted`. Provado contra o relatório
+> detalhado da própria loja: R$ 393.838,47 / 10.898 vendas / 11.361
+> unidades em setembro de 2026, com igualdade de conjunto pedido a pedido.
+>
+> As duas dimensões coexistem de propósito: venda bruta é o que foi
+> vendido, pagamento é o que entrou. A segunda segue `PARTIAL`, e é dela
+> que o resto deste documento trata.
+
+**Não** descreve o espelho da CDS (tabela `pedidos`, Dashboard, página
+Vendas), declarado como
 `CDS_SALES_MIRROR_ACCURACY = KNOWN_UNRELIABLE / DEFERRED`.
 
 ---

@@ -341,9 +341,21 @@ export const DECLARACOES: Readonly<Record<string, { descricao: string; schemaEnt
     }),
     "mercadolivre.vendas.consultar": Object.freeze({
       descricao:
-        "Consulta as vendas PAGAS na conta do Mercado Livre ligada a este agente, direto " +
+        "Consulta as VENDAS BRUTAS na conta do Mercado Livre ligada a este agente, direto " +
         "na API oficial do Mercado Livre. Use esta ferramenta quando a pergunta for sobre " +
         "vendas, faturamento ou pedidos DO MERCADO LIVRE: ela e a fonte oficial. " +
+        // ── F7b.4.8.5: o que os tres numeros SAO ────────────────────
+        //
+        // A saida traz `vendasBrutas.valor`, `.vendas` e `.unidades`. Sao
+        // coisas diferentes, e o painel do Mercado Livre mostra as tres
+        // separadas. Um modelo que confunde venda com unidade responde
+        // "11.361 vendas" num mes que teve 10.898 — e o numero fica errado
+        // sem parecer errado.
+        "A resposta traz TRES numeros, e eles nao sao a mesma coisa: `vendasBrutas.valor` " +
+        "em reais, `vendasBrutas.vendas` (quantas vendas) e `vendasBrutas.unidades` " +
+        "(quantos itens, que e maior quando alguem compra duas unidades do mesmo anuncio). " +
+        "Ao responder, diga os tres: Vendas brutas em R$, numero de Vendas e numero de " +
+        "Unidades. Nunca use a contagem de vendas como se fosse unidades. " +
         "Em `periodo`, repita o periodo COM AS PALAVRAS DA PESSOA — 'esta semana', " +
         "'ultimos 7 dias', 'agosto de 2026', 'de 10/09/2026 ate 20/09/2026', " +
         "'no dia 15/08/2026'. A CDS converte em datas no fuso de Sao Paulo; nao calcule " +
@@ -363,7 +375,7 @@ export const DECLARACOES: Readonly<Record<string, { descricao: string; schemaEnt
         "ferramenta devolveu, para a pessoa corrigir se nao for o que ela queria. " +
         "Para COMPARAR dois periodos, chame a ferramenta DUAS vezes, uma por periodo. " +
         "A resposta traz `completo`: quando ele for false, a varredura nao recuperou " +
-        "todos os pedidos e NAO ha totais — nesse caso diga que nao foi possivel " +
+        "todas as vendas e NAO ha numeros — nesse caso diga que nao foi possivel " +
         "recuperar tudo e NAO apresente comparacao nem porcentagem como conclusao. " +
         // ── F7b.4.8.3 §10: o que o numero E, dito ao modelo ─────────
         //
@@ -373,11 +385,25 @@ export const DECLARACOES: Readonly<Record<string, { descricao: string; schemaEnt
         // periodo passado nao e imutavel. Se o modelo nao souber, ele
         // apresenta um numero bruto como se fosse o que a pessoa ganhou,
         // e um mes fechado como se nunca mais fosse mudar.
-        "O `faturamento` e BRUTO — e o que o comprador pagou, sem descontar tarifa " +
-        "do Mercado Livre, frete do vendedor, imposto nem custo. Nao o chame de lucro " +
-        "nem de liquido. Estorno, chargeback e mediacao mudam o numero de um periodo " +
-        "JA PASSADO, entao nao apresente periodo fechado como definitivo: e o que a " +
-        "conta do Mercado Livre diz agora sobre aquele periodo. " +
+        // ── F7b.4.8.5: a semantica provada no F7b.4.8.4 ─────────────
+        //
+        // `valor` e a soma de `order.total_amount` dos pedidos FECHADOS no
+        // periodo, no fuso de Sao Paulo. Provado contra o relatorio
+        // detalhado que o dono baixou do proprio Mercado Livre: igual em
+        // 10.898 de 10.898 vendas de setembro de 2026.
+        //
+        // A regra anterior somava `paid_amount` dos pagamentos aprovados e
+        // devolvia R$ 383.829,43 onde o oficial diz R$ 393.838,47 — dez mil
+        // reais e 568 vendas a menos, porque venda cancelada depois tem
+        // `paid_amount` zero e ainda assim e venda do mes.
+        "`vendasBrutas.valor` e BRUTO: e o que o comprador pagou pelos produtos, sem " +
+        "descontar tarifa do Mercado Livre, frete do vendedor, imposto nem custo. Nao o " +
+        "chame de lucro, de liquido nem de recebido. " +
+        "A venda conta no mes em que foi FECHADA, mesmo que depois tenha sido cancelada " +
+        "ou estornada — e assim que o proprio Mercado Livre conta. " +
+        "Estorno, chargeback e mediacao podem mudar o numero de um periodo JA PASSADO, " +
+        "entao nao apresente periodo fechado como definitivo: e o que a conta do " +
+        "Mercado Livre diz agora sobre aquele periodo. " +
         "Somente leitura: nao altera anuncio, nao cancela e nao responde nada.",
       // ── F7b.4.8.2: SO `periodo`, e OBRIGATORIO ────────────────────
       //

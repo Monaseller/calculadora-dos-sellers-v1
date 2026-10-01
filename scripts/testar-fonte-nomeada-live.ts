@@ -492,10 +492,10 @@ async function main(): Promise<void> {
         ok("G5  a fonte declarada e a API do Mercado Livre",
           r.fonte === "mercadolivre_api", r.fonte);
         ok("G5a a varredura COMPLETOU — §11",
-          r.completo === true && r.totais !== null,
+          r.completo === true && r.vendasBrutas !== null,
           `completo=${String(r.completo)} parcial=${JSON.stringify(r.parcial)}`);
         ok("G6  houve pedido pago no periodo — resposta real",
-          (r.totais?.pedidos ?? 0) > 0, String(r.totais?.pedidos));
+          (r.vendasBrutas?.vendas ?? 0) > 0, String(r.vendasBrutas?.vendas));
         ok("G7  e o periodo foi resolvido pela CDS",
           r.periodo.de !== "" && r.periodo.de < r.periodo.ate,
           `${r.periodo.de}..${r.periodo.ate}`);

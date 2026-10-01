@@ -56,6 +56,10 @@
  */
 import "server-only";
 import { getMLLojaById } from "@/lib/ml-auth";
+import {
+  diaEmSaoPaulo, fimDoDiaEmSaoPaulo, inicioDoDiaEmSaoPaulo,
+  somarDiasNoCalendario,
+} from "@/lib/fuso-sao-paulo";
 import type { LimiteExterno } from "@/lib/controle-tempo";
 
 /**
@@ -90,6 +94,22 @@ export const LIMITE_POR_PAGINA = 51;
  * O mesmo -5 de `sync-ml.ts`. Ver o bloco de cabecalho.
  */
 export const MARGEM_CRIACAO_DIAS = 5;
+
+/**
+ * Os dois campos de data que `/orders/search` aceita como FILTRO.
+ *
+ * MEDIDO (`medir-ml-filtro-fechamento.ts`): os dois paginam igual —
+ * `unicos == paging.total` em todo dia testado — e setembro inteiro por
+ * `order.date_closed` chegou aos MESMOS 11.032 pedidos que a coleta por
+ * criacao, em 235 chamadas. Nao e inferencia por status 200: e o mesmo
+ * conjunto por dois caminhos diferentes.
+ *
+ * MEDIDO tambem: o filtro vaza alguns pedidos do dia SEGUINTE na borda.
+ * Por isso quem recorta de verdade e o dia em Sao Paulo, localmente — o
+ * filtro so reduz o que vem pela rede.
+ */
+export const CAMPO_DE_CRIACAO = "order.date_created";
+export const CAMPO_DE_FECHAMENTO = "order.date_closed";
 
 /**
  * Teto de paginas por SUBJANELA de um dia.
@@ -354,6 +374,14 @@ function pagamentoQueConta(pedido: Record<string, unknown>): string | null {
 }
 
 /** Somente `number` finito. Nunca `Number(...)`, nunca `+`. */
+/** O resultado de UMA subjanela. `completa` e o que autoriza o total. */
+interface Subjanela {
+  readonly brutos: readonly Record<string, unknown>[];
+  readonly paginas: number;
+  readonly completa: boolean;
+  readonly erroFatal: ErroVendasML | null;
+}
+
 function numeroOuZero(v: unknown): number {
   return typeof v === "number" && Number.isFinite(v) ? v : 0;
 }
@@ -371,21 +399,35 @@ function numeroOuZero(v: unknown): number {
  * O passo 4 nao pode virar passo 3: a API nao o oferece (medido), e
  * pedi-lo a ela devolveria a loja inteira com status 200.
  */
-export async function buscarVendasPagasML(
-  entrada: EntradaVendasML,
-  limiteExterno?: LimiteExterno,
-  portas?: PortasVendasML
-): Promise<ResultadoBrutoVendasML> {
-  const { userId, lojaId, de, ate } = entrada;
-  const janelaVazia = { de: "", ate: "" };
+/** O que a varredura compartilhada devolve. */
+interface Varredura {
+  readonly subjanelas: readonly Subjanela[];
+  readonly erro: ErroVendasML | null;
+}
 
-  if (!userId || !lojaId) return falha("credencial_ausente", janelaVazia);
-  if (!ehDataIso(de) || !ehDataIso(ate) || de > ate) {
-    return falha("resposta_invalida", janelaVazia);
-  }
-
-  const criacaoDe = somarDias(de, -MARGEM_CRIACAO_DIAS);
-  const janela = { de: criacaoDe, ate };
+/**
+ * A varredura, dia por dia — UMA implementacao para as duas regras.
+ *
+ * ── Por que compartilhada ───────────────────────────────────────────
+ *
+ * Aqui moram as correcoes da F7b.4.8.3, que custaram um gate inteiro:
+ * pagina curta nao e fim, offset anda pelo que veio, cobertura conferida
+ * contra `paging.total` do dia, 429 espera em vez de abortar, releitura
+ * do dia que vem curto, concorrencia de tres. Uma segunda copia disso
+ * para a regra nova seria a garantia de que uma das duas regrediria.
+ *
+ * O que muda entre as regras e o CAMPO de data do filtro e a lista de
+ * dias. O resto e identico.
+ */
+async function varrerDias(args: {
+  readonly userId: string;
+  readonly lojaId: string;
+  readonly campoDeData: string;
+  readonly dias: readonly string[];
+  readonly limiteExterno?: LimiteExterno;
+  readonly portas?: PortasVendasML;
+}): Promise<Varredura> {
+  const { userId, lojaId, campoDeData, dias, limiteExterno, portas } = args;
 
   const resolver = portas?.resolverCredencial ?? getMLLojaById;
   const buscar = portas?.buscar ?? fetch;
@@ -394,26 +436,10 @@ export async function buscarVendasPagasML(
   try {
     credencial = await resolver(lojaId, userId, limiteExterno);
   } catch {
-    return falha("indisponivel", janela);
+    return { subjanelas: [], erro: "indisponivel" };
   }
   if (credencial === null || !credencial.accessToken || !credencial.sellerId) {
-    return falha("credencial_ausente", janela);
-  }
-
-  // ── A varredura, subjanela por subjanela ─────────────────────────
-  //
-  // Cada DIA da janela de criacao e uma consulta propria, paginada ate a
-  // pagina curta. O motivo esta no docblock de `MAX_PAGINAS_POR_DIA`: a
-  // janela inteira nao cabe no teto de offset do proprio provedor.
-  const dias: string[] = [];
-  for (let d = criacaoDe; d <= ate; d = somarDias(d, 1)) dias.push(d);
-
-  /** O resultado de UMA subjanela. `completa` e o que autoriza o total. */
-  interface Subjanela {
-    readonly brutos: readonly Record<string, unknown>[];
-    readonly paginas: number;
-    readonly completa: boolean;
-    readonly erroFatal: ErroVendasML | null;
+    return { subjanelas: [], erro: "credencial_ausente" };
   }
 
   const lerSubjanela = async (dia: string): Promise<Subjanela> => {
@@ -466,8 +492,14 @@ export async function buscarVendasPagasML(
       //
       // Um dia civil INTEIRO no fuso de Sao Paulo. Cortar a meia-noite
       // perderia o dia que a pessoa pediu.
-      url.searchParams.set("order.date_created.from", `${dia}T00:00:00.000-03:00`);
-      url.searchParams.set("order.date_created.to", `${dia}T23:59:59.999-03:00`);
+      //
+      // As fronteiras saem de `fuso-sao-paulo.ts`, que descobre o offset
+      // VIGENTE naquele dia em vez de supor -03:00. Se o horario de verao
+      // voltar, o filtro acompanha sem ninguem mexer aqui.
+      url.searchParams.set(
+        `${campoDeData}.from`, inicioDoDiaEmSaoPaulo(dia) ?? `${dia}T00:00:00.000-03:00`);
+      url.searchParams.set(
+        `${campoDeData}.to`, fimDoDiaEmSaoPaulo(dia) ?? `${dia}T23:59:59.999-03:00`);
       url.searchParams.set("sort", "date_asc");
       url.searchParams.set("limit", String(LIMITE_POR_PAGINA));
       url.searchParams.set("offset", String(offset));
@@ -670,14 +702,55 @@ export async function buscarVendasPagasML(
     const fatal = lidas.find((x) => x.erroFatal !== null);
     // Erro de CONTA interrompe: os dias restantes receberiam o mesmo.
     if (fatal !== undefined) {
-      return falha(fatal.erroFatal as ErroVendasML, janela);
+      return { subjanelas: [], erro: fatal.erroFatal as ErroVendasML };
     }
   }
 
   // Nenhum dia leu nada e nenhum completou: nao ha resposta a dar.
   if (subjanelas.every((x) => x.paginas === 0)) {
-    return falha("indisponivel", janela);
+    return { subjanelas: [], erro: "indisponivel" };
   }
+
+  return { subjanelas, erro: null };
+}
+
+/**
+ * As vendas PAGAS no periodo — recorte por data de PAGAMENTO.
+ *
+ * ── O que esta funcao e, e o que ela NAO e ──────────────────────────
+ *
+ * Ela responde sobre FLUXO FINANCEIRO: quanto foi pago, quando o
+ * pagamento foi aprovado. A semantica disso segue PARCIAL
+ * (`docs/SEMANTICA_FATURAMENTO_ML.md`), e ela NAO e a resposta para
+ * "quanto vendi" — essa e `buscarVendasBrutasML`, provada contra o
+ * relatorio oficial do Mercado Livre no F7b.4.8.4.
+ *
+ * Preservada de proposito: pagamento nao e lixo, e outra dimensao.
+ */
+export async function buscarVendasPagasML(
+  entrada: EntradaVendasML,
+  limiteExterno?: LimiteExterno,
+  portas?: PortasVendasML
+): Promise<ResultadoBrutoVendasML> {
+  const { userId, lojaId, de, ate } = entrada;
+  const janelaVazia = { de: "", ate: "" };
+
+  if (!userId || !lojaId) return falha("credencial_ausente", janelaVazia);
+  if (!ehDataIso(de) || !ehDataIso(ate) || de > ate) {
+    return falha("resposta_invalida", janelaVazia);
+  }
+
+  const criacaoDe = somarDias(de, -MARGEM_CRIACAO_DIAS);
+  const janela = { de: criacaoDe, ate };
+
+  const dias: string[] = [];
+  for (let d = criacaoDe; d <= ate; d = somarDias(d, 1)) dias.push(d);
+
+  const varredura = await varrerDias({
+    userId, lojaId, campoDeData: CAMPO_DE_CRIACAO, dias, limiteExterno, portas,
+  });
+  if (varredura.erro !== null) return falha(varredura.erro, janela);
+  const subjanelas = varredura.subjanelas;
 
   // ── Dedupe por id do pedido — §8 ────────────────────────────────
   //
@@ -728,5 +801,205 @@ export async function buscarVendasPagasML(
     duplicadosDescartados: duplicados, foraDaJanelaFinanceira: fora,
     completo, truncado: !completo, subjanelasIncompletas: incompletas,
     janelaDeCriacao: janela,
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// VENDAS BRUTAS — F7b.4.8.5
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * O codigo de cancelamento que o Mercado Livre usa quando ELE desfaz o
+ * pedido e cria outro no lugar.
+ *
+ * MEDIDO na F7b.4.8.4: 134 pedidos de setembro trazem este codigo, nenhum
+ * tem irmao vivo no mesmo `pack_id`, e NENHUM aparece no relatorio oficial
+ * da loja. Contar os dois lados contaria a mesma venda duas vezes.
+ *
+ * A exclusao e so desta: cancelamento comercial — o comprador desistiu, o
+ * envio falhou, houve mediacao — CONTINUA sendo venda bruta, porque e
+ * assim que o relatorio oficial conta.
+ */
+export const CANCELAMENTO_DE_PACOTE_REFEITO = "pack_splitted";
+
+export interface PedidoVendaBrutaML {
+  readonly pedidoId: string;
+  /** `AAAA-MM-DD` em America/Sao_Paulo — o dia do FECHAMENTO. */
+  readonly diaFechamento: string;
+  /** `order.total_amount`, como a API oficial devolveu. */
+  readonly valor: number;
+  /** Soma de `order_items[].quantity`. */
+  readonly unidades: number;
+  readonly status: string;
+  readonly cancelCode: string | null;
+  /**
+   * Soma de `unit_price x quantity` — invariante de observabilidade.
+   *
+   * MEDIDO: igual a `total_amount` em 10.898 de 10.898 vendas de setembro.
+   * Guardado para que uma divergencia futura APARECA em vez de trocar o
+   * valor silenciosamente (§7).
+   */
+  readonly valorPorItens: number;
+}
+
+export interface ResultadoVendasBrutasML {
+  readonly pedidos: readonly PedidoVendaBrutaML[];
+  readonly erro: ErroVendasML | null;
+  readonly paginasLidas: number;
+  readonly recebidosDoProvider: number;
+  readonly duplicadosDescartados: number;
+  /** Veio pelo filtro mas o fechamento cai fora do periodo (borda). */
+  readonly foraDoPeriodo: number;
+  readonly excluidosPackSplitted: number;
+  /** Pedidos em que `total_amount` discorda de `soma(unit_price x qtd)`. */
+  readonly divergenciasDeValor: number;
+  readonly completo: boolean;
+  readonly truncado: boolean;
+  readonly subjanelasIncompletas: number;
+  readonly periodo: { readonly de: string; readonly ate: string; readonly fuso: string };
+}
+
+function falhaBruta(
+  erro: ErroVendasML, de: string, ate: string
+): ResultadoVendasBrutasML {
+  return {
+    pedidos: [], erro, paginasLidas: 0, recebidosDoProvider: 0,
+    duplicadosDescartados: 0, foraDoPeriodo: 0, excluidosPackSplitted: 0,
+    divergenciasDeValor: 0, completo: false, truncado: true,
+    subjanelasIncompletas: 0,
+    periodo: { de, ate, fuso: "America/Sao_Paulo" },
+  };
+}
+
+/** O codigo de cancelamento, quando ha. */
+function codigoDeCancelamento(pedido: Record<string, unknown>): string | null {
+  const detalhe = pedido.cancel_detail;
+  if (typeof detalhe !== "object" || detalhe === null) return null;
+  const codigo = (detalhe as Record<string, unknown>).code;
+  return typeof codigo === "string" && codigo !== "" ? codigo : null;
+}
+
+/**
+ * As VENDAS BRUTAS do periodo — a semantica provada no F7b.4.8.4.
+ *
+ * ── A regra, e de onde ela veio ─────────────────────────────────────
+ *
+ * Provada contra o relatorio detalhado que o dono baixou do proprio
+ * Mercado Livre, pedido por pedido, para setembro de 2026:
+ *
+ *   data        `order.date_closed` em America/Sao_Paulo   10.898/10.898
+ *   valor       `order.total_amount`                       10.898/10.898
+ *   unidades    soma de `order_items[].quantity`           10.898/10.898
+ *   populacao   igualdade de conjunto                      0 a mais, 0 a menos
+ *
+ * E o que ela NAO exige, porque o relatorio oficial tambem nao:
+ *
+ *   `order.status = paid`      nao exigido
+ *   pagamento aprovado         nao exigido
+ *   nao ter sido cancelado     nao exigido
+ *   nao ter sido estornado     nao exigido
+ *
+ * Venda cancelada depois continua sendo venda do mes em que fechou — e
+ * `paid_amount` dela e 0,00, que era exatamente como a regra antiga
+ * perdia R$ 10 mil em setembro.
+ *
+ * ── Por que o filtro e por fechamento ──────────────────────────────
+ *
+ * MEDIDO: o atraso entre criacao e fechamento tem p50 de 17 segundos, mas
+ * chega a 14 DIAS, e 6 pedidos de setembro passam de 5 dias, somando
+ * R$ 212,02. Buscar por criacao com a margem do boleto perderia esses
+ * seis. `order.date_closed` filtra de verdade e pagina igual (medido), e
+ * assim nao ha margem nenhuma a adivinhar.
+ *
+ * O filtro ainda vaza pedido do dia seguinte na borda, entao quem recorta
+ * e o dia em Sao Paulo, aqui dentro.
+ */
+export async function buscarVendasBrutasML(
+  entrada: EntradaVendasML,
+  limiteExterno?: LimiteExterno,
+  portas?: PortasVendasML
+): Promise<ResultadoVendasBrutasML> {
+  const { userId, lojaId, de, ate } = entrada;
+
+  if (!userId || !lojaId) return falhaBruta("credencial_ausente", "", "");
+  if (!ehDataIso(de) || !ehDataIso(ate) || de > ate) {
+    return falhaBruta("resposta_invalida", "", "");
+  }
+
+  // Um dia civil de Sao Paulo por subjanela. Sem margem: o filtro ja e
+  // pelo campo que decide.
+  const dias: string[] = [];
+  for (let d = de; d <= ate; d = somarDiasNoCalendario(d, 1)) dias.push(d);
+
+  const varredura = await varrerDias({
+    userId, lojaId, campoDeData: CAMPO_DE_FECHAMENTO, dias, limiteExterno, portas,
+  });
+  if (varredura.erro !== null) return falhaBruta(varredura.erro, de, ate);
+
+  const pedidos: PedidoVendaBrutaML[] = [];
+  const vistos = new Set<string>();
+  let recebidos = 0;
+  let duplicados = 0;
+  let fora = 0;
+  let excluidos = 0;
+  let divergencias = 0;
+  let paginas = 0;
+  let incompletas = 0;
+
+  for (const sub of varredura.subjanelas) {
+    paginas += sub.paginas;
+    if (!sub.completa) incompletas += 1;
+    recebidos += sub.brutos.length;
+
+    for (const o of sub.brutos) {
+      const id = String(o.id ?? "");
+      if (id !== "" && vistos.has(id)) { duplicados += 1; continue; }
+      if (id !== "") vistos.add(id);
+
+      // ── O RECORTE: dia de FECHAMENTO em Sao Paulo ───────────────
+      //
+      // Convertido ANTES de comparar. Cortar o texto da data e comparar
+      // depois foi o bug que levou dois gates para achar: um pedido de
+      // 31/08 23h33 no offset -04:00 do provedor e venda de 01/09 aqui.
+      const dia = diaEmSaoPaulo(o.date_closed);
+      if (dia === null || dia < de || dia > ate) { fora += 1; continue; }
+
+      const cancelCode = codigoDeCancelamento(o);
+      if (cancelCode === CANCELAMENTO_DE_PACOTE_REFEITO) { excluidos += 1; continue; }
+
+      const itens = Array.isArray(o.order_items) ? o.order_items : [];
+      let unidades = 0;
+      let porItens = 0;
+      for (const bruto of itens) {
+        if (typeof bruto !== "object" || bruto === null) continue;
+        const item = bruto as Record<string, unknown>;
+        const qtd = numeroOuZero(item.quantity);
+        unidades += qtd;
+        porItens += numeroOuZero(item.unit_price) * qtd;
+      }
+
+      const valor = numeroOuZero(o.total_amount);
+      // §7: divergencia NAO troca o valor — ela e contada, para aparecer.
+      if (Math.abs(valor - porItens) > 0.005) divergencias += 1;
+
+      pedidos.push({
+        pedidoId: id,
+        diaFechamento: dia,
+        valor,
+        unidades,
+        status: typeof o.status === "string" ? o.status : "",
+        cancelCode,
+        valorPorItens: porItens,
+      });
+    }
+  }
+
+  const completo = incompletas === 0;
+  return {
+    pedidos, erro: null, paginasLidas: paginas, recebidosDoProvider: recebidos,
+    duplicadosDescartados: duplicados, foraDoPeriodo: fora,
+    excluidosPackSplitted: excluidos, divergenciasDeValor: divergencias,
+    completo, truncado: !completo, subjanelasIncompletas: incompletas,
+    periodo: { de, ate, fuso: "America/Sao_Paulo" },
   };
 }

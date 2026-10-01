@@ -529,12 +529,12 @@ async function main(): Promise<void> {
           r.periodo.de !== "" && r.periodo.ate !== "" && r.periodo.de < r.periodo.ate,
           `${r.periodo.de}..${r.periodo.ate}`);
         ok("F4a a varredura COMPLETOU — §11",
-          r.completo === true && r.totais !== null,
+          r.completo === true && r.vendasBrutas !== null,
           `completo=${String(r.completo)}`);
         ok("F5  houve pedido pago no periodo — a resposta e real",
-          (r.totais?.pedidos ?? 0) > 0, String(r.totais?.pedidos));
+          (r.vendasBrutas?.vendas ?? 0) > 0, String(r.vendasBrutas?.vendas));
         ok("F6  e o faturamento e positivo (valor nao impresso)",
-          (r.totais?.faturamento ?? 0) > 0);
+          (r.vendasBrutas?.valor ?? 0) > 0);
 
         // CONTROLE: o argumento CRU — o que o Rodrigo sofreu — seria
         // recusado pelo validador antes de qualquer chamada.

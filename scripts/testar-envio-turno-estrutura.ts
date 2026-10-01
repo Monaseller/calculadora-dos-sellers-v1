@@ -220,8 +220,13 @@ secao("E. O modelo nao calcula data");
 
 secao("F. A completude e a condicao do total");
 {
-  ok("F1  a leitura devolve `totais: null` quando incompleta",
-    /totais: null/.test(VENDAS));
+  // F7b.4.8.5: o campo mudou de nome junto com a semantica — `totais`
+  // media pagamento, `vendasBrutas` mede venda. O que esta sonda guarda e
+  // a REGRA: varredura incompleta nao entrega numero.
+  ok("F1  a leitura devolve `vendasBrutas: null` quando incompleta",
+    /vendasBrutas: null/.test(VENDAS));
+  ok("F1a e o campo antigo nao sobrou em lugar nenhum",
+    !/totais/.test(VENDAS));
   ok("F2  e diz o tamanho do que faltou", /parcial/.test(VENDAS));
   ok("F3  §8: a completude e conferida contra `paging\\.total` do dia",
     /totaisRelatados/.test(BRUTO) && /idsDoDia\.size >= menorTotal/.test(BRUTO));
