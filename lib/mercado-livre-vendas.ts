@@ -261,6 +261,18 @@ export interface EntradaVendasML {
   readonly de: string;
   /** Fim financeiro, inclusivo, `YYYY-MM-DD` no fuso de Sao Paulo. */
   readonly ate: string;
+  /**
+   * Corte por HORARIO, opcional — F8.2-B.
+   *
+   * Instante (epoch ms) apos o qual um pedido nao conta, mesmo dentro do
+   * dia. Existe para o painel "Vendas ao vivo" comparar hoje ate agora com
+   * ONTEM ATE O MESMO HORARIO. O criterio continua sendo o MESMO
+   * `order.date_closed` do recorte por dia — so com um limite a mais.
+   *
+   * Ausente = comportamento provado de sempre (dia inteiro). A Tool de
+   * vendas e o filtro do modelo NAO passam este campo.
+   */
+  readonly ateInstanteMs?: number;
 }
 
 /**
@@ -963,6 +975,13 @@ export async function buscarVendasBrutasML(
       // 31/08 23h33 no offset -04:00 do provedor e venda de 01/09 aqui.
       const dia = diaEmSaoPaulo(o.date_closed);
       if (dia === null || dia < de || dia > ate) { fora += 1; continue; }
+
+      // F8.2-B: o corte por horario, quando pedido, e o MESMO campo —
+      // fechamento depois do instante fica de fora, contado como borda.
+      if (entrada.ateInstanteMs !== undefined) {
+        const fechadoEm = typeof o.date_closed === "string" ? Date.parse(o.date_closed) : NaN;
+        if (!Number.isFinite(fechadoEm) || fechadoEm > entrada.ateInstanteMs) { fora += 1; continue; }
+      }
 
       const cancelCode = codigoDeCancelamento(o);
       if (cancelCode === CANCELAMENTO_DE_PACOTE_REFEITO) { excluidos += 1; continue; }

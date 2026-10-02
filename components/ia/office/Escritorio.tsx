@@ -3,20 +3,16 @@
 /**
  * O escritorio da CDS IA — home visual da area.
  *
- * ── Layout derivado, nunca coordenada ───────────────────────────────
+ * ── Office V1: cena, painel e chat ──────────────────────────────────
  *
- * Ha duas zonas, e o ESTADO decide em qual o agente aparece:
+ * A cena e a imagem aprovada com seis mesas fixas (`OFFICE_SLOTS`, em
+ * `OfficeSceneV1.tsx`). A posicao pertence ao CENARIO: nenhum agente
+ * carrega `x`/`y`, e nenhuma mesa e reservada por nome. A lista de
+ * agentes, em ordem de apresentacao, ocupa as mesas; quem passa da sexta
+ * aparece em "Outros agentes", abaixo da cena.
  *
- *   estacoes — grid `auto-fit`, para quem esta produzindo;
- *   copa     — para quem esta ocioso ou fora de operacao.
- *
- * Nenhum agente carrega `x`/`y`. Acrescentar o vigesimo agente nao exige
- * tocar em codigo: o grid reflui. E a mudanca de zona ja e, sozinha, a
- * leitura de "levantou da mesa" — sem engine, sem canvas, sem fisica.
- *
- * Quando quisermos a caminhada de verdade, ela entra como transicao de
- * `transform` entre as duas zonas. A estrutura ja permite; e por isso que
- * a posicao nao esta congelada em constante nenhuma.
+ * Ao lado, o painel do agente selecionado (dados e ferramentas reais) e,
+ * abaixo, o `ChatDoAgente` real, num host remontado por agente.
  *
  * ── Por que `agoraMs` vem do cliente, e nao do render ───────────────
  *
@@ -44,19 +40,14 @@
  * quando a rede fica lenta, e a tela passa a aplicar respostas fora de
  * ordem — o palco piscaria entre dois retratos diferentes.
  */
-import { useEffect, useMemo, useState } from "react";
-import { BREAKPOINT, CROMO, ESPACO, FONTE, PALCO, RAIO, degrau } from "@/lib/ia/design";
-import {
-  JANELA_CONCLUIDO_MS,
-  aparenciaDoAgente,
-  estaNaEstacao,
-  rotuloDe,
-} from "@/lib/ia/estados";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { JANELA_CONCLUIDO_MS, aparenciaDoAgente } from "@/lib/ia/estados";
 import { listarAgentesDoEscritorio, type AgenteComSnapshotUI } from "@/lib/ia/agentes-http";
-import type { AgenteUI } from "@/lib/ia/contratos";
-import Estacao, { Personagem } from "@/components/ia/office/Estacao";
-import PainelAgente from "@/components/ia/office/PainelAgente";
-import BadgeEstado from "@/components/ia/BadgeEstado";
+import OfficeSceneV1, { OFFICE_SLOTS, OutrosAgentes } from "@/components/ia/office/OfficeSceneV1";
+import OfficeAgentPanelV1 from "@/components/ia/office/OfficeAgentPanelV1";
+import OfficeChatHost from "@/components/ia/office/OfficeChatHost";
+import VendasAoVivo from "@/components/ia/office/VendasAoVivo";
+import estilos from "@/components/ia/office/office-v1.module.css";
 
 /** De quanto em quanto tempo o palco volta a perguntar. */
 const INTERVALO_REFRESH_MS = 5_000;
@@ -103,12 +94,33 @@ function proximaExpiracaoMs(
 
 type EstadoDaLeitura = "carregando" | "ok" | "nao_autenticado" | "falha";
 
+/**
+ * Qual agente fica selecionado — F8.3-C1.1.
+ *
+ * A regra de sempre (o atual, se ainda existe; senao o primeiro), com UMA
+ * entrada a mais: `pedido` (o `?agente=` da URL) vale SO na selecao
+ * INICIAL (`atual === null`) e SO se o id estiver na lista real. Id
+ * inexistente, invalido ou de outro dono simplesmente nao casa, e vale o
+ * primeiro — o fallback de sempre.
+ */
+export function escolherSelecao(
+  ids: readonly string[], atual: string | null, pedido: string | null
+): string | null {
+  if (atual !== null && ids.includes(atual)) return atual;
+  if (atual === null && pedido !== null && ids.includes(pedido)) return pedido;
+  return ids[0] ?? null;
+}
+
 export default function Escritorio() {
   // `agoraMs` avanca a cada leitura: e o que faz o flash de conclusao
   // expirar. Ele nasce `null` para que o primeiro render seja igual nos
   // dois lados da hidratacao — o relogio so e lido depois da montagem.
   const [agoraMs, setAgoraMs] = useState<number | null>(null);
   const [selecionado, setSelecionado] = useState<string | null>(null);
+  // F8.3-C1.1: `?agente=<id>`, lido UMA vez. Consumido na primeira selecao;
+  // depois disso a URL nao manda mais em nada.
+  const pedido = useRef<string | null>(
+    typeof window === "undefined" ? null : new URLSearchParams(window.location.search).get("agente"));
   const [estado, setEstado] = useState<EstadoDaLeitura>("carregando");
   // O ULTIMO retrato bom. Uma falha de refresh nao o apaga: a tela
   // continua mostrando o que sabe, em vez de piscar para vazio por causa
@@ -174,9 +186,42 @@ export default function Escritorio() {
     return () => window.clearTimeout(despertador);
   }, [agentes, agoraMs]);
 
+  // ── A ORDEM DE APRESENTACAO ───────────────────────────────────────
+  //
+  // O servidor ordena por `criado_em`, sem desempate. Aqui a ordem e
+  // fechada com `id` — so para apresentacao, nada e persistido. E essa
+  // ordem que ocupa os `OFFICE_SLOTS`: o primeiro agente vai para a
+  // mesa 1, e assim por diante. Nenhuma mesa pertence a um nome.
+  const ordenados = useMemo(
+    () =>
+      [...agentes].sort((a, b) => {
+        const porData = a.agente.criado_em.localeCompare(b.agente.criado_em);
+        if (porData !== 0) return porData;
+        return a.agente.id < b.agente.id ? -1 : a.agente.id > b.agente.id ? 1 : 0;
+      }),
+    [agentes]
+  );
+
+  // ── A SELECAO ─────────────────────────────────────────────────────
+  //
+  // Identidade e `agente.id`, nunca o nome. Sem selecao (primeira leitura)
+  // ou com o selecionado sumido apos um refresh, vale o primeiro agente
+  // visualizado. Lista vazia: nada selecionado.
+  //
+  // F8.3-C1.1: a primeira selecao so acontece com a lista REAL na mao
+  // (`estado === "ok"`), entao o `?agente=` e aplicado antes de qualquer
+  // outro agente ser escolhido — sem trocar de A para B na tela.
+  useEffect(() => {
+    if (estado !== "ok") return;
+    if (selecionado !== null && ordenados.some((a) => a.agente.id === selecionado)) return;
+    const proximo = escolherSelecao(ordenados.map((a) => a.agente.id), selecionado, pedido.current);
+    pedido.current = null;
+    setSelecionado(proximo);
+  }, [estado, ordenados, selecionado]);
+
   const comAparencia = useMemo(() => {
     if (agoraMs === null) return [];
-    return agentes.map((item) => ({
+    return ordenados.map((item) => ({
       agente: item.agente,
       // Os cinco estados e o flash transitorio continuam sendo derivados
       // AQUI, pelo helper de sempre. O servidor nao manda estado pronto:
@@ -184,290 +229,76 @@ export default function Escritorio() {
       aparencia: aparenciaDoAgente(item.agente, item.sinais, agoraMs),
       atividade: item.atividade,
     }));
-  }, [agentes, agoraMs]);
+  }, [ordenados, agoraMs]);
 
-  const naEstacao = comAparencia.filter((a) => estaNaEstacao(a.aparencia));
-  const naCopa = comAparencia.filter((a) => !estaNaEstacao(a.aparencia));
+  const naCena = comAparencia.slice(0, OFFICE_SLOTS.length);
+  const outros = comAparencia.slice(OFFICE_SLOTS.length);
   const aberto = comAparencia.find((a) => a.agente.id === selecionado) ?? null;
 
+  const aviso =
+    estado === "carregando" ? (
+      "Montando o escritório…"
+    ) : estado === "nao_autenticado" ? (
+      "Sua sessão expirou. Entre novamente para ver o escritório."
+    ) : estado === "falha" ? (
+      // Falha na PRIMEIRA leitura. A tela assume que nao conseguiu
+      // perguntar — nunca finge um escritorio vazio, e nunca cai para
+      // dados simulados.
+      "Não foi possível carregar o escritório agora. A tela tenta de novo sozinha."
+    ) : comAparencia.length === 0 ? (
+      <>
+        Você ainda não tem agentes. Crie o primeiro na{" "}
+        <a href="/ia/agentes">lista de agentes</a>.
+      </>
+    ) : null;
+
   return (
-    <>
-      <style>{css}</style>
-
-      {/* Abaixo do minimo, o palco nao e espremido: some e da lugar ao
-          convite para a lista, que e a representacao adaptada. Decisao
-          por CSS, nao por JS — sem listener de resize, sem hidratacao
-          divergente. */}
-      <div className="cds-ia-fallback" role="note">
-        <strong style={{ display: "block", marginBottom: 6 }}>Escritório indisponível nesta largura</strong>
-        O mapa do escritório precisa de mais espaço para ser legível. Use a{" "}
-        <a href="/ia/agentes" style={{ color: CROMO.acento }}>lista de agentes</a>, que mostra a
-        mesma informação.
-      </div>
-
-      <div className="cds-ia-palco">
-        {/* Parede */}
-        <div style={estilos.parede}>
-          <div style={estilos.janela} />
-          <div style={{ ...estilos.janela, left: "auto", right: "8%" }} />
-        </div>
-
-        {/* Piso */}
-        <div style={estilos.piso}>
-          {estado === "carregando" ? (
-            <p style={estilos.carregando}>Montando o escritório…</p>
-          ) : estado === "nao_autenticado" ? (
-            <p style={estilos.carregando} role="alert">
-              Sua sessão expirou. Entre novamente para ver o escritório.
-            </p>
-          ) : estado === "falha" ? (
-            // Falha na PRIMEIRA leitura. A tela assume que não conseguiu
-            // perguntar — nunca finge um escritório vazio, e nunca cai
-            // para dados simulados.
-            <p style={estilos.carregando} role="alert">
-              Não foi possível carregar o escritório agora. A tela tenta de novo sozinha.
-            </p>
-          ) : comAparencia.length === 0 ? (
-            <p style={estilos.carregando}>
-              Você ainda não tem agentes. Crie o primeiro na{" "}
-              <a href="/ia/agentes" style={{ color: CROMO.acento }}>lista de agentes</a>.
-            </p>
-          ) : (
-            <div className="cds-ia-zonas">
-              <section aria-label="Estações de trabalho" style={{ minWidth: 0 }}>
-                <h2 style={estilos.tituloZona}>ESTAÇÕES</h2>
-                {naEstacao.length === 0 ? (
-                  <p style={estilos.zonaVazia}>Nenhum agente trabalhando agora.</p>
-                ) : (
-                  <div className="cds-ia-grade">
-                    {naEstacao.map(({ agente, aparencia, atividade }) => (
-                      <Estacao
-                        key={agente.id}
-                        agente={agente}
-                        aparencia={aparencia}
-                        atividade={atividade}
-                        onSelecionar={() => setSelecionado(agente.id)}
-                      />
-                    ))}
-                  </div>
-                )}
-              </section>
-
-              <section aria-label="Copa" style={estilos.copa}>
-                <h2 style={{ ...estilos.tituloZona, textAlign: "center" }}>CAFÉ</h2>
-                <div style={estilos.maquina} aria-hidden="true" />
-                <div style={estilos.mesaRedonda} aria-hidden="true" />
-                <div style={estilos.copaAgentes}>
-                  {naCopa.map(({ agente, aparencia }) => (
-                    <AgenteNaCopa
-                      key={agente.id}
-                      agente={agente}
-                      apagado={aparencia.foraDeOperacao}
-                      rotulo={rotuloDe(aparencia)}
-                      onSelecionar={() => setSelecionado(agente.id)}
-                    >
-                      <BadgeEstado aparencia={aparencia} variante="palco" />
-                    </AgenteNaCopa>
-                  ))}
-                </div>
-              </section>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {aberto && (
-        <PainelAgente
-          agente={aberto.agente}
-          aparencia={aberto.aparencia}
-          atividade={aberto.atividade}
-          onFechar={() => setSelecionado(null)}
-        />
-      )}
-    </>
-  );
-}
-
-/**
- * Agente na copa: em pe, menor, sem mesa.
- *
- * E um `<button>` de verdade — o prototipo usava `<span>` em alguns
- * pontos clicaveis, o que tira teclado e leitor de tela do jogo.
- */
-function AgenteNaCopa({
-  agente,
-  apagado,
-  rotulo,
-  onSelecionar,
-  children,
-}: {
-  agente: AgenteUI;
-  apagado: boolean;
-  rotulo: string;
-  onSelecionar: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onSelecionar}
-      className="cds-ia-estacao"
-      aria-label={`${agente.nome}, ${rotulo}. Abrir detalhes.`}
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        gap: 4,
-        padding: 6,
-        background: "none",
-        border: "none",
-        cursor: "pointer",
-        font: "inherit",
-      }}
+    // Grade de areas: cena e painel lado a lado, "Outros agentes" sob a
+    // cena, e o chat na largura inteira (cena + painel) logo abaixo.
+    <div
+      className={outros.length > 0 ? estilos.raiz : `${estilos.raiz} ${estilos.raizSemOutros}`}
     >
-      <Personagem agente={agente} sentado={false} apagado={apagado} escala={0.8} />
-      <span
-        style={{
-          font: `700 10px/1.3 ${FONTE.palco}`,
-          color: apagado ? "#7c8698" : "#e8ecf3",
-          textShadow: `1px 1px 0 ${PALCO.linha}`,
-        }}
-      >
-        {agente.nome}
-      </span>
-      {children}
-    </button>
+      <div className={estilos.areaCena}>
+        <OfficeSceneV1
+          naCena={naCena}
+          selecionado={selecionado}
+          onSelecionar={setSelecionado}
+          aviso={aviso}
+        />
+      </div>
+
+      {outros.length > 0 && (
+        <div className={estilos.areaOutros}>
+          <OutrosAgentes agentes={outros} selecionado={selecionado} onSelecionar={setSelecionado} />
+        </div>
+      )}
+
+      <div className={`${estilos.areaPainel} ${estilos.colunaDireita}`}>
+        {aberto && (
+          <OfficeAgentPanelV1
+            key={aberto.agente.id}
+            agente={aberto.agente}
+            aparencia={aberto.aparencia}
+            atividade={aberto.atividade}
+          />
+        )}
+        {/* F8.2-A: GLOBAL do Escritorio — fora do `key` do agente, entao
+            trocar de agente nao refaz a leitura de vendas. */}
+        <VendasAoVivo />
+      </div>
+
+      {/* `key` por agente: trocar de agente desmonta o host inteiro, e
+          nenhuma conversa do agente anterior sobrevive a troca. */}
+      {aberto && (
+        <div className={estilos.areaChat}>
+          <OfficeChatHost
+            key={aberto.agente.id}
+            agenteId={aberto.agente.id}
+            nome={aberto.agente.nome}
+            ativo={aberto.agente.ativo}
+          />
+        </div>
+      )}
+    </div>
   );
 }
-
-const estilos: Record<string, React.CSSProperties> = {
-  parede: {
-    position: "relative",
-    height: 96,
-    background: `linear-gradient(180deg, ${PALCO.parede} 0%, ${PALCO.paredeEscura} 100%)`,
-    borderBottom: `6px solid ${PALCO.rodape}`,
-  },
-  janela: {
-    position: "absolute",
-    left: "8%",
-    top: 18,
-    width: 120,
-    height: 58,
-    background: "linear-gradient(180deg,#6fb3e0 0%,#8fd0ea 100%)",
-    border: `4px solid ${PALCO.rodape}`,
-    boxShadow: degrau(),
-  },
-  piso: {
-    padding: ESPACO.xl,
-    minHeight: 380,
-    backgroundColor: PALCO.pisoA,
-    backgroundImage: `linear-gradient(45deg,${PALCO.pisoB} 25%,transparent 25%,transparent 75%,${PALCO.pisoB} 75%),linear-gradient(45deg,${PALCO.pisoB} 25%,transparent 25%,transparent 75%,${PALCO.pisoB} 75%)`,
-    backgroundSize: "48px 48px",
-    backgroundPosition: "0 0, 24px 24px",
-  },
-  tituloZona: {
-    margin: `0 0 ${ESPACO.md}px`,
-    font: `700 10px/1 ${FONTE.palco}`,
-    letterSpacing: 2,
-    color: "#3b3227",
-  },
-  zonaVazia: {
-    margin: 0,
-    font: `12px/1.5 ${FONTE.palco}`,
-    color: "#4a4033",
-  },
-  copa: {
-    background: PALCO.copa,
-    border: `4px solid ${PALCO.rodape}`,
-    boxShadow: degrau(),
-    borderRadius: RAIO.palco,
-    padding: ESPACO.md,
-    alignSelf: "start",
-  },
-  maquina: {
-    margin: "0 auto",
-    width: 40,
-    height: 52,
-    background: "#2c3a52",
-    border: `3px solid ${PALCO.rodape}`,
-    boxShadow: "inset 0 -14px 0 0 #6b4a2f",
-  },
-  mesaRedonda: {
-    margin: `${ESPACO.md}px auto 0`,
-    width: 74,
-    height: 36,
-    background: PALCO.mesaTopo,
-    border: `3px solid ${PALCO.rodape}`,
-    boxShadow: degrau(),
-  },
-  copaAgentes: {
-    display: "flex",
-    flexWrap: "wrap",
-    justifyContent: "center",
-    gap: ESPACO.sm,
-    marginTop: ESPACO.md,
-  },
-  carregando: {
-    margin: 0,
-    font: `12px/1.5 ${FONTE.palco}`,
-    color: "#4a4033",
-  },
-};
-
-/**
- * O CSS que `style={{}}` nao alcanca: pseudo-classes, animacoes, media
- * queries. Mesmo recurso que o prototipo usa, pelo mesmo motivo.
- *
- * `prefers-reduced-motion` desliga PISCAR e PULSAR por completo — nao os
- * deixa mais lentos. Movimento repetitivo e gatilho vestibular, e o
- * estado continua legivel pelo icone, pelo texto e pela cor.
- */
-const css = `
-  .cds-ia-palco { display: block; }
-  .cds-ia-fallback { display: none; }
-
-  .cds-ia-zonas {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 190px;
-    gap: 24px;
-    align-items: start;
-  }
-  .cds-ia-grade {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-    gap: 16px;
-  }
-
-  .cds-ia-estacao { transition: transform .08s steps(2); }
-  .cds-ia-estacao:hover { transform: translateY(-3px); }
-  .cds-ia-estacao:focus-visible { outline: 3px solid #4fd1c5; outline-offset: 4px; }
-
-  .cds-ia-piscando { animation: cds-ia-piscar 1s steps(2, jump-none) infinite; }
-  @keyframes cds-ia-piscar { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
-
-  .cds-ia-pulso { animation: cds-ia-pulsar 1.2s steps(2, jump-none) infinite; }
-  @keyframes cds-ia-pulsar { 0%,100% { opacity: 1 } 50% { opacity: .2 } }
-
-  @media (max-width: ${BREAKPOINT.tablet}px) {
-    .cds-ia-zonas { grid-template-columns: minmax(0, 1fr); }
-  }
-
-  @media (max-width: ${BREAKPOINT.palcoMinimo}px) {
-    .cds-ia-palco { display: none; }
-    .cds-ia-fallback {
-      display: block;
-      padding: 20px;
-      border: 1px solid ${CROMO.borda};
-      border-radius: ${RAIO.card}px;
-      background: ${CROMO.fundoCard};
-      color: ${CROMO.textoFraco};
-      font: 13px/1.6 ${FONTE.interface};
-    }
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .cds-ia-estacao { transition: none; }
-    .cds-ia-estacao:hover { transform: none; }
-    .cds-ia-piscando, .cds-ia-pulso { animation: none; }
-  }
-`;

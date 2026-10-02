@@ -738,7 +738,9 @@ secao("J. Mocks e procedencia");
   const SUPERFICIES_DO_AGENTE = [
     "components/ia/agente/PaginaAgente.tsx",
     "components/ia/agente/VisaoGeral.tsx",
-    "components/ia/office/PainelAgente.tsx",
+    // F8.3-C3-D: o painel do Office antigo foi removido; a superficie
+    // do agente no Office agora e o painel V1.
+    "components/ia/office/OfficeAgentPanelV1.tsx",
     "components/ia/EmBreve.tsx",
   ];
   ok("J7  nenhuma superficie do agente consome mock ou avisa simulacao",

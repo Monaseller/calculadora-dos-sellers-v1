@@ -418,6 +418,9 @@ export async function responderNaConversa(
   const passos: PassoRegistrado[] = saida.passos.map((p) => ({
     funcaoId: p.funcaoId, desfecho: p.desfecho, executou: p.executou, requestId: p.requestId,
     ...(p.aprovacaoId === undefined ? {} : { aprovacaoId: p.aprovacaoId }),
+    // F8.1-B4A: repassada como o laco a montou — ja reduzida pela
+    // allowlist de `apresentacaoDoPasso`. Nada e recalculado aqui.
+    ...(p.apresentacao === undefined ? {} : { apresentacao: p.apresentacao }),
   }));
 
   const resposta = await portaConversas.anexarMensagem({

@@ -65,6 +65,76 @@ export interface PassoRegistrado {
    * pessoa ve vem do banco, e nao da memoria do browser (§11).
    */
   readonly aprovacaoId?: string;
+  /**
+   * Dados MINIMOS de apresentacao do passo — F8.1-B4A.
+   *
+   * Este campo contem SOMENTE dados de apresentacao explicitamente
+   * allowlisted, campo a campo, por `apresentacaoDoPasso`. Ele NUNCA
+   * recebe o output de uma Tool copiado automaticamente: nada de
+   * `porDia`, pedido, item, comprador, request/response bruto ou
+   * credencial. Ausente = nao ha apresentacao estruturada.
+   */
+  readonly apresentacao?: ApresentacaoDoPasso;
+}
+
+/** A Funcao cujo resultado pode virar apresentacao. Hoje, uma so. */
+export const FUNCAO_VENDAS_ML = "mercadolivre.vendas.consultar";
+
+/**
+ * Uniao FECHADA. Um tipo novo entra aqui com o seu `tipo` literal e o
+ * seu extrator — nunca como `unknown`/`Record` generico.
+ *
+ * `vendas_ml`: os quatro agregados e o periodo que o runtime do Mercado
+ * Livre JA calculou (`VendasBrutasML` + `periodo`). Copiados, nunca
+ * recalculados: a semantica financeira (date_closed, total_amount, sem
+ * pack_splitted, ticket = valor/vendas) mora no runtime.
+ */
+export type ApresentacaoDoPasso = {
+  readonly tipo: "vendas_ml";
+  readonly valor: number;
+  readonly vendas: number;
+  readonly unidades: number;
+  readonly ticketMedio: number;
+  readonly periodo: { readonly de: string; readonly ate: string };
+};
+
+/**
+ * A apresentacao de UM passo de SUCESSO, ou `null`.
+ *
+ * Recebe o `data` do envelope de sucesso — a saida ja validada por
+ * `interpretarSaidaVendasML` — e devolve um objeto NOVO, montado chave a
+ * chave. `null` para outra Funcao, consulta incompleta
+ * (`completo !== true` ou `vendasBrutas === null`) e qualquer forma
+ * inesperada: na duvida, nao ha card, e o texto continua valendo.
+ *
+ * Quem chama garante que o passo foi SUCESSO; erro, recusa e aprovacao
+ * pendente nem chegam aqui.
+ */
+export function apresentacaoDoPasso(
+  funcaoId: string,
+  data: unknown
+): ApresentacaoDoPasso | null {
+  if (funcaoId !== FUNCAO_VENDAS_ML) return null;
+  if (typeof data !== "object" || data === null) return null;
+  const saida = data as Record<string, unknown>;
+  if (saida.completo !== true) return null;
+
+  const brutas = saida.vendasBrutas;
+  if (typeof brutas !== "object" || brutas === null) return null;
+  const { valor, vendas, unidades, ticketMedio } = brutas as Record<string, unknown>;
+  const finito = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+  if (!finito(valor) || !finito(vendas) || !finito(unidades) || !finito(ticketMedio)) {
+    return null;
+  }
+
+  const periodo = saida.periodo;
+  if (typeof periodo !== "object" || periodo === null) return null;
+  const { de, ate } = periodo as Record<string, unknown>;
+  if (typeof de !== "string" || de === "" || typeof ate !== "string" || ate === "") {
+    return null;
+  }
+
+  return { tipo: "vendas_ml", valor, vendas, unidades, ticketMedio, periodo: { de, ate } };
 }
 
 export interface Mensagem {

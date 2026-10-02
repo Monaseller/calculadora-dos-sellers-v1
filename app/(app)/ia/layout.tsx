@@ -10,7 +10,7 @@
  * foi preciso tocar em `middleware.ts` nem em `lib/middleware-rotas.ts`.
  *
  * Este layout acrescenta exatamente duas coisas: o titulo da area e a
- * subnavegacao das 6 secoes.
+ * subnavegacao principal (Escritorio e Agentes — F8.1-C1).
  *
  * ── A tarja de simulacao SAIU daqui ─────────────────────────────────
  *
@@ -25,9 +25,10 @@
  * elas. Nenhuma tarja global a substitui: nao existe mais uma frase
  * verdadeira sobre a CDS IA inteira.
  *
- * `maxWidth` e maior que os 1000px de `central-ia/page.tsx` porque o
- * escritorio e um mapa, nao um formulario — apertar o palco para caber
- * na largura de leitura de texto o tornaria ilegivel.
+ * A area ocupa a largura toda depois da Sidebar (F8.1-B2): o escritorio
+ * e um mapa, nao um formulario, e o antigo teto de 1280px deixava a cena
+ * com ~900px e uma faixa vazia a direita. `maxWidth: 1840` so impede o
+ * crescimento absurdo em monitores muito largos.
  */
 import type { ReactNode } from "react";
 import SubNavIA from "@/components/ia/SubNavIA";
@@ -35,25 +36,44 @@ import { CROMO, ESPACO, FONTE } from "@/lib/ia/design";
 
 export default function LayoutCdsIa({ children }: { children: ReactNode }) {
   return (
-    <div style={{ padding: ESPACO.xxl, maxWidth: 1280, margin: "0 auto" }}>
-      <header style={{ marginBottom: ESPACO.lg }}>
-        <h1 style={{ margin: 0, fontSize: 24, fontWeight: 900, color: CROMO.texto }}>CDS IA</h1>
-
-        <p
+    <div
+      style={{
+        padding: `${ESPACO.lg}px ${ESPACO.xl}px ${ESPACO.xl}px`,
+        width: "100%",
+        maxWidth: 1840,
+        margin: "0 auto",
+        boxSizing: "border-box",
+      }}
+    >
+      {/* F8.1-C1: titulo e navegacao numa linha so. A frase de apresentacao
+          e o bloco proprio da subnav sairam: eram ~90px empurrando o
+          escritorio para baixo da dobra. */}
+      <header
+        style={{
+          display: "flex",
+          alignItems: "center",
+          flexWrap: "wrap",
+          gap: ESPACO.xl,
+          marginBottom: ESPACO.md,
+          paddingBottom: ESPACO.sm,
+          borderBottom: `1px solid ${CROMO.bordaSutil}`,
+        }}
+      >
+        {/* F8.2-A: o titulo saiu da TELA (a Sidebar ja diz onde se esta), mas
+            continua para leitor de tela — a pagina segue tendo um h1. */}
+        <h1
           style={{
-            margin: `6px 0 0`,
-            fontSize: 14,
-            color: CROMO.textoFraco,
-            font: `14px/1.6 ${FONTE.interface}`,
+            position: "absolute", width: 1, height: 1, margin: -1, padding: 0,
+            overflow: "hidden", clip: "rect(0 0 0 0)", whiteSpace: "nowrap", border: 0,
+            font: `900 20px/1.2 ${FONTE.interface}`,
           }}
         >
-          Onde seus agentes de IA trabalham, e onde você decide o que eles podem fazer.
-        </p>
+          CDS IA
+        </h1>
+        <SubNavIA />
       </header>
 
-      <SubNavIA />
-
-      <main style={{ paddingTop: ESPACO.xl }}>{children}</main>
+      <main>{children}</main>
     </div>
   );
 }

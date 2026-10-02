@@ -372,8 +372,20 @@ ok("N2c CONTROLE NEGATIVO: TROCA mantendo o total reprovaria",
       !/\.insert\(|\.update\(|\.rpc\(/.test(ESCRITA));
   // Bloqueado PERSISTE aqui. Apagar a linha colapsaria `permissao_ausente` em
   // `permissao_bloqueada` e perderia QUANDO o dono proibiu.
-  ok("N3c ZERO delete — bloqueado grava linha, nao apaga",
-    !/\.delete\(/.test(ESCRITA));
+  //
+  // F8.2-B: existe UM delete, e ele NAO e o caminho de bloquear: e o de
+  // REMOVER UM PACK (voltar ao "nao selecionado"), decisao de produto
+  // ratificada. A guarda passa a cobrar exatamente isso — o caminho de
+  // definir nivel continua sem delete, e o delete so existe dentro da
+  // remocao de pack.
+  const DEFINIR = ESCRITA.slice(
+    ESCRITA.indexOf("export async function definirPermissaoDeFuncaoDoAgente"),
+    ESCRITA.indexOf("export async function removerPackDoAgente"));
+  const REMOVER_PACK = ESCRITA.slice(ESCRITA.indexOf("export async function removerPackDoAgente"));
+  ok("N3c bloqueado grava linha, nao apaga — o unico delete e o de remover PACK",
+    DEFINIR.length > 200 && !/\.delete\(/.test(DEFINIR) &&
+      (ESCRITA.match(/\.delete\(/g) ?? []).length === 1 &&
+      /\.delete\(/.test(REMOVER_PACK) && !/bloqueado/.test(REMOVER_PACK));
   ok("N3d o alvo do conflito e a PK publicada, nominalmente",
     /onConflict: CONFLITO_IDENTIDADE/.test(ESCRITA) &&
       /CONFLITO_IDENTIDADE = "agente_id,funcao_id"/.test(ESCRITA));

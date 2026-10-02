@@ -1,0 +1,1488 @@
+/*
+ * Agentes + Configuracao de agente — F8.3-C1.
+ *
+ * Mesmos tokens do Office V1 (fundo, borda, laranja CDS), declarados
+ * aqui para a area Agentes nao depender do CSS do Escritorio — que esta
+ * congelado. Nada global e alterado.
+ */
+
+.raiz {
+  --ag-acento: #f97316;
+  --ag-acento-suave: rgb(249 115 22 / 0.12);
+  --ag-acento-borda: rgb(249 115 22 / 0.55);
+  --ag-glow: rgb(249 115 22 / 0.35);
+  --ag-fundo: #0b0f17;
+  --ag-card: #111723;
+  --ag-secundario: #171e2b;
+  --ag-borda: #222b3a;
+  --ag-texto: #eef1f6;
+  --ag-fraco: #98a2b3;
+  --ag-ok: #22c55e;
+  --ag-atencao: #f0b429;
+  --ag-erro: #f06a6a;
+  --ag-raio: 10px;
+
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  /* F8.3-C1.2: em tela gigante o conteudo nao se perde — teto de largura,
+     alinhado a esquerda como a navegacao. */
+  max-width: 1640px;
+  color: var(--ag-texto);
+  font-size: 14px;
+  /* F8.3-C1.6: controles nativos (select, lista de opcoes, scrollbar,
+     checkbox) no tema escuro e na cor da CDS — nada de texto preto em
+     fundo escuro, nada de azul do navegador. */
+  color-scheme: dark;
+  accent-color: var(--ag-acento);
+  caret-color: var(--ag-acento);
+}
+
+/* Regra global CDS: foco e selecao SEMPRE em laranja, em toda a tela. */
+.raiz :focus-visible {
+  outline-color: var(--ag-acento);
+}
+
+.raiz ::selection {
+  background: rgb(249 115 22 / 0.35);
+  color: var(--ag-texto);
+}
+
+/* ── Cabecalho da pagina ─────────────────────────────────────────── */
+
+.titulo {
+  margin: 0;
+  font-size: 26px;
+  font-weight: 900;
+  letter-spacing: -0.01em;
+}
+
+.subtitulo {
+  margin: 4px 0 0;
+  font-size: 14px;
+  color: var(--ag-fraco);
+}
+
+/* ── Busca + filtros ─────────────────────────────────────────────── */
+
+.barra {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.busca {
+  position: relative;
+  width: 100%;
+  max-width: 340px;
+}
+
+.busca input {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 10px 12px 10px 38px;
+  font-size: 14px;
+  border: 1px solid var(--ag-borda);
+  border-radius: 8px;
+  background: var(--ag-card);
+  color: var(--ag-texto);
+  font: inherit;
+  outline: none;
+}
+
+.busca input:hover {
+  border-color: rgb(249 115 22 / 0.4);
+}
+
+.busca input:focus-visible {
+  border-color: var(--ag-acento);
+  box-shadow: 0 0 0 3px var(--ag-acento-suave);
+}
+
+.buscaIcone {
+  position: absolute;
+  top: 50%;
+  left: 12px;
+  display: flex;
+  transform: translateY(-50%);
+  color: var(--ag-fraco);
+  pointer-events: none;
+}
+
+.filtros {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--ag-borda);
+  border-radius: 8px;
+  background: var(--ag-card);
+}
+
+.filtro {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 14px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ag-fraco);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.filtro:hover {
+  color: var(--ag-texto);
+}
+
+.filtro:focus-visible,
+.botao:focus-visible,
+.aba:focus-visible,
+.segmento:focus-visible,
+.interruptor:focus-visible {
+  outline: 2px solid var(--ag-acento);
+  outline-offset: 2px;
+}
+
+.filtroAtivo {
+  background: var(--ag-acento-suave);
+  color: var(--ag-acento);
+  box-shadow: inset 0 0 0 1px var(--ag-acento-borda);
+  font-weight: 600;
+}
+
+.filtroContagem {
+  font-variant-numeric: tabular-nums;
+  color: rgb(152 162 179 / 0.7);
+}
+
+.filtroAtivo .filtroContagem {
+  color: var(--ag-acento);
+}
+
+/* ── Card ────────────────────────────────────────────────────────── */
+
+.card {
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  padding: 16px;
+  gap: 12px;
+  border: 1px solid var(--ag-borda);
+  border-radius: 12px;
+  background: var(--ag-card);
+  transition: border-color 150ms ease-out;
+}
+
+.card:hover {
+  border-color: var(--ag-acento-borda);
+}
+
+.cardSelecionado,
+.cardSelecionado:hover {
+  border-color: var(--ag-acento);
+  box-shadow: 0 0 0 1px var(--ag-glow), 0 0 24px -8px var(--ag-glow);
+}
+
+.cardInativo {
+  opacity: 0.78;
+}
+
+.tileAgente {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  border-radius: 10px;
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.08);
+}
+
+.cardTopo {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.avatar {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+  flex-shrink: 0;
+  border-radius: 10px;
+  /* Tinta da cor do TIPO sobre o fundo: o icone ganha presenca. */
+  background: color-mix(in srgb, var(--ag-cor-tipo, #98a2b3) 18%, var(--ag-secundario));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ag-cor-tipo, #98a2b3) 30%, transparent);
+  color: var(--ag-cor-tipo, var(--ag-fraco));
+  font-size: 19px;
+  font-weight: 800;
+}
+
+.avatarGrande {
+  width: 56px;
+  height: 56px;
+  border-radius: 12px;
+  font-size: 23px;
+}
+
+.cardIdentidade {
+  display: flex;
+  flex: 1 1 140px;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.cardModelo {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  color: var(--ag-fraco);
+}
+
+.cardNome {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--ag-status);
+  white-space: nowrap;
+}
+
+.statusPonto {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: var(--ag-status);
+}
+
+.statusPontoVazado {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--ag-status);
+}
+
+/* APIs · Tools · Memoria numa linha, como no v0. */
+.fichas {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 16px;
+  margin: 0;
+}
+
+.ficha {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12.5px;
+  color: rgb(238 241 246 / 0.88);
+}
+
+.ficha dd {
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fichaIcone {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  flex-shrink: 0;
+  color: var(--ag-fraco);
+}
+
+.fichaIconeAtivo {
+  color: #60a5fa;
+}
+
+/* Marca do provedor (a inicial, como no v0). */
+.marca {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  border-radius: 4px;
+  background: var(--ag-secundario);
+  color: var(--ag-fraco);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.fraco {
+  color: var(--ag-fraco);
+}
+
+.somenteLeitor {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.cardAcoes {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Lista estreita: as acoes descem para uma linha propria, alinhadas
+   ao texto (como o `max-xl:pl-15` do v0). */
+@media (max-width: 1279px) {
+  .cardAcoes {
+    width: 100%;
+    padding-left: 64px;
+  }
+}
+
+.botaoConfigurar {
+  padding: 6px 12px;
+  border: 1px solid var(--ag-acento-borda);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ag-acento);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 150ms ease-out;
+}
+
+.botaoConfigurar:hover,
+.botaoConfigurarAtivo {
+  background: var(--ag-acento-suave);
+  border-color: var(--ag-acento);
+}
+
+.botaoConfigurar:focus-visible {
+  outline: 2px solid var(--ag-acento);
+  outline-offset: 2px;
+}
+
+.botaoIcone {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  color: var(--ag-texto);
+}
+
+.botaoIcone:hover,
+.botaoIcone[aria-expanded="true"] {
+  color: var(--ag-acento);
+}
+
+/* `.botao` vem depois e devolvia o padding de 14px ao botao de 30px: o
+   SVG (item flex) encolhia ate sumir. Especificidade maior + sem encolher. */
+.botao.botaoIcone {
+  padding: 0;
+}
+
+.botaoIcone svg {
+  flex-shrink: 0;
+}
+
+.menuAncora {
+  position: relative;
+}
+
+/* ── Botoes ──────────────────────────────────────────────────────── */
+
+.botao {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 9px 14px;
+  border: 1px solid var(--ag-borda);
+  border-radius: 8px;
+  background: var(--ag-secundario);
+  color: var(--ag-texto);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 150ms ease-out;
+}
+
+.botao:hover {
+  border-color: rgb(249 115 22 / 0.5);
+}
+
+.botao:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.botaoCheio {
+  flex: 1;
+}
+
+.botaoAtivo {
+  border-color: var(--ag-acento-borda);
+  color: var(--ag-acento);
+}
+
+.botaoPrimario {
+  border-color: var(--ag-acento);
+  background: var(--ag-acento);
+  color: #fff;
+  font-weight: 700;
+}
+
+.botaoPrimario:hover {
+  border-color: #ea580c;
+  background: #ea580c;
+}
+
+.botaoFantasma {
+  border-color: transparent;
+  background: transparent;
+  color: var(--ag-fraco);
+}
+
+.botaoFantasma:hover {
+  border-color: transparent;
+  background: var(--ag-secundario);
+  color: var(--ag-texto);
+}
+
+.botaoPerigo:hover {
+  border-color: rgb(240 106 106 / 0.6);
+  color: var(--ag-erro);
+}
+
+/* ── Menu "..." ──────────────────────────────────────────────────── */
+
+.menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  min-width: 220px;
+  padding: 6px;
+  border: 1px solid var(--ag-borda);
+  border-radius: 8px;
+  background: #161c28;
+  box-shadow: 0 12px 28px rgb(0 0 0 / 0.45);
+}
+
+.menuAbaixo {
+  top: calc(100% + 6px);
+}
+
+.menuItem {
+  padding: 9px 11px;
+  border-radius: 6px;
+  color: var(--ag-texto);
+  font-size: 13px;
+  text-decoration: none;
+}
+
+.menuItem:hover,
+.menuItem:focus-visible {
+  background: var(--ag-acento-suave);
+  color: var(--ag-acento);
+  outline: none;
+}
+
+/* ── Configuracao ────────────────────────────────────────────────── */
+
+.config {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--ag-borda);
+  border-radius: var(--ag-raio);
+  background: var(--ag-card);
+  min-width: 0;
+}
+
+.configTopo {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+  padding: 20px 22px;
+  border-bottom: 1px solid var(--ag-borda);
+}
+
+.configNome {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 19px;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.configIdentidade {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.alerta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 22px;
+  border-bottom: 1px solid rgb(240 180 41 / 0.3);
+  background: rgb(240 180 41 / 0.1);
+  color: var(--ag-atencao);
+  font-size: 12px;
+}
+
+.abas {
+  display: flex;
+  overflow-x: auto;
+  margin: 0;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--ag-borda);
+  list-style: none;
+}
+
+.aba {
+  padding: 13px 16px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--ag-fraco);
+  font: inherit;
+  font-size: 14px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.aba:hover {
+  color: var(--ag-texto);
+}
+
+.abaAtiva {
+  border-bottom-color: var(--ag-acento);
+  color: var(--ag-acento);
+  font-weight: 600;
+}
+
+.painel {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 24px 22px;
+}
+
+.rodape {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 14px 22px;
+  border-top: 1px solid var(--ag-borda);
+}
+
+.dica {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ag-fraco);
+}
+
+.erro {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid rgb(240 106 106 / 0.4);
+  border-radius: 8px;
+  background: rgb(240 106 106 / 0.1);
+  font-size: 12px;
+}
+
+.ok {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid rgb(34 197 94 / 0.35);
+  border-radius: 8px;
+  background: rgb(34 197 94 / 0.08);
+  font-size: 12px;
+}
+
+/* ── Geral: campos + resumo (v0) ───────────────────────────────── */
+
+.geral {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 22px;
+}
+
+@media (min-width: 1280px) {
+  .geral { grid-template-columns: minmax(0, 1fr) 340px; }
+}
+
+@media (min-width: 1536px) {
+  .geral { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+}
+
+.geralCampos {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.geralResumo {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-width: 0;
+}
+
+@media (min-width: 1280px) {
+  .geralResumo {
+    padding-left: 22px;
+    border-left: 1px solid var(--ag-borda);
+  }
+}
+
+.resumoBloco {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.resumoTopo {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.resumoTitulo {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+  color: rgb(238 241 246 / 0.9);
+}
+
+.resumoVazio {
+  margin: 0;
+  padding: 14px;
+  border: 1px dashed var(--ag-borda);
+  border-radius: 8px;
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--ag-fraco);
+}
+
+.resumoLista {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.resumoItem {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--ag-borda);
+  border-radius: 8px;
+  background: var(--ag-fundo);
+}
+
+.resumoLogo {
+  width: 28px;
+  height: 20px;
+  object-fit: contain;
+  flex-shrink: 0;
+}
+
+.resumoNome {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.contador {
+  align-self: flex-end;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ag-fraco);
+}
+
+/* ── Campos ──────────────────────────────────────────────────────── */
+
+.campos {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+@media (max-width: 760px) {
+  .campos {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.campo {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.campoRotulo {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: rgb(238 241 246 / 0.9);
+}
+
+.campoDica {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--ag-fraco);
+}
+
+.entrada {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 10px 13px;
+  border: 1px solid var(--ag-borda);
+  border-radius: 8px;
+  background: var(--ag-fundo);
+  color: var(--ag-texto);
+  font: inherit;
+  font-size: 14px;
+  outline: none;
+}
+
+.entrada:hover {
+  border-color: rgb(249 115 22 / 0.4);
+}
+
+.entrada:focus,
+.entrada:focus-visible {
+  border-color: var(--ag-acento);
+  box-shadow: 0 0 0 3px var(--ag-acento-suave);
+}
+
+.entradaSoLeitura,
+.entradaSoLeitura:hover {
+  border-color: var(--ag-borda);
+  background: rgb(23 30 43 / 0.6);
+  color: var(--ag-fraco);
+  cursor: not-allowed;
+}
+
+.areaTexto {
+  min-height: 220px;
+  resize: vertical;
+  line-height: 1.55;
+}
+
+/* ── Opcoes (provedor, ferramenta, api) ──────────────────────────── */
+
+.opcoes {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 10px;
+}
+
+.opcao {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--ag-borda);
+  border-radius: var(--ag-raio);
+  background: var(--ag-fundo);
+  color: var(--ag-texto);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.opcao:hover {
+  border-color: var(--ag-acento-borda);
+}
+
+.opcaoAtiva,
+.opcaoAtiva:hover {
+  border-color: var(--ag-acento);
+  background: var(--ag-acento-suave);
+}
+
+.opcao:disabled {
+  cursor: progress;
+}
+
+.opcaoMarca {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: 6px;
+  background: var(--ag-secundario);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.opcaoAtiva .opcaoMarca {
+  background: var(--ag-acento);
+  color: #fff;
+}
+
+.opcaoTexto {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.opcaoNome {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.opcaoSub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  color: var(--ag-fraco);
+}
+
+.opcaoEstado {
+  font-size: 11px;
+  color: var(--ag-fraco);
+}
+
+.opcaoAtiva .opcaoEstado {
+  color: var(--ag-acento);
+}
+
+/* Segmentado (nivel de trabalho, nivel de permissao). */
+.segmentos {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--ag-borda);
+  border-radius: 8px;
+  background: var(--ag-fundo);
+}
+
+.segmento {
+  padding: 6px 12px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ag-fraco);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.segmento:hover {
+  color: var(--ag-texto);
+}
+
+.segmentoAtivo {
+  background: var(--ag-acento-suave);
+  color: var(--ag-acento);
+  box-shadow: inset 0 0 0 1px var(--ag-acento-borda);
+  font-weight: 600;
+}
+
+.segmento:disabled {
+  cursor: progress;
+}
+
+/* Linhas de API / Tool. */
+.itens {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 16px;
+  border: 1px solid var(--ag-borda);
+  border-radius: var(--ag-raio);
+  background: var(--ag-fundo);
+}
+
+.itemDesligado {
+  opacity: 0.6;
+}
+
+.itemIcone {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  border-radius: 8px;
+  background: rgb(238 241 246 / 0.06);
+}
+
+.itemIcone img {
+  display: block;
+  max-width: 28px;
+  max-height: 24px;
+}
+
+.itemTexto {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 180px;
+}
+
+.itemNome {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.itemSub {
+  font-size: 12.5px;
+  color: var(--ag-fraco);
+}
+
+.itemAcoes {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.selo {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.seloOk { color: var(--ag-ok); }
+.seloAtencao { color: var(--ag-atencao); }
+.seloFraco { color: var(--ag-fraco); }
+
+/* Bloco (memoria, status). */
+.bloco {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px 20px;
+  border: 1px solid var(--ag-borda);
+  border-radius: var(--ag-raio);
+  background: var(--ag-fundo);
+}
+
+.blocoLinha {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.blocoTitulo {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+/* Interruptor. */
+.interruptor {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  width: 38px;
+  height: 22px;
+  flex-shrink: 0;
+  padding: 0;
+  border: 1px solid var(--ag-borda);
+  border-radius: 999px;
+  background: var(--ag-secundario);
+  cursor: pointer;
+}
+
+.interruptor::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: var(--ag-texto);
+  transition: transform 150ms ease-out;
+}
+
+.interruptorLigado {
+  border-color: var(--ag-acento);
+  background: var(--ag-acento);
+}
+
+.interruptorLigado::after {
+  transform: translateX(16px);
+}
+
+.interruptor:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.estados {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.estados li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--ag-fraco);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card,
+  .botao,
+  .interruptor::after {
+    transition: none;
+  }
+}
+
+/* ══ Layout operacional final (F8.3-C1.4) ═══════════════════════════ */
+
+.secaoTitulo {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 800;
+}
+
+.secaoSub {
+  margin: 3px 0 0;
+  font-size: 12.5px;
+  color: var(--ag-fraco);
+}
+
+/* [ lista ][ seletor / chat / configuracao ] — 320px, 400px a partir de 1280 (v0). */
+.operacional {
+  display: grid;
+  grid-template-columns: 320px minmax(0, 1fr);
+  align-items: start;
+  gap: 16px;
+}
+
+@media (min-width: 1280px) {
+  .operacional { grid-template-columns: 400px minmax(0, 1fr); }
+}
+
+/* Coluna esquerda: presa na tela, com scroll PROPRIO. */
+.colunaLista {
+  position: sticky;
+  top: 16px;
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100dvh - 32px);
+  min-width: 0;
+  border: 1px solid var(--ag-borda);
+  border-radius: var(--ag-raio);
+  background: var(--ag-card);
+}
+
+.listaTopo {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  border-bottom: 1px solid var(--ag-borda);
+}
+
+.listaTopo .busca {
+  max-width: none;
+}
+
+.listaTopo .filtros {
+  align-self: flex-start;
+}
+
+.listaTopo .filtro {
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+.listaAgentes {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+  padding: 12px;
+  overflow-y: auto;
+  list-style: none;
+  scrollbar-width: thin;
+  scrollbar-color: rgb(152 162 179 / 0.3) transparent;
+}
+
+.listaVazia {
+  margin: 12px;
+  padding: 24px;
+  border: 1px dashed var(--ag-borda);
+  border-radius: 8px;
+  text-align: center;
+  color: var(--ag-fraco);
+}
+
+.colunaTrabalho {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+/* Seletor: uma linha, scroll horizontal PROPRIO. */
+.seletor {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--ag-borda);
+  border-radius: var(--ag-raio);
+  background: var(--ag-card);
+  min-width: 0;
+}
+
+.seletorLista {
+  display: flex;
+  gap: 12px;
+  margin: 0;
+  padding: 0 0 4px;
+  overflow-x: auto;
+  list-style: none;
+  scrollbar-width: thin;
+  scrollbar-color: rgb(152 162 179 / 0.3) transparent;
+}
+
+.seletorLista > li {
+  flex-shrink: 0;
+}
+
+.seletorItem {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 200px;
+  padding: 12px;
+  border: 1px solid var(--ag-borda);
+  border-radius: var(--ag-raio);
+  background: var(--ag-fundo);
+  color: var(--ag-texto);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 150ms ease-out;
+}
+
+.seletorItem:hover {
+  border-color: var(--ag-acento-borda);
+}
+
+.seletorItem:focus-visible {
+  outline: 2px solid var(--ag-acento);
+  outline-offset: 2px;
+}
+
+.seletorItemAtivo,
+.seletorItemAtivo:hover {
+  border-color: var(--ag-acento);
+  background: var(--ag-acento-suave);
+  box-shadow: 0 0 0 1px var(--ag-glow);
+}
+
+.seletorTexto {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.seletorNome {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+/* Chat: janela com altura propria; o ChatDoAgente real dentro, intacto,
+   lendo as mesmas variaveis --cds-chat-* que o Escritorio usa. */
+.chat {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border: 1px solid var(--ag-borda);
+  border-radius: var(--ag-raio);
+  background: var(--ag-card);
+  overflow: hidden;
+  /* `clip` (onde houver): recorta sem virar container rolavel — nem
+     gesto nem scrollIntoView conseguem deslocar o conteudo. */
+  overflow: clip;
+}
+
+.chatTopo {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--ag-borda);
+}
+
+.chatAcao {
+  margin-left: auto;
+}
+
+.chatInativo {
+  margin: 0;
+  padding: 24px 16px;
+  color: var(--ag-fraco);
+}
+
+.chatCorpo {
+  --cds-chat-barra-margem: 0;
+  --cds-chat-barra-padding: 8px 16px;
+  --cds-chat-barra-borda: 1px solid var(--ag-borda);
+  --cds-chat-barra-fundo: #0e131d;
+  --cds-chat-trilha-gap: 14px;
+  --cds-chat-trilha-padding: 16px max(16px, calc((100% - 960px) / 2)) 12px;
+  --cds-chat-bolha-max-usuario: min(640px, 80%);
+  --cds-chat-bolha-max-agente: 100%;
+  --cds-chat-bolha-fundo-usuario: rgb(249 115 22 / 0.12);
+  --cds-chat-bolha-borda-usuario: 1px solid rgb(249 115 22 / 0.35);
+  --cds-chat-bolha-fundo-agente: var(--ag-secundario);
+  --cds-chat-bolha-borda-agente: 1px solid var(--ag-borda);
+  --cds-chat-bolha-raio: 12px;
+  --cds-chat-bolha-padding: 10px 14px;
+  --cds-chat-hora-display: inline;
+  --cds-chat-kpis-display: block;
+  --cds-chat-kpi-fundo: #0e131d;
+  --cds-chat-kpi-borda: 1px solid var(--ag-borda);
+  --cds-chat-kpi-rotulo: var(--ag-fraco);
+  --cds-chat-kpi-valor: var(--ag-texto);
+  --cds-chat-coluna-margem: max(16px, calc((100% - 960px) / 2));
+  --cds-chat-composer-margem-baixo: 12px;
+  --cds-chat-composer-padding: 6px;
+  --cds-chat-composer-fundo: #0e131d;
+  --cds-chat-composer-borda: 1px solid var(--ag-borda);
+  --cds-chat-composer-raio: 10px;
+  --cds-chat-campo-fundo: transparent;
+  --cds-chat-campo-borda: 1px solid transparent;
+
+  /* Piso 480: barra + minHeight 420 do ChatDoAgente (senao o composer corta). */
+  height: clamp(480px, 50vh, 560px);
+  min-height: 0;
+}
+
+.chatCorpo [data-cds-chat-trilha]::-webkit-scrollbar {
+  width: 6px;
+}
+
+.chatCorpo [data-cds-chat-trilha]::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 999px;
+}
+
+.chat:hover [data-cds-chat-trilha]::-webkit-scrollbar-thumb,
+.chat:focus-within [data-cds-chat-trilha]::-webkit-scrollbar-thumb {
+  background: rgb(152 162 179 / 0.35);
+}
+
+@supports (-moz-appearance: none) {
+  .chatCorpo [data-cds-chat-trilha] {
+    scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+  }
+  .chat:hover [data-cds-chat-trilha],
+  .chat:focus-within [data-cds-chat-trilha] {
+    scrollbar-color: rgb(152 162 179 / 0.35) transparent;
+  }
+}
+
+/* Abaixo de 1200px: uma coluna — lista (com scroll proprio) em cima. */
+@media (max-width: 1199px) {
+  .operacional {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .colunaLista {
+    position: static;
+    max-height: 420px;
+  }
+}
+
+.vazio {
+  margin: 0;
+  padding: 32px;
+  border: 1px dashed var(--ag-borda);
+  border-radius: var(--ag-raio);
+  text-align: center;
+  color: var(--ag-fraco);
+}
+
+/* ── F8.3-C1.6: corte da mensagem para a esquerda ─────────────────────
+
+   Causa (reproduzida no Chrome): um token sem quebra (URL, codigo,
+   id de pedido) numa bolha deixava a trilha mais larga que a area
+   visivel; como a trilha tem `overflow-y: auto`, o eixo X virava
+   rolavel. Um gesto horizontal (touchpad / shift+roda) deslocava TODAS
+   as bolhas para a esquerda, sem barra visivel para voltar. Sem o
+   gesto, o mesmo texto ficava cortado na borda direita.
+
+   Correcao no HOST (o ChatDoAgente nao muda): o texto quebra dentro da
+   bolha, e a trilha nao rola na horizontal. Tabelas continuam rolando
+   no proprio container (TextoDoAgente). */
+.chatCorpo [data-cds-chat-trilha] {
+  overflow-x: hidden;
+  overflow-wrap: break-word;
+}
+
+/* ── F8.3-C1.6: APIs = integracoes da CDS ─────────────────────────── */
+
+.integracao {
+  transition: border-color 150ms ease-out;
+}
+
+.integracao:hover {
+  border-color: rgb(249 115 22 / 0.4);
+}
+
+.integracaoAtiva,
+.itemAtivo {
+  border-color: var(--ag-acento-borda);
+  box-shadow: inset 3px 0 0 var(--ag-acento);
+}
+
+.seloApi {
+  padding: 1px 7px;
+  border: 1px solid var(--ag-acento-borda);
+  border-radius: 999px;
+  color: var(--ag-acento);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.itemConta {
+  font-size: 12.5px;
+  color: var(--ag-fraco);
+}
+
+.nomeConta {
+  color: var(--ag-acento);
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.itemAtencao {
+  font-size: 12.5px;
+  color: var(--ag-atencao);
+}
+
+.integracaoDetalhe {
+  display: flex;
+  flex-basis: 100%;
+  flex-direction: column;
+  gap: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--ag-borda);
+}
+
+/* Select no padrao CDS: fundo escuro, texto claro, seta propria. */
+.selecao {
+  max-width: 360px;
+  padding-right: 34px;
+  appearance: none;
+  cursor: pointer;
+  background-image: linear-gradient(45deg, transparent 50%, var(--ag-acento) 50%),
+    linear-gradient(135deg, var(--ag-acento) 50%, transparent 50%);
+  background-position: calc(100% - 17px) 50%, calc(100% - 12px) 50%;
+  background-size: 5px 5px;
+  background-repeat: no-repeat;
+}
+
+.selecao option {
+  background: var(--ag-card);
+  color: var(--ag-texto);
+}
+
+/* ── F8.3-C1.6: busca da aba Tools ────────────────────────────────── */
+
+.buscaTools {
+  max-width: 420px;
+}
+
+.buscaTools input {
+  background: var(--ag-fundo);
+}

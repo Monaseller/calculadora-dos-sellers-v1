@@ -85,7 +85,7 @@ const ROTULO_DO_NIVEL: Record<string, string> = {
 };
 
 export function BuscaDeFerramentas({
-  agenteId, aoMudar, packSelecionado, aoAdicionarPack,
+  agenteId, aoMudar, packSelecionado, aoAdicionarPack, aoRemoverPack,
 }: {
   agenteId: string;
   /** Avisa o wizard para recarregar o resumo. */
@@ -94,7 +94,14 @@ export function BuscaDeFerramentas({
   packSelecionado: (chave: string) => boolean;
   /** Adiciona um pack INTERNO — o wizard ja sabe fazer isso. */
   aoAdicionarPack: (chave: string) => void;
+  /**
+   * F8.2-B: remove um pack INTERNO (volta ao "nao selecionado"). Opcional:
+   * sem ela, o cartao continua so dizendo "Adicionada", como antes.
+   */
+  aoRemoverPack?: (chave: string) => void;
 }) {
+  /** Pack com remocao pedida — o 2o clique confirma. */
+  const [confirmandoRemocao, setConfirmandoRemocao] = useState<string | null>(null);
   const [termo, setTermo] = useState("");
   const [achados, setAchados] = useState<readonly AchadoDeFerramentaUI[]>([]);
   const [externoDesfecho, setExternoDesfecho] = useState<string>("nao_consultado");
@@ -330,7 +337,28 @@ export function BuscaDeFerramentas({
               <div style={{ flexShrink: 0 }}>
                 {interna ? (
                   dentro
-                    ? <Etiqueta tom="ok">Adicionada</Etiqueta>
+                    ? (
+                      <div style={{ display: "flex", gap: ESPACO.xs, alignItems: "center", flexWrap: "wrap" }}>
+                        <Etiqueta tom="ok">Adicionada</Etiqueta>
+                        {aoRemoverPack !== undefined && (
+                          confirmandoRemocao === a.chave
+                            ? <>
+                                <Botao tom="perigo" onClick={() => {
+                                  setConfirmandoRemocao(null);
+                                  aoRemoverPack(a.chave);
+                                }}>
+                                  Confirmar remoção
+                                </Botao>
+                                <Botao tom="sutil" onClick={() => setConfirmandoRemocao(null)}>
+                                  Cancelar
+                                </Botao>
+                              </>
+                            : <Botao tom="sutil" onClick={() => setConfirmandoRemocao(a.chave)}>
+                                Remover
+                              </Botao>
+                        )}
+                      </div>
+                    )
                     : <Botao tom="primario" onClick={() => aoAdicionarPack(a.chave)}>
                         Adicionar
                       </Botao>

@@ -50,7 +50,7 @@ import { autenticarRequisicao } from "@/lib/autenticacao";
 import { lerAgenteDoDono } from "@/lib/agentes/capability";
 import { funcaoExiste, listarFuncoesRegistradas, resolverFuncao } from "@/lib/agentes/funcoes/registry";
 import { resolverFatosPermissoes } from "@/lib/agentes/permissoes/fatos";
-import { definirPermissaoDeFuncaoDoAgente } from "@/lib/agentes/permissoes/escrita";
+import { definirPermissaoDeFuncaoDoAgente, removerPackDoAgente } from "@/lib/agentes/permissoes/escrita";
 import { NIVEIS_AUTONOMIA } from "@/lib/ia/conceitos";
 
 /** Configuracao privada por dono, que muda a cada definicao. Nunca cacheada. */
@@ -204,6 +204,7 @@ async function atravessarPorta(
 
 const FALHA_LEITURA = "Falha ao ler as permissões.";
 const FALHA_ESCRITA = "Falha ao definir a permissão.";
+const FALHA_REMOCAO = "Falha ao remover a ferramenta.";
 
 export async function GET(request: Request, { params }: { params: { agenteId: string } }) {
   try {
@@ -290,5 +291,35 @@ export async function PATCH(request: Request, { params }: { params: { agenteId: 
     );
   } catch {
     return responder({ ok: false, erro: FALHA_ESCRITA }, 500);
+  }
+}
+
+/**
+ * DELETE — remove um PACK do agente (F8.2-B): volta ao "nao selecionado".
+ *
+ * Query: `?packId=<id de TOOL_PACKS>` — DELETE sem corpo, como o
+ * desvincular de acao externa. So o id do pack: quais linhas saem e
+ * decisao do SERVIDOR (`removerPackDoAgente`), nunca uma lista de Funcoes
+ * vinda do cliente. Mesma porta do PATCH: sessao, uuid e propriedade do
+ * agente antes de qualquer escrita.
+ */
+export async function DELETE(request: Request, { params }: { params: { agenteId: string } }) {
+  try {
+    const porta = await atravessarPorta(request, params.agenteId, FALHA_REMOCAO);
+    if (!porta.ok) return porta.resposta;
+
+    const packId = new URL(request.url).searchParams.get("packId");
+    if (typeof packId !== "string" || packId.length === 0) {
+      return responder({ ok: false, erro: "pack inválido." }, 400);
+    }
+
+    const r = await removerPackDoAgente({
+      userId: porta.userId, agenteId: porta.agenteId, packId,
+    });
+    if (r.estado === "entrada_invalida") return responder({ ok: false, erro: "pack inválido." }, 400);
+    if (r.estado !== "removido") return responder({ ok: false, erro: FALHA_REMOCAO }, 500);
+    return responder({ ok: true, removido: { packId, linhas: r.linhas ?? 0 } }, 200);
+  } catch {
+    return responder({ ok: false, erro: FALHA_REMOCAO }, 500);
   }
 }

@@ -16,12 +16,13 @@
  *
  * Rodar:  npx tsx scripts/testar-ia-agentes-ui-create.ts
  */
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import { TIPOS_AGENTE_UI } from "../lib/ia/contratos";
 import { DESCRICAO_TIPO } from "../lib/ia/conceitos";
 import { CORES_TIPO } from "../lib/ia/design";
+import { FUNCOES_DE_CRIACAO } from "../lib/ia/criar-agente";
 
 let passou = 0;
 let falhou = 0;
@@ -46,11 +47,17 @@ const codigo = (f: string) =>
   f.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
 
 const TRANSPORTE = "lib/ia/agentes-http.ts";
-const DIALOGO = "components/ia/agente/CriarAgente.tsx";
+// F8.3-C3-C: o dialogo antigo (`components/ia/agente/CriarAgente.tsx`) e a
+// lista legada que o abria foram REMOVIDOS. A criacao e o fluxo de 6
+// etapas — e a Identidade dele e quem cria o agente.
+const DIALOGO_REMOVIDO = "components/ia/agente/CriarAgente.tsx";
+const LISTA_LEGADA_REMOVIDA = "components/ia/agente/ListaDeAgentesLegada.tsx";
+const CRIAR = "components/ia/criar/CriarAgente.tsx";
+const NOVO = "app/(app)/ia/agentes/novo/page.tsx";
 const LISTA = "app/(app)/ia/agentes/page.tsx";
 
 const CODIGO_TRANSPORTE = codigo(ler(TRANSPORTE));
-const CODIGO_DIALOGO = codigo(ler(DIALOGO));
+const CODIGO_CRIAR = codigo(ler(CRIAR));
 const CODIGO_LISTA = codigo(ler(LISTA));
 
 function arquivosDe(dirRel: string): string[] {
@@ -82,7 +89,7 @@ secao("A. A escrita mora num lugar so");
   ok("A1  exatamente UM arquivo da area faz POST",
     JSON.stringify(comPost) === JSON.stringify([TRANSPORTE]), comPost.join(", "));
   ok("A2  e e o mesmo boundary de rede de sempre",
-    /\bfetch\s*\(/.test(CODIGO_TRANSPORTE) && !/\bfetch\s*\(/.test(CODIGO_DIALOGO) &&
+    /\bfetch\s*\(/.test(CODIGO_TRANSPORTE) && !/\bfetch\s*\(/.test(CODIGO_CRIAR) &&
       !/\bfetch\s*\(/.test(CODIGO_LISTA));
   // ── A3 reconciliado na AGENT-VERTICAL-SLICE-V1-I3 ────────────────
   //
@@ -130,17 +137,20 @@ secao("A. A escrita mora num lugar so");
     ((CODIGO_TRANSPORTE + '\n  method: "PATCH"').match(/method:\s*"PATCH"/g) ?? []).length !== 2);
   ok("A3d CONTROLE NEGATIVO: a sonda de PUT/DELETE acusa quando o padrao existe",
     /"PUT"|"DELETE"/.test('method: "PUT"') && /"PUT"|"DELETE"/.test('method: "DELETE"'));
-  // Criar e alterar sao capacidades separadas, e as telas tambem. O
-  // dialogo de criacao nao pode ganhar um caminho de edicao por dentro:
-  // seria uma escrita a mais numa tela que o usuario abriu para outra
-  // coisa.
-  ok("A3e a tela de CRIACAO nao alcanca a capacidade de alterar",
-    !/atualizarAgenteViaApi/.test(CODIGO_DIALOGO) &&
+  // Criar e alterar sao capacidades separadas. F8.3-C3-C: o fluxo de 6
+  // etapas grava o RASCUNHO que ele mesmo criou (PATCH so de nome e
+  // instrucoes, depois do POST, no id devolvido) — nao e caminho de
+  // edicao de outro agente. A lista de Agentes segue sem nenhum dos dois.
+  ok("A3e a criacao so altera o proprio rascunho, so nome/instrucoes",
+    /atualizarAgenteViaApi\(agenteId, \{ nome: nome\.trim\(\), instrucoes \}\)/.test(CODIGO_CRIAR) &&
+      (CODIGO_CRIAR.match(/atualizarAgenteViaApi\(/g) ?? []).length === 1 &&
       !/atualizarAgenteViaApi/.test(CODIGO_LISTA));
   // Nem a de CONFIGURAR capacidade: criar um agente nao pode, de
   // passagem, conceder nivel de autonomia a uma Funcao.
-  ok("A3f nem a capacidade de configurar permissao de Funcao",
-    !/definirPermissaoDeFuncao|listarPermissoesDoAgente/.test(CODIGO_DIALOGO) &&
+  // Permissao de Funcao so pelas etapas APIs/Tools (o helper de pack), e
+  // nunca gravada direto pela tela de criacao nem pela lista.
+  ok("A3f nem a capacidade de configurar permissao de Funcao direto",
+    !/definirPermissaoDeFuncao|listarPermissoesDoAgente/.test(CODIGO_CRIAR) &&
       !/definirPermissaoDeFuncao|listarPermissoesDoAgente/.test(CODIGO_LISTA));
   ok("A4  o nome do dominio continua reservado ao servidor",
     /export async function criarAgenteViaApi\(/.test(CODIGO_TRANSPORTE) &&
@@ -154,96 +164,99 @@ secao("A. A escrita mora num lugar so");
   ok("A7  ANCORA: a varredura leu a area", AREA.length > 40, String(AREA.length));
 }
 
-secao("B. O dialogo pede tres coisas, e nenhuma a mais");
+secao("B. A Identidade pede nome, funcao e instrucoes — e nenhuma a mais");
 
 {
-  ok("B1  e Client Component", /^"use client"/.test(ler(DIALOGO)));
-  ok("B2  tem formulario com submit", /<form onSubmit=/.test(CODIGO_DIALOGO));
-  ok("B3  campo de nome", /<input[\s\S]{0,200}value=\{nome\}/.test(CODIGO_DIALOGO));
-  ok("B4  select de tipo", /<select[\s\S]{0,200}value=\{tipo\}/.test(CODIGO_DIALOGO));
-  ok("B5  textarea de instrucoes", /<textarea[\s\S]{0,200}value=\{instrucoes\}/.test(CODIGO_DIALOGO));
-  ok("B6  botao de envio", /type="submit"/.test(CODIGO_DIALOGO));
+  // F8.3-C3-C: o dialogo antigo foi removido. As mesmas perguntas valem
+  // para a etapa Identidade do fluxo atual, que e quem CRIA o agente.
+  ok("B0  o dialogo antigo foi REMOVIDO", !existsSync(join(RAIZ, DIALOGO_REMOVIDO)));
+  ok("B1  e Client Component", /^"use client"/.test(ler(CRIAR)));
+  ok("B2  cria pelo transporte, com corpo de TRES chaves",
+    /criarAgenteViaApi\(\{\s*nome: nome\.trim\(\), tipo, instrucoes: instrucoes\.trim\(\) === "" \? null : instrucoes,\s*\}\)/
+      .test(CODIGO_CRIAR));
+  ok("B3  campo de nome", /<input[\s\S]{0,120}value=\{nome\}/.test(CODIGO_CRIAR));
+  ok("B4  funcao escolhida entre os tipos da autoridade",
+    /FUNCOES_DE_CRIACAO\.map/.test(CODIGO_CRIAR) && /onClick=\{\(\) => setTipo\(f\.tipo\)\}/.test(CODIGO_CRIAR));
+  ok("B5  textarea de instrucoes", /<textarea[\s\S]{0,160}value=\{instrucoes\}/.test(CODIGO_CRIAR));
+  ok("B6  Continuar e quem cria", /if \(etapa === 1\) \{\s*if \(!\(await salvarIdentidade\(\)\)\) return;/.test(CODIGO_CRIAR));
 
-  ok("B7  o select vem da autoridade, sem lista literal duplicada",
-    /TIPOS_AGENTE_UI\.map/.test(CODIGO_DIALOGO) &&
-      !/"personalizado"|"mensagens"|"ads"|"fotos"|"anuncios"|"financeiro"|"gerente"/
-        .test(CODIGO_DIALOGO));
-  ok("B8  o rotulo vem de DESCRICAO_TIPO, e o VALOR e o tipo canonico",
-    /value=\{t\}/.test(CODIGO_DIALOGO) && /DESCRICAO_TIPO\[t\]/.test(CODIGO_DIALOGO));
-
-  // ── O setimo perfil (SKILL-1D.agent-custom-type-B) ────────────────
-  //
-  // `personalizado` existe para que criar um agente nao obrigue a
-  // escolher, no primeiro segundo, uma funcao que o dono ainda nao sabe
-  // qual e. Ele e o PRIMEIRO da autoridade, e e por isso — e so por
-  // isso — que aparece selecionado: nao ha `setTipo("personalizado")`
-  // em lugar nenhum.
+  ok("B7  as funcoes vem da autoridade, sem tipo inventado",
+    FUNCOES_DE_CRIACAO.length === TIPOS_AGENTE_UI.length &&
+      FUNCOES_DE_CRIACAO.every((f) => (TIPOS_AGENTE_UI as readonly string[]).includes(f.tipo)) &&
+      !/"(mensagens|ads|fotos|anuncios|financeiro|gerente)"/.test(CODIGO_CRIAR));
   ok("B7a a autoridade tem exatamente sete perfis",
     TIPOS_AGENTE_UI.length === 7, String(TIPOS_AGENTE_UI.length));
-  ok("B7b `personalizado` e o primeiro — logo, o estado inicial",
+  ok("B7b `personalizado` e o estado inicial (o unico tipo escrito na tela)",
     TIPOS_AGENTE_UI[0] === "personalizado" &&
-      /useState<TipoAgenteUI>\(TIPOS_AGENTE_UI\[0\]\)/.test(CODIGO_DIALOGO));
-  ok("B7c e o default NAO vem de logica paralela",
-    !/setTipo\("personalizado"\)|=== "personalizado"/.test(CODIGO_DIALOGO));
-  ok("B7d ele tem descricao propria, e as outras seis nao mudaram",
+      /useState<TipoAgenteUI>\("personalizado"\)/.test(CODIGO_CRIAR));
+  ok("B7c depois de criado, a funcao NAO muda (o PATCH nao leva tipo)",
+    /disabled=\{agenteId !== null \|\| ocupado\}/.test(CODIGO_CRIAR) &&
+      !/atualizarAgenteViaApi\([^)]*tipo/.test(CODIGO_CRIAR));
+  ok("B7d a autoridade de descricoes segue intacta",
     DESCRICAO_TIPO.personalizado === "Propósito definido por você" &&
       DESCRICAO_TIPO.mensagens === "Atendimento ao comprador");
-  ok("B7e e cor propria, neutra, sem tocar as seis de identidade",
+  ok("B7e e a de cores tambem",
     CORES_TIPO.personalizado === "#8b93a5" && CORES_TIPO.mensagens === "#4a9de8");
   ok("B7f toda a autoridade tem descricao e cor",
     TIPOS_AGENTE_UI.every((t) => DESCRICAO_TIPO[t]?.length > 0 && CORES_TIPO[t]?.length > 0));
-  ok("B7g o campo se chama `Perfil inicial` na tela, e `tipo` no contrato",
-    /<span className="cds-ia-criar-rotulo">Perfil inicial<\/span>/.test(CODIGO_DIALOGO) &&
-      !/>Tipo</.test(CODIGO_DIALOGO) && /tipo,/.test(CODIGO_DIALOGO));
-  ok("B7h a ajuda diz que o perfil nao limita capacidade",
-    /O perfil inicial não limita as capacidades do agente\./.test(CODIGO_DIALOGO) &&
-      /aria-describedby=\{AJUDA_ID\}/.test(CODIGO_DIALOGO));
-  ok("B7i zero <option> escrito a mao fora do map",
-    (CODIGO_DIALOGO.match(/<option/g) ?? []).length === 1);
+  ok("B7h a tela diz que a funcao nao da nem tira capacidade",
+    /O que ele pode fazer é definido em APIs e Tools\./.test(CODIGO_CRIAR));
 
-  ok("B9  zero campo prematuro",
+  ok("B9  zero campo prematuro na tela de criacao",
     !/value=\{(modelo|temperatura|tools?|funcao|skill|fonte|conexao|permissao|memoria|avatar|cor|icone|agenda|budget)\}/i
-      .test(CODIGO_DIALOGO));
+      .test(CODIGO_CRIAR));
   ok("B10 zero controle de dono, id, ativo ou datas",
-    !/value=\{(userId|uid|user_id|id|ativo|criado_em|atualizado_em)\}/.test(CODIGO_DIALOGO));
-
-  ok("B11 acessibilidade no padrao do painel existente",
-    /role="dialog"/.test(CODIGO_DIALOGO) && /aria-modal="true"/.test(CODIGO_DIALOGO) &&
-      /aria-labelledby=/.test(CODIGO_DIALOGO));
-  ok("B12 Escape fecha, e devolve o foco a quem abriu",
-    /evento\.key !== "Escape"/.test(CODIGO_DIALOGO) && /anterior\.focus\(\)/.test(CODIGO_DIALOGO));
-  ok("B13 mas NAO fecha enquanto a escrita esta em voo",
-    /if \(enviandoRef\.current\) return;/.test(CODIGO_DIALOGO) &&
-      /if \(!enviando\) onFechar\(\)/.test(CODIGO_DIALOGO));
-
-  ok("B14 envio duplo fechado no botao",
-    /disabled=\{enviando \|\| !nomeValido\}/.test(CODIGO_DIALOGO));
-  ok("B15 e tambem no handler, antes de qualquer render",
-    /if \(enviandoRef\.current \|\| !nomeValido\) return;/.test(CODIGO_DIALOGO));
+    !/value=\{(userId|uid|user_id|id|ativo|criado_em|atualizado_em)\}/.test(CODIGO_CRIAR));
+  ok("B11 acessibilidade: etapas navegaveis e etapa atual marcada",
+    /aria-label="Etapas da criação"/.test(CODIGO_CRIAR) && /aria-current=\{atual \? "step" : undefined\}/.test(CODIGO_CRIAR));
+  ok("B14 envio duplo fechado no botao enquanto grava",
+    /className=\{cx\(estilos\.botao, estilos\.botaoPrimario\)\} disabled=\{ocupado\}\s*onClick=\{\(\) => void continuar\(\)\}/.test(CODIGO_CRIAR));
   ok("B16 nome obrigatorio por trim, sem regra alem da do servidor",
-    /nome\.trim\(\) !== ""/.test(CODIGO_DIALOGO));
+    /if \(nome\.trim\(\) === ""\) \{ setErro\("Dê um nome ao agente\."\)/.test(CODIGO_CRIAR));
   ok("B17 instrucoes vazias viram null, explicitamente",
-    /instrucoes\.trim\(\) === "" \? null : instrucoes\.trim\(\)/.test(CODIGO_DIALOGO));
-  ok("B18 o dialogo nao navega e nao conhece rota",
-    !/useRouter|router\.|next\/navigation|next\/link/.test(CODIGO_DIALOGO));
-  ok("B19 e nao conhece mock nenhum", !/MOCK_/.test(CODIGO_DIALOGO));
+    /instrucoes: instrucoes\.trim\(\) === "" \? null : instrucoes/.test(CODIGO_CRIAR));
+  ok("B18 a criacao nao navega por router nem leva ao assistente antigo",
+    !/useRouter|router\.|next\/navigation|\/configurar/.test(CODIGO_CRIAR));
+  ok("B19 e nao conhece mock nenhum", !/MOCK_/.test(CODIGO_CRIAR));
 }
 
-secao("C. A lista abre a criacao — e so ela decide a lista");
+secao("C. Um caminho so de criacao");
 
 {
-  ok("C1  ha CTA quando a lista esta vazia",
-    /Criar primeiro agente/.test(CODIGO_LISTA));
-  ok("C2  e ha CTA quando ja existem agentes",
-    /Criar agente/.test(CODIGO_LISTA));
-  ok("C3  os dois abrem o MESMO dialogo",
-    (CODIGO_LISTA.match(/setCriando\(true\)/g) ?? []).length === 2 &&
-      (CODIGO_LISTA.match(/<CriarAgente/g) ?? []).length === 1);
-  ok("C4  o sucesso insere o objeto que o servidor devolveu",
-    /agentes: \[\.\.\.atual\.agentes, novo\]/.test(CODIGO_LISTA));
-  ok("C5  sem segunda leitura, sem reload, sem navegacao automatica",
+  // ── F8.3-C3-C: a intencao original (CAMINHO UNICO) sobre a UI atual ──
+  //
+  // Antes, "a lista abre a criacao". Agora: a pagina Agentes NAO cria; a
+  // criacao e so a aba "Criar agente" (`/ia/agentes/novo`), que monta o
+  // fluxo de 6 etapas. O dialogo antigo e a lista legada foram removidos.
+  const SUBNAV = codigo(ler("components/ia/SubNavIA.tsx"));
+  const GESTAO = codigo(ler("components/ia/agentes/GestaoDeAgentes.tsx"));
+  const PAGINA_NOVO = codigo(ler(NOVO));
+  const RUNTIME = [...arquivosDe("app"), ...arquivosDe("components"), ...arquivosDe("lib")]
+    .filter((a) => /\.(tsx?|jsx?)$/.test(a));
+  const chamamCriacao = RUNTIME.filter((a) => a !== TRANSPORTE && /criarAgenteViaApi\(/.test(codigo(ler(a))));
+  ok("C1  criar agente e aba da navegacao principal",
+    /href: "\/ia\/agentes\/novo", rotulo: "Criar agente", principal: true/.test(SUBNAV));
+  ok("C2  a pagina Agentes nao oferece criacao (nem botao, nem dialogo)",
+    !/Criar agente|CriarAgente|setCriando|criarAgenteViaApi/.test(CODIGO_LISTA + GESTAO));
+  ok("C3  /ia/agentes usa a GestaoDeAgentes; /ia/agentes/novo usa o fluxo atual",
+    /<GestaoDeAgentes \/>/.test(CODIGO_LISTA) &&
+      /import CriarAgente from "@\/components\/ia\/criar\/CriarAgente";/.test(PAGINA_NOVO) && /<CriarAgente \/>/.test(PAGINA_NOVO));
+  ok("C4  o dialogo antigo e a lista legada foram removidos",
+    !existsSync(join(RAIZ, DIALOGO_REMOVIDO)) && !existsSync(join(RAIZ, LISTA_LEGADA_REMOVIDA)));
+  ok("C4a e nada mais os importa",
+    RUNTIME.every((a) => !/components\/ia\/agente\/(CriarAgente|ListaDeAgentesLegada)\b/.test(ler(a))));
+  // O Wizard antigo ainda tem um ramo de criacao, mas nenhuma rota o monta
+  // sem id: ele so configura agente EXISTENTE (`/ia/agentes/[id]/configurar`).
+  ok("C4b so o fluxo atual cria em runtime (o Wizard so entra com id)",
+    JSON.stringify(chamamCriacao.sort()) === JSON.stringify([CRIAR, "components/ia/factory/Wizard.tsx"].sort()) &&
+      RUNTIME.every((a) => !/agenteIdInicial=\{null\}/.test(codigo(ler(a)))) &&
+      /<Wizard agenteIdInicial=\{params\.id\} \/>/.test(codigo(ler("app/(app)/ia/agentes/[id]/configurar/page.tsx"))),
+    chamamCriacao.join(", "));
+  ok("C4c nenhum botao interno antigo recria o dialogo",
+    RUNTIME.every((a) => !/setCriando\(true\)|criar primeiro agente/i.test(codigo(ler(a)))));
+  ok("C5  sem segunda leitura, sem reload, sem navegacao automatica na lista",
     !/listarAgentes\(\)[\s\S]{0,80}aoCriar|router\.|location\.reload|window\.location/.test(CODIGO_LISTA));
-  ok("C6  a lista nao inventa id, ativo nem data para o novo agente",
+  ok("C6  a lista nao inventa id, ativo nem data para agente nenhum",
     !/id:\s*(crypto|randomUUID|`)|ativo:\s*true|criado_em:\s*new Date/.test(CODIGO_LISTA));
   ok("C7  e continua sem mock", !/MOCK_/.test(CODIGO_LISTA));
 }

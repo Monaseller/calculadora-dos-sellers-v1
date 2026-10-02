@@ -29,6 +29,7 @@ import {
   Aviso, Botao, Etiqueta, PainelLateral, TAMANHO,
 } from "@/components/ui/Primitivas";
 import { TextoDoAgente } from "@/components/ui/TextoDoAgente";
+import SalesMetricsCards, { apresentacoesDeVendasML } from "@/components/ia/factory/SalesMetricsCards";
 import {
   criarConversaDoChat, decidirAprovacaoNoChat, decidirCapacidadeNoChat,
   enviarFonteDoAgente, iniciarConexaoDaCapacidade,
@@ -676,10 +677,20 @@ export function ChatDoAgente({
         </div>
       )}
 
-      {/* Fontes de forma discreta, como o §41 pede. */}
+      {/* Fontes de forma discreta, como o §41 pede.
+          ── F8.1-B3: os `var(--cds-chat-*)` sao SO apresentacao ─────────
+          Cada um cai no valor de sempre quando a variavel nao existe — o
+          Workspace e o Wizard desenham igual. Quem as define e o host do
+          Office V1, no wrapper dele. Nenhuma condicao ou dado depende delas. */}
       <div style={{
         display: "flex", gap: ESPACO.sm, alignItems: "center",
-        marginBottom: ESPACO.md, flexWrap: "wrap",
+        marginBottom: `var(--cds-chat-barra-margem, ${ESPACO.md}px)`, flexWrap: "wrap",
+        justifyContent: "var(--cds-chat-barra-alinhamento, flex-start)",
+        minHeight: "var(--cds-chat-barra-altura, auto)",
+        padding: "var(--cds-chat-barra-padding, 0)",
+        borderBottom: "var(--cds-chat-barra-borda, none)",
+        background: "var(--cds-chat-barra-fundo, transparent)",
+        boxSizing: "border-box",
       }}>
         <Botao tom="sutil" onClick={() => setPainelFontes(true)}>
           Arquivos {fontes.length}
@@ -690,7 +701,7 @@ export function ChatDoAgente({
       </div>
 
       {pendenteDeProposito !== null && (
-        <div style={{ marginBottom: ESPACO.md }}>
+        <div style={{ marginBottom: ESPACO.md, marginInline: "var(--cds-chat-coluna-margem, 0)" }}>
           <Aviso tom="info">
             <strong>{pendenteDeProposito}</strong> foi adicionado a este agente. Descreva o que
             ele representa em <strong>Configurar → Arquivos</strong>, senão o agente não conseguirá
@@ -699,9 +710,12 @@ export function ChatDoAgente({
         </div>
       )}
 
-      <div style={{
+      {/* `data-cds-chat-trilha`: gancho SO de estilo (scrollbar do Office V1,
+          F8.1-B3.2). Nenhuma logica le este atributo. */}
+      <div data-cds-chat-trilha="" style={{
         flex: 1, overflowY: "auto", display: "flex", flexDirection: "column",
-        gap: ESPACO.md, paddingRight: ESPACO.xs,
+        gap: `var(--cds-chat-trilha-gap, ${ESPACO.md}px)`,
+        padding: `var(--cds-chat-trilha-padding, 0 ${ESPACO.xs}px 0 0)`,
       }}>
         {/*
           ── A retomada, §15 ───────────────────────────────────────────
@@ -737,17 +751,30 @@ export function ChatDoAgente({
             key={m.id}
             style={{
               alignSelf: m.papel === "usuario" ? "flex-end" : "flex-start",
-              maxWidth: "min(720px, 88%)",
-              background: m.papel === "usuario" ? CROMO.acentoFundo : CROMO.fundoCard,
-              border: `1px solid ${m.papel === "usuario" ? CROMO.acentoBorda : CROMO.borda}`,
-              borderRadius: RAIO.card,
-              padding: ESPACO.md,
+              maxWidth: m.papel === "usuario"
+                ? "var(--cds-chat-bolha-max-usuario, min(720px, 88%))"
+                : "var(--cds-chat-bolha-max-agente, min(720px, 88%))",
+              background: m.papel === "usuario"
+                ? `var(--cds-chat-bolha-fundo-usuario, ${CROMO.acentoFundo})`
+                : `var(--cds-chat-bolha-fundo-agente, ${CROMO.fundoCard})`,
+              border: m.papel === "usuario"
+                ? `var(--cds-chat-bolha-borda-usuario, 1px solid ${CROMO.acentoBorda})`
+                : `var(--cds-chat-bolha-borda-agente, 1px solid ${CROMO.borda})`,
+              borderRadius: `var(--cds-chat-bolha-raio, ${RAIO.card}px)`,
+              padding: `var(--cds-chat-bolha-padding, ${ESPACO.md}px)`,
             }}
           >
             <div style={{
               fontSize: TAMANHO.miudo, color: CROMO.textoFraco, marginBottom: 4,
             }}>
               {m.papel === "usuario" ? "Você" : "Agente"}
+              {/* Horario REAL (`criadoEm` do proprio contrato). Oculto por
+                  padrao; so o Office V1 o exibe. Sem data valida, nada. */}
+              {m.criadoEm !== null && !Number.isNaN(Date.parse(m.criadoEm)) && (
+                <span style={{ display: "var(--cds-chat-hora-display, none)", marginLeft: ESPACO.sm, opacity: 0.75 }}>
+                  {new Date(m.criadoEm).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}
+                </span>
+              )}
             </div>
             {/* ── F7b.4.8.5-R1: o Markdown do modelo era mostrado cru ───
               *
@@ -766,6 +793,12 @@ export function ChatDoAgente({
                 {m.conteudo}
               </div>
             )}
+            {/* F8.1-B4B: KPIs SO da apresentacao estruturada dos passos
+                desta mensagem — nunca do texto acima. Sem apresentacao
+                (mensagem antiga, erro, incompleta), nada aparece. */}
+            {m.papel === "assistente" && apresentacoesDeVendasML(m.passos).map((a, i) => (
+              <SalesMetricsCards key={`${m.id}:kpi:${i}`} apresentacao={a} />
+            ))}
             {m.passos.length > 0 && (
               <div style={{ marginTop: ESPACO.sm }}>
                 <Botao tom="sutil" onClick={() => setProvenienciaDe(m)}>
@@ -804,6 +837,7 @@ export function ChatDoAgente({
           marginTop: ESPACO.md, padding: ESPACO.md,
           border: `1px solid ${CROMO.acentoBorda}`, borderRadius: RAIO.card,
           background: CROMO.acentoFundo,
+          marginInline: "var(--cds-chat-coluna-margem, 0)",
         }}>
           <strong style={{ fontSize: TAMANHO.corpo, color: CROMO.texto }}>
             Preciso de uma ferramenta
@@ -864,6 +898,7 @@ export function ChatDoAgente({
           marginTop: ESPACO.md, padding: ESPACO.md,
           border: `1px solid ${CROMO.acentoBorda}`, borderRadius: RAIO.card,
           background: CROMO.acentoFundo,
+          marginInline: "var(--cds-chat-coluna-margem, 0)",
         }}>
           <strong style={{ fontSize: TAMANHO.corpo, color: CROMO.texto }}>
             {precisaConectar.reconectar
@@ -911,6 +946,7 @@ export function ChatDoAgente({
           marginTop: ESPACO.md, padding: ESPACO.md,
           border: `1px solid ${CROMO.acentoBorda}`, borderRadius: RAIO.card,
           background: CROMO.acentoFundo,
+          marginInline: "var(--cds-chat-coluna-margem, 0)",
         }}>
           <strong style={{ fontSize: TAMANHO.corpo, color: CROMO.texto }}>
             {escolherLoja.lojas.length === 1
@@ -942,10 +978,12 @@ export function ChatDoAgente({
       {/* Marketplace nativo sem conta nenhuma: o consentimento dele mora
           na tela de Conexões, que e o fluxo oficial da CDS. */}
       {precisaConectarMkt !== null && (
-        <Aviso tom="atencao">
-          Para isso eu preciso que o {precisaConectarMkt.nome} esteja conectado na
-          sua conta. Depois de conectar, volte aqui e eu continuo de onde paramos.
-        </Aviso>
+        <div style={{ marginInline: "var(--cds-chat-coluna-margem, 0)" }}>
+          <Aviso tom="atencao">
+            Para isso eu preciso que o {precisaConectarMkt.nome} esteja conectado na
+            sua conta. Depois de conectar, volte aqui e eu continuo de onde paramos.
+          </Aviso>
+        </div>
       )}
 
       {aprovacao !== null && (
@@ -953,6 +991,7 @@ export function ChatDoAgente({
           marginTop: ESPACO.md, padding: ESPACO.md,
           border: `1px solid ${CROMO.acentoBorda}`, borderRadius: RAIO.card,
           background: CROMO.acentoFundo,
+          marginInline: "var(--cds-chat-coluna-margem, 0)",
         }}>
           <strong style={{ fontSize: TAMANHO.corpo, color: CROMO.texto }}>
             Esta ação precisa da sua aprovação
@@ -990,7 +1029,7 @@ export function ChatDoAgente({
       )}
 
       {erro !== null && barrado?.desfecho !== "aguardando_aprovacao" && (
-        <div style={{ marginTop: ESPACO.md }}>
+        <div style={{ marginTop: ESPACO.md, marginInline: "var(--cds-chat-coluna-margem, 0)" }}>
           <Aviso tom="atencao">
             {erro}
             {codigoTecnico !== null && (
@@ -1011,6 +1050,12 @@ export function ChatDoAgente({
       <div style={{
         marginTop: ESPACO.md, display: "flex", gap: ESPACO.sm, alignItems: "flex-end",
         position: "relative",
+        marginInline: "var(--cds-chat-coluna-margem, 0)",
+        marginBottom: "var(--cds-chat-composer-margem-baixo, 0)",
+        padding: "var(--cds-chat-composer-padding, 0)",
+        background: "var(--cds-chat-composer-fundo, transparent)",
+        border: "var(--cds-chat-composer-borda, none)",
+        borderRadius: "var(--cds-chat-composer-raio, 0)",
       }}>
         <Botao tom="secundario" onClick={() => setMenuMais((v) => !v)} titulo="Adicionar arquivo">
           +
@@ -1075,8 +1120,8 @@ export function ChatDoAgente({
           placeholder="Digite uma mensagem..."
           rows={2}
           style={{
-            flex: 1, background: "rgba(0,0,0,0.25)",
-            border: `1px solid ${CROMO.borda}`, borderRadius: RAIO.controle,
+            flex: 1, background: "var(--cds-chat-campo-fundo, rgba(0,0,0,0.25))",
+            border: `var(--cds-chat-campo-borda, 1px solid ${CROMO.borda})`, borderRadius: RAIO.controle,
             padding: ESPACO.md, color: CROMO.texto, fontSize: TAMANHO.corpo,
             lineHeight: 1.5, resize: "vertical", fontFamily: "inherit", minHeight: 52,
           }}

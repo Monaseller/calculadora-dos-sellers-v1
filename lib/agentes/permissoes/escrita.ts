@@ -14,9 +14,9 @@
  *
  * Duas suites afirmavam que "nao existe write path de permissao". A
  * revogacao foi ratificada e e ESTREITA: existe UM escritor, para UMA
- * linha, com UM upsert. Nao existe DELETE — ver "Ausente nao e um
- * destino" abaixo — e nao existe escrita em lote, em cascata ou por
- * perfil de agente.
+ * linha, com UM upsert. Nao existe escrita em lote, em cascata ou por
+ * perfil de agente. O DELETE existe so para REMOVER UM PACK do agente —
+ * ver "Remover pack e voltar a nao selecionado" abaixo (F8.2-B).
  *
  * ── CONFIGURAR nao e EXECUTAR ───────────────────────────────────────
  *
@@ -32,8 +32,25 @@
  * `permissao_bloqueada` para o outro — e representar bloqueio como
  * ausencia perderia QUANDO o dono decidiu, tornaria
  * `permissao_bloqueada` inalcancavel na pratica e confundiria "nunca
- * configurei" com "proibi". Por isso nao ha `removerPermissao` nesta
- * fase: negar e uma escolha explicita, com carimbo.
+ * configurei" com "proibi". Negar continua sendo uma escolha explicita,
+ * com carimbo: `bloqueado` NUNCA e implementado como DELETE.
+ *
+ * ── Remover pack e voltar a nao selecionado — F8.2-B ────────────────
+ *
+ * Decisao de produto ratificada: REMOVER uma Tool interna do agente e
+ * devolve-la ao estado "nao selecionado" — o mesmo de quem nunca a
+ * escolheu. Isso e AUSENCIA, e nao bloqueio: o guard volta a emitir
+ * `permissao_ausente` para essas Funcoes, e `estadoDosPacks` deixa de
+ * contar o pack como selecionado.
+ *
+ * Por isso a remocao e um DELETE das linhas do pack, e nao um upsert de
+ * `bloqueado`. Ela e estreita como o upsert:
+ *   - por PACK, nunca por lista livre: as Funcoes vem de `TOOL_PACKS`
+ *     aqui no servidor, e o chamador nao escolhe quais linhas apagar;
+ *   - UMA instrucao (`in funcao_id`), atomica — nunca o pack pela metade;
+ *   - escopo `user_id` + `agente_id`: linha de outro dono nao casa.
+ * O carimbo de quando a permissao foi definida vai junto com a linha: e
+ * o preco de "nao selecionado" ser o mesmo estado de "nunca escolhido".
  *
  * ── Autenticacao NAO acontece aqui ──────────────────────────────────
  *
@@ -49,6 +66,7 @@ import "server-only";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { NIVEIS_AUTONOMIA, type NivelAutonomia } from "@/lib/ia/conceitos";
 import { funcaoExiste } from "@/lib/agentes/funcoes/registry";
+import { packPorId } from "@/lib/agentes/factory/catalogo-ui";
 
 const TABELA_PERMISSOES = "agente_permissoes";
 
@@ -201,4 +219,51 @@ export async function definirPermissaoDeFuncaoDoAgente(
   // nao precisa — e "criada" contra "substituida" e distincao que
   // ninguem pediu, com o mesmo estado final nos dois casos.
   return DEFINIDA;
+}
+
+// ─── Remover um PACK do agente — F8.2-B ───────────────────────────────
+
+export interface EntradaRemoverPack {
+  userId: string;
+  agenteId: string;
+  packId: string;
+}
+
+export interface ResultadoRemoverPack {
+  estado: "removido" | "entrada_invalida" | "falha_escrita";
+  /** Quantas linhas de permissao sairam. 0 = o pack ja nao estava la. */
+  linhas?: number;
+}
+
+/**
+ * Devolve um pack ao estado "nao selecionado": apaga as linhas de
+ * permissao das Funcoes DELE, e de nenhuma outra.
+ *
+ * A propriedade do agente e conferida pela ROTA (sessao + dono) antes de
+ * chegar aqui; o filtro por `user_id` e a segunda trava — mesmo com um
+ * `agenteId` alheio, nenhuma linha de outro dono casa.
+ *
+ * Idempotente: remover um pack que ja nao esta no agente e sucesso com
+ * zero linhas, e nao erro — o estado final pedido ja vale.
+ */
+export async function removerPackDoAgente(
+  entrada: EntradaRemoverPack
+): Promise<ResultadoRemoverPack> {
+  const { userId, agenteId, packId } = entrada;
+  if (!userId || !agenteId) return { estado: "entrada_invalida" };
+  const pack = packPorId(packId);
+  if (pack === null || pack.funcoes.length === 0) return { estado: "entrada_invalida" };
+
+  const r = await getSupabaseServidor()
+    .from(TABELA_PERMISSOES)
+    .delete({ count: "exact" })
+    .eq("user_id", userId)
+    .eq("agente_id", agenteId)
+    .in("funcao_id", [...pack.funcoes]);
+
+  if (r.error) {
+    console.error(`[permissoes] falha ao remover pack (sqlstate ${codigoDe(r.error) ?? "desconhecido"})`);
+    return { estado: "falha_escrita" };
+  }
+  return { estado: "removido", linhas: r.count ?? 0 };
 }

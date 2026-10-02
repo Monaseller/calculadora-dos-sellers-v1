@@ -1816,7 +1816,25 @@ export interface PassoDoChatUI {
    * mandava a pessoa para outra pagina — que e onde o turno se perdia.
    */
   readonly aprovacaoId: string | null;
+  /**
+   * Agregados minimos de apresentacao — F8.1-B4A. `null` = nao ha.
+   *
+   * Contem SOMENTE dados de apresentacao explicitamente allowlisted pelo
+   * servidor (`apresentacaoDoPasso`). Uniao fechada: nunca o output de
+   * uma Tool, e nunca `unknown` repassado.
+   */
+  readonly apresentacao: ApresentacaoDoPassoUI | null;
 }
+
+/** Espelha `ApresentacaoDoPasso` do dominio. Hoje, so `vendas_ml`. */
+export type ApresentacaoDoPassoUI = {
+  readonly tipo: "vendas_ml";
+  readonly valor: number;
+  readonly vendas: number;
+  readonly unidades: number;
+  readonly ticketMedio: number;
+  readonly periodo: { readonly de: string; readonly ate: string };
+};
 
 /** O custo de um turno. So mensagem de assistente tem. */
 export interface UsoDoTurnoUI {
@@ -2077,16 +2095,48 @@ function conversaDaResposta(bruto: unknown): ConversaDoChatUI | null {
   };
 }
 
+/**
+ * A apresentacao do passo, campo a campo — F8.1-B4A.
+ *
+ * Devolve `undefined` quando a forma nao e a esperada: quem chama trata
+ * isso como passo malformado, o mesmo rigor do resto do contrato. Um
+ * card desenhado a partir de meia apresentacao seria um numero sem
+ * procedencia.
+ */
+function apresentacaoDaResposta(bruto: unknown): ApresentacaoDoPassoUI | undefined {
+  if (!ehObjeto(bruto)) return undefined;
+  const { tipo, valor, vendas, unidades, ticketMedio, periodo } = bruto;
+  if (tipo !== "vendas_ml") return undefined;
+  const finito = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+  if (!finito(valor) || !finito(vendas) || !finito(unidades) || !finito(ticketMedio)) {
+    return undefined;
+  }
+  if (!ehObjeto(periodo)) return undefined;
+  const { de, ate } = periodo;
+  if (typeof de !== "string" || typeof ate !== "string") return undefined;
+  return { tipo, valor, vendas, unidades, ticketMedio, periodo: { de, ate } };
+}
+
 function passoDaResposta(bruto: unknown): PassoDoChatUI | null {
   if (!ehObjeto(bruto)) return null;
   const { funcaoId, desfecho, executou, requestId, aprovacaoId } = bruto;
   if (typeof funcaoId !== "string" || funcaoId.length === 0) return null;
   if (typeof desfecho !== "string" || desfecho.length === 0) return null;
   if (typeof executou !== "boolean") return null;
+  // Ausente (ou `null`) e legitimo: a maioria dos passos nao tem. Presente
+  // e torto condena o passo — e, pela regra de `mensagemDaResposta`, a
+  // mensagem: procedencia meio lida e pior que nenhuma.
+  let apresentacao: ApresentacaoDoPassoUI | null = null;
+  if (bruto.apresentacao !== undefined && bruto.apresentacao !== null) {
+    const lida = apresentacaoDaResposta(bruto.apresentacao);
+    if (lida === undefined) return null;
+    apresentacao = lida;
+  }
   return {
     funcaoId, desfecho, executou,
     requestId: textoOuNulo(requestId),
     aprovacaoId: textoOuNulo(aprovacaoId),
+    apresentacao,
   };
 }
 
@@ -2824,11 +2874,16 @@ export async function criarMemoriaDoAgente(
   return dados === null ? { estado: "falha" } : { estado: "ok", dados };
 }
 
-/** Liga ou desliga UMA memoria. PATCH porque altera o que existe. */
+/**
+ * Liga/desliga UMA memoria, ou troca o TEXTO dela. PATCH porque altera o
+ * que existe. F8.3-C1.5: `conteudo` ja era aceito pela rota (allowlist
+ * conteudo/tipo/ordem/ativo, validado no servico); so o transporte nao o
+ * expunha. Um campo por chamada, nunca o objeto cru.
+ */
 export async function alterarMemoriaDoAgente(
   agenteId: string,
   memoriaId: string,
-  alteracao: { ativo: boolean }
+  alteracao: { ativo: boolean } | { conteudo: string }
 ): Promise<RespostaDaFactory<MemoriaDoAgenteUI>> {
   let resposta: Response;
   try {
@@ -2837,7 +2892,8 @@ export async function alterarMemoriaDoAgente(
       {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ativo: alteracao.ativo }),
+        body: JSON.stringify("ativo" in alteracao
+          ? { ativo: alteracao.ativo } : { conteudo: alteracao.conteudo }),
       }
     );
   } catch {
@@ -4012,4 +4068,265 @@ export async function definirIaDoAgente(
   if (desfecho !== null) return desfecho;
   const dados = estadoDaIaDaResposta(corpo);
   return dados === null ? { estado: "falha" } : { estado: "ok", dados };
+}
+
+// ─── Remover um PACK do agente — F8.2-B ───────────────────────────────
+//
+// "Remover" e voltar ao NAO SELECIONADO: o servidor apaga as linhas de
+// permissao das Funcoes daquele pack (e de nenhuma outra). Vai so o id
+// do pack, na QUERY — DELETE sem corpo, como `desvincularFerramentaExterna`
+// — e quais linhas saem e decisao do servidor.
+
+/** Remove uma Tool INTERNA (pack) do agente. Idempotente. */
+export async function removerFerramentaDoAgente(
+  agenteId: string,
+  packId: string
+): Promise<RespostaDaFactory<{ readonly linhas: number }>> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(
+      `${caminhoDasPermissoes(agenteId)}?packId=${encodeURIComponent(packId)}`,
+      { method: "DELETE" }
+    );
+  } catch {
+    return { estado: "falha" };
+  }
+  const corpo = await corpoDe(resposta);
+  const desfecho = desfechoDaResposta<{ readonly linhas: number }>(resposta, corpo);
+  if (desfecho !== null) return desfecho;
+  const removido = (corpo as { removido?: unknown }).removido;
+  if (!ehObjeto(removido) || removido.packId !== packId) return { estado: "falha" };
+  const linhas = typeof removido.linhas === "number" && Number.isFinite(removido.linhas)
+    ? removido.linhas : 0;
+  return { estado: "ok", dados: { linhas } };
+}
+
+// ─── Vendas AO VIVO — F8.2-A ──────────────────────────────────────────
+//
+// Leitura do painel global do Escritorio. Nao passa por agente, conversa
+// nem IA: e a camada deterministica de vendas do ML, servida por
+// `/api/ia/vendas-ao-vivo`. Aqui so se valida a forma — campo a campo, e
+// um item torto condena a resposta, como no resto deste transporte.
+
+export type MarketplaceAoVivoUI = "mercadolivre" | "shopee";
+
+export interface KpisAoVivoUI {
+  readonly valor: number;
+  readonly vendas: number;
+  readonly unidades: number;
+  readonly ticketMedio: number;
+}
+
+/** F8.2-B: variacao de um KPI. `pct` null = ontem era zero. */
+export interface VariacaoAoVivoUI {
+  readonly delta: number;
+  readonly pct: number | null;
+}
+
+/** Hoje ate agora x ontem ate o mesmo horario. */
+export interface ComparativoAoVivoUI {
+  readonly ontem: KpisAoVivoUI;
+  readonly periodoOntem: { readonly de: string; readonly ate: string };
+  /** Hoje / ontem em vendas brutas (1 = igual). `null` = ontem zero. */
+  readonly progressoValor: number | null;
+  readonly variacao: {
+    readonly valor: VariacaoAoVivoUI;
+    readonly vendas: VariacaoAoVivoUI;
+    readonly unidades: VariacaoAoVivoUI;
+    readonly ticketMedio: VariacaoAoVivoUI;
+  };
+}
+
+export type LojaAoVivoUI =
+  | {
+      readonly nome: string;
+      readonly estado: "ok";
+      readonly periodo: { readonly de: string; readonly ate: string };
+      readonly kpis: KpisAoVivoUI;
+      /** `null` = ontem nao tem total confiavel: sem comparativo. */
+      readonly comparativo: ComparativoAoVivoUI | null;
+    }
+  | { readonly nome: string; readonly estado: "incompleto" | "erro" };
+
+export interface MarketplaceDoPainelUI {
+  readonly marketplace: MarketplaceAoVivoUI;
+  readonly configurado: boolean;
+  readonly lojas: readonly LojaAoVivoUI[];
+}
+
+export interface VendasAoVivoUI {
+  readonly geradoEm: string;
+  /** F8.2-B: os dois cortes (ISO), para dizer "ate HH:MM" sem calcular. */
+  readonly corteHoje: string;
+  readonly corteOntem: string;
+  readonly marketplaces: readonly MarketplaceDoPainelUI[];
+}
+
+export type RespostaVendasAoVivo =
+  | { estado: "ok"; dados: VendasAoVivoUI }
+  | { estado: "nao_autenticado" }
+  | { estado: "falha" };
+
+const ROTA_VENDAS_AO_VIVO = "/api/ia/vendas-ao-vivo";
+
+const finitoAoVivo = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+
+function kpisAoVivoDaResposta(bruto: unknown): KpisAoVivoUI | null {
+  if (!ehObjeto(bruto)) return null;
+  const { valor, vendas, unidades, ticketMedio } = bruto;
+  if (!finitoAoVivo(valor) || !finitoAoVivo(vendas) || !finitoAoVivo(unidades) ||
+      !finitoAoVivo(ticketMedio)) return null;
+  return { valor, vendas, unidades, ticketMedio };
+}
+
+function variacaoAoVivoDaResposta(bruto: unknown): VariacaoAoVivoUI | null {
+  if (!ehObjeto(bruto) || !finitoAoVivo(bruto.delta)) return null;
+  if (bruto.pct !== null && !finitoAoVivo(bruto.pct)) return null;
+  return { delta: bruto.delta, pct: bruto.pct as number | null };
+}
+
+/** `undefined` = forma invalida (condena); `null` = sem comparativo. */
+function comparativoAoVivoDaResposta(bruto: unknown): ComparativoAoVivoUI | null | undefined {
+  if (bruto === null) return null;
+  if (!ehObjeto(bruto)) return undefined;
+  const ontem = kpisAoVivoDaResposta(bruto.ontem);
+  const p = bruto.periodoOntem;
+  const v = bruto.variacao;
+  if (ontem === null || !ehObjeto(p) || typeof p.de !== "string" || typeof p.ate !== "string" ||
+      !ehObjeto(v)) return undefined;
+  const valor = variacaoAoVivoDaResposta(v.valor);
+  const vendas = variacaoAoVivoDaResposta(v.vendas);
+  const unidades = variacaoAoVivoDaResposta(v.unidades);
+  const ticketMedio = variacaoAoVivoDaResposta(v.ticketMedio);
+  if (valor === null || vendas === null || unidades === null || ticketMedio === null) return undefined;
+  const progresso = bruto.progressoValor;
+  if (progresso !== null && !finitoAoVivo(progresso)) return undefined;
+  return {
+    ontem, periodoOntem: { de: p.de, ate: p.ate },
+    progressoValor: progresso as number | null,
+    variacao: { valor, vendas, unidades, ticketMedio },
+  };
+}
+
+function lojaAoVivoDaResposta(bruto: unknown): LojaAoVivoUI | null {
+  if (!ehObjeto(bruto) || typeof bruto.nome !== "string") return null;
+  const { nome, estado } = bruto;
+  if (estado === "incompleto" || estado === "erro") return { nome, estado };
+  if (estado !== "ok") return null;
+  const { periodo, kpis } = bruto;
+  if (!ehObjeto(periodo) || typeof periodo.de !== "string" || typeof periodo.ate !== "string") {
+    return null;
+  }
+  const lidos = kpisAoVivoDaResposta(kpis);
+  if (lidos === null) return null;
+  // Ausente conta como "sem comparativo" so para resposta de antes do
+  // F8.2-B; presente e torto condena a loja.
+  const comparativo = comparativoAoVivoDaResposta(bruto.comparativo ?? null);
+  if (comparativo === undefined) return null;
+  return {
+    nome, estado,
+    periodo: { de: periodo.de, ate: periodo.ate },
+    kpis: lidos,
+    comparativo,
+  };
+}
+
+function marketplaceAoVivoDaResposta(bruto: unknown): MarketplaceDoPainelUI | null {
+  if (!ehObjeto(bruto)) return null;
+  const { marketplace, configurado, lojas } = bruto;
+  if (marketplace !== "mercadolivre" && marketplace !== "shopee") return null;
+  if (typeof configurado !== "boolean" || !Array.isArray(lojas)) return null;
+  const lidas: LojaAoVivoUI[] = [];
+  for (const l of lojas) {
+    const loja = lojaAoVivoDaResposta(l);
+    if (loja === null) return null;
+    lidas.push(loja);
+  }
+  return { marketplace, configurado, lojas: lidas };
+}
+
+/** O corpo da rota -> o contrato do painel. Exportado para a suite. */
+export function vendasAoVivoDaResposta(corpo: unknown): VendasAoVivoUI | null {
+  if (!ehObjeto(corpo) || corpo.ok !== true) return null;
+  if (typeof corpo.geradoEm !== "string" || !Array.isArray(corpo.marketplaces)) return null;
+  if (typeof corpo.corteHoje !== "string" || typeof corpo.corteOntem !== "string") return null;
+  const marketplaces: MarketplaceDoPainelUI[] = [];
+  for (const m of corpo.marketplaces) {
+    const lido = marketplaceAoVivoDaResposta(m);
+    if (lido === null) return null;
+    marketplaces.push(lido);
+  }
+  return {
+    geradoEm: corpo.geradoEm, corteHoje: corpo.corteHoje, corteOntem: corpo.corteOntem,
+    marketplaces,
+  };
+}
+
+/** As vendas de HOJE, por loja. Leitura pura, sem IA. */
+export async function lerVendasAoVivo(signal?: AbortSignal): Promise<RespostaVendasAoVivo> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(ROTA_VENDAS_AO_VIVO, { signal, cache: "no-store" });
+  } catch {
+    return { estado: "falha" };
+  }
+  if (resposta.status === 401) return { estado: "nao_autenticado" };
+  const corpo = await corpoDe(resposta);
+  if (!resposta.ok) return { estado: "falha" };
+  const dados = vendasAoVivoDaResposta(corpo);
+  return dados === null ? { estado: "falha" } : { estado: "ok", dados };
+}
+
+// ── Contas de marketplace do DONO — F8.3-C1.6 ─────────────────────────
+//
+// A aba APIs da pagina Agentes mostra, por integracao da CDS, se o dono
+// JA tem conta conectada. A fonte e a MESMA de Configuracoes: GET
+// `/api/lojas` (lojas ativas do dono da sessao; a rota nao projeta token).
+// Aqui a resposta e reduzida ao que a tela usa — `seller_id` nao passa.
+//
+// Conectar uma conta NOVA nao acontece aqui: e o fluxo OAuth que a CDS ja
+// tem (`/api/auth/mercadolivre`, `/api/auth/shopee`). A tela so abre o
+// endereco; credencial nunca trafega pelo cliente.
+
+const ROTA_LOJAS_DO_DONO = "/api/lojas";
+
+/** Onde comeca o fluxo de conexao de conta da CDS, por marketplace da loja. */
+export const ENDERECO_PARA_CONECTAR_CONTA: Readonly<Record<"ML" | "Shopee", string>> = Object.freeze({
+  ML: "/api/auth/mercadolivre",
+  Shopee: "/api/auth/shopee",
+});
+
+export interface LojaDoDonoUI {
+  readonly id: string;
+  readonly nome: string | null;
+  readonly nickname: string | null;
+  /** Como a tabela `lojas` grava: "ML" | "Shopee" (outros valores passam como vieram). */
+  readonly marketplace: string;
+}
+
+export type RespostaLojasDoDono =
+  | { estado: "ok"; lojas: readonly LojaDoDonoUI[] }
+  | { estado: "nao_autenticado" }
+  | { estado: "falha" };
+
+export async function listarLojasDoDono(signal?: AbortSignal): Promise<RespostaLojasDoDono> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(ROTA_LOJAS_DO_DONO, { signal });
+  } catch {
+    return { estado: "falha" };
+  }
+  if (resposta.status === 401) return { estado: "nao_autenticado" };
+  const corpo = await corpoDe(resposta);
+  // Sucesso e SEMPRE array (vazio e legitimo); qualquer outra coisa e falha.
+  if (!resposta.ok || !Array.isArray(corpo)) return { estado: "falha" };
+  const lojas: LojaDoDonoUI[] = [];
+  for (const bruto of corpo) {
+    if (!ehObjeto(bruto)) return { estado: "falha" };
+    const { id, nome, nickname, marketplace } = bruto;
+    if (typeof id !== "string" || id.length === 0) return { estado: "falha" };
+    if (typeof marketplace !== "string" || marketplace.length === 0) return { estado: "falha" };
+    lojas.push({ id, nome: textoOuNulo(nome), nickname: textoOuNulo(nickname), marketplace });
+  }
+  return { estado: "ok", lojas };
 }

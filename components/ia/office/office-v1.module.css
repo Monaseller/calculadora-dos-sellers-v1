@@ -1,0 +1,1108 @@
+/*
+ * Office V1 — estilos ESCOPADOS do escritorio da rota `/ia`.
+ *
+ * CSS Module de proposito: o projeto nao usa Tailwind, e as
+ * pseudo-classes que o prototipo aprovado precisa (hover, focus-visible,
+ * media query) nao cabem em `style={{}}`.
+ *
+ * O laranja `--ov1-acento` (#f97316) e o acento aprovado do Office V1 e
+ * vale SO aqui dentro. O acento global do CDS (`CROMO.acento`) nao muda.
+ */
+
+.raiz {
+  --ov1-acento: #f97316;
+  --ov1-glow: rgb(249 115 22 / 0.55);
+  --ov1-anel: rgb(249 115 22 / 0.25);
+  --ov1-fundo: #0b0f17;
+  --ov1-card: #111723;
+  --ov1-secundario: #171e2b;
+  --ov1-borda: #222b3a;
+  --ov1-texto: #eef1f6;
+  --ov1-texto-fraco: #98a2b3;
+  --ov1-raio: 10px;
+
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 320px);
+  /* F8.1-B3.2: o chat fica SO sob a cena. O painel ocupa a coluna da
+     direita em todas as linhas, e nada passa por baixo dele. */
+  grid-template-areas:
+    "cena   painel"
+    "outros painel"
+    "chat   painel";
+  grid-template-rows: auto auto auto;
+  gap: 16px;
+  align-items: start;
+  color: var(--ov1-texto);
+}
+
+/* Sem "Outros agentes", a linha deles nao existe — nem o gap dela. */
+.raizSemOutros {
+  grid-template-areas:
+    "cena painel"
+    "chat painel";
+  grid-template-rows: auto auto;
+}
+
+.areaCena {
+  grid-area: cena;
+  min-width: 0;
+}
+
+.areaOutros {
+  grid-area: outros;
+  min-width: 0;
+}
+
+.areaPainel {
+  grid-area: painel;
+  min-width: 0;
+}
+
+.areaChat {
+  grid-area: chat;
+  min-width: 0;
+}
+
+/* ── Cena ─────────────────────────────────────────────────────────── */
+
+.cena {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--ov1-borda);
+  border-radius: var(--ov1-raio);
+  background: var(--ov1-card);
+  /* IMAGE_W / SCENE_H — a mesma proporcao do prototipo aprovado. */
+  aspect-ratio: 1804 / 940;
+  /* Os hotspots escalam com a LARGURA DA CENA (cqi), nao da viewport. */
+  container-type: inline-size;
+}
+
+.imagem {
+  object-fit: cover;
+  object-position: center;
+}
+
+.avisoCena {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  max-width: min(420px, 90%);
+  margin: 0;
+  padding: 12px 16px;
+  border: 1px solid var(--ov1-borda);
+  border-radius: var(--ov1-raio);
+  background: rgb(11 15 23 / 0.88);
+  backdrop-filter: blur(4px);
+  font-size: 13px;
+  line-height: 1.5;
+  text-align: center;
+  color: var(--ov1-texto);
+}
+
+.avisoCena a {
+  color: var(--ov1-acento);
+}
+
+/* ── Hotspot ──────────────────────────────────────────────────────── */
+
+.hotspot {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: clamp(2px, 0.3cqi, 4px);
+  padding: clamp(4px, 0.5cqi, 8px) clamp(8px, 0.9cqi, 14px);
+  margin: 0;
+  border: 1px solid rgb(238 241 246 / 0.18);
+  border-radius: 8px;
+  background: rgb(11 15 23 / 0.8);
+  backdrop-filter: blur(4px);
+  color: var(--ov1-texto);
+  font: inherit;
+  cursor: pointer;
+  transition:
+    transform 300ms ease-out,
+    border-color 300ms ease-out,
+    box-shadow 300ms ease-out,
+    background-color 300ms ease-out;
+}
+
+.hotspot:hover {
+  border-color: rgb(249 115 22 / 0.6);
+  box-shadow: 0 0 16px var(--ov1-glow);
+}
+
+.hotspot:focus-visible {
+  outline: 2px solid var(--ov1-acento);
+  outline-offset: 2px;
+}
+
+.hotspotSelecionado {
+  z-index: 10;
+  transform: translate(-50%, -50%) scale(1.05);
+  border: 2px solid var(--ov1-acento);
+  background: rgb(11 15 23 / 0.95);
+  box-shadow:
+    0 0 0 4px var(--ov1-anel),
+    0 0 32px var(--ov1-glow);
+}
+
+.hotspotSelecionado:hover {
+  border-color: var(--ov1-acento);
+  box-shadow:
+    0 0 0 4px var(--ov1-anel),
+    0 0 32px var(--ov1-glow);
+}
+
+.hotspotApagado .hotspotNome {
+  color: var(--ov1-texto-fraco);
+}
+
+.hotspotNome {
+  max-width: clamp(140px, 16cqi, 240px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: clamp(11px, 1.05cqi, 15px);
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+/* O status do hotspot acompanha a escala da cena. */
+.hotspot .status {
+  padding: 0 clamp(6px, 0.55cqi, 9px);
+  font-size: clamp(10px, 0.85cqi, 12.5px);
+  line-height: clamp(16px, 1.4cqi, 20px);
+}
+
+.hotspot .statusPonto {
+  width: clamp(6px, 0.5cqi, 8px);
+  height: clamp(6px, 0.5cqi, 8px);
+}
+
+/* ── Status (texto + icone + ponto; nunca so cor) ─────────────────── */
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: rgb(238 241 246 / 0.1);
+  font-size: 10px;
+  line-height: 16px;
+  white-space: nowrap;
+  color: rgb(238 241 246 / 0.85);
+}
+
+.statusPonto {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: var(--ov1-status);
+}
+
+.statusIcone {
+  font-size: 9px;
+  color: var(--ov1-status);
+}
+
+.statusGrande {
+  gap: 6px;
+  padding: 2px 8px;
+  border: 1px solid color-mix(in srgb, var(--ov1-status) 40%, transparent);
+  background: color-mix(in srgb, var(--ov1-status) 15%, transparent);
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--ov1-texto);
+}
+
+.statusGrande .statusPonto {
+  width: 8px;
+  height: 8px;
+}
+
+/* ── Outros agentes (> 6) ─────────────────────────────────────────── */
+
+.outros {
+  padding: 12px;
+  border: 1px solid var(--ov1-borda);
+  border-radius: var(--ov1-raio);
+  background: var(--ov1-card);
+}
+
+.outrosTitulo {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.outrosLista {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.outroAgente {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--ov1-borda);
+  border-radius: 8px;
+  background: var(--ov1-secundario);
+  color: var(--ov1-texto);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 200ms ease-out, box-shadow 200ms ease-out;
+}
+
+.outroAgente:hover {
+  border-color: rgb(249 115 22 / 0.5);
+}
+
+.outroAgente:focus-visible {
+  outline: 2px solid var(--ov1-acento);
+  outline-offset: 2px;
+}
+
+.outroAgenteSelecionado {
+  border-color: var(--ov1-acento);
+  box-shadow: 0 0 0 3px var(--ov1-anel);
+}
+
+/* ── Painel direito ───────────────────────────────────────────────── */
+
+.painel {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 20px;
+  border: 1px solid var(--ov1-borda);
+  border-radius: var(--ov1-raio);
+  background: var(--ov1-card);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.painelCabecalho {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.avatar {
+  display: grid;
+  place-items: center;
+  width: 60px;
+  height: 60px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: var(--ov1-secundario);
+  box-shadow: 0 0 0 2px rgb(238 241 246 / 0.1);
+  font-size: 22px;
+  font-weight: 800;
+  color: var(--ov1-avatar);
+}
+
+.avatarApagado {
+  opacity: 0.5;
+  filter: saturate(0.25);
+}
+
+.painelIdentidade {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.painelNome {
+  margin: 0;
+  font-size: 19px;
+  font-weight: 700;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.painelInfo {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  color: var(--ov1-texto-fraco);
+}
+
+.painelInfo p {
+  margin: 0;
+}
+
+.atividade {
+  color: var(--ov1-texto);
+}
+
+.progresso {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgb(238 241 246 / 0.08);
+}
+
+.progressoBarra {
+  height: 100%;
+  background: var(--ov1-acento);
+}
+
+.acoes {
+  display: flex;
+  gap: 8px;
+}
+
+.botao {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 9px 14px;
+  border: 1px solid var(--ov1-borda);
+  border-radius: 8px;
+  background: var(--ov1-secundario);
+  color: var(--ov1-texto);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+  transition: border-color 200ms ease-out;
+}
+
+.botao:hover {
+  border-color: rgb(249 115 22 / 0.5);
+}
+
+.botao:focus-visible {
+  outline: 2px solid var(--ov1-acento);
+  outline-offset: 2px;
+}
+
+.botaoLargo {
+  flex: 1;
+  justify-content: flex-start;
+}
+
+/* Link contextual do painel (F8.1-C1): aprovacao pendente / erro. */
+.botaoContexto {
+  justify-content: space-between;
+  border-color: rgb(249 115 22 / 0.35);
+  background: rgb(249 115 22 / 0.08);
+}
+
+.botaoQuadrado {
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.ferramentas {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-top: 16px;
+  border-top: 1px solid var(--ov1-borda);
+}
+
+.ferramentasCabecalho {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.ferramentasTitulo {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.ferramentasLista {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ferramenta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--ov1-borda);
+  border-radius: 8px;
+  background: rgb(23 30 43 / 0.6);
+}
+
+.ferramentaIcone {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  border-radius: 8px;
+  /* F8.2-A: o icone real ja tem cor; o fundo so emoldura. */
+  background: rgb(238 241 246 / 0.06);
+  box-shadow: inset 0 0 0 1px rgb(238 241 246 / 0.06);
+}
+
+.ferramentaIcone img {
+  display: block;
+  width: 24px;
+  height: 24px;
+  object-fit: contain;
+}
+
+.ferramenta {
+  position: relative;
+}
+
+/* Remover acao externa: discreto, aparece no hover/foco do card. */
+.ferramentaRemover {
+  margin-left: auto;
+  align-self: flex-start;
+  flex-shrink: 0;
+  min-width: 26px;
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ov1-texto-fraco);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 150ms ease-out, border-color 150ms ease-out;
+}
+
+.ferramenta:hover .ferramentaRemover,
+.ferramenta:focus-within .ferramentaRemover,
+.ferramentaRemoverConfirmar {
+  opacity: 1;
+}
+
+.ferramentaRemover:hover {
+  border-color: rgb(240 106 106 / 0.5);
+  color: #f06a6a;
+}
+
+.ferramentaRemover:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--ov1-acento);
+  outline-offset: 2px;
+}
+
+.ferramentaRemoverConfirmar {
+  border-color: rgb(240 106 106 / 0.5);
+  background: rgb(240 106 106 / 0.12);
+  color: #f06a6a;
+}
+
+.ferramentaRemover:disabled {
+  cursor: progress;
+}
+
+.ferramentaTexto {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.ferramentaNome {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.ferramentaDescricao {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--ov1-texto-fraco);
+}
+
+.ferramentaNivel {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ov1-texto);
+}
+
+.textoFraco {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ov1-texto-fraco);
+}
+
+.erro {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid rgb(240 106 106 / 0.4);
+  border-radius: 8px;
+  background: rgb(240 106 106 / 0.1);
+  font-size: 12px;
+  color: var(--ov1-texto);
+}
+
+/* ── Coluna direita + Vendas ao vivo (F8.2-A) ───────────────────────── */
+
+.colunaDireita {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  /* F8.2-B: a coluna acompanha a altura de cena + chat, e o painel ao
+     vivo ocupa o que sobra embaixo do painel do agente. */
+  align-self: stretch;
+}
+
+.colunaDireita > .aoVivo {
+  flex: 1;
+}
+
+.aoVivo {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px;
+  border: 1px solid var(--ov1-borda);
+  border-radius: var(--ov1-raio);
+  background: var(--ov1-card);
+  font-size: 13px;
+}
+
+.aoVivoCabecalho {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.aoVivoTitulo {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.aoVivoStatus {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--ov1-texto-fraco);
+}
+
+.aoVivoPonto {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  border-radius: 999px;
+}
+
+.aoVivoMarketplace {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.aoVivoMarca {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.aoVivoMarca img {
+  display: block;
+  height: 16px;
+  width: auto;
+}
+
+.aoVivoLoja {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* HOJE: o foco do painel. */
+.aoVivoHoje {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.aoVivoHojeRotulo {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ov1-texto-fraco);
+}
+
+.aoVivoLojaNome {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--ov1-texto-fraco);
+}
+
+.aoVivoGrade {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.aoVivoKpi {
+  min-width: 0;
+  padding: 12px 12px 11px;
+  border-radius: 10px;
+  /* F8.2-B2: o valor escala com a LARGURA do card, e nao quebra. */
+  container-type: inline-size;
+}
+
+.aoVivoKpiRotulo {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0;
+  font-size: 11px;
+  color: var(--ov1-texto-fraco);
+}
+
+/* Numero NUNCA quebra: nowrap + fonte que encolhe com o card. */
+.aoVivoKpiValor {
+  margin: 6px 0 0;
+  /* 12cqi: "R$ 123.456,78" (13 car.) cabe nos ~113px uteis do card. */
+  font-size: clamp(12px, 12cqi, 22px);
+  font-weight: 800;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  word-break: keep-all;
+  overflow-wrap: normal;
+}
+
+/* Variacao: seta + sinal + valor (+%). A cor reforca, nao carrega. */
+.aoVivoVariacao {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  font-size: 11.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  word-break: keep-all;
+}
+
+.aoVivoSobe { color: #4ade80; }
+.aoVivoDesce { color: #f87171; }
+.aoVivoIgual { color: var(--ov1-texto-fraco); }
+
+.aoVivoPct {
+  font-weight: 500;
+  opacity: 0.85;
+}
+
+/* ── Comparativo com ontem: secao SEPARADA, embaixo (F8.2-B2) ── */
+.aoVivoCmp {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 4px;
+  padding-top: 14px;
+  border-top: 1px solid var(--ov1-borda);
+}
+
+.aoVivoCmpCabecalho {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.aoVivoCmpTitulo {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ov1-texto);
+}
+
+.aoVivoCmpSub {
+  margin: 0;
+  font-size: 11px;
+  color: var(--ov1-texto-fraco);
+  white-space: nowrap;
+}
+
+/* As linhas se distribuem pelo espaco livre do fim da coluna. */
+.aoVivoCmpLista {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-evenly;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.aoVivoCmpLinha {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.aoVivoCmpTopo {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.aoVivoCmpRotulo {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--ov1-texto-fraco);
+  white-space: nowrap;
+}
+
+.aoVivoCmpValores {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ov1-texto-fraco);
+  white-space: nowrap;
+  word-break: keep-all;
+}
+
+.aoVivoCmpValores > span:first-child {
+  color: var(--ov1-texto);
+}
+
+.aoVivoCmpChave {
+  margin-right: 4px;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--ov1-texto-fraco);
+}
+
+/* Barras pareadas hoje x ontem (escala do proprio par). */
+.aoVivoBarras {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.aoVivoBarraTrilho {
+  height: 6px;
+  border-radius: 999px;
+  background: rgb(238 241 246 / 0.06);
+  overflow: hidden;
+}
+
+.aoVivoBarra {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+}
+
+.somenteLeitor {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.aoVivoLink {
+  color: var(--ov1-acento);
+}
+
+.aoVivoGirando {
+  display: inline-block;
+  animation: ov1-girar 900ms linear infinite;
+}
+
+@keyframes ov1-girar {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .aoVivoGirando { animation: none; }
+  .ferramentaRemover { transition: none; }
+}
+
+/* ── Chat (F8.1-B3) ───────────────────────────────────────────────
+ *
+ * A janela inteira e um card do Office. O `ChatDoAgente` real fica
+ * dentro, intacto; o que muda e so o que ele le de `--cds-chat-*`. Fora
+ * daqui essas variaveis nao existem e o chat cai nos valores de sempre.
+ *
+ * A coluna de leitura (~1100px) e centralizada por padding/margem
+ * calculados contra a largura da janela, entao a barra de rolagem
+ * continua na borda do card — pertence ao chat, nao a coluna.
+ */
+
+.chat {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.chatJanela {
+  --ov1-chat-barra: 60px;
+  --ov1-chat-nova: 140px;
+  --ov1-chat-coluna: 1100px;
+  --ov1-chat-lateral: max(20px, calc((100% - var(--ov1-chat-coluna)) / 2));
+
+  /* Barra unica: a linha de Arquivos do chat vira a barra do topo, e
+     reserva a direita o espaco do botao "Nova conversa" sobreposto. */
+  --cds-chat-barra-margem: 0;
+  --cds-chat-barra-altura: var(--ov1-chat-barra);
+  --cds-chat-barra-alinhamento: flex-end;
+  --cds-chat-barra-padding: 0 calc(16px + var(--ov1-chat-nova) + 10px) 0 16px;
+  --cds-chat-barra-borda: 1px solid var(--ov1-borda);
+  --cds-chat-barra-fundo: #0e131d;
+
+  /* Trilha: coluna central, mais densa. */
+  --cds-chat-trilha-gap: 14px;
+  --cds-chat-trilha-padding: 20px var(--ov1-chat-lateral) 16px;
+
+  /* Bolhas. A do agente pode ocupar a coluna inteira: tabela e
+     relatorio nao devem ser espremidos. */
+  --cds-chat-bolha-max-usuario: min(680px, 80%);
+  --cds-chat-bolha-max-agente: 100%;
+  --cds-chat-bolha-fundo-usuario: rgb(249 115 22 / 0.12);
+  --cds-chat-bolha-borda-usuario: 1px solid rgb(249 115 22 / 0.35);
+  --cds-chat-bolha-fundo-agente: var(--ov1-secundario);
+  --cds-chat-bolha-borda-agente: 1px solid var(--ov1-borda);
+  --cds-chat-bolha-raio: 14px;
+  --cds-chat-bolha-padding: 12px 16px;
+  --cds-chat-hora-display: inline;
+
+  /* KPIs de vendas ML (F8.1-B4B): ocultos fora do Office; aqui aparecem. */
+  --cds-chat-kpis-display: block;
+  --cds-chat-kpi-fundo: #0e131d;
+  --cds-chat-kpi-borda: 1px solid var(--ov1-borda);
+  --cds-chat-kpi-rotulo: var(--ov1-texto-fraco);
+  --cds-chat-kpi-valor: var(--ov1-texto);
+
+  /* Cartoes de decisao, erro e composer na mesma coluna da trilha. */
+  --cds-chat-coluna-margem: var(--ov1-chat-lateral);
+
+  /* Composer integrado: uma caixa so com +, campo e Enviar. */
+  --cds-chat-composer-margem-baixo: 16px;
+  --cds-chat-composer-padding: 8px;
+  --cds-chat-composer-fundo: #0e131d;
+  --cds-chat-composer-borda: 1px solid var(--ov1-borda);
+  --cds-chat-composer-raio: 12px;
+  --cds-chat-campo-fundo: transparent;
+  --cds-chat-campo-borda: 1px solid transparent;
+
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  /* Piso 480 = barra (60) + minHeight 420 do ChatDoAgente: abaixo disso
+     o composer seria cortado pelo overflow da janela. */
+  height: clamp(480px, 50vh, 580px);
+  border: 1px solid var(--ov1-borda);
+  border-radius: var(--ov1-raio);
+  background: var(--ov1-card);
+  overflow: hidden;
+}
+
+.chatJanela:focus-within {
+  border-color: rgb(249 115 22 / 0.35);
+}
+
+/* Sobreposto a linha de Arquivos do chat. So os filhos recebem clique,
+   para o botao Arquivos (do chat, por baixo) continuar alcancavel. */
+.chatCabecalho {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  height: var(--ov1-chat-barra);
+  padding: 0 16px;
+  pointer-events: none;
+}
+
+.chatCabecalho > * {
+  pointer-events: auto;
+}
+
+.chatIdentidade {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  /* Deixa espaco para Arquivos + Nova conversa a direita. */
+  max-width: calc(100% - var(--ov1-chat-nova) - 260px);
+}
+
+.chatAvatar {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: rgb(249 115 22 / 0.15);
+  box-shadow: 0 0 0 1px rgb(249 115 22 / 0.35);
+  font-size: 14px;
+  font-weight: 800;
+  color: var(--ov1-acento);
+}
+
+.chatTitulo {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chatNova {
+  width: var(--ov1-chat-nova);
+}
+
+.chatCorpo {
+  flex: 1;
+  min-height: 0;
+}
+
+/* ── Scrollbar da conversa (F8.1-B3.2) ─────────────────────────────
+ *
+ * No elemento que ROLA de verdade: a trilha do `ChatDoAgente`, marcada
+ * com `data-cds-chat-trilha`. O scroll continua intacto (nada de
+ * `overflow: hidden`); so o desenho muda.
+ *
+ * Normal: trilho e polegar transparentes. Hover ou foco dentro da janela:
+ * polegar fino e discreto. A largura e sempre a mesma (6px), entao o
+ * conteudo nao pula quando ela aparece — sem precisar de gutter extra.
+ */
+/* Firefox. So nele: no Chrome 121+ as propriedades padrao DESLIGAM os
+   `::-webkit-scrollbar` abaixo, e a barra perderia os 6px. */
+@supports (-moz-appearance: none) {
+  .chatJanela [data-cds-chat-trilha] {
+    scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+  }
+
+  .chatJanela:hover [data-cds-chat-trilha],
+  .chatJanela:focus-within [data-cds-chat-trilha] {
+    scrollbar-color: rgb(152 162 179 / 0.35) transparent;
+  }
+}
+
+.chatJanela [data-cds-chat-trilha]::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.chatJanela [data-cds-chat-trilha]::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.chatJanela [data-cds-chat-trilha]::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 999px;
+}
+
+.chatJanela:hover [data-cds-chat-trilha]::-webkit-scrollbar-thumb,
+.chatJanela:focus-within [data-cds-chat-trilha]::-webkit-scrollbar-thumb {
+  background: rgb(152 162 179 / 0.35);
+}
+
+.chatJanela [data-cds-chat-trilha]::-webkit-scrollbar-thumb:hover {
+  background: rgb(249 115 22 / 0.45);
+}
+
+.chatInativo {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--ov1-borda);
+  border-radius: var(--ov1-raio);
+  background: var(--ov1-card);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.chatInativo p {
+  margin: 0;
+}
+
+/* ── Larguras menores: empilha, nao redesenha ─────────────────────── */
+
+@media (max-width: 1024px) {
+  .raiz {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "cena"
+      "outros"
+      "painel"
+      "chat";
+  }
+  .raizSemOutros {
+    grid-template-areas:
+      "cena"
+      "painel"
+      "chat";
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hotspot,
+  .outroAgente,
+  .botao {
+    transition: none;
+  }
+}

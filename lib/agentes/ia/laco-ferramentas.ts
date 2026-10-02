@@ -50,6 +50,9 @@ import {
   type CategoriaDeBloqueio,
 } from "@/lib/agentes/ia/falhas-de-ferramenta";
 import type { ProvedorIA } from "@/lib/ai-gateway/tipos";
+import {
+  apresentacaoDoPasso, type ApresentacaoDoPasso,
+} from "@/lib/agentes/conversas/tipos";
 
 /**
  * Quantos TURNOS de ferramenta um unico pedido do usuario pode gastar.
@@ -171,6 +174,12 @@ export interface PassoDeFerramenta {
    * mandar a pessoa para outra pagina e perder o turno.
    */
   readonly aprovacaoId?: string;
+  /**
+   * Agregados minimos de apresentacao — F8.1-B4A. So em SUCESSO, e so
+   * quando `apresentacaoDoPasso` reconhece a Funcao e a saida completa.
+   * Nunca o `data` inteiro.
+   */
+  readonly apresentacao?: ApresentacaoDoPasso;
 }
 
 export interface ResultadoDoLaco {
@@ -272,14 +281,18 @@ async function executarUmPedido(
   } as Parameters<typeof executarFuncao>[0]);
 
   if (r.tipo === "sucesso") {
+    const data = (r as { envelope?: { data?: unknown } }).envelope?.data;
+    // F8.1-B4A: a MESMA saida que o modelo le, reduzida pela allowlist.
+    const apresentacao = apresentacaoDoPasso(pedido.nome, data);
     return {
       resposta: {
         id: pedido.id,
-        conteudo: conteudoDeSucesso((r as { envelope?: { data?: unknown } }).envelope?.data),
+        conteudo: conteudoDeSucesso(data),
         erro: false,
       },
       passo: { funcaoId: pedido.nome, desfecho: "sucesso", requestId: r.requestId,
-        executou: true, codigo: null },
+        executou: true, codigo: null,
+        ...(apresentacao === null ? {} : { apresentacao }) },
     };
   }
 

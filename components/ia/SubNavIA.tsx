@@ -1,7 +1,21 @@
 "use client";
 
 /**
- * Subnavegacao da CDS IA — as 6 areas.
+ * Subnavegacao da CDS IA.
+ *
+ * ── Areas principais enxutas — F8.1-C1 (F8.3-C1: + Criar agente) ───
+ *
+ * Escritorio (operar: cena, agentes, painel, chat), Agentes (gerenciar e
+ * configurar) e — F8.3-C1 — Criar agente. Conexoes, Aprovacoes, Atividade, Monitoramento e Custos
+ * continuam EXISTINDO — rotas, telas e leituras intactas — mas sairam da
+ * barra: seis abas administrativas faziam a area parecer um painel de
+ * operador e empurravam o escritorio para baixo.
+ *
+ * `AREAS_CDS_IA` continua sendo o REGISTRO de todas as areas, com
+ * `principal` dizendo quem aparece na barra. As demais sao alcancadas de
+ * forma contextual (o painel do agente aponta Aprovacoes e
+ * Monitoramento quando o estado pede) e por URL. Um registro so, e
+ * nenhuma tela duplicada.
  *
  * ── Por que uma subnav, e nao 6 itens na Sidebar ────────────────────
  *
@@ -46,6 +60,10 @@ interface ItemNav {
   rotulo: string;
   /** `true` = so casa por igualdade. Ver cabecalho. */
   exato?: boolean;
+  /** `true` = aparece na barra. F8.3-C1: Escritorio, Agentes e Criar agente. */
+  principal: boolean;
+  /** Prefixos que NAO ativam este item (ex.: `/ia/agentes/novo` e de Criar). */
+  excetoPrefixos?: readonly string[];
   /** Nenhuma area preenche isto hoje: nao ha leitura real de tarefas
    *  nem de aprovacoes. Ver o cabecalho. */
   contador?: number;
@@ -54,25 +72,33 @@ interface ItemNav {
 }
 
 export const AREAS_CDS_IA: readonly ItemNav[] = [
-  { href: "/ia", rotulo: "Escritório", exato: true },
-  { href: "/ia/agentes", rotulo: "Agentes" },
-  { href: "/ia/conexoes", rotulo: "Conexões" },
-  { href: "/ia/aprovacoes", rotulo: "Aprovações" },
-  { href: "/ia/atividade", rotulo: "Atividade" },
+  { href: "/ia", rotulo: "Escritório", exato: true, principal: true },
+  { href: "/ia/agentes", rotulo: "Agentes", principal: true, excetoPrefixos: ["/ia/agentes/novo"] },
+  // F8.3-C1: aponta para o fluxo ATUAL de criacao (assistente). O redesenho
+  // do "Criar agente" e o F8.3-C2.
+  { href: "/ia/agentes/novo", rotulo: "Criar agente", principal: true },
+  { href: "/ia/conexoes", rotulo: "Conexões", principal: false },
+  { href: "/ia/aprovacoes", rotulo: "Aprovações", principal: false },
+  { href: "/ia/atividade", rotulo: "Atividade", principal: false },
   // I4P10. Entra ao lado de Atividade, e nao dentro dela, porque sao
   // perguntas diferentes: "o que aconteceu" e historia, "o que esta
   // quebrado agora" e estado. E Atividade ainda e simulada — misturar
   // incidente real com feed simulado poria a tarja de simulacao em cima
   // de dado verdadeiro.
-  { href: "/ia/monitoramento", rotulo: "Monitoramento" },
-  { href: "/ia/custos", rotulo: "Custos" },
+  { href: "/ia/monitoramento", rotulo: "Monitoramento", principal: false },
+  { href: "/ia/custos", rotulo: "Custos", principal: false },
 ];
+
+/** O endereco de uma area do registro — para link contextual sem repetir rota. */
+export function hrefDaArea(rotulo: string): string | null {
+  return AREAS_CDS_IA.find((a) => a.rotulo === rotulo)?.href ?? null;
+}
 
 export default function SubNavIA() {
   const caminho = usePathname() ?? "";
 
   return (
-    <nav aria-label="Áreas da CDS IA" style={{ borderBottom: `1px solid ${CROMO.bordaSutil}` }}>
+    <nav aria-label="Áreas da CDS IA">
       <ul
         style={{
           display: "flex",
@@ -83,10 +109,12 @@ export default function SubNavIA() {
           padding: 0,
         }}
       >
-        {AREAS_CDS_IA.map((item) => {
-          const ativo = item.exato
+        {AREAS_CDS_IA.filter((item) => item.principal).map((item) => {
+          const excluido = (item.excetoPrefixos ?? []).some(
+            (p) => caminho === p || caminho.startsWith(p + "/"));
+          const ativo = !excluido && (item.exato
             ? caminho === item.href
-            : caminho === item.href || caminho.startsWith(item.href + "/");
+            : caminho === item.href || caminho.startsWith(item.href + "/"));
 
           return (
             <li key={item.href}>
@@ -97,8 +125,8 @@ export default function SubNavIA() {
                   display: "inline-flex",
                   alignItems: "center",
                   gap: ESPACO.sm,
-                  padding: "10px 14px",
-                  borderRadius: `${RAIO.controle}px ${RAIO.controle}px 0 0`,
+                  padding: "8px 14px",
+                  borderRadius: RAIO.controle,
                   textDecoration: "none",
                   font: `${ativo ? 700 : 500} 13px/1 ${FONTE.interface}`,
                   color: ativo ? CROMO.acento : CROMO.textoFraco,

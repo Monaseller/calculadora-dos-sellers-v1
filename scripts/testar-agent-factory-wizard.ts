@@ -728,11 +728,15 @@ secao("H. Clicar no agente abre a conversa, nao a configuracao");
     /<PaginaAgente/.test(rota) && /abaSegura\(searchParams\?\.aba\)/.test(rota));
   ok("H3  a aba continua saindo de `abaSegura`, nunca de indice cru",
     !/COMPONENTES\[|MAPA\[searchParams/.test(rota));
-  ok("H4  criar e configurar usam O MESMO wizard",
-    /<Wizard/.test(novo) && /<Wizard/.test(conf));
-  ok("H5  criar entra sem id; configurar entra com o id da rota",
-    /agenteIdInicial=\{null\}/.test(novo) &&
-      /agenteIdInicial=\{params\.id\}/.test(conf));
+  // F8.3-C2: criar passou a ser o fluxo de 6 etapas (`CriarAgente`); o
+  // assistente de agente EXISTENTE segue sendo o Wizard. Continua havendo
+  // UMA so entrada que cria agente: o Wizard so entra com id da rota.
+  const criar = codigo("components/ia/criar/CriarAgente.tsx");
+  ok("H4  criar = fluxo de 6 etapas; configurar = o Wizard de sempre",
+    /<CriarAgente \/>/.test(novo) && !/<Wizard/.test(novo) && /<Wizard/.test(conf));
+  ok("H5  so o fluxo de criar cria; configurar entra com o id da rota",
+    /criarAgenteViaApi\(/.test(criar) && /agenteIdInicial=\{params\.id\}/.test(conf) &&
+      !/agenteIdInicial=\{null\}/.test(novo + conf));
   ok("H6  nao existe tela paralela de edicao",
     !/EditarAgente|FormularioDeEdicao/.test(conf));
 }

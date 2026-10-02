@@ -2153,10 +2153,14 @@ async function principal(): Promise<void> {
     ok("T2  a rota real esta no grafo",
       Object.keys(require.cache).map((p) => p.replace(/\\/g, "/"))
         .some((p) => p.includes("/app/api/agentes/[agenteId]/permissoes/route.ts")));
-    ok("T3  DOIS verbos, e sao GET e PATCH",
+    // F8.2-B: TRES verbos. O DELETE remove um PACK do agente (volta ao
+    // "nao selecionado") — decisao de produto ratificada. POST/PUT seguem
+    // vetados.
+    ok("T3  TRES verbos, e sao GET, PATCH e DELETE (remover pack)",
       /export async function GET\(/.test(CODIGO_PERM) &&
         /export async function PATCH\(/.test(CODIGO_PERM) &&
-        !/export async function (POST|PUT|DELETE|HEAD|OPTIONS)\(/.test(CODIGO_PERM));
+        /export async function DELETE\(/.test(CODIGO_PERM) &&
+        !/export async function (POST|PUT|HEAD|OPTIONS)\(/.test(CODIGO_PERM));
     ok("T4  zero Supabase direto na rota",
       !/getSupabaseServidor|createClient|service_role|\.from\(/.test(CODIGO_PERM));
     ok("T5  zero spread do corpo externo",
@@ -2210,9 +2214,14 @@ async function principal(): Promise<void> {
       !/worker|anthropic|AdaptadorIA|conexoes|selecao/i.test(CODIGO_PERM));
     ok("T14 a mesma fronteira vale para a capability de escrita",
       !/executarFuncao|autorizarFuncao|criarTarefa|aprovacao/i.test(CODIGO_ESCRITA));
-    ok("T15 nenhum DELETE em lugar nenhum desta frente",
-      !/\.delete\(/.test(CODIGO_ESCRITA) && !/\.delete\(/.test(CODIGO_PERM) &&
-        !/"DELETE"/.test(CODIGO_PERM));
+    // F8.2-B: o DELETE desta frente e UM so, e estreito: a rota nao toca
+    // Supabase (delega a `removerPackDoAgente`), e a escrita tem um unico
+    // `.delete(` — o da remocao de pack, que nunca grava `bloqueado`.
+    ok("T15 o unico DELETE desta frente e o de remover PACK, e a rota delega",
+      (CODIGO_ESCRITA.match(/\.delete\(/g) ?? []).length === 1 &&
+        /export async function removerPackDoAgente/.test(CODIGO_ESCRITA) &&
+        !/\.delete\(/.test(CODIGO_PERM) &&
+        /removerPackDoAgente\(\{/.test(CODIGO_PERM));
     ok("T16 toda resposta sai com no-store",
       /"Cache-Control": "no-store"/.test(CODIGO_PERM) &&
         (CODIGO_PERM.match(/NextResponse\.json\(/g) ?? []).length === 1);

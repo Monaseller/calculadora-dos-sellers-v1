@@ -80,7 +80,7 @@ import {
   criarPortaDeConversas, type PortaDeConversas,
 } from "@/lib/agentes/conversas/repositorio";
 import {
-  recortarHistorico, type Mensagem, type PassoRegistrado,
+  apresentacaoDoPasso, recortarHistorico, type Mensagem, type PassoRegistrado,
 } from "@/lib/agentes/conversas/tipos";
 import type { MensagemDoDialogo } from "@/lib/agentes/ia/ferramentas";
 
@@ -102,6 +102,12 @@ export type ResultadoDaRetomada =
 
 function falha(codigo: string, mensagem: string): ResultadoDaRetomada {
   return { ok: false, codigo, mensagem };
+}
+
+/** O `data` de um envelope `ok` — o mesmo que `conteudoDoEnvelope` serializa. */
+export function dataDoEnvelope(r: unknown): unknown {
+  const env = (r as { envelope?: { ok?: boolean; data?: unknown } }).envelope;
+  return env?.ok === true ? env.data : null;
 }
 
 /**
@@ -351,11 +357,18 @@ export async function retomarTurnoAprovado(
   }
 
   // ── 6. A resposta final, NA MESMA conversa ────────────────────────
+  // F8.1-B4A: a consulta aprovada que termina em sucesso produz o MESMO
+  // contrato de apresentacao da execucao direta — pelo mesmo extrator,
+  // sobre o mesmo `data` que o modelo leu. Falha nao gera apresentacao.
+  const apresentacao = executou
+    ? apresentacaoDoPasso(aprovacao.funcaoId, dataDoEnvelope(execucao))
+    : null;
   const passos: PassoRegistrado[] = [{
     funcaoId: aprovacao.funcaoId,
     desfecho: executou ? "sucesso" : "erro",
     executou,
     requestId: (execucao as { requestId?: string }).requestId ?? null,
+    ...(apresentacao === null ? {} : { apresentacao }),
   }];
 
   const resposta = await portaConversas.anexarMensagem({

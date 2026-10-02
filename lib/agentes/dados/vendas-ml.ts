@@ -258,7 +258,13 @@ export function criarLeiturasDeVendasML(
   lojaId: string,
   agoraMs: number,
   limiteExterno?: LimiteExterno,
-  portas?: PortasVendasML
+  portas?: PortasVendasML,
+  /**
+   * F8.2-B: corte por horario dentro do periodo (ver `EntradaVendasML`).
+   * So o painel "Vendas ao vivo" usa; a Tool nunca passa. Ausente = o
+   * comportamento provado de sempre.
+   */
+  corte?: { readonly ateInstanteMs: number }
 ): LerVendasML {
   return async (filtro: FiltroVendasML): Promise<ResultadoVendasML> => {
     const validacao = validarFiltroVendasML(filtro);
@@ -286,7 +292,11 @@ export function criarLeiturasDeVendasML(
     }
 
     const bruto = await buscarVendasBrutasML(
-      { userId, lojaId, de: janela.de, ate: janela.ate }, limiteExterno, portas);
+      {
+        userId, lojaId, de: janela.de, ate: janela.ate,
+        ...(corte === undefined ? {} : { ateInstanteMs: corte.ateInstanteMs }),
+      },
+      limiteExterno, portas);
 
     if (bruto.erro !== null) return comErro(bruto.erro, janela);
 

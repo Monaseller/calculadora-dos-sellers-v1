@@ -45,9 +45,7 @@ import {
   PainelLateral, TAMANHO,
 } from "@/components/ui/Primitivas";
 import { TOOL_PACKS } from "@/lib/agentes/factory/catalogo-ui";
-import {
-  efeitoDaFuncaoInterna, nivelSugeridoParaEfeito,
-} from "@/lib/agentes/factory/efeito";
+import { adicionarPackAoAgente, removerPackDoAgente } from "@/lib/ia/ferramentas-do-agente";
 // §6: "resolver inline usando o fluxo JA EXISTENTE". Este componente e o
 // fluxo de escolher loja da area de Conexoes, montado aqui dentro. Uma
 // segunda tela de escolha de loja divergiria da primeira.
@@ -59,7 +57,7 @@ import {
   alterarMemoriaDoAgente, atualizarAgenteViaApi, criarAgenteViaApi,
   criarMemoriaDoAgente, criarSkillDoDono, definirAtivacaoDoAgente,
   definirIaDoAgente, definirPermissaoDeFerramentaExterna,
-  definirMemoriaDoAgente, definirPermissaoDeFuncao, lerAtivacaoDoAgente,
+  definirMemoriaDoAgente, lerAtivacaoDoAgente,
   listarAgentes, listarFontesDoAgente, listarMemoriasDoAgente,
   listarSkillsDoAgente, listarSkillsDoDono,
   removerMemoriaDoAgente, vincularSkillNoAgente,
@@ -258,34 +256,37 @@ export function Wizard({ agenteIdInicial }: { agenteIdInicial: string | null }) 
    */
   async function definirNivelDoPack(packId: string, nivel: NivelAutonomia | null) {
     if (agenteId === null) return;
-    const pack = TOOL_PACKS.find((p) => p.id === packId);
-    if (pack === undefined) return;
     setErro(null);
     setSalvando(true);
     try {
-      for (const funcaoId of pack.funcoes) {
-        // ── §28: o nivel vem do EFEITO quando ninguem o escolheu ────
-        //
-        // Antes era o literal "aprovacao" para todo pack adicionado
-        // aqui. Isso punha confirmacao em CIMA de uma leitura: adicionar
-        // "Mercado Livre" fazia o dono aprovar cada consulta de vendas,
-        // que o §28 diz explicitamente para nao pedir.
-        //
-        // `nivelSugeridoParaEfeito` e a mesma regra que o caminho inline
-        // do chat ja usava (`ativarCapacidade`) — nao e regra nova, e
-        // sim a MESMA regra, agora nos dois caminhos.
-        //
-        // `nivel` explicito continua vencendo: a etapa 8 e o lugar onde
-        // o dono decide, e ela nao passa `null`.
-        const efetivo = nivel ?? nivelSugeridoParaEfeito(
-          efeitoDaFuncaoInterna({ funcaoId, acesso: pack.acesso }));
-        const r = await definirPermissaoDeFuncao(agenteId, { funcaoId, nivel: efetivo });
-        if (r.estado !== "ok") {
-          setErro(r.estado === "dados_invalidos"
-            ? r.mensagem
-            : frasePorEstado(r, "Não foi possível salvar a permissão."));
-          return;
-        }
+      // F8.2-A: a regra (uma permissao por Funcao, nivel sugerido pelo
+      // EFEITO quando `nivel` e null — §28) saiu daqui para
+      // `adicionarPackAoAgente`, que o Escritorio tambem usa. Mesmo laco,
+      // mesma parada na primeira recusa; so mudou de casa.
+      const r = await adicionarPackAoAgente(agenteId, packId, nivel);
+      if (r.estado === "pack_desconhecido") return;
+      if (r.estado === "recusado") {
+        setErro(r.resposta.estado === "dados_invalidos"
+          ? r.resposta.mensagem
+          : frasePorEstado(r.resposta, "Não foi possível salvar a permissão."));
+        return;
+      }
+      await recarregar(agenteId);
+    } finally {
+      setSalvando(false);
+    }
+  }
+
+  /** F8.2-B: remove um pack (volta ao "nao selecionado"). Mesmo contrato do Escritorio. */
+  async function removerPack(packId: string) {
+    if (agenteId === null) return;
+    setErro(null);
+    setSalvando(true);
+    try {
+      const r = await removerPackDoAgente(agenteId, packId);
+      if (r.estado === "recusado") {
+        setErro("Não foi possível remover esta ferramenta.");
+        return;
       }
       await recarregar(agenteId);
     } finally {
@@ -720,6 +721,7 @@ export function Wizard({ agenteIdInicial }: { agenteIdInicial: string | null }) 
                     packSelecionado={(chave) =>
                       ativacao?.ferramentas.some((f) => f.id === chave) === true}
                     aoAdicionarPack={(chave) => void definirNivelDoPack(chave, null)}
+                    aoRemoverPack={(chave) => void removerPack(chave)}
                   />
                 </>
               : <Aviso tom="info">Conclua a etapa 1 para escolher ferramentas.</Aviso>

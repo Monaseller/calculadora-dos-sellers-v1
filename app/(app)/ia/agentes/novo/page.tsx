@@ -1,19 +1,20 @@
 /**
- * `/ia/agentes/novo` — criar um agente.
+ * `/ia/agentes/novo` — criar um agente (F8.3-C2).
  *
- * O MESMO wizard de `/ia/agentes/[id]/configurar`, com `null` no lugar
- * do id. Nao existe tela paralela de criacao: a diferenca entre criar e
- * editar e so se a etapa 1 faz `POST` ou `PATCH`, e quem decide isso e
- * o wizard, olhando se ja tem id.
+ * O fluxo de 6 etapas (Identidade, Modelo de IA, APIs, Tools, Memoria,
+ * Criar). Nao ha criacao paralela: e a unica entrada que CRIA agente, e
+ * usa os mesmos contratos do Wizard (`criarAgenteViaApi` na Identidade,
+ * agente inativo; `definirAtivacaoDoAgente` no "Criar agente").
  *
- * Assim que a etapa 1 grava, a URL passa a ser `/[id]/configurar` — um
- * refresh a partir dali volta para o mesmo rascunho, e nao para um
- * formulario em branco.
+ * Depois que a Identidade grava, a URL passa a ser
+ * `/ia/agentes/novo?agente=<id>&etapa=<n>`: refresh volta para o mesmo
+ * rascunho, NESTE fluxo. O assistente de configuracao de agente existente
+ * (`/ia/agentes/[id]/configurar`, com Skills e Arquivos) segue intacto.
  */
-import { Wizard } from "@/components/ia/factory/Wizard";
+import CriarAgente from "@/components/ia/criar/CriarAgente";
 
 export const dynamic = "force-dynamic";
 
 export default function PaginaNovoAgente() {
-  return <Wizard agenteIdInicial={null} />;
+  return <CriarAgente />;
 }
