@@ -35,6 +35,7 @@
 import "server-only";
 import { executarFuncao } from "@/lib/agentes/execucao-funcoes/executar";
 import type { DefinicaoFuncao } from "@/lib/agentes/funcoes/registry";
+import type { FonteDeArquivo } from "@/lib/agentes/planilhas/fonte";
 import type {
   AdaptadorIAComFerramentas,
   FerramentaDeclarada,
@@ -109,6 +110,15 @@ export interface EntradaDoLaco {
    * `executarFuncao`. O laco nao decide o que existe — ele so entrega.
    */
   readonly definicoesExternas?: Readonly<Record<string, DefinicaoFuncao>>;
+  /**
+   * A fonte de arquivo DESTE turno — F9.1.
+   *
+   * Atravessa o laco sem ser interpretada, como `definicoesExternas`: quem
+   * monta e o runtime, preso a dono, agente e conversa, e quem usa e
+   * `executarFuncao`. Viaja com cada pedido em vez de morar num modulo,
+   * entao dois turnos simultaneos nunca enxergam a fonte um do outro.
+   */
+  readonly fonteDeArquivo?: FonteDeArquivo | null;
   /**
    * A conversa deste turno — F7b.4.4.
    *
@@ -239,7 +249,8 @@ async function executarUmPedido(
   permitidas: ReadonlySet<string>,
   porta: typeof executarFuncao,
   definicoesExternas?: Readonly<Record<string, DefinicaoFuncao>>,
-  origem?: { conversaId: string; textoAssistente: string | null }
+  origem?: { conversaId: string; textoAssistente: string | null },
+  fonteDeArquivo?: FonteDeArquivo | null
 ): Promise<{ resposta: RespostaDeFerramenta; passo: PassoDeFerramenta }> {
   // Cerca previa: o modelo so pode pedir o que foi DECLARADO a ele. Nao
   // substitui o guard — `executarFuncao` continua sendo a autoridade —,
@@ -268,6 +279,8 @@ async function executarUmPedido(
     // provedor, nao da Funcao. Ver `argumentos-do-modelo.ts`.
     argumentos: semCamposNulos(pedido.argumentos),
     definicoesExternas,
+    // F9.1: so quando o runtime passou. Ausente mantem a entrada de antes.
+    ...(fonteDeArquivo === undefined ? {} : { fonteDeArquivo }),
     // `pedido.id` e o id que o PROVEDOR deu a esta chamada. E ele que
     // permite remontar o dialogo depois: todo provedor exige que o
     // resultado da ferramenta cite o id do pedido que o originou.
@@ -407,7 +420,8 @@ export async function conversarComFerramentas(
           ? undefined
           // `r.texto` e o que o modelo disse JUNTO do pedido, e faz parte
           // do turno que sera remontado. Perde-lo mudaria o dialogo.
-          : { conversaId: entrada.conversaId, textoAssistente: r.texto });
+          : { conversaId: entrada.conversaId, textoAssistente: r.texto },
+        entrada.fonteDeArquivo);
       respostas.push(resposta);
       passos.push(p);
       passosDesteTurno.push(p);

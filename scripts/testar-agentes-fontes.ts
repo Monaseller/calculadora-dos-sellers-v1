@@ -32,7 +32,6 @@ import { autorizarFuncao } from "@/lib/agentes/funcoes/guard";
 import { declararFerramentas } from "@/lib/agentes/ia/ferramentas";
 import { conversarComFerramentas } from "@/lib/agentes/ia/laco-ferramentas";
 import { criarAdaptadorFakeComFerramentas } from "@/lib/agentes/ia/ferramentas-fake";
-import { registrarFonteDeArquivo } from "@/lib/agentes/funcoes/planilha";
 import {
   CODIGOS_CORRIGIVEIS,
   CODIGOS_DE_FONTE_QUE_FECHAM,
@@ -296,9 +295,9 @@ async function main(): Promise<void> {
         JSON.stringify(r.mensagens).includes(PROIBIDO) && r.motivo === "concluido");
     }
 
-    // Fonte ausente tambem fecha.
+    // Fonte ausente tambem fecha. F9.1: "ausente" e o contexto sem
+    // `fonteDeArquivo` — nao ha mais registro de modulo a zerar.
     {
-      registrarFonteDeArquivo(null);
       let execucoes = 0;
       const porta = async (e: { funcaoId: unknown; argumentos: unknown }) => {
         execucoes += 1;
@@ -564,10 +563,11 @@ async function main(): Promise<void> {
   {
     const res = criarFonteDeArquivoDasSources({
       porta, userId: DONO_A, agenteId: AGENTE_1 });
-    registrarFonteDeArquivo(res);
 
-    const ctx: ContextoFuncao = Object.freeze({ userId: DONO_A, conexao: null });
-    const chamar = async (id: string, args: unknown) => {
+    // F9.1: a fonte vai no CONTEXTO da chamada, e nao num registro global.
+    const chamar = async (id: string, args: unknown, fonte = res) => {
+      const ctx: ContextoFuncao = Object.freeze({
+        userId: DONO_A, conexao: null, fonteDeArquivo: fonte });
       const d = resolverFuncao(id);
       const v = d.validarEntrada(args);
       if (!v.valida) return { ok: false, codigo: v.codigo } as Record<string, unknown>;
@@ -611,12 +611,10 @@ async function main(): Promise<void> {
     // A fonte de OUTRO agente, pedida pela Tool, morre ANTES da leitura.
     const resOutro = criarFonteDeArquivoDasSources({
       porta, userId: DONO_A, agenteId: AGENTE_2 });
-    registrarFonteDeArquivo(resOutro);
-    const negado = await chamar("planilha.inspecionar", { fileId: entradas.id });
+    const negado = await chamar("planilha.inspecionar", { fileId: entradas.id }, resOutro);
     ok("F10 fonte de outro agente morre ANTES de ler bytes",
       negado.ok === false && negado.codigo === "arquivo_nao_encontrado",
       JSON.stringify(negado));
-    registrarFonteDeArquivo(res);
 
     // O arquivo original nao foi tocado.
     ok("F11 a fixture original continua byte-identica",
@@ -722,7 +720,9 @@ async function main(): Promise<void> {
     // `testar-ia-skill-1d-b.ts` (J1), que e o dono do tripwire: ele
     // existe para manter implementacao FORA do registry, e o que sobrou
     // la e o mapa. A entrada nova cabe; um executor nao caberia.
-    ok("H10 J1 intacto", linhasReg < 580 && linhasReg === 568, String(linhasReg));
+    // F9.1: 568 -> 577 — um CAMPO de `ContextoFuncao` (`fonteDeArquivo`)
+    // e o import do tipo. Nenhuma implementacao entrou; o teto 580 segue.
+    ok("H10 J1 intacto", linhasReg < 580 && linhasReg === 577, String(linhasReg));
   }
 
   console.log(`\n── placar ${"─".repeat(54)}`);

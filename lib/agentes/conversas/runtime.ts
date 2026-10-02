@@ -97,8 +97,10 @@ import { resolverFatosPermissoes } from "@/lib/agentes/permissoes/fatos";
 import { resolverSkillsDoAgente } from "@/lib/agentes/skills/fatos";
 import { criarPortaDeFontes } from "@/lib/agentes/fontes/repositorio";
 import { criarPortaDeMemorias } from "@/lib/agentes/memorias/repositorio";
-import { criarFonteDeArquivoDasSources } from "@/lib/agentes/fontes/resolvedor";
-import { registrarFonteDeArquivo } from "@/lib/agentes/funcoes/planilha";
+import {
+  criarFonteDeArquivoDasSources,
+  listarFontesDoTurno,
+} from "@/lib/agentes/fontes/resolvedor";
 import { paraModelo } from "@/lib/agentes/fontes/tipos";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import {
@@ -219,7 +221,10 @@ export async function responderNaConversa(
     }),
     resolverSkillsDoAgente({ userId: entrada.userId, agenteId: entrada.agenteId }),
     portaMemorias.listarAtivas(entrada.userId, entrada.agenteId),
-    portaFontes.listarDoAgente(entrada.userId, entrada.agenteId),
+    // F9.1: as do agente E os anexos desta conversa. A conversa ja foi
+    // conferida acima como deste dono e deste agente — e essa conferencia
+    // que impede um anexo de outro agente de entrar aqui.
+    listarFontesDoTurno(portaFontes, entrada.userId, entrada.agenteId, entrada.conversaId),
     portaConversas.listarMensagens(entrada.userId, entrada.conversaId),
     // F7b.4.3: as duas leituras que sustentam a ferramenta externa. Vao
     // no MESMO `Promise.all` do resto do estado de agora — uma ida a mais
@@ -341,15 +346,16 @@ export async function responderNaConversa(
     externas: externas.declaraveis,
   });
 
-  // O resolvedor de arquivo vive por CHAMADA e carrega dono e agente
-  // fechados. Registrar aqui e o que faz `planilha.*` enxergar as
-  // fontes deste agente — e SO as dele.
-  registrarFonteDeArquivo(criarFonteDeArquivoDasSources({
+  // O resolvedor de arquivo vive por TURNO e carrega dono, agente e
+  // conversa fechados. F9.1: ele viaja com o laco ate o contexto de cada
+  // Funcao, em vez de ser registrado num modulo que o turno seguinte —
+  // de qualquer dono — sobrescreveria no meio deste.
+  const fonteDeArquivo = criarFonteDeArquivoDasSources({
     porta: portaFontes,
     userId: entrada.userId,
     agenteId: entrada.agenteId,
     conversaId: entrada.conversaId,
-  }));
+  });
 
   const recorte = recortarHistorico(historico);
   const dialogo: MensagemDoDialogo[] = recorte.incluidas.map((m) =>
@@ -402,6 +408,7 @@ export async function responderNaConversa(
       // permissao — e por isso que permissao historica nao ressuscita
       // ferramenta removida nem aqui.
       definicoesExternas: externas.definicoes,
+      fonteDeArquivo,
       // F7b.4.4: sem isto, uma aprovacao criada neste turno nasce sem
       // saber a qual conversa voltar — e era esse o defeito.
       conversaId: entrada.conversaId,

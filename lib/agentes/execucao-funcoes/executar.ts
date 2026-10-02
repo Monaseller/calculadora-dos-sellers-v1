@@ -81,6 +81,7 @@ import {
   type DefinicaoFuncao,
 } from "@/lib/agentes/funcoes/registry";
 import { resolverFatosPermissoes } from "@/lib/agentes/permissoes/fatos";
+import type { FonteDeArquivo } from "@/lib/agentes/planilhas/fonte";
 import type { FatoConexao, FatoPermissao } from "@/lib/ia/skills/diagnostico";
 
 // ─── Vocabulario ──────────────────────────────────────────────────────
@@ -180,6 +181,15 @@ export interface EntradaExecucaoFuncao {
    * por isso que sao dois.
    */
   controleTempo?: ControleDeTempo;
+  /**
+   * A fonte de arquivo DESTA execucao — F9.1. Ver `ContextoFuncao`.
+   *
+   * Montada server-side por quem conhece a sessao (o runtime do chat),
+   * presa a dono, agente e conversa. Atravessa intacta ate o contexto do
+   * executor e nunca e lida daqui. Omitir = nenhuma fonte, e `planilha.*`
+   * recusa com `fonte_nao_configurada`, como sempre recusou.
+   */
+  fonteDeArquivo?: FonteDeArquivo | null;
   tarefaId?: string | null;
   funcaoId: unknown;
   argumentos: unknown;
@@ -534,7 +544,8 @@ type LeituraDeArgumentos =
 function contextoDaFuncao(
   snapshot: SnapshotChamada,
   definicao: DefinicaoFuncao,
-  controle?: ControleDeTempo
+  controle?: ControleDeTempo,
+  fonteDeArquivo?: FonteDeArquivo | null
 ): ContextoFuncao | null {
   // SO o limite do provider atravessa. O rigido fica desta camada: uma
   // Funcao nao tem o que fazer com o relogio da persistencia, e
@@ -544,8 +555,12 @@ function contextoDaFuncao(
 
   const sinalDoBanco = controle?.sinalRigido;
 
+  // F9.1: a fonte so entra quando foi passada. Ausente continua ausente,
+  // e o contexto das Funcoes que nao leem arquivo nao muda de forma.
+  const fonte = fonteDeArquivo === undefined ? {} : { fonteDeArquivo };
+
   if (definicao.conexaoNecessaria === null) {
-    return { userId: snapshot.userId, conexao: null, limiteDoProvider, sinalDoBanco };
+    return { userId: snapshot.userId, conexao: null, limiteDoProvider, sinalDoBanco, ...fonte };
   }
 
   const { plataforma, recurso, lojaId } = snapshot;
@@ -556,6 +571,7 @@ function contextoDaFuncao(
     conexao: { plataforma, recurso, lojaId },
     limiteDoProvider,
     sinalDoBanco,
+    ...fonte,
   };
 }
 
@@ -638,7 +654,8 @@ async function executarComAberturaFeita(
   snapshot: SnapshotChamada,
   definicao: DefinicaoFuncao,
   argumentos: unknown,
-  controle?: ControleDeTempo
+  controle?: ControleDeTempo,
+  fonteDeArquivo?: FonteDeArquivo | null
 ): Promise<ResultadoExecucaoFuncao> {
   // ── Execucao ──────────────────────────────────────────────────────
   //
@@ -650,7 +667,7 @@ async function executarComAberturaFeita(
   // por isso que a montagem mora nesta funcao e nao em cada chamador.
   // Duas construcoes divergiriam no primeiro conserto feito so de um
   // lado, e a que divergisse seria a que decide contra QUAL conta agir.
-  const contexto = contextoDaFuncao(snapshot, definicao, controle);
+  const contexto = contextoDaFuncao(snapshot, definicao, controle, fonteDeArquivo);
   if (contexto === null) {
     // Requisito de conexao sem binding no snapshot e defeito NOSSO, nao
     // pedido malformado: o guard ja autorizou, entao o vinculo tinha de
@@ -1083,7 +1100,8 @@ export async function executarFuncao(
   // Daqui para a frente a chamada JA esta aberta, e o que acontece nao
   // depende de como ela foi aberta. Uma implementacao so — a mesma que
   // fecha uma abertura vinda da RPC de aprovacao.
-  return executarComAberturaFeita(snapshot, definicao, argumentos, entrada.controleTempo);
+  return executarComAberturaFeita(
+    snapshot, definicao, argumentos, entrada.controleTempo, entrada.fonteDeArquivo);
 }
 
 // ─── A retomada ───────────────────────────────────────────────────────
@@ -1104,6 +1122,14 @@ export interface EntradaRetomadaAprovacao {
   aprovacaoId: string;
   /** As Funcoes externas do agente — F7b.4.4 §24. Ver `EntradaConsumirAprovacao`. */
   definicoesExternas?: Readonly<Record<string, DefinicaoFuncao>>;
+  /**
+   * A fonte de arquivo da conversa que esta sendo retomada — F9.1.
+   *
+   * Mesmo papel do campo em `EntradaExecucaoFuncao`. Nao escolhe Funcao,
+   * argumento, agente nem loja: so diz de onde `planilha.*` le, e o
+   * resolvedor continua preso ao dono que o montou.
+   */
+  fonteDeArquivo?: FonteDeArquivo | null;
 }
 
 /**
@@ -1188,7 +1214,8 @@ export async function retomarAprovacao(
     lojaId: contexto.lojaId,
   };
 
-  return executarComAberturaFeita(snapshot, contexto.definicao, contexto.argumentos);
+  return executarComAberturaFeita(
+    snapshot, contexto.definicao, contexto.argumentos, undefined, entrada.fonteDeArquivo);
 }
 
 // ─── A porta da lane de RETOMADA ──────────────────────────────────────

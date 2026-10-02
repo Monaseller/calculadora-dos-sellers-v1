@@ -23,7 +23,6 @@ import { autorizarFuncao } from "@/lib/agentes/funcoes/guard";
 import { DECLARACOES, declararFerramentas } from "@/lib/agentes/ia/ferramentas";
 import { conversarComFerramentas } from "@/lib/agentes/ia/laco-ferramentas";
 import { criarAdaptadorFakeComFerramentas } from "@/lib/agentes/ia/ferramentas-fake";
-import { registrarFonteDeArquivo } from "@/lib/agentes/funcoes/planilha";
 import type { ArquivoResolvido, FonteDeArquivo } from "@/lib/agentes/planilhas/fonte";
 import { lerValorMonetario, paraTexto } from "@/lib/agentes/planilhas/numeros";
 import { deSerialExcel, inferirOrdem, lerData } from "@/lib/agentes/planilhas/datas";
@@ -89,13 +88,19 @@ const fonteDaFixture: FonteDeArquivo = {
   },
 };
 
-const CONTEXTO: ContextoFuncao = Object.freeze({ userId: DONO, conexao: null });
+// F9.1: a fonte viaja no CONTEXTO da chamada, e nao num registro global.
+const CONTEXTO: ContextoFuncao = Object.freeze({
+  userId: DONO, conexao: null, fonteDeArquivo: fonteDaFixture });
 
-async function chamar(funcaoId: string, argumentos: unknown): Promise<Record<string, unknown>> {
+async function chamar(
+  funcaoId: string,
+  argumentos: unknown,
+  contexto: ContextoFuncao = CONTEXTO
+): Promise<Record<string, unknown>> {
   const def = resolverFuncao(funcaoId);
   const v = def.validarEntrada(argumentos);
   if (!v.valida) return { ok: false, codigo: v.codigo, mensagem: "entrada invalida" };
-  return (await def.executor(CONTEXTO, argumentos)) as Record<string, unknown>;
+  return (await def.executor(contexto, argumentos)) as Record<string, unknown>;
 }
 
 // ─── A porta REAL do laco, sem banco ──────────────────────────────────
@@ -174,7 +179,6 @@ const TODAS_AUTOMATICAS: FatoPermissao[] = TOOLS_F3.map((funcaoId) => ({
 }));
 
 async function main(): Promise<void> {
-  registrarFonteDeArquivo(fonteDaFixture);
 
   console.log("\n══ CDS IA — AGENT-FACTORY-F3: Tools deterministicas ══");
 
@@ -272,7 +276,8 @@ async function main(): Promise<void> {
       JSON.stringify(g3.codigo) ===
         JSON.stringify(((await (async () => {
           const def = resolverFuncao("planilha.ler");
-          return (await def.executor({ userId: "outro-dono", conexao: null },
+          return (await def.executor(
+            { userId: "outro-dono", conexao: null, fonteDeArquivo: fonteDaFixture },
             { fileId: "entradas" })) as Record<string, unknown>;
         })()) as Record<string, unknown>).codigo));
 
@@ -767,7 +772,8 @@ async function main(): Promise<void> {
       (await chamar("planilha.inspecionar", { fileId: "entradas" })).ok === true);
     ok("AK3 arquivo de OUTRO dono nao e lido",
       ((await resolverFuncao("planilha.inspecionar")
-        .executor({ userId: "outro", conexao: null }, { fileId: "entradas" })) as Record<string, unknown>)
+        .executor({ userId: "outro", conexao: null, fonteDeArquivo: fonteDaFixture },
+          { fileId: "entradas" })) as Record<string, unknown>)
         .ok === false);
     const FONTE_F = semComentarios(ler("lib/agentes/planilhas/fonte.ts"));
     ok("AK4 o contrato de fonte NAO conhece filesystem",
@@ -775,23 +781,22 @@ async function main(): Promise<void> {
     ok("AK5 nem o modulo das Funcoes de planilha",
       !/node:fs|readFileSync/.test(semComentarios(ler("lib/agentes/funcoes/planilha.ts"))));
 
-    ok("AL1 extensao nao suportada e recusada",
-      (() => { const f: FonteDeArquivo = { async resolver() {
-          return { fileId: "x", nome: "a.xls", extensao: "xls" as never, bytes: new Uint8Array() }; } };
-        registrarFonteDeArquivo(f);
-        return true; })());
+    const fonteXls: FonteDeArquivo = { async resolver() {
+      return { fileId: "x", nome: "a.xls", extensao: "xls" as never, bytes: new Uint8Array() }; } };
+    ok("AL1 extensao nao suportada e recusada", typeof fonteXls.resolver === "function");
     {
-      const r = await chamar("planilha.inspecionar", { fileId: "qualquer" });
+      const r = await chamar("planilha.inspecionar", { fileId: "qualquer" },
+        { userId: DONO, conexao: null, fonteDeArquivo: fonteXls });
       ok("AL2 .xls cai em extensao_nao_suportada",
         r.ok === false && r.codigo === "extensao_nao_suportada", JSON.stringify(r));
     }
-    registrarFonteDeArquivo(null);
     {
-      const r = await chamar("planilha.inspecionar", { fileId: "entradas" });
+      // F9.1: "sem fonte" e o contexto sem `fonteDeArquivo`.
+      const r = await chamar("planilha.inspecionar", { fileId: "entradas" },
+        { userId: DONO, conexao: null });
       ok("AL3 SEM fonte configurada, o default NEGA",
         r.ok === false && r.codigo === "fonte_nao_configurada", JSON.stringify(r));
     }
-    registrarFonteDeArquivo(fonteDaFixture);
 
     const insp = await chamar("planilha.inspecionar", { fileId: "entradas" });
     const abas = insp.abas as { formulasPresentes: boolean; celulasComFormula: number }[];

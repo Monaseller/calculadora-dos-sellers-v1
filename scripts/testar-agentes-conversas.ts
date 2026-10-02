@@ -370,7 +370,8 @@ async function main(): Promise<void> {
       /conversarComFerramentas/.test(RT));
     ok("D6  a configuracao e lida a cada turno, nao guardada na conversa",
       /resolverFatosPermissoes/.test(RT) && /resolverSkillsDoAgente/.test(RT) &&
-      /listarAtivas/.test(RT) && /listarDoAgente/.test(RT));
+      // F9.1: as fontes vem de `listarFontesDoTurno` (agente + conversa).
+      /listarAtivas/.test(RT) && /listarFontesDoTurno/.test(RT));
     ok("D7  o userId vem da ENTRADA, e o tipo o marca como da sessao",
       /Da SESSAO/.test(ler("lib/agentes/conversas/runtime.ts")));
     ok("D8  mensagem de provedor nao sobe crua ao cliente",

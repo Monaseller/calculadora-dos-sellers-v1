@@ -42,6 +42,7 @@
  * — nao importando este modulo.
  */
 import type { LimiteExterno } from "@/lib/controle-tempo";
+import type { FonteDeArquivo } from "@/lib/agentes/planilhas/fonte";
 import "server-only";
 import {
   executarVendasConsultar,
@@ -166,6 +167,14 @@ export interface ContextoFuncao {
    * cancelar uma consulta de banco.
    */
   readonly sinalDoBanco?: AbortSignal;
+  /**
+   * De onde `planilha.*` le arquivos NESTA execucao — F9.1. Era variavel
+   * de MODULO, sobrescrita a cada turno: turnos concorrentes trocavam de
+   * resolvedor no meio do `await`. Montada server-side (dono, agente,
+   * conversa), nunca dos argumentos. Ausente = nenhuma fonte, e
+   * `planilha.*` recusa com `fonte_nao_configurada`, como antes.
+   */
+  readonly fonteDeArquivo?: FonteDeArquivo | null;
 }
 
 /**

@@ -26,7 +26,6 @@ import { autorizarFuncao } from "@/lib/agentes/funcoes/guard";
 import { declararFerramentas } from "@/lib/agentes/ia/ferramentas";
 import { conversarComFerramentas } from "@/lib/agentes/ia/laco-ferramentas";
 import { criarAdaptadorFakeComFerramentas } from "@/lib/agentes/ia/ferramentas-fake";
-import { registrarFonteDeArquivo } from "@/lib/agentes/funcoes/planilha";
 import {
   BLOCOS_NAO_CONFIAVEIS,
   CONFIANCA_POR_BLOCO,
@@ -665,8 +664,9 @@ async function main(): Promise<void> {
     };
     const fEntradas = await subir("entrada.xlsx", "Entradas");
     const fSaidas = await subir("saida.xlsx", "Saidas");
-    registrarFonteDeArquivo(criarFonteDeArquivoDasSources({
-      porta: portaF, userId: DONO_A, agenteId: AGENTE_1 }));
+    // F9.1: a fonte vai no contexto da Funcao (`contextoFn`), nao num modulo.
+    const fonteDoAgente = criarFonteDeArquivoDasSources({
+      porta: portaF, userId: DONO_A, agenteId: AGENTE_1 });
 
     const memsComposto: Memoria[] = [
       { id: "ord", userId: DONO_A, agenteId: AGENTE_1,
@@ -692,7 +692,8 @@ async function main(): Promise<void> {
       { funcaoId: "calculadora.calcular", nivel: "automatico" },
     ];
     const funcoes: FatoFuncao[] = Object.keys(FUNCOES).map((id) => ({ id, existe: true }));
-    const contextoFn: ContextoFuncao = Object.freeze({ userId: DONO_A, conexao: null });
+    const contextoFn: ContextoFuncao = Object.freeze({
+      userId: DONO_A, conexao: null, fonteDeArquivo: fonteDoAgente });
     const porta = async (e: { funcaoId: unknown; argumentos: unknown }) => {
       const g = autorizarFuncao({ funcaoId: e.funcaoId, conexaoNecessaria: null,
         funcoes, permissoes: PERM, conexoes: [] });
@@ -758,8 +759,6 @@ async function main(): Promise<void> {
         .includes("saldo, entradas, saidas"));
     ok("J11 e o fileId usado foi o AUTORIZADO daquele agente",
       dialogo.includes(fEntradas.id));
-
-    registrarFonteDeArquivo(null);
   }
 
   console.log(`\n── placar ${"─".repeat(54)}`);

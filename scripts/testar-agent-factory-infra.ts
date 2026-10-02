@@ -38,6 +38,7 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { BUCKET_FONTES } from "@/lib/agentes/fontes/armazenamento";
 import { criarPortaDeFontes } from "@/lib/agentes/fontes/repositorio";
 import { criarFonteDeArquivoDasSources } from "@/lib/agentes/fontes/resolvedor";
+import type { FonteDeArquivo } from "@/lib/agentes/planilhas/fonte";
 import { receberFonte } from "@/lib/agentes/fontes/upload";
 import { criarPortaDeMemorias } from "@/lib/agentes/memorias/repositorio";
 import {
@@ -45,7 +46,6 @@ import {
 } from "@/lib/agentes/memorias/servico";
 import { montarContextoDoAgente } from "@/lib/agentes/ia/contexto-do-agente";
 import { criarPortaDeConversas } from "@/lib/agentes/conversas/repositorio";
-import { registrarFonteDeArquivo } from "@/lib/agentes/funcoes/planilha";
 import { resolverFuncao, type ContextoFuncao } from "@/lib/agentes/funcoes/registry";
 
 const RAIZ = join(__dirname, "..");
@@ -215,8 +215,11 @@ async function main(): Promise<void> {
     // ═════════════════════════════════════════════════════════════════
     secao("C. Resolver real -> planilha -> numeros conhecidos");
     // ═════════════════════════════════════════════════════════════════
-    const ctx: ContextoFuncao = Object.freeze({ userId: DONO_A, conexao: null });
+    // F9.1: a fonte viaja no CONTEXTO de cada chamada.
+    let fonteDaVez: FonteDeArquivo | null = null;
     const chamar = async (id: string, args: unknown) => {
+      const ctx: ContextoFuncao = Object.freeze({
+        userId: DONO_A, conexao: null, fonteDeArquivo: fonteDaVez });
       const d = resolverFuncao(id);
       const v = d.validarEntrada(args);
       if (!v.valida) return { ok: false, codigo: v.codigo } as Record<string, unknown>;
@@ -225,7 +228,7 @@ async function main(): Promise<void> {
     const resolvedorA1 = criarFonteDeArquivoDasSources({
       porta: portaF, userId: DONO_A, agenteId: AG_A1 });
     {
-      registrarFonteDeArquivo(resolvedorA1);
+      fonteDaVez = resolvedorA1;
 
       const insp = await chamar("planilha.inspecionar", { fileId: ids["entrada.xlsx"] });
       ok("C1  planilha.inspecionar PELO storage", insp.ok === true,
@@ -267,19 +270,19 @@ async function main(): Promise<void> {
     secao("D. Isolamento no runtime real");
     // ═════════════════════════════════════════════════════════════════
     {
-      registrarFonteDeArquivo(criarFonteDeArquivoDasSources({
-        porta: portaF, userId: DONO_A, agenteId: AG_A2 }));
+      fonteDaVez = criarFonteDeArquivoDasSources({
+        porta: portaF, userId: DONO_A, agenteId: AG_A2 });
       const outroAgente = await chamar("planilha.inspecionar", { fileId: ids["entrada.xlsx"] });
       ok("D1  OUTRO AGENTE do mesmo dono nao le",
         outroAgente.ok === false && outroAgente.codigo === "arquivo_nao_encontrado",
         JSON.stringify(outroAgente).slice(0, 90));
 
-      registrarFonteDeArquivo(criarFonteDeArquivoDasSources({
-        porta: portaF, userId: DONO_B, agenteId: AG_B1 }));
+      fonteDaVez = criarFonteDeArquivoDasSources({
+        porta: portaF, userId: DONO_B, agenteId: AG_B1 });
       ok("D2  OUTRO DONO nao le",
         (await chamar("planilha.inspecionar", { fileId: ids["entrada.xlsx"] })).ok === false);
 
-      registrarFonteDeArquivo(resolvedorA1);
+      fonteDaVez = resolvedorA1;
       ok("D3  CONTROLE: o dono/agente certo AINDA le — 'tudo nega' nao e prova",
         (await chamar("planilha.inspecionar", { fileId: ids["entrada.xlsx"] })).ok === true);
 
@@ -427,7 +430,6 @@ async function main(): Promise<void> {
     // ═════════════════════════════════════════════════════════════════
     // CLEANUP — roda mesmo com assert quebrado.
     // ═════════════════════════════════════════════════════════════════
-    registrarFonteDeArquivo(null);
     const removido = await limparFixtures(db);
     log(`\n  cleanup: ${removido.objetos} objetos, ${removido.fontes} fontes, ` +
         `${removido.memorias} memorias, ${removido.agentes} agentes`);

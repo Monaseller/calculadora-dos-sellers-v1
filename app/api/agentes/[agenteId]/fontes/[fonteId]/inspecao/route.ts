@@ -39,7 +39,7 @@ import {
   criarFonteDeArquivoDasSources,
 } from "@/lib/agentes/fontes/resolvedor";
 import { criarPortaDeFontes } from "@/lib/agentes/fontes/repositorio";
-import { executarInspecionar, registrarFonteDeArquivo } from "@/lib/agentes/funcoes/planilha";
+import { executarInspecionar } from "@/lib/agentes/funcoes/planilha";
 import { atravessarPorta, responder, UUID_REGEX } from "@/lib/agentes/api/porta";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 
@@ -83,17 +83,19 @@ export async function GET(
       }, 415);
     }
 
-    // A MESMA porta de arquivo que o runtime registra, com o MESMO
-    // escopo: dono da sessao e agente da rota. O `fileId` e o uuid da
-    // fonte, e nao um caminho — caminho de storage nunca trafega.
-    registrarFonteDeArquivo(criarFonteDeArquivoDasSources({
+    // A MESMA porta de arquivo que o runtime usa, com o MESMO escopo:
+    // dono da sessao e agente da rota. O `fileId` e o uuid da fonte, e
+    // nao um caminho — caminho de storage nunca trafega. F9.1: a fonte vai
+    // no contexto DESTA chamada, e nao num modulo que um turno de chat
+    // concorrente sobrescreveria durante o `await`.
+    const fonteDeArquivo = criarFonteDeArquivoDasSources({
       porta: portaF,
       userId: porta.userId,
       agenteId: porta.agenteId,
-    }));
+    });
 
     const saida = await executarInspecionar(
-      { userId: porta.userId, conexao: null },
+      { userId: porta.userId, conexao: null, fonteDeArquivo },
       { fileId: params.fonteId }
     );
 

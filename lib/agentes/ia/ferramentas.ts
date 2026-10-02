@@ -207,14 +207,24 @@ export const DECLARACOES: Readonly<Record<string, { descricao: string; schemaEnt
       descricao:
         "Le as vendas pagas do lojista num periodo. Devolve as linhas do periodo, " +
         "nunca um total ja calculado.",
+      // ── F9.1: os nomes sao os do VALIDADOR, e nao outros ────────────
+      //
+      // Esta declaracao dizia `inicio`/`fim`, e `validarFiltroVendas` le
+      // `dataInicio`/`dataFim` — o mesmo contrato da rota
+      // `consultar-vendas`, das tarefas, da acao `consultar_vendas` e da
+      // tela de aprovacao. Todo pedido do modelo morria em `data_invalida`
+      // antes do guard, entao nenhuma aprovacao ou tarefa jamais gravou o
+      // formato antigo: nao ha legado a aceitar, so a declaracao a alinhar.
+      // `marketplace` vira `enum` pelo mesmo motivo: o validador so aceita
+      // `MARKETPLACES_VALIDOS`, e "Mercado Livre" seria recusado.
       schemaEntrada: Object.freeze({
         type: "object",
         properties: {
-          inicio: { type: "string", description: "Data inicial, AAAA-MM-DD." },
-          fim: { type: "string", description: "Data final, AAAA-MM-DD." },
-          marketplace: { type: "string", description: "Opcional. ML ou Shopee." },
+          dataInicio: { type: "string", description: "Data inicial, AAAA-MM-DD." },
+          dataFim: { type: "string", description: "Data final, AAAA-MM-DD." },
+          marketplace: { type: "string", enum: ["ML", "Shopee"], description: "Opcional." },
         },
-        required: ["inicio", "fim"],
+        required: ["dataInicio", "dataFim"],
         additionalProperties: false,
       }),
     }),

@@ -25,10 +25,7 @@
  * acidente so porque alguem esqueceu de ligar alguma coisa.
  */
 import "server-only";
-import {
-  abrirArquivo,
-  type FonteDeArquivo,
-} from "@/lib/agentes/planilhas/fonte";
+import { abrirArquivo } from "@/lib/agentes/planilhas/fonte";
 import { ErroPlanilha, lerCsv, lerXlsx } from "@/lib/agentes/planilhas/leitura";
 import {
   MAX_ABAS_INSPECIONADAS,
@@ -53,23 +50,14 @@ import type {
 } from "@/lib/agentes/funcoes/registry";
 
 // ─── A porta ──────────────────────────────────────────────────────────
-
-let fonteAtual: FonteDeArquivo | null = null;
-
-/**
- * Liga uma fonte de arquivo.
- *
- * Existe para a suite e para o dia em que o gate de Sources publicar a
- * implementacao real. O default continua sendo NENHUMA fonte — quem
- * nao registrou, nao le.
- */
-export function registrarFonteDeArquivo(fonte: FonteDeArquivo | null): void {
-  fonteAtual = fonte;
-}
-
-export function obterFonteDeArquivo(): FonteDeArquivo | null {
-  return fonteAtual;
-}
+//
+// A fonte de arquivo chega em `contexto.fonteDeArquivo`, montada por quem
+// conhece a sessao, e vale so para ESTA chamada — F9.1. Nao ha variavel
+// de modulo: ela era sobrescrita a cada turno, e dois turnos concorrentes
+// na mesma instancia trocavam de resolvedor no meio de um `await`.
+//
+// Sem fonte no contexto, o default continua NEGANDO
+// (`fonte_nao_configurada`): quem nao recebeu fonte, nao le.
 
 /** Erro de dominio desta frente, no formato que o interpretador espera. */
 interface FalhaPlanilha {
@@ -86,7 +74,7 @@ async function abrirPasta(
   contexto: ContextoFuncao,
   fileId: unknown
 ): Promise<{ pasta: Pasta; nome: string; fileId: string } | FalhaPlanilha> {
-  const fonte = fonteAtual;
+  const fonte = contexto.fonteDeArquivo ?? null;
   if (fonte === null) {
     return falha("fonte_nao_configurada", "Nao ha fonte de arquivos configurada neste ambiente.");
   }

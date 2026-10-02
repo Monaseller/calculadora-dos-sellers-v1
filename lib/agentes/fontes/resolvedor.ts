@@ -94,6 +94,60 @@ export function criarFonteDeArquivoDasSources(entrada: EntradaDoResolvedor): Fon
 
 // ─── O que o modelo recebe sobre as fontes ────────────────────────────
 
+// ─── Quais fontes um TURNO enxerga — F9.1 ─────────────────────────────
+
+/**
+ * As fontes do agente seguidas dos anexos da conversa, sem repetir fonte.
+ *
+ * A identidade e o `id` (uuid da linha), nunca o nome: dois arquivos
+ * diferentes podem se chamar "vendas.xlsx", e o mesmo arquivo nao muda de
+ * id. O CHECK `agente_fontes_vinculo_coerente` ja impede uma linha de ter
+ * os dois escopos; a deduplicacao e a cerca barata para o caso de algum
+ * dia uma mesma fonte chegar pelas duas listas. Na repeticao vence a
+ * primeira ocorrencia — a do agente, que e a permanente.
+ */
+export function unirFontesDoTurno(
+  doAgente: readonly Fonte[],
+  daConversa: readonly Fonte[]
+): readonly Fonte[] {
+  const vistas = new Set<string>();
+  const saida: Fonte[] = [];
+  for (const f of [...doAgente, ...daConversa]) {
+    if (vistas.has(f.id)) continue;
+    vistas.add(f.id);
+    saida.push(f);
+  }
+  return saida;
+}
+
+/**
+ * Lista o que o modelo pode usar NESTE turno: fontes permanentes do
+ * agente e anexos SO desta conversa.
+ *
+ * Ate o F9.1 o runtime listava apenas `listarDoAgente`. O resolvedor ja
+ * abria o anexo da conversa, mas o modelo nunca recebia o id dele — o
+ * arquivo aparecia na tela e era invisivel para o agente.
+ *
+ * `conversaId` PRECISA ter sido conferido pelo chamador como conversa
+ * deste dono E deste agente (`obterConversa(userId, ...)` +
+ * `conversa.agenteId === agenteId`). A linha de anexo nao guarda
+ * `agente_id` — o vinculo dela e a conversa —, entao e essa conferencia
+ * que impede um anexo de atravessar para outro agente. As duas consultas
+ * filtram `user_id`, escopo e `ativo`.
+ */
+export async function listarFontesDoTurno(
+  porta: PortaDeFontes,
+  userId: string,
+  agenteId: string,
+  conversaId: string
+): Promise<readonly Fonte[]> {
+  const [doAgente, daConversa] = await Promise.all([
+    porta.listarDoAgente(userId, agenteId),
+    porta.listarDaConversa(userId, conversaId),
+  ]);
+  return unirFontesDoTurno(doAgente, daConversa);
+}
+
 export interface ContextoDeFontes {
   readonly fontes: readonly FonteParaModelo[];
   readonly texto: string;

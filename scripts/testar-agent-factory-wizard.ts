@@ -856,9 +856,11 @@ secao("K. Inspecionar e do DONO, e reusa o inspetor do modelo");
     /executarInspecionar\(/.test(rota));
   ok("K2  e nao reimplementa leitura de planilha",
     !/lerXlsx|lerCsv|cabecalhos\(|larguraDaAba/.test(rota));
-  ok("K3  registra a MESMA porta de arquivo do runtime",
+  // F9.1: a porta vai no CONTEXTO da chamada; registro de modulo e proibido.
+  ok("K3  usa a MESMA porta de arquivo do runtime, no contexto da chamada",
     /criarFonteDeArquivoDasSources\(\{/.test(rota) &&
-      /registrarFonteDeArquivo\(/.test(rota));
+      /fonteDeArquivo \}/.test(rota) &&
+      !/registrarFonteDeArquivo\(/.test(rota));
   ok("K4  com o escopo da SESSAO e do agente da rota",
     /userId: porta\.userId/.test(rota) && /agenteId: porta\.agenteId/.test(rota));
 
@@ -1754,8 +1756,11 @@ secao("T. Aprovar acontece NO chat — e adicionar pergunta o nivel");
     })());
   ok("T15a CONTROLE NEGATIVO: a sonda acharia uma gravacao de usuario",
     /papel: "usuario"/.test('anexarMensagem({ papel: "usuario" })'));
+  // F9.1: a fonte de arquivo DA CONVERSA passa a seguir junto; o resto
+  // da entrada continua o mesmo — nada de Funcao, argumento ou loja.
   ok("T16 ela executa a Funcao CONGELADA, pela porta atomica",
-    /retomarAprovacao\(\{ userId, aprovacaoId, definicoesExternas \}\)/.test(retomada));
+    /retomarAprovacao\(\{\s*userId, aprovacaoId, definicoesExternas, fonteDeArquivo,\s*\}\)/
+      .test(retomada));
   ok("T16a e o mapa de externas vem dos VINCULOS de AGORA",
     /listarVinculosExternos\(\{ userId, agenteId: aprovacao\.agenteId \}\)/.test(retomada) &&
       /prepararFuncoesExternas/.test(retomada));

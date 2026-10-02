@@ -73,6 +73,10 @@ import { resolverIaDoAgente } from "@/lib/agentes/factory/ia-do-agente";
 import { montarContextoDoAgente } from "@/lib/agentes/ia/contexto-do-agente";
 import { resolverSkillsDoAgente } from "@/lib/agentes/skills/fatos";
 import { criarPortaDeFontes } from "@/lib/agentes/fontes/repositorio";
+import {
+  criarFonteDeArquivoDasSources,
+  listarFontesDoTurno,
+} from "@/lib/agentes/fontes/resolvedor";
 import { criarPortaDeMemorias } from "@/lib/agentes/memorias/repositorio";
 import { paraModelo } from "@/lib/agentes/fontes/tipos";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
@@ -235,7 +239,20 @@ export async function retomarTurnoAprovado(
     return falha("indisponivel", "Nao foi possivel carregar as ferramentas do agente.");
   }
 
-  const execucao = await retomarAprovacao({ userId, aprovacaoId, definicoesExternas });
+  // F9.1: a Funcao aprovada le arquivo pela fonte DESTA conversa — a que
+  // foi conferida acima como deste dono e do agente da aprovacao —, e nao
+  // pelo que o ultimo turno de qualquer dono tivesse registrado no modulo.
+  const portaFontes = criarPortaDeFontes(getSupabaseServidor());
+  const fonteDeArquivo = criarFonteDeArquivoDasSources({
+    porta: portaFontes,
+    userId,
+    agenteId: aprovacao.agenteId,
+    conversaId: aprovacao.conversaId,
+  });
+
+  const execucao = await retomarAprovacao({
+    userId, aprovacaoId, definicoesExternas, fonteDeArquivo,
+  });
 
   if (execucao.tipo === "aprovacao_indisponivel") {
     const codigo = (execucao as { codigo?: string }).codigo;
@@ -264,7 +281,8 @@ export async function retomarTurnoAprovado(
   const [skills, memorias, fontes, historico] = await Promise.all([
     resolverSkillsDoAgente({ userId, agenteId: aprovacao.agenteId }),
     criarPortaDeMemorias(db).listarAtivas(userId, aprovacao.agenteId),
-    criarPortaDeFontes(db).listarDoAgente(userId, aprovacao.agenteId),
+    // F9.1: os anexos desta conversa entram junto, como no turno normal.
+    listarFontesDoTurno(portaFontes, userId, aprovacao.agenteId, aprovacao.conversaId),
     portaConversas.listarMensagens(userId, aprovacao.conversaId),
   ]);
   if (skills.coleta !== "ok") {
@@ -345,6 +363,7 @@ export async function retomarTurnoAprovado(
       historico: dialogo,
       ferramentas: ferramentasParaConcluir,
       definicoesExternas: definicoesExternas,
+      fonteDeArquivo,
       conversaId: aprovacao.conversaId,
       nivelDeTrabalho: ia.nivel ?? undefined,
       adaptador,
