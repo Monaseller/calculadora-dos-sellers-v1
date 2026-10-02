@@ -160,8 +160,8 @@ async function main(): Promise<void> {
       r.recusados.includes("ferramenta"));
 
     const chaves = [
-      "minha chave e sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA",
-      "token: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+      "minha chave e sk-ant-TESTE-nao-e-chave-real-001",
+      "token: eyJmYWtlIjp0cnVlfQ.eyJ0ZXN0ZSI6MX0.assinatura-falsa-de-teste",
       "Authorization: Api-Key abcdefghijklmnop123456",
       "baixe em https://x.supabase.co/storage/v1/o.xlsx?token=abc123def456",
       "conecte em postgresql://user:senha@host:5432/db",
@@ -176,7 +176,7 @@ async function main(): Promise<void> {
       redigir("prefiro o saldo primeiro no resumo").redigidos.length === 0);
     ok("B6  mensagem que sobra so como marcador NAO e ingerida",
       prepararParaMemoria([
-        { papel: "usuario", conteudo: "sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA" },
+        { papel: "usuario", conteudo: "sk-ant-TESTE-nao-e-chave-real-001" },
       ]).aprovadas.length === 0);
   }
 

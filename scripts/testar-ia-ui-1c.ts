@@ -361,11 +361,11 @@ secao("D. Tarefas — apresentacao derivada, sem coluna inventada");
   // A regra de seguranca do titulo: allowlist de chaves.
   const venenosa = t({
     tipo: "responder_perguntas",
-    entrada: { quantidade: 2, segredo: "sk-ant-NAO-DEVE-APARECER", token: "eyJabc.def" },
+    entrada: { quantidade: 2, segredo: "sk-ant-TESTE-nao-e-chave-real-000", token: "eyJmYWtlIjp0cnVlfQ.eyJ0ZXN0ZSI6MX0.assinatura-falsa-de-teste" },
   });
   const titulo = tituloDaTarefa(venenosa);
   ok("D8  titulo NAO despeja chaves desconhecidas de `entrada`",
-    !titulo.includes("sk-ant") && !titulo.includes("eyJabc") && !titulo.includes("segredo"),
+    !titulo.includes("sk-ant") && !titulo.includes("eyJmYWtlIjp0cnVlfQ") && !titulo.includes("segredo"),
     titulo);
   ok("D9  controle negativo: a chave conhecida ENTRA no titulo", titulo.includes("2"));
   ok("D10 valor de tipo errado e ignorado (nao vira 'NaN')",
@@ -591,7 +591,7 @@ secao("J. Zero backend na area inteira");
       "A API key vem de Conexoes, nunca da Skill.";
     ok("Js1 segredo: prosa documental NAO dispara", !sondaSegredo.test(DOC));
     ok("Js2 segredo: valor atribuido dispara", sondaSegredo.test('access_token = "aB3xK9zQ7mP2wL5tR8"'));
-    ok("Js3 segredo: JWT sintetico dispara", sondaSegredo.test("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.aZ"));
+    ok("Js3 segredo: JWT sintetico dispara", sondaSegredo.test("eyJmYWtlIjp0cnVlfQ.eyJ0ZXN0ZSI6MX0.assinatura-falsa-de-teste"));
     ok("Js4 segredo: Bearer com valor dispara", sondaSegredo.test("Bearer " + "A".repeat(24)));
     ok("Js5 segredo: chave sk- dispara", sondaSegredo.test("sk-" + "A".repeat(20)));
     ok("Js6 segredo: bloco PRIVATE KEY dispara", sondaSegredo.test("-----BEGIN RSA PRIVATE KEY-----"));
