@@ -79,9 +79,8 @@ import {
 import { montarContextoDoAgente } from "@/lib/agentes/ia/contexto-do-agente";
 import { adaptadorDoProvedor } from "@/lib/agentes/ia/adaptador-por-provedor";
 import { prepararFuncoesExternas } from "@/lib/agentes/composio/preparar-externas";
-import {
-  ingerirTurno, recuperarMemoriaDoDono,
-} from "@/lib/agentes/memoria/automatica";
+import { recuperarMemoriaDoDono } from "@/lib/agentes/memoria/automatica";
+import { ingerirTurnoDaConversa } from "@/lib/agentes/conversas/memoria-da-conversa";
 import { capacidadesDoAgente } from "@/lib/agentes/factory/capacidades";
 import { assuntoDaMensagem } from "@/lib/agentes/conversas/retomada-resumo";
 import {
@@ -523,7 +522,11 @@ export async function responderNaConversa(
   //
   // `ingerirTurno` ja devolve cedo quando a memoria esta desligada — sem
   // rede nenhuma. Agente sem memoria nao paga por isto.
-  const ingestao = await ingerirTurno(
+  //
+  // F9.1-D: conversa que tem ou ja teve anexo "so desta conversa" nao
+  // alimenta a memoria — nem usuario, nem assistente. Ver
+  // `memoria-da-conversa.ts`. Falha na verificacao = nao ingerir.
+  const ingestao = await ingerirTurnoDaConversa(
     {
       userId: entrada.userId,
       agenteId: entrada.agenteId,
@@ -533,7 +536,8 @@ export async function responderNaConversa(
     [
       { papel: "usuario", conteudo: gravadaDoUsuario.conteudo ?? "" },
       { papel: "assistente", conteudo: resposta.conteudo ?? "" },
-    ]
+    ],
+    (userId, conversaId) => portaFontes.conversaTemOuTeveAnexo(userId, conversaId)
   );
   if (ingestao.desfecho === "falha") {
     // Sem conteudo no log: a mensagem e do usuario. So o fato.

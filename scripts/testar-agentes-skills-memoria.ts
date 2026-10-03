@@ -143,6 +143,7 @@ function criarPortaDeFontesFake(linhas: LinhaFonteMem[]): PortaDeFontes {
         l.escopo === "agente" && l.ativo).map(soDominio);
     },
     async listarDaConversa() { return []; },
+    async conversaTemOuTeveAnexo() { return false; },
     async criar(nova: NovaFonte) {
       const id = randomUUID();
       const l: LinhaFonteMem = {

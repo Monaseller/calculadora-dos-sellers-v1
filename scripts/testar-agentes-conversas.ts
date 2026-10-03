@@ -166,6 +166,11 @@ function criarPortaDeFontesFake(linhas: LinhaFonteMem[]): PortaDeFontes {
       return linhas.filter((l) => l.userId === userId && l.conversaId === conversaId &&
         l.escopo === "conversa" && l.ativo).map(soDominio);
     },
+    // F9.1-D: como a real — SEM filtro de `ativo`.
+    async conversaTemOuTeveAnexo(userId, conversaId) {
+      return linhas.some((l) => l.userId === userId && l.conversaId === conversaId &&
+        l.escopo === "conversa");
+    },
     async criar(nova: NovaFonte) {
       const id = randomUUID();
       const l: LinhaFonteMem = {

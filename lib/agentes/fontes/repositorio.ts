@@ -69,6 +69,15 @@ export interface PortaDeFontes {
   ): Promise<FonteComCaminho | null>;
   listarDoAgente(userId: string, agenteId: string): Promise<readonly Fonte[]>;
   listarDaConversa(userId: string, conversaId: string): Promise<readonly Fonte[]>;
+  /**
+   * Esta conversa TEM ou JA TEVE anexo "so desta conversa"? — F9.1-D.
+   *
+   * Inclui `ativo = false` de proposito: o dado de um anexo removido ja
+   * pode ter sido lido e repetido no chat. E o que marca a conversa como
+   * fora da memoria automatica. Lanca em falha — quem chama decide, e a
+   * decisao e nao ingerir.
+   */
+  conversaTemOuTeveAnexo(userId: string, conversaId: string): Promise<boolean>;
   criar(nova: NovaFonte): Promise<Fonte>;
   desativar(userId: string, fonteId: string): Promise<boolean>;
   lerBytes(caminhoObjeto: string): Promise<Uint8Array>;
@@ -160,6 +169,18 @@ export function criarPortaDeFontes(supabase: SupabaseClient): PortaDeFontes {
         .order("criado_em", { ascending: true });
       if (error) throw new Error(`Falha ao listar anexos: ${error.message}`);
       return ((data ?? []) as unknown as LinhaFonte[]).map((l) => semCaminho(daLinha(l)));
+    },
+
+    async conversaTemOuTeveAnexo(userId, conversaId) {
+      // SEM `ativo`: removido tambem conta. So o id volta — nada de nome,
+      // caminho ou conteudo e necessario para responder sim ou nao.
+      const { data, error } = await supabase.from(TABELA).select("id")
+        .eq("user_id", userId).eq("conversa_id", conversaId)
+        .eq("escopo", "conversa")
+        .limit(1);
+      // Sem `error.message`: o log de quem chama nao precisa do texto do driver.
+      if (error) throw new Error("Falha ao verificar anexos da conversa");
+      return Array.isArray(data) && data.length > 0;
     },
 
     async criar(nova) {
