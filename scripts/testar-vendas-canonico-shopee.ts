@@ -143,13 +143,19 @@ async function principal() {
   const dia = S.intervaloSaoPaulo("2026-10-02", "2026-10-02");
   const janelaOk = (extra: Partial<JanelaListagem> = {}): JanelaListagem => ({ lojaId: LOJA, campoTempo: "update_time",
     inicio: "2026-10-01T00:00:00.000Z", fim: "2026-10-04T00:00:00.000Z", listagemCompleta: true, status: "concluido", ...extra });
+  // S2-D1.1: prova = CADEIA de update_time com sucessora. Duas janelas
+  // sobrepostas; watermark = inicio da ultima (03/10 11:45Z) >= fim do dia.
+  const cadeiaOk = (): JanelaListagem[] => [
+    janelaOk({ inicio: "2026-10-01T00:00:00.000Z", fim: "2026-10-03T12:00:00.000Z" }),
+    janelaOk({ inicio: "2026-10-03T11:45:00.000Z", fim: "2026-10-04T00:00:00.000Z" }),
+  ];
   t("4a. listagem coberta + detail + escrow atual = COMPLETE", () => {
-    const r = S.avaliarCompletudeShopee({ ...dia, janelas: [janelaOk()], pedidosPagos: [pedido("X")], itens: [item("X")] });
+    const r = S.avaliarCompletudeShopee({ ...dia, janelas: cadeiaOk(), pedidosPagos: [pedido("X")], itens: [item("X")] });
     assert(r.completude === "COMPLETE", JSON.stringify(r));
   });
   t("4b. buraco na cobertura = PARTIAL", () => {
     const r = S.avaliarCompletudeShopee({ ...dia, janelas: [janelaOk({ fim: "2026-10-02T12:00:00.000Z" }), janelaOk({ inicio: "2026-10-02T13:00:00.000Z" })], pedidosPagos: [pedido("X")], itens: [item("X")] });
-    assert(r.completude === "PARTIAL" && r.motivos.includes("listagem_nao_coberta"), JSON.stringify(r));
+    assert(r.completude === "PARTIAL" && r.motivos.includes("listagem_nao_provada_por_update_time"), JSON.stringify(r));
   });
   t("4c. janela em erro sem cobertura = FAILED", () => {
     const r = S.avaliarCompletudeShopee({ ...dia, janelas: [janelaOk({ listagemCompleta: null, status: "erro" })], pedidosPagos: [pedido("X")], itens: [item("X")] });
@@ -160,7 +166,7 @@ async function principal() {
     assert(r.completude !== "COMPLETE", JSON.stringify(r));
   });
   t("4e. escrow lido antes da ultima mudanca do pedido = PARTIAL (escrow desatualizado)", () => {
-    const r = S.avaliarCompletudeShopee({ ...dia, janelas: [janelaOk()], pedidosPagos: [pedido("X", { updateTime: "2026-10-03T10:00:00.000Z" })], itens: [item("X")] });
+    const r = S.avaliarCompletudeShopee({ ...dia, janelas: cadeiaOk(), pedidosPagos: [pedido("X", { updateTime: "2026-10-03T10:00:00.000Z" })], itens: [item("X")] });
     assert(r.completude === "PARTIAL" && r.motivos.some((m) => m.startsWith("escrow_ausente_ou_desatualizado")), JSON.stringify(r));
   });
   t("4f. detail ausente / item sem escrow / pedido sem itens = PARTIAL", () => {
@@ -169,15 +175,77 @@ async function principal() {
       [pedido("X"), [item("X", { moedas: null })], "escrow_ausente_ou_desatualizado"],
       [pedido("X"), [], "pedido_sem_itens"],
     ] as const) {
-      const r = S.avaliarCompletudeShopee({ ...dia, janelas: [janelaOk()], pedidosPagos: [p], itens: [...its] });
+      const r = S.avaliarCompletudeShopee({ ...dia, janelas: cadeiaOk(), pedidosPagos: [p], itens: [...its] });
       assert(r.completude === "PARTIAL" && r.motivos.some((x) => x.startsWith(m)), `${m}: ${JSON.stringify(r)}`);
     }
   });
-  t("4g. backfill por create_time precisa cobrir LAG_MAXIMO antes do dia", () => {
-    const curta = janelaOk({ campoTempo: "create_time", inicio: "2026-10-01T00:00:00.000Z" });
-    const longa = janelaOk({ campoTempo: "create_time", inicio: "2026-09-20T00:00:00.000Z" });
-    assert(S.avaliarCompletudeShopee({ ...dia, janelas: [curta], pedidosPagos: [pedido("X")], itens: [item("X")] }).completude === "PARTIAL", "curta");
-    assert(S.avaliarCompletudeShopee({ ...dia, janelas: [longa], pedidosPagos: [pedido("X")], itens: [item("X")] }).completude === "COMPLETE", "longa");
+  t("4g. create_time NUNCA prova COMPLETE — nem com 7, nem com 365 dias de margem", () => {
+    for (const ini of ["2026-09-25T00:00:00.000Z", "2025-10-02T00:00:00.000Z"]) {
+      const cadeiaCreate = [janelaOk({ campoTempo: "create_time", inicio: ini, fim: "2026-10-03T12:00:00.000Z" }),
+        janelaOk({ campoTempo: "create_time", inicio: "2026-10-03T11:45:00.000Z" })];
+      const r = S.avaliarCompletudeShopee({ ...dia, janelas: cadeiaCreate, pedidosPagos: [pedido("X")], itens: [item("X")] });
+      assert(r.completude === "PARTIAL" && r.motivos.includes("so_create_time_sem_prova"), `${ini}: ${JSON.stringify(r)}`);
+    }
+  });
+  t("4h. UMA janela de update_time cobrindo o dia, sem sucessora, nao prova (watermark = seu inicio)", () => {
+    const r = S.avaliarCompletudeShopee({ ...dia, janelas: [janelaOk()], pedidosPagos: [pedido("X")], itens: [item("X")] });
+    assert(r.completude === "PARTIAL" && r.watermark === "2026-10-01T00:00:00.000Z", JSON.stringify(r));
+  });
+  t("4i. cadeia que comeca DEPOIS do inicio do dia nao prova", () => {
+    const r = S.avaliarCompletudeShopee({ ...dia, janelas: [janelaOk({ inicio: "2026-10-02T03:30:00.000Z", fim: "2026-10-03T12:00:00.000Z" }),
+      janelaOk({ inicio: "2026-10-03T11:45:00.000Z" })], pedidosPagos: [pedido("X")], itens: [item("X")] });
+    assert(r.completude === "PARTIAL" && r.watermark === null, JSON.stringify(r));
+  });
+
+  console.log("\n[4-ADV. pedidos adversariais: criados muito antes, pagos em D]");
+  // D = 02/10 em Sao Paulo. Pertinencia a D e SO por pay_time.
+  const D = dia;
+  const advDez = pedido("ADV10", { payTime: "2026-10-02T15:00:00.000Z",
+    updateTime: "2026-10-14T15:00:00.000Z", escrowUpdateTime: "2026-10-14T15:00:00.000Z" }); // criado D-10, update D+12
+  const advTrinta = pedido("ADV30", { payTime: "2026-10-02T15:00:00.000Z", updateTime: "2026-10-02T15:00:00.000Z",
+    escrowUpdateTime: "2026-10-02T15:00:00.000Z" }); // criado D-30; escrow lido no update vigente
+  const criadoDez = new Date("2026-09-22T15:00:00.000Z").getTime(), criadoTrinta = new Date("2026-09-02T15:00:00.000Z").getTime();
+  t("ADV-10a. criado em D-10, pago em D, update em D+12: pertence a D", () => {
+    assert(criadoDez < D.inicio.getTime() - S.MARGEM_OPERACIONAL_CREATE_TIME_MS, "fixture: criado antes da margem de 7d");
+    const em = S.filtrarPagosNoIntervalo([advDez], D.inicio, D.fim);
+    assert(em.length === 1, "fora de D");
+    assert(S.calcularMetricasShopee(em, [item("ADV10")]).metricas.pedidos === 1, "nao contou");
+  });
+  t("ADV-10b. backfill create_time a partir de D-7 (nao o enxergaria) NAO produz COMPLETE", () => {
+    const cadeiaCreate7 = [janelaOk({ campoTempo: "create_time", inicio: "2026-09-25T03:00:00.000Z", fim: "2026-10-03T12:00:00.000Z" }),
+      janelaOk({ campoTempo: "create_time", inicio: "2026-10-03T11:45:00.000Z", fim: "2026-10-04T00:00:00.000Z" })];
+    const nenhumaCobreCriacao = cadeiaCreate7.every((j) => !(new Date(j.inicio).getTime() <= criadoDez && criadoDez < new Date(j.fim).getTime()));
+    assert(nenhumaCobreCriacao, "fixture: a margem de 7d de fato nao alcanca a criacao");
+    const r = S.avaliarCompletudeShopee({ ...D, janelas: cadeiaCreate7, pedidosPagos: [advDez], itens: [item("ADV10")] });
+    assert(r.completude !== "COMPLETE", JSON.stringify(r));
+  });
+  t("ADV-10c. cadeia de update_time que alcanca o update do pedido o descobre e prova D", () => {
+    const cadeiaUpd = [janelaOk({ inicio: "2026-10-02T00:00:00.000Z", fim: "2026-10-08T00:00:00.000Z" }),
+      janelaOk({ inicio: "2026-10-07T23:45:00.000Z", fim: "2026-10-14T20:00:00.000Z" }),
+      janelaOk({ inicio: "2026-10-14T19:45:00.000Z", fim: "2026-10-15T00:00:00.000Z" })];
+    const u = new Date(advDez.updateTime).getTime();
+    assert(cadeiaUpd.some((j) => new Date(j.inicio).getTime() <= u && u < new Date(j.fim).getTime()), "nenhuma janela de update_time contem o update do pedido");
+    const r = S.avaliarCompletudeShopee({ ...D, janelas: cadeiaUpd, pedidosPagos: [advDez], itens: [item("ADV10")] });
+    assert(r.completude === "COMPLETE", JSON.stringify(r));
+  });
+  t("ADV-30a. criado em D-30, pago e atualizado em D: pertence a D e nenhuma margem de create_time o exclui", () => {
+    assert(criadoTrinta < D.inicio.getTime() - S.MARGEM_OPERACIONAL_CREATE_TIME_MS, "fixture");
+    const em = S.filtrarPagosNoIntervalo([advTrinta, advDez], D.inicio, D.fim);
+    assert(em.map((p) => p.orderSn).sort().join() === "ADV10,ADV30", em.map((p) => p.orderSn).join());
+    const { metricas } = S.calcularMetricasShopee(em, [item("ADV10"), item("ADV30")]);
+    assert(metricas.pedidos === 2, JSON.stringify(metricas));
+  });
+  t("ADV-30b. so backfill create_time (margem 7d) → PARTIAL; cadeia de update_time → COMPLETE", () => {
+    const cadeiaCreate7 = [janelaOk({ campoTempo: "create_time", inicio: "2026-09-25T03:00:00.000Z", fim: "2026-10-03T12:00:00.000Z" }),
+      janelaOk({ campoTempo: "create_time", inicio: "2026-10-03T11:45:00.000Z" })];
+    assert(S.avaliarCompletudeShopee({ ...D, janelas: cadeiaCreate7, pedidosPagos: [advTrinta], itens: [item("ADV30")] }).completude === "PARTIAL", "create");
+    assert(S.avaliarCompletudeShopee({ ...D, janelas: cadeiaOk(), pedidosPagos: [advTrinta], itens: [item("ADV30")] }).completude === "COMPLETE", "update");
+  });
+  t("ADV-z. a margem de 7 dias nao aparece na regra de completude (so como constante operacional)", () => {
+    const fonte = readFileSync(join(RAIZ, "lib/vendas/canonico/shopee.ts"), "utf8");
+    const corpo = fonte.slice(fonte.indexOf("export function avaliarCompletudeShopee"), fonte.indexOf("// ── Leitura do banco"));
+    assert(corpo.length > 100 && !/MARGEM_OPERACIONAL|LAG_MAXIMO|7 \* 24/.test(corpo), "margem usada na completude");
+    assert(!/LAG_MAXIMO_PAGAMENTO/.test(fonte), "constante antiga ainda existe");
   });
 
   console.log("\n[5. leitura do banco (duplo)]");
@@ -211,7 +279,10 @@ async function principal() {
         detail_fetched_at: "z", escrow_fetched_at: "z", escrow_update_time: "2026-10-03T16:00:00.000Z", original_shopee_discount: 9, pix_discount: 0 },
     ],
     pedidos: [{ user_id: UID, marketplace: "Shopee", loja_id: LOJA, order_id: "X", qtd: 2, valor_unit: 10, escrow_voucher_seller: 1, escrow_voucher_shopee: 0, escrow_coin: 0 }],
-    sync_jobs: [{ user_id: UID, loja_id: LOJA, marketplace: "Shopee", campo_tempo: "update_time", janela_inicio: "2026-10-01T00:00:00.000Z", janela_fim: "2026-10-04T00:00:00.000Z", listagem_completa: true, status: "concluido" }],
+    sync_jobs: [
+      { user_id: UID, loja_id: LOJA, marketplace: "Shopee", campo_tempo: "update_time", janela_inicio: "2026-10-01T00:00:00.000Z", janela_fim: "2026-10-03T12:00:00.000Z", listagem_completa: true, status: "concluido" },
+      { user_id: UID, loja_id: LOJA, marketplace: "Shopee", campo_tempo: "update_time", janela_inicio: "2026-10-03T11:45:00.000Z", janela_fim: "2026-10-04T00:00:00.000Z", listagem_completa: true, status: "concluido" },
+    ],
   });
   t("5a. dono em TODA consulta; so pedidos pagos no dia; total = loja", async () => {
     const regs: Reg[] = [];

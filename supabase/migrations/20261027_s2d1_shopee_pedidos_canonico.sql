@@ -22,7 +22,7 @@
 -- SEGURANCA
 -- ---------------------------------------------------------------------
 -- O default privilege de tabelas criadas por `postgres` em public ja da
--- acesso so a postgres/service_role; mesmo assim o REVOKE de anon e
+-- acesso so a postgres/service_role; mesmo assim o REVOKE de PUBLIC, anon e
 -- authenticated e explicito e a RLS nasce ligada SEM policy (padrao
 -- SEC-3-C): so o servidor, via service_role (BYPASSRLS), acessa.
 -- `pedidos` e `sync_jobs` (tabelas SEC-3) recebem apenas ADD COLUMN:
@@ -88,7 +88,7 @@ CREATE INDEX idx_shopee_pedidos_loja_update_time ON public.shopee_pedidos (loja_
 CREATE INDEX idx_shopee_pedidos_escrow_pendente ON public.shopee_pedidos (loja_id, pay_time)
   WHERE pay_time IS NOT NULL AND (escrow_fetched_at IS NULL OR escrow_update_time IS DISTINCT FROM update_time);
 
-REVOKE ALL PRIVILEGES ON TABLE public.shopee_pedidos FROM anon, authenticated;
+REVOKE ALL PRIVILEGES ON TABLE public.shopee_pedidos FROM PUBLIC, anon, authenticated;
 ALTER TABLE public.shopee_pedidos ENABLE ROW LEVEL SECURITY;
 
 ALTER TABLE public.pedidos

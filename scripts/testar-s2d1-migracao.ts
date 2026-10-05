@@ -47,7 +47,8 @@ function tabelasAbertas(sqlBruto: string): string[] {
   return criadas.filter((tab) => {
     const revoga = [...s.matchAll(/REVOKE ALL(?: PRIVILEGES)? ON (?:TABLE )?([^;]+?) FROM ([^;]+?);/gi)]
       .some((m) => m[1].split(",").map((x) => x.trim().replace(/^public\./i, "").toLowerCase()).includes(tab)
-        && /\banon\b/i.test(m[2]) && /\bauthenticated\b/i.test(m[2]));
+        // S2-D1.1: fail-closed explicito — PUBLIC, anon E authenticated.
+        && /\bPUBLIC\b/i.test(m[2]) && /\banon\b/i.test(m[2]) && /\bauthenticated\b/i.test(m[2]));
     const rls = new RegExp(`ALTER TABLE (?:public\\.)?${tab} ENABLE ROW LEVEL SECURITY`, "i").test(s);
     return !(revoga && rls);
   });
@@ -136,8 +137,10 @@ t("7. toda migration a partir da SEC-3-C que cria tabela em public a fecha no me
 console.log("\n[8. auto-teste dos validadores]");
 const variante = (de: string | RegExp, para: string) => SQL.replace(de, para);
 const pega = (sql: string, padrao: RegExp) => validarS2D1(sql).some((x) => padrao.test(x));
-t("8a. sem REVOKE → tabela nao nasce fechada", () => assert(pega(variante(/^REVOKE ALL PRIVILEGES ON TABLE public\.shopee_pedidos FROM anon, authenticated;$/m, ""), /nao nasce fechada/), "nao pegou"));
-t("8b. REVOKE so de anon → pego", () => assert(pega(variante("FROM anon, authenticated;", "FROM anon;"), /nao nasce fechada/), "nao pegou"));
+t("8a. sem REVOKE → tabela nao nasce fechada", () => assert(pega(variante(/^REVOKE ALL PRIVILEGES ON TABLE public\.shopee_pedidos FROM PUBLIC, anon, authenticated;$/m, ""), /nao nasce fechada/), "nao pegou"));
+t("8b. REVOKE so de anon → pego", () => assert(pega(variante("FROM PUBLIC, anon, authenticated;", "FROM anon;"), /nao nasce fechada/), "nao pegou"));
+t("8b2. REVOKE sem PUBLIC → pego (fail-closed explicito)", () => assert(pega(variante("FROM PUBLIC, anon, authenticated;", "FROM anon, authenticated;"), /nao nasce fechada/), "nao pegou"));
+t("8b3. a migration real revoga explicitamente de PUBLIC, anon e authenticated", () => assert(/^REVOKE ALL PRIVILEGES ON TABLE public\.shopee_pedidos FROM PUBLIC, anon, authenticated;$/m.test(SQL), "linha ausente"));
 t("8c. sem ENABLE RLS → pego", () => assert(pega(variante(/^ALTER TABLE public\.shopee_pedidos ENABLE ROW LEVEL SECURITY;$/m, ""), /nao nasce fechada/), "nao pegou"));
 t("8d. policy permissiva → pega", () => assert(pega(variante(/^COMMIT;$/m, "CREATE POLICY p ON public.shopee_pedidos USING (true);\nCOMMIT;"), /policy/), "nao pegou"));
 t("8e. DEFAULT 0 em pedidos → pego", () => assert(pega(variante("ADD COLUMN escrow_coin           numeric NULL;", "ADD COLUMN escrow_coin numeric NULL DEFAULT 0;"), /DEFAULT|escrow_coin/), "nao pegou"));
@@ -148,7 +151,8 @@ t("8i. pay_time NOT NULL → nulidade errada", () => assert(pega(variante("pay_t
 t("8j. PK diferente → pega", () => assert(pega(variante("PRIMARY KEY (loja_id, order_sn)", "PRIMARY KEY (order_sn)"), /PK/), "nao pegou"));
 t("8k. guard permanente pega tabela nova aberta em migration futura", () => {
   assert(tabelasAbertas("BEGIN; CREATE TABLE public.nova (id int); COMMIT;").join() === "nova", "nao pegou");
-  assert(tabelasAbertas("CREATE TABLE public.ok (id int); REVOKE ALL ON TABLE public.ok FROM anon, authenticated; ALTER TABLE public.ok ENABLE ROW LEVEL SECURITY;").length === 0, "falso positivo");
+  assert(tabelasAbertas("CREATE TABLE public.ok (id int); REVOKE ALL ON TABLE public.ok FROM PUBLIC, anon, authenticated; ALTER TABLE public.ok ENABLE ROW LEVEL SECURITY;").length === 0, "falso positivo");
+  assert(tabelasAbertas("CREATE TABLE public.sem_public (id int); REVOKE ALL ON TABLE public.sem_public FROM anon, authenticated; ALTER TABLE public.sem_public ENABLE ROW LEVEL SECURITY;").join() === "sem_public", "nao exigiu PUBLIC");
 });
 
 console.log(`\n${falhou === 0 ? "✓" : "✗"} S2-D1-MIGRACAO — ${passou} passaram, ${falhou} falharam`);

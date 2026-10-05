@@ -89,13 +89,17 @@ export function intervaloSaoPaulo(de: string, ate: string): { inicio: Date; fim:
 }
 
 /**
- * Atraso maximo admitido entre criacao e pagamento, para provar cobertura
- * por janelas de `create_time` (backfill). Observado no S2-B: maximo 64h
- * em 6.401 pedidos (boleto/Pix). 7 dias e margem de seguranca declarada,
- * NAO uma propriedade garantida pela Shopee — a cobertura por `update_time`
- * (sync incremental) nao depende dela.
+ * Margem OPERACIONAL de `create_time` (S2-D1.1): quanto antes do dia um
+ * backfill por criacao costuma precisar ir para TRAZER os pedidos pagos no
+ * dia. Observado no S2-B: maximo 64h em 6.401 pedidos (boleto/Pix).
+ *
+ * NUNCA E PROVA. A Shopee nao documenta limite entre criacao e pagamento
+ * (OBSERVED_MAX != CONTRACTUAL_MAX): um pedido criado em D-30 e pago em D
+ * pertence a D. Por isso este valor serve para dimensionar backfill,
+ * diagnostico e reconciliacao rapida — e nao participa de
+ * `avaliarCompletudeShopee`. Completude so se prova por `update_time`.
  */
-export const LAG_MAXIMO_PAGAMENTO_MS = 7 * 24 * 3600 * 1000;
+export const MARGEM_OPERACIONAL_CREATE_TIME_MS = 7 * 24 * 3600 * 1000;
 
 // ── Calculo (puro) ───────────────────────────────────────────────────
 
@@ -176,25 +180,60 @@ export function filtrarPagosNoIntervalo(pedidos: PedidoShopeeCanonico[], inicio:
 
 // ── Completude (pura) ────────────────────────────────────────────────
 
-/** A uniao das janelas completas cobre [de, ate] sem buraco? */
-export function coberturaContinua(janelas: { inicio: string; fim: string }[], de: number, ate: number): boolean {
+/**
+ * WATERMARK DE COBERTURA por `update_time` a partir de `desde` (S2-D1.1).
+ *
+ * Toma a cadeia de janelas COMPLETAS de `update_time` que comeca numa
+ * janela contendo `desde` e segue sem buraco (cada proxima janela comeca
+ * dentro do alcance da cadeia). O watermark e o INICIO da ultima janela
+ * da cadeia — um passo atras do alcance — ou `null` se nao houver cadeia.
+ *
+ * Por que o inicio da ultima, e nao o fim:
+ *   pressupostos (S2-D2 deve cumprir; documentados no contrato):
+ *   (P1) `update_time` muda a cada mudanca de status (docs/CHANGELOG.md
+ *        "update_time muda toda vez que o status do pedido muda"); pagar e
+ *        mudar de status, logo pay_time <= update_time (0/6.401 no S2-C);
+ *   (P2) `get_order_list` por update_time devolve o pedido pelo seu
+ *        update_time ATUAL no momento da listagem;
+ *   (P3) cada janela termina, no maximo, no instante em que a sua listagem
+ *        comecou (nunca cobre futuro), e janelas consecutivas se sobrepoem.
+ *   Seja o pedido pago em p, com p no dia, e seja u o seu update_time num
+ *   momento em que a cadeia ja processou janelas ate o watermark W. Se o
+ *   pedido mudou durante a listagem de uma janela k, o novo update_time cai
+ *   na janela k+1 (sobreposta) e e visto ali — exceto se k for a ULTIMA
+ *   janela, que ainda nao tem sucessora. Declarar o watermark no inicio da
+ *   ultima janela garante que toda mudanca anterior a W foi vista por uma
+ *   janela que JA teve sucessora completa. Logo todo pedido com
+ *   start(dia) <= p < W esta no corpus (no estado mais recente que a
+ *   cadeia viu).
+ *
+ * Nao ha "D + N dias" aqui: o watermark e o que a cobertura real provou.
+ */
+export function watermarkUpdateTime(janelas: { inicio: string; fim: string }[], desde: number): number | null {
   const ord = janelas.map((j) => [new Date(j.inicio).getTime(), new Date(j.fim).getTime()] as const)
     .filter(([a, b]) => Number.isFinite(a) && Number.isFinite(b) && b > a)
-    .sort((x, y) => x[0] - y[0]);
-  let alcance = de;
+    .sort((x, y) => x[0] - y[0] || x[1] - y[1]);
+  let alcance: number | null = null;
+  let inicioUltima: number | null = null;
   for (const [a, b] of ord) {
-    if (a > alcance) break;
-    if (b > alcance) alcance = b;
-    if (alcance >= ate) return true;
+    if (alcance === null) {
+      if (a <= desde && b > desde) { alcance = b; inicioUltima = a; }
+      continue;
+    }
+    if (a > alcance) break;               // buraco: a cadeia para aqui
+    if (b > alcance) { alcance = b; inicioUltima = a; }
   }
-  return alcance >= ate;
+  return inicioUltima;
 }
 
 /**
- * COMPLETE para uma loja/periodo exige, todas juntas:
- *  1. listagem provada: janelas de `update_time` com `listagem_completa`
- *     cobrindo [inicio, fim] continuamente, OU janelas de `create_time`
- *     cobrindo [inicio − LAG_MAXIMO, fim);
+ * COMPLETE para uma loja/periodo [inicio, fim) exige, todas juntas:
+ *  1. listagem PROVADA por update_time: watermark (acima) a partir de
+ *     `inicio` com W >= fim. Janelas de `create_time` (backfill) NUNCA
+ *     provam completude — servem para popular o corpus; sem prova por
+ *     update_time o periodo fica PARTIAL, qualquer que seja a margem usada.
+ *     Periodo historico sem incremental previo precisa de uma passada de
+ *     update_time de `inicio` ate o watermark de sincronizacao atual.
  *  2. detail obtido para todo pedido pago no periodo;
  *  3. escrow ATUAL (lido no update_time vigente) para todo pedido pago, e
  *     componentes de item presentes.
@@ -206,14 +245,21 @@ export function avaliarCompletudeShopee(args: {
   janelas: JanelaListagem[];
   pedidosPagos: PedidoShopeeCanonico[];
   itens: ItemShopeeCanonico[];
-}): { completude: Completude; motivos: string[] } {
+}): { completude: Completude; motivos: string[]; watermark: string | null } {
   const { inicio, fim, janelas, pedidosPagos, itens } = args;
   const a = inicio.getTime(), b = fim.getTime();
   const completas = janelas.filter((j) => j.listagemCompleta === true);
-  const porUpdate = coberturaContinua(completas.filter((j) => j.campoTempo === "update_time"), a, b);
-  const porCreate = coberturaContinua(completas.filter((j) => j.campoTempo === "create_time"), a - LAG_MAXIMO_PAGAMENTO_MS, b);
+  const w = watermarkUpdateTime(completas.filter((j) => j.campoTempo === "update_time"), a);
+  const porUpdate = w !== null && w >= b;
+  const watermark = w === null ? null : new Date(w).toISOString();
   const motivos: string[] = [];
-  if (!porUpdate && !porCreate) motivos.push("listagem_nao_coberta");
+  if (!porUpdate) {
+    motivos.push("listagem_nao_provada_por_update_time");
+    // diagnostico apenas: create_time pode ter populado, mas nao prova nada
+    if (completas.some((j) => j.campoTempo === "create_time" && new Date(j.fim).getTime() > a && new Date(j.inicio).getTime() < b)) {
+      motivos.push("so_create_time_sem_prova");
+    }
+  }
 
   const itensPorPedido = new Map<string, ItemShopeeCanonico[]>();
   for (const it of itens) { const k = chave(it.lojaId, it.orderSn); (itensPorPedido.get(k) ?? itensPorPedido.set(k, []).get(k)!).push(it); }
@@ -232,10 +278,10 @@ export function avaliarCompletudeShopee(args: {
   if (semItens) motivos.push(`pedido_sem_itens:${semItens}`);
   if (semEscrow) motivos.push(`escrow_ausente_ou_desatualizado:${semEscrow}`);
 
-  if (motivos.length === 0) return { completude: "COMPLETE", motivos };
-  const falhou = !porUpdate && !porCreate && janelas.some((j) =>
+  if (motivos.length === 0) return { completude: "COMPLETE", motivos, watermark };
+  const falhou = !porUpdate && janelas.some((j) =>
     j.status === "erro" && new Date(j.fim).getTime() > a && new Date(j.inicio).getTime() < b);
-  return { completude: falhou ? "FAILED" : "PARTIAL", motivos };
+  return { completude: falhou ? "FAILED" : "PARTIAL", motivos, watermark };
 }
 
 // ── Leitura do banco (server-side, dono SEMPRE explicito) ────────────
@@ -313,8 +359,10 @@ export async function lerVendasShopee(
       .select("loja_id, campo_tempo, janela_inicio, janela_fim, listagem_completa, status")
       .eq("user_id", userId).eq("loja_id", lojaId).eq("marketplace", "Shopee")
       .not("janela_inicio", "is", null)
-      .lt("janela_inicio", fim.toISOString())
-      .gt("janela_fim", new Date(inicio.getTime() - LAG_MAXIMO_PAGAMENTO_MS).toISOString());
+      // Sem limite superior: o watermark depende das janelas POSTERIORES ao
+      // periodo (a sucessora da ultima). Sem margem de create_time: ela nao
+      // prova nada (S2-D1.1).
+      .gt("janela_fim", inicio.toISOString());
     if (errJobs) throw new Error("leitura_falhou");
     const janelas: JanelaListagem[] = ((jobs ?? []) as Record<string, unknown>[]).map((j) => ({
       lojaId, campoTempo: j.campo_tempo as JanelaListagem["campoTempo"],
