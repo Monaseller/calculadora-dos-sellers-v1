@@ -331,13 +331,15 @@ async function principal() {
 
   // ══ H. dashboard ══════════════════════════════════════════════════
   console.log("\n[H. dashboard]");
-  t("H1. projecao=dashboard: so de A e com as MESMAS 8 colunas de antes", async () => {
+  // SEC-3-B3.3: as 8 colunas de antes menos `margem_contribuicao`, que não
+  // existe na tabela (a consulta do dashboard já falhava em Production).
+  t("H1. projecao=dashboard: so de A e com as 7 colunas reais de antes", async () => {
     reset();
     const r = await rotaLista.GET(req("/api/anuncios?projecao=dashboard&de=0&ate=999", { sessao: sessaoA }));
     const corpo = await r.json();
     assert(corpo.anuncios.every((a: any) => a.user_id === UID_A), "anuncio alheio");
     const c = chamadas.find((x) => x.tabela === "anuncios")!;
-    assert(c.colunas === "ml_item_id, thumbnail, nome, sku, marketplace, custo_produto, preco_anuncio, margem_contribuicao", c.colunas ?? "");
+    assert(c.colunas === "ml_item_id, thumbnail, nome, sku, marketplace, custo_produto, preco_anuncio", c.colunas ?? "");
     assert(filtroDono(c) === UID_A, "filtro de dono");
   });
   t("H2. a tela do dashboard usa a API, sem user_id, mesma pagina unica 0..999", () => {

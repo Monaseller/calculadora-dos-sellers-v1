@@ -1,0 +1,32 @@
+{
+  "tabela": "public.anuncios",
+  "capturado_em": "2026-10-05",
+  "fonte": "information_schema.columns do banco de Production (somente leitura), ordenado por ordinal_position",
+  "observacao": "A tabela foi criada fora das migrations deste repo; este snapshot e a fonte versionada do schema para os guards offline. Atualize-o junto com qualquer migration que altere public.anuncios.",
+  "colunas": [
+    { "nome": "id", "tipo": "uuid", "nulo": false, "default": true },
+    { "nome": "created_at", "tipo": "timestamp with time zone", "nulo": true, "default": true },
+    { "nome": "nome", "tipo": "text", "nulo": false, "default": false },
+    { "nome": "marketplace", "tipo": "text", "nulo": false, "default": false },
+    { "nome": "categoria", "tipo": "text", "nulo": true, "default": false },
+    { "nome": "tipo_anuncio", "tipo": "text", "nulo": true, "default": false },
+    { "nome": "tipo_conta_shopee", "tipo": "text", "nulo": true, "default": false },
+    { "nome": "custo_produto", "tipo": "numeric", "nulo": false, "default": true },
+    { "nome": "insumos", "tipo": "numeric", "nulo": false, "default": true },
+    { "nome": "custo_frete", "tipo": "numeric", "nulo": false, "default": true },
+    { "nome": "frete_gratis", "tipo": "boolean", "nulo": false, "default": true },
+    { "nome": "imposto", "tipo": "numeric", "nulo": false, "default": true },
+    { "nome": "margem_desejada", "tipo": "numeric", "nulo": false, "default": true },
+    { "nome": "preco_ideal", "tipo": "numeric", "nulo": true, "default": false },
+    { "nome": "ativo", "tipo": "boolean", "nulo": false, "default": true },
+    { "nome": "ml_item_id", "tipo": "text", "nulo": true, "default": false },
+    { "nome": "sku", "tipo": "text", "nulo": true, "default": false },
+    { "nome": "preco_anuncio", "tipo": "numeric", "nulo": true, "default": false },
+    { "nome": "thumbnail", "tipo": "text", "nulo": true, "default": false },
+    { "nome": "permalink", "tipo": "text", "nulo": true, "default": false },
+    { "nome": "peso_kg", "tipo": "numeric", "nulo": true, "default": false },
+    { "nome": "variation_id", "tipo": "text", "nulo": true, "default": false },
+    { "nome": "logistic_type", "tipo": "text", "nulo": true, "default": false },
+    { "nome": "user_id", "tipo": "text", "nulo": true, "default": false }
+  ]
+}

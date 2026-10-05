@@ -19,20 +19,13 @@
  */
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { COLUNAS_ANUNCIO_DASHBOARD, COLUNAS_ANUNCIO_TELA } from "./colunas";
 
 // ── Projeções ────────────────────────────────────────────────────────
-
-/** Tudo que Meus Produtos (lista + formulário de edição) lê. Sem `user_id`. */
-export const COLUNAS_ANUNCIO_TELA = [
-  "id", "created_at", "nome", "marketplace", "categoria", "tipo_anuncio", "tipo_conta_shopee",
-  "custo_produto", "insumos", "custo_frete", "frete_gratis", "imposto", "margem_desejada",
-  "preco_ideal", "preco_anuncio", "ml_item_id", "thumbnail", "permalink", "ativo", "sku",
-  "lucro_liquido", "margem_contribuicao", "peso_kg", "variation_id", "logistic_type",
-].join(", ");
-
-/** Exatamente as colunas que o dashboard já pedia. */
-export const COLUNAS_ANUNCIO_DASHBOARD =
-  "ml_item_id, thumbnail, nome, sku, marketplace, custo_produto, preco_anuncio, margem_contribuicao";
+// SEC-3-B3.3: as projeções vêm de ./colunas (colunas FÍSICAS da tabela,
+// validadas contra docs/schema/anuncios.colunas.json) — nunca da interface
+// TypeScript `Anuncio`, que tem campos derivados inexistentes no banco.
+export { COLUNAS_ANUNCIO_DASHBOARD, COLUNAS_ANUNCIO_TELA };
 
 export type Projecao = "tela" | "dashboard";
 
