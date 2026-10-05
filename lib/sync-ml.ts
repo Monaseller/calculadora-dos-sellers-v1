@@ -17,7 +17,8 @@
  *
  * Retorna { found, inserted } para validacao externa.
  */
-import { createClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { CATEGORIAS_ML } from "@/lib/comissoes-mercado-livre";
 import { getMLLojaAtiva } from "@/lib/ml-auth";
 import { listarLojasMLDoDonoPorSeller } from "@/lib/marketplace/credenciais";
@@ -25,10 +26,13 @@ import { LojaIdIntegrityError } from "@/lib/sync-errors";
 // import { atualizarResumosDosDias } from "@/lib/resumos-diarios"; — desativado
 // temporariamente 2026-07-13 (ver bloco de chamada removido mais abaixo).
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+// SEC-3-B1: dados sensiveis (SEC-3) so por service_role, server-side.
+// O cliente nasce sob demanda — nunca no import — a partir do helper
+// oficial; o isolamento por dono e da propria rota, nao do banco.
+let clienteServidor: SupabaseClient | null = null;
+function supabase(): SupabaseClient {
+  return (clienteServidor ??= getSupabaseServidor());
+}
 
 async function withRetry<T>(
   fn: () => Promise<T>,
@@ -304,7 +308,7 @@ export async function syncMLForUserV2(
   const found = allOrders.length;
   if (found === 0) return { found: 0, inserted: 0 };
 
-  const { data: anuncios } = await supabase
+  const { data: anuncios } = await supabase()
     .from("anuncios")
     .select("id, ml_item_id, nome, sku, custo_produto, insumos, custo_frete, frete_gratis, imposto, tipo_anuncio, categoria")
     .eq("ativo", true)
@@ -438,7 +442,7 @@ export async function syncMLForUserV2(
 
   const UPSERT_BATCH = 250;
   for (let i = 0; i < rows.length; i += UPSERT_BATCH) {
-    await supabase
+    await supabase()
       .from("pedidos")
       .upsert(rows.slice(i, i + UPSERT_BATCH), { onConflict: "id" });
   }

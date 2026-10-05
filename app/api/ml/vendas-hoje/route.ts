@@ -1,11 +1,15 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { autenticarRequisicao } from "@/lib/autenticacao";
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+// SEC-3-B1: dados sensiveis (SEC-3) so por service_role, server-side.
+// O cliente nasce sob demanda — nunca no import — a partir do helper
+// oficial; o isolamento por dono e da propria rota, nao do banco.
+let clienteServidor: SupabaseClient | null = null;
+function supabase(): SupabaseClient {
+  return (clienteServidor ??= getSupabaseServidor());
+}
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -24,10 +28,17 @@ function hojeISO() {
 
 // ── GET /api/ml/vendas-hoje ────────────────────────────────────────────────
 export async function GET(request: Request) {
-  const token  = getToken(request);
-  // Sessão OPCIONAL aqui, como antes: `userId` só refina a consulta.
+  // ── SEC-3-B1: sessão OBRIGATÓRIA ──────────────────────────────────
+  // Era opcional ("`userId` só refina a consulta"): sem sessão, a busca de
+  // anúncios saía SEM filtro de dono — custos e anúncios de todos — e o
+  // `vendas_dia` era gravado para eles. Com service_role o banco não
+  // filtra nada, então o dono vem SEMPRE da sessão, antes de qualquer coisa.
   const auth = await autenticarRequisicao(request);
-  const userId = auth.autenticado ? auth.uid : null;
+  if (!auth.autenticado) {
+    return NextResponse.json({ erro: true, mensagem: "Sessao invalida." }, { status: 401 });
+  }
+  const userId = auth.uid;
+  const token  = getToken(request);
 
   if (!token) {
     return NextResponse.json({ erro: true, semConexao: true, mensagem: "Conta do Mercado Livre não conectada." });
@@ -73,12 +84,13 @@ export async function GET(request: Request) {
   }
 
   // 4. Busca anúncios cadastrados no Supabase
-  let anunciosQuery = supabase
+  let anunciosQuery = supabase()
     .from("anuncios")
     .select("id, ml_item_id, nome, preco_ideal, custo_produto, insumos, custo_frete, frete_gratis, imposto, margem_desejada")
     .eq("ativo", true)
     .not("ml_item_id", "is", null);
-  if (userId) anunciosQuery = anunciosQuery.eq("user_id", userId);
+  // Filtro de dono INCONDICIONAL: `userId` vem da sessão (acima).
+  anunciosQuery = anunciosQuery.eq("user_id", userId);
   const { data: anuncios } = await anunciosQuery;
 
   const mapa = new Map<string, any>();
@@ -141,7 +153,7 @@ export async function GET(request: Request) {
 
   // 6. Salva/atualiza vendas_dia no Supabase para anúncios cadastrados
   for (const item of itens.filter(i => i.cadastrado && i.anuncioId)) {
-    await supabase.from("vendas_dia").upsert({
+    await supabase().from("vendas_dia").upsert({
       anuncio_id: item.anuncioId,
       data: hoje,
       unidades_vendidas: item.unidades,

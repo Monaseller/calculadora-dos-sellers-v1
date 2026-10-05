@@ -44,7 +44,8 @@
  * inexistente ou permissao negada, pare e nao rode em lote.
  */
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { autenticarRequisicao } from "@/lib/autenticacao";
 import { getShopeeLojaAtiva } from "@/lib/shopee-auth";
 import { shopeeGet } from "@/lib/shopee-api";
@@ -58,10 +59,13 @@ import {
 
 export const maxDuration = 60;
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+// SEC-3-B1: dados sensiveis (SEC-3) so por service_role, server-side.
+// O cliente nasce sob demanda — nunca no import — a partir do helper
+// oficial; o isolamento por dono e da propria rota, nao do banco.
+let clienteServidor: SupabaseClient | null = null;
+function supabase(): SupabaseClient {
+  return (clienteServidor ??= getSupabaseServidor());
+}
 
 // round2 vem de lib/shopee-financeiro.ts — uma implementacao so, para a rota e
 // os testes arredondarem exatamente igual.
@@ -235,7 +239,7 @@ export async function GET(request: Request) {
   // 30 dias auditada isso e 23.387 de 31.463 linhas (81%).
   // CANCELLED entra: escrow 0 + seller_return_refund < 0 e dado financeiro REAL
   // (a venda comercial existiu, o repasse foi zerado), nao ausencia de dado.
-  let sel = supabase
+  let sel = supabase()
     .from("pedidos")
     .select(COLUNAS_SELECAO)
     .eq("user_id", userId)
@@ -303,7 +307,7 @@ export async function GET(request: Request) {
     // na fronteira da janela de linhas teria o escrow rateado sobre parte
     // dos itens — erro financeiro silencioso.
     if (orderIds.length > 0) {
-      const { data: completasRaw, error: erroCompletas } = await supabase
+      const { data: completasRaw, error: erroCompletas } = await supabase()
         .from("pedidos")
         .select(COLUNAS_SELECAO)
         .eq("user_id", userId)
@@ -472,7 +476,7 @@ export async function GET(request: Request) {
         let erroGravacao: string | null = null;
         for (const w of wouldWriteRows) {
           const { id, ...campos } = w;
-          const { error: updErr } = await supabase.from("pedidos").update(campos).eq("id", id);
+          const { error: updErr } = await supabase().from("pedidos").update(campos).eq("id", id);
           if (updErr) erroGravacao = updErr.message;
         }
         if (erroGravacao) {

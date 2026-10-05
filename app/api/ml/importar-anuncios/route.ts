@@ -1,15 +1,19 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { calcularFreteMl, calcularFreteFullMl, calcularFreteFlexMl } from "@/lib/tabela-frete-ml";
 import { CATEGORIAS_ML } from "@/lib/comissoes-mercado-livre";
 import { autenticarRequisicao, lerCookie } from "@/lib/autenticacao";
 import { applyMLCookies } from "@/lib/ml-auth";
 import { resolverContaML } from "@/lib/ml-conexao";
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+// SEC-3-B1: dados sensiveis (SEC-3) so por service_role, server-side.
+// O cliente nasce sob demanda — nunca no import — a partir do helper
+// oficial; o isolamento por dono e da propria rota, nao do banco.
+let clienteServidor: SupabaseClient | null = null;
+function supabase(): SupabaseClient {
+  return (clienteServidor ??= getSupabaseServidor());
+}
 
 function mapTipoAnuncio(listingTypeId: string): string {
   return (listingTypeId === "gold_premium" || listingTypeId === "gold_pro") ? "Premium" : "Clássico";
@@ -152,7 +156,7 @@ export async function POST(request: Request) {
   }
 
   // ── 3. Busca anúncios existentes no Supabase (apenas deste usuário) ──────
-  const { data: existentes } = await supabase
+  const { data: existentes } = await supabase()
     .from("anuncios")
     .select("id, ml_item_id, variation_id, sku, custo_produto, insumos, custo_frete, imposto, peso_kg, preco_anuncio")
     .eq("marketplace", "ML")
@@ -240,10 +244,10 @@ export async function POST(request: Request) {
             if (!existente.peso_kg && pesoKg) upd.peso_kg = pesoKg;
             if (!existente.custo_frete && custoFrete) upd.custo_frete = custoFrete;
             if (!existente.sku && sku) upd.sku = sku;
-            await supabase.from("anuncios").update(upd).eq("id", existente.id);
+            await supabase().from("anuncios").update(upd).eq("id", existente.id);
             atualizados++;
           } else {
-            await supabase.from("anuncios").insert({
+            await supabase().from("anuncios").insert({
               marketplace: "ML",
               nome: titulo,
               ml_item_id: itemId,
@@ -305,10 +309,10 @@ export async function POST(request: Request) {
               if (!existente.peso_kg && pesoKg) upd.peso_kg = pesoKg;
               if (!existente.custo_frete && custoFrete) upd.custo_frete = custoFrete;
               if (!existente.sku && sku) upd.sku = sku;
-              await supabase.from("anuncios").update(upd).eq("id", existente.id);
+              await supabase().from("anuncios").update(upd).eq("id", existente.id);
               atualizados++;
             } else {
-              await supabase.from("anuncios").insert({
+              await supabase().from("anuncios").insert({
                 marketplace: "ML",
                 nome: nomeVar,
                 ml_item_id: itemId,

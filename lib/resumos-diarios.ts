@@ -28,12 +28,16 @@
  * Σ r.tarifaVenda) — não reconstruir a partir de commission_fee/service_fee/
  * transaction_fee/campaign_fee, que subestimam pedidos não reconciliados.
  */
-import { createClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+// SEC-3-B1: dados sensiveis (SEC-3) so por service_role, server-side.
+// O cliente nasce sob demanda — nunca no import — a partir do helper
+// oficial; o isolamento por dono e da propria rota, nao do banco.
+let clienteServidor: SupabaseClient | null = null;
+function supabase(): SupabaseClient {
+  return (clienteServidor ??= getSupabaseServidor());
+}
 
 export type TipoData = "pagamento" | "criacao";
 
@@ -88,7 +92,7 @@ async function buscarPedidosDoDia(
   for (let page = 0; page < MAX_PAGES; page++) {
     const from = page * PAGE_SIZE;
     const to = from + PAGE_SIZE - 1;
-    const { data, error } = await supabase
+    const { data, error } = await supabase()
       .from("pedidos")
       .select(
         "order_id, status, qtd, item_subtotal, faturamento, buyer_paid_amount, escrow_amount, " +
@@ -158,7 +162,7 @@ export async function atualizarResumoDia(
   const margemContribuicao = somaFaturamento > 0 ? (somaLucro / somaFaturamento) * 100 : 0;
   const ticketMedio        = pedidosPagos > 0 ? somaFaturamento / pedidosPagos : 0;
 
-  const { error: upsertErr } = await supabase
+  const { error: upsertErr } = await supabase()
     .from("dashboard_resumos_diarios")
     .upsert({
       user_id:              userId,

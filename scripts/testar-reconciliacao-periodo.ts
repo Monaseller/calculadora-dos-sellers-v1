@@ -459,7 +459,8 @@ t("25. A/B. so_selecao esvazia a lista de trabalho — o laço não roda", () =>
 });
 
 t("26. C. o único UPDATE está dentro de if (!dryRun) e dentro do laço", () => {
-  const updates = [...FONTE.matchAll(/supabase\s*\.from\("pedidos"\)\s*\.update\(/g)];
+  // SEC-3-B1: o cliente virou acessor sob demanda (`supabase()`).
+  const updates = [...FONTE.matchAll(/supabase(?:\(\))?\s*\.from\("pedidos"\)\s*\.update\(/g)];
   assert(updates.length === 1, `esperava 1 UPDATE em pedidos, achei ${updates.length}`);
   const laco = bloco(FONTE, "for (const orderId of orderIdsParaProcessar)");
   assert(/\.update\(campos\)/.test(laco), "o UPDATE saiu do laço");

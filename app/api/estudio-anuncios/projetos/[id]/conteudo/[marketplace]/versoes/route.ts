@@ -20,7 +20,7 @@
  * Salvar cria rascunho; aprovar é uma ação separada e explícita.
  */
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { autenticarRequisicao } from "@/lib/autenticacao";
 import { buscarProjetoPorId } from "@/lib/estudio-anuncios/projetos";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
@@ -33,10 +33,13 @@ import {
 } from "@/lib/estudio-anuncios/conteudo-editorial";
 import type { EnvelopeAdaptacaoMarketplace } from "@/lib/estudio-anuncios/adaptacao-marketplace-tipos";
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+// SEC-3-B1: dados sensiveis (SEC-3) so por service_role, server-side.
+// O cliente nasce sob demanda — nunca no import — a partir do helper
+// oficial; o isolamento por dono e da propria rota, nao do banco.
+let clienteServidor: SupabaseClient | null = null;
+function supabase(): SupabaseClient {
+  return (clienteServidor ??= getSupabaseServidor());
+}
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -67,13 +70,13 @@ export async function POST(
   const requestId = typeof body?.requestId === "string" && body.requestId.length <= 100 ? body.requestId : null;
 
   try {
-    const projeto = await buscarProjetoPorId(supabase, userId, params.id);
+    const projeto = await buscarProjetoPorId(supabase(), userId, params.id);
     if (!projeto) {
       return NextResponse.json({ ok: false, erro: "Projeto não encontrado." }, { status: 404 });
     }
 
     const marketplace = decodeURIComponent(params.marketplace);
-    const canal = await buscarCanalDoProjeto(supabase, params.id, marketplace);
+    const canal = await buscarCanalDoProjeto(supabase(), params.id, marketplace);
     if (!canal) {
       return NextResponse.json({ ok: false, erro: "Marketplace não pertence a este projeto." }, { status: 404 });
     }
@@ -81,7 +84,7 @@ export async function POST(
     // A versão 1 (snapshot da IA) é materializada lazily pela RPC, e só
     // pode nascer da adaptação REAL deste canal. Sem adaptação, não há
     // camada editorial — nunca se fabrica uma base vazia.
-    const resultados = await buscarResultadosPipelinePorProjeto(supabase, params.id);
+    const resultados = await buscarResultadosPipelinePorProjeto(supabase(), params.id);
     const linhaAdaptacao = resultados.get("adaptacao_marketplace");
     const envelope = linhaAdaptacao?.resultado as EnvelopeAdaptacaoMarketplace | undefined;
     const adaptacao = (envelope?.saida?.adaptacoes ?? []).find(a => a.marketplace === marketplace);

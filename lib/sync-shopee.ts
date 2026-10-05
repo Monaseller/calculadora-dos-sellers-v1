@@ -27,7 +27,8 @@
  *   Nenhum status desconhecido mapeado para "paid".
  *   Status "unknown" não entra em faturamento nem contagem de pedidos.
  */
-import { createClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import {
   calcularJanelaIncremental,
   fatiarJanelaEmChunks,
@@ -47,10 +48,13 @@ import {
   agruparMudancasDeStatus,
 } from "@/lib/shopee-financeiro";
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+// SEC-3-B1: dados sensiveis (SEC-3) so por service_role, server-side.
+// O cliente nasce sob demanda — nunca no import — a partir do helper
+// oficial; o isolamento por dono e da propria rota, nao do banco.
+let clienteServidor: SupabaseClient | null = null;
+function supabase(): SupabaseClient {
+  return (clienteServidor ??= getSupabaseServidor());
+}
 
 // ── P5: mapeamento completo de status ────────────────────────────────────────
 // NUNCA usar "paid" como default — status desconhecido nao deve inflar faturamento
@@ -286,7 +290,7 @@ export async function filtrarOrderSnsAusentes(
 ): Promise<string[]> {
   if (sns.length === 0) return [];
   const consultar = buscarExistentes ?? (async (lote: string[]) => {
-    const { data, error } = await supabase
+    const { data, error } = await supabase()
       .from("pedidos")
       .select("order_id")
       .eq("user_id", userId)
@@ -494,7 +498,7 @@ export interface SyncShopeeResult {
  * duplicar na rota de backfill pontual). Mesma query, mesmo resultado.
  */
 export async function carregarMapaAnuncios(userId: string): Promise<Map<string, any>> {
-  const { data: anuncios } = await supabase
+  const { data: anuncios } = await supabase()
     .from("anuncios")
     .select("id, ml_item_id, variation_id, sku, custo_produto, insumos, custo_frete, imposto")
     .eq("marketplace", "Shopee")
@@ -1221,7 +1225,7 @@ async function executarSyncShopee(
       const snsListados = Array.from(new Set(statusListadosTodos.map(x => x.order_sn)));
       const noBanco = new Map<string, string | null>();
       for (const lote of lotesDeOrderSn(snsListados)) {
-        const { data, error } = await supabase
+        const { data, error } = await supabase()
           .from("pedidos")
           .select("order_id, status_shopee_raw")
           .eq("user_id", userId)
@@ -1242,7 +1246,7 @@ async function executarSyncShopee(
       for (const g of grupos) porStatus[g.statusRaw] = (porStatus[g.statusRaw] ?? 0) + g.orderSns.length;
 
       for (const g of grupos) {
-        const { error } = await supabase
+        const { error } = await supabase()
           .from("pedidos")
           // SOMENTE status. Nenhum campo financeiro, nenhuma data, nenhum valor
           // comercial entra nesta instrucao — a protecao e estrutural.
@@ -1377,7 +1381,7 @@ async function executarSyncShopee(
       const idsReconciliados = new Set<string>();
       const todosIds = rows.map(r => r.id).filter(Boolean);
       for (const lote of lotesDeOrderSn(todosIds)) {
-        const { data, error } = await supabase
+        const { data, error } = await supabase()
           .from("pedidos")
           .select("id")
           .in("id", lote)
@@ -1420,7 +1424,7 @@ async function executarSyncShopee(
   const _etapa5InicioMs = Date.now();
 
   for (let i = 0; i < rows.length; i += UPSERT_BATCH) {
-    const { error } = await supabase
+    const { error } = await supabase()
       .from("pedidos")
       .upsert(rows.slice(i, i + UPSERT_BATCH), { onConflict: "id" });
 

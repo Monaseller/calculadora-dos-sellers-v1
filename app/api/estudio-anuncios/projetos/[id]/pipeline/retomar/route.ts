@@ -25,16 +25,19 @@
  * service role ser usado para a RPC.
  */
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { autenticarRequisicao } from "@/lib/autenticacao";
 import { buscarProjetoPorId } from "@/lib/estudio-anuncios/projetos";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { buscarPipelinePorProjeto } from "@/lib/estudio-anuncios/pipeline/pipeline";
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+// SEC-3-B1: dados sensiveis (SEC-3) so por service_role, server-side.
+// O cliente nasce sob demanda — nunca no import — a partir do helper
+// oficial; o isolamento por dono e da propria rota, nao do banco.
+let clienteServidor: SupabaseClient | null = null;
+function supabase(): SupabaseClient {
+  return (clienteServidor ??= getSupabaseServidor());
+}
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -49,7 +52,7 @@ export async function POST(request: Request, { params }: { params: { id: string 
   }
 
   try {
-    const projeto = await buscarProjetoPorId(supabase, userId, params.id);
+    const projeto = await buscarProjetoPorId(supabase(), userId, params.id);
     if (!projeto) {
       return NextResponse.json({ ok: false, erro: "Projeto não encontrado." }, { status: 404 });
     }
@@ -66,7 +69,7 @@ export async function POST(request: Request, { params }: { params: { id: string 
       );
     }
 
-    const pipeline = await buscarPipelinePorProjeto(supabase, params.id);
+    const pipeline = await buscarPipelinePorProjeto(supabase(), params.id);
     if (!pipeline) {
       return NextResponse.json(
         { ok: false, erro: "Este projeto ainda não tem uma geração iniciada." },

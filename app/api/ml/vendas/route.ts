@@ -4,15 +4,19 @@
  * O cron /api/sync mantém os últimos 7 dias sempre frescos.
  */
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { autenticarRequisicao } from "@/lib/autenticacao";
 import { syncMLForUser } from "@/lib/sync-ml";
 import { lerIdLojaMLAtivaMaisRecenteDoDono } from "@/lib/marketplace/credenciais";
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+// SEC-3-B1: dados sensiveis (SEC-3) so por service_role, server-side.
+// O cliente nasce sob demanda — nunca no import — a partir do helper
+// oficial; o isolamento por dono e da propria rota, nao do banco.
+let clienteServidor: SupabaseClient | null = null;
+function supabase(): SupabaseClient {
+  return (clienteServidor ??= getSupabaseServidor());
+}
 
 function getToken(request: Request): string | null {
   const cookieHeader = request.headers.get("cookie") || "";
@@ -105,7 +109,7 @@ export async function GET(request: Request) {
   });
 
   // Checa cache
-  const { data: probe } = await supabase
+  const { data: probe } = await supabase()
     .from("pedidos")
     .select("synced_at")
     .eq("user_id", userId)
@@ -154,7 +158,7 @@ export async function GET(request: Request) {
       // Tem cache: só atualiza hoje se o range inclui hoje (barato, 1 dia)
       const rangeIncludeHoje = dateFrom <= hoje && hoje <= dateTo;
       if (rangeIncludeHoje) {
-        const { data: probeHoje } = await supabase
+        const { data: probeHoje } = await supabase()
           .from("pedidos").select("synced_at")
           .eq("user_id", userId).eq("marketplace", "ML")
           .eq("data", hoje)
@@ -199,7 +203,7 @@ export async function GET(request: Request) {
     selectArg: string,
     opts?: { count?: "exact"; head?: boolean }
   ) {
-    let q = supabase
+    let q = supabase()
       .from("pedidos")
       .select(selectArg, opts as any)
       .eq("user_id", userId)

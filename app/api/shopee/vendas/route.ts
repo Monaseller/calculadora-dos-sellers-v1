@@ -5,15 +5,19 @@
  * Sync de histórico via /api/sync ou botão Histórico.
  */
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { autenticarRequisicao } from "@/lib/autenticacao";
 import { getShopeeLojaAtiva } from "@/lib/shopee-auth";
 import { syncShopeeForUserV2 } from "@/lib/sync-shopee";
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+// SEC-3-B1: dados sensiveis (SEC-3) so por service_role, server-side.
+// O cliente nasce sob demanda — nunca no import — a partir do helper
+// oficial; o isolamento por dono e da propria rota, nao do banco.
+let clienteServidor: SupabaseClient | null = null;
+function supabase(): SupabaseClient {
+  return (clienteServidor ??= getSupabaseServidor());
+}
 
 function hojeISO() {
   return new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString().split("T")[0];
@@ -142,7 +146,7 @@ export async function GET(request: Request) {
       // datas"). Passa a perguntar pelas duas dimensões reais: "quando gravamos
       // pela última vez uma linha que pertence a hoje", seja por criação, seja
       // por pagamento. Sem linha de hoje ainda → lastSync=0 → sincroniza.
-      const { data: probeHoje } = await supabase
+      const { data: probeHoje } = await supabase()
         .from("pedidos").select("synced_at")
         .eq("user_id", userId).eq("marketplace", "Shopee")
         .or(`data_criacao.eq.${hoje},data_pagamento.eq.${hoje}`)
@@ -211,7 +215,7 @@ export async function GET(request: Request) {
   // em páginas de PAGE_SIZE via .range(), até uma página vir incompleta - mesmos
   // filtros de sempre, só que sem depender do limite implícito do PostgREST.
   function buildPedidosQuery(selectArg: string, opts?: { count?: "exact"; head?: boolean }) {
-    let q = supabase
+    let q = supabase()
       .from("pedidos")
       .select(selectArg, opts as any)
       .eq("user_id", userId)

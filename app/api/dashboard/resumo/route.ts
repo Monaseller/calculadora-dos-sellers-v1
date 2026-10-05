@@ -17,13 +17,17 @@
  *   conta                - opcional: filtra uma conta específica.
  */
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { autenticarRequisicao } from "@/lib/autenticacao";
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+// SEC-3-B1: dados sensiveis (SEC-3) so por service_role, server-side.
+// O cliente nasce sob demanda — nunca no import — a partir do helper
+// oficial; o isolamento por dono e da propria rota, nao do banco.
+let clienteServidor: SupabaseClient | null = null;
+function supabase(): SupabaseClient {
+  return (clienteServidor ??= getSupabaseServidor());
+}
 
 interface ResumoRow {
   data_referencia:     string;
@@ -70,7 +74,7 @@ export async function GET(request: Request) {
   const marketplace = searchParams.get("marketplace");
   const conta        = searchParams.get("conta");
 
-  let q = supabase
+  let q = supabase()
     .from("dashboard_resumos_diarios")
     .select(
       "data_referencia, marketplace, conta, pedidos_total, pedidos_pagos, pedidos_cancelados, " +

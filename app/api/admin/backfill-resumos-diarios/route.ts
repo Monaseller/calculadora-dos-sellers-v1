@@ -5,8 +5,16 @@
  * já existente no banco. NÃO chama nenhuma API de marketplace — só lê e
  * escreve no Supabase (regra aprovada 2026-07-10, Parte 7 do backfill).
  *
- * Rota operacional, não exposta em tela/menu — gated pela sessão (autenticarRequisicao),
- * mesmo padrão dos outros endpoints /api/admin/*.
+ * Rota operacional, não exposta em tela/menu.
+ *
+ * ── SEC-3-B1: sessão E `CRON_SECRET` ────────────────────────────────
+ * Com service_role o banco não filtra nada, então quem pode chamar passa
+ * a ser decidido aqui. A sessão (que o middleware já exige em /api/admin)
+ * continua sendo o DONO: só as lojas dele são recalculadas (cross-check
+ * por `user_id` em `listarLojasDoDonoPorIds`). E o uso real desta rota é
+ * de OPERADOR (`scripts/backfill-resumos-diarios.mjs`), então ela exige
+ * também `Authorization: Bearer <CRON_SECRET>` — o mecanismo de operador
+ * que o projeto já usa, fail-closed. Usuário comum com sessão não dispara.
  *
  * Query params:
  *   data         - YYYY-MM-DD (obrigatório): dia a recalcular.
@@ -47,17 +55,21 @@
  * só diagnóstico, não afeta correção do recálculo.
  */
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { autenticarRequisicao } from "@/lib/autenticacao";
 import { atualizarResumoDia } from "@/lib/resumos-diarios";
 import { listarLojasDoDonoPorIds } from "@/lib/marketplace/credenciais";
 
 export const maxDuration = 60;
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+// SEC-3-B1: dados sensiveis (SEC-3) so por service_role, server-side.
+// O cliente nasce sob demanda — nunca no import — a partir do helper
+// oficial; o isolamento por dono e da propria rota, nao do banco.
+let clienteServidor: SupabaseClient | null = null;
+function supabase(): SupabaseClient {
+  return (clienteServidor ??= getSupabaseServidor());
+}
 
 /** Soma 1 dia a uma data YYYY-MM-DD, sem depender de timezone do ambiente. */
 function proximoDiaISO(iso: string): string {
@@ -66,11 +78,27 @@ function proximoDiaISO(iso: string): string {
   return d.toISOString().split("T")[0];
 }
 
+/**
+ * `Authorization: Bearer <CRON_SECRET>`, fail-closed — o mesmo contrato das
+ * rotas internas (`internal/agentes/worker`, `monitor-ingestao`). Sem a
+ * env, ninguem passa; segredo so por header, nunca por query ou body.
+ */
+function operadorAutorizado(request: Request): boolean {
+  const segredo = process.env.CRON_SECRET;
+  const cabecalho = request.headers.get("authorization");
+  return !!segredo && !!cabecalho && cabecalho === `Bearer ${segredo}`;
+}
+
 export async function GET(request: Request) {
   const auth = await autenticarRequisicao(request);
   const userId = auth.autenticado ? auth.uid : null;
   if (!userId) {
     return NextResponse.json({ erro: true, mensagem: "Sessao invalida." }, { status: 401 });
+  }
+  // Depois da sessao, e com a MESMA resposta para "sem env" e "segredo
+  // errado": quem chamou nao aprende como o servidor esta configurado.
+  if (!operadorAutorizado(request)) {
+    return NextResponse.json({ erro: true, mensagem: "Nao autorizado." }, { status: 403 });
   }
 
   const url = new URL(request.url);
@@ -84,7 +112,7 @@ export async function GET(request: Request) {
   const proximoDia = proximoDiaISO(data);
 
   // Query 1: lojas com pedido no intervalo, por data_pagamento.
-  const { data: porPagamento, error: errPagamento } = await supabase
+  const { data: porPagamento, error: errPagamento } = await supabase()
     .from("pedidos")
     .select("loja_id")
     .gte("data_pagamento", data)
@@ -96,7 +124,7 @@ export async function GET(request: Request) {
   }
 
   // Query 2: idem, por data_criacao.
-  const { data: porCriacao, error: errCriacao } = await supabase
+  const { data: porCriacao, error: errCriacao } = await supabase()
     .from("pedidos")
     .select("loja_id")
     .gte("data_criacao", data)

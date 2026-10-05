@@ -45,7 +45,7 @@
  * continua sendo quem reivindica e executa jobs.
  */
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { autenticarRequisicao } from "@/lib/autenticacao";
 import { buscarProjetoPorId } from "@/lib/estudio-anuncios/projetos";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
@@ -53,10 +53,13 @@ import { iniciarPipelineAtomico } from "@/lib/estudio-anuncios/pipeline/pipeline
 import { buscarJobPorId } from "@/lib/estudio-anuncios/jobs";
 import { obterEstadoFotosProjeto } from "@/lib/estudio-anuncios/fotos";
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+// SEC-3-B1: dados sensiveis (SEC-3) so por service_role, server-side.
+// O cliente nasce sob demanda — nunca no import — a partir do helper
+// oficial; o isolamento por dono e da propria rota, nao do banco.
+let clienteServidor: SupabaseClient | null = null;
+function supabase(): SupabaseClient {
+  return (clienteServidor ??= getSupabaseServidor());
+}
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -75,7 +78,7 @@ export async function POST(
   }
 
   try {
-    const projeto = await buscarProjetoPorId(supabase, userId, params.id);
+    const projeto = await buscarProjetoPorId(supabase(), userId, params.id);
     if (!projeto) {
       return NextResponse.json({ ok: false, erro: "Projeto não encontrado." }, { status: 404 });
     }
@@ -101,7 +104,7 @@ export async function POST(
     // 20260810_estudio_anuncios_pipeline_exigir_foto.sql), então esta
     // checagem aqui é só para devolver um erro rápido e amigável antes
     // de sequer chamar o service role — nunca a única linha de defesa.
-    const estadoFotos = await obterEstadoFotosProjeto(supabase, params.id);
+    const estadoFotos = await obterEstadoFotosProjeto(supabase(), params.id);
     if (estadoFotos.total === 0) {
       return NextResponse.json(
         { ok: false, erro: "Adicione pelo menos uma foto do produto antes de iniciar a geração." },
@@ -116,7 +119,7 @@ export async function POST(
     // devolver junto do Pipeline — leitura simples, cliente anon,
     // mesmo padrão do resto do módulo.
     const job = resultado.pipeline.jobAtualId
-      ? await buscarJobPorId(supabase, resultado.pipeline.jobAtualId)
+      ? await buscarJobPorId(supabase(), resultado.pipeline.jobAtualId)
       : null;
 
     if (!resultado.criadoAgora) {

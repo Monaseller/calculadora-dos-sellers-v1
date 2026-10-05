@@ -15,17 +15,20 @@
  * documentado, não um bug.
  */
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { autenticarRequisicao } from "@/lib/autenticacao";
 import { listarProjetos, criarProjeto } from "@/lib/estudio-anuncios/projetos";
 import { validarCriarProjeto } from "@/lib/estudio-anuncios/validacao";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import type { ProjetoComAdaptacoes } from "@/lib/estudio-anuncios/tipos";
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+// SEC-3-B1: dados sensiveis (SEC-3) so por service_role, server-side.
+// O cliente nasce sob demanda — nunca no import — a partir do helper
+// oficial; o isolamento por dono e da propria rota, nao do banco.
+let clienteServidor: SupabaseClient | null = null;
+function supabase(): SupabaseClient {
+  return (clienteServidor ??= getSupabaseServidor());
+}
 
 /** user_id nunca é selecionado do banco (ver lib/estudio-anuncios/projetos.ts), mas por segurança a resposta nunca o repassa mesmo se algum dia aparecer. */
 function paraResposta(p: ProjetoComAdaptacoes) {
@@ -47,7 +50,7 @@ export async function GET(request: Request) {
   const pageSizeParam = url.searchParams.get("pageSize");
 
   try {
-    const resultado = await listarProjetos(supabase, userId, {
+    const resultado = await listarProjetos(supabase(), userId, {
       status,
       page: pageParam ? parseInt(pageParam, 10) : undefined,
       pageSize: pageSizeParam ? parseInt(pageSizeParam, 10) : undefined,
@@ -90,7 +93,7 @@ export async function POST(request: Request) {
     // deste escopo de função. Se as env vars necessárias faltarem,
     // getSupabaseServidor() lança um erro controlado (capturado abaixo).
     const supabaseServico = getSupabaseServidor();
-    const projeto = await criarProjeto(supabase, supabaseServico, userId, validacao.dados);
+    const projeto = await criarProjeto(supabase(), supabaseServico, userId, validacao.dados);
     return NextResponse.json({ ok: true, projeto: paraResposta(projeto) }, { status: 201 });
   } catch (err: any) {
     // Nunca logar err completo se pudesse conter a service key — aqui

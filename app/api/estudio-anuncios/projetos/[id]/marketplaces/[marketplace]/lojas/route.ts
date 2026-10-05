@@ -13,7 +13,7 @@
  * forjado carregaria token alheio.
  */
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { autenticarRequisicao } from "@/lib/autenticacao";
 import { buscarProjetoPorId } from "@/lib/estudio-anuncios/projetos";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
@@ -21,10 +21,13 @@ import { resolverMarketplacePorSlug } from "@/lib/estudio-anuncios/compliance/ti
 import { listarLojasConectadasDoDono } from "@/lib/marketplace/credenciais";
 import { resolverModeloDaConta } from "@/lib/estudio-anuncios/compliance/validacao-oficial";
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+// SEC-3-B1: dados sensiveis (SEC-3) so por service_role, server-side.
+// O cliente nasce sob demanda — nunca no import — a partir do helper
+// oficial; o isolamento por dono e da propria rota, nao do banco.
+let clienteServidor: SupabaseClient | null = null;
+function supabase(): SupabaseClient {
+  return (clienteServidor ??= getSupabaseServidor());
+}
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -39,7 +42,7 @@ async function autorizar(request: Request, params: { id: string; marketplace: st
   if (!marketplace) {
     return { erro: NextResponse.json({ ok: false, erro: "Marketplace não encontrado." }, { status: 404 }) };
   }
-  const projeto = await buscarProjetoPorId(supabase, userId, params.id);
+  const projeto = await buscarProjetoPorId(supabase(), userId, params.id);
   if (!projeto) {
     return { erro: NextResponse.json({ ok: false, erro: "Projeto não encontrado." }, { status: 404 }) };
   }
@@ -129,7 +132,7 @@ export async function POST(request: Request, { params }: { params: { id: string;
     // Melhor-esforço: se a API não responder, a validação tenta de novo.
     let modelo: string | null = null;
     if (canal.loja_id) {
-      const r = await resolverModeloDaConta(supabase, getSupabaseServidor(), {
+      const r = await resolverModeloDaConta(supabase(), getSupabaseServidor(), {
         projetoMarketplaceId: canal.id,
         lojaId: canal.loja_id,
         userId: auth.userId,

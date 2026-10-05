@@ -11,13 +11,17 @@
  * anterior.
  */
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { autenticarRequisicao } from "@/lib/autenticacao";
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+// SEC-3-B1: dados sensiveis (SEC-3) so por service_role, server-side.
+// O cliente nasce sob demanda — nunca no import — a partir do helper
+// oficial; o isolamento por dono e da propria rota, nao do banco.
+let clienteServidor: SupabaseClient | null = null;
+function supabase(): SupabaseClient {
+  return (clienteServidor ??= getSupabaseServidor());
+}
 
 export async function GET(request: Request) {
   const auth = await autenticarRequisicao(request);
@@ -34,9 +38,15 @@ export async function GET(request: Request) {
     return NextResponse.json({ ok: false, erro: "job_id ou loja_id é obrigatório." }, { status: 400 });
   }
 
-  let query = supabase
+  let query = supabase()
     .from("sync_jobs")
-    .select("id, user_id, loja_id, marketplace, tipo, status, tentativas, max_tentativas, erro_mensagem, criado_em, iniciado_em, concluido_em, heartbeat_em");
+    .select("id, user_id, loja_id, marketplace, tipo, status, tentativas, max_tentativas, erro_mensagem, criado_em, iniciado_em, concluido_em, heartbeat_em")
+    // SEC-3-B1: dono DENTRO da consulta. Antes, por `loja_id`, a linha
+    // mais recente de QUALQUER dono era lida e só depois descartada (404),
+    // o que distinguia "loja alheia com jobs" de "loja sem jobs". Agora as
+    // duas respondem igual ("idle"). A checagem abaixo fica como segunda
+    // barreira.
+    .eq("user_id", userId);
 
   if (jobId) {
     query = query.eq("id", jobId);

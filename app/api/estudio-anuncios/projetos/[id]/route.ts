@@ -39,7 +39,7 @@
  * resposta.
  */
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { autenticarRequisicao } from "@/lib/autenticacao";
 import { buscarProjetoPorId, editarProjeto, cancelarProjetoLogicamente } from "@/lib/estudio-anuncios/projetos";
 import { validarEditarProjeto } from "@/lib/estudio-anuncios/validacao";
@@ -64,10 +64,13 @@ import type { EnvelopeAdaptacaoMarketplace } from "@/lib/estudio-anuncios/adapta
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import type { ProjetoComAdaptacoes, ProjetoMestre } from "@/lib/estudio-anuncios/tipos";
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+// SEC-3-B1: dados sensiveis (SEC-3) so por service_role, server-side.
+// O cliente nasce sob demanda — nunca no import — a partir do helper
+// oficial; o isolamento por dono e da propria rota, nao do banco.
+let clienteServidor: SupabaseClient | null = null;
+function supabase(): SupabaseClient {
+  return (clienteServidor ??= getSupabaseServidor());
+}
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -92,7 +95,7 @@ export async function GET(
   }
 
   try {
-    const projeto = await buscarProjetoPorId(supabase, userId, params.id);
+    const projeto = await buscarProjetoPorId(supabase(), userId, params.id);
     if (!projeto) {
       return NextResponse.json({ ok: false, erro: "Projeto não encontrado." }, { status: 404 });
     }
@@ -103,9 +106,9 @@ export async function GET(
     // das linhas em si usa o cliente anon comum, mesmo padrão de
     // pipeline/jobs acima).
     const [pipeline, jobs, fotos, resultado, resultadosPorEtapa] = await Promise.all([
-      buscarPipelinePorProjeto(supabase, params.id),
-      listarJobsPorProjeto(supabase, params.id),
-      listarFotosPorProjeto(supabase, getSupabaseServidor(), params.id),
+      buscarPipelinePorProjeto(supabase(), params.id),
+      listarJobsPorProjeto(supabase(), params.id),
+      listarFotosPorProjeto(supabase(), getSupabaseServidor(), params.id),
       // SEC-1c-3: 1o argumento migrado de `supabase` (anon) para
       // service_role. `montarResultadoProjeto` delega a
       // `buscarCustoProjeto(supabase, ...)`, que le `central_ia_consumo`
@@ -113,7 +116,7 @@ export async function GET(
       // daquela tabela. O 2o argumento ja era service_role (Storage) e
       // nao muda. A posse do projeto foi validada na linha 95.
       montarResultadoProjeto(getSupabaseServidor(), getSupabaseServidor(), params.id),
-      buscarResultadosPipelinePorProjeto(supabase, params.id),
+      buscarResultadosPipelinePorProjeto(supabase(), params.id),
     ]);
 
     // Camada editorial (2026-08-20): 2 queries no total — canais do
@@ -122,7 +125,7 @@ export async function GET(
     // consulta nova.
     const linhaAdaptacao = resultadosPorEtapa.get("adaptacao_marketplace");
     const editorial = await montarEditorialProjeto(
-      supabase,
+      supabase(),
       params.id,
       (linhaAdaptacao?.resultado as EnvelopeAdaptacaoMarketplace | undefined) ?? null,
       linhaAdaptacao?.id ?? null
@@ -146,7 +149,7 @@ export async function GET(
       // projeto_id. Nenhum token, nenhum segredo — só o que o usuário
       // configurou e o snapshot público da categoria.
       buscarPublicacaoDoProjeto(
-        supabase,
+        supabase(),
         params.id,
         // Titulos aprovados so alimentam a SUGESTAO de family_name — o
         // conteudo editorial nao e alterado por isso.
@@ -194,7 +197,7 @@ export async function GET(
         }).hashPayload
       );
     }
-    const validacoes = await buscarValidacoesDoProjeto(supabase, params.id, hashPayloadPorCanal);
+    const validacoes = await buscarValidacoesDoProjeto(supabase(), params.id, hashPayloadPorCanal);
     // Publicações VIVAS do projeto (2026-08-31). É o que faz o botão de
     // publicar sumir: canal com anúncio criado (ou em estado incerto)
     // não pode publicar de novo, e a UI precisa saber disso.
@@ -301,7 +304,7 @@ export async function PATCH(
     // quantidade_imagens_solicitada corretamente quando o PATCH não
     // está trocando o modo junto — e essa busca já serve para
     // devolver 404 cedo se o projeto não existir/não for do usuário.
-    const atual = await buscarProjetoPorId(supabase, userId, params.id);
+    const atual = await buscarProjetoPorId(supabase(), userId, params.id);
     if (!atual) {
       return NextResponse.json({ ok: false, erro: "Projeto não encontrado." }, { status: 404 });
     }

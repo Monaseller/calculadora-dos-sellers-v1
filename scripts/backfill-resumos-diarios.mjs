@@ -11,7 +11,7 @@
  * nada.
  *
  * Uso:
- *   CDS_SESSION=<valor_do_cookie_cds_session> node scripts/backfill-resumos-diarios.mjs \
+ *   CDS_SESSION=<valor_do_cookie_cds_session> CRON_SECRET=<segredo> node scripts/backfill-resumos-diarios.mjs \
  *     --date-from 2026-07-01 --date-to 2026-07-10 [--marketplace Shopee] [--conta NomeDaLoja]
  *
  * Opções:
@@ -68,7 +68,11 @@ function sleep(ms) {
 // padrao ja validado por consistencia.
 function httpGetJson(url, cookie) {
   return new Promise((resolve, reject) => {
-    const req = http.get(url, { headers: { cookie: `cds_session=${cookie}` }, timeout: 5 * 60 * 1000 }, (res) => {
+    // SEC-3-B1: a rota exige sessao (dono) E `Authorization: Bearer <CRON_SECRET>` (operador).
+    const req = http.get(url, {
+      headers: { cookie: `cds_session=${cookie}`, authorization: `Bearer ${process.env.CRON_SECRET ?? ""}` },
+      timeout: 5 * 60 * 1000,
+    }, (res) => {
       let raw = "";
       res.on("data", chunk => { raw += chunk; });
       res.on("end", () => resolve({ status: res.statusCode, raw }));
@@ -85,6 +89,11 @@ async function main() {
 
   if (!cookie) {
     console.error("ERRO: defina CDS_SESSION com o valor do cookie 'cds_session'.");
+    process.exit(1);
+  }
+  // SEC-3-B1: a rota tambem exige o segredo de operador.
+  if (!process.env.CRON_SECRET) {
+    console.error("ERRO: defina CRON_SECRET (a rota exige Authorization: Bearer <CRON_SECRET>).");
     process.exit(1);
   }
   if (!opts.dateFrom || !opts.dateTo) {

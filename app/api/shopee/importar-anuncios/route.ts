@@ -1,13 +1,17 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { shopeeGet } from "@/lib/shopee-api";
 import { autenticarRequisicao } from "@/lib/autenticacao";
 import { getShopeeLojaAtiva } from "@/lib/shopee-auth";
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+// SEC-3-B1: dados sensiveis (SEC-3) so por service_role, server-side.
+// O cliente nasce sob demanda — nunca no import — a partir do helper
+// oficial; o isolamento por dono e da propria rota, nao do banco.
+let clienteServidor: SupabaseClient | null = null;
+function supabase(): SupabaseClient {
+  return (clienteServidor ??= getSupabaseServidor());
+}
 
 export async function POST(request: Request) {
   const auth = await autenticarRequisicao(request);
@@ -48,7 +52,7 @@ export async function POST(request: Request) {
   }
 
   // ── 2. Busca existentes no Supabase (apenas deste usuário) ──────────────
-  const { data: existentes } = await supabase
+  const { data: existentes } = await supabase()
     .from("anuncios")
     .select("id, ml_item_id, variation_id, sku, custo_produto, insumos, custo_frete, imposto")
     .eq("marketplace", "Shopee")
@@ -97,10 +101,10 @@ export async function POST(request: Request) {
           // dados atualizados e permanece `ativo=false`.
           const upd: any = { nome: titulo, preco_anuncio: preco, thumbnail };
           if (!existente.sku && sku) upd.sku = sku;
-          await supabase.from("anuncios").update(upd).eq("id", existente.id);
+          await supabase().from("anuncios").update(upd).eq("id", existente.id);
           atualizados++;
         } else {
-          await supabase.from("anuncios").insert({
+          await supabase().from("anuncios").insert({
             marketplace: "Shopee", nome: titulo,
             ml_item_id: itemId, variation_id: null,
             preco_anuncio: preco, sku, thumbnail,
@@ -129,10 +133,10 @@ export async function POST(request: Request) {
             // Ver comentário acima: `ativo` fora do update.
             const upd: any = { nome: nomeVar, preco_anuncio: preco, thumbnail };
             if (!existente.sku && sku) upd.sku = sku;
-            await supabase.from("anuncios").update(upd).eq("id", existente.id);
+            await supabase().from("anuncios").update(upd).eq("id", existente.id);
             atualizados++;
           } else {
-            await supabase.from("anuncios").insert({
+            await supabase().from("anuncios").insert({
               marketplace: "Shopee", nome: nomeVar,
               ml_item_id: itemId, variation_id: variationId,
               preco_anuncio: preco, sku, thumbnail,

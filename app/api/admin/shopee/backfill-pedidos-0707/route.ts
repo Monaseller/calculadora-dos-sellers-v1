@@ -33,7 +33,8 @@
  * filtros de leitura, arquitetura de datas, ou qualquer regra de negócio.
  */
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { autenticarRequisicao } from "@/lib/autenticacao";
 import { getShopeeLojaAtiva } from "@/lib/shopee-auth";
 import { shopeeGet } from "@/lib/shopee-api";
@@ -49,10 +50,13 @@ import { DEFAULT_ORDER_IDS_0707 } from "@/lib/backfill-0707-order-ids";
 
 export const maxDuration = 60;
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+// SEC-3-B1: dados sensiveis (SEC-3) so por service_role, server-side.
+// O cliente nasce sob demanda — nunca no import — a partir do helper
+// oficial; o isolamento por dono e da propria rota, nao do banco.
+let clienteServidor: SupabaseClient | null = null;
+function supabase(): SupabaseClient {
+  return (clienteServidor ??= getSupabaseServidor());
+}
 
 // Janela usada só para o filtro de data dentro de `montarLinhasDoPedido`
 // (dataBrt precisa cair neste intervalo pra linha não ser descartada). Os 189
@@ -87,7 +91,7 @@ export async function GET(request: Request) {
   // por esta rota — ficam só reportados, para o relatório e como trava extra
   // de segurança (mesma checagem que já tinha sido rodada manualmente antes,
   // repetida aqui como parte do fluxo em vez de depender de memória).
-  const { data: existentesRows, error: existentesErr } = await supabase
+  const { data: existentesRows, error: existentesErr } = await supabase()
     .from("pedidos")
     .select("order_id")
     .eq("user_id", userId)
@@ -213,7 +217,7 @@ export async function GET(request: Request) {
 
   for (let i = 0; i < todasAsLinhas.length; i += UPSERT_BATCH) {
     const lote = todasAsLinhas.slice(i, i + UPSERT_BATCH);
-    const { error } = await supabase.from("pedidos").upsert(lote, { onConflict: "id" });
+    const { error } = await supabase().from("pedidos").upsert(lote, { onConflict: "id" });
     if (error) {
       errosGravacao++;
       detalheErros.push(`lote ${i / UPSERT_BATCH + 1}: ${error.message}`);

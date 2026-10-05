@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { calcularFreteMl, calcularFreteFullMl, calcularFreteFlexMl } from "@/lib/tabela-frete-ml";
 import { CATEGORIAS_ML } from "@/lib/comissoes-mercado-livre";
 import { autenticarRequisicao, lerCookie } from "@/lib/autenticacao";
@@ -7,10 +8,13 @@ import { applyMLCookies } from "@/lib/ml-auth";
 import { resolverContaML } from "@/lib/ml-conexao";
 import { getActivePromoPrice } from "@/lib/ml-promotions";
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+// SEC-3-B1: dados sensiveis (SEC-3) so por service_role, server-side.
+// O cliente nasce sob demanda — nunca no import — a partir do helper
+// oficial; o isolamento por dono e da propria rota, nao do banco.
+let clienteServidor: SupabaseClient | null = null;
+function supabase(): SupabaseClient {
+  return (clienteServidor ??= getSupabaseServidor());
+}
 
 function mapTipoAnuncio(listingTypeId: string): string {
   if (listingTypeId === "gold_premium" || listingTypeId === "gold_pro") return "Premium";
@@ -140,7 +144,7 @@ export async function POST(request: Request) {
   }
   const token = conta.accessToken;
 
-  const { data: anuncios, error } = await supabase
+  const { data: anuncios, error } = await supabase()
     .from("anuncios")
     .select("id, ml_item_id, nome, preco_anuncio, frete_gratis, tipo_anuncio, thumbnail, permalink, variation_id, custo_frete, peso_kg, custo_produto, imposto, categoria, sku")
     .eq("ativo", true)
@@ -279,7 +283,7 @@ export async function POST(request: Request) {
       }
 
       if (Object.keys(mudancas).length > 0) {
-        await supabase.from("anuncios").update(mudancas).eq("id", anuncio.id);
+        await supabase().from("anuncios").update(mudancas).eq("id", anuncio.id);
         atualizados++;
       }
 

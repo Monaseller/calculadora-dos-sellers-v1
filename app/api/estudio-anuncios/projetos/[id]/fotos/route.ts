@@ -45,7 +45,7 @@
  * nível de requisição (401/400/404/409/500) usam {ok:false, erro}.
  */
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { randomUUID } from "node:crypto";
 import { autenticarRequisicao } from "@/lib/autenticacao";
 import { buscarProjetoPorId } from "@/lib/estudio-anuncios/projetos";
@@ -63,10 +63,13 @@ import {
 import { obterEstadoFotosProjeto, inserirFoto, paraRespostaFoto } from "@/lib/estudio-anuncios/fotos";
 import type { FotoRespostaAPI, FalhaUploadFoto } from "@/lib/estudio-anuncios/tipos";
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+// SEC-3-B1: dados sensiveis (SEC-3) so por service_role, server-side.
+// O cliente nasce sob demanda — nunca no import — a partir do helper
+// oficial; o isolamento por dono e da propria rota, nao do banco.
+let clienteServidor: SupabaseClient | null = null;
+function supabase(): SupabaseClient {
+  return (clienteServidor ??= getSupabaseServidor());
+}
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -86,7 +89,7 @@ export async function POST(
 
   let projeto;
   try {
-    projeto = await buscarProjetoPorId(supabase, userId, params.id);
+    projeto = await buscarProjetoPorId(supabase(), userId, params.id);
   } catch (err: any) {
     console.error("[POST /api/estudio-anuncios/projetos/[id]/fotos] falha ao buscar projeto:", err?.message);
     return NextResponse.json({ ok: false, erro: "Falha ao buscar projeto." }, { status: 500 });

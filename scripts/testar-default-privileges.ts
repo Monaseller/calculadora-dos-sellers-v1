@@ -324,9 +324,14 @@ ok(
     // reprova a limpeza oportunista proibida, e deixa de reprovar cada
     // migração futura de call site. A regex também passa a tolerar
     // espaço — a estrita perdia chamadas multilinha.
-    "42. o cliente anon da rota PERMANECE para os demais call sites",
-    /^const supabase = createClient\(/m.test(rota) &&
-      (rota.match(/\w+\(\s*supabase\s*[,)]/g) ?? []).length > 0
+    // SEC-3-B1: o cliente da rota deixou de ser anon e passou a ser o
+    // acessor sob demanda do helper oficial (service_role). O invariante
+    // continua o mesmo — nao houve substituicao global: o cliente segue
+    // declarado E servindo os demais call sites.
+    "42. o cliente da rota (agora service_role sob demanda) PERMANECE para os demais call sites",
+    /return \(clienteServidor \?\?= getSupabaseServidor\(\)\);/.test(rota) &&
+      !/NEXT_PUBLIC_SUPABASE_ANON_KEY/.test(rota) &&
+      (rota.match(/\w+\(\s*supabase\(\)\s*[,)]/g) ?? []).length > 0
   );
 
   // ── A migration ───────────────────────────────────────────────────
@@ -421,11 +426,14 @@ ok(
   // Limpeza oportunista é proibida: o cliente anon segue servindo os
   // outros call sites de cada rota.
   ok(
-    "60. o cliente anon PERMANECE nas rotas que ainda o usam",
+    // SEC-3-B1: idem 42 — o cliente segue servindo os outros call
+    // sites, agora como acessor service_role do helper oficial.
+    "60. o cliente da rota (agora service_role sob demanda) PERMANECE nas rotas que ainda o usam",
     ARQS.every((a) => {
       const c = codigo(a);
-      const declara = /^const supabase = createClient\(/m.test(c);
-      const usa = (c.match(/\w+\(\s*supabase\s*[,)]/g) ?? []).length > 0;
+      const declara = /return \(clienteServidor \?\?= getSupabaseServidor\(\)\);/.test(c) &&
+        !/NEXT_PUBLIC_SUPABASE_ANON_KEY/.test(c);
+      const usa = (c.match(/\w+\(\s*supabase\(\)\s*[,)]/g) ?? []).length > 0;
       return declara && usa;
     })
   );

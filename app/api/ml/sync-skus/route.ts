@@ -1,12 +1,16 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { autenticarRequisicao, lerCookie } from "@/lib/autenticacao";
 import { resolverContaML } from "@/lib/ml-conexao";
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+// SEC-3-B1: dados sensiveis (SEC-3) so por service_role, server-side.
+// O cliente nasce sob demanda — nunca no import — a partir do helper
+// oficial; o isolamento por dono e da propria rota, nao do banco.
+let clienteServidor: SupabaseClient | null = null;
+function supabase(): SupabaseClient {
+  return (clienteServidor ??= getSupabaseServidor());
+}
 
 // Busca SKU via user_products API (fallback para itens omnichannel)
 async function buscarSkuUserProducts(
@@ -60,7 +64,7 @@ export async function POST(request: Request) {
   const token = conta.accessToken;
 
   // Busca anúncios com ml_item_id mas sem SKU (ou SKU vazio) — apenas deste usuário
-  const { data: anuncios, error } = await supabase
+  const { data: anuncios, error } = await supabase()
     .from("anuncios")
     .select("id, ml_item_id, nome, sku")
     .eq("ativo", true)
@@ -165,7 +169,7 @@ export async function POST(request: Request) {
 
         if (Object.keys(updates).length === 0) continue;
 
-        const { error: updateError } = await supabase
+        const { error: updateError } = await supabase()
           .from("anuncios")
           .update(updates)
           .eq("ml_item_id", body.id)

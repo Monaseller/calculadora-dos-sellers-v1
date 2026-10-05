@@ -21,15 +21,19 @@
  *     em andamento.
  */
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { autenticarRequisicao } from "@/lib/autenticacao";
 import { ASYNC_SYNC_JOBS_ENABLED } from "@/lib/feature-flags";
 import { lerLojaParaValidacaoDeJob } from "@/lib/marketplace/credenciais";
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+// SEC-3-B1: dados sensiveis (SEC-3) so por service_role, server-side.
+// O cliente nasce sob demanda — nunca no import — a partir do helper
+// oficial; o isolamento por dono e da propria rota, nao do banco.
+let clienteServidor: SupabaseClient | null = null;
+function supabase(): SupabaseClient {
+  return (clienteServidor ??= getSupabaseServidor());
+}
 
 // "Ontem" e "hoje" em America/Sao_Paulo (mesmo padrão -3h já usado em todo
 // o projeto — ver sync-shopee.ts/sync-ml.ts/api de vendas).
@@ -94,7 +98,7 @@ export async function POST(request: Request) {
   const dateFrom = ontemBrt();
   const dateTo   = hojeBrt();
 
-  const { data: job, error: insertErr } = await supabase
+  const { data: job, error: insertErr } = await supabase()
     .from("sync_jobs")
     .insert({
       user_id:     userId,
@@ -112,10 +116,13 @@ export async function POST(request: Request) {
     // pendente/rodando para esta loja) — não é erro, é o caminho
     // esperado de "já está sincronizando".
     if (insertErr.code === "23505") {
-      const { data: existente } = await supabase
+      const { data: existente } = await supabase()
         .from("sync_jobs")
         .select("id")
         .eq("loja_id", lojaId)
+        // SEC-3-B1: a loja já foi validada como do usuário acima; o dono
+        // entra também aqui para a consulta nunca depender só disso.
+        .eq("user_id", userId)
         .in("status", ["pendente", "rodando"])
         .order("criado_em", { ascending: false })
         .limit(1)
