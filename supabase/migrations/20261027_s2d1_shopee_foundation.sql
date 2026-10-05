@@ -67,6 +67,7 @@
 -- =====================================================================
 
 BEGIN;
+SET LOCAL lock_timeout = '5s';
 
 CREATE TABLE public.shopee_pedidos (
   user_id                  text        NOT NULL,
