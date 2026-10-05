@@ -47,6 +47,10 @@ export interface ResultadoVendasLoja {
   dimensoes?: { descoberta: boolean; estado: boolean; financeiro: boolean };
   /** Detail mais antigo usado: as metricas valem "na data de estadoEm". */
   estadoEm?: string | null;
+  /** ANCORA (prova absoluta) ou POLITICA_PRAZO_PAGAMENTO (politica publicada + sentinela). */
+  baseDescoberta?: "ANCORA" | "POLITICA_PRAZO_PAGAMENTO";
+  /** Inicio exigido do corpus por create_time para este periodo. */
+  descobertaDesde?: string;
 }
 
 export interface ResultadoVendas {

@@ -43,6 +43,8 @@ export interface PedidoShopeeCanonico {
   lojaId: string;
   orderSn: string;
   orderStatus: string | null;
+  /** ISO 8601. Usado so pelo sentinela da politica de prazo de pagamento. */
+  createTime?: string | null;
   /** ISO 8601 (timestamptz). `null` = nunca pago. */
   payTime: string | null;
   updateTime: string;
@@ -210,16 +212,24 @@ export function filtrarPagosNoIntervalo(pedidos: PedidoShopeeCanonico[], inicio:
  * COMPLETE (loja, periodo [inicio, fim)) = A && B && C:
  *
  *  A. DISCOVERY_COMPLETE — o CORPUS por `create_time` esta completo de
- *     `ancoraDescoberta` ate `fim`. `create_time` e imutavel: numa janela
+ *     `desde` ate `fim` (ver BASE abaixo). `create_time` e imutavel: numa janela
  *     FECHADA (fim <= inicio da listagem, garantido pelo motor) a populacao
  *     nao muda quando o status muda. Todo pedido pago em [inicio, fim) foi
  *     criado antes de `fim` (create_time <= pay_time) e, por definicao da
  *     ancora, nao antes dela. Prova = cadeia SEM BURACO de janelas de
  *     create_time completas (`listagem_completa` E job `concluido`) que
  *     comeca numa janela contendo a ancora e alcanca `fim`.
- *     A ancora e EXPLICITA e comprovada (inicio do historico recuperavel
- *     da loja / primeira data de um backfill completo). Sem ancora: A falso.
- *     Nada de D-N dias.
+ *     BASE (S2-D3-B3), uma de duas, informada em `baseDescoberta`:
+ *       ANCORA — `desde` = ancora EXPLICITA e comprovada (inicio do
+ *         historico da loja). Prova absoluta.
+ *       POLITICA_PRAZO_PAGAMENTO — sem ancora: `desde` = inicio do periodo
+ *         − LIMITE_POLITICA_PAGAMENTO_MS. A Shopee publica que pedido nao
+ *         pago no prazo e cancelado automaticamente (logo pay_time −
+ *         create_time <= prazo). E POLITICA PUBLICADA, nao contrato da API:
+ *         um SENTINELA derruba A se qualquer pedido pago do periodo tiver
+ *         atraso acima do limite (ou create_time desconhecido). Nao e
+ *         heuristica de "D-N dias observados": o limite vem da regra
+ *         publicada, com folga, e e verificado a cada consulta.
  *  B. STATE_CURRENT — o estado conhecido e posterior ao fim do periodo:
  *     todo pedido pago no periodo tem detail obtido em >= `fim`, e nenhum
  *     pedido do corpus criado antes de `fim` segue sem pagamento conhecido
@@ -262,11 +272,24 @@ export function alcanceDescobertaCriacao(janelas: JanelaListagem[], ancora: numb
 }
 
 export interface DimensoesCompletude { descoberta: boolean; estado: boolean; financeiro: boolean }
+export type BaseDescoberta = "ANCORA" | "POLITICA_PRAZO_PAGAMENTO";
+
+/**
+ * Prazo MAXIMO entre criacao e pagamento pela POLITICA PUBLICADA da Shopee
+ * Brasil (Central de Ajuda, "Quanto tempo tenho para fazer o pagamento do
+ * meu pedido nao pago?" e "Por que meu pedido foi cancelado
+ * automaticamente"): boleto = 1 dia util para pagar + processamento de ate
+ * 3 dias uteis; Pix = 1h a 24h; cartao = verificacao em ate 24h; nao pago
+ * no prazo → cancelado automaticamente. Pior caso: 4 dias uteis; 10 dias
+ * corridos cobrem fins de semana + feriados prolongados (ex.: Carnaval).
+ * Maior atraso OBSERVADO (S2-B, 6.401 pedidos): 64h.
+ */
+export const LIMITE_POLITICA_PAGAMENTO_MS = 10 * 24 * 3600 * 1000;
 
 export function avaliarCompletudeShopee(args: {
   inicio: Date; fim: Date;
   janelas: JanelaListagem[];
-  /** DISCOVERY_ANCHOR explicita e comprovada; `null` = indefinida → nunca COMPLETE. */
+  /** DISCOVERY_ANCHOR explicita e comprovada; `null` = usa a POLITICA de prazo de pagamento + sentinela. */
   ancoraDescoberta: Date | null;
   pedidosPagos: PedidoShopeeCanonico[];
   itens: ItemShopeeCanonico[];
@@ -276,19 +299,29 @@ export function avaliarCompletudeShopee(args: {
    * terminal verificado. Qualquer um deles pode ter sido pago no periodo.
    */
   naoPagosSemObservacaoPosPeriodo: number;
-}): { completude: Completude; motivos: string[]; dimensoes: DimensoesCompletude; alcanceDescoberta: string | null; estadoEm: string | null } {
+}): { completude: Completude; motivos: string[]; dimensoes: DimensoesCompletude; alcanceDescoberta: string | null; estadoEm: string | null;
+  baseDescoberta: BaseDescoberta; descobertaDesde: string } {
   const { inicio, fim, janelas, ancoraDescoberta, pedidosPagos, itens } = args;
   const a = inicio.getTime(), b = fim.getTime();
   const motivos: string[] = [];
 
-  // ── A. descoberta (create_time, a partir da ancora) ──
-  let alcance: number | null = null;
-  if (ancoraDescoberta === null) motivos.push("ancora_de_descoberta_indefinida");
-  else {
-    alcance = alcanceDescobertaCriacao(janelas, ancoraDescoberta.getTime());
-    if (alcance === null || alcance < b) motivos.push("descoberta_por_create_time_nao_provada");
+  // ── A. descoberta (create_time, desde a ancora OU desde inicio − prazo publicado) ──
+  const baseDescoberta: BaseDescoberta = ancoraDescoberta !== null ? "ANCORA" : "POLITICA_PRAZO_PAGAMENTO";
+  const desde = ancoraDescoberta !== null ? ancoraDescoberta.getTime() : a - LIMITE_POLITICA_PAGAMENTO_MS;
+  const alcance = alcanceDescobertaCriacao(janelas, desde);
+  if (alcance === null || alcance < b) motivos.push("descoberta_por_create_time_nao_provada");
+  let sentinelaOk = true;
+  if (baseDescoberta === "POLITICA_PRAZO_PAGAMENTO") {
+    let semCriacao = 0, acima = 0;
+    for (const p of pedidosPagos) {
+      if (!p.createTime || !p.payTime) { semCriacao++; continue; }
+      if (new Date(p.payTime).getTime() - new Date(p.createTime).getTime() > LIMITE_POLITICA_PAGAMENTO_MS) acima++;
+    }
+    if (semCriacao) motivos.push(`create_time_desconhecido:${semCriacao}`);
+    if (acima) motivos.push(`atraso_de_pagamento_acima_da_politica:${acima}`);
+    sentinelaOk = semCriacao === 0 && acima === 0;
   }
-  const descoberta = ancoraDescoberta !== null && alcance !== null && alcance >= b;
+  const descoberta = alcance !== null && alcance >= b && sentinelaOk;
   // diagnostico: update_time "completo" nao e prova (S2-D3-B2)
   if (!descoberta && janelas.some((j) => j.campoTempo === "update_time" && j.listagemCompleta === true)) {
     motivos.push("update_time_nao_prova_descoberta");
@@ -326,11 +359,11 @@ export function avaliarCompletudeShopee(args: {
   const dimensoes = { descoberta, estado, financeiro };
   const alcanceDescoberta = alcance === null ? null : new Date(alcance).toISOString();
   const estadoEm = estadoMin === null ? null : new Date(estadoMin).toISOString();
-  if (descoberta && estado && financeiro) return { completude: "COMPLETE", motivos: [], dimensoes, alcanceDescoberta, estadoEm };
-  const desde = ancoraDescoberta?.getTime() ?? a;
+  const base = { dimensoes, alcanceDescoberta, estadoEm, baseDescoberta, descobertaDesde: new Date(desde).toISOString() };
+  if (descoberta && estado && financeiro) return { completude: "COMPLETE", motivos: [], ...base };
   const falhou = !descoberta && janelas.some((j) => j.campoTempo === "create_time" && j.status === "erro"
     && new Date(j.fim).getTime() > desde && new Date(j.inicio).getTime() < b);
-  return { completude: falhou ? "FAILED" : "PARTIAL", motivos, dimensoes, alcanceDescoberta, estadoEm };
+  return { completude: falhou ? "FAILED" : "PARTIAL", motivos, ...base };
 }
 
 /**
@@ -392,12 +425,13 @@ export async function lerVendasShopee(
   for (const lojaId of lojaIds) {
     const linhas = await paginar<Record<string, unknown>>((a, b) => cliente
       .from("shopee_pedidos")
-      .select("loja_id, order_sn, order_status, pay_time, update_time, detail_fetched_at, escrow_fetched_at, escrow_update_time, original_shopee_discount, pix_discount")
+      .select("loja_id, order_sn, order_status, create_time, pay_time, update_time, detail_fetched_at, escrow_fetched_at, escrow_update_time, original_shopee_discount, pix_discount")
       .eq("user_id", userId).eq("loja_id", lojaId)
       .gte("pay_time", inicio.toISOString()).lt("pay_time", fim.toISOString())
       .order("order_sn", { ascending: true }).range(a, b));
     const pedidos: PedidoShopeeCanonico[] = linhas.map((r) => ({
       lojaId: String(r.loja_id), orderSn: String(r.order_sn), orderStatus: (r.order_status as string) ?? null,
+      createTime: (r.create_time as string) ?? null,
       payTime: (r.pay_time as string) ?? null, updateTime: String(r.update_time),
       detailFetchedAt: (r.detail_fetched_at as string) ?? null, escrowFetchedAt: (r.escrow_fetched_at as string) ?? null,
       escrowUpdateTime: (r.escrow_update_time as string) ?? null,
@@ -438,20 +472,22 @@ export async function lerVendasShopee(
     // do periodo (poderiam ter sido pagos nele). Nenhum status terminal e
     // presumido (ESTADOS_TERMINAIS_VERIFICADOS).
     const fimIso = fim.toISOString();
+    const ancora = args.ancorasDescoberta?.[lojaId];
+    // so o corpus que pode conter pagamentos do periodo (mesmo `desde` de A)
+    const desdeIso = new Date(ancora ? new Date(ancora).getTime() : inicio.getTime() - LIMITE_POLITICA_PAGAMENTO_MS).toISOString();
     let naoPagos = 0;
     for (const sem of [false, true]) {
       let q = cliente.from("shopee_pedidos").select("order_sn", { count: "exact", head: true })
-        .eq("user_id", userId).eq("loja_id", lojaId).is("pay_time", null).lt("create_time", fimIso);
+        .eq("user_id", userId).eq("loja_id", lojaId).is("pay_time", null).gte("create_time", desdeIso).lt("create_time", fimIso);
       q = sem ? q.is("detail_fetched_at", null) : q.lt("detail_fetched_at", fimIso);
       if (ESTADOS_TERMINAIS_VERIFICADOS.length) q = q.not("order_status", "in", `(${ESTADOS_TERMINAIS_VERIFICADOS.join(",")})`);
       const { count, error } = await q;
       if (error || count === null || count === undefined) throw new Error("leitura_falhou");
       naoPagos += count;
     }
-    const ancora = args.ancorasDescoberta?.[lojaId];
     const av = avaliarCompletudeShopee({ inicio, fim, janelas, ancoraDescoberta: ancora ? new Date(ancora) : null,
       pedidosPagos: pedidos, itens, naoPagosSemObservacaoPosPeriodo: naoPagos });
-    const extra = { dimensoes: av.dimensoes, estadoEm: av.estadoEm };
+    const extra = { dimensoes: av.dimensoes, estadoEm: av.estadoEm, baseDescoberta: av.baseDescoberta, descobertaDesde: av.descobertaDesde };
     if (av.completude !== "COMPLETE") {
       resultados.push({ lojaId, completude: av.completude, motivos: av.motivos, metricas: null, componentes: null, ...extra });
       continue;

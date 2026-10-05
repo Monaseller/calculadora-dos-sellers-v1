@@ -38,7 +38,7 @@ interface Fx { p: string; st: string; c: string; u: string; pg: string; osd: num
 const FX = JSON.parse(readFileSync(join(RAIZ, "scripts/fixtures/vendas-canonico/shopee-seller-center-2026-10-01-03.json"), "utf8"));
 const LOJA = "11111111-1111-4111-8111-111111111111";
 const pedidosFx: PedidoShopeeCanonico[] = (FX.pedidos as Fx[]).map((o) => ({
-  lojaId: LOJA, orderSn: o.p, orderStatus: o.st, payTime: o.pg, updateTime: o.u,
+  lojaId: LOJA, orderSn: o.p, orderStatus: o.st, createTime: o.c, payTime: o.pg, updateTime: o.u,
   detailFetchedAt: o.u, escrowFetchedAt: o.u, escrowUpdateTime: o.u,
   originalShopeeDiscount: o.osd, pixDiscount: o.pix,
 }));
@@ -47,7 +47,7 @@ const itensFx: ItemShopeeCanonico[] = (FX.pedidos as Fx[]).flatMap((o) => o.i.ma
 })));
 
 function pedido(sn: string, extra: Partial<PedidoShopeeCanonico> = {}): PedidoShopeeCanonico {
-  return { lojaId: LOJA, orderSn: sn, orderStatus: "SHIPPED", payTime: "2026-10-02T15:00:00.000Z", updateTime: "2026-10-02T16:00:00.000Z",
+  return { lojaId: LOJA, orderSn: sn, orderStatus: "SHIPPED", createTime: "2026-10-02T14:30:00.000Z", payTime: "2026-10-02T15:00:00.000Z", updateTime: "2026-10-02T16:00:00.000Z",
     detailFetchedAt: "2026-10-05T16:01:00.000Z", escrowFetchedAt: "2026-10-05T16:01:00.000Z", escrowUpdateTime: "2026-10-02T16:00:00.000Z",
     originalShopeeDiscount: 0, pixDiscount: 0, ...extra };
 }
@@ -167,9 +167,24 @@ async function principal() {
       assert(r.completude === "PARTIAL" && !r.dimensoes.descoberta && r.motivos.includes("update_time_nao_prova_descoberta"), JSON.stringify(r));
     }
   });
-  t("4c. sem ancora explicita → nunca COMPLETE (nada de D-N dias)", () => {
-    const r = av({ ancoraDescoberta: null });
-    assert(r.completude === "PARTIAL" && r.motivos.includes("ancora_de_descoberta_indefinida"), JSON.stringify(r));
+  t("4c. sem ancora → base POLITICA_PRAZO_PAGAMENTO: corpus desde inicio − 10d basta; o que comeca depois nao", () => {
+    const desde = new Date(dia.inicio.getTime() - S.LIMITE_POLITICA_PAGAMENTO_MS);
+    const corpusDe = (ini: Date) => { const out: JanelaListagem[] = []; for (let x = ini.getTime(); x < Date.parse("2026-10-04T00:00:00.000Z"); x += 14 * 86400e3) out.push(jan({ inicio: new Date(x).toISOString(), fim: new Date(Math.min(x + 14 * 86400e3, Date.parse("2026-10-04T00:00:00.000Z"))).toISOString() })); return out; };
+    const ok = av({ ancoraDescoberta: null, janelas: corpusDe(desde) });
+    assert(ok.completude === "COMPLETE" && ok.baseDescoberta === "POLITICA_PRAZO_PAGAMENTO" && ok.descobertaDesde === desde.toISOString(), JSON.stringify(ok));
+    const curto = av({ ancoraDescoberta: null, janelas: corpusDe(new Date(desde.getTime() + 1000)) });
+    assert(curto.completude === "PARTIAL" && curto.motivos.includes("descoberta_por_create_time_nao_provada"), JSON.stringify(curto));
+  });
+  t("4c2. POLITICA: sentinela — pedido do periodo com atraso de pagamento > 10d, ou create_time desconhecido → PARTIAL", () => {
+    const lento = pedido("X", { createTime: "2026-09-21T14:59:59.000Z" }); // 10d + 1s antes do pagamento
+    const r1 = av({ ancoraDescoberta: null, pedidosPagos: [lento] });
+    assert(r1.completude === "PARTIAL" && r1.motivos.includes("atraso_de_pagamento_acima_da_politica:1"), JSON.stringify(r1));
+    const limite = pedido("X", { createTime: "2026-09-22T15:00:00.000Z" }); // exatamente 10d
+    assert(av({ ancoraDescoberta: null, pedidosPagos: [limite] }).completude === "COMPLETE", "10d exatos devia passar");
+    const r2 = av({ ancoraDescoberta: null, pedidosPagos: [pedido("X", { createTime: null })] });
+    assert(r2.completude === "PARTIAL" && r2.motivos.includes("create_time_desconhecido:1"), JSON.stringify(r2));
+    // com ANCORA provada o sentinela nao se aplica: o corpus inteiro e a prova
+    assert(av({ pedidosPagos: [lento] }).completude === "COMPLETE", "ancora provada nao devia depender do prazo");
   });
   t("4d. buraco no corpus / corpus que nao alcanca o fim do dia / que comeca depois da ancora → PARTIAL", () => {
     const comBuraco = corpus().filter((_, i) => i !== 2);
@@ -296,11 +311,12 @@ async function principal() {
     assert(em.map((p) => p.orderSn).sort().join() === "ADV10,ADV30", em.map((p) => p.orderSn).join());
     assert(av({ pedidosPagos: [advTrinta], itens: [item("ADV30")] }).completude === "COMPLETE", "corpus");
   });
-  t("ADV-z. nenhuma margem de N dias nem update_time na regra de completude", () => {
+  t("ADV-z. nenhuma margem OBSERVADA de N dias nem update_time na regra; so o limite da politica publicada", () => {
     const fonte = readFileSync(join(RAIZ, "lib/vendas/canonico/shopee.ts"), "utf8");
     const corpo = fonte.slice(fonte.indexOf("export function alcanceDescobertaCriacao"), fonte.indexOf("// ── Leitura do banco"))
       .replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
     assert(corpo.length > 100 && !/MARGEM_OPERACIONAL|LAG_MAXIMO|7 \* 24|86400/.test(corpo), "margem usada na completude");
+    assert(/LIMITE_POLITICA_PAGAMENTO_MS = 10 \* 24 \* 3600 \* 1000;/.test(fonte) && /Central de Ajuda/.test(fonte), "limite da politica sem fonte");
     assert(!/watermarkUpdateTime/.test(fonte), "watermark de update_time ainda existe");
     // update_time so aparece como DIAGNOSTICO (motivo), nunca no alcance
     const alc = corpo.slice(0, corpo.indexOf("export function avaliarCompletudeShopee"));
@@ -363,9 +379,17 @@ async function principal() {
     try { await S.lerVendasShopee(clienteFalso(base(), []), { userId: UID, de: "2026-10-02", ate: "2026-10-02", lojaIds: [L2] }); } catch (e: any) { erro = e.message; }
     assert(erro === "loja_invalida", erro || "nao lancou");
   });
-  t("5c. sem ancora (estado atual de producao) → PARTIAL e total NULL, mesmo com update_time 'completo'", async () => {
-    const r = await S.lerVendasShopee(clienteFalso(base(), []), { userId: UID, de: "2026-10-02", ate: "2026-10-02" });
-    assert(r.completude === "PARTIAL" && r.total === null && r.lojas[0].metricas === null && r.lojas[0].motivos.includes("ancora_de_descoberta_indefinida"), JSON.stringify(r));
+  t("5c. sem ancora: so update_time 'completo' (sem corpus create_time) → PARTIAL e total NULL", async () => {
+    const d = base(); d.sync_jobs = d.sync_jobs.filter((j) => j.campo_tempo === "update_time");
+    const r = await S.lerVendasShopee(clienteFalso(d, []), { userId: UID, de: "2026-10-02", ate: "2026-10-02" });
+    assert(r.completude === "PARTIAL" && r.total === null && r.lojas[0].metricas === null && r.lojas[0].motivos.includes("descoberta_por_create_time_nao_provada"), JSON.stringify(r));
+  });
+  t("5c2. sem ancora + corpus create_time cobrindo inicio − 10d → COMPLETE pela POLITICA, e o B so olha o corpus relevante", async () => {
+    const regs: Reg[] = [];
+    const r = await S.lerVendasShopee(clienteFalso(base(), regs), { userId: UID, de: "2026-10-02", ate: "2026-10-02" });
+    assert(r.completude === "COMPLETE" && r.lojas[0].baseDescoberta === "POLITICA_PRAZO_PAGAMENTO" && r.total?.pedidos === 1, JSON.stringify(r));
+    const b = regs.filter((g) => g.tabela === "shopee_pedidos" && g.head);
+    assert(b.length === 2 && b.every((g) => g.filtros.some(([op, c, v]) => op === "gte" && c === "create_time" && v === "2026-09-22T03:00:00.000Z")), JSON.stringify(b));
   });
   t("5d. pedido do corpus nao pago visto so antes do fim do dia → PARTIAL (poderia ter sido pago no dia)", async () => {
     const d = base();
@@ -373,6 +397,44 @@ async function principal() {
       update_time: "2026-10-01T10:00:00.000Z", detail_fetched_at: "2026-10-02T20:00:00.000Z", escrow_fetched_at: null as any, escrow_update_time: null as any, original_shopee_discount: null as any, pix_discount: null as any });
     const r = await S.lerVendasShopee(clienteFalso(d, []), { userId: UID, de: "2026-10-02", ate: "2026-10-02", ancorasDescoberta: ANC });
     assert(r.completude === "PARTIAL" && r.total === null && r.lojas[0].motivos.includes("nao_pagos_sem_observacao_pos_periodo:1"), JSON.stringify(r));
+  });
+
+  console.log("\n[7. PERIODOS (S2-D3-B3): pay_time em America/Sao_Paulo, [inicio 00:00, dia seguinte ao fim 00:00)]");
+  const em = (de: string, ate: string, pay: string) => { const { inicio, fim } = S.intervaloSaoPaulo(de, ate); return S.filtrarPagosNoIntervalo([pedido("P", { payTime: pay })], inicio, fim).length === 1; };
+  const met = (de: string, ate: string) => { const { inicio, fim } = S.intervaloSaoPaulo(de, ate); return S.calcularMetricasShopee(S.filtrarPagosNoIntervalo(pedidosFx, inicio, fim), itensFx).metricas; };
+  t("7A. um unico dia (02/10) = Seller Center 939/15/22719.10/22205.82", () => {
+    const m = met("2026-10-02", "2026-10-02");
+    assert(m.pedidos === 939 && m.cancelados === 15 && m.vendas === 22719.10 && m.vendasSemDescontosPlataforma === 22205.82, JSON.stringify(m));
+  });
+  t("7B. 01/10 → 03/10 = 2828 / 62 / 68378.37 / 67008.24 (exato)", () => {
+    const m = met("2026-10-01", "2026-10-03");
+    assert(m.pedidos === 2828 && m.cancelados === 62 && m.vendas === 68378.37 && m.vendasSemDescontosPlataforma === 67008.24, JSON.stringify(m));
+  });
+  t("7C/D. inicio incluso; fim selecionado incluso comercialmente = dia seguinte 00:00 EXCLUSIVO", () => {
+    const { inicio, fim } = S.intervaloSaoPaulo("2026-10-01", "2026-10-03");
+    assert(inicio.toISOString() === "2026-10-01T03:00:00.000Z" && fim.toISOString() === "2026-10-04T03:00:00.000Z", `${inicio.toISOString()} ${fim.toISOString()}`);
+  });
+  t("7E-H. 30/09 23:59:59 fora; 01/10 00:00 dentro; 03/10 23:59:59 dentro; 04/10 00:00 fora (horario de Sao Paulo)", () => {
+    assert(!em("2026-10-01", "2026-10-03", "2026-10-01T02:59:59.000Z"), "E");
+    assert(em("2026-10-01", "2026-10-03", "2026-10-01T03:00:00.000Z"), "F");
+    assert(em("2026-10-01", "2026-10-03", "2026-10-04T02:59:59.000Z"), "G");
+    assert(!em("2026-10-01", "2026-10-03", "2026-10-04T03:00:00.000Z"), "H");
+    assert(em("2026-10-01", "2026-10-03", "2026-10-04T02:59:59.999Z") && !em("2026-10-01", "2026-10-03", "2026-10-01T02:59:59.999Z"), "milissegundo da borda");
+  });
+  t("7I/J. fuso America/Sao_Paulo pela tabela (nao -3h fixo): periodo cruzando o inicio do horario de verao de 2018", () => {
+    // 04/11/2018 comecou o horario de verao (UTC-2): 03/11 00:00 = 03:00Z, 05/11 00:00 = 02:00Z
+    const { inicio, fim } = S.intervaloSaoPaulo("2018-11-03", "2018-11-04");
+    assert(inicio.toISOString() === "2018-11-03T03:00:00.000Z" && fim.toISOString() === "2018-11-05T02:00:00.000Z", `${inicio.toISOString()} ${fim.toISOString()}`);
+    assert(em("2018-11-03", "2018-11-04", "2018-11-05T01:59:59.000Z") && !em("2018-11-03", "2018-11-04", "2018-11-05T02:00:00.000Z"), "borda no horario de verao");
+  });
+  t("7K. AGREGACAO: metric(01→03) = metric(01) + metric(02) + metric(03) em pedidos, cancelados, unidades, vendas e sem descontos — sem erro de arredondamento", () => {
+    const tot = met("2026-10-01", "2026-10-03");
+    const dias = ["2026-10-01", "2026-10-02", "2026-10-03"].map((d) => met(d, d));
+    const soma = S.somarMetricas(dias);
+    assert(JSON.stringify(tot) === JSON.stringify(soma), `${JSON.stringify(tot)} != ${JSON.stringify(soma)}`);
+    const c = (x: number) => Math.round(x * 100);
+    assert(c(tot.vendas) === dias.reduce((s, m) => s + c(m.vendas), 0) && c(tot.vendasSemDescontosPlataforma) === dias.reduce((s, m) => s + c(m.vendasSemDescontosPlataforma), 0), "centavos");
+    assert(tot.unidades === dias.reduce((s, m) => s + m.unidades, 0) && tot.unidades > 0, "unidades");
   });
 
   console.log("\n[6. fonte unica da formula]");
