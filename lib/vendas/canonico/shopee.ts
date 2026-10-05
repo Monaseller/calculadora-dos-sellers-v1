@@ -248,7 +248,10 @@ export function avaliarCompletudeShopee(args: {
 }): { completude: Completude; motivos: string[]; watermark: string | null } {
   const { inicio, fim, janelas, pedidosPagos, itens } = args;
   const a = inicio.getTime(), b = fim.getTime();
-  const completas = janelas.filter((j) => j.listagemCompleta === true);
+  // Evidencia = listagem completa E job concluido (S2-D2): um job que listou
+  // tudo mas terminou em `erro` (pedido listado que nunca materializou) nao
+  // prova cobertura — o pedido faltante nem existe em shopee_pedidos.
+  const completas = janelas.filter((j) => j.listagemCompleta === true && j.status === "concluido");
   const w = watermarkUpdateTime(completas.filter((j) => j.campoTempo === "update_time"), a);
   const porUpdate = w !== null && w >= b;
   const watermark = w === null ? null : new Date(w).toISOString();

@@ -165,6 +165,13 @@ async function principal() {
     const r = S.avaliarCompletudeShopee({ ...dia, janelas: [janelaOk({ listagemCompleta: false })], pedidosPagos: [pedido("X")], itens: [item("X")] });
     assert(r.completude !== "COMPLETE", JSON.stringify(r));
   });
+  t("4d2. listagem completa mas job em 'rodando' ou 'erro' nao prova (S2-D2: pedido listado pode nao ter materializado)", () => {
+    for (const status of ["rodando", "erro"]) {
+      const cadeia = cadeiaOk().map((j, i) => (i === 0 ? { ...j, status } : j));
+      const r = S.avaliarCompletudeShopee({ ...dia, janelas: cadeia, pedidosPagos: [pedido("X")], itens: [item("X")] });
+      assert(r.completude !== "COMPLETE", `${status}: ${JSON.stringify(r)}`);
+    }
+  });
   t("4e. escrow lido antes da ultima mudanca do pedido = PARTIAL (escrow desatualizado)", () => {
     const r = S.avaliarCompletudeShopee({ ...dia, janelas: cadeiaOk(), pedidosPagos: [pedido("X", { updateTime: "2026-10-03T10:00:00.000Z" })], itens: [item("X")] });
     assert(r.completude === "PARTIAL" && r.motivos.some((m) => m.startsWith("escrow_ausente_ou_desatualizado")), JSON.stringify(r));
@@ -308,9 +315,18 @@ async function principal() {
   t("6a. componentes de escrow e formulas so aparecem no servico canonico (e migration/testes)", () => {
     const arqs = execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard", "app", "lib", "components"], { cwd: RAIZ, encoding: "utf8" })
       .split(/\r?\n/).filter((f) => /\.(ts|tsx)$/.test(f));
-    const fora = arqs.filter((f) => f !== "lib/vendas/canonico/shopee.ts" &&
+    // S2-D2: o motor de ingestao GRAVA os componentes (tipos/normalizacao/
+    // persistencia) — isso e esperado. O que nao pode existir fora do
+    // servico canonico e CALCULO com eles.
+    const ARMAZENAM = ["lib/vendas/canonico/shopee.ts", "lib/shopee/ingestao/tipos.ts",
+      "lib/shopee/ingestao/normalizar.ts", "lib/shopee/ingestao/persistencia.ts"];
+    const fora = arqs.filter((f) => !ARMAZENAM.includes(f) &&
       /escrow_voucher_seller|escrow_voucher_shopee|escrow_coin|shopee_pedidos/.test(readFileSync(join(RAIZ, f), "utf8")));
     assert(fora.length === 0, fora.join(", "));
+    const calculo = /[-+*]\s*[\w.!?()]*\b(pix_discount|original_shopee_discount|escrow_voucher_seller|escrow_voucher_shopee|escrow_coin|pixDiscount|originalShopeeDiscount|voucherVendedor|voucherShopee|moedas)\b/;
+    const calculam = arqs.filter((f) => f !== "lib/vendas/canonico/shopee.ts" && f.startsWith("lib/") &&
+      calculo.test(readFileSync(join(RAIZ, f), "utf8").replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "")));
+    assert(calculam.length === 0, `calculo com componentes fora do servico canonico: ${calculam.join(", ")}`);
   });
   t("6b. o servico e server-only e nao conhece UI", () => {
     const s = readFileSync(join(RAIZ, "lib/vendas/canonico/shopee.ts"), "utf8");
