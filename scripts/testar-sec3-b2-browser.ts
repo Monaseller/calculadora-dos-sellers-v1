@@ -534,14 +534,18 @@ async function principal() {
 
   // ══ M. escopo ═════════════════════════════════════════════════════
   console.log("\n[M. nenhuma migration / grant / RLS]");
-  t("M1. nada em supabase/ mudou desde a base", () => {
-    const d = git("diff", "--name-only", BASE, "--", "supabase").trim();
-    const novos = git("ls-files", "--others", "--exclude-standard", "supabase").trim();
-    assert(d === "" && novos === "", `${d} ${novos}`);
+  // SEC-3-C: a migration de lockdown e a unica mudanca aprovada em
+  // supabase/ (validada por scripts/testar-sec3-c-lockdown.ts).
+  const MIGRACAO_SEC3C = "supabase/migrations/20261026_sec3c_lockdown_tabelas_publicas.sql";
+  t("M1. nada em supabase/ mudou desde a base (alem da migration SEC-3-C)", () => {
+    const d = git("diff", "--name-only", BASE, "--", "supabase").split(/\r?\n/).filter((f) => f && f !== MIGRACAO_SEC3C);
+    const novos = git("ls-files", "--others", "--exclude-standard", "supabase").split(/\r?\n/).filter((f) => f && f !== MIGRACAO_SEC3C);
+    assert(d.length === 0 && novos.length === 0, `${d} ${novos}`);
   });
   t("M2. nenhum GRANT/REVOKE/RLS/POLICY introduzido", () => {
-    const d = git("diff", BASE, "--", ".", ":(exclude)scripts/testar-sec3-*.ts");
-    const novos = git("ls-files", "--others", "--exclude-standard").split(/\r?\n/).filter((f) => f && !/^scripts\/testar-sec3-/.test(f));
+    const d = git("diff", BASE, "--", ".", ":(exclude)scripts/testar-sec3-*.ts", `:(exclude)${MIGRACAO_SEC3C}`);
+    const novos = git("ls-files", "--others", "--exclude-standard").split(/\r?\n/)
+      .filter((f) => f && !/^scripts\/testar-sec3-/.test(f) && f !== MIGRACAO_SEC3C);
     const linhas = [
       ...d.split(/\r?\n/).filter((l) => l.startsWith("+") && !l.startsWith("+++")),
       ...novos.flatMap((f) => readFileSync(join(RAIZ, f), "utf8").split(/\r?\n/)),

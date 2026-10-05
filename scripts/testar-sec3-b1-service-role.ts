@@ -529,15 +529,22 @@ async function principal() {
     const cliente = d.filter((f) => fonte.has(f) && browser.has(f) && !BROWSER_PENDENTE.includes(f));
     assert(cliente.length === 0, cliente.join(", "));
   });
-  t("K1. nenhuma migration / arquivo em supabase/ mudou", () => {
-    const d = git("diff", "--name-only", BASE, "--", "supabase").trim();
-    assert(d === "", d);
+  // SEC-3-C: a migration de lockdown e a unica mudanca aprovada em
+  // supabase/ (validada por scripts/testar-sec3-c-lockdown.ts).
+  t("K1. nenhuma migration / arquivo em supabase/ mudou (alem da migration SEC-3-C)", () => {
+    const d = git("diff", "--name-only", BASE, "--", "supabase").split(/\r?\n/)
+      .filter((f) => f && f !== "supabase/migrations/20261026_sec3c_lockdown_tabelas_publicas.sql");
+    assert(d.length === 0, d.join(", "));
   });
   // ── K2: mudanca de banco no diff ──────────────────────────────────
   // As suites SEC-3 (esta e a do B2) CONTEM o proprio padrao de busca, e
   // por isso ficam fora — so elas. Todo o resto do diff (inclusive outros
   // scripts e arquivos novos ainda nao commitados) continua varrido.
   const EXCLUSAO_K2 = ":(exclude)scripts/testar-sec3-*.ts";
+  // SEC-3-C: a migration de lockdown e a UNICA mudanca de banco aprovada;
+  // ela e validada linha a linha por scripts/testar-sec3-c-lockdown.ts.
+  // Qualquer outro GRANT/REVOKE/RLS/POLICY no diff continua reprovando.
+  const EXCLUSAO_SEC3C = ":(exclude)supabase/migrations/20261026_sec3c_lockdown_tabelas_publicas.sql";
   const RE_MUDANCA_BANCO =
     /\b(GRANT|REVOKE)\s+\w+|\b(ENABLE|DISABLE|FORCE)\s+ROW\s+LEVEL\s+SECURITY|ROW LEVEL SECURITY|\b(CREATE|ALTER|DROP)\s+POLICY\b/i;
   /** Linhas ADICIONADAS (diff unificado) que mudam grant/RLS/policy. */
@@ -545,8 +552,8 @@ async function principal() {
     diff.split(/\r?\n/).filter((l) => l.startsWith("+") && !l.startsWith("+++") && RE_MUDANCA_BANCO.test(l));
 
   t("K2. nenhum GRANT/REVOKE/RLS/POLICY introduzido no diff (fora das suites SEC-3)", () => {
-    const d = git("diff", BASE, "--", ".", EXCLUSAO_K2);
-    const novos = git("ls-files", "--others", "--exclude-standard", "--", ".", EXCLUSAO_K2)
+    const d = git("diff", BASE, "--", ".", EXCLUSAO_K2, EXCLUSAO_SEC3C);
+    const novos = git("ls-files", "--others", "--exclude-standard", "--", ".", EXCLUSAO_K2, EXCLUSAO_SEC3C)
       .split(/\r?\n/).filter(Boolean);
     const diffNovos = novos.map((f) => readFileSync(join(RAIZ, f), "utf8").split(/\r?\n/).map((l) => `+${l}`).join("\n")).join("\n");
     const sql = [...mudancasDeBanco(d), ...mudancasDeBanco(diffNovos)];
