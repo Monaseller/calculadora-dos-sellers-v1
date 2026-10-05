@@ -65,7 +65,10 @@ export interface CapacidadeProjetada {
   readonly descricao: string;
   readonly efeito: EfeitoDaCapacidade;
   readonly disponivel: boolean;
-  /** Ha permissao gravada (qualquer nivel conhecido) para esta capability. */
+  /**
+   * Habilitada = `automatico` ou `aprovacao`. `bloqueado` e "desligada" —
+   * a mesma regra do agregador de conexoes e do guard (F9.2-A3).
+   */
   readonly habilitadaNoAgente: boolean;
   readonly nivel: Nivel | null;
 }
@@ -137,7 +140,7 @@ export function projetarApisDoAgente(entrada: {
       return {
         id: c.id, nome: c.nome, descricao: c.descricao, efeito: c.efeito,
         disponivel: c.status === "disponivel",
-        habilitadaNoAgente: nivel !== null,
+        habilitadaNoAgente: nivel === "automatico" || nivel === "aprovacao",
         nivel,
       };
     });

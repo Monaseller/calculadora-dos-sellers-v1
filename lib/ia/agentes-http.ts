@@ -1706,7 +1706,10 @@ export interface CapacidadeDaApiUI {
   readonly id: string;
   readonly nome: string;
   readonly disponivel: boolean;
+  /** `automatico` ou `aprovacao`. `bloqueado`/sem linha = desligada. */
   readonly habilitadaNoAgente: boolean;
+  /** O nivel gravado, como o servidor devolveu; `null` = sem linha. */
+  readonly nivel: "automatico" | "aprovacao" | "bloqueado" | null;
 }
 
 export interface ApiDoAgenteUI {
@@ -1766,7 +1769,11 @@ function apiDaResposta(bruto: unknown): ApiDoAgenteUI | null {
   for (const c of bruto.capacidades) {
     if (!ehObjeto(c) || typeof c.id !== "string" || typeof c.nome !== "string" ||
         typeof c.disponivel !== "boolean" || typeof c.habilitadaNoAgente !== "boolean") return null;
-    capacidades.push({ id: c.id, nome: c.nome, disponivel: c.disponivel, habilitadaNoAgente: c.habilitadaNoAgente });
+    const nivel = c.nivel;
+    if (nivel !== null && nivel !== "automatico" && nivel !== "aprovacao" && nivel !== "bloqueado") return null;
+    capacidades.push({
+      id: c.id, nome: c.nome, disponivel: c.disponivel, habilitadaNoAgente: c.habilitadaNoAgente, nivel,
+    });
   }
   return { id, nome, disponivelParaAgentes, textoDeStatus, conexoes, contaDoAgente, capacidades };
 }

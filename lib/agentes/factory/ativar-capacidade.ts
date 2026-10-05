@@ -100,7 +100,7 @@ async function ativarPackInterno(entrada: {
     // F9.2-A2: a mesma heranca de conta do PATCH /permissoes, antes da
     // permissao. Tool passa direto; API com conta unica a reaproveita.
     const heranca = await herdarContaDoProvedor({
-      userId: entrada.userId, agenteId: entrada.agenteId, funcaoId,
+      userId: entrada.userId, agenteId: entrada.agenteId, funcaoId, nivel,
     });
     if (heranca.estado === "falha") return { estado: "falha" };
 

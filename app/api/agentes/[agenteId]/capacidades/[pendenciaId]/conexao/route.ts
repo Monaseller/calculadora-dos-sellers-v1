@@ -34,7 +34,7 @@ import {
   faltaParaCompletar, requisitosDeConexaoDoPack,
 } from "@/lib/agentes/factory/completar-capacidade";
 import { gerarLinkDeConexao } from "@/lib/agentes/composio/conexao";
-import { definirSelecaoDeLoja } from "@/lib/agentes/conexoes/selecao-escrita";
+import { aplicarContaAosRecursos } from "@/lib/agentes/apis/servico";
 import { responderNaConversa } from "@/lib/agentes/conversas/runtime";
 
 export const dynamic = "force-dynamic";
@@ -177,16 +177,17 @@ export async function PATCH(
       if (requisitos.length === 0) {
         return responder({ ok: false, erro: "Esta capacidade não pede conexão." }, 409);
       }
-      for (const r of requisitos) {
-        const d = await definirSelecaoDeLoja({
-          userId: porta.userId, agenteId: porta.agenteId,
-          plataforma: r.plataforma, recurso: r.recurso, lojaId,
-        });
-        // `definida` e o unico sucesso: a escrita e upsert, e substituir
-        // uma selecao anterior tambem devolve `definida`.
-        if (d.estado !== "definida") {
-          return responder({ ok: false, erro: FALHA, codigo: d.estado }, 409);
-        }
+      // F9.2-A3: a MESMA aplicacao tudo-ou-nada do PATCH /apis. Se uma
+      // linha falhar, as ja gravadas voltam ao estado anterior; nunca fica
+      // o provider com contas diferentes por recurso.
+      const aplicado = await aplicarContaAosRecursos({
+        userId: porta.userId, agenteId: porta.agenteId,
+        gravacoes: requisitos.map((r) => ({
+          tipo: "definir" as const, plataforma: r.plataforma, recurso: r.recurso, lojaId,
+        })),
+      });
+      if (!aplicado.ok) {
+        return responder({ ok: false, erro: FALHA, codigo: aplicado.codigo }, 409);
       }
       return await concluirERetomar(porta.userId, porta.agenteId, pendencia);
     }

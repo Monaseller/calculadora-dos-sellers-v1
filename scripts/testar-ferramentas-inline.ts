@@ -131,8 +131,13 @@ async function main(): Promise<void> {
   const pk3 = fetchRoteirizadoRemocao(500);
   const r8 = await comFetch(pk3.f, () => removerPackDoAgente(AGENTE, "planilhas"));
   ok("C5  falha do servidor -> recusado (a tela avisa)", r8.estado === "recusado");
+  // F9.2-A3: o arquivo agora tambem tem o DESLIGAR de uma capability de API
+  // (que e `bloqueado` por definicao, e nao e remocao). A cerca continua a
+  // mesma, sobre o fluxo de REMOCAO: o corpo de `removerPackDoAgente`.
+  const HELPERS = semComentario(ler("lib/ia/ferramentas-do-agente.ts"));
+  const REMOCAO = HELPERS.slice(HELPERS.indexOf("export async function removerPackDoAgente"));
   ok("C6  remover NUNCA vira bloqueado (nenhuma escrita de nivel no fluxo de remocao)",
-    !/"bloqueado"/.test(PAINEL + GER + semComentario(ler("lib/ia/ferramentas-do-agente.ts"))));
+    REMOCAO.length > 50 && !/"bloqueado"|definirPermissaoDeFuncao/.test(PAINEL + GER + REMOCAO));
   ok("C7  painel: pack por removerPackDoAgente, externa por desvincularFerramentaExterna",
     /removerPackDoAgente\(agente\.id, packId\)/.test(PAINEL) &&
       /desvincularFerramentaExterna\(agente\.id, funcaoId\)/.test(PAINEL));

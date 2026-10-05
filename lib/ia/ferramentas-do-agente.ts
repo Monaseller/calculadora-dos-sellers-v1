@@ -57,6 +57,46 @@ export async function adicionarPackAoAgente(
   return { estado: "ok" };
 }
 
+/**
+ * Liga ou desliga UMA capability de API — F9.2-A3.
+ *
+ * Mesmo contrato de sempre (PATCH /permissoes por `funcao_id`), sem
+ * semantica nova: ligar grava o nivel do provider (`automatico` ou
+ * `aprovacao`); desligar grava `bloqueado`. Desligar NAO remove a conta do
+ * provider nem toca as outras capabilities. Ao ligar, o servidor herda a
+ * conta do provider para o recurso dela antes de gravar.
+ */
+export async function definirCapacidadeDaApi(
+  agenteId: string,
+  funcaoId: string,
+  ligada: boolean,
+  nivelQuandoLigada: "automatico" | "aprovacao"
+): Promise<ResultadoAdicionarPack> {
+  const r = await definirPermissaoDeFuncao(agenteId, {
+    funcaoId, nivel: ligada ? nivelQuandoLigada : "bloqueado",
+  });
+  return r.estado === "ok" ? { estado: "ok" } : { estado: "recusado", resposta: r };
+}
+
+/**
+ * Muda o nivel do provider aplicando-o SO as capabilities ligadas — F9.2-A3.
+ *
+ * `adicionarPackAoAgente(pack, nivel)` grava TODAS as Funcoes do pack, e
+ * religaria uma capability que o dono desligou. Aqui o nivel vale para as
+ * ligadas; as desligadas continuam `bloqueado`.
+ */
+export async function definirNivelDasCapacidadesDaApi(
+  agenteId: string,
+  funcaoIdsLigadas: readonly string[],
+  nivel: NivelAutonomia
+): Promise<ResultadoAdicionarPack> {
+  for (const funcaoId of funcaoIdsLigadas) {
+    const r = await definirPermissaoDeFuncao(agenteId, { funcaoId, nivel });
+    if (r.estado !== "ok") return { estado: "recusado", resposta: r };
+  }
+  return { estado: "ok" };
+}
+
 export type ResultadoRemoverPack =
   | { readonly estado: "ok" }
   | { readonly estado: "pack_desconhecido" }

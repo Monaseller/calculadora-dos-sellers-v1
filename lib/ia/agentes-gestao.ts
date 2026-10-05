@@ -301,6 +301,8 @@ export function planoDeConexao(
  */
 export type PlanoDaApi =
   | { tipo: "indisponivel" }
+  /** Nenhuma capability ligada: nao ha conta a exigir agora. */
+  | { tipo: "sem_requisito" }
   | { tipo: "pronta"; lojaId: string }
   | { tipo: "auto"; lojaId: string }
   | { tipo: "escolher" }
@@ -311,15 +313,43 @@ export function planoDaApi(
 ): PlanoDaApi {
   if (!api.disponivelParaAgentes) return { tipo: "indisponivel" };
   const c = api.contaDoAgente;
+  if (c.estado === "sem_requisito") return { tipo: "sem_requisito" };
   const elegivel = (id: string) => api.conexoes.some((l) => l.id === id);
   if (c.estado === "definida" && c.utilizavel && elegivel(c.lojaId)) return { tipo: "pronta", lojaId: c.lojaId };
   if (api.conexoes.length === 0) return { tipo: "conectar_conta" };
   // Completar o que ja foi escolhido com a MESMA conta nao e escolher por ele.
   if (c.estado === "incompleta" && elegivel(c.lojaId)) return { tipo: "auto", lojaId: c.lojaId };
-  if ((c.estado === "nenhuma" || c.estado === "sem_requisito") && api.conexoes.length === 1) {
+  if (c.estado === "nenhuma" && api.conexoes.length === 1) {
     return { tipo: "auto", lojaId: api.conexoes[0].id };
   }
   return { tipo: "escolher" };
+}
+
+/**
+ * As capabilities que a aba APIs mostra — F9.2-A3: SO as disponiveis do
+ * catalogo, na ordem dele. Nada de futuras, ids crus ou packs.
+ */
+export function capacidadesVisiveisDaApi(
+  api: Pick<ApiDoAgenteUI, "capacidades">
+): ApiDoAgenteUI["capacidades"] {
+  return api.capacidades.filter((c) => c.disponivel);
+}
+
+/**
+ * O nivel do provider no seletor: o nivel COMUM das capabilities ligadas.
+ * Nenhuma ligada -> `bloqueado`. Ligadas com niveis diferentes -> `null`.
+ */
+export function nivelDaApi(api: Pick<ApiDoAgenteUI, "capacidades">): string | null {
+  const ligadas = capacidadesVisiveisDaApi(api).filter((c) => c.habilitadaNoAgente);
+  if (ligadas.length === 0) return "bloqueado";
+  const niveis = new Set(ligadas.map((c) => c.nivel));
+  return niveis.size === 1 ? (ligadas[0].nivel as string) : null;
+}
+
+/** O nivel com que uma capability e LIGADA: o do provider, senao automatico. */
+export function nivelParaLigar(api: Pick<ApiDoAgenteUI, "capacidades">): "automatico" | "aprovacao" {
+  const n = nivelDaApi(api);
+  return n === "aprovacao" ? "aprovacao" : "automatico";
 }
 
 /** A conta que o select do provider mostra: a escolhida, se for uma so. */

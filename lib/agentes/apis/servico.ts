@@ -16,6 +16,7 @@ import "server-only";
  */
 import { resolverConexoesDoAgente } from "@/lib/agentes/conexoes/agregador";
 import { definirSelecaoDeLoja, removerSelecaoDeLoja } from "@/lib/agentes/conexoes/selecao-escrita";
+import { resolverSelecoesDoAgente } from "@/lib/agentes/conexoes/selecao-fatos";
 import { listarPermissoesGravadas } from "@/lib/agentes/permissoes/gravadas";
 import { listarLojasConectadasDoDono } from "@/lib/marketplace/credenciais";
 import {
@@ -32,7 +33,10 @@ import {
   type ContaDoDono,
   type ProvedorProjetado,
 } from "@/lib/agentes/apis/projecao";
-import { aplicarComCompensacao, chaveDaLinha, type PortasDeConta } from "@/lib/agentes/apis/aplicacao";
+import {
+  aplicarComCompensacao, chaveDaLinha, type PortasDeConta, type ResultadoDaAplicacao,
+} from "@/lib/agentes/apis/aplicacao";
+import type { GravacaoDeConta } from "@/lib/agentes/apis/projecao";
 
 async function contasDoMarketplace(userId: string, marketplace: string): Promise<ContaDoDono[] | null> {
   const { linhas, erro } = await listarLojasConectadasDoDono(userId, marketplace);
@@ -139,16 +143,35 @@ export async function definirContaDoProvedor(entrada: {
   });
   if (!plano.ok) return plano;
 
-  const anteriores = new Map(
-    resolvido.requisitos
-      .filter((r) => r.plataforma === provedor.plataforma)
-      .map((r) => [chaveDaLinha(r), r.lojaIdSelecionada] as const)
-  );
-  const aplicado = await aplicarComCompensacao(plano.gravacoes, anteriores, portasReais(userId, agenteId));
+  const aplicado = await aplicarContaAosRecursos({ userId, agenteId, gravacoes: plano.gravacoes });
   if (!aplicado.ok) {
     return { ok: false, codigo: aplicado.codigo === "inconsistente" ? "inconsistente" : "falha" };
   }
   return { ok: true, provedor: plano.provedor, recursos: plano.gravacoes.map((g) => g.recurso) };
+}
+
+/**
+ * A UNICA forma de gravar a conta de um provider em varios recursos —
+ * F9.2-A3. Usada pelo PATCH /apis e pela escolha de loja no chat
+ * (`capacidades/[pendenciaId]/conexao`): os dois fluxos que escolhem conta
+ * tem a MESMA semantica tudo-ou-nada, sem segunda implementacao de volta.
+ *
+ * O estado anterior vem das linhas GRAVADAS (`resolverSelecoesDoAgente`,
+ * dono conferido), e nao so dos requisitos: uma linha de recurso hoje
+ * desligado tambem volta ao que era se a escrita falhar.
+ */
+export async function aplicarContaAosRecursos(entrada: {
+  readonly userId: string;
+  readonly agenteId: string;
+  readonly gravacoes: readonly GravacaoDeConta[];
+}): Promise<ResultadoDaAplicacao | { readonly ok: false; readonly codigo: "falha_leitura" }> {
+  const { userId, agenteId } = entrada;
+  const lidas = await resolverSelecoesDoAgente({ userId, agenteId });
+  if (lidas.coleta !== "ok") return { ok: false, codigo: "falha_leitura" };
+  const anteriores = new Map<string, string | null>(
+    lidas.selecoes.map((s) => [chaveDaLinha(s), s.lojaId] as const)
+  );
+  return aplicarComCompensacao(entrada.gravacoes, anteriores, portasReais(userId, agenteId));
 }
 
 export type ResultadoDaHeranca =
@@ -156,6 +179,8 @@ export type ResultadoDaHeranca =
       readonly estado:
         /** A Funcao nao e capability de API (Tool, externa): nada a fazer. */
         | "nao_e_api"
+        /** O nivel pedido nao habilita (`bloqueado`): desligar nao mexe em conta. */
+        | "nao_habilita"
         /** O recurso ja tem conta escolhida. */
         | "ja_vinculada"
         /** O provider ainda nao tem conta: a capability fica sem cobertura. */
@@ -185,10 +210,15 @@ export async function herdarContaDoProvedor(entrada: {
   readonly userId: string;
   readonly agenteId: string;
   readonly funcaoId: string;
+  /** O nivel que vai ser gravado. So `automatico`/`aprovacao` habilitam. */
+  readonly nivel: string;
 }): Promise<ResultadoDaHeranca> {
   const { userId, agenteId } = entrada;
   const capacidade = capacidadeDaFuncao(entrada.funcaoId);
   if (capacidade === null) return { estado: "nao_e_api" };
+  // Desligar (bloqueado) nao cria nem troca conta: a conta do provider
+  // continua a mesma para as outras capabilities (F9.2-A3).
+  if (entrada.nivel !== "automatico" && entrada.nivel !== "aprovacao") return { estado: "nao_habilita" };
   const provedor = provedorPorId(capacidade.provedor);
   if (provedor === null) return { estado: "nao_e_api" };
 
@@ -199,7 +229,17 @@ export async function herdarContaDoProvedor(entrada: {
     r.plataforma === provedor.plataforma && r.recurso === capacidade.recurso && r.lojaIdSelecionada !== null);
   if (jaTem) return { estado: "ja_vinculada" };
 
-  const herdada = contaParaHerdar(provedor, resolvido.requisitos);
+  // Primeiro as capabilities LIGADAS (requisitos). Se nenhuma ligada tem
+  // conta — ex.: todas foram desligadas e uma volta agora —, as linhas
+  // GRAVADAS do provider dizem qual era a conta. Divergente: nao adivinha.
+  let herdada = contaParaHerdar(provedor, resolvido.requisitos);
+  if ("motivo" in herdada && herdada.motivo === "sem_conta") {
+    const lidas = await resolverSelecoesDoAgente({ userId, agenteId });
+    if (lidas.coleta !== "ok") return { estado: "falha" };
+    herdada = contaParaHerdar(provedor, lidas.selecoes.map((s) => ({
+      plataforma: s.plataforma, recurso: s.recurso, lojaIdSelecionada: s.lojaId, utilizavel: true,
+    })));
+  }
   if ("motivo" in herdada) return { estado: herdada.motivo };
 
   const elegiveis = await contasDoMarketplace(userId, provedor.marketplace);

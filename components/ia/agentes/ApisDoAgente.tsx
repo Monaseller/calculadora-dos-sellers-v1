@@ -31,10 +31,13 @@ import {
   definirPermissaoDeFerramentaExterna, desvincularFerramentaExterna,
   type ApiDoAgenteUI, type AtivacaoDoAgenteUI,
 } from "@/lib/ia/agentes-http";
-import { adicionarPackAoAgente, removerPackDoAgente } from "@/lib/ia/ferramentas-do-agente";
+import {
+  adicionarPackAoAgente, definirCapacidadeDaApi, definirNivelDasCapacidadesDaApi, removerPackDoAgente,
+} from "@/lib/ia/ferramentas-do-agente";
 import { ICONE_ACAO_EXTERNA } from "@/lib/ia/icones-ferramentas";
 import {
-  INTEGRACOES_CDS, contaEmUsoDaApi, contaSelecionadaDaApi, nomeDaConta, planoDaApi,
+  INTEGRACOES_CDS, capacidadesVisiveisDaApi, contaEmUsoDaApi, contaSelecionadaDaApi, nivelDaApi,
+  nivelParaLigar, nomeDaConta, planoDaApi,
   type IntegracaoCds, type ProjecaoDeCapacidades,
 } from "@/lib/ia/agentes-gestao";
 import SeletorDeNivel, { nivelDoPack } from "@/components/ia/agentes/SeletorDeNivel";
@@ -44,6 +47,20 @@ type Escrever = (acao: () => Promise<{ estado: string; mensagem?: string }>, fal
 
 function cx(...c: (string | false | null | undefined)[]): string {
   return c.filter(Boolean).join(" ");
+}
+
+/** O interruptor aprovado da pagina Agentes (`.interruptor`), para capabilities. */
+function Interruptor({
+  ligado, aoMudar, rotulo, desabilitado,
+}: { ligado: boolean; aoMudar: (v: boolean) => void; rotulo: string; desabilitado?: boolean }) {
+  return (
+    <button
+      type="button" role="switch" aria-checked={ligado} aria-label={rotulo}
+      disabled={desabilitado}
+      onClick={() => aoMudar(!ligado)}
+      className={cx(estilos.interruptor, ligado && estilos.interruptorLigado)}
+    />
+  );
 }
 
 /** Resultado de pack no formato que `escrever` entende. */
@@ -156,7 +173,11 @@ export default function ApisDoAgente({
           const pack = i.packId === null ? null : cap.packsDeApi.find((f) => f.id === i.packId) ?? null;
           const plano = api === null ? null : planoDaApi(api);
           const semLoja = ativacao.conexoesSemLoja.some((c) => c.plataforma === i.plataforma);
-          const pronta = pack !== null && !semLoja && (plano === null || plano.tipo === "pronta");
+          const pronta = pack !== null && !semLoja &&
+            (plano === null || plano.tipo === "pronta" || plano.tipo === "sem_requisito");
+          // F9.2-A3: SO as capabilities reais do catalogo, com o estado deste agente.
+          const capacidades = api === null ? [] : capacidadesVisiveisDaApi(api);
+          const ligadas = capacidades.filter((c) => c.habilitadaNoAgente).map((c) => c.id);
           const contaEmUso = api === null ? null : contaEmUsoDaApi(api);
           const semContaNaCds = contas !== null && contas.length === 0;
 
@@ -204,8 +225,13 @@ export default function ApisDoAgente({
                   <>
                     <SeletorDeNivel
                       rotulo={`Quando o agente pode usar o ${i.nome}`}
-                      valor={nivelDoPack(pack)} desabilitado={ocupado}
-                      aoMudar={(n) => void escrever(() => comoEscrita(adicionarPackAoAgente(agenteId, pack.id, n)),
+                      valor={api === null ? nivelDoPack(pack) : nivelDaApi(api)} desabilitado={ocupado}
+                      // F9.2-A3: o nivel vale para as capabilities LIGADAS (ou todas, se
+                      // nenhuma estiver) — nunca religa uma que o dono desligou.
+                      aoMudar={(n) => void escrever(() => comoEscrita(api === null
+                        ? adicionarPackAoAgente(agenteId, pack.id, n)
+                        : definirNivelDasCapacidadesDaApi(agenteId,
+                            ligadas.length > 0 ? ligadas : capacidades.map((c) => c.id), n)),
                         "Não foi possível salvar a permissão.")}
                     />
                     {!pronta && (
@@ -232,6 +258,26 @@ export default function ApisDoAgente({
                   </>
                 )}
               </div>
+
+              {/* Capacidades do provider NESTE agente (F9.2-A3): so as reais, liga/desliga
+                  pelo PATCH /permissoes de sempre. Desligar nao mexe na conta. */}
+              {pack !== null && api !== null && capacidades.length > 0 && (
+                <div className={estilos.integracaoDetalhe} aria-label={`Capacidades do ${i.nome}`}>
+                  <span className={estilos.dica}>Capacidades</span>
+                  {capacidades.map((c) => (
+                    <div key={c.id} className={estilos.blocoLinha}>
+                      <span className={estilos.itemSub}>{c.nome}</span>
+                      <Interruptor
+                        ligado={c.habilitadaNoAgente} rotulo={`${c.nome} no ${i.nome}`} desabilitado={ocupado}
+                        aoMudar={(v) => void escrever(
+                          () => comoEscrita(definirCapacidadeDaApi(agenteId, c.id, v, nivelParaLigar(api))),
+                          v ? `Não foi possível ligar: ${c.nome}.` : `Não foi possível desligar: ${c.nome}.`,
+                        ).then(() => recarregar())}
+                      />
+                    </div>
+                  ))}
+                </div>
+              )}
 
               {/* Escolha de conta: UM seletor por provider (F9.2-A2). */}
               {escolhendo === i.chave && api !== null && (

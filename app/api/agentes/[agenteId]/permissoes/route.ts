@@ -267,7 +267,7 @@ export async function PATCH(request: Request, { params }: { params: { agenteId: 
     // nasce "permissao ativa + recurso sem conta" quando havia conta. Tool
     // e acao externa passam direto (`nao_e_api`).
     const heranca = await herdarContaDoProvedor({
-      userId: porta.userId, agenteId: porta.agenteId, funcaoId: leitura.funcaoId,
+      userId: porta.userId, agenteId: porta.agenteId, funcaoId: leitura.funcaoId, nivel: leitura.nivel,
     });
     if (heranca.estado === "falha") {
       return responder({ ok: false, erro: FALHA_ESCRITA }, 500);

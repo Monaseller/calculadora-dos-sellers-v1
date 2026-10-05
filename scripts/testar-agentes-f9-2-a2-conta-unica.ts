@@ -249,8 +249,12 @@ async function main(): Promise<void> {
     ok("F6  rota: inconsistente vira erro 500 com codigo, nunca ok",
       /case "inconsistente":[\s\S]*?codigo: "inconsistente"[\s\S]*?500/.test(rt));
     const sv = semComentarios(ler("lib/agentes/apis/servico.ts"));
+    // F9.2-A3: a aplicacao virou UMA porta (`aplicarContaAosRecursos`),
+    // com o estado anterior das linhas GRAVADAS — mesma garantia.
     ok("F7  servico: PATCH usa a aplicacao com compensacao e o estado anterior real",
-      /aplicarComCompensacao\(plano\.gravacoes, anteriores/.test(sv) && /r\.lojaIdSelecionada/.test(sv));
+      /aplicarContaAosRecursos\(\{ userId, agenteId, gravacoes: plano\.gravacoes \}\)/.test(sv) &&
+        /aplicarComCompensacao\(entrada\.gravacoes, anteriores/.test(sv) &&
+        /resolverSelecoesDoAgente\(\{ userId, agenteId \}\)/.test(sv) && /s\.lojaId/.test(sv));
   }
 
   // ═══════════════════════════════════════════════════════════════════
