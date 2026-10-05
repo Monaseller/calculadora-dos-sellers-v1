@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
-import { supabase, type Anuncio } from "@/lib/supabase";
+import { type Anuncio } from "@/lib/supabase";
 import { moeda } from "@/lib/cds-engine";
 import {
   interpretarConexaoML,
@@ -97,17 +97,17 @@ export default function AnunciosPage() {
     // já exibida por uma vazia. Sem esta guarda, trocaríamos "some 76
     // anúncios" por "somem todos quando a rede oscila".
     let houveResposta = false;
+    //
+    // SEC-3-B2: a MESMA página (`de`..`ate`, o antigo `.range`) agora vem
+    // de GET /api/anuncios. Filtros (`ativo`, dono) e ordem (`created_at`
+    // DESC + desempate por `id`) são aplicados no servidor; o dono é a
+    // sessão lá, não este `id`. Falha continua sendo `null`.
     const dados = await buscarPaginado<Anuncio>(async (de, ate) => {
-      const { data } = await supabase
-        .from("anuncios")
-        .select("*")
-        .eq("ativo", true)
-        .eq("user_id", id)
-        .order("created_at", { ascending: false })
-        .order("id", { ascending: false })
-        .range(de, ate);
+      const r = await fetch(`/api/anuncios?de=${de}&ate=${ate}`).catch(() => null);
+      const corpo = r && r.ok ? await r.json().catch(() => null) : null;
+      const data = corpo && Array.isArray(corpo.anuncios) ? (corpo.anuncios as Anuncio[]) : null;
       if (data) houveResposta = true;
-      return (data as Anuncio[] | null);
+      return data;
     });
     if (houveResposta) setAnuncios(dados);
     setLoading(false);
@@ -172,15 +172,18 @@ export default function AnunciosPage() {
     if (!userId) {
       return { confirmados: [], naoConfirmados: [...new Set(ids)], erro: "Sessão não identificada. Recarregue a página." };
     }
+    // SEC-3-B2: o soft delete de cada lote é POST /api/anuncios/desativar,
+    // que grava `ativo:false` com `user_id = sessão` e devolve só os ids
+    // confirmados — mesma semântica de antes, dono decidido no servidor.
     return desativarEmLotes(async (lote) => {
-      const { data, error } = await supabase
-        .from("anuncios")
-        .update({ ativo: false })
-        .in("id", lote)
-        .eq("user_id", userId)
-        .select("id");
-      if (error) return { ids: null, erro: error.message };
-      return { ids: (data ?? []).map((r: { id: string }) => r.id), erro: null };
+      const r = await fetch("/api/anuncios/desativar", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: lote }),
+      });
+      const corpo = await r.json().catch(() => null);
+      if (!r.ok) return { ids: null, erro: corpo?.erro ?? `HTTP ${r.status}` };
+      return { ids: Array.isArray(corpo?.ids) ? (corpo.ids as string[]) : [], erro: null };
     }, ids);
   }
 

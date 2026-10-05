@@ -1,14 +1,8 @@
 "use client";
 import React, { useEffect, useState, useCallback, useRef } from "react";
-import { createClient } from "@supabase/supabase-js";
 import DateRangePicker from "../vendas/DateRangePicker";
 import { useDateField } from "@/lib/date-field-context";
 import { addDays, calcularUltimos7Dias } from "@/lib/date-range-utils";
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
 
 type VendaRow = {
   orderId: string; data: string; anuncio: string; status: string;
@@ -658,11 +652,15 @@ export default function DashboardPage() {
       .then(r => r.json())
       .then(({ userId }) => {
         if (!userId) return;
-        supabase.from("anuncios")
-          .select("ml_item_id, thumbnail, nome, sku, marketplace, custo_produto, preco_anuncio, margem_contribuicao")
-          .eq("ativo", true)
-          .eq("user_id", userId)
-          .then(({ data }) => { if (data) { anunciosRef.current = data as Anuncio[]; setAnuncios(data as Anuncio[]); } });
+        // SEC-3-B2: mesma projeção e mesmo teto de uma página (0..999) de
+        // antes, agora por GET /api/anuncios — o dono é a sessão no servidor.
+        fetch("/api/anuncios?projecao=dashboard&de=0&ate=999")
+          .then(r => (r.ok ? r.json() : null))
+          .then(corpo => {
+            const data = corpo?.anuncios;
+            if (Array.isArray(data)) { anunciosRef.current = data as Anuncio[]; setAnuncios(data as Anuncio[]); }
+          })
+          .catch(() => {});
       })
       .catch(() => {});
 

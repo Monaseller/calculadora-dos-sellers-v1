@@ -282,22 +282,31 @@ async function principal() {
 
   const CARREGAR = corpoDaFuncao(CODIGO, "carregar");
 
+  // SEC-3-B2: a consulta saiu do browser para GET /api/anuncios. A página
+  // continua sendo pedida pela tela (buscarPaginado + de/ate); filtros,
+  // ordem, desempate e `range` passaram para lib/anuncios/servico.ts — e
+  // é LÁ que estes invariantes são cobrados agora.
+  const SERVICO = fs.readFileSync(path.join(RAIZ, "lib", "anuncios", "servico.ts"), "utf8");
+  const LISTAR = corpoDaFuncao(SERVICO, "listarAnunciosDoDono");
+
   t("20. carregar() usa buscarPaginado e pede range explícito", () => {
     assert(/buscarPaginado</.test(CARREGAR), "carregar() não usa buscarPaginado");
-    assert(/\.range\(/.test(CARREGAR), "carregar() não pede range — o corte de 1000 volta");
+    assert(/\/api\/anuncios\?de=\$\{de\}&ate=\$\{ate\}/.test(CARREGAR),
+      "carregar() não pede a página de/ate — o corte de 1000 volta");
+    assert(/\.range\(de,\s*ate\)/.test(LISTAR), "o servidor não aplica o range pedido");
   });
 
-  t("21. carregar() preserva os filtros originais", () => {
-    assert(/\.eq\("ativo",\s*true\)/.test(CARREGAR), "perdeu o filtro ativo=true");
-    assert(/\.eq\("user_id",\s*id\)/.test(CARREGAR), "perdeu o filtro user_id");
-    assert(/\.order\("created_at",\s*\{\s*ascending:\s*false\s*\}\)/.test(CARREGAR),
+  t("21. a leitura preserva os filtros originais (no servidor)", () => {
+    assert(/\.eq\("ativo",\s*true\)/.test(LISTAR), "perdeu o filtro ativo=true");
+    assert(/\.eq\("user_id",\s*dono\)/.test(LISTAR), "perdeu o filtro user_id");
+    assert(/\.order\("created_at",\s*\{\s*ascending:\s*false\s*\}\)/.test(LISTAR),
       "perdeu a ordenação created_at DESC");
   });
 
-  t("22. carregar() tem desempate determinístico por id", () => {
+  t("22. a leitura tem desempate determinístico por id (no servidor)", () => {
     // created_at DESC não é ordem total. Sem desempate, páginas pedidas em
     // requisições separadas podem repetir ou perder linhas na fronteira.
-    assert(/\.order\("id",\s*\{\s*ascending:\s*false\s*\}\)/.test(CARREGAR),
+    assert(/\.order\("id",\s*\{\s*ascending:\s*false\s*\}\)/.test(LISTAR),
       "sem desempate por id a paginação pode duplicar ou perder linhas");
   });
 
@@ -308,10 +317,12 @@ async function principal() {
       "setAnuncios deveria estar condicionado a ter havido resposta");
   });
 
-  t("24. a tela continua lendo o Supabase direto, sem endpoint novo", () => {
-    // Esta etapa corrige truncamento; criar rota nova era fora de escopo.
-    assert(/from\("anuncios"\)/.test(CARREGAR), "carregar() deixou de consultar a tabela anuncios");
-    assert(!/fetch\(/.test(CARREGAR), "carregar() passou a chamar um endpoint — fora do escopo desta etapa");
+  t("24. SEC-3-B2: a tela NÃO lê a tabela direto — só pela API", () => {
+    // Inverteu de propósito: até o B2 a regra era "sem endpoint novo"; a
+    // partir dele o browser não pode tocar `anuncios` com a chave anon.
+    assert(!/from\("anuncios"\)/.test(CARREGAR), "carregar() voltou a consultar a tabela pelo browser");
+    assert(/fetch\(/.test(CARREGAR), "carregar() não chama a API");
+    assert(!/user_id/.test(CARREGAR), "carregar() não pode mandar dono para a API");
   });
 
   secao("\n[8. UX pós-import: foca o marketplace importado]");

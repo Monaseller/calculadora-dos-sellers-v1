@@ -294,9 +294,10 @@ async function principal() {
       .map(([f]) => f);
     assert(usando.length === 0, usando.join(", "));
   });
-  t("A7. os unicos usuarios restantes da chave anon sao browser (dashboard/page.tsx) e lib/supabase.ts", () => {
+  // SEC-3-B2: o dashboard deixou de criar o proprio cliente anon.
+  t("A7. o unico usuario restante da chave anon e lib/supabase.ts", () => {
     const usando = [...fonte].filter(([, s]) => /NEXT_PUBLIC_SUPABASE_ANON_KEY/.test(s)).map(([f]) => f).sort();
-    assert(JSON.stringify(usando) === JSON.stringify(["app/(app)/dashboard/page.tsx", "lib/supabase.ts"]), usando.join(", "));
+    assert(JSON.stringify(usando) === JSON.stringify(["lib/supabase.ts"]), usando.join(", "));
   });
 
   // ══ B. helper oficial nas entradas migradas ═══════════════════════
@@ -516,13 +517,16 @@ async function principal() {
 
   // ══ J/K. escopo do gate ═══════════════════════════════════════════
   console.log("\n[J/K. escopo: browser, migrations, grants, RLS]");
-  t("J1. nenhum arquivo de browser pendente (nem lib/supabase.ts) mudou", () => {
-    const d = git("diff", "--name-only", BASE, "--", ...BROWSER_PENDENTE, "lib/supabase.ts").trim();
+  // SEC-3-B2 mudou de proposito as 4 telas de browser (a guarda completa
+  // de browser fica em testar-sec3-b2-browser.ts). O que continua valendo
+  // daqui: lib/supabase.ts intocado, e nenhum OUTRO arquivo de browser mudou.
+  t("J1. lib/supabase.ts nao mudou", () => {
+    const d = git("diff", "--name-only", BASE, "--", "lib/supabase.ts").trim();
     assert(d === "", d);
   });
-  t("J2. nenhum arquivo 'use client' mudou", () => {
+  t("J2. os unicos arquivos 'use client' alterados sao as 4 telas do SEC-3-B2", () => {
     const d = git("diff", "--name-only", BASE, "--", "app", "components", "lib").split(/\r?\n/).filter(Boolean);
-    const cliente = d.filter((f) => fonte.has(f) && browser.has(f));
+    const cliente = d.filter((f) => fonte.has(f) && browser.has(f) && !BROWSER_PENDENTE.includes(f));
     assert(cliente.length === 0, cliente.join(", "));
   });
   t("K1. nenhuma migration / arquivo em supabase/ mudou", () => {

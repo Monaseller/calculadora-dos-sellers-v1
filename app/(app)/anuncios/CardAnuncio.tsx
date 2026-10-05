@@ -1,6 +1,6 @@
 "use client";
 import { useState } from "react";
-import { supabase, type Anuncio } from "@/lib/supabase";
+import { type Anuncio } from "@/lib/supabase";
 import { CATEGORIAS_ML } from "@/lib/comissoes-mercado-livre";
 
 interface Props {
@@ -67,13 +67,14 @@ export default function CardAnuncio({ anuncio: a, onEditar, onExcluir }: Props) 
     const u = Number(vendas) || 0;
     if (!u || !resultado) return;
     setSalvando(true);
-    await supabase.from("vendas_dia").upsert({
-      anuncio_id: a.id,
-      data: new Date().toISOString().split("T")[0],
-      unidades_vendidas: u,
-      faturamento: resultado.faturamento,
-      lucro: resultado.lucro,
-    }, { onConflict: "anuncio_id,data" });
+    // SEC-3-B2: pela API, que prova que o anúncio é do dono da sessão antes
+    // de gravar. A data (dia UTC, como antes) e a chave `anuncio_id,data`
+    // ficam no servidor.
+    await fetch(`/api/anuncios/${encodeURIComponent(a.id)}/vendas-dia`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ unidades_vendidas: u, faturamento: resultado.faturamento, lucro: resultado.lucro }),
+    }).catch(() => null);
     setSalvando(false);
     setVendas("");
     setResultado(null);

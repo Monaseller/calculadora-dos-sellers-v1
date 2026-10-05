@@ -245,26 +245,29 @@ async function principal() {
   const INDIV     = corpoDaFuncao(CODIGO, "excluir");
   const DUPL      = corpoDaFuncao(CODIGO, "excluirTodosDuplicados");
 
-  t("8. toda escrita filtra por user_id", () => {
-    assert(/\.eq\("user_id",\s*userId\)/.test(DESATIVAR),
+  // SEC-3-B2: a escrita saiu do browser para POST /api/anuncios/desativar.
+  // A tela segue fazendo os lotes e a confirmação; o dono, o soft delete e
+  // o `.select("id")` passaram para lib/anuncios/servico.ts — cobrados lá.
+  const SERVICO = fs.readFileSync(path.join(RAIZ, "lib", "anuncios", "servico.ts"), "utf8");
+  const DESATIVAR_SERVIDOR = corpoDaFuncao(SERVICO, "desativarAnunciosDoDono");
+
+  t("8. toda escrita filtra por user_id (no servidor)", () => {
+    assert(/\.eq\("user_id",\s*dono\)/.test(DESATIVAR_SERVIDOR),
       "🔴 escrita sem ownership — sem RLS, um id conhecido bastaria para excluir de outro usuário");
     assert(/if\s*\(!userId\)/.test(DESATIVAR),
       "sem sessão a escrita deveria ser recusada antes de tentar");
+    assert(!/user_id/.test(DESATIVAR), "a tela não pode mandar dono para a API");
   });
 
   t("8b. a escrita é soft delete, nunca delete físico", () => {
-    assert(/\.update\(\{\s*ativo:\s*false\s*\}\)/.test(DESATIVAR), "não faz update ativo:false");
-    // Só a CADEIA do Supabase interessa: `n.delete(id)` de um Set em
-    // toggleSelect é legítimo e não pode fazer este teste falhar.
-    for (const m of CODIGO.matchAll(/from\("anuncios"\)([\s\S]{0,200})/g)) {
-      assert(!/\.\s*delete\s*\(/.test(m[1]),
-        "🔴 a tela passou a apagar fisicamente linhas de `anuncios`");
-    }
-    assert(/from\("anuncios"\)/.test(DESATIVAR), "a escrita não passa pela tabela anuncios");
+    assert(/\.update\(\{\s*ativo:\s*false\s*\}\)/.test(DESATIVAR_SERVIDOR), "não faz update ativo:false");
+    assert(!/\.\s*delete\s*\(/.test(SERVICO), "🔴 o serviço passou a apagar fisicamente linhas de `anuncios`");
+    assert(!/from\("anuncios"\)/.test(CODIGO), "🔴 a tela voltou a tocar a tabela anuncios pelo browser");
+    assert(/\/api\/anuncios\/desativar/.test(DESATIVAR), "a escrita não passa pela rota de soft delete");
   });
 
   t("8c. a escrita pede de volta os ids alterados", () => {
-    assert(/\.select\("id"\)/.test(DESATIVAR), "sem .select('id') não há como saber o que foi alterado");
+    assert(/\.select\("id"\)/.test(DESATIVAR_SERVIDOR), "sem .select('id') não há como saber o que foi alterado");
     assert(/desativarEmLotes\(/.test(DESATIVAR), "não usa o helper de lotes");
   });
 

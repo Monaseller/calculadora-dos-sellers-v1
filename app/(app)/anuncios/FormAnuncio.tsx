@@ -1,6 +1,6 @@
 "use client";
 import { useState, useEffect } from "react";
-import { supabase, type Anuncio } from "@/lib/supabase";
+import { type Anuncio } from "@/lib/supabase";
 import { CATEGORIAS_ML, type TipoAnuncio } from "@/lib/comissoes-mercado-livre";
 import {
   calcularFreteMl, calcularFreteFullMl, calcularFreteFlexMl,
@@ -9,7 +9,7 @@ import {
 
 interface Props {
   inicial: Anuncio | null;
-  userId: string | null;
+  userId: string | null; // SEC-3-B2: não decide mais o dono — a sessão decide no servidor
   onSalvar: () => void;
   onFechar: () => void;
 }
@@ -41,7 +41,21 @@ interface DadosML {
   tamanhoFull?: string | null;
 }
 
-export default function FormAnuncio({ inicial, userId, onSalvar, onFechar }: Props) {
+/**
+ * SEC-3-B2: gravação pela API — criação em POST /api/anuncios, edição em
+ * PATCH /api/anuncios/[id]. O dono é a sessão no servidor (o payload não
+ * leva mais `user_id`), e a edição só casa anúncio do próprio dono. Como
+ * antes, o resultado não é inspecionado: o fluxo da tela não muda.
+ */
+async function gravarAnuncio(payload: object, idExistente?: string): Promise<void> {
+  await fetch(idExistente ? `/api/anuncios/${encodeURIComponent(idExistente)}` : "/api/anuncios", {
+    method: idExistente ? "PATCH" : "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  }).catch(() => null);
+}
+
+export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
   const modoEdicao = !!inicial;
   const [etapa, setEtapa] = useState<Etapa>(modoEdicao ? "custos" : "link");
 
@@ -375,7 +389,6 @@ export default function FormAnuncio({ inicial, userId, onSalvar, onFechar }: Pro
         permalink:         dadosML?.permalink ?? null,
         ativo:             true,
         logistic_type:     tipoEnvio === "Full" ? "fulfillment" : tipoEnvio === "Flex" ? "self_service" : "me2",
-        user_id:           userId ?? null,
       };
     }
 
@@ -390,7 +403,7 @@ export default function FormAnuncio({ inicial, userId, onSalvar, onFechar }: Pro
           v.id,
           variacoesOverride.find(x => x.id === v.id)?.sku || v.sku || skuManual.trim() || dadosML.sku || null,
         );
-        await supabase.from("anuncios").insert(payload);
+        await gravarAnuncio(payload);
       }
       setSalvando(false);
       onSalvar();
@@ -408,11 +421,7 @@ export default function FormAnuncio({ inicial, userId, onSalvar, onFechar }: Pro
     // Garante margem_desejada do calcResultado quando disponível
     if (r) (payload as any).margem_desejada = Math.round(r.margem * 100) / 100;
 
-    if (inicial) {
-      await supabase.from("anuncios").update(payload).eq("id", inicial.id);
-    } else {
-      await supabase.from("anuncios").insert(payload);
-    }
+    await gravarAnuncio(payload, inicial?.id);
     setSalvando(false);
     onSalvar();
   }
