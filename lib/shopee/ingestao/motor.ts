@@ -28,6 +28,7 @@
 import "server-only";
 import { ASYNC_SYNC_JOBS_ENABLED } from "@/lib/feature-flags";
 import { JANELA_MAXIMA_MS } from "./janelas";
+import { escrowShopeeAtual } from "@/lib/vendas/canonico/shopee";
 import { ErroCorrespondenciaEscrow, normalizarDetalhe, normalizarEscrow } from "./normalizar";
 import { comRetry, RETRY_PADRAO, type OpcoesRetry } from "./retry";
 import {
@@ -183,13 +184,14 @@ export async function executarFatiaShopee(
       if (pedidos.length) {
         await repo.gravarDetalhes(pedidos, itens);
         pr.detail_concluidos += pedidos.length; pr.pedidos_gravados += pedidos.length; pr.itens_gravados += itens.length;
-        // Escrow necessario: pago E (nunca lido OU lido num update_time que
-        // nao e o vigente) — mesma regra da coluna gerada `escrow_pendente`
-        // e do "escrow atual" do servico canonico.
+        // Escrow necessario: pago E nao atual — `escrowShopeeAtual`, a mesma
+        // regra da coluna gerada `escrow_pendente` (S2-D3-A.1: so `<` ou
+        // nunca lido; `>=` e atual). estadoEscrow so devolve escrow_update_time,
+        // que e gravado junto com escrow_fetched_at.
         const estado = await repo.estadoEscrow(job.userId, job.lojaId, [...pagos.keys()]);
         const precisa = [...pagos].filter(([sn, upd]) => {
           const lido = estado.get(sn) ?? null;
-          return lido === null || new Date(lido).getTime() !== new Date(upd).getTime();
+          return !escrowShopeeAtual(lido, lido, upd);
         }).map(([sn]) => sn);
         pr.escrow_necessarios += precisa.length;
         acrescentar(ck.pendentesEscrow, precisa);

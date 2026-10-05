@@ -86,8 +86,8 @@ function validarS2D1(sqlBruto: string): string[] {
   // S2-D2.1: fila de escrow por loja em ordem de order_sn, sobre a coluna gerada
   for (const esperado of ["user_id,loja_id,pay_time", "loja_id,update_time", "user_id,loja_id,order_sn|parcial"]) if (!idx.includes(esperado)) e.push(`indice ${esperado} ausente`);
   if (!/CREATE INDEX idx_shopee_pedidos_escrow_pendente ON public\.shopee_pedidos \(user_id, loja_id, order_sn\) WHERE escrow_pendente;/i.test(s)) e.push("indice de escrow pendente nao usa a coluna gerada");
-  // coluna gerada: mesma semantica de "escrow atual" do servico canonico (igualdade)
-  if (!/escrow_pendente boolean GENERATED ALWAYS AS \( pay_time IS NOT NULL AND \(escrow_fetched_at IS NULL OR escrow_update_time IS DISTINCT FROM update_time\) \) STORED/i.test(s)) {
+  // coluna gerada: mesma semantica de "escrow atual" do servico canonico e do motor (S2-D3-A.1: so < e pendente)
+  if (!/escrow_pendente boolean GENERATED ALWAYS AS \( pay_time IS NOT NULL AND \(escrow_fetched_at IS NULL OR escrow_update_time IS NULL OR escrow_update_time < update_time\) \) STORED/i.test(s)) {
     e.push("coluna gerada escrow_pendente ausente ou com regra diferente");
   }
   // S2-D2.2: a FUNDACAO coexiste com o sync legado — a chave unica de item
@@ -194,11 +194,36 @@ t("8m4. trigger ou coluna gerada em tabela existente → pega", () => {
   assert(pega(variante(/^COMMIT;$/m, "CREATE TRIGGER t BEFORE INSERT ON public.pedidos FOR EACH ROW EXECUTE FUNCTION f();\nCOMMIT;"), /trigger/), "trigger");
   assert(pega(variante("ADD COLUMN escrow_coin           numeric NULL", "ADD COLUMN escrow_coin numeric GENERATED ALWAYS AS (0) STORED"), /coluna gerada em tabela existente|restritiva/), "gerada");
 });
-t("8n. escrow_pendente com regra diferente da do servico canonico (< em vez de distinto) → pega", () => assert(pega(variante(/escrow_update_time IS DISTINCT FROM update_time(\)\r?\n\s*\) STORED)/, "escrow_update_time < update_time$1"), /escrow_pendente/), "nao pegou"));
+t("8n. escrow_pendente com regra antiga (DISTINCT FROM: '>' viraria pendente → refetch repetitivo) → pega", () => assert(pega(variante(/escrow_update_time IS NULL OR escrow_update_time < update_time(\)\r?\n\s*\) STORED)/, "escrow_update_time IS DISTINCT FROM update_time$1"), /escrow_pendente/), "nao pegou"));
+t("8n2. escrow_pendente com <= ('==' viraria pendente) → pega", () => assert(pega(variante(/escrow_update_time < update_time(\)\r?\n\s*\) STORED)/, "escrow_update_time <= update_time$1"), /escrow_pendente/), "nao pegou"));
+t("8n3. escrow_pendente sem o caso escrow_update_time IS NULL → pega", () => assert(pega(variante(/escrow_update_time IS NULL OR (escrow_update_time < update_time\)\r?\n\s*\) STORED)/, "$1"), /escrow_pendente/), "nao pegou"));
 t("8o. as variantes dos auto-testes de fato alteram o SQL (nenhum auto-teste e vazio)", () => {
   assert(variante("escrow_coin           numeric NULL", "escrow_coin           numeric NOT NULL") !== SQL, "8m2 nao mudou nada");
   assert(variante(/(ADD CONSTRAINT sync_jobs_janela_check CHECK \()/, "X$1") !== SQL, "8m3 nao mudou nada");
-  assert(variante(/escrow_update_time IS DISTINCT FROM update_time(\)\r?\n\s*\) STORED)/, "escrow_update_time < update_time$1") !== SQL, "8n nao mudou nada");
+  assert(variante(/escrow_update_time IS NULL OR escrow_update_time < update_time(\)\r?\n\s*\) STORED)/, "escrow_update_time IS DISTINCT FROM update_time$1") !== SQL, "8n nao mudou nada");
+  assert(variante(/escrow_update_time < update_time(\)\r?\n\s*\) STORED)/, "escrow_update_time <= update_time$1") !== SQL, "8n2 nao mudou nada");
+  assert(variante(/escrow_update_time IS NULL OR (escrow_update_time < update_time\)\r?\n\s*\) STORED)/, "$1") !== SQL, "8n3 nao mudou nada");
+});
+t("8p. A-F: a expressao REAL do arquivo, avaliada caso a caso (so '<' ou nunca lido e pendente)", () => {
+  const m = SQL.match(/escrow_pendente\s+boolean\s+GENERATED ALWAYS AS \(([\s\S]*?)\)\s*STORED/i);
+  assert(m, "expressao nao encontrada");
+  // traducao fechada: qualquer token fora deste vocabulario derruba o teste
+  let js = m[1].replace(/\s+/g, " ").trim()
+    .replace(/(\w+) IS NOT NULL/g, "(r.$1 !== null)")
+    .replace(/(\w+) IS NULL/g, "(r.$1 === null)")
+    .replace(/(\w+) < (\w+)/g, "(r.$1 !== null && r.$2 !== null && r.$1 < r.$2)")
+    .replace(/ AND /g, " && ").replace(/ OR /g, " || ");
+  assert(/^[\sa-z_.()!=&|<null]+$/.test(js) && !/[A-Z]/.test(js), `token SQL nao traduzido: ${js}`);
+  const f = new Function("r", `return ${js};`) as (r: Record<string, number | null>) => boolean;
+  const U = 1000;
+  for (const [caso, r, esperado] of [
+    ["A pay_time NULL", { pay_time: null, escrow_fetched_at: null, escrow_update_time: null, update_time: U }, false],
+    ["B escrow_fetched_at NULL", { pay_time: 1, escrow_fetched_at: null, escrow_update_time: null, update_time: U }, true],
+    ["C escrow_update_time NULL", { pay_time: 1, escrow_fetched_at: 5, escrow_update_time: null, update_time: U }, true],
+    ["D <", { pay_time: 1, escrow_fetched_at: 5, escrow_update_time: U - 1, update_time: U }, true],
+    ["E ==", { pay_time: 1, escrow_fetched_at: 5, escrow_update_time: U, update_time: U }, false],
+    ["F >", { pay_time: 1, escrow_fetched_at: 5, escrow_update_time: U + 1, update_time: U }, false],
+  ] as const) assert(f(r) === esperado, `${caso}: ${f(r)}`);
 });
 t("9. FOUNDATION_BREAKS_LEGACY_WRITE = NO: nenhum writer legado de pedidos/sync_jobs grava as colunas novas", () => {
   const legados = ["lib/sync-shopee.ts", "lib/sync-ml.ts", "lib/shopee-status.ts", "lib/shopee-financeiro.ts",

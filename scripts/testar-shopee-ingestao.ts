@@ -513,6 +513,48 @@ async function principal() {
     const r = await rodarCatchUp(c);
     assert(r.res.estado === "concluido" && c.api.chamadas.escrow === antes, `chamadas ${c.api.chamadas.escrow - antes}`);
   });
+  t("16C2. A-F na fila do catch-up: so nunca-lido, escrow_update_time NULL e '<' sao refeitos", async () => {
+    const c = cenario(gerar(30));
+    await rodarJob(c, M, W1); await rodarJob(c, M, W2);
+    const pagos = [...c.repo.pedidos.values()].filter((p: any) => p.pay_time).sort((a: any, b: any) => (a.order_sn < b.order_sn ? -1 : 1)) as any[];
+    const naoPago = [...c.repo.pedidos.values()].find((p: any) => !p.pay_time) as any;
+    assert(naoPago && pagos.length >= 5, "fixture");
+    naoPago.escrow_fetched_at = null; naoPago.escrow_update_time = null;                                   // A → nao
+    pagos[0].escrow_fetched_at = null; pagos[0].escrow_update_time = null;                                 // B → sim
+    pagos[1].escrow_update_time = null;                                                                    // C → sim
+    pagos[2].escrow_update_time = new Date(Date.parse(pagos[2].update_time) - 1000).toISOString();         // D → sim
+    pagos[3].escrow_update_time = pagos[3].update_time;                                                    // E → nao
+    pagos[4].escrow_update_time = new Date(Date.parse(pagos[4].update_time) + 1000).toISOString();         // F → nao
+    const vistos: string[] = []; c.api.onEscrow = (sn) => { vistos.push(sn); return undefined; };
+    const r = await rodarCatchUp(c);
+    c.api.onEscrow = undefined;
+    const esperado = [pagos[0], pagos[1], pagos[2]].map((p) => p.order_sn).sort();
+    assert(r.res.estado === "concluido" && JSON.stringify([...vistos].sort()) === JSON.stringify(esperado), `refeitos ${JSON.stringify(vistos)}`);
+  });
+  t("16C3. NAO-LOOP: escrow_update_time (T2) > update_time (T1) → 0 chamadas de escrow em DUAS execucoes do catch-up", async () => {
+    const c = cenario(gerar(20));
+    await rodarJob(c, M, W1); await rodarJob(c, M, W2);
+    for (const p of c.repo.pedidos.values() as any) if (p.pay_time) p.escrow_update_time = new Date(Date.parse(p.update_time) + 5 * 60_000).toISOString();
+    const antes = c.api.chamadas.escrow;
+    const r1 = await rodarCatchUp(c);
+    assert(r1.res.estado === "concluido" && c.api.chamadas.escrow === antes, `1a: ${c.api.chamadas.escrow - antes}`);
+    const r2 = await rodarCatchUp(c);
+    assert(r2.res.estado === "concluido" && c.api.chamadas.escrow === antes, `2a: ${c.api.chamadas.escrow - antes}`);
+  });
+  t("16C4. NAO-LOOP na fase ESCROW do job: relistar a janela com escrow_update_time > update_time → 0 chamadas", async () => {
+    const c = cenario(gerar(20));
+    await rodarJob(c, M, W1);
+    for (const p of c.repo.pedidos.values() as any) if (p.pay_time) p.escrow_update_time = new Date(Date.parse(p.update_time) + 5 * 60_000).toISOString();
+    const antes = c.api.chamadas.escrow;
+    await rodarJob(c, M, W1); await rodarJob(c, M, W1);
+    assert(c.api.chamadas.escrow === antes, `refez ${c.api.chamadas.escrow - antes}`);
+  });
+  t("16C5. regra unica: motor e servico canonico usam escrowShopeeAtual; motor sem comparacao propria", () => {
+    const motor = readFileSync(join(RAIZ, "lib/shopee/ingestao/motor.ts"), "utf8");
+    assert(/escrowShopeeAtual\(/.test(motor) && !/getTime\(\) !== new Date/.test(motor), "motor com regra propria");
+    const can = readFileSync(join(RAIZ, "lib/vendas/canonico/shopee.ts"), "utf8");
+    assert((can.match(/escrowShopeeAtual\(/g) ?? []).length === 2, "servico canonico sem a regra unica");
+  });
   t("16D. 1 de 100 falha transitoriamente: retry dentro do contrato e completa", async () => {
     const ps = gerar(120).filter((p) => p.payTime !== null).slice(0, 100);
     const { c } = await semEscrow(ps);

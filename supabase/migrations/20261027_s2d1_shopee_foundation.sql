@@ -87,9 +87,11 @@ CREATE TABLE public.shopee_pedidos (
   -- S2-D2.1: fila de catch-up de escrow. Comparar duas colunas nao e
   -- expressavel em filtro do PostgREST; a coluna gerada torna a condicao
   -- consultavel e indexavel. Mesma semantica de "escrow atual" do servico
-  -- canonico: lido no update_time vigente (igualdade), senao pendente.
+  -- canonico e do motor (S2-D3-A.1): atual quando escrow_update_time >=
+  -- update_time; pendente so se nunca lido ou lido num update_time ANTERIOR.
+  -- ">" nunca e pendente (evita refetch repetitivo).
   escrow_pendente          boolean     GENERATED ALWAYS AS (
-    pay_time IS NOT NULL AND (escrow_fetched_at IS NULL OR escrow_update_time IS DISTINCT FROM update_time)
+    pay_time IS NOT NULL AND (escrow_fetched_at IS NULL OR escrow_update_time IS NULL OR escrow_update_time < update_time)
   ) STORED,
   CONSTRAINT shopee_pedidos_pkey PRIMARY KEY (loja_id, order_sn),
   CONSTRAINT shopee_pedidos_loja_do_mesmo_dono FOREIGN KEY (loja_id, user_id) REFERENCES public.lojas (id, user_id)

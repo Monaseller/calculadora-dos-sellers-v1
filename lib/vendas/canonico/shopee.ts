@@ -109,6 +109,18 @@ const chave = (lojaId: string, orderSn: string) => `${lojaId}|${orderSn}`;
 export class ErroGraoShopee extends Error {}
 
 /**
+ * Regra UNICA de frescor do escrow (S2-D3-A.1), a mesma da coluna gerada
+ * `shopee_pedidos.escrow_pendente` e do motor de ingestao: o escrow esta
+ * ATUAL quando foi lido (`escrowFetchedAt` e `escrowUpdateTime` presentes)
+ * num update_time >= ao update_time vigente do pedido. `>` e atual — nunca
+ * gera refetch. So `<` (ou nunca lido) e pendente.
+ */
+export function escrowShopeeAtual(escrowFetchedAt: string | null, escrowUpdateTime: string | null, updateTime: string): boolean {
+  if (escrowFetchedAt === null || escrowUpdateTime === null) return false;
+  return new Date(escrowUpdateTime).getTime() >= new Date(updateTime).getTime();
+}
+
+/**
  * As metricas oficiais para um conjunto de pedidos JA filtrado pelo
  * periodo. Exige componentes presentes (nao-nulos): quem chama so deve
  * pedir isto para um conjunto COMPLETE.
@@ -235,7 +247,7 @@ export function watermarkUpdateTime(janelas: { inicio: string; fim: string }[], 
  *     Periodo historico sem incremental previo precisa de uma passada de
  *     update_time de `inicio` ate o watermark de sincronizacao atual.
  *  2. detail obtido para todo pedido pago no periodo;
- *  3. escrow ATUAL (lido no update_time vigente) para todo pedido pago, e
+ *  3. escrow ATUAL (`escrowShopeeAtual`) para todo pedido pago, e
  *     componentes de item presentes.
  * FAILED: a listagem nao esta provada e alguma janela do periodo terminou
  * em erro. PARTIAL: qualquer outra falta.
@@ -269,8 +281,7 @@ export function avaliarCompletudeShopee(args: {
   let semDetalhe = 0, semEscrow = 0, semItens = 0;
   for (const p of pedidosPagos) {
     if (!p.detailFetchedAt) semDetalhe++;
-    const escrowAtual = p.escrowFetchedAt !== null && p.escrowUpdateTime !== null
-      && new Date(p.escrowUpdateTime).getTime() === new Date(p.updateTime).getTime()
+    const escrowAtual = escrowShopeeAtual(p.escrowFetchedAt, p.escrowUpdateTime, p.updateTime)
       && p.originalShopeeDiscount !== null && p.pixDiscount !== null;
     const its = itensPorPedido.get(chave(p.lojaId, p.orderSn)) ?? [];
     if (its.length === 0) semItens++;

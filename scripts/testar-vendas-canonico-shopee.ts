@@ -176,6 +176,21 @@ async function principal() {
     const r = S.avaliarCompletudeShopee({ ...dia, janelas: cadeiaOk(), pedidosPagos: [pedido("X", { updateTime: "2026-10-03T10:00:00.000Z" })], itens: [item("X")] });
     assert(r.completude === "PARTIAL" && r.motivos.some((m) => m.startsWith("escrow_ausente_ou_desatualizado")), JSON.stringify(r));
   });
+  t("4e2. escrow lido num update_time POSTERIOR ao vigente (>) = ATUAL, nao desatualizado", () => {
+    const r = S.avaliarCompletudeShopee({ ...dia, janelas: cadeiaOk(), pedidosPagos: [pedido("X", { escrowUpdateTime: "2026-10-02T17:00:00.000Z" })], itens: [item("X")] });
+    assert(r.completude === "COMPLETE", JSON.stringify(r));
+  });
+  t("4e3. escrowShopeeAtual A-F (regra unica S2-D3-A.1)", () => {
+    const U = "2026-10-02T16:00:00.000Z", menos = "2026-10-02T15:59:59.000Z", mais = "2026-10-02T16:00:01.000Z";
+    for (const [caso, fetched, eut, esperadoAtual] of [
+      ["B nunca lido", null, null, false],
+      ["C fetched sem escrow_update_time", "z", null, false],
+      ["D <", "z", menos, false],
+      ["E ==", "z", U, true],
+      ["F >", "z", mais, true],
+    ] as const) assert(S.escrowShopeeAtual(fetched, eut, U) === esperadoAtual, caso);
+    // A (pay_time NULL) nao entra: avaliarCompletude so recebe pedidos pagos.
+  });
   t("4f. detail ausente / item sem escrow / pedido sem itens = PARTIAL", () => {
     for (const [p, its, m] of [
       [pedido("X", { detailFetchedAt: null }), [item("X")], "detalhe_ausente"],

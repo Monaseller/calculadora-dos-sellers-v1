@@ -132,7 +132,8 @@ export class RepoFake implements Repositorio {
   async pendentesEscrow(userId: string, lojaId: string, apos: string | null, limite: number) {
     return [...this.pedidos.values()]
       .filter((p) => p.user_id === userId && p.loja_id === lojaId && p.pay_time !== null && p.pay_time !== undefined
-        && (!p.escrow_fetched_at || p.escrow_update_time !== p.update_time))
+        && (!p.escrow_fetched_at || !p.escrow_update_time
+          || Date.parse(p.escrow_update_time as string) < Date.parse(p.update_time as string)))
       .map((p) => String(p.order_sn)).filter((sn) => apos === null || sn > apos).sort().slice(0, limite);
   }
   async estadoEscrow(userId: string, lojaId: string, sns: string[]) {
