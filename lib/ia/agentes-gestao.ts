@@ -10,13 +10,13 @@
  * aplicada aos `sinais` de `listarAgentesDoEscritorio`. Os filtros abaixo
  * so AGRUPAM esse estado; nenhum deles cria estado novo.
  *
- * ── API x Tool: projecao VISUAL sobre o dominio atual ───────────────
+ * ── API x Tool: derivado do DOMINIO — F9.2-A ────────────────────────
  *
- * Decisao de produto: API != Tool. Mas o dominio ainda nao foi
- * refatorado — o Mercado Livre continua sendo um TOOL_PACK
- * (`mercadolivre-perguntas`) com permissoes por Funcao. Aqui ele so e
- * MOSTRADO na secao APIs, junto das acoes externas vinculadas (servicos
- * de fora). Nada muda em `TOOL_PACKS`, permissoes ou runtime.
+ * Decisao de produto: API != Tool. Desde o F9.2-A quem decide isso e o
+ * catalogo de APIs (`lib/agentes/apis/catalogo.ts`): Mercado Livre e
+ * Shopee sao PROVIDERS. O pack `mercadolivre-perguntas` continua gravado
+ * em agentes antigos e aqui e so o ALIAS do provider Mercado Livre — os
+ * valores exportados abaixo sao os mesmos de antes, agora derivados.
  */
 import type { AparenciaAgente } from "@/lib/ia/estados";
 import type { TipoAgenteUI } from "@/lib/ia/contratos";
@@ -24,17 +24,22 @@ import type {
   AtivacaoDoAgenteUI, ConexaoRequisitoUI, FerramentaDaAtivacaoUI, FerramentaExternaVinculadaUI,
   LojaDoDonoUI,
 } from "@/lib/ia/agentes-http";
+import {
+  PROVEDORES_DE_API, ehAliasDeApi, provedorDisponivelParaAgentes,
+  type IdProvedorDeApi,
+} from "@/lib/agentes/apis/catalogo";
 
-/** O pack que, visualmente, e uma API (Mercado Livre). Id de dominio. */
-export const PACK_API_MERCADO_LIVRE = "mercadolivre-perguntas";
+/** O alias legado do provider Mercado Livre (id de pack persistido). */
+export const PACK_API_MERCADO_LIVRE: string =
+  PROVEDORES_DE_API.find((p) => p.id === "mercado_livre")?.aliasesLegados[0] ?? "mercadolivre-perguntas";
 
-/** Packs que a UI apresenta como API, e nao como Tool. */
-export const PACKS_APRESENTADOS_COMO_API: readonly string[] = Object.freeze([
-  PACK_API_MERCADO_LIVRE,
-]);
+/** Packs que, no dominio, sao alias de um provider de API — nunca Tool. */
+export const PACKS_APRESENTADOS_COMO_API: readonly string[] = Object.freeze(
+  PROVEDORES_DE_API.flatMap((p) => p.aliasesLegados)
+);
 
 export function ehPackDeApi(packId: string): boolean {
-  return PACKS_APRESENTADOS_COMO_API.includes(packId);
+  return ehAliasDeApi(packId);
 }
 
 // ── Filtros ──────────────────────────────────────────────────────────
@@ -182,13 +187,14 @@ export function podeTrocarDeAgente(temRascunho: boolean, confirmar: () => boolea
 /**
  * As integracoes que a CDS SUPORTA, na ordem em que aparecem.
  *
- * Fonte: o que existe de verdade no produto — conta conectada pelo fluxo
- * OAuth da CDS (`lojas.marketplace`), e o pack de agente que usa essa
- * conta. Shopee tem conta (OAuth da CDS), mas NENHUM pack de agente
- * ainda: `packId: null` e a tela diz isso, sem fingir capacidade.
+ * Fonte desde o F9.2-A: os PROVIDERS do catalogo de APIs. Identidade,
+ * marketplace e plataforma vem de la; aqui so ficam logo e frase, que sao
+ * apresentacao. `packId` e o alias legado do provider quando ele tem
+ * capability para agentes; Shopee nao tem nenhuma ainda, entao `null` e a
+ * tela diz isso, sem fingir capacidade.
  */
 export interface IntegracaoCds {
-  readonly chave: "mercado_livre" | "shopee";
+  readonly chave: IdProvedorDeApi;
   readonly nome: string;
   /** Valor de `lojas.marketplace` para as contas desta integracao. */
   readonly marketplace: "ML" | "Shopee";
@@ -200,18 +206,29 @@ export interface IntegracaoCds {
   readonly descricao: string;
 }
 
-export const INTEGRACOES_CDS: readonly IntegracaoCds[] = Object.freeze([
-  {
-    chave: "mercado_livre", nome: "Mercado Livre", marketplace: "ML", plataforma: "mercado_livre",
-    logo: "/logo-ml.svg", packId: PACK_API_MERCADO_LIVRE,
+/** So apresentacao, por provider. O resto vem do catalogo. */
+const APRESENTACAO_DA_INTEGRACAO: Readonly<Record<IdProvedorDeApi, { logo: string; descricao: string }>> = {
+  mercado_livre: {
+    logo: "/logo-ml.svg",
     descricao: "Vendas, pedidos e perguntas da sua conta do Mercado Livre.",
   },
-  {
-    chave: "shopee", nome: "Shopee", marketplace: "Shopee", plataforma: "shopee",
-    logo: "/logo-shopee.svg", packId: null,
+  shopee: {
+    logo: "/logo-shopee.svg",
     descricao: "Conecte a conta da Shopee pela CDS. Ferramentas da Shopee para agentes ainda não existem.",
   },
-] as const);
+};
+
+export const INTEGRACOES_CDS: readonly IntegracaoCds[] = Object.freeze(
+  PROVEDORES_DE_API.map((p) => Object.freeze({
+    chave: p.id,
+    nome: p.nome,
+    marketplace: p.marketplace,
+    plataforma: p.plataforma,
+    logo: APRESENTACAO_DA_INTEGRACAO[p.id].logo,
+    packId: provedorDisponivelParaAgentes(p.id) ? p.aliasesLegados[0] ?? null : null,
+    descricao: APRESENTACAO_DA_INTEGRACAO[p.id].descricao,
+  }))
+);
 
 /** As contas do dono que pertencem a uma integracao. */
 export function contasDaIntegracao(
