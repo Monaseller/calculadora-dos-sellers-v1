@@ -36,7 +36,8 @@ import {
 } from "@/lib/ia/ferramentas-do-agente";
 import { ICONE_ACAO_EXTERNA } from "@/lib/ia/icones-ferramentas";
 import {
-  INTEGRACOES_CDS, capacidadesVisiveisDaApi, contaEmUsoDaApi, contaSelecionadaDaApi, nivelDaApi,
+  INTEGRACOES_CDS, capacidadesParaMudarNivel, capacidadesVisiveisDaApi, contaEmUsoDaApi,
+  contaSelecionadaDaApi, nivelDaApi,
   nivelParaLigar, nomeDaConta, planoDaApi,
   type IntegracaoCds, type ProjecaoDeCapacidades,
 } from "@/lib/ia/agentes-gestao";
@@ -177,7 +178,8 @@ export default function ApisDoAgente({
             (plano === null || plano.tipo === "pronta" || plano.tipo === "sem_requisito");
           // F9.2-A3: SO as capabilities reais do catalogo, com o estado deste agente.
           const capacidades = api === null ? [] : capacidadesVisiveisDaApi(api);
-          const ligadas = capacidades.filter((c) => c.habilitadaNoAgente).map((c) => c.id);
+          // F9.2-A4: o nivel SO mexe nas ligadas; com nenhuma ligada, nada muda.
+          const ligadas = api === null ? [] : capacidadesParaMudarNivel(api);
           const contaEmUso = api === null ? null : contaEmUsoDaApi(api);
           const semContaNaCds = contas !== null && contas.length === 0;
 
@@ -225,13 +227,13 @@ export default function ApisDoAgente({
                   <>
                     <SeletorDeNivel
                       rotulo={`Quando o agente pode usar o ${i.nome}`}
-                      valor={api === null ? nivelDoPack(pack) : nivelDaApi(api)} desabilitado={ocupado}
-                      // F9.2-A3: o nivel vale para as capabilities LIGADAS (ou todas, se
-                      // nenhuma estiver) — nunca religa uma que o dono desligou.
+                      valor={api === null ? nivelDoPack(pack) : nivelDaApi(api)}
+                      desabilitado={ocupado || (api !== null && ligadas.length === 0)}
+                      // F9.2-A4: o nivel vale SO para as capabilities LIGADAS — nunca
+                      // religa uma desligada. Nenhuma ligada: desabilitado, nada a gravar.
                       aoMudar={(n) => void escrever(() => comoEscrita(api === null
                         ? adicionarPackAoAgente(agenteId, pack.id, n)
-                        : definirNivelDasCapacidadesDaApi(agenteId,
-                            ligadas.length > 0 ? ligadas : capacidades.map((c) => c.id), n)),
+                        : definirNivelDasCapacidadesDaApi(agenteId, ligadas, n)),
                         "Não foi possível salvar a permissão.")}
                     />
                     {!pronta && (

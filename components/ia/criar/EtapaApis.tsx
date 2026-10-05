@@ -24,11 +24,14 @@ import {
   definirPermissaoDeFerramentaExterna, desvincularFerramentaExterna,
   type ApiDoAgenteUI, type AtivacaoDoAgenteUI,
 } from "@/lib/ia/agentes-http";
-import { adicionarPackAoAgente, removerPackDoAgente } from "@/lib/ia/ferramentas-do-agente";
+import {
+  adicionarPackAoAgente, definirNivelDasCapacidadesDaApi, removerPackDoAgente,
+} from "@/lib/ia/ferramentas-do-agente";
 import { ICONE_ACAO_EXTERNA } from "@/lib/ia/icones-ferramentas";
 import { packPorId } from "@/lib/agentes/factory/catalogo-ui";
 import {
-  INTEGRACOES_CDS, contaEmUsoDaApi, contaSelecionadaDaApi, nomeDaConta, planoDaApi, projetarCapacidades,
+  INTEGRACOES_CDS, capacidadesParaMudarNivel, contaEmUsoDaApi, contaSelecionadaDaApi, nivelDaApi,
+  nomeDaConta, planoDaApi, projetarCapacidades,
   type IntegracaoCds,
 } from "@/lib/ia/agentes-gestao";
 import { CAPACIDADES_MERCADO_LIVRE } from "@/lib/ia/criar-agente";
@@ -139,7 +142,8 @@ export default function EtapaApis({
           const pack = i.packId === null ? null : cap.packsDeApi.find((f) => f.id === i.packId) ?? null;
           const plano = api === null ? null : planoDaApi(api);
           const semLoja = ativacao.conexoesSemLoja.some((c) => c.plataforma === i.plataforma);
-          const pronta = pack !== null && !semLoja && (plano === null || plano.tipo === "pronta");
+          const pronta = pack !== null && !semLoja &&
+            (plano === null || plano.tipo === "pronta" || plano.tipo === "sem_requisito");
           const contaEmUso = api === null ? null : contaEmUsoDaApi(api);
           const semContaNaCds = contas !== null && contas.length === 0;
           const funcoesDoPack = i.packId === null ? [] : packPorId(i.packId)?.funcoes ?? [];
@@ -199,8 +203,13 @@ export default function EtapaApis({
                     <span className={estilos.dica}>Quando o agente pode usar o {i.nome}</span>
                     <SeletorDeNivel
                       rotulo={`Quando o agente pode usar o ${i.nome}`}
-                      valor={nivelDoPack(pack)} desabilitado={ocupado}
-                      aoMudar={(n) => void escrever(() => comoEscrita(adicionarPackAoAgente(agenteId, pack.id, n)),
+                      valor={api === null ? nivelDoPack(pack) : nivelDaApi(api)}
+                      desabilitado={ocupado || (api !== null && capacidadesParaMudarNivel(api).length === 0)}
+                      // F9.2-A4: mudar o nivel SO mexe nas capabilities ligadas; uma
+                      // desligada (bloqueado) nunca e religada por aqui.
+                      aoMudar={(n) => void escrever(() => comoEscrita(api === null
+                        ? adicionarPackAoAgente(agenteId, pack.id, n)
+                        : definirNivelDasCapacidadesDaApi(agenteId, capacidadesParaMudarNivel(api), n)),
                         "Não foi possível salvar a permissão.")}
                     />
                   </div>

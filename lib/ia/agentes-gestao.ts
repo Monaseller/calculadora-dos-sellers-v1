@@ -25,7 +25,7 @@ import type {
   FerramentaExternaVinculadaUI, LojaDoDonoUI,
 } from "@/lib/ia/agentes-http";
 import {
-  PROVEDORES_DE_API, ehAliasDeApi, provedorDisponivelParaAgentes,
+  PROVEDORES_DE_API, ehAliasDeApi, provedorDaPlataforma, provedorDisponivelParaAgentes,
   type IdProvedorDeApi,
 } from "@/lib/agentes/apis/catalogo";
 
@@ -344,6 +344,28 @@ export function nivelDaApi(api: Pick<ApiDoAgenteUI, "capacidades">): string | nu
   if (ligadas.length === 0) return "bloqueado";
   const niveis = new Set(ligadas.map((c) => c.nivel));
   return niveis.size === 1 ? (ligadas[0].nivel as string) : null;
+}
+
+/**
+ * Quais capabilities uma troca de NIVEL do provider pode gravar — F9.2-A4.
+ *
+ * SO as ligadas. Uma capability desligada (`bloqueado`) nunca e reescrita
+ * por troca de nivel: mudar Automatico <-> Exige aprovacao nao religa nada.
+ * Lista vazia = nada a mudar, e o seletor fica desabilitado.
+ */
+export function capacidadesParaMudarNivel(api: Pick<ApiDoAgenteUI, "capacidades">): readonly string[] {
+  return capacidadesVisiveisDaApi(api).filter((c) => c.habilitadaNoAgente).map((c) => c.id);
+}
+
+/**
+ * O provider de API (com capability para agentes) de uma plataforma de
+ * requisito — F9.2-A4. `null` = plataforma sem capability de agente (ex.:
+ * requisito declarado so por Skill): ela segue o contrato antigo.
+ * Fica aqui, e nao no componente, para a UI nao importar o dominio.
+ */
+export function provedorDeAgentesDaPlataforma(plataforma: string): IdProvedorDeApi | null {
+  const p = provedorDaPlataforma(plataforma);
+  return p !== null && provedorDisponivelParaAgentes(p.id) ? p.id : null;
 }
 
 /** O nivel com que uma capability e LIGADA: o do provider, senao automatico. */

@@ -1113,7 +1113,7 @@ export function Wizard({ agenteIdInicial }: { agenteIdInicial: string | null }) 
                     margin: `${ESPACO.xs}px 0 ${ESPACO.sm}px`,
                     fontSize: TAMANHO.miudo, color: CROMO.textoFraco,
                   }}>
-                    {ativacao.conexoesSemLoja.map((c) => c.nome).join(", ")}:
+                    {[...new Set(ativacao.conexoesSemLoja.map((c) => c.nome))].join(", ")}:
                     sua conta já está conectada na CDS. Só preciso saber de qual
                     loja este agente deve falar.
                   </p>

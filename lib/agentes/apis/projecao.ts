@@ -47,6 +47,17 @@ export interface RequisitoDoAgente {
   readonly utilizavel: boolean;
 }
 
+/**
+ * Uma linha GRAVADA de `agente_conexoes` (`resolverSelecoesDoAgente`, dono
+ * conferido) — F9.2-A4. A conta do provider existe mesmo quando nenhuma
+ * capability esta ligada: conexao != capability.
+ */
+export interface SelecaoGravada {
+  readonly plataforma: string;
+  readonly recurso: string;
+  readonly lojaId: string;
+}
+
 /** Conta JA filtrada por dono e por `marketplace` (`listarLojasConectadasDoDono`). */
 export interface ContaDoDono {
   readonly id: string;
@@ -102,10 +113,31 @@ function nivelConhecido(n: string | undefined): Nivel | null {
 
 export function contaDoAgente(
   provedor: ProvedorDeApi,
-  requisitos: readonly RequisitoDoAgente[]
+  requisitos: readonly RequisitoDoAgente[],
+  /** F9.2-A4: as linhas gravadas, para quando nenhuma capability esta ligada. */
+  selecoes: readonly SelecaoGravada[] = [],
+  /** As contas elegiveis do dono neste provider (para `utilizavel`). */
+  elegiveis?: readonly ContaDoDono[]
 ): ContaDoAgente {
   const doProvedor = requisitos.filter((r) => r.plataforma === provedor.plataforma);
-  if (doProvedor.length === 0) return { estado: "sem_requisito" };
+  if (doProvedor.length === 0) {
+    // ── Conexao != capability (F9.2-A4) ──────────────────────────────
+    //
+    // Todas desligadas nao e "sem conta": as linhas GRAVADAS do provider
+    // continuam dizendo qual conta ele usa. Uma conta so -> definida (com
+    // zero capabilities ligadas, o que e valido). Contas diferentes ->
+    // divergente: nao se adivinha; a escolha unica reconcilia.
+    const gravadas = new Set(
+      selecoes.filter((s) => s.plataforma === provedor.plataforma).map((s) => s.lojaId)
+    );
+    if (gravadas.size === 0) return { estado: "sem_requisito" };
+    if (gravadas.size > 1) return { estado: "divergente" };
+    const lojaId = [...gravadas][0];
+    return {
+      estado: "definida", lojaId,
+      utilizavel: elegiveis === undefined ? true : elegiveis.some((l) => l.id === lojaId),
+    };
+  }
   const escolhidas = doProvedor.filter((r) => r.lojaIdSelecionada !== null);
   if (escolhidas.length === 0) return { estado: "nenhuma" };
   const distintas = new Set(escolhidas.map((r) => r.lojaIdSelecionada));
@@ -125,6 +157,8 @@ export function projetarApisDoAgente(entrada: {
   readonly requisitos: readonly RequisitoDoAgente[];
   /** Por provider. Ausente = nenhuma conta conectada na CDS. */
   readonly contasPorProvedor: Readonly<Partial<Record<IdProvedorDeApi, readonly ContaDoDono[]>>>;
+  /** F9.2-A4: linhas gravadas de `agente_conexoes` (conta mesmo com tudo desligado). */
+  readonly selecoes?: readonly SelecaoGravada[];
 }): readonly ProvedorProjetado[] {
   // Permissao de Funcao que nao e capability catalogada NAO vira API
   // aqui (Tool, acao externa, ou id desconhecido seguem seus caminhos).
@@ -150,7 +184,8 @@ export function projetarApisDoAgente(entrada: {
       disponivelParaAgentes: disponivel,
       textoDeStatus: disponivel ? null : provedor.textoSemCapacidade,
       conexoes: entrada.contasPorProvedor[provedor.id] ?? [],
-      contaDoAgente: contaDoAgente(provedor, entrada.requisitos),
+      contaDoAgente: contaDoAgente(provedor, entrada.requisitos, entrada.selecoes ?? [],
+        entrada.contasPorProvedor[provedor.id] ?? []),
       capacidades,
     };
   });
@@ -210,15 +245,23 @@ export function planejarContaDoProvedor(entrada: {
   readonly lojaId: unknown;
   readonly requisitos: readonly RequisitoDoAgente[];
   readonly elegiveis: readonly ContaDoDono[];
+  /**
+   * F9.2-A4: linhas ja gravadas do provider. Entram como recursos a
+   * reconciliar: com tudo desligado, a escolha unica ainda reconcilia o que
+   * esta salvo (inclusive um estado divergente). Nao inventa recurso: so o
+   * que o agente exige agora ou ja tinha gravado.
+   */
+  readonly selecoes?: readonly SelecaoGravada[];
 }): PlanoDeConta {
   const provedor = provedorPorId(entrada.provedorId);
   if (provedor === null) return { ok: false, codigo: "provedor_desconhecido" };
   if (!provedorDisponivelParaAgentes(provedor.id)) {
     return { ok: false, codigo: "provedor_indisponivel_para_agentes" };
   }
-  const recursos = [...new Set(
-    entrada.requisitos.filter((r) => r.plataforma === provedor.plataforma).map((r) => r.recurso)
-  )].sort();
+  const recursos = [...new Set([
+    ...entrada.requisitos.filter((r) => r.plataforma === provedor.plataforma).map((r) => r.recurso),
+    ...(entrada.selecoes ?? []).filter((s) => s.plataforma === provedor.plataforma).map((s) => s.recurso),
+  ])].sort();
   if (recursos.length === 0) return { ok: false, codigo: "sem_requisito" };
 
   if (entrada.lojaId === null) {

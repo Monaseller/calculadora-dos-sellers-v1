@@ -172,8 +172,11 @@ async function main(): Promise<void> {
     await definirNivelDasCapacidadesDaApi(AGENTE, ["mercadolivre.vendas.consultar"], "aprovacao");
     ok("E6  mudar o nivel do provider NAO religa a desligada",
       pedidos.length === 1 && pedidos[0].corpo?.funcaoId === "mercadolivre.vendas.consultar");
-    ok("E7  a tela usa o nivel so nas ligadas (ou todas, se nenhuma)",
-      /definirNivelDasCapacidadesDaApi\(agenteId,\s*ligadas\.length > 0 \? ligadas : capacidades\.map/.test(APIS));
+    // F9.2-A4: SO as ligadas — com nenhuma ligada o seletor fica
+    // desabilitado e nada e gravado (nunca "todas", que religaria).
+    ok("E7  a tela usa o nivel so nas ligadas (nenhuma ligada: nada a gravar)",
+      /definirNivelDasCapacidadesDaApi\(agenteId, ligadas, n\)/.test(APIS) &&
+        !/ligadas\.length > 0 \? ligadas/.test(APIS));
   }
 
   // ═══════════════════════════════════════════════════════════════════

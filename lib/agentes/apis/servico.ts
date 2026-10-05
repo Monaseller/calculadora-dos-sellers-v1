@@ -50,11 +50,13 @@ export type LeituraDasApis =
   | { readonly ok: false };
 
 export async function lerApisDoAgente(userId: string, agenteId: string): Promise<LeituraDasApis> {
-  const [gravadas, resolvido] = await Promise.all([
+  const [gravadas, resolvido, selecoes] = await Promise.all([
     listarPermissoesGravadas({ userId, agenteId }),
     resolverConexoesDoAgente({ userId, agenteId, agoraMs: Date.now() }),
+    // F9.2-A4: a conta do provider aparece mesmo com tudo desligado.
+    resolverSelecoesDoAgente({ userId, agenteId }),
   ]);
-  if (gravadas.coleta !== "ok" || resolvido.coleta !== "ok") return { ok: false };
+  if (gravadas.coleta !== "ok" || resolvido.coleta !== "ok" || selecoes.coleta !== "ok") return { ok: false };
 
   const contasPorProvedor: Partial<Record<IdProvedorDeApi, readonly ContaDoDono[]>> = {};
   for (const p of PROVEDORES_DE_API) {
@@ -69,6 +71,7 @@ export async function lerApisDoAgente(userId: string, agenteId: string): Promise
       permissoes: gravadas.permissoes,
       requisitos: resolvido.requisitos,
       contasPorProvedor,
+      selecoes: selecoes.selecoes,
     }),
   };
 }
@@ -126,9 +129,15 @@ export async function definirContaDoProvedor(entrada: {
     return { ok: false, codigo: "provedor_indisponivel_para_agentes" };
   }
 
-  const resolvido = await resolverConexoesDoAgente({ userId, agenteId, agoraMs: Date.now() });
-  if (resolvido.coleta !== "ok") return { ok: false, codigo: "falha" };
-  if (!resolvido.requisitos.some((r) => r.plataforma === provedor.plataforma)) {
+  const [resolvido, gravadas] = await Promise.all([
+    resolverConexoesDoAgente({ userId, agenteId, agoraMs: Date.now() }),
+    resolverSelecoesDoAgente({ userId, agenteId }),
+  ]);
+  if (resolvido.coleta !== "ok" || gravadas.coleta !== "ok") return { ok: false, codigo: "falha" };
+  // F9.2-A4: o provider "e usado" se alguma capability ligada o exige OU se
+  // ja ha conta gravada para ele (tudo desligado continua sendo conexao).
+  if (!resolvido.requisitos.some((r) => r.plataforma === provedor.plataforma) &&
+      !gravadas.selecoes.some((s) => s.plataforma === provedor.plataforma)) {
     return { ok: false, codigo: "sem_requisito" };
   }
 
@@ -140,6 +149,7 @@ export async function definirContaDoProvedor(entrada: {
     lojaId: entrada.lojaId,
     requisitos: resolvido.requisitos,
     elegiveis,
+    selecoes: gravadas.selecoes,
   });
   if (!plano.ok) return plano;
 

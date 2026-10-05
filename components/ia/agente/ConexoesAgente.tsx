@@ -36,6 +36,17 @@
  * como "nenhuma conta escolhida" apagaria a única pista de que há algo a
  * corrigir. É o estado mais importante desta tela.
  *
+ * ── UMA conta por provider — F9.2-A4 ────────────────────────────────
+ *
+ * Esta tela continua acessivel (aba Conexoes de `PaginaAgente` e o Wizard
+ * de configurar), e listava UM seletor por requisito ("Mercado Livre ·
+ * Perguntas", "· Vendas") — o oposto do produto aprovado. Agora os
+ * requisitos sao AGRUPADOS por plataforma: um item e um seletor por
+ * provider, sem recurso na tela. Provider com capability para agentes
+ * grava pelo `PATCH /apis` (tudo ou nada). Plataforma sem capability (so
+ * por requisito de Skill — nunca o Mercado Livre) segue o contrato antigo,
+ * com a MESMA escolha para todos os recursos dela.
+ *
  * ── Sem otimismo ────────────────────────────────────────────────────
  *
  * Nada muda na tela antes de o servidor confirmar, e a confirmação do
@@ -48,16 +59,57 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   buscarConexoesDoAgente,
+  definirContaDaApi,
   definirConexaoDoAgente,
   type ConexaoRequisitoUI,
   type LojaElegivelUI,
 } from "@/lib/ia/agentes-http";
+import { provedorDeAgentesDaPlataforma } from "@/lib/ia/agentes-gestao";
 
-/** A identidade de um requisito. Nominal, nunca posicional: a ordem da
- *  lista pode mudar, e `key` por índice faria o React reaproveitar o
- *  estado de um requisito em outro. */
-const chaveDe = (c: { plataforma: string; recurso: string }) =>
-  `${c.plataforma}:${c.recurso}`;
+/**
+ * Os requisitos de UMA plataforma, vistos como UMA conexao — F9.2-A4.
+ *
+ * `selecionada`: a conta, quando todos os recursos concordam; `null` sem
+ * escolha. `divergente`: recursos com contas DIFERENTES (estado antigo) —
+ * a tela pede uma escolha, e ela vale para todos.
+ */
+export interface ConexaoDaPlataforma {
+  readonly plataforma: string;
+  readonly recursos: readonly ConexaoRequisitoUI[];
+  readonly obrigatoria: boolean;
+  readonly lojasElegiveis: readonly LojaElegivelUI[];
+  readonly selecionada: string | null;
+  readonly divergente: boolean;
+  readonly incompleta: boolean;
+  readonly utilizavel: boolean;
+}
+
+export function agruparPorPlataforma(conexoes: readonly ConexaoRequisitoUI[]): ConexaoDaPlataforma[] {
+  const ordem: string[] = [];
+  const por = new Map<string, ConexaoRequisitoUI[]>();
+  for (const c of conexoes) {
+    if (!por.has(c.plataforma)) { por.set(c.plataforma, []); ordem.push(c.plataforma); }
+    por.get(c.plataforma)!.push(c);
+  }
+  return ordem.map((plataforma) => {
+    const recursos = por.get(plataforma)!;
+    const lojas = new Map<string, LojaElegivelUI>();
+    for (const r of recursos) for (const l of r.lojasElegiveis) lojas.set(l.id, l);
+    const escolhidas = new Set(recursos.filter((r) => r.lojaIdSelecionada !== null).map((r) => r.lojaIdSelecionada));
+    return {
+      plataforma,
+      recursos,
+      obrigatoria: recursos.some((r) => r.obrigatoria),
+      lojasElegiveis: [...lojas.values()],
+      // Incompleta (parte sem conta) aparece como "sem escolha": UMA escolha aplica a todos.
+      selecionada: escolhidas.size === 1 && !recursos.some((r) => r.lojaIdSelecionada === null)
+        ? ([...escolhidas][0] as string) : null,
+      divergente: escolhidas.size > 1,
+      incompleta: escolhidas.size === 1 && recursos.some((r) => r.lojaIdSelecionada === null),
+      utilizavel: recursos.every((r) => r.utilizavel),
+    };
+  });
+}
 
 /**
  * Rótulos das poucas plataformas e recursos que existem hoje.
@@ -70,9 +122,6 @@ const chaveDe = (c: { plataforma: string; recurso: string }) =>
 const ROTULO_PLATAFORMA: Readonly<Record<string, string>> = {
   mercado_livre: "Mercado Livre",
   shopee: "Shopee",
-};
-const ROTULO_RECURSO: Readonly<Record<string, string>> = {
-  perguntas: "Perguntas",
 };
 
 /** O nome visível de uma conta. Nunca `seller_id`. */
@@ -92,10 +141,9 @@ const MENSAGEM_FALHA_LEITURA = "Não foi possível carregar as conexões.";
 
 export default function ConexoesAgente({ agenteId }: { agenteId: string }) {
   const [leitura, setLeitura] = useState<Leitura>({ estado: "carregando" });
-  /** Requisitos com PATCH em voo, por chave nominal. Um requisito
-   *  pendente não trava os outros. */
+  /** Plataformas com escrita em voo. Uma pendente não trava as outras. */
   const [pendentes, setPendentes] = useState<Readonly<Record<string, true>>>({});
-  /** Erro de escrita, por requisito. Some assim que outra tentativa começa. */
+  /** Erro de escrita, por plataforma. Some assim que outra tentativa começa. */
   const [errosPorRequisito, setErros] = useState<Readonly<Record<string, string>>>({});
 
   /** O GET em voo. Um novo cancela o anterior: sem isto, a resposta de um
@@ -133,7 +181,11 @@ export default function ConexoesAgente({ agenteId }: { agenteId: string }) {
   }, [carregar]);
 
   /**
-   * Grava a escolha de UM requisito.
+   * Grava a escolha de UMA plataforma — para todos os recursos dela.
+   *
+   * Provider de API: `PATCH /apis` (tudo ou nada no servidor). Outra
+   * plataforma (requisito de Skill): o contrato antigo, a MESMA loja em
+   * cada recurso, parando no primeiro erro.
    *
    * `lojaId === null` remove. Sucesso e conflito terminam igual: novo
    * GET. O conflito significa que o servidor sabe algo que a tela não
@@ -142,8 +194,8 @@ export default function ConexoesAgente({ agenteId }: { agenteId: string }) {
    * seleção que foi recusada.
    */
   const definir = useCallback(
-    async (conexao: ConexaoRequisitoUI, lojaId: string | null) => {
-      const chave = chaveDe(conexao);
+    async (grupo: ConexaoDaPlataforma, lojaId: string | null) => {
+      const chave = grupo.plataforma;
       setPendentes((atual) => ({ ...atual, [chave]: true }));
       setErros((atual) => {
         const proximo = { ...atual };
@@ -151,11 +203,19 @@ export default function ConexoesAgente({ agenteId }: { agenteId: string }) {
         return proximo;
       });
 
-      const resposta = await definirConexaoDoAgente(agenteId, {
-        plataforma: conexao.plataforma,
-        recurso: conexao.recurso,
-        lojaId,
-      });
+      const provedor = provedorDeAgentesDaPlataforma(grupo.plataforma);
+      let resposta: { estado: string; mensagem?: string };
+      if (provedor !== null) {
+        resposta = await definirContaDaApi(agenteId, provedor, lojaId);
+      } else {
+        resposta = { estado: "ok" };
+        for (const r of grupo.recursos) {
+          resposta = await definirConexaoDoAgente(agenteId, {
+            plataforma: r.plataforma, recurso: r.recurso, lojaId,
+          });
+          if (resposta.estado !== "ok") break;
+        }
+      }
 
       const encerrar = (mensagem?: string) => {
         setPendentes((atual) => {
@@ -176,7 +236,7 @@ export default function ConexoesAgente({ agenteId }: { agenteId: string }) {
         return;
       }
 
-      if (resposta.estado === "conflito") {
+      if (resposta.estado === "conflito" || resposta.estado === "inconsistente") {
         await carregar();
         encerrar(resposta.mensagem);
         return;
@@ -241,17 +301,16 @@ export default function ConexoesAgente({ agenteId }: { agenteId: string }) {
   return (
     <div className="cds-cx-raiz">
       <ul className="cds-cx-lista" aria-label="Conexões deste agente">
-        {leitura.conexoes.map((conexao) => {
-          const chave = chaveDe(conexao);
+        {agruparPorPlataforma(leitura.conexoes).map((conexao) => {
+          const chave = conexao.plataforma;
           const pendente = pendentes[chave] === true;
           const erro = errosPorRequisito[chave];
           const selecionada = conexao.lojasElegiveis.find(
-            (l) => l.id === conexao.lojaIdSelecionada
+            (l) => l.id === conexao.selecionada
           );
           const idSelect = `cds-cx-select-${chave.replace(/[^a-z0-9-]/gi, "-")}`;
-          const rotulo = `${ROTULO_PLATAFORMA[conexao.plataforma] ?? conexao.plataforma} · ${
-            ROTULO_RECURSO[conexao.recurso] ?? conexao.recurso
-          }`;
+          // UM rotulo por provider: o recurso e detalhe do servidor.
+          const rotulo = ROTULO_PLATAFORMA[conexao.plataforma] ?? conexao.plataforma;
 
           return (
             <li key={chave} className="cds-cx-item">
@@ -263,7 +322,11 @@ export default function ConexoesAgente({ agenteId }: { agenteId: string }) {
                 {conexao.obrigatoria && <span className="cds-cx-marca">Obrigatória</span>}
               </div>
 
-              {conexao.lojaIdSelecionada === null ? (
+              {conexao.divergente ? (
+                <p className="cds-cx-estado cds-cx-incompativel" role="status">
+                  Este agente está com contas diferentes. Escolha uma.
+                </p>
+              ) : conexao.selecionada === null ? (
                 <p className="cds-cx-estado">Nenhuma conta escolhida</p>
               ) : conexao.utilizavel ? (
                 <p className="cds-cx-estado">
@@ -291,7 +354,7 @@ export default function ConexoesAgente({ agenteId }: { agenteId: string }) {
                   <select
                     id={idSelect}
                     className="cds-cx-select"
-                    value={conexao.lojaIdSelecionada ?? ""}
+                    value={conexao.selecionada ?? ""}
                     disabled={pendente}
                     onChange={(evento) => {
                       const valor = evento.target.value;
@@ -306,7 +369,7 @@ export default function ConexoesAgente({ agenteId }: { agenteId: string }) {
                     ))}
                   </select>
 
-                  {conexao.lojaIdSelecionada !== null && (
+                  {(conexao.selecionada !== null || conexao.divergente || conexao.incompleta) && (
                     <button
                       type="button"
                       className="cds-cx-secundario"

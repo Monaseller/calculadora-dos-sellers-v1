@@ -217,11 +217,13 @@ async function principal(): Promise<void> {
 
   secao("C. UI-CONN-6..10 — os cinco estados da tela");
 
+  // F9.2-A4: a lista inteira do servidor, AGRUPADA por provider (um item
+  // por plataforma) — ainda sem filtrar nada.
   ok("UI-CONN-6  renderiza a lista inteira do servidor, sem filtrar",
-    /leitura\.conexoes\.map\(/.test(COMPONENTE) &&
+    /agruparPorPlataforma\(leitura\.conexoes\)\.map\(/.test(COMPONENTE) &&
       !/\.filter\(\s*\(?c\)?\s*=>\s*c\.utilizavel/.test(COMPONENTE));
   ok("UI-CONN-7  sem selecao diz `Nenhuma conta escolhida`",
-    /lojaIdSelecionada === null \? \(/.test(COMPONENTE) &&
+    /conexao\.selecionada === null \? \(/.test(COMPONENTE) &&
       /Nenhuma conta escolhida/.test(COMPONENTE));
   ok("UI-CONN-7a e NAO diz `Nenhuma conta conectada` — sao coisas diferentes",
     !/Nenhuma conta conectada/.test(COMPONENTE));
@@ -249,9 +251,13 @@ async function principal(): Promise<void> {
 
   secao("D. UI-CONN-11..15 — escrever sem otimismo");
 
-  ok("UI-CONN-11 selecionar chama o PATCH com plataforma e recurso do item",
-    /definirConexaoDoAgente\(agenteId, \{\s*plataforma: conexao\.plataforma,\s*recurso: conexao\.recurso,\s*lojaId,\s*\}\)/s
-      .test(COMPONENTE));
+  // F9.2-A4: UMA escolha por provider. Provider de API -> PATCH /apis
+  // (tudo ou nada); plataforma sem capability -> o PATCH antigo, com a
+  // MESMA loja em cada recurso daquela plataforma.
+  ok("UI-CONN-11 selecionar grava a conta do PROVIDER (e, fora dele, a mesma loja por recurso)",
+    /definirContaDaApi\(agenteId, provedor, lojaId\)/.test(COMPONENTE) &&
+      /definirConexaoDoAgente\(agenteId, \{\s*plataforma: r\.plataforma, recurso: r\.recurso, lojaId,\s*\}\)/s
+        .test(COMPONENTE));
   ok("UI-CONN-12 remover manda `null`",
     /definir\(conexao, null\)/.test(COMPONENTE) &&
       /valor === "" \? null : valor/.test(COMPONENTE));
@@ -259,7 +265,7 @@ async function principal(): Promise<void> {
     /pendentes\[chave\] === true/.test(COMPONENTE) &&
       /disabled=\{pendente\}/.test(COMPONENTE));
   ok("UI-CONN-13a e a chave NAO e o indice do array",
-    /const chaveDe = \(c/.test(COMPONENTE) &&
+    /const chave = conexao\.plataforma;/.test(COMPONENTE) &&
       /key=\{chave\}/.test(COMPONENTE) &&
       !/\.map\(\((\w+), (i|idx|index)\)/.test(COMPONENTE));
   ok("UI-CONN-14 erro de PATCH vira erro daquele requisito, nunca sucesso",
@@ -270,7 +276,8 @@ async function principal(): Promise<void> {
   ok("UI-CONN-15 sucesso ressincroniza pelo GET",
     /resposta\.estado === "ok"\)\s*\{\s*await carregar\(\)/s.test(COMPONENTE));
   ok("UI-CONN-15a conflito TAMBEM ressincroniza",
-    /resposta\.estado === "conflito"\)\s*\{\s*await carregar\(\)/s.test(COMPONENTE));
+    /resposta\.estado === "conflito" \|\| resposta\.estado === "inconsistente"\)\s*\{\s*await carregar\(\)/s
+      .test(COMPONENTE));
   ok("UI-CONN-15b zero otimismo: a tela nao deriva estado local da escolha",
     !/setLeitura\(\s*\(?atual/.test(COMPONENTE));
   ok("UI-CONN-15c o GET em voo e cancelavel, e o novo cancela o velho",
