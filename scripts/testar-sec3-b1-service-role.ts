@@ -107,6 +107,16 @@ const MIGRADOS = [
 // Guarda estatica SERVER_SEC3 (exportavel como funcao pura para o
 // auto-teste: a guarda tem de PEGAR a violacao, nao so passar).
 // ─────────────────────────────────────────────────────────────────────
+/**
+ * Mudancas de banco APROVADAS depois da base deste gate — cada uma com o
+ * proprio guard linha a linha (SEC-3-C: testar-sec3-c-lockdown;
+ * S2-D1: testar-s2d1-migracao). Qualquer outra continua reprovando K1/K2.
+ */
+const MIGRACOES_APROVADAS = [
+  "supabase/migrations/20261026_sec3c_lockdown_tabelas_publicas.sql",
+  "supabase/migrations/20261027_s2d1_shopee_pedidos_canonico.sql",
+];
+
 const RE_TABELA = new RegExp(`\\.from\\(\\s*["'\`](${TABELAS_SEC3.join("|")})["'\`]\\s*\\)`, "g");
 const RE_RPC_SEC3 = /\.rpc\(\s*["'`](claim_next_sync_job|criar_projeto_estudio_anuncios|estudio_anuncios_\w+)["'`]/g;
 
@@ -533,7 +543,7 @@ async function principal() {
   // supabase/ (validada por scripts/testar-sec3-c-lockdown.ts).
   t("K1. nenhuma migration / arquivo em supabase/ mudou (alem da migration SEC-3-C)", () => {
     const d = git("diff", "--name-only", BASE, "--", "supabase").split(/\r?\n/)
-      .filter((f) => f && f !== "supabase/migrations/20261026_sec3c_lockdown_tabelas_publicas.sql");
+      .filter((f) => f && !MIGRACOES_APROVADAS.includes(f));
     assert(d.length === 0, d.join(", "));
   });
   // ── K2: mudanca de banco no diff ──────────────────────────────────
@@ -544,7 +554,10 @@ async function principal() {
   // SEC-3-C: a migration de lockdown e a UNICA mudanca de banco aprovada;
   // ela e validada linha a linha por scripts/testar-sec3-c-lockdown.ts.
   // Qualquer outro GRANT/REVOKE/RLS/POLICY no diff continua reprovando.
-  const EXCLUSAO_SEC3C = ":(exclude)supabase/migrations/20261026_sec3c_lockdown_tabelas_publicas.sql";
+  // S2-D1: a fundacao canonica Shopee e a segunda mudanca de banco
+  // aprovada (validada por scripts/testar-s2d1-migracao.ts, que contem o
+  // proprio padrao de busca e por isso tambem sai da varredura).
+  const EXCLUSOES_APROVADAS = [...MIGRACOES_APROVADAS, "scripts/testar-s2d1-migracao.ts"].map((f) => `:(exclude)${f}`);
   const RE_MUDANCA_BANCO =
     /\b(GRANT|REVOKE)\s+\w+|\b(ENABLE|DISABLE|FORCE)\s+ROW\s+LEVEL\s+SECURITY|ROW LEVEL SECURITY|\b(CREATE|ALTER|DROP)\s+POLICY\b/i;
   /** Linhas ADICIONADAS (diff unificado) que mudam grant/RLS/policy. */
@@ -552,8 +565,8 @@ async function principal() {
     diff.split(/\r?\n/).filter((l) => l.startsWith("+") && !l.startsWith("+++") && RE_MUDANCA_BANCO.test(l));
 
   t("K2. nenhum GRANT/REVOKE/RLS/POLICY introduzido no diff (fora das suites SEC-3)", () => {
-    const d = git("diff", BASE, "--", ".", EXCLUSAO_K2, EXCLUSAO_SEC3C);
-    const novos = git("ls-files", "--others", "--exclude-standard", "--", ".", EXCLUSAO_K2, EXCLUSAO_SEC3C)
+    const d = git("diff", BASE, "--", ".", EXCLUSAO_K2, ...EXCLUSOES_APROVADAS);
+    const novos = git("ls-files", "--others", "--exclude-standard", "--", ".", EXCLUSAO_K2, ...EXCLUSOES_APROVADAS)
       .split(/\r?\n/).filter(Boolean);
     const diffNovos = novos.map((f) => readFileSync(join(RAIZ, f), "utf8").split(/\r?\n/).map((l) => `+${l}`).join("\n")).join("\n");
     const sql = [...mudancasDeBanco(d), ...mudancasDeBanco(diffNovos)];
