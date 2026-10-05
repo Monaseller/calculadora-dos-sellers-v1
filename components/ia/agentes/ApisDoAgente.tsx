@@ -6,18 +6,18 @@
  * APIs = INTEGRACOES DA CDS (Mercado Livre, Shopee), nao uma busca solta
  * de aplicativos. Cada integracao mostra duas coisas, das fontes reais:
  *
- *   conta na CDS   `listarLojasDoDono` (GET /api/lojas, o mesmo de
- *                  Configuracoes). Sem conta: "Conectar" abre o fluxo
+ *   conta na CDS   as contas do dono por provider, de `buscarApisDoAgente`
+ *                  (GET /apis). Sem conta: "Conectar" abre o fluxo
  *                  OAuth da CDS numa aba nova — a pagina nao se perde.
  *   neste agente   o pack de agente da integracao (`adicionarPackAoAgente`
- *                  / `removerPackDoAgente`, nivel) e a conta escolhida
- *                  para cada requisito (`buscarConexoesDoAgente` /
- *                  `definirConexaoDoAgente`).
+ *                  / `removerPackDoAgente`, nivel) e UMA conta por provider
+ *                  (`buscarApisDoAgente` / `definirContaDaApi`, F9.2-A2).
  *
  * "Conectar" com conta ja disponivel e AUTOMATICO quando so ha uma conta
- * possivel por requisito (`planoDeConexao`): um PATCH por requisito e UMA
- * releitura de validacao. Com mais de uma conta, o dono escolhe. Nada
- * fala com o marketplace daqui (sem chamada remota, sem 429).
+ * possivel (`planoDaApi`): um PATCH do provider e UMA releitura. Com mais
+ * de uma conta, o dono escolhe UMA — recursos (perguntas, vendas) sao
+ * detalhe do servidor e nao aparecem aqui. Nada fala com o marketplace
+ * daqui (sem chamada remota, sem 429).
  *
  * Shopee: conta conectavel pela CDS, mas sem pack de agente ainda — a
  * tela diz isso e nao oferece "adicionar".
@@ -27,22 +27,20 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  ENDERECO_PARA_CONECTAR_CONTA, buscarConexoesDoAgente, definirConexaoDoAgente,
-  definirPermissaoDeFerramentaExterna, desvincularFerramentaExterna, listarLojasDoDono,
-  type AtivacaoDoAgenteUI, type ConexaoRequisitoUI, type LojaDoDonoUI,
+  ENDERECO_PARA_CONECTAR_CONTA, buscarApisDoAgente, definirContaDaApi,
+  definirPermissaoDeFerramentaExterna, desvincularFerramentaExterna,
+  type ApiDoAgenteUI, type AtivacaoDoAgenteUI,
 } from "@/lib/ia/agentes-http";
 import { adicionarPackAoAgente, removerPackDoAgente } from "@/lib/ia/ferramentas-do-agente";
 import { ICONE_ACAO_EXTERNA } from "@/lib/ia/icones-ferramentas";
 import {
-  INTEGRACOES_CDS, contasDaIntegracao, nomeDaConta, planoDeConexao,
+  INTEGRACOES_CDS, contaEmUsoDaApi, contaSelecionadaDaApi, nomeDaConta, planoDaApi,
   type IntegracaoCds, type ProjecaoDeCapacidades,
 } from "@/lib/ia/agentes-gestao";
 import SeletorDeNivel, { nivelDoPack } from "@/components/ia/agentes/SeletorDeNivel";
 import estilos from "@/components/ia/agentes/agentes.module.css";
 
 type Escrever = (acao: () => Promise<{ estado: string; mensagem?: string }>, falha: string) => Promise<boolean>;
-
-const ROTULO_RECURSO: Readonly<Record<string, string>> = { perguntas: "Perguntas" };
 
 function cx(...c: (string | false | null | undefined)[]): string {
   return c.filter(Boolean).join(" ");
@@ -64,9 +62,8 @@ export default function ApisDoAgente({
   escrever: Escrever;
   avisar: (mensagem: string) => void;
 }) {
-  const [lojas, setLojas] = useState<readonly LojaDoDonoUI[] | null>(null);
+  const [apis, setApis] = useState<readonly ApiDoAgenteUI[] | null>(null);
   const [falhaLojas, setFalhaLojas] = useState(false);
-  const [conexoes, setConexoes] = useState<readonly ConexaoRequisitoUI[] | null>(null);
   /** Integracao com a escolha de conta aberta (mais de uma conta possivel). */
   const [escolhendo, setEscolhendo] = useState<string | null>(null);
   /** Integracao aguardando o dono concluir o OAuth na outra aba. */
@@ -77,18 +74,27 @@ export default function ApisDoAgente({
     controlador.current?.abort();
     const c = new AbortController();
     controlador.current = c;
-    const [l, x] = await Promise.all([listarLojasDoDono(c.signal), buscarConexoesDoAgente(agenteId, c.signal)]);
+    // F9.2-A2: UMA leitura — providers, contas do dono e a conta do agente.
+    const x = await buscarApisDoAgente(agenteId, c.signal);
     if (c.signal.aborted) return null;
-    if (l.estado === "ok") { setLojas(l.lojas); setFalhaLojas(false); } else setFalhaLojas(true);
-    const lidas = x.estado === "ok" ? x.conexoes : null;
-    if (lidas !== null) setConexoes(lidas);
-    return lidas;
+    if (x.estado !== "ok") { setFalhaLojas(true); return null; }
+    setApis(x.apis);
+    setFalhaLojas(false);
+    return x.apis;
   }, [agenteId]);
 
   useEffect(() => {
     void recarregar();
     return () => controlador.current?.abort();
   }, [recarregar]);
+
+  /** PATCH /apis: UMA conta para o provider; o servidor aplica tudo ou nada. */
+  async function gravarContaDaApi(provedor: string, lojaId: string | null) {
+    const r = await definirContaDaApi(agenteId, provedor, lojaId);
+    if (r.estado === "ok") return { estado: "ok" };
+    return r.estado === "conflito" || r.estado === "dados_invalidos" || r.estado === "inconsistente"
+      ? { estado: "recusado", mensagem: r.mensagem } : { estado: "falha" };
+  }
 
   /**
    * "Conectar" uma integracao neste agente: adiciona o pack (se faltar),
@@ -103,23 +109,16 @@ export default function ApisDoAgente({
       if (!ok) return;
     }
     const lidas = await recarregar();
-    if (lidas === null) return;
-    const plano = planoDeConexao(lidas, integracao.plataforma);
+    const api = lidas?.find((a) => a.id === integracao.chave);
+    if (!api) return;
+    const plano = planoDaApi(api);
     if (plano.tipo === "auto") {
-      const ok = await escrever(async () => {
-        for (const g of plano.gravar) {
-          const r = await definirConexaoDoAgente(agenteId, g);
-          if (r.estado !== "ok") {
-            return r.estado === "conflito" || r.estado === "dados_invalidos"
-              ? { estado: "recusado", mensagem: r.mensagem } : { estado: "falha" };
-          }
-        }
-        return { estado: "ok" };
-      }, `Não foi possível conectar a conta do ${integracao.nome}.`);
+      const ok = await escrever(() => gravarContaDaApi(integracao.chave, plano.lojaId),
+        `Não foi possível conectar a conta do ${integracao.nome}.`);
       // A validacao: uma releitura so — `utilizavel` e calculado pelo servidor.
-      const validadas = await recarregar();
-      if (ok && validadas !== null && planoDeConexao(validadas, integracao.plataforma).tipo === "pronta") {
-        const conta = lojas?.find((l) => l.id === plano.gravar[0].lojaId);
+      const depois = (await recarregar())?.find((a) => a.id === integracao.chave);
+      if (ok && depois && planoDaApi(depois).tipo === "pronta") {
+        const conta = depois.conexoes.find((l) => l.id === plano.lojaId);
         avisar(`${integracao.nome} conectado${conta ? ` com a conta ${nomeDaConta(conta)}` : ""}.`);
       }
       return;
@@ -128,13 +127,8 @@ export default function ApisDoAgente({
     if (plano.tipo === "conectar_conta") setAguardandoConta(integracao.chave);
   }
 
-  async function escolherConta(c: ConexaoRequisitoUI, lojaId: string | null) {
-    await escrever(async () => {
-      const r = await definirConexaoDoAgente(agenteId, { plataforma: c.plataforma, recurso: c.recurso, lojaId });
-      if (r.estado === "ok") return { estado: "ok" };
-      return r.estado === "conflito" || r.estado === "dados_invalidos"
-        ? { estado: "recusado", mensagem: r.mensagem } : { estado: "falha" };
-    }, "Não foi possível salvar a conta escolhida.");
+  async function escolherConta(i: IntegracaoCds, lojaId: string | null) {
+    await escrever(() => gravarContaDaApi(i.chave, lojaId), "Não foi possível salvar a conta escolhida.");
     await recarregar();
   }
 
@@ -157,15 +151,13 @@ export default function ApisDoAgente({
       )}
       <ul className={estilos.itens} aria-label="Integrações da CDS">
         {INTEGRACOES_CDS.map((i) => {
-          const contas = lojas === null ? null : contasDaIntegracao(i, lojas);
+          const api = apis?.find((a) => a.id === i.chave) ?? null;
+          const contas = api === null ? null : api.conexoes;
           const pack = i.packId === null ? null : cap.packsDeApi.find((f) => f.id === i.packId) ?? null;
-          const doAgente = conexoes?.filter((c) => c.plataforma === i.plataforma) ?? [];
-          const plano = conexoes === null ? null : planoDeConexao(conexoes, i.plataforma);
+          const plano = api === null ? null : planoDaApi(api);
           const semLoja = ativacao.conexoesSemLoja.some((c) => c.plataforma === i.plataforma);
-          const pronta = pack !== null && !semLoja && (plano === null || plano.tipo === "pronta" || plano.tipo === "sem_requisito");
-          const contaEmUso = doAgente
-            .map((c) => c.lojasElegiveis.find((l) => l.id === c.lojaIdSelecionada && c.utilizavel))
-            .find((l) => l !== undefined);
+          const pronta = pack !== null && !semLoja && (plano === null || plano.tipo === "pronta");
+          const contaEmUso = api === null ? null : contaEmUsoDaApi(api);
           const semContaNaCds = contas !== null && contas.length === 0;
 
           return (
@@ -226,7 +218,7 @@ export default function ApisDoAgente({
                           </button>
                         )
                     )}
-                    {pronta && doAgente.length > 0 && (contas?.length ?? 0) > 1 && escolhendo !== i.chave && (
+                    {pronta && (contas?.length ?? 0) > 1 && escolhendo !== i.chave && (
                       <button type="button" className={estilos.botao} disabled={ocupado}
                         onClick={() => setEscolhendo(i.chave)}>
                         Trocar conta
@@ -241,33 +233,30 @@ export default function ApisDoAgente({
                 )}
               </div>
 
-              {/* Escolha de conta (mais de uma possivel): selects no padrao CDS. */}
-              {escolhendo === i.chave && doAgente.length > 0 && (
+              {/* Escolha de conta: UM seletor por provider (F9.2-A2). */}
+              {escolhendo === i.chave && api !== null && (
                 <div className={estilos.integracaoDetalhe}>
-                  {doAgente.map((c) => {
-                    const id = `ag-conta-${i.chave}-${c.recurso}`;
-                    return (
-                      <label key={`${c.plataforma}:${c.recurso}`} className={estilos.campo} htmlFor={id}>
-                        <span className={estilos.campoRotulo}>
-                          Conta do {i.nome} · {ROTULO_RECURSO[c.recurso] ?? c.recurso}
-                        </span>
-                        {c.lojaIdSelecionada !== null && !c.utilizavel && (
-                          <span className={estilos.itemAtencao}>A conta escolhida não serve para este uso. Escolha outra.</span>
-                        )}
-                        <select id={id} className={cx(estilos.entrada, estilos.selecao)} disabled={ocupado}
-                          value={c.lojaIdSelecionada ?? ""}
-                          onChange={(e) => void escolherConta(c, e.target.value === "" ? null : e.target.value)}>
-                          <option value="">Nenhuma</option>
-                          {c.lojasElegiveis.map((l) => <option key={l.id} value={l.id}>{nomeDaConta(l)}</option>)}
-                        </select>
-                      </label>
-                    );
-                  })}
+                  <label className={estilos.campo} htmlFor={`ag-conta-${i.chave}`}>
+                    <span className={estilos.campoRotulo}>Conta do {i.nome}</span>
+                    {api.contaDoAgente.estado === "definida" && !api.contaDoAgente.utilizavel && (
+                      <span className={estilos.itemAtencao}>A conta escolhida não serve para este uso. Escolha outra.</span>
+                    )}
+                    {api.contaDoAgente.estado === "divergente" && (
+                      <span className={estilos.itemAtencao}>Este agente está com contas diferentes. Escolha uma.</span>
+                    )}
+                    <select id={`ag-conta-${i.chave}`} className={cx(estilos.entrada, estilos.selecao)} disabled={ocupado}
+                      value={contaSelecionadaDaApi(api) ?? ""}
+                      onChange={(e) => void escolherConta(i, e.target.value === "" ? null : e.target.value)}>
+                      <option value="">Nenhuma</option>
+                      {api.conexoes.map((l) => <option key={l.id} value={l.id}>{nomeDaConta(l)}</option>)}
+                    </select>
+                  </label>
                   <div>
                     <button type="button" className={estilos.botao} onClick={() => setEscolhendo(null)}>Concluir</button>
                   </div>
                 </div>
               )}
+
 
               {/* Conta sendo conectada na outra aba (fluxo OAuth da CDS). */}
               {aguardandoConta === i.chave && (

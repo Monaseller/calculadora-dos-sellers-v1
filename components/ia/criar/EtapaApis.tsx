@@ -6,12 +6,12 @@
  * Os MESMOS contratos e regras da aba APIs da pagina Agentes, no visual
  * do v0 aprovado:
  *
- *   conta na CDS   `listarLojasDoDono` (GET /api/lojas)
+ *   conta na CDS   as contas do dono por provider (`buscarApisDoAgente`)
  *   usar no agente `adicionarPackAoAgente` / `removerPackDoAgente` do pack
- *                  do Mercado Livre (no dominio ainda e TOOL_PACK — a
- *                  separacao API x Tool aqui e VISUAL)
- *   conta escolhida `buscarConexoesDoAgente` / `definirConexaoDoAgente`,
- *                  automatico so com UMA conta possivel (`planoDeConexao`)
+ *                  do Mercado Livre (alias legado do provider Mercado Livre)
+ *   conta escolhida UMA por provider (`buscarApisDoAgente` /
+ *                  `definirContaDaApi`, F9.2-A2); automatico so com UMA
+ *                  conta possivel (`planoDaApi`)
  *   conectar conta o fluxo OAuth da CDS, em aba nova
  *
  * Capacidades: so as Funcoes REAIS do pack aparecem como incluidas; o
@@ -20,15 +20,15 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  ENDERECO_PARA_CONECTAR_CONTA, buscarConexoesDoAgente, definirConexaoDoAgente,
-  definirPermissaoDeFerramentaExterna, desvincularFerramentaExterna, listarLojasDoDono,
-  type AtivacaoDoAgenteUI, type ConexaoRequisitoUI, type LojaDoDonoUI,
+  ENDERECO_PARA_CONECTAR_CONTA, buscarApisDoAgente, definirContaDaApi,
+  definirPermissaoDeFerramentaExterna, desvincularFerramentaExterna,
+  type ApiDoAgenteUI, type AtivacaoDoAgenteUI,
 } from "@/lib/ia/agentes-http";
 import { adicionarPackAoAgente, removerPackDoAgente } from "@/lib/ia/ferramentas-do-agente";
 import { ICONE_ACAO_EXTERNA } from "@/lib/ia/icones-ferramentas";
 import { packPorId } from "@/lib/agentes/factory/catalogo-ui";
 import {
-  INTEGRACOES_CDS, contasDaIntegracao, nomeDaConta, planoDeConexao, projetarCapacidades,
+  INTEGRACOES_CDS, contaEmUsoDaApi, contaSelecionadaDaApi, nomeDaConta, planoDaApi, projetarCapacidades,
   type IntegracaoCds,
 } from "@/lib/ia/agentes-gestao";
 import { CAPACIDADES_MERCADO_LIVRE } from "@/lib/ia/criar-agente";
@@ -53,9 +53,8 @@ export default function EtapaApis({
   aoMudarConexao: () => void;
 }) {
   const cap = projetarCapacidades(ativacao);
-  const [lojas, setLojas] = useState<readonly LojaDoDonoUI[] | null>(null);
+  const [apis, setApis] = useState<readonly ApiDoAgenteUI[] | null>(null);
   const [falhaLojas, setFalhaLojas] = useState(false);
-  const [conexoes, setConexoes] = useState<readonly ConexaoRequisitoUI[] | null>(null);
   const [escolhendo, setEscolhendo] = useState<string | null>(null);
   const [aguardandoConta, setAguardandoConta] = useState<string | null>(null);
   const controlador = useRef<AbortController | null>(null);
@@ -64,18 +63,27 @@ export default function EtapaApis({
     controlador.current?.abort();
     const c = new AbortController();
     controlador.current = c;
-    const [l, x] = await Promise.all([listarLojasDoDono(c.signal), buscarConexoesDoAgente(agenteId, c.signal)]);
+    // F9.2-A2: UMA leitura — providers, contas do dono e a conta do agente.
+    const x = await buscarApisDoAgente(agenteId, c.signal);
     if (c.signal.aborted) return null;
-    if (l.estado === "ok") { setLojas(l.lojas); setFalhaLojas(false); } else setFalhaLojas(true);
-    const lidas = x.estado === "ok" ? x.conexoes : null;
-    if (lidas !== null) setConexoes(lidas);
-    return lidas;
+    if (x.estado !== "ok") { setFalhaLojas(true); return null; }
+    setApis(x.apis);
+    setFalhaLojas(false);
+    return x.apis;
   }, [agenteId]);
 
   useEffect(() => {
     void recarregar();
     return () => controlador.current?.abort();
   }, [recarregar]);
+
+  /** PATCH /apis: UMA conta para o provider; o servidor aplica tudo ou nada. */
+  async function gravarContaDaApi(provedor: string, lojaId: string | null) {
+    const r = await definirContaDaApi(agenteId, provedor, lojaId);
+    if (r.estado === "ok") return { estado: "ok" };
+    return r.estado === "conflito" || r.estado === "dados_invalidos" || r.estado === "inconsistente"
+      ? { estado: "recusado", mensagem: r.mensagem } : { estado: "falha" };
+  }
 
   /** Liga a integracao: pack (se faltar) -> requisitos -> plano. */
   async function usar(integracao: IntegracaoCds, packPresente: boolean) {
@@ -86,23 +94,16 @@ export default function EtapaApis({
       if (!ok) return;
     }
     const lidas = await recarregar();
-    if (lidas === null) return;
-    const plano = planoDeConexao(lidas, integracao.plataforma);
+    const api = lidas?.find((a) => a.id === integracao.chave);
+    if (!api) return;
+    const plano = planoDaApi(api);
     if (plano.tipo === "auto") {
-      const ok = await escrever(async () => {
-        for (const g of plano.gravar) {
-          const r = await definirConexaoDoAgente(agenteId, g);
-          if (r.estado !== "ok") {
-            return r.estado === "conflito" || r.estado === "dados_invalidos"
-              ? { estado: "recusado", mensagem: r.mensagem } : { estado: "falha" };
-          }
-        }
-        return { estado: "ok" };
-      }, `Não foi possível conectar a conta do ${integracao.nome}.`);
+      const ok = await escrever(() => gravarContaDaApi(integracao.chave, plano.lojaId),
+        `Não foi possível conectar a conta do ${integracao.nome}.`);
       // Validacao: UMA releitura — `utilizavel` e calculado pelo servidor.
-      const validadas = await recarregar();
-      if (ok && validadas !== null && planoDeConexao(validadas, integracao.plataforma).tipo === "pronta") {
-        const conta = lojas?.find((l) => l.id === plano.gravar[0].lojaId);
+      const depois = (await recarregar())?.find((a) => a.id === integracao.chave);
+      if (ok && depois && planoDaApi(depois).tipo === "pronta") {
+        const conta = depois.conexoes.find((l) => l.id === plano.lojaId);
         avisar(`${integracao.nome} conectado${conta ? ` com a conta ${nomeDaConta(conta)}` : ""}.`);
       }
       aoMudarConexao();
@@ -112,13 +113,8 @@ export default function EtapaApis({
     if (plano.tipo === "conectar_conta") setAguardandoConta(integracao.chave);
   }
 
-  async function escolherConta(c: ConexaoRequisitoUI, lojaId: string | null) {
-    await escrever(async () => {
-      const r = await definirConexaoDoAgente(agenteId, { plataforma: c.plataforma, recurso: c.recurso, lojaId });
-      if (r.estado === "ok") return { estado: "ok" };
-      return r.estado === "conflito" || r.estado === "dados_invalidos"
-        ? { estado: "recusado", mensagem: r.mensagem } : { estado: "falha" };
-    }, "Não foi possível salvar a conta escolhida.");
+  async function escolherConta(i: IntegracaoCds, lojaId: string | null) {
+    await escrever(() => gravarContaDaApi(i.chave, lojaId), "Não foi possível salvar a conta escolhida.");
     await recarregar();
     aoMudarConexao();
   }
@@ -138,16 +134,13 @@ export default function EtapaApis({
       {falhaLojas && <p className={estilos.erro} role="alert">Não foi possível ler as contas conectadas agora.</p>}
       <ul className={estilos.itens} aria-label="Integrações da CDS">
         {INTEGRACOES_CDS.map((i) => {
-          const contas = lojas === null ? null : contasDaIntegracao(i, lojas);
+          const api = apis?.find((a) => a.id === i.chave) ?? null;
+          const contas = api === null ? null : api.conexoes;
           const pack = i.packId === null ? null : cap.packsDeApi.find((f) => f.id === i.packId) ?? null;
-          const doAgente = conexoes?.filter((c) => c.plataforma === i.plataforma) ?? [];
-          const plano = conexoes === null ? null : planoDeConexao(conexoes, i.plataforma);
+          const plano = api === null ? null : planoDaApi(api);
           const semLoja = ativacao.conexoesSemLoja.some((c) => c.plataforma === i.plataforma);
-          const pronta = pack !== null && !semLoja &&
-            (plano === null || plano.tipo === "pronta" || plano.tipo === "sem_requisito");
-          const contaEmUso = doAgente
-            .map((c) => c.lojasElegiveis.find((l) => l.id === c.lojaIdSelecionada && c.utilizavel))
-            .find((l) => l !== undefined);
+          const pronta = pack !== null && !semLoja && (plano === null || plano.tipo === "pronta");
+          const contaEmUso = api === null ? null : contaEmUsoDaApi(api);
           const semContaNaCds = contas !== null && contas.length === 0;
           const funcoesDoPack = i.packId === null ? [] : packPorId(i.packId)?.funcoes ?? [];
 
@@ -228,7 +221,7 @@ export default function EtapaApis({
                     </div>
                   )}
 
-                  {pronta && doAgente.length > 0 && (contas?.length ?? 0) > 1 && escolhendo !== i.chave && (
+                  {pronta && (contas?.length ?? 0) > 1 && escolhendo !== i.chave && (
                     <div>
                       <button type="button" className={estilos.botao} disabled={ocupado}
                         onClick={() => setEscolhendo(i.chave)}>
@@ -237,20 +230,18 @@ export default function EtapaApis({
                     </div>
                   )}
 
-                  {escolhendo === i.chave && doAgente.map((c) => {
-                    const id = `cr-conta-${i.chave}-${c.recurso}`;
-                    return (
-                      <label key={`${c.plataforma}:${c.recurso}`} className={estilos.campo} htmlFor={id}>
-                        <span className={estilos.rotulo}>Conta do {i.nome}</span>
-                        <select id={id} className={cx(estilos.entrada, estilos.selecao)} disabled={ocupado}
-                          value={c.lojaIdSelecionada ?? ""}
-                          onChange={(e) => void escolherConta(c, e.target.value === "" ? null : e.target.value)}>
-                          <option value="">Nenhuma</option>
-                          {c.lojasElegiveis.map((l) => <option key={l.id} value={l.id}>{nomeDaConta(l)}</option>)}
-                        </select>
-                      </label>
-                    );
-                  })}
+                  {/* UM seletor por provider (F9.2-A2): sem select por recurso. */}
+                  {escolhendo === i.chave && api !== null && (
+                    <label className={estilos.campo} htmlFor={`cr-conta-${i.chave}`}>
+                      <span className={estilos.rotulo}>Conta do {i.nome}</span>
+                      <select id={`cr-conta-${i.chave}`} className={cx(estilos.entrada, estilos.selecao)} disabled={ocupado}
+                        value={contaSelecionadaDaApi(api) ?? ""}
+                        onChange={(e) => void escolherConta(i, e.target.value === "" ? null : e.target.value)}>
+                        <option value="">Nenhuma</option>
+                        {api.conexoes.map((l) => <option key={l.id} value={l.id}>{nomeDaConta(l)}</option>)}
+                      </select>
+                    </label>
+                  )}
                   {escolhendo === i.chave && (
                     <div>
                       <button type="button" className={estilos.botao} onClick={() => setEscolhendo(null)}>Concluir</button>

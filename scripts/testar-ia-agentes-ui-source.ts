@@ -184,10 +184,11 @@ secao("B. O que a UI NAO manda");
   // SEM corpo e nao declara nenhum — se declarasse, a igualdade entre as
   // duas contagens continuaria valendo e a invariavel nao acusaria, mas
   // estaria descrevendo um corpo inexistente. Ela fica de fora por isso.
-  ok("B3c os UNICOS cabecalhos sao os vinte e quatro Content-Type do corpo JSON",
-    (CODIGO_TRANSPORTE.match(/headers\s*:/g) ?? []).length === 24 &&
+  // F9.2-A2: VINTE E CINCO — `definirContaDaApi` leva corpo JSON.
+  ok("B3c os UNICOS cabecalhos sao os vinte e cinco Content-Type do corpo JSON",
+    (CODIGO_TRANSPORTE.match(/headers\s*:/g) ?? []).length === 25 &&
       (CODIGO_TRANSPORTE.match(/headers: \{ "Content-Type": "application\/json" \}/g) ?? [])
-        .length === 24 &&
+        .length === 25 &&
       !/"X-|Cookie|Api-Key|Idempotency-Key/i.test(CODIGO_TRANSPORTE));
   ok("B3c1 o envio de arquivo NAO declara Content-Type a mao",
     /body: formulario/.test(corpoDaFuncaoAdiante("enviarFonteDoAgente")) &&
@@ -235,6 +236,9 @@ secao("B. O que a UI NAO manda");
     // escolha atual de cada um. Leitura pura — nao grava binding, nao
     // consulta cobertura remota e nao toca marketplace.
     "buscarConexoesDoAgente",
+    // F9.2-A2: os providers de API do agente, com UMA conta por provider.
+    // Leitura pura — nao grava conta nem fala com marketplace.
+    "buscarApisDoAgente",
     // M1-I1-V2: a SETIMA. Mesma rota de `listarAgentes`, PROJECAO
     // diferente — esta devolve `sinais` e `atividade`, que a outra
     // descarta. Duas leituras publicadas sobre uma chamada so.
@@ -350,7 +354,7 @@ secao("B. O que a UI NAO manda");
     JSON.stringify([...LEITURAS_AUTORIZADAS, "buscarQualquerOutraCoisa"].sort())
       !== leiturasEsperadas);
   ok("B5a4 ANCORA: a varredura enxergou leitores de verdade",
-    leiturasReais.length === 23 && corpoDaFuncao("listarPermissoesDoAgente").length > 50);
+    leiturasReais.length === 24 && corpoDaFuncao("listarPermissoesDoAgente").length > 50);
   ok("F83C16-C1 CONTROLE: `listarLojasDoDono` fora do esperado reprovaria",
     JSON.stringify(
       LEITURAS_AUTORIZADAS.filter((f) => f !== "listarLojasDoDono").sort()
@@ -572,6 +576,12 @@ secao("B. O que a UI NAO manda");
     // sub-recurso `/permissoes`, SEM corpo (o packId vai na query, como
     // em `desvincularFerramentaExterna`). Nunca grava `bloqueado`.
     removerFerramentaDoAgente: "DELETE",
+    // ── F9.2-A2: UMA conta por provider de API ────────────────────
+    //
+    // PATCH: altera a escolha de conta do agente naquele provider. Corpo
+    // fechado `{ provedor, lojaId }` — sem recurso, sem plataforma, sem
+    // dono. O servidor aplica tudo ou nada.
+    definirContaDaApi: "PATCH",
   };
   const ESCRITAS_AUTORIZADAS = Object.keys(VERBOS_AUTORIZADOS);
   const verboDaFuncao = (nome: string): string | null =>
@@ -589,7 +599,7 @@ secao("B. O que a UI NAO manda");
     JSON.stringify(Object.keys(mapa).sort().map((n) => `${n}=${mapa[n]}`));
   const paresReais = JSON.stringify(escritasReais.map((n) => `${n}=${verboDaFuncao(n)}`));
 
-  ok("B5b as escritas publicadas sao EXATAMENTE as trinta nominais",
+  ok("B5b as escritas publicadas sao EXATAMENTE as trinta e uma nominais",
     JSON.stringify(escritasReais) === esperadas, escritasReais.join(", ") || "nenhuma");
   ok("B5b0 cada escrita usa EXATAMENTE o verbo autorizado para ela",
     paresReais === pares(VERBOS_AUTORIZADOS),
@@ -620,8 +630,8 @@ secao("B. O que a UI NAO manda");
 
   ok("B5b1 cada escrita leva o seu verbo autorizado",
     ESCRITAS_AUTORIZADAS.every((f) => verboDaFuncao(f) === VERBOS_AUTORIZADOS[f]));
-  ok("B5b1a as vinte e quatro escritas de corpo JSON levam JSON.stringify",
-    CORPO_JSON.length === 24 &&
+  ok("B5b1a as vinte e cinco escritas de corpo JSON levam JSON.stringify",
+    CORPO_JSON.length === 25 &&
       CORPO_JSON.every((f) => /body: JSON\.stringify/.test(corpoDaFuncao(f))));
   ok("B5b1b o envio de arquivo leva FormData, e NAO JSON",
     CORPO_MULTIPART.every((f) =>
@@ -640,12 +650,12 @@ secao("B. O que a UI NAO manda");
     /body\s*:/.test('method: "POST", body: JSON.stringify({})'));
   ok("B5b1d CONTROLE NEGATIVO: um DELETE ganhar corpo reprovaria",
     /body\s*:/.test('method: "DELETE", body: JSON.stringify({})'));
-  ok("B5b2 o transporte tem trinta method, vinte e cinco body e nenhum a mais",
-    (CODIGO_TRANSPORTE.match(/method\s*:/g) ?? []).length === 30 &&
-      // 24 JSON + 1 multipart. Os QUATRO DELETE e o POST sem corpo nao
+  ok("B5b2 o transporte tem trinta e um method, vinte e seis body e nenhum a mais",
+    (CODIGO_TRANSPORTE.match(/method\s*:/g) ?? []).length === 31 &&
+      // 25 JSON + 1 multipart. Os QUATRO DELETE e o POST sem corpo nao
       // entram, e e a diferenca entre as duas contagens que prova isso.
-      (CODIGO_TRANSPORTE.match(/body\s*:/g) ?? []).length === 25 &&
-      (CODIGO_TRANSPORTE.match(/body: JSON\.stringify/g) ?? []).length === 24 &&
+      (CODIGO_TRANSPORTE.match(/body\s*:/g) ?? []).length === 26 &&
+      (CODIGO_TRANSPORTE.match(/body: JSON\.stringify/g) ?? []).length === 25 &&
       (CODIGO_TRANSPORTE.match(/body: formulario/g) ?? []).length === 1);
   ok("B5b3 a escrita de conversa vai para a rota de conversa, com corpo so de mensagem",
     /ROTA_SUFIXO_CONVERSA/.test(CODIGO_TRANSPORTE) &&
@@ -701,7 +711,7 @@ secao("B. O que a UI NAO manda");
     JSON.stringify([...ESCRITAS_AUTORIZADAS, "definirQualquerOutraCoisa"].sort())
       !== esperadas);
   ok("B5b8 ANCORA: a varredura enxergou funcoes de verdade",
-    escritasReais.length === 30 && corpoDaFuncao("criarAgenteViaApi").length > 50);
+    escritasReais.length === 31 && corpoDaFuncao("criarAgenteViaApi").length > 50);
   ok("F82B-E1 CONTROLE: `removerFerramentaDoAgente` fora do esperado reprovaria",
     JSON.stringify(ESCRITAS_AUTORIZADAS.filter((f) => f !== "removerFerramentaDoAgente").sort())
       !== esperadas);
@@ -820,14 +830,15 @@ secao("B. O que a UI NAO manda");
   //   DELETE passa a existir para DOIS recursos — memoria e fonte —
   //   porque sao conteudo que o dono escreveu e enviou. Apagar AGENTE
   //   continua sem caminho, e o assert abaixo cobra isso pelo nome.
-  ok("B7b quatorze POST, doze alteracoes por PATCH, quatro DELETE — e nada alem",
+  ok("B7b quatorze POST, treze alteracoes por PATCH, quatro DELETE — e nada alem",
     // F7b.4.7: mais UM POST e mais UM PATCH — pedir o link da conexao e
     // resolve-la. DELETE segue em TRES: a area nao ganhou como apagar.
     (CODIGO_TRANSPORTE.match(/method:\s*"POST"/g) ?? []).length === 14 &&
       // F7b.4.6: mais UM PATCH — ativar a capacidade que faltou. Continua
       // sem POST e sem DELETE novos: a area nao ganhou recurso para criar
       // nem para apagar.
-      (CODIGO_TRANSPORTE.match(/method:\s*"PATCH"/g) ?? []).length === 12 &&
+      // F9.2-A2: mais UM PATCH — a conta do provider de API.
+      (CODIGO_TRANSPORTE.match(/method:\s*"PATCH"/g) ?? []).length === 13 &&
       // F8.2-B: QUATRO DELETE — o quarto remove um pack do agente.
       (CODIGO_TRANSPORTE.match(/method:\s*"DELETE"/g) ?? []).length === 4 &&
       /export async function registrarDecisaoAprovacao\(/.test(CODIGO_TRANSPORTE) &&

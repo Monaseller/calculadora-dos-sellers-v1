@@ -111,8 +111,9 @@ async function main(): Promise<void> {
   ok("D1  ML: adicionar/nivel/remover (no componente da aba APIs)",
     /adicionarPackAoAgente\(agenteId, integracao\.packId as string, null\)/.test(APIS) &&
       /adicionarPackAoAgente\(agenteId, pack\.id, n\)/.test(APIS) && /removerPackDoAgente\(agenteId, pack\.id\)/.test(APIS));
-  ok("D2  ML: loja pelos contratos de conexao (sem sair da pagina)",
-    /buscarConexoesDoAgente\(agenteId, c\.signal\)/.test(APIS) && /definirConexaoDoAgente\(agenteId, /.test(APIS));
+  // F9.2-A2: UMA conta por provider, pelo contrato de APIs.
+  ok("D2  ML: conta do provider pelo contrato de APIs (sem sair da pagina)",
+    /buscarApisDoAgente\(agenteId, c\.signal\)/.test(APIS) && /definirContaDaApi\(agenteId, /.test(APIS));
   ok("D3  externas vinculadas: nivel + remover", /definirPermissaoDeFerramentaExterna\(agenteId, e\.funcaoId, n\)/.test(APIS) &&
     /desvincularFerramentaExterna\(agenteId, e\.funcaoId\)/.test(APIS));
   ok("D4  sem busca generica de aplicativo na configuracao",
@@ -172,11 +173,13 @@ async function main(): Promise<void> {
   ok("G9  todo estado de edicao e LOCAL da configuracao (morre no remount)",
     /useState\(""\)/.test(CONFIG) && /useState<\{ id: string; texto: string \} \| null>\(null\)/.test(CONFIG) &&
       !/novaMemoria|editando/.test(GESTAO));
-  const RX = /(?:adicionarPackAoAgente|removerPackDoAgente|definir\w+|desvincular\w+|atualizarAgenteViaApi|criarMemoriaDoAgente|alterarMemoriaDoAgente|removerMemoriaDoAgente|listarMemoriasDoAgente|lerAtivacaoDoAgente|lerMemoriaDoAgente|buscarConexoesDoAgente)\(([^,)]+)/g;
+  const RX = /(?:adicionarPackAoAgente|removerPackDoAgente|definir\w+|desvincular\w+|atualizarAgenteViaApi|criarMemoriaDoAgente|alterarMemoriaDoAgente|removerMemoriaDoAgente|listarMemoriasDoAgente|lerAtivacaoDoAgente|lerMemoriaDoAgente|buscarConexoesDoAgente|buscarApisDoAgente)\(([^,)]+)/g;
   const escritas = CONFIG.match(RX) ?? [];
   const escritasApis = APIS.match(RX) ?? [];
   ok("G10 toda leitura/escrita da configuracao usa o id do agente aberto (sem vazamento)",
     escritas.length >= 12 && escritas.every((e) => /\(agente\.id$/.test(e)) &&
+      // F9.2-A2: o par conexoes (ler + gravar) virou o par APIs
+      // (`buscarApisDoAgente` entrou no RX; `definir\w+` ja cobre a escrita).
       escritasApis.length >= 7 && escritasApis.every((e) => /\(agenteId$/.test(e)) &&
       /<ApisDoAgente\s+agenteId=\{agente\.id\}/.test(CONFIG),
     [...escritas, ...escritasApis].filter((e) => !/\((agente\.id|agenteId)$/.test(e)).join(" | "));

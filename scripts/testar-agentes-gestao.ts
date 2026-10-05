@@ -130,8 +130,9 @@ function main(): void {
   ok("G5  DOMINIO intocado: ML continua em TOOL_PACKS", TOOL_PACKS.some((t) => t.id === PACK_API_MERCADO_LIVRE));
   ok("G6  so o ML e projetado como API", ehPackDeApi(PACK_API_MERCADO_LIVRE) && !ehPackDeApi("planilhas"));
   // F8.3-C1.6: a loja e escolhida pelos MESMOS contratos do ConexoesAgente, na aba APIs.
-  ok("G7  loja pelos contratos reais de conexao do agente",
-    /buscarConexoesDoAgente\(agenteId, c\.signal\)/.test(APIS) && /definirConexaoDoAgente\(agenteId, /.test(APIS));
+  // F9.2-A2: a conta e do PROVIDER, pelo contrato de APIs.
+  ok("G7  conta pelo contrato real de APIs do agente (uma por provider)",
+    /buscarApisDoAgente\(agenteId, c\.signal\)/.test(APIS) && /definirContaDaApi\(agenteId, /.test(APIS));
   ok("G8  Shopee aparece como API, mas nao como funcional para agentes",
     INTEGRACOES_CDS.find((i) => i.chave === "shopee")?.packId === null &&
       /Ainda não disponível para agentes/.test(ler("components/ia/agentes/ApisDoAgente.tsx")));

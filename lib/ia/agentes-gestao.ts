@@ -21,8 +21,8 @@
 import type { AparenciaAgente } from "@/lib/ia/estados";
 import type { TipoAgenteUI } from "@/lib/ia/contratos";
 import type {
-  AtivacaoDoAgenteUI, ConexaoRequisitoUI, FerramentaDaAtivacaoUI, FerramentaExternaVinculadaUI,
-  LojaDoDonoUI,
+  ApiDoAgenteUI, AtivacaoDoAgenteUI, ConexaoRequisitoUI, ContaDaApiUI, FerramentaDaAtivacaoUI,
+  FerramentaExternaVinculadaUI, LojaDoDonoUI,
 } from "@/lib/ia/agentes-http";
 import {
   PROVEDORES_DE_API, ehAliasDeApi, provedorDisponivelParaAgentes,
@@ -280,6 +280,61 @@ export function planoDeConexao(
     };
   }
   return { tipo: "escolher" };
+}
+
+// ── UMA conta por API — F9.2-A2 ──────────────────────────────────────
+
+/**
+ * O que a tela faz com UM provider, a partir de `GET /apis`.
+ *
+ *   indisponivel    o provider nao tem capability para agentes (Shopee):
+ *                   so o selo "Ainda não disponível para agentes"
+ *   pronta          a conta do provider esta escolhida e serve
+ *   auto            nada escolhido (ou parte escolhida com UMA conta) e ha
+ *                   uma conta possivel: grava essa conta no provider
+ *   escolher        mais de uma conta possivel, conta escolhida que nao
+ *                   serve mais, ou contas diferentes (divergente): o dono
+ *                   escolhe UMA — nunca se troca escolha sem ele
+ *   conectar_conta  nenhuma conta na CDS: abrir o fluxo de conexao
+ *
+ * Nao ha recurso aqui: perguntas/vendas sao detalhe do servidor.
+ */
+export type PlanoDaApi =
+  | { tipo: "indisponivel" }
+  | { tipo: "pronta"; lojaId: string }
+  | { tipo: "auto"; lojaId: string }
+  | { tipo: "escolher" }
+  | { tipo: "conectar_conta" };
+
+export function planoDaApi(
+  api: Pick<ApiDoAgenteUI, "disponivelParaAgentes" | "conexoes" | "contaDoAgente">
+): PlanoDaApi {
+  if (!api.disponivelParaAgentes) return { tipo: "indisponivel" };
+  const c = api.contaDoAgente;
+  const elegivel = (id: string) => api.conexoes.some((l) => l.id === id);
+  if (c.estado === "definida" && c.utilizavel && elegivel(c.lojaId)) return { tipo: "pronta", lojaId: c.lojaId };
+  if (api.conexoes.length === 0) return { tipo: "conectar_conta" };
+  // Completar o que ja foi escolhido com a MESMA conta nao e escolher por ele.
+  if (c.estado === "incompleta" && elegivel(c.lojaId)) return { tipo: "auto", lojaId: c.lojaId };
+  if ((c.estado === "nenhuma" || c.estado === "sem_requisito") && api.conexoes.length === 1) {
+    return { tipo: "auto", lojaId: api.conexoes[0].id };
+  }
+  return { tipo: "escolher" };
+}
+
+/** A conta que o select do provider mostra: a escolhida, se for uma so. */
+export function contaSelecionadaDaApi(api: Pick<ApiDoAgenteUI, "contaDoAgente">): string | null {
+  const c = api.contaDoAgente;
+  return c.estado === "definida" || c.estado === "incompleta" ? c.lojaId : null;
+}
+
+/** A conta EM USO (escolhida e utilizavel), para "Conta em uso: X". */
+export function contaEmUsoDaApi(
+  api: Pick<ApiDoAgenteUI, "conexoes" | "contaDoAgente">
+): ContaDaApiUI | null {
+  const c = api.contaDoAgente;
+  if (c.estado !== "definida" || !c.utilizavel) return null;
+  return api.conexoes.find((l) => l.id === c.lojaId) ?? null;
 }
 
 // ── Busca de Tools (aba Tools) — F8.3-C1.6 ───────────────────────────

@@ -1684,6 +1684,161 @@ export async function definirConexaoDoAgente(
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// F9.2-A2 — APIs do agente: UMA conta por provider
+//
+// A tela de APIs escolhe a conta do PROVIDER (Mercado Livre), nao a de
+// cada recurso. Recursos (perguntas, vendas...) sao detalhe do servidor:
+// nenhum campo `recurso` entra ou sai daqui.
+// ─────────────────────────────────────────────────────────────────────
+
+export interface ContaDaApiUI {
+  readonly id: string;
+  readonly nome: string | null;
+  readonly nickname: string | null;
+}
+
+export type ContaDoAgenteNaApiUI =
+  | { readonly estado: "sem_requisito" | "nenhuma" | "divergente" }
+  | { readonly estado: "incompleta"; readonly lojaId: string }
+  | { readonly estado: "definida"; readonly lojaId: string; readonly utilizavel: boolean };
+
+export interface CapacidadeDaApiUI {
+  readonly id: string;
+  readonly nome: string;
+  readonly disponivel: boolean;
+  readonly habilitadaNoAgente: boolean;
+}
+
+export interface ApiDoAgenteUI {
+  readonly id: string;
+  readonly nome: string;
+  readonly disponivelParaAgentes: boolean;
+  readonly textoDeStatus: string | null;
+  readonly conexoes: readonly ContaDaApiUI[];
+  readonly contaDoAgente: ContaDoAgenteNaApiUI;
+  readonly capacidades: readonly CapacidadeDaApiUI[];
+}
+
+export type RespostaApisDoAgente =
+  | { estado: "ok"; apis: readonly ApiDoAgenteUI[] }
+  | { estado: "nao_autenticado" }
+  | { estado: "nao_encontrado" }
+  | { estado: "falha" };
+
+const caminhoDasApis = (agenteId: string) =>
+  `${ROTA_BASE}/${encodeURIComponent(agenteId)}/apis`;
+
+function contaDaApiDaResposta(bruto: unknown): ContaDaApiUI | null {
+  if (!ehObjeto(bruto) || typeof bruto.id !== "string" || bruto.id.length === 0) return null;
+  const nome = bruto.nome === null || typeof bruto.nome === "string" ? bruto.nome : undefined;
+  const nickname = bruto.nickname === null || typeof bruto.nickname === "string" ? bruto.nickname : undefined;
+  if (nome === undefined || nickname === undefined) return null;
+  return { id: bruto.id, nome, nickname };
+}
+
+function contaDoAgenteDaResposta(bruto: unknown): ContaDoAgenteNaApiUI | null {
+  if (!ehObjeto(bruto)) return null;
+  const e = bruto.estado;
+  if (e === "sem_requisito" || e === "nenhuma" || e === "divergente") return { estado: e };
+  if (typeof bruto.lojaId !== "string" || bruto.lojaId.length === 0) return null;
+  if (e === "incompleta") return { estado: e, lojaId: bruto.lojaId };
+  if (e === "definida" && typeof bruto.utilizavel === "boolean") {
+    return { estado: e, lojaId: bruto.lojaId, utilizavel: bruto.utilizavel };
+  }
+  return null;
+}
+
+function apiDaResposta(bruto: unknown): ApiDoAgenteUI | null {
+  if (!ehObjeto(bruto)) return null;
+  const { id, nome, disponivelParaAgentes, textoDeStatus } = bruto;
+  if (typeof id !== "string" || typeof nome !== "string" || typeof disponivelParaAgentes !== "boolean") return null;
+  if (textoDeStatus !== null && typeof textoDeStatus !== "string") return null;
+  if (!Array.isArray(bruto.conexoes) || !Array.isArray(bruto.capacidades)) return null;
+  const conexoes: ContaDaApiUI[] = [];
+  for (const c of bruto.conexoes) {
+    const conta = contaDaApiDaResposta(c);
+    if (conta === null) return null;
+    conexoes.push(conta);
+  }
+  const contaDoAgente = contaDoAgenteDaResposta(bruto.contaDoAgente);
+  if (contaDoAgente === null) return null;
+  const capacidades: CapacidadeDaApiUI[] = [];
+  for (const c of bruto.capacidades) {
+    if (!ehObjeto(c) || typeof c.id !== "string" || typeof c.nome !== "string" ||
+        typeof c.disponivel !== "boolean" || typeof c.habilitadaNoAgente !== "boolean") return null;
+    capacidades.push({ id: c.id, nome: c.nome, disponivel: c.disponivel, habilitadaNoAgente: c.habilitadaNoAgente });
+  }
+  return { id, nome, disponivelParaAgentes, textoDeStatus, conexoes, contaDoAgente, capacidades };
+}
+
+/** Os providers de API deste agente: contas do dono e a conta do agente. */
+export async function buscarApisDoAgente(
+  agenteId: string,
+  signal?: AbortSignal
+): Promise<RespostaApisDoAgente> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(caminhoDasApis(agenteId), { signal });
+  } catch {
+    return { estado: "falha" };
+  }
+  if (resposta.status === 401) return { estado: "nao_autenticado" };
+  if (resposta.status === 404) return { estado: "nao_encontrado" };
+  const corpo = await corpoDe(resposta);
+  if (!resposta.ok || !ehObjeto(corpo) || corpo.ok !== true || !Array.isArray(corpo.provedores)) {
+    return { estado: "falha" };
+  }
+  const apis: ApiDoAgenteUI[] = [];
+  for (const bruto of corpo.provedores) {
+    const api = apiDaResposta(bruto);
+    if (api === null) return { estado: "falha" };
+    apis.push(api);
+  }
+  return { estado: "ok", apis };
+}
+
+export type RespostaContaDaApi =
+  | { estado: "ok" }
+  | { estado: "conflito"; mensagem: string }
+  | { estado: "dados_invalidos"; mensagem: string }
+  /** A troca falhou e a conta anterior nao voltou: escolher de novo. */
+  | { estado: "inconsistente"; mensagem: string }
+  | { estado: "nao_autenticado" }
+  | { estado: "nao_encontrado" }
+  | { estado: "falha" };
+
+/**
+ * Escolhe — ou remove (`lojaId: null`) — a conta do PROVIDER neste agente.
+ * Corpo fechado: so `provedor` e `lojaId`. O servidor aplica a todos os
+ * recursos que o agente usa, tudo ou nada.
+ */
+export async function definirContaDaApi(
+  agenteId: string,
+  provedor: string,
+  lojaId: string | null
+): Promise<RespostaContaDaApi> {
+  let resposta: Response;
+  try {
+    resposta = await fetch(caminhoDasApis(agenteId), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provedor, lojaId }),
+    });
+  } catch {
+    return { estado: "falha" };
+  }
+  if (resposta.status === 401) return { estado: "nao_autenticado" };
+  if (resposta.status === 404) return { estado: "nao_encontrado" };
+  const corpo = await corpoDe(resposta);
+  const frase = ehObjeto(corpo) && typeof corpo.erro === "string" ? corpo.erro : MENSAGEM_GENERICA_CONEXAO;
+  if (resposta.status === 409) return { estado: "conflito", mensagem: frase };
+  if (resposta.status === 400) return { estado: "dados_invalidos", mensagem: MENSAGEM_GENERICA_CONEXAO };
+  if (ehObjeto(corpo) && corpo.codigo === "inconsistente") return { estado: "inconsistente", mensagem: frase };
+  if (!resposta.ok || !ehObjeto(corpo) || corpo.ok !== true) return { estado: "falha" };
+  return { estado: "ok" };
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // AGENT-FACTORY-F7b.1 — o transporte da Factory e do chat do agente
 //
 // Dezessete funcoes novas, e todas moram AQUI pelo mesmo motivo que as

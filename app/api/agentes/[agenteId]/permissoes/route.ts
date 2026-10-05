@@ -52,6 +52,7 @@ import { funcaoExiste, listarFuncoesRegistradas, resolverFuncao } from "@/lib/ag
 import { resolverFatosPermissoes } from "@/lib/agentes/permissoes/fatos";
 import { definirPermissaoDeFuncaoDoAgente, removerPackDoAgente } from "@/lib/agentes/permissoes/escrita";
 import { NIVEIS_AUTONOMIA } from "@/lib/ia/conceitos";
+import { herdarContaDoProvedor } from "@/lib/agentes/apis/servico";
 
 /** Configuracao privada por dono, que muda a cada definicao. Nunca cacheada. */
 export const dynamic = "force-dynamic";
@@ -257,6 +258,19 @@ export async function PATCH(request: Request, { params }: { params: { agenteId: 
         return responder({ ok: false, erro: "nível inválido." }, 400);
       }
       return responder({ ok: false, erro: "Definição inválida." }, 400);
+    }
+
+    // ── F9.2-A2: capability de API herda a conta do provider ANTES ──
+    //
+    // Se o provider ja tem UMA conta consistente, o recurso desta Funcao
+    // recebe a mesma loja primeiro. Falhar aqui impede a permissao: nao
+    // nasce "permissao ativa + recurso sem conta" quando havia conta. Tool
+    // e acao externa passam direto (`nao_e_api`).
+    const heranca = await herdarContaDoProvedor({
+      userId: porta.userId, agenteId: porta.agenteId, funcaoId: leitura.funcaoId,
+    });
+    if (heranca.estado === "falha") {
+      return responder({ ok: false, erro: FALHA_ESCRITA }, 500);
     }
 
     // O dono e `auth.uid`, e so ele. `funcaoId` e reconferido contra o

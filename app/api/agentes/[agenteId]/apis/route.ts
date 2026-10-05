@@ -65,6 +65,12 @@ export async function PATCH(request: Request, { params }: { params: { agenteId: 
       case "conta_indisponivel":
         // Inexistente, alheia, inativa e de outro marketplace: a MESMA resposta.
         return responder({ ok: false, erro: "Conta indisponível para esta API." }, 409);
+      case "inconsistente":
+        // A escrita falhou e a volta tambem: dizer isso, e nunca `ok`.
+        return responder({
+          ok: false, codigo: "inconsistente",
+          erro: "Não foi possível salvar a conta, e a anterior não pôde ser restaurada. Escolha a conta novamente.",
+        }, 500);
       default:
         return responder({ ok: false, erro: FALHA_ESCRITA }, 500);
     }

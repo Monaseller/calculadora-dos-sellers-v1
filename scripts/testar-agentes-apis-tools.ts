@@ -61,9 +61,11 @@ async function main(): Promise<void> {
     planoDeConexao([req({ plataforma: "shopee", lojasElegiveis: [] })], "mercado_livre").tipo === "sem_requisito");
   const dois = planoDeConexao([req({ lojasElegiveis: [L1] }), req({ recurso: "vendas", lojasElegiveis: [L1] })], "mercado_livre");
   ok("A8  dois requisitos com uma conta cada -> grava os dois", dois.tipo === "auto" && dois.gravar.length === 2);
-  ok("A9  aplica o plano: PATCH por requisito e UMA releitura de validacao",
-    /for \(const g of plano\.gravar\) \{\s*const r = await definirConexaoDoAgente\(agenteId, g\);/.test(APIS) &&
-      /const validadas = await recarregar\(\);/.test(APIS));
+  // F9.2-A2: o plano agora e do PROVIDER — um PATCH /apis e UMA releitura.
+  ok("A9  aplica o plano: UM PATCH do provider e UMA releitura de validacao",
+    /gravarContaDaApi\(integracao\.chave, plano\.lojaId\)/.test(APIS) &&
+      /const depois = \(await recarregar\(\)\)\?\.find/.test(APIS) &&
+      !/definirConexaoDoAgente/.test(APIS));
   ok("A10 nenhuma chamada ao marketplace / rede propria no componente", !/fetch\(|window\.open|["'`]\/api\//.test(APIS));
   ok("A11 conectar conta: o fluxo da CDS em ABA NOVA (a pagina nao se perde)",
     /href=\{ENDERECO_PARA_CONECTAR_CONTA\[i\.marketplace\]\} target="_blank" rel="noopener noreferrer"/.test(APIS) &&

@@ -35,6 +35,7 @@ import "server-only";
 import { FUNCOES } from "@/lib/agentes/funcoes/registry";
 import { TOOL_PACKS } from "@/lib/agentes/factory/catalogo-ui";
 import { definirPermissaoDeFuncaoDoAgente } from "@/lib/agentes/permissoes/escrita";
+import { herdarContaDoProvedor } from "@/lib/agentes/apis/servico";
 import {
   definirPermissaoDeFerramentaExterna, vincularFerramentaExternaNoAgente,
 } from "@/lib/agentes/ferramentas-externas/repositorio";
@@ -95,6 +96,13 @@ async function ativarPackInterno(entrada: {
 
     const nivel = nivelSugeridoParaEfeito(
       efeitoDaFuncaoInterna({ funcaoId, acesso: definicao.acesso }));
+
+    // F9.2-A2: a mesma heranca de conta do PATCH /permissoes, antes da
+    // permissao. Tool passa direto; API com conta unica a reaproveita.
+    const heranca = await herdarContaDoProvedor({
+      userId: entrada.userId, agenteId: entrada.agenteId, funcaoId,
+    });
+    if (heranca.estado === "falha") return { estado: "falha" };
 
     const r = await definirPermissaoDeFuncaoDoAgente({
       userId: entrada.userId, agenteId: entrada.agenteId, funcaoId, nivel,

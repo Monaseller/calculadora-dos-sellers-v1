@@ -20,16 +20,19 @@ import { listarPermissoesGravadas } from "@/lib/agentes/permissoes/gravadas";
 import { listarLojasConectadasDoDono } from "@/lib/marketplace/credenciais";
 import {
   PROVEDORES_DE_API,
+  capacidadeDaFuncao,
   provedorDisponivelParaAgentes,
   provedorPorId,
   type IdProvedorDeApi,
 } from "@/lib/agentes/apis/catalogo";
 import {
+  contaParaHerdar,
   planejarContaDoProvedor,
   projetarApisDoAgente,
   type ContaDoDono,
   type ProvedorProjetado,
 } from "@/lib/agentes/apis/projecao";
+import { aplicarComCompensacao, chaveDaLinha, type PortasDeConta } from "@/lib/agentes/apis/aplicacao";
 
 async function contasDoMarketplace(userId: string, marketplace: string): Promise<ContaDoDono[] | null> {
   const { linhas, erro } = await listarLojasConectadasDoDono(userId, marketplace);
@@ -75,8 +78,25 @@ export type ResultadoDaConta =
         | "provedor_indisponivel_para_agentes"
         | "sem_requisito"
         | "conta_indisponivel"
-        | "falha";
+        | "falha"
+        /** Falhou E a compensacao falhou: o provider pode estar dividido. */
+        | "inconsistente";
     };
+
+/** As escritas reais de `agente_conexoes`, como porta de `aplicarComCompensacao`. */
+function portasReais(userId: string, agenteId: string): PortasDeConta {
+  return {
+    async definir(g) {
+      const r = await definirSelecaoDeLoja({ userId, agenteId, ...g });
+      return r.estado === "definida";
+    },
+    async remover(g) {
+      const r = await removerSelecaoDeLoja({ userId, agenteId, ...g });
+      // Apagar o que ja nao existe alcancou o estado pedido.
+      return r.estado === "removida" || r.estado === "nao_encontrada";
+    },
+  };
+}
 
 /**
  * UMA conta para um provider -> uma linha de `agente_conexoes` por recurso
@@ -85,9 +105,9 @@ export type ResultadoDaConta =
  * A ordem repete a da rota `/conexoes`: o requisito e provado ANTES de
  * olhar as contas, para a rota nao virar sonda de quais lojas existem.
  *
- * As gravacoes sao upserts idempotentes por (agente, plataforma, recurso).
- * Se uma falhar no meio, a resposta e `falha` e repetir o mesmo pedido
- * converge — nao ha estado intermediario que uma repeticao piore.
+ * F9.2-A2: tudo ou nada. O estado anterior de cada linha vem dos
+ * requisitos resolvidos; se uma escrita falhar, as aplicadas voltam
+ * (`aplicacao.ts`). O dono nunca recebe `ok` com o provider dividido.
  */
 export async function definirContaDoProvedor(entrada: {
   readonly userId: string;
@@ -119,16 +139,75 @@ export async function definirContaDoProvedor(entrada: {
   });
   if (!plano.ok) return plano;
 
-  for (const g of plano.gravacoes) {
-    if (g.tipo === "definir") {
-      const r = await definirSelecaoDeLoja({
-        userId, agenteId, plataforma: g.plataforma, recurso: g.recurso, lojaId: g.lojaId,
-      });
-      if (r.estado !== "definida") return { ok: false, codigo: "falha" };
-    } else {
-      const r = await removerSelecaoDeLoja({ userId, agenteId, plataforma: g.plataforma, recurso: g.recurso });
-      if (r.estado !== "removida" && r.estado !== "nao_encontrada") return { ok: false, codigo: "falha" };
-    }
+  const anteriores = new Map(
+    resolvido.requisitos
+      .filter((r) => r.plataforma === provedor.plataforma)
+      .map((r) => [chaveDaLinha(r), r.lojaIdSelecionada] as const)
+  );
+  const aplicado = await aplicarComCompensacao(plano.gravacoes, anteriores, portasReais(userId, agenteId));
+  if (!aplicado.ok) {
+    return { ok: false, codigo: aplicado.codigo === "inconsistente" ? "inconsistente" : "falha" };
   }
   return { ok: true, provedor: plano.provedor, recursos: plano.gravacoes.map((g) => g.recurso) };
+}
+
+export type ResultadoDaHeranca =
+  | {
+      readonly estado:
+        /** A Funcao nao e capability de API (Tool, externa): nada a fazer. */
+        | "nao_e_api"
+        /** O recurso ja tem conta escolhida. */
+        | "ja_vinculada"
+        /** O provider ainda nao tem conta: a capability fica sem cobertura. */
+        | "sem_conta"
+        /** Contas diferentes no provider: nao se adivinha. */
+        | "divergente"
+        /** A conta do provider nao e mais elegivel (inativa/desconectada). */
+        | "conta_indisponivel"
+        | "vinculada";
+    }
+  | { readonly estado: "falha" };
+
+/**
+ * A capability que entra DEPOIS herda a conta do provider — F9.2-A2.
+ *
+ * Chamada ANTES de gravar a permissao (PATCH /permissoes e a ativacao pelo
+ * chat). Se o provider tem UMA conta consistente, o recurso novo recebe a
+ * mesma loja; so entao a permissao e gravada. `falha` aqui impede a
+ * permissao: nao nasce "permissao ativa + recurso sem conta" quando havia
+ * conta para herdar. Linha de conexao sem permissao e inofensiva — o guard
+ * exige a permissao.
+ *
+ * Tools e acoes externas passam direto (`nao_e_api`): a semantica delas
+ * nao muda.
+ */
+export async function herdarContaDoProvedor(entrada: {
+  readonly userId: string;
+  readonly agenteId: string;
+  readonly funcaoId: string;
+}): Promise<ResultadoDaHeranca> {
+  const { userId, agenteId } = entrada;
+  const capacidade = capacidadeDaFuncao(entrada.funcaoId);
+  if (capacidade === null) return { estado: "nao_e_api" };
+  const provedor = provedorPorId(capacidade.provedor);
+  if (provedor === null) return { estado: "nao_e_api" };
+
+  const resolvido = await resolverConexoesDoAgente({ userId, agenteId, agoraMs: Date.now() });
+  if (resolvido.coleta !== "ok") return { estado: "falha" };
+
+  const jaTem = resolvido.requisitos.some((r) =>
+    r.plataforma === provedor.plataforma && r.recurso === capacidade.recurso && r.lojaIdSelecionada !== null);
+  if (jaTem) return { estado: "ja_vinculada" };
+
+  const herdada = contaParaHerdar(provedor, resolvido.requisitos);
+  if ("motivo" in herdada) return { estado: herdada.motivo };
+
+  const elegiveis = await contasDoMarketplace(userId, provedor.marketplace);
+  if (elegiveis === null) return { estado: "falha" };
+  if (!elegiveis.some((l) => l.id === herdada.lojaId)) return { estado: "conta_indisponivel" };
+
+  const r = await definirSelecaoDeLoja({
+    userId, agenteId, plataforma: provedor.plataforma, recurso: capacidade.recurso, lojaId: herdada.lojaId,
+  });
+  return r.estado === "definida" ? { estado: "vinculada" } : { estado: "falha" };
 }

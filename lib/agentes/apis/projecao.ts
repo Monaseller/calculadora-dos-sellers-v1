@@ -76,8 +76,10 @@ export type ContaDoAgente =
   | { readonly estado: "nenhuma" }
   /** Todos os recursos apontam para a MESMA conta. */
   | { readonly estado: "definida"; readonly lojaId: string; readonly utilizavel: boolean }
-  /** Parte dos recursos tem conta, parte nao — ou contas diferentes. */
-  | { readonly estado: "incompleta" | "divergente" };
+  /** Parte dos recursos tem conta (a MESMA), parte ainda nao. */
+  | { readonly estado: "incompleta"; readonly lojaId: string }
+  /** Linhas antigas apontam contas DIFERENTES. Nunca se adivinha qual vale. */
+  | { readonly estado: "divergente" };
 
 export interface ProvedorProjetado {
   readonly id: IdProvedorDeApi;
@@ -105,7 +107,9 @@ export function contaDoAgente(
   if (escolhidas.length === 0) return { estado: "nenhuma" };
   const distintas = new Set(escolhidas.map((r) => r.lojaIdSelecionada));
   if (distintas.size > 1) return { estado: "divergente" };
-  if (escolhidas.length < doProvedor.length) return { estado: "incompleta" };
+  if (escolhidas.length < doProvedor.length) {
+    return { estado: "incompleta", lojaId: escolhidas[0].lojaIdSelecionada as string };
+  }
   return {
     estado: "definida",
     lojaId: escolhidas[0].lojaIdSelecionada as string,
@@ -147,6 +151,28 @@ export function projetarApisDoAgente(entrada: {
       capacidades,
     };
   });
+}
+
+/**
+ * A conta que uma capability NOVA deve herdar do provider — F9.2-A2.
+ *
+ * Existe exatamente UMA loja entre as escolhas atuais do provider: e ela.
+ * Nenhuma escolha -> `null` (a capability fica sem cobertura ate o dono
+ * escolher). Escolhas diferentes -> `null` tambem: com estado divergente
+ * nao se adivinha; a escolha unica do provider reconcilia.
+ */
+export function contaParaHerdar(
+  provedor: ProvedorDeApi,
+  requisitos: readonly RequisitoDoAgente[]
+): { readonly lojaId: string } | { readonly motivo: "sem_conta" | "divergente" } {
+  const lojas = new Set(
+    requisitos
+      .filter((r) => r.plataforma === provedor.plataforma && r.lojaIdSelecionada !== null)
+      .map((r) => r.lojaIdSelecionada as string)
+  );
+  if (lojas.size === 0) return { motivo: "sem_conta" };
+  if (lojas.size > 1) return { motivo: "divergente" };
+  return { lojaId: [...lojas][0] };
 }
 
 // ─── Escrita: UMA conta -> todos os recursos do provider ──────────────

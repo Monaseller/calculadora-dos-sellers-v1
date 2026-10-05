@@ -167,8 +167,10 @@ async function main(): Promise<void> {
   ok("D5  nenhuma capacidade e selecionavel (sem checkbox sem efeito)", !/type="checkbox"/.test(htmlApis) && !/type="checkbox"/.test(APIS));
   ok("D6  usar/remover o ML pelos contratos de pack", /adicionarPackAoAgente\(agenteId, integracao\.packId as string, null\)/.test(APIS) &&
     /removerPackDoAgente\(agenteId, pack\.id\)/.test(APIS));
-  ok("D7  conta real e troca de conta pelos contratos de conexao",
-    /listarLojasDoDono\(c\.signal\)/.test(APIS) && /definirConexaoDoAgente\(agenteId, \{ plataforma: c\.plataforma, recurso: c\.recurso, lojaId \}\)/.test(APIS) &&
+  // F9.2-A2: contas do dono e troca pelo contrato de APIs, UMA por provider.
+  ok("D7  conta real e troca de conta pelo contrato de APIs (sem recurso)",
+    /buscarApisDoAgente\(agenteId, c\.signal\)/.test(APIS) && /definirContaDaApi\(agenteId, provedor, lojaId\)/.test(APIS) &&
+      !/recurso/.test(APIS.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\{\/\*[\s\S]*?\*\/\}/g, "")) &&
       /Trocar conta/.test(APIS));
   ok("D8  nivel do ML (Automático / Exige aprovação / Bloqueado)",
     /Quando o agente pode usar o Mercado Livre/.test(htmlApis) && /Exige aprovação/.test(htmlApis));
