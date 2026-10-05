@@ -47,6 +47,7 @@
 -- ---------------------------------------------------------------------
 --     BEGIN;
 --     DROP TABLE public.shopee_pedidos;
+--     DROP INDEX public.pedidos_shopee_item_por_loja_unico;
 --     ALTER TABLE public.pedidos DROP COLUMN escrow_voucher_seller,
 --       DROP COLUMN escrow_voucher_shopee, DROP COLUMN escrow_coin;
 --     DROP INDEX public.idx_sync_jobs_cobertura;
@@ -76,6 +77,13 @@ CREATE TABLE public.shopee_pedidos (
   detail_fetched_at        timestamptz NULL,
   escrow_fetched_at        timestamptz NULL,
   escrow_update_time       timestamptz NULL,
+  -- S2-D2.1: fila de catch-up de escrow. Comparar duas colunas nao e
+  -- expressavel em filtro do PostgREST; a coluna gerada torna a condicao
+  -- consultavel e indexavel. Mesma semantica de "escrow atual" do servico
+  -- canonico: lido no update_time vigente (igualdade), senao pendente.
+  escrow_pendente          boolean     GENERATED ALWAYS AS (
+    pay_time IS NOT NULL AND (escrow_fetched_at IS NULL OR escrow_update_time IS DISTINCT FROM update_time)
+  ) STORED,
   CONSTRAINT shopee_pedidos_pkey PRIMARY KEY (loja_id, order_sn),
   CONSTRAINT shopee_pedidos_loja_do_mesmo_dono FOREIGN KEY (loja_id, user_id) REFERENCES public.lojas (id, user_id)
 );
@@ -84,9 +92,10 @@ CREATE TABLE public.shopee_pedidos (
 CREATE INDEX idx_shopee_pedidos_dono_loja_pay_time ON public.shopee_pedidos (user_id, loja_id, pay_time);
 -- sync incremental por update_time
 CREATE INDEX idx_shopee_pedidos_loja_update_time ON public.shopee_pedidos (loja_id, update_time);
--- fila de escrow: pedidos pagos sem escrow, ou com escrow anterior a ultima mudanca
-CREATE INDEX idx_shopee_pedidos_escrow_pendente ON public.shopee_pedidos (loja_id, pay_time)
-  WHERE pay_time IS NOT NULL AND (escrow_fetched_at IS NULL OR escrow_update_time IS DISTINCT FROM update_time);
+-- fila de escrow (catch-up por loja, em ordem de order_sn): pedidos pagos
+-- sem escrow, ou com escrow lido antes da ultima mudanca
+CREATE INDEX idx_shopee_pedidos_escrow_pendente ON public.shopee_pedidos (user_id, loja_id, order_sn)
+  WHERE escrow_pendente;
 
 REVOKE ALL PRIVILEGES ON TABLE public.shopee_pedidos FROM PUBLIC, anon, authenticated;
 ALTER TABLE public.shopee_pedidos ENABLE ROW LEVEL SECURITY;
@@ -95,6 +104,17 @@ ALTER TABLE public.pedidos
   ADD COLUMN escrow_voucher_seller numeric NULL,
   ADD COLUMN escrow_voucher_shopee numeric NULL,
   ADD COLUMN escrow_coin           numeric NULL;
+
+-- S2-D2.1: chave de ITEM por loja. O `pedidos.id` legado
+-- (<user>_SHOPEE_<order_sn>_<item>_<model|nv>) nao contem a loja; ele e
+-- preservado (nenhum id e reescrito) e esta unicidade passa a garantir, no
+-- banco, que (loja, pedido, item, variacao) Shopee e UMA linha. Parcial
+-- (so Shopee): o ML nao e afetado. NULLS NOT DISTINCT: item sem variacao
+-- (variation_id NULL) tambem e unico. Medido antes (2026-10-05): 0
+-- duplicatas nesta chave em 290.558 linhas Shopee.
+CREATE UNIQUE INDEX pedidos_shopee_item_por_loja_unico
+  ON public.pedidos (loja_id, order_id, ml_item_id, variation_id) NULLS NOT DISTINCT
+  WHERE marketplace = 'Shopee';
 
 ALTER TABLE public.sync_jobs
   ADD COLUMN checkpoint        jsonb       NULL,

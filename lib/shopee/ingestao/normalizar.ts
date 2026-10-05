@@ -34,6 +34,40 @@ export function idItem(userId: string, orderSn: string, itemId: string, modelId:
 
 const chaveItem = (itemId: string, modelId: string | null) => `${itemId}|${modelId ?? ""}`;
 
+/**
+ * CHAVE CANONICA DE ITEM (S2-D2.1): (loja, pedido, item, variacao). E o que
+ * o indice unico parcial `pedidos_shopee_item_por_loja_unico` garante no
+ * banco. Nao se supoe order_sn unico entre lojas.
+ */
+export function chaveItemLoja(lojaId: string, orderSn: string, itemId: string, modelId: string | null): string {
+  return `${lojaId}|${orderSn}|${itemId}|${modelId ?? ""}`;
+}
+
+/** Variante do id quando o id legado ja pertence a OUTRA loja do dono. */
+export function idItemPorLoja(userId: string, lojaId: string, orderSn: string, itemId: string, modelId: string | null): string {
+  return `${userId}_SHOPEE_L${lojaId}_${orderSn}_${itemId}_${modelId ?? "nv"}`;
+}
+
+/**
+ * Decide o `pedidos.id` de cada item sem reescrever id existente:
+ *  1. ja existe linha desta LOJA para (pedido, item, variacao) → o id dela;
+ *  2. senao, o id legado se estiver livre;
+ *  3. senao (legado ocupado por outra loja do dono) → variante com a loja.
+ * Puro: o adaptador real e o fake usam a mesma regra.
+ */
+export function resolverIdsDeItens<T extends LinhaItemDetalhe>(
+  itens: T[], existentesPorChave: Map<string, string>, idsOcupados: Set<string>,
+): T[] {
+  return itens.map((it) => {
+    const k = chaveItemLoja(it.loja_id, it.order_id, it.ml_item_id, it.variation_id);
+    const existente = existentesPorChave.get(k);
+    if (existente) return { ...it, id: existente };
+    const legado = idItem(it.user_id, it.order_id, it.ml_item_id, it.variation_id);
+    if (!idsOcupados.has(legado)) return { ...it, id: legado };
+    return { ...it, id: idItemPorLoja(it.user_id, it.loja_id, it.order_id, it.ml_item_id, it.variation_id) };
+  });
+}
+
 export function normalizarDetalhe(
   d: PedidoDetalhe,
   ctx: { userId: string; lojaId: string; agoraIso: string },

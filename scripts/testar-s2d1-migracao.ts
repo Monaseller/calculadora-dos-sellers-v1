@@ -83,7 +83,17 @@ function validarS2D1(sqlBruto: string): string[] {
     if (/\bDEFAULT\b/i.test(corpo)) e.push("DEFAULT em shopee_pedidos");
   }
   const idx = [...s.matchAll(/CREATE INDEX (\w+) ON public\.shopee_pedidos \(([^)]+)\)( WHERE [^;]+)?;/gi)].map((m) => `${m[2].replace(/\s/g, "")}${m[3] ? "|parcial" : ""}`);
-  for (const esperado of ["user_id,loja_id,pay_time", "loja_id,update_time", "loja_id,pay_time|parcial"]) if (!idx.includes(esperado)) e.push(`indice ${esperado} ausente`);
+  // S2-D2.1: fila de escrow por loja em ordem de order_sn, sobre a coluna gerada
+  for (const esperado of ["user_id,loja_id,pay_time", "loja_id,update_time", "user_id,loja_id,order_sn|parcial"]) if (!idx.includes(esperado)) e.push(`indice ${esperado} ausente`);
+  if (!/CREATE INDEX idx_shopee_pedidos_escrow_pendente ON public\.shopee_pedidos \(user_id, loja_id, order_sn\) WHERE escrow_pendente;/i.test(s)) e.push("indice de escrow pendente nao usa a coluna gerada");
+  // coluna gerada: mesma semantica de "escrow atual" do servico canonico (igualdade)
+  if (!/escrow_pendente boolean GENERATED ALWAYS AS \( pay_time IS NOT NULL AND \(escrow_fetched_at IS NULL OR escrow_update_time IS DISTINCT FROM update_time\) \) STORED/i.test(s)) {
+    e.push("coluna gerada escrow_pendente ausente ou com regra diferente");
+  }
+  // S2-D2.1: chave de ITEM por loja — indice unico parcial Shopee, NULLS NOT DISTINCT
+  if (!/CREATE UNIQUE INDEX pedidos_shopee_item_por_loja_unico ON public\.pedidos \(loja_id, order_id, ml_item_id, variation_id\) NULLS NOT DISTINCT WHERE marketplace = 'Shopee';/i.test(s)) {
+    e.push("chave unica de item por loja ausente/diferente");
+  }
   if (idx.length !== 3) e.push(`indices em shopee_pedidos: ${idx.length} (esperado 3)`);
   if (tabelasAbertas(sqlBruto).length) e.push(`tabela nao nasce fechada: ${tabelasAbertas(sqlBruto)}`);
   if (/\bCREATE POLICY\b|\bALTER POLICY\b/i.test(s)) e.push("policy presente");
@@ -149,6 +159,13 @@ t("8g. GRANT em tabela SEC-3 → pego", () => assert(pega(variante(/^COMMIT;$/m,
 t("8h. DISABLE RLS em tabela SEC-3 → pego", () => assert(pega(variante(/^COMMIT;$/m, "ALTER TABLE public.vendas_dia DISABLE ROW LEVEL SECURITY;\nCOMMIT;"), /DISABLE|vendas_dia/), "nao pegou"));
 t("8i. pay_time NOT NULL → nulidade errada", () => assert(pega(variante("pay_time                 timestamptz NULL", "pay_time                 timestamptz NOT NULL"), /pay_time: nulidade/), "nao pegou"));
 t("8j. PK diferente → pega", () => assert(pega(variante("PRIMARY KEY (loja_id, order_sn)", "PRIMARY KEY (order_sn)"), /PK/), "nao pegou"));
+t("8l. sem a chave unica de item por loja → pego", () => assert(pega(variante(/^CREATE UNIQUE INDEX pedidos_shopee_item_por_loja_unico[\s\S]*?WHERE marketplace = 'Shopee';$/m, ""), /chave unica de item por loja/), "nao pegou"));
+t("8m. chave de item sem NULLS NOT DISTINCT (variation_id NULL duplicaria) → pega", () => assert(pega(variante(/variation_id\) NULLS NOT DISTINCT(\r?)$/m, "variation_id)$1"), /chave unica de item por loja/), "nao pegou"));
+t("8n. escrow_pendente com regra diferente da do servico canonico (< em vez de distinto) → pega", () => assert(pega(variante(/escrow_update_time IS DISTINCT FROM update_time(\)\r?\n\s*\) STORED)/, "escrow_update_time < update_time$1"), /escrow_pendente/), "nao pegou"));
+t("8o. as variantes de 8m/8n de fato alteram o SQL (o auto-teste nao e vazio)", () => {
+  assert(variante(/variation_id\) NULLS NOT DISTINCT(\r?)$/m, "variation_id)$1") !== SQL, "8m nao mudou nada");
+  assert(variante(/escrow_update_time IS DISTINCT FROM update_time(\)\r?\n\s*\) STORED)/, "escrow_update_time < update_time$1") !== SQL, "8n nao mudou nada");
+});
 t("8k. guard permanente pega tabela nova aberta em migration futura", () => {
   assert(tabelasAbertas("BEGIN; CREATE TABLE public.nova (id int); COMMIT;").join() === "nova", "nao pegou");
   assert(tabelasAbertas("CREATE TABLE public.ok (id int); REVOKE ALL ON TABLE public.ok FROM PUBLIC, anon, authenticated; ALTER TABLE public.ok ENABLE ROW LEVEL SECURITY;").length === 0, "falso positivo");

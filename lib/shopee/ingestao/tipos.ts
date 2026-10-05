@@ -136,6 +136,23 @@ export interface CheckpointShopee {
   falhasEscrow: Record<string, string>;
 }
 
+/**
+ * Checkpoint do CATCH-UP de escrow (S2-D2.1). So o cursor (ultimo
+ * order_sn passado) e mapas pequenos — nunca payload.
+ */
+export interface CheckpointCatchUpEscrow {
+  versao: 1;
+  modo: "escrow_catchup";
+  /** Maior order_sn ja passado na varredura (null = inicio). */
+  apos: string | null;
+  varreduraTerminou: boolean;
+  /** Falhas transitorias a repetir depois da varredura. */
+  retentar: string[];
+  tentativas: Record<string, number>;
+  /** Desistidos (continuam pendentes no banco → periodo PARTIAL). */
+  falhas: Record<string, string>;
+}
+
 /** Conteudo de sync_jobs.progresso — auditavel. */
 export interface ProgressoShopee {
   paginas: number;
@@ -168,18 +185,23 @@ export interface Repositorio {
   /** A loja existe, e Shopee, esta ativa e pertence ao usuario? */
   lojaDoDono(userId: string, lojaId: string): Promise<boolean>;
   /**
-   * Ids de item que JA existem com OUTRA loja. A chave de item existente nao
-   * inclui a loja; sem esta checagem um upsert moveria a linha de loja.
+   * Upsert do DETAIL. O id de cada item e resolvido pela chave por loja
+   * (normalizar.resolverIdsDeItens) antes de gravar: nunca move linha de
+   * loja, nunca reescreve id existente.
    */
-  idsDeOutraLoja(userId: string, lojaId: string, ids: string[]): Promise<Set<string>>;
   gravarDetalhes(pedidos: LinhaPedidoDetalhe[], itens: LinhaItemDetalhe[]): Promise<void>;
+  /**
+   * Fila de catch-up de escrow da LOJA: order_sn pagos com escrow ausente
+   * ou anterior ao update_time, em ordem de order_sn, depois de `apos`.
+   */
+  pendentesEscrow(userId: string, lojaId: string, apos: string | null, limite: number): Promise<string[]>;
   /** escrow_update_time atual por order_sn (null = nunca lido). */
   estadoEscrow(userId: string, lojaId: string, orderSns: string[]): Promise<Map<string, string | null>>;
   /** Pedido (update_time vigente) + chaves dos itens gravados. */
   pedidoParaEscrow(userId: string, lojaId: string, orderSn: string): Promise<{ updateTime: string; itens: { id: string; itemId: string; modelId: string | null }[] } | null>;
   gravarEscrow(pedido: LinhaPedidoEscrow, itens: LinhaItemEscrow[]): Promise<void>;
   salvarJob(job: { id: string; userId: string; lojaId: string }, patch: {
-    checkpoint: CheckpointShopee; progresso: ProgressoShopee;
+    checkpoint: CheckpointShopee | CheckpointCatchUpEscrow; progresso: ProgressoShopee;
     listagemCompleta?: boolean; janelaFim?: string; status?: "rodando" | "concluido" | "erro"; erroMensagem?: string | null;
   }): Promise<void>;
 }

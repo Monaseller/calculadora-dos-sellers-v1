@@ -10,6 +10,7 @@
  */
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { chaveItemLoja, idItem, resolverIdsDeItens } from "./normalizar";
 import type { LinhaItemDetalhe, LinhaItemEscrow, LinhaPedidoDetalhe, LinhaPedidoEscrow, Repositorio } from "./tipos";
 
 const LOTE = 200;
@@ -23,25 +24,49 @@ export function criarRepositorioSupabase(cliente: SupabaseClient): Repositorio {
       falha("lojaDoDono", error);
       return !!data;
     },
-    async idsDeOutraLoja(userId, lojaId, ids) {
-      const out = new Set<string>();
-      for (let i = 0; i < ids.length; i += LOTE) {
-        const { data, error } = await cliente.from("pedidos").select("id")
-          .eq("user_id", userId).neq("loja_id", lojaId).in("id", ids.slice(i, i + LOTE));
-        falha("idsDeOutraLoja", error);
-        for (const r of (data ?? []) as { id: string }[]) out.add(r.id);
-      }
-      return out;
-    },
-    async gravarDetalhes(pedidos: LinhaPedidoDetalhe[], itens: LinhaItemDetalhe[]) {
+    async gravarDetalhes(pedidos: LinhaPedidoDetalhe[], itensBrutos: LinhaItemDetalhe[]) {
       for (let i = 0; i < pedidos.length; i += LOTE) {
         const { error } = await cliente.from("shopee_pedidos").upsert(pedidos.slice(i, i + LOTE), { onConflict: "loja_id,order_sn" });
         falha("shopee_pedidos", error);
       }
+      if (itensBrutos.length === 0) return;
+      // Um job = uma loja (o motor garante): todos os itens tem o mesmo dono/loja.
+      const { user_id: userId, loja_id: lojaId } = itensBrutos[0];
+      // 1) linhas JA existentes desta loja, pela chave (pedido, item, variacao)
+      const existentes = new Map<string, string>();
+      const sns = [...new Set(itensBrutos.map((i) => i.order_id))];
+      for (let i = 0; i < sns.length; i += LOTE) {
+        const { data, error } = await cliente.from("pedidos").select("id, order_id, ml_item_id, variation_id")
+          .eq("user_id", userId).eq("marketplace", "Shopee").eq("loja_id", lojaId).in("order_id", sns.slice(i, i + LOTE));
+        falha("itensExistentes", error);
+        for (const r of (data ?? []) as { id: string; order_id: string; ml_item_id: string; variation_id: string | null }[]) {
+          existentes.set(chaveItemLoja(lojaId, r.order_id, String(r.ml_item_id), r.variation_id ?? null), r.id);
+        }
+      }
+      // 2) ids legados ja ocupados (por outra loja do mesmo dono)
+      const legados = itensBrutos
+        .filter((it) => !existentes.has(chaveItemLoja(lojaId, it.order_id, it.ml_item_id, it.variation_id)))
+        .map((it) => idItem(userId, it.order_id, it.ml_item_id, it.variation_id));
+      const ocupados = new Set<string>();
+      for (let i = 0; i < legados.length; i += LOTE) {
+        const { data, error } = await cliente.from("pedidos").select("id").eq("user_id", userId).in("id", legados.slice(i, i + LOTE));
+        falha("idsOcupados", error);
+        for (const r of (data ?? []) as { id: string }[]) ocupados.add(r.id);
+      }
+      // 3) upsert por id ja resolvido pela chave da loja: nunca move linha de loja
+      const itens = resolverIdsDeItens(itensBrutos, existentes, ocupados);
       for (let i = 0; i < itens.length; i += LOTE) {
         const { error } = await cliente.from("pedidos").upsert(itens.slice(i, i + LOTE), { onConflict: "id" });
         falha("pedidos", error);
       }
+    },
+    async pendentesEscrow(userId, lojaId, apos, limite) {
+      let q = cliente.from("shopee_pedidos").select("order_sn")
+        .eq("user_id", userId).eq("loja_id", lojaId).eq("escrow_pendente", true);
+      if (apos !== null) q = q.gt("order_sn", apos);
+      const { data, error } = await q.order("order_sn", { ascending: true }).limit(limite);
+      falha("pendentesEscrow", error);
+      return ((data ?? []) as { order_sn: string }[]).map((r) => r.order_sn);
     },
     async estadoEscrow(userId, lojaId, orderSns) {
       const out = new Map<string, string | null>();

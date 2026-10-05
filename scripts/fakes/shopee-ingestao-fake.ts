@@ -9,8 +9,9 @@
  * RepoFake: as tabelas shopee_pedidos/pedidos/sync_jobs em memoria, com a
  * mesma semantica de upsert por coluna da persistencia real.
  */
+import { chaveItemLoja, resolverIdsDeItens } from "../../lib/shopee/ingestao/normalizar";
 import {
-  ErroShopee, type CampoTempo, type CheckpointShopee, type EscrowPedido, type ItemEscrow, type LinhaItemDetalhe,
+  ErroShopee, type CampoTempo, type CheckpointCatchUpEscrow, type CheckpointShopee, type EscrowPedido, type ItemEscrow, type LinhaItemDetalhe,
   type LinhaItemEscrow, type LinhaPedidoDetalhe, type LinhaPedidoEscrow, type PaginaListagem, type PedidoDetalhe,
   type ProgressoShopee, type Relogio, type Repositorio, type ShopeeApi,
 } from "../../lib/shopee/ingestao/tipos";
@@ -86,8 +87,10 @@ export class ShopeeFake implements ShopeeApi {
 }
 
 export interface JobFake {
-  id: string; user_id: string; loja_id: string; campo_tempo: CampoTempo; janela_inicio: string; janela_fim: string;
-  checkpoint: CheckpointShopee | null; progresso: ProgressoShopee | null; listagem_completa: boolean | null; status: string; erro_mensagem: string | null;
+  id: string; user_id: string; loja_id: string;
+  /** null = job sem janela (catch-up de escrow): nunca e evidencia de listagem. */
+  campo_tempo: CampoTempo | null; janela_inicio: string | null; janela_fim: string | null;
+  checkpoint: CheckpointShopee | CheckpointCatchUpEscrow | null; progresso: ProgressoShopee | null; listagem_completa: boolean | null; status: string; erro_mensagem: string | null;
   historicoStatus: string[];
   /** Toda gravacao de listagem_completa, com o estado do cursor naquele momento. */
   historicoListagem: { completa: boolean; terminou: boolean; paginas: number }[];
@@ -100,12 +103,31 @@ export class RepoFake implements Repositorio {
   jobs = new Map<string, JobFake>();
 
   async lojaDoDono(userId: string, lojaId: string) { return this.lojas.some((l) => l.id === lojaId && l.user_id === userId); }
-  async idsDeOutraLoja(userId: string, lojaId: string, ids: string[]) {
-    return new Set(ids.filter((id) => { const r = this.itens.get(id); return r && r.user_id === userId && r.loja_id !== lojaId; }));
-  }
-  async gravarDetalhes(pedidos: LinhaPedidoDetalhe[], itens: LinhaItemDetalhe[]) {
+  async gravarDetalhes(pedidos: LinhaPedidoDetalhe[], itensBrutos: LinhaItemDetalhe[]) {
     for (const p of pedidos) { const k = `${p.loja_id}|${p.order_sn}`; this.pedidos.set(k, { ...(this.pedidos.get(k) ?? {}), ...structuredClone(p) }); }
-    for (const i of itens) this.itens.set(i.id, { ...(this.itens.get(i.id) ?? {}), ...structuredClone(i) });
+    // mesmas entradas que a persistencia real consulta, mesma regra pura
+    const existentes = new Map<string, string>();
+    for (const r of this.itens.values()) {
+      if (r.marketplace === "Shopee") existentes.set(chaveItemLoja(String(r.loja_id), String(r.order_id), String(r.ml_item_id), (r.variation_id as string | null) ?? null), String(r.id));
+    }
+    const ocupados = new Set(this.itens.keys());
+    const itens = resolverIdsDeItens(itensBrutos, existentes, ocupados);
+    for (const i of itens) {
+      // indice unico parcial (loja, pedido, item, variacao) — como o banco
+      const k = chaveItemLoja(i.loja_id, i.order_id, i.ml_item_id, i.variation_id);
+      const dono = existentes.get(k);
+      if (dono && dono !== i.id) throw new Error(`violacao pedidos_shopee_item_por_loja_unico: ${k}`);
+      const atual = this.itens.get(i.id);
+      if (atual && (atual.loja_id !== i.loja_id || atual.user_id !== i.user_id)) throw new Error(`upsert moveria linha de loja/dono: ${i.id}`);
+      this.itens.set(i.id, { ...(atual ?? {}), ...structuredClone(i) });
+      existentes.set(k, i.id);
+    }
+  }
+  async pendentesEscrow(userId: string, lojaId: string, apos: string | null, limite: number) {
+    return [...this.pedidos.values()]
+      .filter((p) => p.user_id === userId && p.loja_id === lojaId && p.pay_time !== null && p.pay_time !== undefined
+        && (!p.escrow_fetched_at || p.escrow_update_time !== p.update_time))
+      .map((p) => String(p.order_sn)).filter((sn) => apos === null || sn > apos).sort().slice(0, limite);
   }
   async estadoEscrow(userId: string, lojaId: string, sns: string[]) {
     const m = new Map<string, string | null>();
@@ -136,13 +158,14 @@ export class RepoFake implements Repositorio {
     j.checkpoint = structuredClone(patch.checkpoint); j.progresso = structuredClone(patch.progresso);
     if (patch.listagemCompleta !== undefined) {
       j.listagem_completa = patch.listagemCompleta;
-      j.historicoListagem.push({ completa: patch.listagemCompleta, terminou: patch.checkpoint.listagemTerminou, paginas: patch.checkpoint.paginasLidas });
+      const ck = patch.checkpoint as CheckpointShopee;
+      j.historicoListagem.push({ completa: patch.listagemCompleta, terminou: ck.listagemTerminou, paginas: ck.paginasLidas });
     }
     if (patch.janelaFim !== undefined) j.janela_fim = patch.janelaFim;
     if (patch.status !== undefined) { j.status = patch.status; j.historicoStatus.push(patch.status); }
     if (patch.erroMensagem !== undefined) j.erro_mensagem = patch.erroMensagem;
   }
-  criarJob(j: { id: string; userId: string; lojaId: string; campoTempo: CampoTempo; inicio: string; fim: string }) {
+  criarJob(j: { id: string; userId: string; lojaId: string; campoTempo: CampoTempo | null; inicio: string | null; fim: string | null }) {
     this.jobs.set(j.id, { id: j.id, user_id: j.userId, loja_id: j.lojaId, campo_tempo: j.campoTempo, janela_inicio: j.inicio, janela_fim: j.fim,
       checkpoint: null, progresso: null, listagem_completa: null, status: "pendente", erro_mensagem: null, historicoStatus: [], historicoListagem: [] });
   }

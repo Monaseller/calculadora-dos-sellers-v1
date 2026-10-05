@@ -20,8 +20,8 @@
 import "./_server-only-inerte";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { ErroShopee, type CampoTempo } from "../lib/shopee/ingestao/tipos";
-import { RelogioFake, RepoFake, ShopeeFake, type PedidoFake } from "./fakes/shopee-ingestao-fake";
+import { ErroShopee, type CampoTempo, type CheckpointCatchUpEscrow, type CheckpointShopee } from "../lib/shopee/ingestao/tipos";
+import { RelogioFake, RepoFake, ShopeeFake, type JobFake, type PedidoFake } from "./fakes/shopee-ingestao-fake";
 import type { ItemShopeeCanonico, JanelaListagem, PedidoShopeeCanonico } from "../lib/vendas/canonico/shopee";
 
 let passou = 0, falhou = 0;
@@ -94,13 +94,14 @@ async function rodarJob(c: Cen, M: typeof import("../lib/shopee/ingestao/motor")
   for (; fatias < (o.maxFatias ?? 5000); ) {
     const r = c.repo.jobs.get(id)!;
     fatias++;
-    res = await M.executarFatiaShopee({ id, userId, lojaId, campoTempo: r.campo_tempo, janelaInicio: r.janela_inicio, janelaFim: r.janela_fim, checkpoint: r.checkpoint, progresso: r.progresso },
+    res = await M.executarFatiaShopee({ id, userId, lojaId, campoTempo: r.campo_tempo!, janelaInicio: r.janela_inicio!, janelaFim: r.janela_fim!, checkpoint: r.checkpoint as CheckpointShopee | null, progresso: r.progresso },
       { api: j.api ?? c.api, repo: c.repo, relogio: c.relogio },
       { prazoMs: c.relogio.agoraMs() + (o.fatiaMs ?? 10_000_000), margemMs: 0, habilitado: true, retry: c.retry, concorrenciaEscrow: o.concorrenciaEscrow ?? 4 });
     if (res.estado === "pausado") { fasesPausa.push(res.checkpoint.fase); continue; }
     break;
   }
-  return { id, res: res!, fatias, fasesPausa, job: c.repo.jobs.get(id)! };
+  // job de LISTAGEM: o checkpoint e o do motor de listagem (nao o do catch-up)
+  return { id, res: res!, fatias, fasesPausa, job: c.repo.jobs.get(id)! as Omit<JobFake, "checkpoint"> & { checkpoint: CheckpointShopee | null } };
 }
 
 /** Repo → entradas do servico canonico. */
@@ -112,8 +113,9 @@ function paraCanonico(repo: RepoFake) {
   const itens: ItemShopeeCanonico[] = [...repo.itens.values()].map((i: any) => ({
     lojaId: i.loja_id, orderSn: i.order_id, precoUnitario: i.valor_unit, quantidade: i.qtd,
     voucherVendedor: i.escrow_voucher_seller ?? null, voucherShopee: i.escrow_voucher_shopee ?? null, moedas: i.escrow_coin ?? null }));
-  const janelas: JanelaListagem[] = [...repo.jobs.values()].map((j) => ({ lojaId: j.loja_id, campoTempo: j.campo_tempo,
-    inicio: j.janela_inicio, fim: j.janela_fim, listagemCompleta: j.listagem_completa, status: j.status }));
+  // como o leitor real: so jobs COM janela (catch-up de escrow nao tem)
+  const janelas: JanelaListagem[] = [...repo.jobs.values()].filter((j) => j.janela_inicio !== null).map((j) => ({ lojaId: j.loja_id, campoTempo: j.campo_tempo!,
+    inicio: j.janela_inicio!, fim: j.janela_fim!, listagemCompleta: j.listagem_completa, status: j.status }));
   return { pedidos, itens, janelas };
 }
 
@@ -176,7 +178,7 @@ async function principal() {
     const id = r.id;
     for (let k = 0; k < 50; k++) {
       const j = c.repo.jobs.get(id)!;
-      const res = await M.executarFatiaShopee({ id, userId: UID, lojaId: LOJA, campoTempo: "update_time", janelaInicio: j.janela_inicio, janelaFim: j.janela_fim, checkpoint: j.checkpoint, progresso: j.progresso },
+      const res = await M.executarFatiaShopee({ id, userId: UID, lojaId: LOJA, campoTempo: "update_time", janelaInicio: j.janela_inicio!, janelaFim: j.janela_fim!, checkpoint: j.checkpoint as CheckpointShopee | null, progresso: j.progresso },
         { api: c.api, repo: c.repo, relogio: c.relogio }, { prazoMs: c.relogio.agoraMs() + 1e9, margemMs: 0, habilitado: true, retry: c.retry });
       if (res.estado !== "pausado") break;
     }
@@ -281,14 +283,37 @@ async function principal() {
     assert(c.repo.pedidos.size === 10 && c.repo.pedidos.has(`${LOJA}|S00000`) && c.repo.pedidos.has(`${LB}|S00000`), `${c.repo.pedidos.size}`);
     for (const i of c.repo.itens.values()) assert((i.loja_id === LOJA) === (i.user_id === UID), "item cruzou dono/loja");
   });
-  t("7b. mesmo dono, duas lojas, mesmo order_sn: a 2a loja FALHA explicitamente (colisao), a 1a fica intacta", async () => {
+  t("7b. MESMO dono, lojas A e B, order ABC / item 10 / model 20: as duas persistem, sem overwrite, move, conflito ou falha", async () => {
     const LB = "33333333-3333-4333-8333-333333333333";
-    const ps = gerar(3);
-    const c = cenario(ps, [{ id: LOJA, user_id: UID }, { id: LB, user_id: UID }]);
-    await rodarJob(c, M, W1);
-    const r = await rodarJob(c, M, { ...W1, lojaId: LB, api: new ShopeeFake(c.relogio, ps) });
-    assert(r.res.estado === "falhou" && /nao_materializados/.test(r.job.erro_mensagem ?? ""), `${r.res.estado} ${r.job.erro_mensagem}`);
-    for (const i of c.repo.itens.values()) assert(i.loja_id === LOJA, "linha de item mudou de loja");
+    const mk = (osd: number, preco: number): PedidoFake => ({ orderSn: "ABC", createTime: D0 + 50, updateTime: D0 + 400, payTime: D0 + 100, status: "SHIPPED",
+      totalAmount: preco, osd, pix: 0, itens: [{ itemId: "10", modelId: "20", preco, qtd: 1, vs: 0, vsh: 0, coin: 0 }] });
+    const c = cenario([mk(1, 30)], [{ id: LOJA, user_id: UID }, { id: LB, user_id: UID }]);
+    const apiB = new ShopeeFake(c.relogio, [mk(2, 55)]);
+    const ra = await rodarJob(c, M, W1);
+    const rb = await rodarJob(c, M, { ...W1, lojaId: LB, api: apiB });
+    assert(ra.res.estado === "concluido" && rb.res.estado === "concluido", `${ra.res.estado} ${rb.res.estado} ${rb.job.erro_mensagem}`);
+    assert(c.repo.pedidos.has(`${LOJA}|ABC`) && c.repo.pedidos.has(`${LB}|ABC`), "falta pedido de uma loja");
+    const its = [...c.repo.itens.values()].filter((i) => i.order_id === "ABC");
+    assert(its.length === 2, `itens ${its.length}`);
+    const a = its.find((i) => i.loja_id === LOJA)!, b = its.find((i) => i.loja_id === LB)!;
+    assert(a && b && a.id !== b.id, "ids iguais");
+    assert(a.id === `${UID}_SHOPEE_ABC_10_20` && b.id === `${UID}_SHOPEE_L${LB}_ABC_10_20`, `${a.id} | ${b.id}`);
+    assert(a.valor_unit === 30 && b.valor_unit === 55, "overwrite entre lojas");
+    assert((c.repo.pedidos.get(`${LOJA}|ABC`) as any).original_shopee_discount === 1 && (c.repo.pedidos.get(`${LB}|ABC`) as any).original_shopee_discount === 2, "escrow cruzou loja");
+    // re-sync das duas: idempotente, mesmos ids, nada duplica
+    await rodarJob(c, M, W1); await rodarJob(c, M, { ...W1, lojaId: LB, api: apiB });
+    assert([...c.repo.itens.values()].filter((i) => i.order_id === "ABC").length === 2, "duplicou no re-sync");
+  });
+  t("7b2. a ordem nao importa: loja B sincronizada primeiro fica com o id legado; A recebe a variante — sem conflito", async () => {
+    const LB = "44444444-4444-4444-8444-444444444444";
+    const mk = (preco: number): PedidoFake => ({ orderSn: "ABC", createTime: D0 + 50, updateTime: D0 + 400, payTime: D0 + 100, status: "SHIPPED",
+      totalAmount: preco, osd: 0, pix: 0, itens: [{ itemId: "10", modelId: "20", preco, qtd: 1, vs: 0, vsh: 0, coin: 0 }] });
+    const c = cenario([mk(30)], [{ id: LOJA, user_id: UID }, { id: LB, user_id: UID }]);
+    const rb = await rodarJob(c, M, { ...W1, lojaId: LB, api: new ShopeeFake(c.relogio, [mk(55)]) });
+    const ra = await rodarJob(c, M, W1);
+    assert(ra.res.estado === "concluido" && rb.res.estado === "concluido", "falhou");
+    const its = [...c.repo.itens.values()];
+    assert(its.length === 2 && its.find((i) => i.loja_id === LB)!.id === `${UID}_SHOPEE_ABC_10_20` && its.find((i) => i.loja_id === LOJA)!.id === `${UID}_SHOPEE_L${LOJA}_ABC_10_20`, its.map((i) => i.id).join());
   });
   t("7c. loja que nao e do usuario: falha antes de qualquer chamada a Shopee", async () => {
     const c = cenario(gerar(5), [{ id: LOJA, user_id: "outro" }]);
@@ -357,7 +382,7 @@ async function principal() {
     const c = cenario(gerar(5));
     const r = await rodarJob(c, M, { inicio: "2026-10-09T00:00:00.000Z", fim: "2026-10-11T00:00:00.000Z" });
     const ini = Date.parse(r.job.checkpoint!.listagemIniciadaEm!);
-    assert(Date.parse(r.job.janela_fim) <= ini && Date.parse(r.job.janela_fim) === AGORA, `${r.job.janela_fim} vs ${r.job.checkpoint!.listagemIniciadaEm}`);
+    assert(Date.parse(r.job.janela_fim!) <= ini && Date.parse(r.job.janela_fim!) === AGORA, `${r.job.janela_fim} vs ${r.job.checkpoint!.listagemIniciadaEm}`);
   });
   t("11b. janela acima do limite da API (14d) e recusada sem chamar a Shopee", async () => {
     const c = cenario(gerar(5));
@@ -419,6 +444,120 @@ async function principal() {
     assert(n.pedido.pay_time === null && n.itens[0].data_pagamento === null && n.pedido.total_amount === null && n.itens[0].data_criacao === "2026-10-02", JSON.stringify(n.itens[0]));
   });
 
+  console.log("\n[16. catch-up de escrow (sem relistagem)]");
+  const rodarCatchUp = async (c: Cen, o: { fatiaMs?: number; lojaId?: string; userId?: string } = {}) => {
+    const id = `cu-${++seq}`; const userId = o.userId ?? UID, lojaId = o.lojaId ?? LOJA;
+    c.repo.criarJob({ id, userId, lojaId, campoTempo: null, inicio: null, fim: null });
+    const pausas: number[] = []; let res: Awaited<ReturnType<typeof M.executarFatiaCatchUpEscrow>> | null = null;
+    for (let k = 0; k < 5000; k++) {
+      const j = c.repo.jobs.get(id)!;
+      res = await M.executarFatiaCatchUpEscrow({ id, userId, lojaId, checkpoint: j.checkpoint as CheckpointCatchUpEscrow | null, progresso: j.progresso },
+        { api: c.api, repo: c.repo, relogio: c.relogio },
+        { prazoMs: c.relogio.agoraMs() + (o.fatiaMs ?? 1e9), margemMs: 0, habilitado: true, retry: c.retry, loteCatchUp: 7, concorrenciaEscrow: 3 });
+      if (res.estado === "pausado") { pausas.push(k); continue; }
+      break;
+    }
+    return { id, res: res!, pausas, job: c.repo.jobs.get(id)! };
+  };
+  /** Popula o banco so com DETAIL (escrow falha) e depois deixa o escrow disponivel. */
+  const semEscrow = async (ps: PedidoFake[]) => {
+    const c = cenario(ps);
+    let bloquear = true;
+    c.api.onEscrow = () => (bloquear ? new ErroShopee("permanente", "indisponivel") : undefined);
+    await rodarJob(c, M, W1); await rodarJob(c, M, W2);
+    bloquear = false; c.api.onEscrow = undefined;
+    const listarAntes = c.api.chamadas.listar;
+    return { c, listarAntes };
+  };
+  t("16A. pedido pago sem escrow e NUNCA relistado: o catch-up acha e completa (0 chamadas de listagem)", async () => {
+    const ps = gerar(40);
+    const { c, listarAntes } = await semEscrow(ps);
+    assert(canonico(c.repo).comp.completude === "PARTIAL", "fixture: devia estar sem escrow");
+    const r = await rodarCatchUp(c);
+    assert(r.res.estado === "concluido" && c.api.chamadas.listar === listarAntes, `${r.res.estado} listou ${c.api.chamadas.listar - listarAntes}`);
+    const { comp, metricas } = canonico(c.repo);
+    assert(comp.completude === "COMPLETE" && JSON.stringify(metricas) === JSON.stringify(esperado(ps)), JSON.stringify(comp));
+  });
+  t("16B. escrow antigo (escrow_update_time < update_time): refetch pelo catch-up", async () => {
+    const c = cenario(gerar(10));
+    await rodarJob(c, M, W1); await rodarJob(c, M, W2);
+    const p: any = c.repo.pedidos.get(`${LOJA}|S00001`);
+    p.update_time = new Date(Date.parse(p.update_time) + 60_000).toISOString(); // pedido mudou (detail mais novo)
+    c.api.pedidos.get("S00001")!.osd = 7;
+    const antes = c.api.chamadas.escrow;
+    const r = await rodarCatchUp(c);
+    assert(r.res.estado === "concluido" && c.api.chamadas.escrow === antes + 1, `chamadas ${c.api.chamadas.escrow - antes}`);
+    assert(p.escrow_update_time === p.update_time && p.original_shopee_discount === 7, JSON.stringify(p));
+  });
+  t("16C. escrow atual (escrow_update_time == update_time): 0 chamadas", async () => {
+    const c = cenario(gerar(30));
+    await rodarJob(c, M, W1);
+    const antes = c.api.chamadas.escrow;
+    const r = await rodarCatchUp(c);
+    assert(r.res.estado === "concluido" && c.api.chamadas.escrow === antes, `chamadas ${c.api.chamadas.escrow - antes}`);
+  });
+  t("16D. 1 de 100 falha transitoriamente: retry dentro do contrato e completa", async () => {
+    const ps = gerar(120).filter((p) => p.payTime !== null).slice(0, 100);
+    const { c } = await semEscrow(ps);
+    let falhas = 0;
+    c.api.onEscrow = (sn) => (sn === ps[50].orderSn && falhas++ < 4 ? new ErroShopee("transitorio", "error_server") : undefined);
+    const r = await rodarCatchUp(c);
+    const comEscrow = [...c.repo.pedidos.values()].filter((p: any) => p.escrow_fetched_at).length;
+    assert(r.res.estado === "concluido" && comEscrow === 100 && Object.keys((r.job.checkpoint as CheckpointCatchUpEscrow).falhas).length === 0, `${comEscrow} ${JSON.stringify((r.job.checkpoint as any).falhas)}`);
+  });
+  t("16E. falha permanente: fica pendente/incompleto, periodo PARTIAL e sem total", async () => {
+    const ps = gerar(20).filter((p) => p.payTime !== null);
+    const { c } = await semEscrow(ps);
+    c.api.onEscrow = (sn) => (sn === ps[3].orderSn ? new ErroShopee("permanente", "nao existe") : undefined);
+    const r = await rodarCatchUp(c);
+    const ck = r.job.checkpoint as CheckpointCatchUpEscrow;
+    assert(r.res.estado === "concluido" && ps[3].orderSn in ck.falhas, JSON.stringify(ck.falhas));
+    assert((await c.repo.pendentesEscrow(UID, LOJA, null, 100)).join() === ps[3].orderSn, "devia continuar pendente no banco");
+    const { comp, metricas } = canonico(c.repo);
+    assert(comp.completude === "PARTIAL" && metricas === null, JSON.stringify(comp));
+  });
+  t("16F. resume: fatias minusculas pausam e retomam, resultado igual ao sem interrupcao, sem duplicar chamadas", async () => {
+    const ps = gerar(60).filter((p) => p.payTime !== null);
+    const a = await semEscrow(ps); const ra = await rodarCatchUp(a.c);
+    const b = await semEscrow(ps); const escAntes = b.c.api.chamadas.escrow; const rb = await rodarCatchUp(b.c, { fatiaMs: 400 });
+    assert(ra.res.estado === "concluido" && rb.res.estado === "concluido" && rb.pausas.length > 3, `${rb.pausas.length} pausas`);
+    const limpar = (m: Map<string, Record<string, unknown>>) => JSON.stringify([...m.entries()].sort().map(([k, v]) => [k, Object.fromEntries(Object.entries(v).filter(([c]) => !/fetched_at|synced_at/.test(c)).sort())]));
+    assert(limpar(a.c.repo.pedidos) === limpar(b.c.repo.pedidos) && limpar(a.c.repo.itens) === limpar(b.c.repo.itens), "estado final diferente");
+    assert(b.c.api.chamadas.escrow - escAntes === ps.length, `chamadas ${b.c.api.chamadas.escrow - escAntes} para ${ps.length} pedidos (duplicou?)`);
+    const ck = rb.job.checkpoint as CheckpointCatchUpEscrow;
+    assert(JSON.stringify(ck).length < 2000, "checkpoint guarda payload");
+  });
+  t("16G. catch-up e por LOJA: nunca toca outra loja/dono", async () => {
+    const LB = "55555555-5555-4555-8555-555555555555";
+    const ps = gerar(10).filter((p) => p.payTime !== null);
+    const c = cenario(ps, [{ id: LOJA, user_id: UID }, { id: LB, user_id: "user-b" }]);
+    c.api.onEscrow = () => new ErroShopee("permanente", "x");
+    const apiB = new ShopeeFake(c.relogio, ps); apiB.onEscrow = () => new ErroShopee("permanente", "x");
+    await rodarJob(c, M, W1); await rodarJob(c, M, { ...W1, userId: "user-b", lojaId: LB, api: apiB });
+    assert([...c.repo.pedidos.values()].filter((p: any) => p.loja_id === LB).every((p: any) => !p.escrow_fetched_at), "fixture: B devia estar sem escrow");
+    c.api.onEscrow = undefined; apiB.onEscrow = undefined;
+    await rodarCatchUp(c, { lojaId: LOJA });
+    assert([...c.repo.pedidos.values()].filter((p: any) => p.loja_id === LOJA).every((p: any) => p.escrow_fetched_at), "catch-up de A nao completou A");
+    const b = [...c.repo.pedidos.values()].filter((p: any) => p.loja_id === LB);
+    assert(b.length > 0 && b.every((p: any) => !p.escrow_fetched_at), "catch-up da loja A tocou a loja B");
+  });
+  t("16H. catch-up NAO e evidencia de listagem: sem janelas de update_time o dia segue PARTIAL", async () => {
+    const ps = gerar(15).filter((p) => p.payTime !== null);
+    const c = cenario(ps);
+    c.api.onEscrow = () => new ErroShopee("permanente", "x");
+    await rodarJob(c, M, { campoTempo: "create_time", inicio: "2026-09-20T00:00:00.000Z", fim: "2026-10-03T12:00:00.000Z" });
+    c.api.onEscrow = undefined;
+    const r = await rodarCatchUp(c);
+    assert(r.res.estado === "concluido" && r.job.listagem_completa === null && r.job.janela_inicio === null, "catch-up virou janela");
+    const { comp } = canonico(c.repo);
+    assert(comp.completude === "PARTIAL" && comp.motivos.includes("listagem_nao_provada_por_update_time"), JSON.stringify(comp));
+  });
+  t("16I. uma unica implementacao de escrow: fase ESCROW e catch-up usam processarEscrowDePedido", () => {
+    const fonte = readFileSync(join(RAIZ, "lib/shopee/ingestao/motor.ts"), "utf8");
+    assert((fonte.match(/api\.escrow\(/g) ?? []).length === 1 && (fonte.match(/normalizarEscrow\(/g) ?? []).length === 1, "escrow duplicado");
+    assert((fonte.match(/processarEscrowDePedido\(sn, /g) ?? []).length === 2, "fase ESCROW e catch-up nao compartilham a rotina");
+  });
+
   console.log("\n[15. adaptador Supabase: formato das consultas]");
   t("15a. toda consulta/escrita leva dono e loja; upserts nas chaves certas; job filtrado por dono/loja", async () => {
     const regs: { tabela: string; op: string; filtros: string[]; opcoes?: any }[] = [];
@@ -438,8 +577,9 @@ async function principal() {
     const P = await import("../lib/shopee/ingestao/persistencia");
     const repo = P.criarRepositorioSupabase(cliente);
     await repo.lojaDoDono(UID, LOJA);
-    await repo.idsDeOutraLoja(UID, LOJA, ["x"]);
-    await repo.gravarDetalhes([{ user_id: UID, loja_id: LOJA, order_sn: "S" } as any], [{ id: "i", user_id: UID, loja_id: LOJA } as any]);
+    await repo.gravarDetalhes([{ user_id: UID, loja_id: LOJA, order_sn: "S" } as any],
+      [{ id: "i", user_id: UID, loja_id: LOJA, order_id: "S", ml_item_id: "1", variation_id: null, marketplace: "Shopee" } as any]);
+    await repo.pendentesEscrow(UID, LOJA, null, 10);
     await repo.estadoEscrow(UID, LOJA, ["S"]);
     await repo.pedidoParaEscrow(UID, LOJA, "S");
     await repo.gravarEscrow({ user_id: UID, loja_id: LOJA, order_sn: "S" } as any, [{ id: "i", user_id: UID, loja_id: LOJA } as any]);
@@ -449,9 +589,15 @@ async function principal() {
     assert(up.find((r) => r.tabela === "pedidos")?.opcoes?.onConflict === "id", "onConflict item");
     assert(!regs.some((r) => r.op === "delete"), "delete!");
     for (const r of regs.filter((r) => r.op !== "upsert")) {
-      assert(r.filtros.includes("eq:user_id") || (r.tabela === "lojas" && r.filtros.includes("eq:user_id")), `${r.tabela}/${r.op} sem user_id: ${r.filtros}`);
-      if (r.tabela !== "lojas") assert(r.filtros.some((f) => /:loja_id$/.test(f)), `${r.tabela}/${r.op} sem loja_id: ${r.filtros}`);
+      assert(r.filtros.includes("eq:user_id"), `${r.tabela}/${r.op} sem user_id: ${r.filtros}`);
+      // unica consulta sem loja: "id legado ja ocupado?" — de proposito em
+      // TODAS as lojas do dono (e o que impede reutilizar id de outra loja)
+      const ocupados = r.tabela === "pedidos" && r.filtros.join() === "eq:user_id,in:id";
+      if (r.tabela !== "lojas" && !ocupados) assert(r.filtros.some((f) => /:loja_id$/.test(f)), `${r.tabela}/${r.op} sem loja_id: ${r.filtros}`);
     }
+    assert(regs.some((r) => r.tabela === "pedidos" && r.filtros.join() === "eq:user_id,in:id"), "consulta de id ocupado ausente");
+    const pend = regs.find((r) => r.tabela === "shopee_pedidos" && r.filtros.includes("eq:escrow_pendente"));
+    assert(pend && pend.filtros.includes("eq:user_id") && pend.filtros.includes("eq:loja_id"), `fila de escrow: ${pend?.filtros}`);
     const job = regs.find((r) => r.tabela === "sync_jobs")!;
     assert(["eq:id", "eq:user_id", "eq:loja_id", "eq:marketplace"].every((f) => job.filtros.includes(f)), job.filtros.join());
     assert(regs.find((r) => r.tabela === "lojas")!.filtros.join() === "eq:id,eq:user_id,eq:marketplace,eq:ativo", "lojaDoDono");

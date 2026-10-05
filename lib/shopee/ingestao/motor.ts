@@ -31,7 +31,7 @@ import { JANELA_MAXIMA_MS } from "./janelas";
 import { ErroCorrespondenciaEscrow, normalizarDetalhe, normalizarEscrow } from "./normalizar";
 import { comRetry, RETRY_PADRAO, type OpcoesRetry } from "./retry";
 import {
-  ErroShopee, type CheckpointShopee, type JobShopee, type LinhaItemDetalhe, type LinhaPedidoDetalhe,
+  ErroShopee, type CheckpointCatchUpEscrow, type CheckpointShopee, type JobShopee, type LinhaItemDetalhe, type LinhaPedidoDetalhe,
   type ProgressoShopee, type Relogio, type Repositorio, type ShopeeApi,
 } from "./tipos";
 
@@ -178,25 +178,18 @@ export async function executarFatiaShopee(
           } catch (e) { registrarFalhaDetalhe(sn, `normalizacao: ${msgDe(e)}`, true); }
         }
       }
-      // Nenhum dado cruza loja: item cujo id ja pertence a OUTRA loja do mesmo
-      // dono falha o pedido inteiro (explicito), em vez de mover a linha.
-      if (itens.length) {
-        const colididos = await repo.idsDeOutraLoja(job.userId, job.lojaId, itens.map((i) => i.id));
-        if (colididos.size) {
-          const snsColididos = new Set(itens.filter((i) => colididos.has(i.id)).map((i) => i.order_id));
-          for (const sn of snsColididos) { registrarFalhaDetalhe(sn, "colisao_de_chave_de_item_entre_lojas", true); resolvidos.delete(sn); pagos.delete(sn); }
-          for (let i = pedidos.length - 1; i >= 0; i--) if (snsColididos.has(pedidos[i].order_sn)) pedidos.splice(i, 1);
-          for (let i = itens.length - 1; i >= 0; i--) if (snsColididos.has(itens[i].order_id)) itens.splice(i, 1);
-        }
-      }
+      // Chave de item por loja (S2-D2.1): o repositorio resolve o id pela
+      // chave (loja, pedido, item, variacao) — nada cruza loja, nada falha.
       if (pedidos.length) {
         await repo.gravarDetalhes(pedidos, itens);
         pr.detail_concluidos += pedidos.length; pr.pedidos_gravados += pedidos.length; pr.itens_gravados += itens.length;
-        // Escrow necessario: pago E (nunca lido OU lido antes do update_time atual).
+        // Escrow necessario: pago E (nunca lido OU lido num update_time que
+        // nao e o vigente) — mesma regra da coluna gerada `escrow_pendente`
+        // e do "escrow atual" do servico canonico.
         const estado = await repo.estadoEscrow(job.userId, job.lojaId, [...pagos.keys()]);
         const precisa = [...pagos].filter(([sn, upd]) => {
           const lido = estado.get(sn) ?? null;
-          return lido === null || new Date(lido).getTime() < new Date(upd).getTime();
+          return lido === null || new Date(lido).getTime() !== new Date(upd).getTime();
         }).map(([sn]) => sn);
         pr.escrow_necessarios += precisa.length;
         acrescentar(ck.pendentesEscrow, precisa);
@@ -218,21 +211,16 @@ export async function executarFatiaShopee(
       const agoraIso = new Date(relogio.agoraMs()).toISOString();
       let progrediu = false; let transitorio: string | null = null;
       await Promise.all(rodada.map(async (sn) => {
-        try {
-          const ped = await repo.pedidoParaEscrow(job.userId, job.lojaId, sn);
-          if (!ped) { desistirEscrow(sn, "pedido nao materializado"); return; }
-          const e = await comRetry(() => api.escrow(sn), o.retry);
-          const n = normalizarEscrow(e, { userId: job.userId, lojaId: job.lojaId, agoraIso, updateTimeDoPedido: ped.updateTime, itensGravados: ped.itens });
-          await repo.gravarEscrow(n.pedido, n.itens);
+        const r = await processarEscrowDePedido(sn, { userId: job.userId, lojaId: job.lojaId, api, repo, retry: o.retry, agoraIso });
+        if (r.ok) {
           pr.escrow_concluidos++; progrediu = true;
           ck.pendentesEscrow = ck.pendentesEscrow.filter((x) => x !== sn); delete ck.tentativasEscrow[sn];
-        } catch (e) {
-          // Correspondencia 1:1 quebrada: nao adivinhar — falha o financeiro do pedido.
-          if (e instanceof ErroCorrespondenciaEscrow || tipoDe(e) === "permanente") { desistirEscrow(sn, msgDe(e)); return; }
-          transitorio = `escrow: ${msgDe(e)}`;
-          ck.tentativasEscrow[sn] = (ck.tentativasEscrow[sn] ?? 0) + 1;
-          if (ck.tentativasEscrow[sn] >= o.maxTentativasPorPedido) desistirEscrow(sn, transitorio);
+          return;
         }
+        if (r.definitivo) { desistirEscrow(sn, r.motivo); return; }
+        transitorio = r.motivo;
+        ck.tentativasEscrow[sn] = (ck.tentativasEscrow[sn] ?? 0) + 1;
+        if (ck.tentativasEscrow[sn] >= o.maxTentativasPorPedido) desistirEscrow(sn, transitorio);
       }));
       await salvar({ status: "rodando" });
       if (transitorio && !progrediu) return pausar(transitorio);
@@ -257,4 +245,109 @@ export async function executarFatiaShopee(
     ck.falhasEscrow[sn] = motivo; pr.escrow_falhos++; pr.ultimo_erro = `${sn}: ${motivo}`;
     ck.pendentesEscrow = ck.pendentesEscrow.filter((x) => x !== sn); delete ck.tentativasEscrow[sn];
   }
+}
+
+// ── Escrow de UM pedido (rotina unica: fase ESCROW e catch-up) ───────
+
+export type ResultadoEscrow = { ok: true } | { ok: false; definitivo: boolean; motivo: string };
+
+/**
+ * get_escrow_detail → normalizacao 1:1 → gravacao, para um pedido da loja.
+ * `definitivo` = nao adianta repetir (permanente, correspondencia quebrada,
+ * pedido nao materializado); senao e transitorio (ja houve retry/backoff).
+ */
+export async function processarEscrowDePedido(sn: string, c: {
+  userId: string; lojaId: string; api: ShopeeApi; repo: Repositorio; retry: OpcoesRetry; agoraIso: string;
+}): Promise<ResultadoEscrow> {
+  try {
+    const ped = await c.repo.pedidoParaEscrow(c.userId, c.lojaId, sn);
+    if (!ped) return { ok: false, definitivo: true, motivo: "pedido nao materializado" };
+    const e = await comRetry(() => c.api.escrow(sn), c.retry);
+    const n = normalizarEscrow(e, { userId: c.userId, lojaId: c.lojaId, agoraIso: c.agoraIso, updateTimeDoPedido: ped.updateTime, itensGravados: ped.itens });
+    await c.repo.gravarEscrow(n.pedido, n.itens);
+    return { ok: true };
+  } catch (e) {
+    // Correspondencia 1:1 quebrada: nao adivinhar — falha o financeiro do pedido.
+    const definitivo = e instanceof ErroCorrespondenciaEscrow || tipoDe(e) === "permanente";
+    return { ok: false, definitivo, motivo: `escrow: ${msgDe(e)}` };
+  }
+}
+
+// ── CATCH-UP de escrow (S2-D2.1) ─────────────────────────────────────
+//
+// Varre a fila `escrow_pendente` de UMA loja (user_id + loja_id), em ordem
+// de order_sn, em lotes pequenos, sem depender de o pedido reaparecer em
+// get_order_list. Resumivel: o checkpoint guarda so o ultimo order_sn
+// passado e mapas pequenos. NAO produz evidencia de listagem: o job de
+// catch-up nao tem janela nem `listagem_completa` — o servico canonico
+// continua exigindo cobertura de update_time E escrow atual.
+
+export function checkpointCatchUpInicial(): CheckpointCatchUpEscrow {
+  return { versao: 1, modo: "escrow_catchup", apos: null, varreduraTerminou: false, retentar: [], tentativas: {}, falhas: {} };
+}
+
+export type ResultadoCatchUp =
+  | { estado: "desabilitado" }
+  | { estado: "pausado" | "concluido" | "falhou"; motivo?: string; checkpoint: CheckpointCatchUpEscrow; progresso: ProgressoShopee };
+
+export async function executarFatiaCatchUpEscrow(
+  job: { id: string; userId: string; lojaId: string; checkpoint: CheckpointCatchUpEscrow | null; progresso: ProgressoShopee | null },
+  deps: { api: ShopeeApi; repo: Repositorio; relogio: Relogio },
+  opcoes: OpcoesMotor & { loteCatchUp?: number },
+): Promise<ResultadoCatchUp> {
+  if (!(opcoes.habilitado ?? ASYNC_SYNC_JOBS_ENABLED)) return { estado: "desabilitado" };
+  const o = { ...PADROES, loteCatchUp: 50, ...opcoes, retry: opcoes.retry ?? RETRY_PADRAO };
+  const { api, repo, relogio } = deps;
+  const ck: CheckpointCatchUpEscrow = job.checkpoint ? structuredClone(job.checkpoint) : checkpointCatchUpInicial();
+  const pr: ProgressoShopee = job.progresso ? structuredClone(job.progresso) : progressoInicial();
+  const dono = { id: job.id, userId: job.userId, lojaId: job.lojaId };
+  const salvar = (status: "rodando" | "concluido" | "erro", erroMensagem?: string | null) =>
+    repo.salvarJob(dono, { checkpoint: ck, progresso: pr, status, ...(erroMensagem === undefined ? {} : { erroMensagem }) });
+  const cabe = () => relogio.agoraMs() + o.margemMs < o.prazoMs;
+
+  if (!(await repo.lojaDoDono(job.userId, job.lojaId))) {
+    pr.ultimo_erro = "loja_invalida"; await salvar("erro", "loja_invalida");
+    return { estado: "falhou", motivo: "loja_invalida", checkpoint: ck, progresso: pr };
+  }
+
+  const processar = async (sns: string[]) => {
+    const agoraIso = new Date(relogio.agoraMs()).toISOString();
+    let progrediu = false; let transitorio: string | null = null;
+    for (let i = 0; i < sns.length; i += o.concorrenciaEscrow) {
+      await Promise.all(sns.slice(i, i + o.concorrenciaEscrow).map(async (sn) => {
+        pr.escrow_necessarios++;
+        const r = await processarEscrowDePedido(sn, { userId: job.userId, lojaId: job.lojaId, api, repo, retry: o.retry, agoraIso });
+        if (r.ok) { pr.escrow_concluidos++; progrediu = true; ck.retentar = ck.retentar.filter((x) => x !== sn); delete ck.tentativas[sn]; return; }
+        if (r.definitivo) { ck.falhas[sn] = r.motivo; pr.escrow_falhos++; ck.retentar = ck.retentar.filter((x) => x !== sn); delete ck.tentativas[sn]; return; }
+        transitorio = r.motivo;
+        ck.tentativas[sn] = (ck.tentativas[sn] ?? 0) + 1;
+        if (ck.tentativas[sn] >= o.maxTentativasPorPedido) {
+          ck.falhas[sn] = r.motivo; pr.escrow_falhos++; ck.retentar = ck.retentar.filter((x) => x !== sn); delete ck.tentativas[sn];
+        } else if (!ck.retentar.includes(sn)) ck.retentar.push(sn);
+      }));
+    }
+    pr.ultimo_erro = transitorio ?? pr.ultimo_erro;
+    return { progrediu, transitorio };
+  };
+
+  // 1) varredura da fila, em ordem de order_sn
+  while (!ck.varreduraTerminou) {
+    if (!cabe()) { await salvar("rodando"); return { estado: "pausado", motivo: "prazo", checkpoint: ck, progresso: pr }; }
+    const lote = await repo.pendentesEscrow(job.userId, job.lojaId, ck.apos, o.loteCatchUp);
+    // falhas definitivas continuam pendentes no banco: pular, nao repetir
+    const aProcessar = lote.filter((sn) => !(sn in ck.falhas));
+    if (lote.length === 0) { ck.varreduraTerminou = true; break; }
+    await processar(aProcessar);
+    ck.apos = lote[lote.length - 1];
+    await salvar("rodando");
+  }
+  // 2) repete os transitorios (limite por pedido)
+  while (ck.retentar.length > 0) {
+    if (!cabe()) { await salvar("rodando"); return { estado: "pausado", motivo: "prazo", checkpoint: ck, progresso: pr }; }
+    const r = await processar([...ck.retentar]);
+    await salvar("rodando");
+    if (r.transitorio && !r.progrediu && ck.retentar.length > 0) return { estado: "pausado", motivo: r.transitorio, checkpoint: ck, progresso: pr };
+  }
+  await salvar("concluido", null);
+  return { estado: "concluido", checkpoint: ck, progresso: pr };
 }
