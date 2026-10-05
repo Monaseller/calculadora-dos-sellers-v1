@@ -2,10 +2,12 @@
  * Fakes deterministicos para o motor de ingestao Shopee (S2-D2).
  * Sem rede, sem banco, sem token. Usados por scripts/testar-shopee-ingestao.ts.
  *
- * ShopeeFake: API com pedidos em memoria, cursor KEYSET (a proxima pagina
- * comeca depois do ultimo (tempo, order_sn) devolvido — pressuposto sobre o
- * cursor real da Shopee, documentado no relatorio), relogio compartilhado
- * que anda a cada chamada, e ganchos para injetar falha/mutacao.
+ * ShopeeFake: API com pedidos em memoria, cursor KEYSET por padrao (a
+ * proxima pagina comeca depois do ultimo (tempo, order_sn) devolvido) ou
+ * POSICIONAL (`cursorPosicional = true`: offset no conjunto ATUAL — o
+ * comportamento observado em LIVE no S2-D3-B2, que pula pedidos quando o
+ * conjunto muda durante a paginacao), relogio compartilhado que anda a cada
+ * chamada, e ganchos para injetar falha/mutacao.
  * RepoFake: as tabelas shopee_pedidos/pedidos/sync_jobs em memoria, com a
  * mesma semantica de upsert por coluna da persistencia real.
  */
@@ -33,7 +35,9 @@ export class ShopeeFake implements ShopeeApi {
   pedidos = new Map<string, PedidoFake>();
   chamadas = { listar: 0, detalhes: 0, escrow: 0 };
   /** antes de responder uma pagina: pode lancar ErroShopee ou mutar pedidos (corrida). */
-  onListar?: (chamada: number) => ErroShopee | void;
+  onListar?: (chamada: number, a: { campoTempo: CampoTempo; de: number; ate: number; cursor: string | null }) => ErroShopee | void;
+  /** true = cursor e o OFFSET no conjunto atual (S2-D3-B2); false = keyset. */
+  cursorPosicional = false;
   onDetalhes?: (chamada: number, sns: string[]) => ErroShopee | void;
   onEscrow?: (sn: string, chamada: number) => ErroShopee | void;
   /** order_sn → quantas vezes ainda omitir do detail (Infinity = sempre). */
@@ -46,10 +50,16 @@ export class ShopeeFake implements ShopeeApi {
   async listarPagina(a: { campoTempo: CampoTempo; de: number; ate: number; cursor: string | null; tamanhoPagina: number }): Promise<PaginaListagem> {
     this.relogio.andar(this.passoMs);
     const n = ++this.chamadas.listar;
-    const e = this.onListar?.(n); if (e) throw e;
+    const e = this.onListar?.(n, a); if (e) throw e;
     const campo = (p: PedidoFake) => (a.campoTempo === "update_time" ? p.updateTime : p.createTime);
     const todos = [...this.pedidos.values()].filter((p) => campo(p) * 1000 >= a.de && campo(p) * 1000 <= a.ate)
       .map((p) => ({ t: campo(p), sn: p.orderSn })).sort((x, y) => x.t - y.t || x.sn.localeCompare(y.sn));
+    if (this.cursorPosicional) {
+      const off = a.cursor ? Number(a.cursor) : 0;
+      const pagina = todos.slice(off, off + a.tamanhoPagina);
+      const mais = off + pagina.length < todos.length;
+      return { pedidos: pagina.map((x) => ({ orderSn: x.sn })), mais, proximoCursor: mais ? String(off + pagina.length) : null };
+    }
     const [ct, csn] = a.cursor ? [Number(a.cursor.split("|")[0]), a.cursor.split("|")[1]] : [-Infinity, ""];
     const depois = todos.filter((x) => x.t > ct || (x.t === ct && x.sn > csn));
     const pagina = depois.slice(0, a.tamanhoPagina);

@@ -97,7 +97,8 @@ export function intervaloSaoPaulo(de: string, ate: string): { inicio: Date; fim:
  * (OBSERVED_MAX != CONTRACTUAL_MAX): um pedido criado em D-30 e pago em D
  * pertence a D. Por isso este valor serve para dimensionar backfill,
  * diagnostico e reconciliacao rapida — e nao participa de
- * `avaliarCompletudeShopee`. Completude so se prova por `update_time`.
+ * `avaliarCompletudeShopee`. Completude so se prova por descoberta via
+ * `create_time` a partir de uma ancora explicita (S2-D3-B2.1).
  */
 export const MARGEM_OPERACIONAL_CREATE_TIME_MS = 7 * 24 * 3600 * 1000;
 
@@ -193,94 +194,118 @@ export function filtrarPagosNoIntervalo(pedidos: PedidoShopeeCanonico[], inicio:
 // ── Completude (pura) ────────────────────────────────────────────────
 
 /**
- * WATERMARK DE COBERTURA por `update_time` a partir de `desde` (S2-D1.1).
+ * DECISAO ARQUITETURAL (S2-D3-B2.1) — provada em LIVE no S2-D3-B2:
  *
- * Toma a cadeia de janelas COMPLETAS de `update_time` que comeca numa
- * janela contendo `desde` e segue sem buraco (cada proxima janela comeca
- * dentro do alcance da cadeia). O watermark e o INICIO da ultima janela
- * da cadeia — um passo atras do alcance — ou `null` se nao houver cadeia.
+ *   UPDATE_TIME_CAN_PROVE_DISCOVERY_COMPLETE = NO
  *
- * Por que o inicio da ultima, e nao o fim:
- *   pressupostos (S2-D2 deve cumprir; documentados no contrato):
- *   (P1) `update_time` muda a cada mudanca de status (docs/CHANGELOG.md
- *        "update_time muda toda vez que o status do pedido muda"); pagar e
- *        mudar de status, logo pay_time <= update_time (0/6.401 no S2-C);
- *   (P2) `get_order_list` por update_time devolve o pedido pelo seu
- *        update_time ATUAL no momento da listagem;
- *   (P3) cada janela termina, no maximo, no instante em que a sua listagem
- *        comecou (nunca cobre futuro), e janelas consecutivas se sobrepoem.
- *   Seja o pedido pago em p, com p no dia, e seja u o seu update_time num
- *   momento em que a cadeia ja processou janelas ate o watermark W. Se o
- *   pedido mudou durante a listagem de uma janela k, o novo update_time cai
- *   na janela k+1 (sobreposta) e e visto ali — exceto se k for a ULTIMA
- *   janela, que ainda nao tem sucessora. Declarar o watermark no inicio da
- *   ultima janela garante que toda mudanca anterior a W foi vista por uma
- *   janela que JA teve sucessora completa. Logo todo pedido com
- *   start(dia) <= p < W esta no corpus (no estado mais recente que a
- *   cadeia viu).
+ * `get_order_list` por `update_time` pagina um conjunto que MUDA durante a
+ * paginacao (pedidos atualizados saem da janela) e o cursor e posicional:
+ * na run controlada 46 pedidos estaveis foram pulados, 10 deles pagos em
+ * 02/10, com zero erro de API, cursor ate o fim e `listagem_completa=true`.
+ * Nenhum overlap, janela menor, retry ou "duas passagens iguais" transforma
+ * update_time em prova de descoberta — servem so como mitigacao/aceleracao
+ * (TWO_EQUAL_PASSES = CONSISTENCY_CHECK; SMALL_WINDOWS = MITIGATION).
+ * Janelas de update_time sao IGNORADAS aqui.
  *
- * Nao ha "D + N dias" aqui: o watermark e o que a cobertura real provou.
+ * COMPLETE (loja, periodo [inicio, fim)) = A && B && C:
+ *
+ *  A. DISCOVERY_COMPLETE — o CORPUS por `create_time` esta completo de
+ *     `ancoraDescoberta` ate `fim`. `create_time` e imutavel: numa janela
+ *     FECHADA (fim <= inicio da listagem, garantido pelo motor) a populacao
+ *     nao muda quando o status muda. Todo pedido pago em [inicio, fim) foi
+ *     criado antes de `fim` (create_time <= pay_time) e, por definicao da
+ *     ancora, nao antes dela. Prova = cadeia SEM BURACO de janelas de
+ *     create_time completas (`listagem_completa` E job `concluido`) que
+ *     comeca numa janela contendo a ancora e alcanca `fim`.
+ *     A ancora e EXPLICITA e comprovada (inicio do historico recuperavel
+ *     da loja / primeira data de um backfill completo). Sem ancora: A falso.
+ *     Nada de D-N dias.
+ *  B. STATE_CURRENT — o estado conhecido e posterior ao fim do periodo:
+ *     todo pedido pago no periodo tem detail obtido em >= `fim`, e nenhum
+ *     pedido do corpus criado antes de `fim` segue sem pagamento conhecido
+ *     com ultima observacao anterior a `fim` (poderia ter sido pago no
+ *     periodo). Status so e "final" se estiver em `estadosTerminais`
+ *     VERIFICADOS (hoje: nenhum). O resultado informa `estadoEm` (o detail
+ *     mais antigo usado): as metricas valem "na data de estadoEm".
+ *  C. FINANCIAL_CURRENT — escrow ATUAL (`escrowShopeeAtual`) e
+ *     componentes de item presentes para todo pedido pago no periodo.
+ *
+ * FAILED: A falso e alguma janela de create_time do intervalo necessario
+ * terminou em erro. PARTIAL: qualquer outra falta.
  */
-export function watermarkUpdateTime(janelas: { inicio: string; fim: string }[], desde: number): number | null {
-  const ord = janelas.map((j) => [new Date(j.inicio).getTime(), new Date(j.fim).getTime()] as const)
+
+/**
+ * Alcance da descoberta por `create_time` a partir da ancora: fim da cadeia
+ * sem buraco de janelas COMPLETAS de create_time que comeca numa janela
+ * contendo a ancora. `null` = sem cadeia. Membership de create_time e
+ * imutavel, entao o alcance e o FIM da cadeia (sem "um passo atras").
+ */
+export function alcanceDescobertaCriacao(janelas: JanelaListagem[], ancora: number): number | null {
+  const ord = janelas
+    .filter((j) => j.campoTempo === "create_time" && j.listagemCompleta === true && j.status === "concluido")
+    .map((j) => [new Date(j.inicio).getTime(), new Date(j.fim).getTime()] as const)
     .filter(([a, b]) => Number.isFinite(a) && Number.isFinite(b) && b > a)
     .sort((x, y) => x[0] - y[0] || x[1] - y[1]);
   let alcance: number | null = null;
-  let inicioUltima: number | null = null;
   for (const [a, b] of ord) {
-    if (alcance === null) {
-      if (a <= desde && b > desde) { alcance = b; inicioUltima = a; }
-      continue;
-    }
+    if (alcance === null) { if (a <= ancora && b > ancora) alcance = b; continue; }
     if (a > alcance) break;               // buraco: a cadeia para aqui
-    if (b > alcance) { alcance = b; inicioUltima = a; }
+    if (b > alcance) alcance = b;
   }
-  return inicioUltima;
+  return alcance;
 }
 
-/**
- * COMPLETE para uma loja/periodo [inicio, fim) exige, todas juntas:
- *  1. listagem PROVADA por update_time: watermark (acima) a partir de
- *     `inicio` com W >= fim. Janelas de `create_time` (backfill) NUNCA
- *     provam completude — servem para popular o corpus; sem prova por
- *     update_time o periodo fica PARTIAL, qualquer que seja a margem usada.
- *     Periodo historico sem incremental previo precisa de uma passada de
- *     update_time de `inicio` ate o watermark de sincronizacao atual.
- *  2. detail obtido para todo pedido pago no periodo;
- *  3. escrow ATUAL (`escrowShopeeAtual`) para todo pedido pago, e
- *     componentes de item presentes.
- * FAILED: a listagem nao esta provada e alguma janela do periodo terminou
- * em erro. PARTIAL: qualquer outra falta.
- */
+export interface DimensoesCompletude { descoberta: boolean; estado: boolean; financeiro: boolean }
+
 export function avaliarCompletudeShopee(args: {
   inicio: Date; fim: Date;
   janelas: JanelaListagem[];
+  /** DISCOVERY_ANCHOR explicita e comprovada; `null` = indefinida → nunca COMPLETE. */
+  ancoraDescoberta: Date | null;
   pedidosPagos: PedidoShopeeCanonico[];
   itens: ItemShopeeCanonico[];
-}): { completude: Completude; motivos: string[]; watermark: string | null } {
-  const { inicio, fim, janelas, pedidosPagos, itens } = args;
+  /**
+   * Pedidos do corpus criados antes de `fim`, sem pay_time, cuja ultima
+   * observacao (detail) e anterior a `fim` — e que nao estao num status
+   * terminal verificado. Qualquer um deles pode ter sido pago no periodo.
+   */
+  naoPagosSemObservacaoPosPeriodo: number;
+}): { completude: Completude; motivos: string[]; dimensoes: DimensoesCompletude; alcanceDescoberta: string | null; estadoEm: string | null } {
+  const { inicio, fim, janelas, ancoraDescoberta, pedidosPagos, itens } = args;
   const a = inicio.getTime(), b = fim.getTime();
-  // Evidencia = listagem completa E job concluido (S2-D2): um job que listou
-  // tudo mas terminou em `erro` (pedido listado que nunca materializou) nao
-  // prova cobertura — o pedido faltante nem existe em shopee_pedidos.
-  const completas = janelas.filter((j) => j.listagemCompleta === true && j.status === "concluido");
-  const w = watermarkUpdateTime(completas.filter((j) => j.campoTempo === "update_time"), a);
-  const porUpdate = w !== null && w >= b;
-  const watermark = w === null ? null : new Date(w).toISOString();
   const motivos: string[] = [];
-  if (!porUpdate) {
-    motivos.push("listagem_nao_provada_por_update_time");
-    // diagnostico apenas: create_time pode ter populado, mas nao prova nada
-    if (completas.some((j) => j.campoTempo === "create_time" && new Date(j.fim).getTime() > a && new Date(j.inicio).getTime() < b)) {
-      motivos.push("so_create_time_sem_prova");
-    }
+
+  // ── A. descoberta (create_time, a partir da ancora) ──
+  let alcance: number | null = null;
+  if (ancoraDescoberta === null) motivos.push("ancora_de_descoberta_indefinida");
+  else {
+    alcance = alcanceDescobertaCriacao(janelas, ancoraDescoberta.getTime());
+    if (alcance === null || alcance < b) motivos.push("descoberta_por_create_time_nao_provada");
+  }
+  const descoberta = ancoraDescoberta !== null && alcance !== null && alcance >= b;
+  // diagnostico: update_time "completo" nao e prova (S2-D3-B2)
+  if (!descoberta && janelas.some((j) => j.campoTempo === "update_time" && j.listagemCompleta === true)) {
+    motivos.push("update_time_nao_prova_descoberta");
   }
 
+  // ── B. estado ──
+  let semDetalhe = 0, observadoAntes = 0; let estadoMin: number | null = null;
+  for (const p of pedidosPagos) {
+    if (!p.detailFetchedAt) { semDetalhe++; continue; }
+    const t = new Date(p.detailFetchedAt).getTime();
+    if (!(t >= b)) observadoAntes++;
+    if (estadoMin === null || t < estadoMin) estadoMin = t;
+  }
+  if (semDetalhe) motivos.push(`detalhe_ausente:${semDetalhe}`);
+  if (observadoAntes) motivos.push(`estado_observado_antes_do_fim_do_periodo:${observadoAntes}`);
+  if (args.naoPagosSemObservacaoPosPeriodo > 0) motivos.push(`nao_pagos_sem_observacao_pos_periodo:${args.naoPagosSemObservacaoPosPeriodo}`);
+  const estado = semDetalhe === 0 && observadoAntes === 0 && args.naoPagosSemObservacaoPosPeriodo === 0;
+
+  // ── C. financeiro ──
   const itensPorPedido = new Map<string, ItemShopeeCanonico[]>();
   for (const it of itens) { const k = chave(it.lojaId, it.orderSn); (itensPorPedido.get(k) ?? itensPorPedido.set(k, []).get(k)!).push(it); }
-  let semDetalhe = 0, semEscrow = 0, semItens = 0;
+  let semEscrow = 0, semItens = 0;
   for (const p of pedidosPagos) {
-    if (!p.detailFetchedAt) semDetalhe++;
     const escrowAtual = escrowShopeeAtual(p.escrowFetchedAt, p.escrowUpdateTime, p.updateTime)
       && p.originalShopeeDiscount !== null && p.pixDiscount !== null;
     const its = itensPorPedido.get(chave(p.lojaId, p.orderSn)) ?? [];
@@ -288,15 +313,28 @@ export function avaliarCompletudeShopee(args: {
     const itensOk = its.every((i) => i.voucherVendedor !== null && i.voucherShopee !== null && i.moedas !== null);
     if (!escrowAtual || !itensOk) semEscrow++;
   }
-  if (semDetalhe) motivos.push(`detalhe_ausente:${semDetalhe}`);
   if (semItens) motivos.push(`pedido_sem_itens:${semItens}`);
   if (semEscrow) motivos.push(`escrow_ausente_ou_desatualizado:${semEscrow}`);
+  const financeiro = semItens === 0 && semEscrow === 0;
 
-  if (motivos.length === 0) return { completude: "COMPLETE", motivos, watermark };
-  const falhou = !porUpdate && janelas.some((j) =>
-    j.status === "erro" && new Date(j.fim).getTime() > a && new Date(j.inicio).getTime() < b);
-  return { completude: falhou ? "FAILED" : "PARTIAL", motivos, watermark };
+  const dimensoes = { descoberta, estado, financeiro };
+  const alcanceDescoberta = alcance === null ? null : new Date(alcance).toISOString();
+  const estadoEm = estadoMin === null ? null : new Date(estadoMin).toISOString();
+  if (descoberta && estado && financeiro) return { completude: "COMPLETE", motivos: [], dimensoes, alcanceDescoberta, estadoEm };
+  const desde = ancoraDescoberta?.getTime() ?? a;
+  const falhou = !descoberta && janelas.some((j) => j.campoTempo === "create_time" && j.status === "erro"
+    && new Date(j.fim).getTime() > desde && new Date(j.inicio).getTime() < b);
+  return { completude: falhou ? "FAILED" : "PARTIAL", motivos, dimensoes, alcanceDescoberta, estadoEm };
 }
+
+/**
+ * Status Shopee VERIFICADOS como terminais (nao mudam mais). Vazio de
+ * proposito: nenhum foi verificado contra documentacao/comportamento ainda
+ * (COMPLETED nao e assumido final — devolucao pos-entrega; CANCELLED e
+ * candidato). Ate la todo pedido nao pago do corpus precisa ser observado
+ * depois do fim do periodo.
+ */
+export const ESTADOS_TERMINAIS_VERIFICADOS: readonly string[] = [];
 
 // ── Leitura do banco (server-side, dono SEMPRE explicito) ────────────
 
@@ -323,7 +361,15 @@ async function paginar<T>(consulta: (de: number, ate: number) => PromiseLike<{ d
  */
 export async function lerVendasShopee(
   cliente: SupabaseClient,
-  args: { userId: string; de: string; ate: string; lojaIds?: string[] },
+  args: {
+    userId: string; de: string; ate: string; lojaIds?: string[];
+    /**
+     * DISCOVERY_ANCHOR por loja (ISO), explicita e comprovada. Ainda nao ha
+     * onde persisti-la (proposta de schema no S2-D3-B2.1): sem ela, A e
+     * falso e o periodo nunca e COMPLETE.
+     */
+    ancorasDescoberta?: Record<string, string>;
+  },
 ): Promise<ResultadoVendas> {
   const { userId, de, ate } = args;
   if (!userId) throw new Error("user_id_ausente");
@@ -369,14 +415,12 @@ export async function lerVendasShopee(
       });
     }
 
+    // So janelas de DESCOBERTA (create_time): update_time nao prova nada.
+    // Sem filtro pelo periodo: a cadeia comeca na ancora, bem antes dele.
     const { data: jobs, error: errJobs } = await cliente.from("sync_jobs")
       .select("loja_id, campo_tempo, janela_inicio, janela_fim, listagem_completa, status")
       .eq("user_id", userId).eq("loja_id", lojaId).eq("marketplace", "Shopee")
-      .not("janela_inicio", "is", null)
-      // Sem limite superior: o watermark depende das janelas POSTERIORES ao
-      // periodo (a sucessora da ultima). Sem margem de create_time: ela nao
-      // prova nada (S2-D1.1).
-      .gt("janela_fim", inicio.toISOString());
+      .eq("campo_tempo", "create_time").not("janela_inicio", "is", null);
     if (errJobs) throw new Error("leitura_falhou");
     const janelas: JanelaListagem[] = ((jobs ?? []) as Record<string, unknown>[]).map((j) => ({
       lojaId, campoTempo: j.campo_tempo as JanelaListagem["campoTempo"],
@@ -384,13 +428,30 @@ export async function lerVendasShopee(
       listagemCompleta: (j.listagem_completa as boolean | null) ?? null, status: String(j.status),
     }));
 
-    const { completude, motivos } = avaliarCompletudeShopee({ inicio, fim, janelas, pedidosPagos: pedidos, itens });
-    if (completude !== "COMPLETE") {
-      resultados.push({ lojaId, completude, motivos, metricas: null, componentes: null });
+    // B: pedidos do corpus sem pagamento conhecido e sem observacao depois
+    // do periodo (poderiam ter sido pagos nele). Nenhum status terminal e
+    // presumido (ESTADOS_TERMINAIS_VERIFICADOS).
+    const fimIso = fim.toISOString();
+    let naoPagos = 0;
+    for (const sem of [false, true]) {
+      let q = cliente.from("shopee_pedidos").select("order_sn", { count: "exact", head: true })
+        .eq("user_id", userId).eq("loja_id", lojaId).is("pay_time", null).lt("create_time", fimIso);
+      q = sem ? q.is("detail_fetched_at", null) : q.lt("detail_fetched_at", fimIso);
+      if (ESTADOS_TERMINAIS_VERIFICADOS.length) q = q.not("order_status", "in", `(${ESTADOS_TERMINAIS_VERIFICADOS.join(",")})`);
+      const { count, error } = await q;
+      if (error || count === null || count === undefined) throw new Error("leitura_falhou");
+      naoPagos += count;
+    }
+    const ancora = args.ancorasDescoberta?.[lojaId];
+    const av = avaliarCompletudeShopee({ inicio, fim, janelas, ancoraDescoberta: ancora ? new Date(ancora) : null,
+      pedidosPagos: pedidos, itens, naoPagosSemObservacaoPosPeriodo: naoPagos });
+    const extra = { dimensoes: av.dimensoes, estadoEm: av.estadoEm };
+    if (av.completude !== "COMPLETE") {
+      resultados.push({ lojaId, completude: av.completude, motivos: av.motivos, metricas: null, componentes: null, ...extra });
       continue;
     }
     const { metricas, componentes } = calcularMetricasShopee(pedidos, itens);
-    resultados.push({ lojaId, completude, motivos, metricas, componentes });
+    resultados.push({ lojaId, completude: av.completude, motivos: av.motivos, metricas, componentes, ...extra });
   }
 
   const completude: Completude = resultados.every((r) => r.completude === "COMPLETE")

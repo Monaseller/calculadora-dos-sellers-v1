@@ -22,7 +22,9 @@
  *    janela entao NAO serve de prova de cobertura;
  *  - detail_fetched_at / escrow_fetched_at / escrow_update_time por pedido.
  *
- * `create_time` e suportado para backfill e NUNCA prova completude.
+ * S2-D3-B2.1: janelas de `create_time` (FECHADAS) sao a DESCOBERTA do corpus;
+ * janelas de `update_time` so aceleram frescor (o cursor real pula pedidos
+ * quando o conjunto muda durante a paginacao) e nunca provam descoberta.
  * Fica atras de ENABLE_ASYNC_SYNC_JOBS (padrao OFF).
  */
 import "server-only";

@@ -125,11 +125,23 @@ async function principal() {
   const N = await import("../lib/shopee/ingestao/normalizar");
   const J = await import("../lib/shopee/ingestao/janelas");
   const dia = C.intervaloSaoPaulo("2026-10-02", "2026-10-02");
-  const canonico = (repo: RepoFake) => {
+  // DISCOVERY_ANCHOR do cenario: nenhum pedido do fake e criado antes dela.
+  const ANCORA_T = new Date("2026-08-01T00:00:00.000Z");
+  const canonico = (repo: RepoFake, ancora: Date | null = ANCORA_T) => {
     const { pedidos, itens, janelas } = paraCanonico(repo);
     const pagos = C.filtrarPagosNoIntervalo(pedidos, dia.inicio, dia.fim);
-    const comp = C.avaliarCompletudeShopee({ ...dia, janelas, pedidosPagos: pagos, itens });
+    const f = dia.fim.getTime();
+    const naoPagos = [...repo.pedidos.values()].filter((p: any) => p.pay_time === null && Date.parse(p.create_time) < f
+      && !(p.detail_fetched_at && Date.parse(p.detail_fetched_at) >= f)).length;
+    const comp = C.avaliarCompletudeShopee({ ...dia, janelas, ancoraDescoberta: ancora, pedidosPagos: pagos, itens, naoPagosSemObservacaoPosPeriodo: naoPagos });
     return { comp, metricas: comp.completude === "COMPLETE" ? C.calcularMetricasShopee(pagos, itens).metricas : null, pagos };
+  };
+  /** Corpus por create_time da ancora ate `ate` (blocos de 14 dias, janelas fechadas). */
+  const rodarCorpus = async (c: Cen, ate = "2026-10-04T00:00:00.000Z", api?: ShopeeFake) => {
+    for (const j of J.planejarJanelasCriacao(ANCORA_T, new Date(ate))) {
+      const r = await rodarJob(c, M, { campoTempo: "create_time", inicio: j.inicio.toISOString(), fim: j.fim.toISOString(), api });
+      assert(r.res.estado === "concluido", `corpus ${j.inicio.toISOString()}: ${JSON.stringify(r.res)}`);
+    }
   };
 
   console.log("\n[1. fluxo completo: 1.300 pedidos, paginas, lotes, multi-item]");
@@ -145,9 +157,11 @@ async function principal() {
     assert(c.api.chamadas.escrow === pagos && r1.job.progresso!.escrow_concluidos === pagos, `escrow ${c.api.chamadas.escrow}/${pagos}`);
     assert(c.api.chamadas.detalhes === 26, `detail chamadas ${c.api.chamadas.detalhes} (lotes de 50)`);
   });
-  t("1b. com a cadeia W1+W2, o servico canonico da COMPLETE e as metricas batem com o esperado", async () => {
+  t("1b. a cadeia W1+W2 de update_time sozinha NAO da COMPLETE; com o corpus create_time da ancora, COMPLETE e metricas exatas", async () => {
     const c = cenario(base);
     await rodarJob(c, M, W1); await rodarJob(c, M, W2);
+    assert(canonico(c.repo).comp.completude !== "COMPLETE", "update_time provou descoberta");
+    await rodarCorpus(c);
     const { comp, metricas } = canonico(c.repo);
     assert(comp.completude === "COMPLETE", JSON.stringify(comp));
     assert(JSON.stringify(metricas) === JSON.stringify(esperado(base)), `${JSON.stringify(metricas)} != ${JSON.stringify(esperado(base))}`);
@@ -237,7 +251,7 @@ async function principal() {
       itens: [{ itemId: "A", modelId: "1", preco: 10, qtd: 2, vs: 1, vsh: 0.5, coin: 0.25 }, { itemId: "B", modelId: null, preco: 20, qtd: 1, vs: 1, vsh: 0.5, coin: 0.25 },
         { itemId: "C", modelId: "0", preco: 5, qtd: 3, vs: 1, vsh: 0.5, coin: 0.25 }] };
     const c = cenario([p]);
-    await rodarJob(c, M, W1); await rodarJob(c, M, W2);
+    await rodarCorpus(c);
     const ped: any = c.repo.pedidos.get(`${LOJA}|MULTI`);
     assert(ped.original_shopee_discount === 10 && ped.pix_discount === 2, JSON.stringify(ped));
     assert(c.repo.itens.size === 3 && [...c.repo.itens.keys()].some((k) => k.endsWith("_C_0")), [...c.repo.itens.keys()].join());
@@ -259,6 +273,7 @@ async function principal() {
     assert(c.repo.pedidos.size === 1 && depois.pay_time === antes.pay_time, "linha duplicada ou pay_time mudou");
     assert(depois.order_status === "CANCELLED" && depois.escrow_update_time === depois.update_time && depois.update_time !== antes.update_time, JSON.stringify(depois));
     assert(c.api.chamadas.escrow === escAntes + 1 && depois.original_shopee_discount === 0, "escrow nao refeito");
+    await rodarCorpus(c);
     const { metricas } = canonico(c.repo);
     assert(metricas!.pedidos === 1 && metricas!.cancelados === 1, JSON.stringify(metricas));
   });
@@ -364,6 +379,8 @@ async function principal() {
     c.api.onListar = undefined;
     await rodarJob(c, M, { inicio: "2026-10-03T11:45:00.000Z", fim: "2026-10-04T00:00:00.000Z" });
     assert(c.repo.pedidos.has(`${LOJA}|${alvo}`), "PERDIDO: overlap nao recuperou");
+    assert(canonico(c.repo).comp.completude !== "COMPLETE", "overlap de update_time virou prova");
+    await rodarCorpus(c);
     const { comp, metricas } = canonico(c.repo);
     const exp = esperado([...c.api.pedidos.values()]);
     assert(comp.completude === "COMPLETE" && JSON.stringify(metricas) === JSON.stringify(exp), JSON.stringify(comp));
@@ -418,14 +435,22 @@ async function principal() {
     assert(M.PADROES.loteDetalhe === 50 && M.PADROES.tamanhoPagina === 100, JSON.stringify(M.PADROES));
   });
 
-  console.log("\n[12. create_time: popula, nunca prova]");
-  t("12a. backfill por create_time conclui e grava, mas o dia continua PARTIAL (sem prova por update_time)", async () => {
+  console.log("\n[12. create_time: DESCOBERTA a partir da ancora (S2-D3-B2.1)]");
+  t("12a. corpus create_time que NAO comeca na ancora (D-13) popula, mas o dia segue PARTIAL", async () => {
     const c = cenario(gerar(80));
     await rodarJob(c, M, { campoTempo: "create_time", inicio: "2026-09-19T00:00:00.000Z", fim: "2026-10-03T00:00:00.000Z" });
     await rodarJob(c, M, { campoTempo: "create_time", inicio: "2026-10-02T23:45:00.000Z", fim: "2026-10-09T00:00:00.000Z" });
     assert(c.repo.pedidos.size > 0, "nao populou");
     const { comp } = canonico(c.repo);
-    assert(comp.completude === "PARTIAL" && comp.motivos.includes("so_create_time_sem_prova"), JSON.stringify(comp));
+    assert(comp.completude === "PARTIAL" && comp.motivos.includes("descoberta_por_create_time_nao_provada"), JSON.stringify(comp));
+  });
+  t("12a2. corpus create_time da ancora ate depois do dia → COMPLETE; sem ancora → PARTIAL", async () => {
+    const ps = gerar(80);
+    const c = cenario(ps);
+    await rodarCorpus(c);
+    const { comp, metricas } = canonico(c.repo);
+    assert(comp.completude === "COMPLETE" && JSON.stringify(metricas) === JSON.stringify(esperado(ps)), JSON.stringify(comp));
+    assert(canonico(c.repo, null).comp.completude === "PARTIAL", "sem ancora deu COMPLETE");
   });
   t("12b. guard: o motor nao reintroduz completude por N dias nem por create_time", () => {
     for (const f of ["motor.ts", "janelas.ts", "normalizar.ts", "persistencia.ts", "transporte.ts", "retry.ts", "tipos.ts"]) {
@@ -481,7 +506,7 @@ async function principal() {
     const c = cenario(ps);
     let bloquear = true;
     c.api.onEscrow = () => (bloquear ? new ErroShopee("permanente", "indisponivel") : undefined);
-    await rodarJob(c, M, W1); await rodarJob(c, M, W2);
+    await rodarCorpus(c);
     bloquear = false; c.api.onEscrow = undefined;
     const listarAntes = c.api.chamadas.listar;
     return { c, listarAntes };
@@ -600,7 +625,7 @@ async function principal() {
     const b = [...c.repo.pedidos.values()].filter((p: any) => p.loja_id === LB);
     assert(b.length > 0 && b.every((p: any) => !p.escrow_fetched_at), "catch-up da loja A tocou a loja B");
   });
-  t("16H. catch-up NAO e evidencia de listagem: sem janelas de update_time o dia segue PARTIAL", async () => {
+  t("16H. catch-up NAO e evidencia de listagem: sem corpus da ancora o dia segue PARTIAL", async () => {
     const ps = gerar(15).filter((p) => p.payTime !== null);
     const c = cenario(ps);
     c.api.onEscrow = () => new ErroShopee("permanente", "x");
@@ -609,7 +634,7 @@ async function principal() {
     const r = await rodarCatchUp(c);
     assert(r.res.estado === "concluido" && r.job.listagem_completa === null && r.job.janela_inicio === null, "catch-up virou janela");
     const { comp } = canonico(c.repo);
-    assert(comp.completude === "PARTIAL" && comp.motivos.includes("listagem_nao_provada_por_update_time"), JSON.stringify(comp));
+    assert(comp.completude === "PARTIAL" && comp.motivos.includes("descoberta_por_create_time_nao_provada"), JSON.stringify(comp));
   });
   t("16I. uma unica implementacao de escrow: fase ESCROW e catch-up usam processarEscrowDePedido", () => {
     const fonte = readFileSync(join(RAIZ, "lib/shopee/ingestao/motor.ts"), "utf8");
@@ -664,6 +689,68 @@ async function principal() {
   t("15b. checkpoint e progresso nao carregam segredo", () => {
     const s = JSON.stringify({ ...M.checkpointInicial(), ...M.progressoInicial() });
     assert(!/token|secret|partner_key|key/i.test(s), s);
+  });
+
+  console.log("\n[17. cursor POSICIONAL sobre conjunto mutavel (bug real do S2-D3-B2)]");
+  // 1.000 pedidos pagos em D, todos na mesma janela de update_time.
+  const mil = (): PedidoFake[] => Array.from({ length: 1000 }, (_, i) => {
+    const cr = D0 + 60 + i * 80;
+    return { orderSn: `M${String(i).padStart(4, "0")}`, createTime: cr, payTime: cr + 30, updateTime: cr + 300, status: "SHIPPED",
+      totalAmount: 50, osd: i % 5 === 0 ? 1 : 0, pix: 0, itens: [{ itemId: `I${i}`, modelId: null, preco: 10 + (i % 7), qtd: 1 + (i % 2), vs: 0, vsh: 0, coin: 0 }] };
+  });
+  const JU = { inicio: "2026-10-02T03:00:00.000Z", fim: "2026-10-03T12:00:00.000Z" };
+  /** Na leitura da 3a pagina (offset 200): 10 pedidos JA LIDOS mudam de status e saem da janela de update_time. */
+  const mexerNaPagina3 = (c: Cen, campo: CampoTempo) => {
+    const movidos: string[] = [];
+    c.api.onListar = (_n, a) => {
+      if (a.campoTempo !== campo || a.cursor !== "200" || movidos.length) return;
+      const ord = [...c.api.pedidos.values()].sort((x, y) => x.updateTime - y.updateTime || x.orderSn.localeCompare(y.orderSn));
+      for (const p of ord.slice(0, 10)) { p.updateTime = Date.parse(JU.fim) / 1000 + 3600; p.status = "TO_CONFIRM_RECEIVE"; movidos.push(p.orderSn); }
+    };
+    return movidos;
+  };
+  t("17a. update_time + cursor posicional: 10 pedidos ESTAVEIS pulados com 0 erro, cursor ate o fim e listagem_completa=true", async () => {
+    const ps = mil(); const c = cenario(ps); c.api.cursorPosicional = true;
+    const movidos = mexerNaPagina3(c, "update_time");
+    const r = await rodarJob(c, M, JU);
+    assert(movidos.length === 10, "fixture: mutacao nao ocorreu");
+    assert(r.res.estado === "concluido" && r.job.listagem_completa === true && r.job.progresso!.erros_listagem === 0, JSON.stringify(r.job.progresso));
+    const faltam = ps.filter((p) => !c.repo.pedidos.has(`${LOJA}|${p.orderSn}`));
+    assert(faltam.length === 10 && faltam.every((p) => !movidos.includes(p.orderSn)), `faltam ${faltam.length}`);
+  });
+  t("17b. nem a janela sucessora com overlap recupera os ESTAVEIS pulados; o novo modelo NAO da DISCOVERY_COMPLETE", async () => {
+    const ps = mil(); const c = cenario(ps); c.api.cursorPosicional = true;
+    mexerNaPagina3(c, "update_time");
+    await rodarJob(c, M, JU);
+    c.api.onListar = undefined;
+    await rodarJob(c, M, { inicio: "2026-10-03T11:45:00.000Z", fim: "2026-10-09T00:00:00.000Z" });
+    assert(ps.filter((p) => !c.repo.pedidos.has(`${LOJA}|${p.orderSn}`)).length === 10, "fixture: o overlap recuperou");
+    const { comp, metricas } = canonico(c.repo);
+    assert(comp.completude !== "COMPLETE" && !comp.dimensoes.descoberta && metricas === null, JSON.stringify(comp));
+    assert(comp.dimensoes.estado && comp.dimensoes.financeiro, "os 990 vistos deviam estar perfeitos (o falso COMPLETE real)");
+  });
+  t("17c. duas passagens iguais NAO sao prova (CONSISTENCY_CHECK apenas): mesmo conjunto 2x, ainda sem COMPLETE", async () => {
+    const ps = mil(); const c = cenario(ps); c.api.cursorPosicional = true;
+    mexerNaPagina3(c, "update_time");
+    await rodarJob(c, M, JU); c.api.onListar = undefined;
+    await rodarJob(c, M, JU); await rodarJob(c, M, JU); // repassagens estaveis da mesma janela
+    assert(canonico(c.repo).comp.completude !== "COMPLETE", "duas passagens viraram prova");
+  });
+
+  console.log("\n[18. create_time: a mesma mutacao nao muda a populacao da janela]");
+  t("18a. create_time + cursor posicional + mesma mudanca de status: corpus completo (1.000) e COMPLETE com metricas exatas", async () => {
+    const ps = mil(); const c = cenario(ps); c.api.cursorPosicional = true;
+    const movidos = mexerNaPagina3(c, "create_time");
+    await rodarCorpus(c);
+    assert(movidos.length === 10, "fixture: mutacao nao ocorreu durante a listagem por create_time");
+    assert(ps.every((p) => c.repo.pedidos.has(`${LOJA}|${p.orderSn}`)), "create_time perdeu pedido");
+    const { comp, metricas } = canonico(c.repo);
+    assert(comp.completude === "COMPLETE" && JSON.stringify(metricas) === JSON.stringify(esperado([...c.api.pedidos.values()])), JSON.stringify(comp));
+  });
+  t("18b. janela de create_time ABERTA (fim no futuro) e fechada pelo motor no inicio da listagem", async () => {
+    const c = cenario(mil());
+    const r = await rodarJob(c, M, { campoTempo: "create_time", inicio: "2026-10-01T00:00:00.000Z", fim: "2026-10-12T00:00:00.000Z" });
+    assert(Date.parse(r.job.janela_fim!) <= AGORA + 10_000 && Date.parse(r.job.janela_fim!) < Date.parse("2026-10-12T00:00:00.000Z"), r.job.janela_fim!);
   });
 
   await fila;

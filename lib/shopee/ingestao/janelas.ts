@@ -1,11 +1,12 @@
 /**
  * Planejamento de janelas de listagem (puro) — S2-D2.
  *
- * Contrato herdado do S2-D1.1 (prova de completude por update_time):
+ * Contrato das janelas (S2-D3-B2.1: so `create_time` prova descoberta;
+ * `update_time` e acelerador de frescor):
  *  - a janela NUNCA cobre o futuro: fim <= instante em que a listagem dela
  *    comeca (o motor confere de novo ao comecar a listar);
  *  - janelas consecutivas se SOBREPOEM (protecao operacional contra pedido
- *    que muda durante a listagem anterior — nao e regra financeira);
+ *    que muda durante a listagem anterior — MITIGACAO, nunca prova);
  *  - cada janela respeita o limite da API (`get_order_list` aceita ate 15
  *    dias; usamos 14, como o sync atual).
  */
@@ -35,8 +36,8 @@ export function planejarJanelasIncrementais(cursor: Date, agora: Date): Janela[]
 }
 
 /**
- * Janelas de `create_time` em blocos contiguos (backfill — POPULA o corpus;
- * nunca prova completude, ver lib/vendas/canonico/shopee.ts).
+ * Janelas de `create_time` em blocos contiguos — DESCOBERTA do corpus a
+ * partir da ancora (S2-D3-B2.1, ver lib/vendas/canonico/shopee.ts).
  */
 export function planejarJanelasCriacao(de: Date, ate: Date): Janela[] {
   if (!(de < ate)) return [];

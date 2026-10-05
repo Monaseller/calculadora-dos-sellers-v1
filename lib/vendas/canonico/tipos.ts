@@ -43,6 +43,10 @@ export interface ResultadoVendasLoja {
   motivos: string[];
   metricas: MetricasVendas | null;
   componentes: ComponentesVendasShopee | null;
+  /** A (descoberta por create_time), B (estado), C (financeiro) — S2-D3-B2.1. */
+  dimensoes?: { descoberta: boolean; estado: boolean; financeiro: boolean };
+  /** Detail mais antigo usado: as metricas valem "na data de estadoEm". */
+  estadoEm?: string | null;
 }
 
 export interface ResultadoVendas {
