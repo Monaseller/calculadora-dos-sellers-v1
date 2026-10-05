@@ -533,11 +533,52 @@ async function principal() {
     const d = git("diff", "--name-only", BASE, "--", "supabase").trim();
     assert(d === "", d);
   });
-  t("K2. nenhum GRANT/REVOKE/RLS/POLICY introduzido no diff", () => {
-    const d = git("diff", BASE, "--", ".", ":(exclude)scripts/testar-sec3-b1-service-role.ts");
-    const adicionadas = d.split(/\r?\n/).filter((l) => l.startsWith("+") && !l.startsWith("+++"));
-    const sql = adicionadas.filter((l) => /\b(GRANT|REVOKE)\s+\w+|ROW LEVEL SECURITY|CREATE POLICY/i.test(l));
+  // ── K2: mudanca de banco no diff ──────────────────────────────────
+  // As suites SEC-3 (esta e a do B2) CONTEM o proprio padrao de busca, e
+  // por isso ficam fora — so elas. Todo o resto do diff (inclusive outros
+  // scripts e arquivos novos ainda nao commitados) continua varrido.
+  const EXCLUSAO_K2 = ":(exclude)scripts/testar-sec3-*.ts";
+  const RE_MUDANCA_BANCO =
+    /\b(GRANT|REVOKE)\s+\w+|\b(ENABLE|DISABLE|FORCE)\s+ROW\s+LEVEL\s+SECURITY|ROW LEVEL SECURITY|\b(CREATE|ALTER|DROP)\s+POLICY\b/i;
+  /** Linhas ADICIONADAS (diff unificado) que mudam grant/RLS/policy. */
+  const mudancasDeBanco = (diff: string) =>
+    diff.split(/\r?\n/).filter((l) => l.startsWith("+") && !l.startsWith("+++") && RE_MUDANCA_BANCO.test(l));
+
+  t("K2. nenhum GRANT/REVOKE/RLS/POLICY introduzido no diff (fora das suites SEC-3)", () => {
+    const d = git("diff", BASE, "--", ".", EXCLUSAO_K2);
+    const novos = git("ls-files", "--others", "--exclude-standard", "--", ".", EXCLUSAO_K2)
+      .split(/\r?\n/).filter(Boolean);
+    const diffNovos = novos.map((f) => readFileSync(join(RAIZ, f), "utf8").split(/\r?\n/).map((l) => `+${l}`).join("\n")).join("\n");
+    const sql = [...mudancasDeBanco(d), ...mudancasDeBanco(diffNovos)];
     assert(sql.length === 0, sql.join(" | "));
+  });
+  t("K2a. auto-teste: o detector pega GRANT, REVOKE, ENABLE/DISABLE RLS e CREATE/ALTER/DROP POLICY", () => {
+    const casos = [
+      "+GRANT SELECT ON public.pedidos TO anon;",
+      "+revoke all on public.anuncios from anon, authenticated;",
+      "+ALTER TABLE public.pedidos ENABLE ROW LEVEL SECURITY;",
+      "+alter table public.pedidos disable row level security;",
+      "+ALTER TABLE public.pedidos FORCE ROW LEVEL SECURITY;",
+      "+CREATE POLICY dono ON public.anuncios USING (true);",
+      "+ALTER POLICY dono ON public.anuncios USING (false);",
+      "+DROP POLICY dono ON public.anuncios;",
+    ];
+    for (const c of casos) assert(mudancasDeBanco(`diff --git a/x b/x\n${c}`).length === 1, `nao pegou: ${c}`);
+    // linha removida ou de contexto nao conta como mudanca introduzida
+    assert(mudancasDeBanco("-GRANT SELECT ON t TO anon;\n GRANT SELECT ON t TO anon;").length === 0, "contou linha nao adicionada");
+  });
+  t("K2b. auto-teste: a exclusao cobre SO as suites SEC-3 — o resto do diff continua varrido", () => {
+    const todos = git("diff", "--name-only", BASE).split(/\r?\n/).filter(Boolean);
+    const varridos = git("diff", "--name-only", BASE, "--", ".", EXCLUSAO_K2).split(/\r?\n/).filter(Boolean);
+    const fora = todos.filter((f) => !varridos.includes(f));
+    assert(fora.every((f) => /^scripts\/testar-sec3-[^/]+\.ts$/.test(f)), `excluido demais: ${fora.join(", ")}`);
+    // as duas suites SEC-3 commitadas ficam fora (sem falso positivo)...
+    for (const f of ["scripts/testar-sec3-b1-service-role.ts", "scripts/testar-sec3-b2-browser.ts"]) {
+      if (todos.includes(f)) assert(!varridos.includes(f), `${f} ainda varrido`);
+    }
+    // ...e codigo de aplicacao e outros scripts continuam dentro.
+    assert(varridos.some((f) => f.startsWith("app/")) && varridos.some((f) => f.startsWith("lib/")), "app/lib fora da varredura");
+    assert(varridos.includes("scripts/testar-listagem-anuncios.ts"), "outros scripts fora da varredura");
   });
 
   await fila;
