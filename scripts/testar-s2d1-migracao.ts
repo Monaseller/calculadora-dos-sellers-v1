@@ -28,7 +28,7 @@ function assert(c: unknown, m: string): asserts c { if (!c) throw new Error(m); 
 
 const RAIZ = join(__dirname, "..");
 const DIR = join(RAIZ, "supabase/migrations");
-const ARQ = "20261027_s2d1_shopee_pedidos_canonico.sql";
+const ARQ = "20261027_s2d1_shopee_foundation.sql";
 const semComentarios = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/--[^\n]*/g, "");
 const norm = (s: string) => semComentarios(s).replace(/\s+/g, " ").trim();
 const SQL = readFileSync(join(DIR, ARQ), "utf8");
@@ -90,9 +90,31 @@ function validarS2D1(sqlBruto: string): string[] {
   if (!/escrow_pendente boolean GENERATED ALWAYS AS \( pay_time IS NOT NULL AND \(escrow_fetched_at IS NULL OR escrow_update_time IS DISTINCT FROM update_time\) \) STORED/i.test(s)) {
     e.push("coluna gerada escrow_pendente ausente ou com regra diferente");
   }
-  // S2-D2.1: chave de ITEM por loja — indice unico parcial Shopee, NULLS NOT DISTINCT
-  if (!/CREATE UNIQUE INDEX pedidos_shopee_item_por_loja_unico ON public\.pedidos \(loja_id, order_id, ml_item_id, variation_id\) NULLS NOT DISTINCT WHERE marketplace = 'Shopee';/i.test(s)) {
-    e.push("chave unica de item por loja ausente/diferente");
+  // S2-D2.2: a FUNDACAO coexiste com o sync legado — a chave unica de item
+  // por loja e de CUTOVER (supabase/cutover/), nunca da fundacao.
+  if (/pedidos_shopee_item_por_loja_unico/i.test(s)) e.push("chave unica de item por loja na FUNDACAO (e de cutover)");
+  // so a tabela nova recebe a coluna gerada
+  for (const m of s.matchAll(/ALTER TABLE (?:public\.)?(\w+) [^;]*GENERATED/gi)) e.push(`coluna gerada em tabela existente: ${m[1]}`);
+  // FOUNDATION_BREAKS_LEGACY_WRITE = NO: em tabela EXISTENTE so mudanca aditiva
+  // que nao rejeita nenhuma escrita antes aceita.
+  for (const m of s.matchAll(/CREATE (UNIQUE )?INDEX (\w+) ON (?:public\.)?(\w+)/gi)) {
+    if (m[3].toLowerCase() !== "shopee_pedidos" && m[1]) e.push(`indice UNICO em tabela existente: ${m[3]}.${m[2]}`);
+  }
+  if (/\bCREATE (OR REPLACE )?TRIGGER\b/i.test(s)) e.push("trigger na fundacao");
+  for (const m of s.matchAll(/ALTER TABLE (?:public\.)?(pedidos|sync_jobs) ([^;]+);/gi)) {
+    const partes = m[2].split(/,(?![^()]*\))/).map((x) => x.trim());
+    const novas = partes.filter((x) => /^ADD COLUMN /i.test(x)).map((x) => x.split(/\s+/)[2].toLowerCase());
+    for (const parte of partes) {
+      if (/^ADD COLUMN /i.test(parte)) {
+        if (/\bNOT NULL\b|\bDEFAULT\b|\bUNIQUE\b|\bPRIMARY KEY\b|\bREFERENCES\b/i.test(parte)) e.push(`${m[1]}: coluna nova restritiva "${parte.slice(0, 60)}"`);
+      } else if (/^ADD CONSTRAINT \w+ CHECK /i.test(parte)) {
+        // CHECK so pode olhar colunas NOVAS (nulas) — nunca colunas que o legado grava
+        const ids = (parte.replace(/^ADD CONSTRAINT \w+ CHECK /i, "").replace(/'[^']*'/g, "").match(/[a-z_][a-z0-9_]*/gi) ?? [])
+          .map((x) => x.toLowerCase()).filter((x) => !["is", "null", "not", "or", "and", "in"].includes(x));
+        const velhas = ids.filter((x) => !novas.includes(x));
+        if (velhas.length) e.push(`${m[1]}: CHECK em coluna existente (${velhas.join(",")})`);
+      } else if (/^ADD CONSTRAINT /i.test(parte)) e.push(`${m[1]}: constraint nao-CHECK em tabela existente "${parte.slice(0, 60)}"`);
+    }
   }
   if (idx.length !== 3) e.push(`indices em shopee_pedidos: ${idx.length} (esperado 3)`);
   if (tabelasAbertas(sqlBruto).length) e.push(`tabela nao nasce fechada: ${tabelasAbertas(sqlBruto)}`);
@@ -159,12 +181,37 @@ t("8g. GRANT em tabela SEC-3 → pego", () => assert(pega(variante(/^COMMIT;$/m,
 t("8h. DISABLE RLS em tabela SEC-3 → pego", () => assert(pega(variante(/^COMMIT;$/m, "ALTER TABLE public.vendas_dia DISABLE ROW LEVEL SECURITY;\nCOMMIT;"), /DISABLE|vendas_dia/), "nao pegou"));
 t("8i. pay_time NOT NULL → nulidade errada", () => assert(pega(variante("pay_time                 timestamptz NULL", "pay_time                 timestamptz NOT NULL"), /pay_time: nulidade/), "nao pegou"));
 t("8j. PK diferente → pega", () => assert(pega(variante("PRIMARY KEY (loja_id, order_sn)", "PRIMARY KEY (order_sn)"), /PK/), "nao pegou"));
-t("8l. sem a chave unica de item por loja → pego", () => assert(pega(variante(/^CREATE UNIQUE INDEX pedidos_shopee_item_por_loja_unico[\s\S]*?WHERE marketplace = 'Shopee';$/m, ""), /chave unica de item por loja/), "nao pegou"));
-t("8m. chave de item sem NULLS NOT DISTINCT (variation_id NULL duplicaria) → pega", () => assert(pega(variante(/variation_id\) NULLS NOT DISTINCT(\r?)$/m, "variation_id)$1"), /chave unica de item por loja/), "nao pegou"));
+const UNICA = "CREATE UNIQUE INDEX pedidos_shopee_item_por_loja_unico ON public.pedidos (loja_id, order_id, ml_item_id, variation_id) NULLS NOT DISTINCT WHERE marketplace = 'Shopee';";
+t("8l. chave unica de item na FUNDACAO → pega (ela e de cutover)", () => assert(pega(variante(/^COMMIT;$/m, `${UNICA}\nCOMMIT;`), /FUNDACAO \(e de cutover\)/), "nao pegou"));
+t("8m. qualquer indice UNICO novo em tabela existente → pega", () => assert(pega(variante(/^COMMIT;$/m, "CREATE UNIQUE INDEX x ON public.sync_jobs (loja_id, criado_em);\nCOMMIT;"), /indice UNICO em tabela existente/), "nao pegou"));
+t("8m2. coluna nova NOT NULL / DEFAULT / UNIQUE em tabela existente → pega (rejeitaria escrita do legado)", () => {
+  for (const sub of ["escrow_coin           numeric NOT NULL", "escrow_coin           numeric NULL DEFAULT 0", "escrow_coin           numeric NULL UNIQUE"]) {
+    assert(pega(variante("escrow_coin           numeric NULL", sub), /coluna nova restritiva/), `nao pegou: ${sub}`);
+  }
+});
+t("8m3. CHECK que olha coluna que o legado grava → pega", () => assert(pega(variante(/(ADD CONSTRAINT sync_jobs_janela_check CHECK \()/, "ADD CONSTRAINT x CHECK (status <> 'erro'),\n  $1"), /CHECK em coluna existente \(status\)/), "nao pegou"));
+t("8m4. trigger ou coluna gerada em tabela existente → pega", () => {
+  assert(pega(variante(/^COMMIT;$/m, "CREATE TRIGGER t BEFORE INSERT ON public.pedidos FOR EACH ROW EXECUTE FUNCTION f();\nCOMMIT;"), /trigger/), "trigger");
+  assert(pega(variante("ADD COLUMN escrow_coin           numeric NULL", "ADD COLUMN escrow_coin numeric GENERATED ALWAYS AS (0) STORED"), /coluna gerada em tabela existente|restritiva/), "gerada");
+});
 t("8n. escrow_pendente com regra diferente da do servico canonico (< em vez de distinto) → pega", () => assert(pega(variante(/escrow_update_time IS DISTINCT FROM update_time(\)\r?\n\s*\) STORED)/, "escrow_update_time < update_time$1"), /escrow_pendente/), "nao pegou"));
-t("8o. as variantes de 8m/8n de fato alteram o SQL (o auto-teste nao e vazio)", () => {
-  assert(variante(/variation_id\) NULLS NOT DISTINCT(\r?)$/m, "variation_id)$1") !== SQL, "8m nao mudou nada");
+t("8o. as variantes dos auto-testes de fato alteram o SQL (nenhum auto-teste e vazio)", () => {
+  assert(variante("escrow_coin           numeric NULL", "escrow_coin           numeric NOT NULL") !== SQL, "8m2 nao mudou nada");
+  assert(variante(/(ADD CONSTRAINT sync_jobs_janela_check CHECK \()/, "X$1") !== SQL, "8m3 nao mudou nada");
   assert(variante(/escrow_update_time IS DISTINCT FROM update_time(\)\r?\n\s*\) STORED)/, "escrow_update_time < update_time$1") !== SQL, "8n nao mudou nada");
+});
+t("9. FOUNDATION_BREAKS_LEGACY_WRITE = NO: nenhum writer legado de pedidos/sync_jobs grava as colunas novas", () => {
+  const legados = ["lib/sync-shopee.ts", "lib/sync-ml.ts", "lib/shopee-status.ts", "lib/shopee-financeiro.ts",
+    "app/api/admin/shopee/backfill-pedidos-0707/route.ts", "app/api/admin/shopee/reconciliar-financeiro/route.ts",
+    "app/api/admin/shopee/status/route.ts", "app/api/sync/iniciar/route.ts"];
+  for (const f of legados) {
+    const fonte = readFileSync(join(RAIZ, f), "utf8");
+    assert(!/escrow_voucher_seller|escrow_voucher_shopee|escrow_coin|shopee_pedidos|escrow_pendente/.test(fonte), `${f} toca coluna/tabela nova de pedidos`);
+    // colunas novas de sync_jobs: so importam em quem escreve sync_jobs
+    if (/from\(\s*["']sync_jobs["']\s*\)/.test(fonte)) {
+      assert(!/\b(checkpoint|progresso|janela_inicio|janela_fim|campo_tempo|listagem_completa)\b\s*:/.test(fonte), `${f} grava coluna nova de sync_jobs`);
+    }
+  }
 });
 t("8k. guard permanente pega tabela nova aberta em migration futura", () => {
   assert(tabelasAbertas("BEGIN; CREATE TABLE public.nova (id int); COMMIT;").join() === "nova", "nao pegou");

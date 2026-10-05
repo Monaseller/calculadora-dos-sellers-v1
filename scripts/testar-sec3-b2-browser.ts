@@ -540,7 +540,9 @@ async function principal() {
   // que contem o padrao de busca e por isso tambem sai da varredura).
   const APROVADAS = [
     "supabase/migrations/20261026_sec3c_lockdown_tabelas_publicas.sql",
-    "supabase/migrations/20261027_s2d1_shopee_pedidos_canonico.sql",
+    "supabase/migrations/20261027_s2d1_shopee_foundation.sql",
+    // S2-D2.2: cutover (NAO aplicado, fora de supabase/migrations) — guard proprio: testar-s2-cutover-migracao
+    "supabase/cutover/PENDENTE_s2_cutover_shopee_item_store_unique.sql",
   ];
   const FORA_DA_VARREDURA = [...APROVADAS, "scripts/testar-s2d1-migracao.ts"];
   t("M1. nada em supabase/ mudou desde a base (alem da migration SEC-3-C)", () => {

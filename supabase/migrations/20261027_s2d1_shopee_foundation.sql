@@ -1,5 +1,13 @@
 -- =====================================================================
--- CDS-STABILIZATION S2-D1 — FUNDACAO CANONICA SHOPEE
+-- CDS-STABILIZATION S2-D1 — FUNDACAO CANONICA SHOPEE (FOUNDATION)
+--
+-- S2-D2.2: esta e a migration de FUNDACAO, segura para coexistir com o
+-- sync Shopee legado (feature flag ENABLE_ASYNC_SYNC_JOBS OFF): so cria a
+-- tabela nova e adiciona colunas NULAS sem default; nenhuma constraint ou
+-- indice unico novo em tabela existente. A chave unica de item por loja
+-- (pedidos_shopee_item_por_loja_unico) foi para a migration de CUTOVER
+-- (supabase/cutover/), que so se aplica quando o motor novo for o writer
+-- oficial — o legado gera ids sem loja e ignora erro de gravacao.
 --   1. public.shopee_pedidos  (grao: loja + order_sn), nasce FECHADA
 --   2. public.pedidos          + componentes de escrow POR ITEM
 --   3. public.sync_jobs        + checkpoint/progresso + janela de cobertura
@@ -47,7 +55,6 @@
 -- ---------------------------------------------------------------------
 --     BEGIN;
 --     DROP TABLE public.shopee_pedidos;
---     DROP INDEX public.pedidos_shopee_item_por_loja_unico;
 --     ALTER TABLE public.pedidos DROP COLUMN escrow_voucher_seller,
 --       DROP COLUMN escrow_voucher_shopee, DROP COLUMN escrow_coin;
 --     DROP INDEX public.idx_sync_jobs_cobertura;
@@ -104,17 +111,6 @@ ALTER TABLE public.pedidos
   ADD COLUMN escrow_voucher_seller numeric NULL,
   ADD COLUMN escrow_voucher_shopee numeric NULL,
   ADD COLUMN escrow_coin           numeric NULL;
-
--- S2-D2.1: chave de ITEM por loja. O `pedidos.id` legado
--- (<user>_SHOPEE_<order_sn>_<item>_<model|nv>) nao contem a loja; ele e
--- preservado (nenhum id e reescrito) e esta unicidade passa a garantir, no
--- banco, que (loja, pedido, item, variacao) Shopee e UMA linha. Parcial
--- (so Shopee): o ML nao e afetado. NULLS NOT DISTINCT: item sem variacao
--- (variation_id NULL) tambem e unico. Medido antes (2026-10-05): 0
--- duplicatas nesta chave em 290.558 linhas Shopee.
-CREATE UNIQUE INDEX pedidos_shopee_item_por_loja_unico
-  ON public.pedidos (loja_id, order_id, ml_item_id, variation_id) NULLS NOT DISTINCT
-  WHERE marketplace = 'Shopee';
 
 ALTER TABLE public.sync_jobs
   ADD COLUMN checkpoint        jsonb       NULL,

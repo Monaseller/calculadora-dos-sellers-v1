@@ -304,6 +304,23 @@ async function principal() {
     await rodarJob(c, M, W1); await rodarJob(c, M, { ...W1, lojaId: LB, api: apiB });
     assert([...c.repo.itens.values()].filter((i) => i.order_id === "ABC").length === 2, "duplicou no re-sync");
   });
+  t("7b3. SO a fundacao (sem o indice de cutover): sync A, B, A, B → exatamente 2 linhas, uma por loja", async () => {
+    const LB = "66666666-6666-4666-8666-666666666666";
+    const mk = (preco: number): PedidoFake => ({ orderSn: "ABC", createTime: D0 + 50, updateTime: D0 + 400, payTime: D0 + 100, status: "SHIPPED",
+      totalAmount: preco, osd: 0, pix: 0, itens: [{ itemId: "10", modelId: "20", preco, qtd: 1, vs: 0, vsh: 0, coin: 0 }] });
+    const c = cenario([mk(30)], [{ id: LOJA, user_id: UID }, { id: LB, user_id: UID }]);
+    c.repo.exigirIndiceUnicoPorLoja = false; // banco sem a chave unica: quem garante e o motor
+    const apiB = new ShopeeFake(c.relogio, [mk(55)]);
+    for (const [loja, api] of [[LOJA, c.api], [LB, apiB], [LOJA, c.api], [LB, apiB]] as const) {
+      const r = await rodarJob(c, M, { ...W1, lojaId: loja, api });
+      assert(r.res.estado === "concluido", `${loja}: ${r.res.estado}`);
+    }
+    const its = [...c.repo.itens.values()].filter((i) => i.order_id === "ABC" && i.ml_item_id === "10" && i.variation_id === "20");
+    assert(its.length === 2, `linhas ${its.length}`);
+    assert(its.filter((i) => i.loja_id === LOJA).length === 1 && its.filter((i) => i.loja_id === LB).length === 1, "nao e uma por loja");
+    assert(its.find((i) => i.loja_id === LOJA)!.valor_unit === 30 && its.find((i) => i.loja_id === LB)!.valor_unit === 55, "overwrite entre lojas");
+    assert(c.repo.pedidos.size === 2, `pedidos ${c.repo.pedidos.size}`);
+  });
   t("7b2. a ordem nao importa: loja B sincronizada primeiro fica com o id legado; A recebe a variante — sem conflito", async () => {
     const LB = "44444444-4444-4444-8444-444444444444";
     const mk = (preco: number): PedidoFake => ({ orderSn: "ABC", createTime: D0 + 50, updateTime: D0 + 400, payTime: D0 + 100, status: "SHIPPED",

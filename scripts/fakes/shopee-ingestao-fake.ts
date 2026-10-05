@@ -101,6 +101,12 @@ export class RepoFake implements Repositorio {
   pedidos = new Map<string, Record<string, unknown>>(); // loja|sn
   itens = new Map<string, Record<string, unknown>>();   // id
   jobs = new Map<string, JobFake>();
+  /**
+   * Simula o indice unico de CUTOVER (pedidos_shopee_item_por_loja_unico).
+   * false = banco so com a FUNDACAO aplicada (sem o indice): prova que o
+   * proprio motor mantem a chave por loja, sem depender do banco.
+   */
+  exigirIndiceUnicoPorLoja = true;
 
   async lojaDoDono(userId: string, lojaId: string) { return this.lojas.some((l) => l.id === lojaId && l.user_id === userId); }
   async gravarDetalhes(pedidos: LinhaPedidoDetalhe[], itensBrutos: LinhaItemDetalhe[]) {
@@ -116,7 +122,7 @@ export class RepoFake implements Repositorio {
       // indice unico parcial (loja, pedido, item, variacao) — como o banco
       const k = chaveItemLoja(i.loja_id, i.order_id, i.ml_item_id, i.variation_id);
       const dono = existentes.get(k);
-      if (dono && dono !== i.id) throw new Error(`violacao pedidos_shopee_item_por_loja_unico: ${k}`);
+      if (this.exigirIndiceUnicoPorLoja && dono && dono !== i.id) throw new Error(`violacao pedidos_shopee_item_por_loja_unico: ${k}`);
       const atual = this.itens.get(i.id);
       if (atual && (atual.loja_id !== i.loja_id || atual.user_id !== i.user_id)) throw new Error(`upsert moveria linha de loja/dono: ${i.id}`);
       this.itens.set(i.id, { ...(atual ?? {}), ...structuredClone(i) });
