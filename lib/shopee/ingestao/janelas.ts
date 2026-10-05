@@ -36,8 +36,25 @@ export function planejarJanelasIncrementais(cursor: Date, agora: Date): Janela[]
 }
 
 /**
- * Janelas de `create_time` em blocos contiguos — DESCOBERTA do corpus a
- * partir da ancora (S2-D3-B2.1, ver lib/vendas/canonico/shopee.ts).
+ * SEMANTICA REAL da API (provada em LIVE no S2-D3-B2.2): `get_order_list`
+ * filtra `[time_from, time_to]` com AMBAS as pontas INCLUSIVAS, em segundos
+ * inteiros (o transporte trunca com Math.floor). Nao e [inicio, fim).
+ */
+export const SEMANTICA_INTERVALO_API = "AMBOS_INCLUSIVOS" as const;
+/**
+ * Estrategia UNICA de borda entre janelas adjacentes: BORDA COMPARTILHADA —
+ * a janela seguinte comeca exatamente no fim da anterior. Um pedido criado
+ * no segundo da borda e listado pelas duas e gravado UMA vez (upsert por
+ * (loja, order_sn)). Zero lacuna mesmo com milissegundos (o Math.floor do
+ * transporte leva as duas pontas ao mesmo segundo). Duplicata controlada e
+ * aceitavel; lacuna nao. `alcanceDescobertaCriacao` usa a mesma regra.
+ */
+export const ESTRATEGIA_BORDA = "BORDA_COMPARTILHADA_COM_DEDUP" as const;
+
+/**
+ * Janelas de `create_time` em blocos contiguos de ate 14 dias, com BORDA
+ * COMPARTILHADA (fim[i] === inicio[i+1]) — DESCOBERTA do corpus a partir da
+ * ancora (S2-D3-B2.1, ver lib/vendas/canonico/shopee.ts).
  */
 export function planejarJanelasCriacao(de: Date, ate: Date): Janela[] {
   if (!(de < ate)) return [];

@@ -49,6 +49,8 @@ const num = (v: unknown): number | null => (v === null || v === undefined || v =
 export function criarTransporteShopee(cred: CredenciaisShopee): ShopeeApi {
   return {
     async listarPagina({ campoTempo, de, ate, cursor, tamanhoPagina }): Promise<PaginaListagem> {
+      // [time_from, time_to] com AMBAS as pontas inclusivas, em segundos
+      // (S2-D3-B2.2); ver ESTRATEGIA_BORDA em janelas.ts.
       const params: Record<string, string | number> = {
         time_range_field: campoTempo, time_from: Math.floor(de / 1000), time_to: Math.floor(ate / 1000),
         page_size: tamanhoPagina, response_optional_fields: "order_status",

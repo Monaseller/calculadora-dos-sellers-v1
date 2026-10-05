@@ -239,6 +239,12 @@ export function filtrarPagosNoIntervalo(pedidos: PedidoShopeeCanonico[], inicio:
  * sem buraco de janelas COMPLETAS de create_time que comeca numa janela
  * contendo a ancora. `null` = sem cadeia. Membership de create_time e
  * imutavel, entao o alcance e o FIM da cadeia (sem "um passo atras").
+ *
+ * Bordas: a API lista `[time_from, time_to]` com AMBAS as pontas inclusivas
+ * (segundos inteiros). A estrategia unica do planner e a BORDA COMPARTILHADA
+ * (proxima janela comeca no fim da anterior; dedup por (loja, order_sn)).
+ * Por isso a cadeia continua quando `inicio <= alcance`; uma janela que
+ * comeca DEPOIS do alcance (mesmo 1 s) e tratada como lacuna — conservador.
  */
 export function alcanceDescobertaCriacao(janelas: JanelaListagem[], ancora: number): number | null {
   const ord = janelas

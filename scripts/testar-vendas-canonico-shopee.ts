@@ -229,6 +229,18 @@ async function principal() {
     assert(S.alcanceDescobertaCriacao(cadeiaUpdD3B2(), Date.parse("2026-10-02T03:00:00.000Z")) === null, "update_time entrou no alcance");
   });
 
+  t("4m. bordas: janela seguinte comecando NO fim (borda compartilhada) ou antes dele continua a cadeia", () => {
+    const b = "2026-09-01T03:00:00.000Z";
+    const partes = (ini2: string) => [jan({ inicio: ANCORA.toISOString(), fim: b }), jan({ inicio: ini2, fim: "2026-09-14T03:00:00.000Z" })];
+    assert(S.alcanceDescobertaCriacao(partes(b), ANCORA.getTime()) === Date.parse("2026-09-14T03:00:00.000Z"), "borda compartilhada quebrou a cadeia");
+    assert(S.alcanceDescobertaCriacao(partes("2026-09-01T02:59:59.000Z"), ANCORA.getTime()) === Date.parse("2026-09-14T03:00:00.000Z"), "overlap quebrou a cadeia");
+  });
+  t("4n. bordas: janela seguinte comecando 1 s DEPOIS do fim e lacuna (estrategia unica = borda compartilhada)", () => {
+    const b = "2026-09-01T03:00:00.000Z";
+    const js = [jan({ inicio: ANCORA.toISOString(), fim: b }), jan({ inicio: "2026-09-01T03:00:01.000Z", fim: "2026-09-14T03:00:00.000Z" })];
+    assert(S.alcanceDescobertaCriacao(js, ANCORA.getTime()) === Date.parse(b), "lacuna de 1 s foi aceita");
+  });
+
   console.log("\n[4-REG. o falso COMPLETE real do S2-D3-B2]");
   // Seller Center 02/10 = 939. A paginacao de update_time trouxe 929 (cursor
   // posicional sobre conjunto mutavel). detail/escrow dos 929 perfeitos; a

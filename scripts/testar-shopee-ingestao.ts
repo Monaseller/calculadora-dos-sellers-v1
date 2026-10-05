@@ -137,8 +137,8 @@ async function principal() {
     return { comp, metricas: comp.completude === "COMPLETE" ? C.calcularMetricasShopee(pagos, itens).metricas : null, pagos };
   };
   /** Corpus por create_time da ancora ate `ate` (blocos de 14 dias, janelas fechadas). */
-  const rodarCorpus = async (c: Cen, ate = "2026-10-04T00:00:00.000Z", api?: ShopeeFake) => {
-    for (const j of J.planejarJanelasCriacao(ANCORA_T, new Date(ate))) {
+  const rodarCorpus = async (c: Cen, ate = "2026-10-04T00:00:00.000Z", api?: ShopeeFake, de: Date = ANCORA_T) => {
+    for (const j of J.planejarJanelasCriacao(de, new Date(ate))) {
       const r = await rodarJob(c, M, { campoTempo: "create_time", inicio: j.inicio.toISOString(), fim: j.fim.toISOString(), api });
       assert(r.res.estado === "concluido", `corpus ${j.inicio.toISOString()}: ${JSON.stringify(r.res)}`);
     }
@@ -751,6 +751,58 @@ async function principal() {
     const c = cenario(mil());
     const r = await rodarJob(c, M, { campoTempo: "create_time", inicio: "2026-10-01T00:00:00.000Z", fim: "2026-10-12T00:00:00.000Z" });
     assert(Date.parse(r.job.janela_fim!) <= AGORA + 10_000 && Date.parse(r.job.janela_fim!) < Date.parse("2026-10-12T00:00:00.000Z"), r.job.janela_fim!);
+  });
+
+  console.log("\n[19. bordas de create_time: [time_from, time_to] AMBOS inclusivos (S2-D3-B2.3)]");
+  // pedido criado em `cr` (s), pago em D: atraso longo e proposital (criado meses antes)
+  const naBorda = (sn: string, cr: number): PedidoFake => ({ orderSn: sn, createTime: cr, payTime: D0 + 3600, updateTime: D0 + 7200, status: "SHIPPED",
+    totalAmount: 20, osd: 0, pix: 0, itens: [{ itemId: `I${sn}`, modelId: null, preco: 20, qtd: 1, vs: 0, vsh: 0, coin: 0 }] });
+  t("19a. planner: blocos <= 14 dias, borda COMPARTILHADA (fim[i] === inicio[i+1]), sem lacuna, cobrindo [de, ate]", () => {
+    assert(J.SEMANTICA_INTERVALO_API === "AMBOS_INCLUSIVOS" && J.ESTRATEGIA_BORDA === "BORDA_COMPARTILHADA_COM_DEDUP", "semantica");
+    for (const [de, ate] of [["2026-03-01T00:00:00.000Z", "2026-10-04T00:00:00.000Z"], ["2026-03-01T00:00:00.500Z", "2026-03-29T00:00:00.250Z"], ["2026-01-01T00:00:00.000Z", "2026-01-15T00:00:00.000Z"]]) {
+      const js = J.planejarJanelasCriacao(new Date(de), new Date(ate));
+      assert(js[0].inicio.toISOString() === de && js[js.length - 1].fim.toISOString() === ate, `${de}: extremos`);
+      for (let i = 0; i < js.length; i++) {
+        assert(js[i].fim.getTime() - js[i].inicio.getTime() <= J.JANELA_MAXIMA_MS && js[i].fim > js[i].inicio, `${de}: tamanho ${i}`);
+        if (i > 0) assert(js[i].inicio.getTime() === js[i - 1].fim.getTime(), `${de}: borda ${i} nao compartilhada`);
+        // com milissegundos, o Math.floor do transporte leva as duas pontas ao mesmo segundo: nunca lacuna
+        if (i > 0) assert(Math.floor(js[i].inicio.getTime() / 1000) <= Math.floor(js[i - 1].fim.getTime() / 1000), `${de}: lacuna de segundo ${i}`);
+      }
+    }
+  });
+  t("19b. pedido EXATAMENTE na borda, borda-1s e borda+1s: os tres no corpus, uma vez cada; o da borda listado 2x e gravado 1x", async () => {
+    const js = J.planejarJanelasCriacao(ANCORA_T, new Date("2026-10-04T00:00:00.000Z"));
+    const b = js[1].fim.getTime() / 1000; // borda entre a 2a e a 3a janela
+    const ps = [naBorda("BMENOS", b - 1), naBorda("BIGUAL", b), naBorda("BMAIS", b + 1)];
+    const c = cenario(ps);
+    await rodarCorpus(c);
+    const listados = [...c.repo.jobs.values()].reduce((s, j) => s + (j.progresso?.listados ?? 0), 0);
+    assert(c.repo.pedidos.size === 3 && c.repo.itens.size === 3, `pedidos ${c.repo.pedidos.size} itens ${c.repo.itens.size}`);
+    assert(listados === 4, `listados ${listados} (esperado 3 + 1 da borda)`);
+    const { comp, metricas } = canonico(c.repo);
+    assert(comp.completude === "COMPLETE" && metricas!.pedidos === 3 && metricas!.vendas === 60, JSON.stringify(comp));
+  });
+  t("19c. sequencia longa (ancora → 7 meses, 16 janelas): pedidos em TODAS as bordas e vizinhos; nenhuma lacuna, nenhum duplo no corpus", async () => {
+    const ANC = new Date("2026-03-01T00:00:00.000Z");
+    const js = J.planejarJanelasCriacao(ANC, new Date("2026-10-04T00:00:00.000Z"));
+    const ps: PedidoFake[] = [naBorda("ANC0", ANC.getTime() / 1000)];
+    js.forEach((j, i) => {
+      const f = j.fim.getTime() / 1000;
+      ps.push(naBorda(`B${i}m`, f - 1), naBorda(`B${i}i`, f), naBorda(`B${i}p`, Math.min(f + 1, Date.parse("2026-10-03T23:59:59Z") / 1000)));
+      ps.push(naBorda(`M${i}`, Math.floor((j.inicio.getTime() + j.fim.getTime()) / 2000) + i));
+    });
+    const unicos = new Map(ps.map((p) => [p.orderSn, p]));
+    const c = cenario([...unicos.values()]);
+    await rodarCorpus(c, "2026-10-04T00:00:00.000Z", undefined, ANC);
+    assert(js.length >= 15, `janelas ${js.length}`);
+    const faltam = [...unicos.keys()].filter((sn) => !c.repo.pedidos.has(`${LOJA}|${sn}`));
+    assert(faltam.length === 0, `faltam ${faltam.join()}`);
+    assert(c.repo.pedidos.size === unicos.size && c.repo.itens.size === unicos.size, `duplo: ${c.repo.pedidos.size} ${c.repo.itens.size} / ${unicos.size}`);
+    const listados = [...c.repo.jobs.values()].reduce((s, j) => s + (j.progresso?.listados ?? 0), 0);
+    const nasBordasInternas = js.slice(0, -1).length; // o pedido "i" de cada borda interna e listado 2x
+    assert(listados === unicos.size + nasBordasInternas, `listados ${listados} != ${unicos.size} + ${nasBordasInternas}`);
+    const { comp, metricas } = canonico(c.repo, ANC);
+    assert(comp.completude === "COMPLETE" && metricas!.pedidos === unicos.size, JSON.stringify({ comp, metricas }));
   });
 
   await fila;
