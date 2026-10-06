@@ -149,6 +149,11 @@ export const ROTAS_COM_SEGREDO: Readonly<Record<string, readonly string[]>> = {
   // uma camada antes. Quem autoriza continua sendo `CRON_SECRET`, dentro
   // da rota, fail-closed. So GET, porque so GET e exportado.
   "/api/internal/agentes/monitor-ingestao": ["GET"], // Vercel Cron * * * * *
+  // SALES-SYNC-B1. Worker CANONICO de vendas. Declarado junto com a rota
+  // (licao da FIX2/I4C). Quem autoriza e `CRON_SECRET`, dentro da rota,
+  // fail-closed. Sem entrada em `crons` (vercel.json) ainda: agendar e
+  // outro gate. So GET, porque so GET e exportado.
+  "/api/internal/vendas-sync/worker": ["GET"], // Vercel Cron — NAO agendado
 };
 
 /**
