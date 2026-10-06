@@ -123,12 +123,20 @@ function httpPostJson(urlStr, bodyObj, headers, timeoutMs) {
 // Não usa FOR UPDATE SKIP LOCKED aqui — é aceitável um worker único rodando
 // nesta fase local. Guarda mínima: o .eq("status","rodando") no UPDATE evita
 // reaplicar em um job que outra iteração já tirou de "rodando" nesse meio-tempo.
+//
+// FENCE (SALES-SYNC-C1): só job LEGADO — allowlist positiva, a mesma de
+// claim_next_sync_job(): campo_tempo IS NULL AND checkpoint IS NULL. Job
+// canônico (date_closed, create_time, catch-up de escrow, tipo futuro)
+// nunca é re-enfileirado nem marcado erro aqui: a recuperação dele é do
+// worker canônico (lib/vendas/sync/worker.ts, lease por heartbeat_em).
 async function reclamarJobsTravados() {
   const limite = new Date(Date.now() - STALE_MINUTES * 60 * 1000).toISOString();
   const { data: travados, error } = await supabase
     .from("sync_jobs")
     .select("id, tentativas, max_tentativas")
     .eq("status", "rodando")
+    .is("campo_tempo", null)
+    .is("checkpoint", null)
     .lt("heartbeat_em", limite);
 
   if (error) {
@@ -146,7 +154,7 @@ async function reclamarJobsTravados() {
         ? "heartbeat expirado — máximo de tentativas atingido"
         : "heartbeat expirado — reenfileirado",
       heartbeat_em: null,
-    }).eq("id", job.id).eq("status", "rodando");
+    }).eq("id", job.id).eq("status", "rodando").is("campo_tempo", null).is("checkpoint", null);
 
     console.log(`[worker] job ${job.id} travado (heartbeat > ${STALE_MINUTES}min) — ${esgotou ? "marcado como erro" : "reenfileirado"} (tentativa ${novasTentativas}/${job.max_tentativas})`);
   }

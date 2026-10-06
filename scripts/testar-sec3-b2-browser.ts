@@ -545,6 +545,8 @@ async function principal() {
     "supabase/cutover/PENDENTE_s2_cutover_shopee_item_store_unique.sql",
     // ML-CORPUS-A: foundation ML (NAO aplicada) — guard proprio: testar-ml-corpus-migracao
     "supabase/migrations/20261028_ml_corpus_foundation.sql",
+    // SALES-SYNC-C1: fence do claim legado (NAO aplicada) — guard proprio: testar-sync-legacy-fence
+    "supabase/migrations/20261029_sales_sync_c1_legacy_claim_fence.sql",
   ];
   const FORA_DA_VARREDURA = [...APROVADAS, "scripts/testar-s2d1-migracao.ts", "scripts/testar-ml-corpus-migracao.ts"];
   t("M1. nada em supabase/ mudou desde a base (alem da migration SEC-3-C)", () => {

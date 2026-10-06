@@ -385,9 +385,14 @@ async function principal() {
     assert(/executarFatiaML/.test(w) && /executarFatiaShopee/.test(w) && /executarFatiaCatchUpEscrow/.test(w) && /classificarJobParaWorker/.test(w), "roteamento");
   });
   t("legado, canonicos, migrations, vercel.json e env INTOCADOS desde a base", () => {
+    // SALES-SYNC-C1 muda DE PROPOSITO so o fence legado: scripts/sync-worker.mjs (recuperacao)
+    // e a migration do claim — os dois validados linha a linha por scripts/testar-sync-legacy-fence.ts.
+    const FENCE_C1 = ["scripts/sync-worker.mjs", "supabase/migrations/20261029_sales_sync_c1_legacy_claim_fence.sql"];
     const d = execFileSync("git", ["diff", "--name-only", BASE, "--", "scripts/sync-worker.mjs", "app/api/internal/sync", "app/api/sync", "lib/sync-ml.ts", "lib/sync-shopee.ts",
-      "lib/vendas/canonico", "lib/mercado-livre/ingestao", "lib/shopee/ingestao", "supabase", "vercel.json", ".env.example", "lib/feature-flags.ts"], { cwd: RAIZ, encoding: "utf8" }).trim();
-    const novos = execFileSync("git", ["ls-files", "--others", "--exclude-standard", "--", "supabase"], { cwd: RAIZ, encoding: "utf8" }).trim();
+      "lib/vendas/canonico", "lib/mercado-livre/ingestao", "lib/shopee/ingestao", "supabase", "vercel.json", ".env.example", "lib/feature-flags.ts"], { cwd: RAIZ, encoding: "utf8" })
+      .trim().split(/\r?\n/).filter((f) => f && !FENCE_C1.includes(f)).join(",");
+    const novos = execFileSync("git", ["ls-files", "--others", "--exclude-standard", "--", "supabase"], { cwd: RAIZ, encoding: "utf8" })
+      .trim().split(/\r?\n/).filter((f) => f && !FENCE_C1.includes(f)).join(",");
     assert(d === "" && novos === "", `alterados: ${d} ${novos}`);
     assert(!/vendas-sync/.test(readFileSync(join(RAIZ, "vercel.json"), "utf8")), "cron criado");
   });

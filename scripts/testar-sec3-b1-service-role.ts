@@ -119,6 +119,8 @@ const MIGRACOES_APROVADAS = [
   "supabase/cutover/PENDENTE_s2_cutover_shopee_item_store_unique.sql",
   // ML-CORPUS-A: foundation ML (NAO aplicada) — guard proprio: testar-ml-corpus-migracao
   "supabase/migrations/20261028_ml_corpus_foundation.sql",
+  // SALES-SYNC-C1: fence do claim legado (NAO aplicada) — guard proprio: testar-sync-legacy-fence
+  "supabase/migrations/20261029_sales_sync_c1_legacy_claim_fence.sql",
 ];
 
 const RE_TABELA = new RegExp(`\\.from\\(\\s*["'\`](${TABELAS_SEC3.join("|")})["'\`]\\s*\\)`, "g");
