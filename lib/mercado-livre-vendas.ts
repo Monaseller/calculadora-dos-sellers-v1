@@ -730,6 +730,31 @@ async function varrerDias(args: {
 }
 
 /**
+ * ML-CORPUS-D1 — a MESMA varredura homologada, por FECHAMENTO, de UM dia
+ * civil de Sao Paulo, devolvida CRUA para o motor de ingestao do corpus
+ * (`lib/mercado-livre/ingestao`). Nada e recortado nem excluido aqui:
+ * o recorte do dia e a regra (pack_splitted, unidades, valor) sao do
+ * servico canonico. `completa=false` nunca e tratado como fim.
+ */
+export async function varrerFechamentosDoDiaML(args: {
+  readonly userId: string;
+  readonly lojaId: string;
+  readonly dia: string;
+  readonly limiteExterno?: LimiteExterno;
+  readonly portas?: PortasVendasML;
+}): Promise<{ brutos: readonly Record<string, unknown>[]; paginas: number; completa: boolean; erro: ErroVendasML | null }> {
+  if (!args.userId || !args.lojaId) return { brutos: [], paginas: 0, completa: false, erro: "credencial_ausente" };
+  if (!ehDataIso(args.dia)) return { brutos: [], paginas: 0, completa: false, erro: "resposta_invalida" };
+  const v = await varrerDias({
+    userId: args.userId, lojaId: args.lojaId, campoDeData: CAMPO_DE_FECHAMENTO, dias: [args.dia],
+    limiteExterno: args.limiteExterno, portas: args.portas,
+  });
+  if (v.erro !== null || v.subjanelas.length !== 1) return { brutos: [], paginas: 0, completa: false, erro: v.erro ?? "indisponivel" };
+  const s = v.subjanelas[0];
+  return { brutos: s.brutos, paginas: s.paginas, completa: s.completa, erro: null };
+}
+
+/**
  * As vendas PAGAS no periodo — recorte por data de PAGAMENTO.
  *
  * ── O que esta funcao e, e o que ela NAO e ──────────────────────────
