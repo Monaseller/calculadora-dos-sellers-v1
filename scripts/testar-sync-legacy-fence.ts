@@ -238,8 +238,11 @@ async function principal() {
     assert(!/sync_jobs|claim_next_sync_job/.test(s), "cron diario passou a usar sync_jobs");
   });
   t("I3. worker canonico, coordenador, planner, motores, canonicos, rotas legadas e sync-on-read INTOCADOS desde a base", () => {
+    // SALES-SYNC-C3 muda DE PROPOSITO a camada de credencial Shopee (CAS do refresh):
+    // lib/shopee-auth.ts e lib/marketplace/credenciais.ts saem desta lista — quem os
+    // guarda agora e scripts/testar-shopee-token-cas.ts (+ testar-credenciais-marketplace).
     const d = execFileSync("git", ["diff", "--name-only", BASE, "--", "lib/vendas", "lib/mercado-livre/ingestao", "lib/shopee/ingestao", "lib/sync-ml.ts", "lib/sync-shopee.ts",
-      "lib/ml-auth.ts", "lib/shopee-auth.ts", "lib/marketplace/credenciais.ts", "app/api/sync", "app/api/internal", "app/api/ml/vendas", "app/api/shopee/vendas", "vercel.json", "lib/feature-flags.ts"], { cwd: RAIZ, encoding: "utf8" }).trim();
+      "lib/ml-auth.ts", "app/api/sync", "app/api/internal", "app/api/ml/vendas", "app/api/shopee/vendas", "vercel.json", "lib/feature-flags.ts"], { cwd: RAIZ, encoding: "utf8" }).trim();
     assert(d === "", d);
   });
   t("I4. a unica migration nova e a do fence, e ela nao toca idx_sync_jobs_loja_ativo (so comentario)", () => {

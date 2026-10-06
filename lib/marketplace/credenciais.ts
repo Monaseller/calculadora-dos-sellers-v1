@@ -277,12 +277,14 @@ export async function gravarCredencialML(
  */
 export async function lerCredencialShopeeDoDono(
   userId: string,
-  lojaId?: string | null
+  lojaId?: string | null,
+  /** Opcional (SALES-SYNC-C3): cliente injetado nos testes; padrão = service_role. */
+  cliente?: any
 ): Promise<ResultadoLeitura<LinhaCredencialShopee>> {
   if (!userId) return { linha: null, erro: null };
 
   let consulta = aplicarFiltros(
-    getSupabaseServidor().from("lojas").select(COLUNAS_SHOPEE),
+    (cliente ?? getSupabaseServidor()).from("lojas").select(COLUNAS_SHOPEE),
     filtrosShopeeDoDono(userId, lojaId)
   );
 
@@ -1171,22 +1173,50 @@ export async function lerLojaParaPublicacaoML(
 }
 
 /**
- * Grava credencial Shopee renovada.
+ * Filtro do COMPARE-AND-SWAP da credencial Shopee (SALES-SYNC-C3): loja +
+ * dono + marketplace + o `refresh_token` que o chamador LEU. Pura, para a
+ * suíte provar a invariante sem banco.
+ */
+export function filtrosCasShopee(lojaId: string, userId: string, refreshAnterior: string): Record<string, unknown> {
+  return { id: lojaId, user_id: String(userId), marketplace: MARKETPLACE_SHOPEE, refresh_token: refreshAnterior };
+}
+
+/**
+ * Grava credencial Shopee renovada com COMPARE-AND-SWAP — SALES-SYNC-C3.
  *
- * NÃO há compare-and-swap aqui, e isso é intencional nesta PR: a
- * ausência de CAS na Shopee é um limite PRÉ-EXISTENTE, documentado e
- * testado, cuja correção é frente própria. Acrescentá-lo aqui alteraria
- * semântica que esta PR se comprometeu a preservar.
+ * Antes era um UPDATE cego (só id + user_id): dois processos que leram a
+ * mesma linha vencida renovavam com o MESMO refresh_token e a segunda
+ * escrita apagava a primeira. Agora a escrita só acontece se a linha
+ * AINDA tiver o `refreshAnterior` de onde o chamador partiu — a mesma
+ * proteção do ML (`gravarCredencialML` + `renovarComCas`), sem migration:
+ * as colunas já existem. O banco é a fonte de verdade entre instâncias.
+ *
+ * Só os três campos de autenticação são gravados, mesmo que o chamador
+ * mande mais. Devolve `true` só quando exatamente UMA linha mudou;
+ * `false` = outra execução rotacionou antes (ou loja/dono não batem) —
+ * quem chama RELÊ em vez de reescrever.
  */
 export async function gravarCredencialShopee(
   lojaId: string,
   userId: string,
-  campos: CamposCredencialShopee
-): Promise<void> {
-  if (!lojaId || !userId) return;
+  campos: CamposCredencialShopee,
+  refreshAnterior: string,
+  /** Opcional: cliente injetado nos testes; padrão = service_role. */
+  cliente?: any
+): Promise<boolean> {
+  if (!lojaId || !userId || !refreshAnterior) return false;
 
-  await aplicarFiltros(
-    getSupabaseServidor().from("lojas").update(campos),
-    filtrosGravacaoPorLojaEDono(lojaId, userId)
-  );
+  const somenteAuth: Record<string, unknown> = {};
+  for (const k of ["access_token", "refresh_token", "token_expires_at"] as const) {
+    if (campos[k] !== undefined) somenteAuth[k] = campos[k];
+  }
+  if (!somenteAuth.access_token || !somenteAuth.refresh_token) return false;
+
+  const { data, error } = await aplicarFiltros(
+    (cliente ?? getSupabaseServidor()).from("lojas").update(somenteAuth),
+    filtrosCasShopee(lojaId, userId, refreshAnterior)
+  ).select("id");
+
+  if (error) return false;
+  return Array.isArray(data) && data.length === 1;
 }

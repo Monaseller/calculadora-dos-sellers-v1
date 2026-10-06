@@ -149,8 +149,12 @@ function guardaServerSec3(arquivos: Map<string, string>, contexto: (f: string) =
   return violacoes;
 }
 
+// SALES-SYNC-C3: o diff contra a base passou de 1 MiB (padrão do maxBuffer)
+// e o spawnSync abortava com ENOBUFS. Só a capacidade muda — base,
+// exclusões, padrões e asserções continuam os mesmos.
+const GIT_MAX_BUFFER = 16 * 1024 * 1024;
 const git = (...args: string[]) =>
-  execFileSync("git", args, { cwd: RAIZ, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  execFileSync("git", args, { cwd: RAIZ, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: GIT_MAX_BUFFER });
 const arquivosRepo = git("ls-files", "app", "lib", "components", "middleware.ts")
   .split(/\r?\n/).filter((f) => /\.(ts|tsx|js|mjs)$/.test(f));
 const fonte = new Map(arquivosRepo.map((f) => [f, readFileSync(join(RAIZ, f), "utf8")]));

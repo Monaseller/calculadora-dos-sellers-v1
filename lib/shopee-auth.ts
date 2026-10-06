@@ -6,12 +6,138 @@ import { shopeeSign, SHOPEE_BASE } from "@/lib/shopee-api";
 import {
   lerCredencialShopeeDoDono,
   gravarCredencialShopee,
+  type LinhaCredencialShopee,
 } from "@/lib/marketplace/credenciais";
 
 export interface ShopeeTokenResult {
   access_token: string;
   refresh_token?: string;
   expire_in?: number;
+}
+
+// ── Renovação concorrente-segura (SALES-SYNC-C3) ────────────────────
+//
+// Mesmo princípio do ML (`renovarComCas` em lib/ml-auth.ts), adaptado ao
+// formato Shopee: o banco decide quem venceu a rotação via
+// compare-and-swap sobre o `refresh_token` LIDO; quem perde — porque o
+// CAS não casou, ou porque o endpoint recusou um refresh_token que outra
+// execução já consumiu — RELÊ a loja e usa a credencial vencedora.
+// Nada de mutex em memória: instâncias serverless diferentes não o
+// compartilhariam; a proteção é a condição do UPDATE.
+
+/** Margem de expiração da Shopee (inalterada): 5 min. */
+const MARGEM_SHOPEE_MS = 5 * 60 * 1000;
+const MAX_LEITURAS_DE_RECUPERACAO_SHOPEE = 2;
+const ESPERA_ENTRE_LEITURAS_SHOPEE_MS = 150;
+
+/**
+ * A loja precisa renovar? Semântica PRESERVADA do fluxo anterior: sem
+ * access_token, ou com validade dentro da margem. (`token_expires_at`
+ * ausente com access_token presente continua sendo "não renovar".)
+ */
+export function precisaRenovarShopee(
+  linha: Pick<LinhaCredencialShopee, "access_token" | "token_expires_at">,
+  agoraMs: number = Date.now()
+): boolean {
+  return !linha.access_token ||
+    (!!linha.token_expires_at && new Date(linha.token_expires_at).getTime() - MARGEM_SHOPEE_MS < agoraMs);
+}
+
+/**
+ * A linha relida prova que OUTRA execução venceu a rotação? Exige
+ * refresh_token DIFERENTE do observado (evidência de rotação) e credencial
+ * utilizável (access_token presente, validade conhecida e fora da margem).
+ * Conservador como o ML: sem rotação comprovada, não há vencedora.
+ */
+export function vencedoraShopeeUtilizavel(
+  linha: Pick<LinhaCredencialShopee, "access_token" | "refresh_token" | "token_expires_at">,
+  refreshObservado: string,
+  agoraMs: number = Date.now()
+): boolean {
+  if (!linha.access_token || !linha.refresh_token) return false;
+  if (linha.refresh_token === refreshObservado) return false;
+  if (!linha.token_expires_at) return false;
+  const vence = new Date(linha.token_expires_at).getTime();
+  return Number.isFinite(vence) && vence - MARGEM_SHOPEE_MS >= agoraMs;
+}
+
+/** Portas da renovação — reais em produção, dublês na suíte. */
+export interface PortasRenovacaoShopee {
+  /** Chama o endpoint de refresh da Shopee com este refresh_token. */
+  renovar(refreshToken: string): Promise<ShopeeTokenResult | null>;
+  /** UPDATE condicional (CAS sobre `refreshAnterior`); true = esta execução venceu. */
+  gravarCas(campos: { access_token: string; refresh_token: string; token_expires_at: string }, refreshAnterior: string): Promise<boolean>;
+  /** Releitura CRUA da mesma loja, fechada no dono. NUNCA renova. */
+  reler(): Promise<Pick<LinhaCredencialShopee, "access_token" | "refresh_token" | "token_expires_at"> | null>;
+  esperar?(ms: number): Promise<void>;
+  agoraMs?(): number;
+}
+
+async function procurarVencedoraShopee(
+  lojaId: string,
+  refreshObservado: string,
+  portas: PortasRenovacaoShopee
+): Promise<{ accessToken: string } | null> {
+  const agora = portas.agoraMs ?? (() => Date.now());
+  const esperar = portas.esperar ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  for (let leitura = 1; leitura <= MAX_LEITURAS_DE_RECUPERACAO_SHOPEE; leitura++) {
+    const atual = await portas.reler();
+    if (atual !== null && vencedoraShopeeUtilizavel(atual, refreshObservado, agora())) {
+      return { accessToken: atual.access_token as string };
+    }
+    if (leitura < MAX_LEITURAS_DE_RECUPERACAO_SHOPEE) await esperar(ESPERA_ENTRE_LEITURAS_SHOPEE_MS);
+  }
+  return null;
+}
+
+/**
+ * Renova a credencial Shopee com COMPARE-AND-SWAP.
+ *
+ *   refresh OK  + CAS casou (1 linha)  → CAS_WON: usa o par novo
+ *   refresh OK  + CAS 0 linhas         → CAS_LOST: relê; usa a vencedora
+ *                                        (o par recebido NUNCA é gravado)
+ *   refresh FALHOU                     → relê; se outra execução já
+ *                                        rotacionou, usa a vencedora
+ *                                        (REFRESH_FAILED_REUSED_WINNER);
+ *                                        senão `null` (falha real)
+ *
+ * Logs só com o id técnico da loja — nunca token, segredo ou comprador.
+ */
+export async function renovarShopeeComCas(
+  lojaId: string,
+  refreshObservado: string,
+  portas: PortasRenovacaoShopee
+): Promise<{ accessToken: string } | null> {
+  const agora = portas.agoraMs ?? (() => Date.now());
+  const renovado = await portas.renovar(refreshObservado);
+
+  if (!renovado?.access_token) {
+    const vencedora = await procurarVencedoraShopee(lojaId, refreshObservado, portas);
+    console.log(`[shopee-auth] ${vencedora ? "REFRESH_FAILED_REUSED_WINNER" : "REFRESH_FAILED"} loja:`, lojaId);
+    return vencedora;
+  }
+
+  const gravou = await portas.gravarCas({
+    access_token: renovado.access_token,
+    refresh_token: renovado.refresh_token ?? refreshObservado,
+    token_expires_at: new Date(agora() + (renovado.expire_in ?? 14400) * 1000).toISOString(),
+  }, refreshObservado);
+  if (gravou) {
+    console.log("[shopee-auth] CAS_WON loja:", lojaId);
+    return { accessToken: renovado.access_token };
+  }
+
+  console.log("[shopee-auth] CAS_LOST loja:", lojaId);
+  return procurarVencedoraShopee(lojaId, refreshObservado, portas);
+}
+
+/** Portas reais: endpoint oficial + CAS em `lojas` + releitura da MESMA loja do dono. */
+function portasReaisShopee(loja: LinhaCredencialShopee, userId: string): PortasRenovacaoShopee {
+  return {
+    renovar: (rt) => refreshShopeeToken(loja.partner_id as string, loja.partner_key as string, Number(loja.shop_id), rt),
+    gravarCas: (campos, anterior) => gravarCredencialShopee(loja.id, userId, campos, anterior),
+    reler: async () => (await lerCredencialShopeeDoDono(userId, loja.id)).linha,
+  };
 }
 
 /**
@@ -100,28 +226,17 @@ export async function getShopeeLojaAtiva(userId: string): Promise<{
   let accessToken: string = loja.access_token ?? "";
 
   // Verifica se token expirou (com 5 min de margem)
-  const expiredOrMissing = !loja.access_token ||
-    (loja.token_expires_at && new Date(loja.token_expires_at).getTime() - 5 * 60 * 1000 < Date.now());
+  const expiredOrMissing = precisaRenovarShopee(loja);
 
   if (expiredOrMissing && loja.refresh_token) {
     console.log("[shopee-auth] token expirado, tentando refresh para loja:", loja.id);
-    const refreshed = await refreshShopeeToken(
-      loja.partner_id,
-      loja.partner_key,
-      Number(loja.shop_id),
-      loja.refresh_token
-    );
-    if (refreshed) {
-      console.log("[shopee-auth] refresh OK para loja:", loja.id);
-      accessToken = refreshed.access_token;
-      // Salva novo token no banco
-      await gravarCredencialShopee(loja.id, userId, {
-        access_token:     refreshed.access_token,
-        refresh_token:    refreshed.refresh_token ?? loja.refresh_token,
-        token_expires_at: new Date(Date.now() + (refreshed.expire_in ?? 14400) * 1000).toISOString(),
-      });
+    // SALES-SYNC-C3: CAS sobre o refresh_token lido + releitura da vencedora.
+    const renovada = await renovarShopeeComCas(loja.id, loja.refresh_token, portasReaisShopee(loja, userId));
+    if (renovada) {
+      accessToken = renovada.accessToken;
     } else {
-      // Refresh falhou → token expirado e não renovável → não tenta usar token inválido
+      // Refresh falhou e nenhuma execução concorrente rotacionou → token
+      // expirado e não renovável → não tenta usar token inválido
       console.error("[shopee-auth] refresh FALHOU para loja:", loja.id, "- reconecte a Shopee");
       return null;
     }
@@ -185,23 +300,13 @@ export async function getShopeeLojaById(lojaId: string, userId: string): Promise
   // tratava isso. String vazia é falsy do mesmo modo.
   let accessToken: string = loja.access_token ?? "";
 
-  const expiredOrMissing = !loja.access_token ||
-    (loja.token_expires_at && new Date(loja.token_expires_at).getTime() - 5 * 60 * 1000 < Date.now());
+  const expiredOrMissing = precisaRenovarShopee(loja);
 
   if (expiredOrMissing && loja.refresh_token) {
-    const refreshed = await refreshShopeeToken(
-      loja.partner_id,
-      loja.partner_key,
-      Number(loja.shop_id),
-      loja.refresh_token
-    );
-    if (refreshed) {
-      accessToken = refreshed.access_token;
-      await gravarCredencialShopee(loja.id, userId, {
-        access_token:     refreshed.access_token,
-        refresh_token:    refreshed.refresh_token ?? loja.refresh_token,
-        token_expires_at: new Date(Date.now() + (refreshed.expire_in ?? 14400) * 1000).toISOString(),
-      });
+    // SALES-SYNC-C3: CAS sobre o refresh_token lido + releitura da vencedora.
+    const renovada = await renovarShopeeComCas(loja.id, loja.refresh_token, portasReaisShopee(loja, userId));
+    if (renovada) {
+      accessToken = renovada.accessToken;
     } else {
       console.error("[shopee-auth] refresh FALHOU (getShopeeLojaById) para loja:", loja.id, "- reconecte a Shopee");
       return null;

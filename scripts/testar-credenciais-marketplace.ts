@@ -163,8 +163,9 @@ ok("21. gravarCredencialML sem userId devolve false e não grava",
   (await gravarCredencialML(LOJA_A, "", { access_token: "x" })) === false);
 ok("22. gravarCredencialML sem lojaId devolve false e não grava",
   (await gravarCredencialML("", USUARIO_A, { access_token: "x" })) === false);
-ok("23. gravarCredencialShopee sem userId retorna sem gravar",
-  (await gravarCredencialShopee(LOJA_A, "", { access_token: "x" })) === undefined);
+// SALES-SYNC-C3: a gravação Shopee agora é CAS e devolve boolean (false = não gravou).
+ok("23. gravarCredencialShopee sem userId devolve false sem gravar",
+  (await gravarCredencialShopee(LOJA_A, "", { access_token: "x", refresh_token: "y" }, "r0")) === false);
 
 console.log("── 5. Worker com par incoerente: sync não executa ─────────");
 // user_id=A + loja_id de B é exatamente o job forjado que `sync_jobs`
@@ -224,22 +225,25 @@ console.log("── 6 e 7. CAS do ML preservado ──────────�
     /function publica\([\s\S]*?return \{ id: loja\.id, nickname: loja\.nickname \?\? "", marketplace: MARKETPLACE_ML \};/.test(conexao));
 }
 
-console.log("── 8. Shopee: semântica de refresh inalterada ─────────────");
+// SALES-SYNC-C3: o limite pré-existente (sem CAS na Shopee) foi FECHADO.
+// 42/43/46 passam a exigir o CAS em vez da ausência dele; o comportamento
+// completo é provado em scripts/testar-shopee-token-cas.ts.
+console.log("── 8. Shopee: refresh com compare-and-swap ────────────────");
 {
   const sh = fonte("lib/shopee-auth.ts");
   const cred = fonte("lib/marketplace/credenciais.ts");
-  ok("42. Shopee continua SEM compare-and-swap (limite pré-existente)",
-    !/refresh_token:\s*refreshAnterior/.test(
-      cred.slice(cred.indexOf("gravarCredencialShopee"))
-    ));
-  ok("43. gravarCredencialShopee não usa .select() de confirmação",
-    !/\.select\(/.test(cred.slice(cred.indexOf("export async function gravarCredencialShopee"))));
+  ok("42. Shopee COM compare-and-swap sobre o refresh_token lido",
+    /refresh_token:\s*refreshAnterior/.test(cred.slice(cred.indexOf("export function filtrosCasShopee"))) &&
+    /filtrosCasShopee\(lojaId, userId, refreshAnterior\)/.test(cred.slice(cred.indexOf("export async function gravarCredencialShopee"))));
+  ok("43. gravarCredencialShopee confirma com .select(\"id\") e exige exatamente 1 linha",
+    /\.select\("id"\)/.test(cred.slice(cred.indexOf("export async function gravarCredencialShopee"))) &&
+    /data\.length === 1/.test(cred.slice(cred.indexOf("export async function gravarCredencialShopee"))));
   ok("44. refresh Shopee mantém a margem de 5 min",
     /5 \* 60 \* 1000/.test(sh));
   ok("45. refresh falho continua devolvendo null, sem usar token inválido",
     /refresh FALHOU/.test(sh));
-  ok("46. ausência de CAS na Shopee está documentada, não escondida",
-    /NÃO há compare-and-swap aqui, e isso é intencional/.test(cred));
+  ok("46. o CAS da Shopee está documentado (SALES-SYNC-C3)",
+    /COMPARE-AND-SWAP — SALES-SYNC-C3/.test(cred));
 }
 
 console.log("── 9 a 13. Superfície privilegiada ────────────────────────");
@@ -341,9 +345,11 @@ console.log("── 9 a 13. Superfície privilegiada ─────────
   ok("59. lerCredencialMLPorLojaEDono exige lojaId + userId", lerCredencialMLPorLojaEDono.length === 2);
   ok("60. gravarCredencialML exige lojaId + userId + campos (+CAS opcional)",
     gravarCredencialML.length === 4);
-  ok("61. gravarCredencialShopee exige lojaId + userId + campos", gravarCredencialShopee.length === 3);
-  ok("62. lerCredencialShopeeDoDono começa pelo userId (loja é opcional)",
-    lerCredencialShopeeDoDono.length === 2);
+  // SALES-SYNC-C3: + refreshAnterior (CAS obrigatório) + cliente opcional (dublê de teste).
+  ok("61. gravarCredencialShopee exige lojaId + userId + campos + refreshAnterior (+cliente opcional)",
+    gravarCredencialShopee.length === 5);
+  ok("62. lerCredencialShopeeDoDono começa pelo userId (loja e cliente opcionais)",
+    lerCredencialShopeeDoDono.length === 3);
   ok("63. nenhuma função de credencial por loja aceita 1 só argumento",
     [getMLLojaById, getShopeeLojaById, lerCredencialMLPorLojaEDono,
      gravarCredencialML, gravarCredencialShopee, saveTokensToDB]
