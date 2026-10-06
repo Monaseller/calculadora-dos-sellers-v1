@@ -1181,6 +1181,55 @@ export function filtrosCasShopee(lojaId: string, userId: string, refreshAnterior
   return { id: lojaId, user_id: String(userId), marketplace: MARKETPLACE_SHOPEE, refresh_token: refreshAnterior };
 }
 
+// ── Lease distribuído do refresh Shopee (SALES-SYNC-C4) ─────────────
+//
+// public.credencial_refresh_lease + RPCs adquirir_/liberar_lease_refresh_credencial
+// (migration 20261030). O lease vem ANTES da chamada ao provider; o CAS
+// do C3 continua DEPOIS dela, como defesa em profundidade.
+
+/** TTL pedido ao banco (faixa aceita pela RPC: 5..120 s). Refresh HTTP aborta em 8 s. */
+export const LEASE_REFRESH_SHOPEE_TTL_S = 30;
+
+/**
+ * ADQUIRIDO = esta tentativa detém o direito de chamar o provider;
+ * OCUPADO   = outra tentativa detém lease válido (ou o banco falhou: não
+ *             chamar o provider é o lado seguro);
+ * INDISPONIVEL = a RPC não existe (migration não aplicada / revertida):
+ *             quem chama cai no modo C3 (só CAS), que já é seguro no banco.
+ */
+export type ResultadoLeaseShopee = "ADQUIRIDO" | "OCUPADO" | "INDISPONIVEL";
+
+const rpcInexistente = (e: { code?: string; message?: string } | null) =>
+  !!e && (e.code === "PGRST202" || e.code === "42883" || /could not find the function|does not exist/i.test(e.message ?? ""));
+
+export async function adquirirLeaseRefreshShopee(
+  lojaId: string,
+  userId: string,
+  portador: string,
+  cliente?: any
+): Promise<ResultadoLeaseShopee> {
+  if (!lojaId || !userId || !portador) return "OCUPADO";
+  const { data, error } = await (cliente ?? getSupabaseServidor()).rpc("adquirir_lease_refresh_credencial", {
+    p_user_id: String(userId), p_loja_id: lojaId, p_marketplace: MARKETPLACE_SHOPEE, p_portador: portador, p_ttl_segundos: LEASE_REFRESH_SHOPEE_TTL_S,
+  });
+  if (error) return rpcInexistente(error) ? "INDISPONIVEL" : "OCUPADO";
+  return data === true ? "ADQUIRIDO" : "OCUPADO";
+}
+
+/** Libera SÓ o lease deste portador. Melhor esforço: a expiração é a garantia real. */
+export async function liberarLeaseRefreshShopee(
+  lojaId: string,
+  userId: string,
+  portador: string,
+  cliente?: any
+): Promise<boolean> {
+  if (!lojaId || !userId || !portador) return false;
+  const { data, error } = await (cliente ?? getSupabaseServidor()).rpc("liberar_lease_refresh_credencial", {
+    p_user_id: String(userId), p_loja_id: lojaId, p_marketplace: MARKETPLACE_SHOPEE, p_portador: portador,
+  });
+  return !error && data === true;
+}
+
 /**
  * Grava credencial Shopee renovada com COMPARE-AND-SWAP — SALES-SYNC-C3.
  *

@@ -3,10 +3,14 @@
  * Access token expira em ~4h. Refresh token dura 30 dias.
  */
 import { shopeeSign, SHOPEE_BASE } from "@/lib/shopee-api";
+import { randomUUID } from "crypto";
 import {
   lerCredencialShopeeDoDono,
   gravarCredencialShopee,
+  adquirirLeaseRefreshShopee,
+  liberarLeaseRefreshShopee,
   type LinhaCredencialShopee,
+  type ResultadoLeaseShopee,
 } from "@/lib/marketplace/credenciais";
 
 export interface ShopeeTokenResult {
@@ -76,16 +80,18 @@ export interface PortasRenovacaoShopee {
 async function procurarVencedoraShopee(
   lojaId: string,
   refreshObservado: string,
-  portas: PortasRenovacaoShopee
+  portas: PortasRenovacaoShopee,
+  leituras: number = MAX_LEITURAS_DE_RECUPERACAO_SHOPEE,
+  esperaMs: number = ESPERA_ENTRE_LEITURAS_SHOPEE_MS
 ): Promise<{ accessToken: string } | null> {
   const agora = portas.agoraMs ?? (() => Date.now());
   const esperar = portas.esperar ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-  for (let leitura = 1; leitura <= MAX_LEITURAS_DE_RECUPERACAO_SHOPEE; leitura++) {
+  for (let leitura = 1; leitura <= leituras; leitura++) {
     const atual = await portas.reler();
     if (atual !== null && vencedoraShopeeUtilizavel(atual, refreshObservado, agora())) {
       return { accessToken: atual.access_token as string };
     }
-    if (leitura < MAX_LEITURAS_DE_RECUPERACAO_SHOPEE) await esperar(ESPERA_ENTRE_LEITURAS_SHOPEE_MS);
+    if (leitura < leituras) await esperar(esperaMs);
   }
   return null;
 }
@@ -131,13 +137,90 @@ export async function renovarShopeeComCas(
   return procurarVencedoraShopee(lojaId, refreshObservado, portas);
 }
 
-/** Portas reais: endpoint oficial + CAS em `lojas` + releitura da MESMA loja do dono. */
-function portasReaisShopee(loja: LinhaCredencialShopee, userId: string): PortasRenovacaoShopee {
+// ── Lease distribuído ANTES do provider (SALES-SYNC-C4) ─────────────
+//
+// O CAS acima resolve a corrida NO BANCO, mas acontece depois da chamada
+// à Shopee. O lease (public.credencial_refresh_lease, relógio do banco)
+// garante no máximo UMA chamada de refresh em andamento por loja entre
+// instâncias. Fluxo: lease → RELER → (só se ainda precisa) provider →
+// CAS → liberar no finally. Lease ocupado NUNCA vira "reconecte".
+
+/** Lease ocupado: espera limitada (~2,5 s) pela vencedora — nunca um segundo refresh. */
+const MAX_LEITURAS_LEASE_OCUPADO = 6;
+const ESPERA_LEASE_OCUPADO_MS = 500;
+
+export interface PortasLeaseShopee {
+  adquirirLease(portador: string): Promise<ResultadoLeaseShopee>;
+  liberarLease(portador: string): Promise<boolean>;
+  /** Portador opaco por tentativa (padrão: UUID aleatório). */
+  novoPortador?(): string;
+}
+
+export type ResultadoRenovacaoShopee =
+  | { ok: true; accessToken: string }
+  /** refresh_em_andamento = outra execução detém o lease (transitório, NÃO reconectar). */
+  | { ok: false; motivo: "refresh_em_andamento" | "credencial_indisponivel" };
+
+const comoResultado = (r: { accessToken: string } | null): ResultadoRenovacaoShopee =>
+  r ? { ok: true, accessToken: r.accessToken } : { ok: false, motivo: "credencial_indisponivel" };
+
+export async function renovarShopeeComLease(
+  lojaId: string,
+  refreshObservado: string,
+  portas: PortasRenovacaoShopee & PortasLeaseShopee
+): Promise<ResultadoRenovacaoShopee> {
+  const agora = portas.agoraMs ?? (() => Date.now());
+  const portador = portas.novoPortador?.() ?? randomUUID();
+  const lease = await portas.adquirirLease(portador);
+
+  if (lease === "OCUPADO") {
+    // Outra execução está renovando: NÃO chamar o provider; esperar (limitado) a vencedora.
+    const vencedora = await procurarVencedoraShopee(lojaId, refreshObservado, portas, MAX_LEITURAS_LEASE_OCUPADO, ESPERA_LEASE_OCUPADO_MS);
+    console.log(`[shopee-auth] ${vencedora ? "LEASE_BUSY_REUSED_WINNER" : "LEASE_BUSY"} loja:`, lojaId);
+    return vencedora ? { ok: true, accessToken: vencedora.accessToken } : { ok: false, motivo: "refresh_em_andamento" };
+  }
+
+  if (lease === "INDISPONIVEL") {
+    // RPC ausente (migration não aplicada/revertida): modo C3 — CAS sem lease, já seguro no banco.
+    console.log("[shopee-auth] LEASE_UNAVAILABLE_FALLBACK_CAS loja:", lojaId);
+    return comoResultado(await renovarShopeeComCas(lojaId, refreshObservado, portas));
+  }
+
+  try {
+    // RELER antes do provider: outra execução pode ter renovado entre a
+    // nossa leitura e a aquisição do lease.
+    const atual = await portas.reler();
+    if (!atual) return { ok: false, motivo: "credencial_indisponivel" };
+    if (atual.access_token && !precisaRenovarShopee(atual, agora())) {
+      console.log("[shopee-auth] LEASE_REREAD_ALREADY_FRESH loja:", lojaId);
+      return { ok: true, accessToken: atual.access_token };
+    }
+    if (!atual.refresh_token) return { ok: false, motivo: "credencial_indisponivel" };
+    // O CAS parte do refresh_token VIGENTE (pode ter rotacionado e vencido de novo).
+    return comoResultado(await renovarShopeeComCas(lojaId, atual.refresh_token, portas));
+  } finally {
+    try { await portas.liberarLease(portador); } catch { /* a expiração devolve a loja */ }
+  }
+}
+
+/** Portas reais: endpoint oficial + CAS em `lojas` + lease no banco + releitura da MESMA loja do dono. */
+function portasReaisShopee(loja: LinhaCredencialShopee, userId: string): PortasRenovacaoShopee & PortasLeaseShopee {
   return {
     renovar: (rt) => refreshShopeeToken(loja.partner_id as string, loja.partner_key as string, Number(loja.shop_id), rt),
     gravarCas: (campos, anterior) => gravarCredencialShopee(loja.id, userId, campos, anterior),
     reler: async () => (await lerCredencialShopeeDoDono(userId, loja.id)).linha,
+    adquirirLease: (portador) => adquirirLeaseRefreshShopee(loja.id, userId, portador),
+    liberarLease: (portador) => liberarLeaseRefreshShopee(loja.id, userId, portador),
   };
+}
+
+/** Mensagem de log do getter quando a renovação não devolve credencial. */
+function logFalhaRenovacao(r: { ok: false; motivo: string }, lojaId: string, rotulo: string) {
+  if (r.motivo === "refresh_em_andamento") {
+    console.error(`[shopee-auth] refresh em andamento por outra execução${rotulo} para loja:`, lojaId, "- tente novamente (NÃO é preciso reconectar)");
+  } else {
+    console.error(`[shopee-auth] refresh FALHOU${rotulo} para loja:`, lojaId, "- reconecte a Shopee");
+  }
 }
 
 /**
@@ -230,14 +313,14 @@ export async function getShopeeLojaAtiva(userId: string): Promise<{
 
   if (expiredOrMissing && loja.refresh_token) {
     console.log("[shopee-auth] token expirado, tentando refresh para loja:", loja.id);
-    // SALES-SYNC-C3: CAS sobre o refresh_token lido + releitura da vencedora.
-    const renovada = await renovarShopeeComCas(loja.id, loja.refresh_token, portasReaisShopee(loja, userId));
-    if (renovada) {
+    // SALES-SYNC-C4: lease distribuído → reler → provider → CAS (C3) → liberar.
+    const renovada = await renovarShopeeComLease(loja.id, loja.refresh_token, portasReaisShopee(loja, userId));
+    if (renovada.ok) {
       accessToken = renovada.accessToken;
     } else {
-      // Refresh falhou e nenhuma execução concorrente rotacionou → token
-      // expirado e não renovável → não tenta usar token inválido
-      console.error("[shopee-auth] refresh FALHOU para loja:", loja.id, "- reconecte a Shopee");
+      // Sem credencial utilizável → não tenta usar token inválido. O log
+      // distingue "outra execução está renovando" de "reconecte".
+      logFalhaRenovacao(renovada, loja.id, "");
       return null;
     }
   }
@@ -303,12 +386,12 @@ export async function getShopeeLojaById(lojaId: string, userId: string): Promise
   const expiredOrMissing = precisaRenovarShopee(loja);
 
   if (expiredOrMissing && loja.refresh_token) {
-    // SALES-SYNC-C3: CAS sobre o refresh_token lido + releitura da vencedora.
-    const renovada = await renovarShopeeComCas(loja.id, loja.refresh_token, portasReaisShopee(loja, userId));
-    if (renovada) {
+    // SALES-SYNC-C4: lease distribuído → reler → provider → CAS (C3) → liberar.
+    const renovada = await renovarShopeeComLease(loja.id, loja.refresh_token, portasReaisShopee(loja, userId));
+    if (renovada.ok) {
       accessToken = renovada.accessToken;
     } else {
-      console.error("[shopee-auth] refresh FALHOU (getShopeeLojaById) para loja:", loja.id, "- reconecte a Shopee");
+      logFalhaRenovacao(renovada, loja.id, " (getShopeeLojaById)");
       return null;
     }
   }

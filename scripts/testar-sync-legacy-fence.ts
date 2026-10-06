@@ -249,7 +249,9 @@ async function principal() {
     const novos = execFileSync("git", ["diff", "--name-only", BASE, "--", "supabase"], { cwd: RAIZ, encoding: "utf8" }).trim().split(/\r?\n/).filter(Boolean);
     const naoRastreados = execFileSync("git", ["ls-files", "--others", "--exclude-standard", "--", "supabase"], { cwd: RAIZ, encoding: "utf8" }).trim().split(/\r?\n/).filter(Boolean);
     const todos = [...new Set([...novos, ...naoRastreados])];
-    assert(todos.length === 1 && todos[0] === MIGRATION, todos.join(", "));
+    // SALES-SYNC-C4 acrescenta a migration do lease Shopee (guard proprio: testar-shopee-refresh-lease); nenhuma outra.
+    const C4 = "supabase/migrations/20261030_sales_sync_c4_shopee_refresh_lease.sql";
+    assert(todos.includes(MIGRATION) && todos.every((f) => f === MIGRATION || f === C4), todos.join(", "));
     assert(!/idx_sync_jobs_loja_ativo/.test(sql.replace(/^--.*$/gm, "")), "migration toca o indice");
   });
 

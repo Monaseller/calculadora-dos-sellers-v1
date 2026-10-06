@@ -121,6 +121,8 @@ const MIGRACOES_APROVADAS = [
   "supabase/migrations/20261028_ml_corpus_foundation.sql",
   // SALES-SYNC-C1: fence do claim legado (NAO aplicada) — guard proprio: testar-sync-legacy-fence
   "supabase/migrations/20261029_sales_sync_c1_legacy_claim_fence.sql",
+  // SALES-SYNC-C4: lease do refresh Shopee (NAO aplicada) — guard proprio: testar-shopee-refresh-lease
+  "supabase/migrations/20261030_sales_sync_c4_shopee_refresh_lease.sql",
 ];
 
 const RE_TABELA = new RegExp(`\\.from\\(\\s*["'\`](${TABELAS_SEC3.join("|")})["'\`]\\s*\\)`, "g");

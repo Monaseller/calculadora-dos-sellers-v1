@@ -95,8 +95,10 @@ async function principal() {
     assert(SA.precisaRenovarShopee({ access_token: null, token_expires_at: VALIDO }, AGORA), "sem access nao renovaria");
     assert(!SA.precisaRenovarShopee({ access_token: "A0", token_expires_at: null }, AGORA), "semantica antiga: expira ausente + access = nao renovar");
     const src = readFileSync(join(RAIZ, "lib/shopee-auth.ts"), "utf8");
-    const usos = src.match(/if \(expiredOrMissing && loja\.refresh_token\) \{[\s\S]*?renovarShopeeComCas\(loja\.id, loja\.refresh_token, portasReaisShopee\(loja, userId\)\)/g) ?? [];
-    assert(usos.length === 2, `getters sem o CAS sob a guarda (${usos.length})`);
+    // C4: os getters entram pelo lease, que envolve o CAS (renovarShopeeComLease → renovarShopeeComCas).
+    const usos = src.match(/if \(expiredOrMissing && loja\.refresh_token\) \{[\s\S]*?renovarShopeeComLease\(loja\.id, loja\.refresh_token, portasReaisShopee\(loja, userId\)\)/g) ?? [];
+    assert(usos.length === 2, `getters sem o lease+CAS sob a guarda (${usos.length})`);
+    assert((src.match(/return comoResultado\(await renovarShopeeComCas\(/g) ?? []).length === 2, "o lease nao delega ao CAS do C3");
   });
 
   console.log("\n[CAS]");
