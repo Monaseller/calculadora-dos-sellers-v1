@@ -543,8 +543,10 @@ async function principal() {
     "supabase/migrations/20261027_s2d1_shopee_foundation.sql",
     // S2-D2.2: cutover (NAO aplicado, fora de supabase/migrations) — guard proprio: testar-s2-cutover-migracao
     "supabase/cutover/PENDENTE_s2_cutover_shopee_item_store_unique.sql",
+    // ML-CORPUS-A: foundation ML (NAO aplicada) — guard proprio: testar-ml-corpus-migracao
+    "supabase/migrations/20261028_ml_corpus_foundation.sql",
   ];
-  const FORA_DA_VARREDURA = [...APROVADAS, "scripts/testar-s2d1-migracao.ts"];
+  const FORA_DA_VARREDURA = [...APROVADAS, "scripts/testar-s2d1-migracao.ts", "scripts/testar-ml-corpus-migracao.ts"];
   t("M1. nada em supabase/ mudou desde a base (alem da migration SEC-3-C)", () => {
     const d = git("diff", "--name-only", BASE, "--", "supabase").split(/\r?\n/).filter((f) => f && !APROVADAS.includes(f));
     const novos = git("ls-files", "--others", "--exclude-standard", "supabase").split(/\r?\n/).filter((f) => f && !APROVADAS.includes(f));

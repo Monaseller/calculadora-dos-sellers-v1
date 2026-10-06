@@ -61,6 +61,9 @@ import {
   somarDiasNoCalendario,
 } from "@/lib/fuso-sao-paulo";
 import type { LimiteExterno } from "@/lib/controle-tempo";
+// ML-CORPUS-A: a regra (normalizacao + pack_splitted) mora no servico
+// canonico — o oraculo live e o corpus do banco usam a MESMA funcao.
+import { CANCELAMENTO_DE_PACOTE_REFEITO, normalizarPedidoML } from "@/lib/vendas/canonico/ml";
 
 /**
  * Os codigos que sobem. MESMO vocabulario de
@@ -832,7 +835,7 @@ export async function buscarVendasPagasML(
  * envio falhou, houve mediacao — CONTINUA sendo venda bruta, porque e
  * assim que o relatorio oficial conta.
  */
-export const CANCELAMENTO_DE_PACOTE_REFEITO = "pack_splitted";
+export { CANCELAMENTO_DE_PACOTE_REFEITO };
 
 export interface PedidoVendaBrutaML {
   readonly pedidoId: string;
@@ -883,13 +886,6 @@ function falhaBruta(
   };
 }
 
-/** O codigo de cancelamento, quando ha. */
-function codigoDeCancelamento(pedido: Record<string, unknown>): string | null {
-  const detalhe = pedido.cancel_detail;
-  if (typeof detalhe !== "object" || detalhe === null) return null;
-  const codigo = (detalhe as Record<string, unknown>).code;
-  return typeof codigo === "string" && codigo !== "" ? codigo : null;
-}
 
 /**
  * As VENDAS BRUTAS do periodo — a semantica provada no F7b.4.8.4.
@@ -983,32 +979,23 @@ export async function buscarVendasBrutasML(
         if (!Number.isFinite(fechadoEm) || fechadoEm > entrada.ateInstanteMs) { fora += 1; continue; }
       }
 
-      const cancelCode = codigoDeCancelamento(o);
+      // Regra canonica UNICA (lib/vendas/canonico/ml.ts): o dia acima e o
+      // `n.diaFechamento` saem da MESMA diaEmSaoPaulo(o.date_closed).
+      const n = normalizarPedidoML(o);
+      const cancelCode = n.cancelCode;
       if (cancelCode === CANCELAMENTO_DE_PACOTE_REFEITO) { excluidos += 1; continue; }
 
-      const itens = Array.isArray(o.order_items) ? o.order_items : [];
-      let unidades = 0;
-      let porItens = 0;
-      for (const bruto of itens) {
-        if (typeof bruto !== "object" || bruto === null) continue;
-        const item = bruto as Record<string, unknown>;
-        const qtd = numeroOuZero(item.quantity);
-        unidades += qtd;
-        porItens += numeroOuZero(item.unit_price) * qtd;
-      }
-
-      const valor = numeroOuZero(o.total_amount);
       // §7: divergencia NAO troca o valor — ela e contada, para aparecer.
-      if (Math.abs(valor - porItens) > 0.005) divergencias += 1;
+      if (Math.abs(n.valor - n.valorPorItens) > 0.005) divergencias += 1;
 
       pedidos.push({
         pedidoId: id,
         diaFechamento: dia,
-        valor,
-        unidades,
-        status: typeof o.status === "string" ? o.status : "",
+        valor: n.valor,
+        unidades: n.unidades,
+        status: n.status,
         cancelCode,
-        valorPorItens: porItens,
+        valorPorItens: n.valorPorItens,
       });
     }
   }

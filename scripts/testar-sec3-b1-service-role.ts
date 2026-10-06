@@ -117,6 +117,8 @@ const MIGRACOES_APROVADAS = [
   "supabase/migrations/20261027_s2d1_shopee_foundation.sql",
   // S2-D2.2: cutover (NAO aplicado, fora de supabase/migrations) — guard proprio: testar-s2-cutover-migracao
   "supabase/cutover/PENDENTE_s2_cutover_shopee_item_store_unique.sql",
+  // ML-CORPUS-A: foundation ML (NAO aplicada) — guard proprio: testar-ml-corpus-migracao
+  "supabase/migrations/20261028_ml_corpus_foundation.sql",
 ];
 
 const RE_TABELA = new RegExp(`\\.from\\(\\s*["'\`](${TABELAS_SEC3.join("|")})["'\`]\\s*\\)`, "g");
@@ -559,7 +561,8 @@ async function principal() {
   // S2-D1: a fundacao canonica Shopee e a segunda mudanca de banco
   // aprovada (validada por scripts/testar-s2d1-migracao.ts, que contem o
   // proprio padrao de busca e por isso tambem sai da varredura).
-  const EXCLUSOES_APROVADAS = [...MIGRACOES_APROVADAS, "scripts/testar-s2d1-migracao.ts"].map((f) => `:(exclude)${f}`);
+  // ML-CORPUS-A: o guard da foundation ML tambem contem o padrao de busca.
+  const EXCLUSOES_APROVADAS = [...MIGRACOES_APROVADAS, "scripts/testar-s2d1-migracao.ts", "scripts/testar-ml-corpus-migracao.ts"].map((f) => `:(exclude)${f}`);
   const RE_MUDANCA_BANCO =
     /\b(GRANT|REVOKE)\s+\w+|\b(ENABLE|DISABLE|FORCE)\s+ROW\s+LEVEL\s+SECURITY|ROW LEVEL SECURITY|\b(CREATE|ALTER|DROP)\s+POLICY\b/i;
   /** Linhas ADICIONADAS (diff unificado) que mudam grant/RLS/policy. */
