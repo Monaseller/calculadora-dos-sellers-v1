@@ -92,6 +92,37 @@ const contem = (j: JobExistenteSync, [a, b]: Iv) => t(j.janelaInicio) <= a && t(
 const completo = (j: JobExistenteSync) => j.status === "concluido" && j.listagemCompleta === true;
 const diaCivil = (ms: number) => diaEmSaoPaulo(isoDe(ms))!;
 
+/** Um trecho atomico da janela e a observacao MAIS NOVA que o cobre por inteiro (null = nenhuma). */
+export interface SegmentoObservado { inicio: number; fim: number; ultimaMs: number | null }
+
+/**
+ * Observacao por SEGMENTO de uma janela create_time (SALES-SYNC-A2).
+ * So contam janelas create_time CONCLUIDAS com listagem completa (pendente,
+ * rodando, erro, listagem incompleta, update_time, legado e catch-up ficam
+ * de fora). A janela e cortada em todos os limites dessas janelas; cada
+ * segmento [p, q] recebe o MAIOR concluido_em entre os jobs que o contem por
+ * inteiro. Bordas sao compartilhadas ([A,B] e [B,C] cobrem B sem buraco):
+ * a mesma semantica de `contem`/`subtrair` do resto do planner.
+ */
+export function observacaoPorSegmento(jobs: JobExistenteSync[], [a, b]: [number, number]): SegmentoObservado[] {
+  const validos = jobs.filter((j) => j.campoTempo === "create_time" && j.janelaInicio && j.janelaFim && completo(j) && Number.isFinite(t(j.concluidoEm)));
+  const cortes = [...new Set([a, b, ...validos.flatMap((j) => [t(j.janelaInicio), t(j.janelaFim)]).filter((x) => x > a && x < b)])].sort((x, y) => x - y);
+  const out: SegmentoObservado[] = [];
+  for (let i = 0; i + 1 < cortes.length; i++) {
+    const seg: Iv = [cortes[i], cortes[i + 1]];
+    const obs = validos.filter((j) => contem(j, seg)).map((j) => t(j.concluidoEm));
+    out.push({ inicio: seg[0], fim: seg[1], ultimaMs: obs.length ? Math.max(...obs) : null });
+  }
+  return out;
+}
+
+/** Observacao EFETIVA de uma janela = a mais velha entre as mais novas de cada segmento (null = algum trecho sem observacao). */
+export function observacaoEfetivaDaJanela(jobs: JobExistenteSync[], iv: [number, number]): number | null {
+  const segs = observacaoPorSegmento(jobs, iv);
+  if (!segs.length || segs.some((s) => s.ultimaMs === null)) return null;
+  return Math.min(...segs.map((s) => s.ultimaMs!));
+}
+
 /** Intervalo maximo aceito entre observacoes para um periodo que termina em `fimMs`. null = sem exigencia. */
 function intervaloDeFrescor(pol: PoliticaSync, fimMs: number, agoraMs: number, origem: OrigemPedido): number | null {
   const idadeDias = (agoraMs - fimMs) / DIA_MS;
@@ -219,18 +250,23 @@ function planejarShopee(loja: LojaAtivaSync, de: string, ate: string, agoraMs: n
     }
   }
   if (!lacunas.length) {
-    const ultima = Math.min(...feitos.filter((j) => sobrepoe(j, necessario)).map((j) => t(j.concluidoEm)).filter(Number.isFinite));
+    // Frescor por SEGMENTO (SALES-SYNC-A2): um refresh mais novo substitui o
+    // job antigo onde reobservou; o trecho NAO reobservado mantem a idade dele.
+    const segs = observacaoPorSegmento(feitos, necessario);
     const intervalo = intervaloDeFrescor(pol, necessario[1], agoraMs, origem);
-    const velho = intervalo !== null && agoraMs - ultima > intervalo;
+    const velhos = intervalo === null ? [] : uniao(segs.filter((s) => s.ultimaMs === null || agoraMs - s.ultimaMs > intervalo).map((s) => [s.inicio, s.fim] as Iv));
+    // nao pago sem observacao pos-periodo: qualquer ponto da janela pode ter o pedido → reler a janela toda
+    const alvos: Iv[] = sinais.naoObservadosAposPeriodo > 0 ? [necessario] : velhos;
     if (sinais.naoObservadosAposPeriodo > 0) motivos.push(`nao_pagos_sem_observacao_pos_periodo:${sinais.naoObservadosAposPeriodo}`);
-    if (velho) motivos.push("observacao_velha");
-    if (sinais.naoObservadosAposPeriodo > 0 || velho) {
-      stale = true; desat.push({ inicio: isoDe(necessario[0]), fim: isoDe(necessario[1]) });
-      if (!ativos.length) {
-        const f = avaliarFalhas(descoberta, necessario, ultima, pol, agoraMs);
+    if (velhos.length) motivos.push("observacao_velha");
+    if (alvos.length) {
+      stale = true; desat.push(...alvos.map(([x, y]) => ({ inicio: isoDe(x), fim: isoDe(y) })));
+      if (!ativos.length) for (const iv of alvos) {
+        // falhas contam a partir da observacao efetiva DESTE trecho (nao de um job antigo de outro trecho)
+        const f = avaliarFalhas(descoberta, iv, observacaoEfetivaDaJanela(feitos, iv) ?? -Infinity, pol, agoraMs);
         if (f.estado === "esgotado") { motivos.push("refresh_falhas_repetidas"); esgotado.push("refresh_falhas_repetidas"); }
-        else if (f.estado === "esperar") espera = f.ate!;
-        else necessidades.push(...janelaJob(necessario[0], necessario[1], "refresh").map((job) => ({ job, tipo: "refresh" as const, prioridade: prioridadeDe(origem, "refresh", recente) })));
+        else if (f.estado === "esperar") espera = espera && espera > f.ate! ? espera : f.ate!;
+        else necessidades.push(...janelaJob(iv[0], iv[1], "refresh").map((job) => ({ job, tipo: "refresh" as const, prioridade: prioridadeDe(origem, "refresh", recente) })));
       }
     }
   }

@@ -7,6 +7,7 @@
  * Uso: npx tsx scripts/testar-vendas-sync-coordenador.ts
  */
 import "./_server-only-inerte";
+import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import type { AvaliacaoLojaSync, JobExistenteSync, LojaAtivaSync, PoliticaSync } from "../lib/vendas/sync/tipos";
@@ -306,6 +307,116 @@ async function principal() {
     assert(c({ marketplace: "ML", campo_tempo: null, janela_inicio: null, janela_fim: null, checkpoint: null }) === "NAO_CANONICO", "legado ml");
     assert(c({ marketplace: "Shopee", campo_tempo: ["update", "time"].join("_"), janela_inicio: "a", janela_fim: "b", checkpoint: null }) === "NAO_CANONICO", "upd");
     assert(c({ marketplace: "ML", campo_tempo: "create_time", janela_inicio: "a", janela_fim: "b", checkpoint: null }) === "NAO_CANONICO", "ml create_time");
+  });
+
+  // ── SALES-SYNC-A2: frescor Shopee por segmento ──
+  // periodo 01→03/10: janela necessaria W = [A, D] = [21/09 03Z, 04/10 03Z]; faixa 6h (fim ha < 7 dias)
+  console.log("\n[A2. frescor Shopee por segmento]");
+  const A = "2026-09-21T03:00:00.000Z", B = "2026-09-25T03:00:00.000Z", M = "2026-09-27T03:00:00.000Z", Cc = "2026-09-30T03:00:00.000Z", D = "2026-10-04T03:00:00.000Z";
+  const ha = (horas: number) => new Date(AGORA - horas * H).toISOString();
+  const sj = (ini: string, fim: string, horas: number, o: Partial<JobExistenteSync> = {}) => jobSP(SPA, ini, fim, { concluidoEm: ha(horas), criadoEm: ha(horas + 1), ...o });
+  const erroSP = (ini: string, fim: string, horas: number) => sj(ini, fim, horas, { status: "erro", listagemCompleta: false });
+  const avW = (jobs: JobExistenteSync[]) => av(sp(SPA), "2026-10-01", "2026-10-03", jobs, { sinaisShopee: SEM_SINAIS });
+  const resumoW = (a: AvaliacaoLojaSync) => ({ cobertura: a.cobertura, frescor: a.frescor, definitivo: a.definitivo, acao: a.proximaAcao.acao,
+    desat: a.desatualizado.map((x) => [x.inicio, x.fim]), refresh: a.necessidades.filter((n) => n.tipo === "refresh").map((n) => [n.job.inicio, n.job.fim]) });
+  const VELHO = () => sj(A, D, 20);
+  t("A2-1. refresh NOVO cobrindo a janela inteira substitui o job velho → FRESH, definitivo, NOOP", () => {
+    const r = resumoW(avW([VELHO(), sj(A, D, 1)]));
+    assert(r.cobertura === "COMPLETE" && r.frescor === "FRESH" && r.definitivo && r.acao === "NOOP", JSON.stringify(r));
+    const so = resumoW(avW([VELHO()]));
+    assert(so.frescor === "STALE" && so.acao === "CREATE_REFRESH_JOB", "controle: so o velho deveria estar STALE");
+  });
+  t("A2-2. refresh PARCIAL → STALE; a metade nao refrescada continua velha e e SO ela que vai para refresh", () => {
+    const r = resumoW(avW([VELHO(), sj(A, M, 1)]));
+    assert(r.cobertura === "COMPLETE" && r.frescor === "STALE" && !r.definitivo && r.acao === "CREATE_REFRESH_JOB", JSON.stringify(r));
+    assert(JSON.stringify(r.desat) === JSON.stringify([[M, D]]) && JSON.stringify(r.refresh) === JSON.stringify([[M, D]]), JSON.stringify(r));
+  });
+  t("A2-3. dois refreshes COMPLEMENTARES (borda compartilhada em M) → FRESH, NOOP", () => {
+    const r = resumoW(avW([VELHO(), sj(A, M, 1), sj(M, D, 2)]));
+    assert(r.frescor === "FRESH" && r.definitivo && r.acao === "NOOP", JSON.stringify(r));
+  });
+  t("A2-4. sobreposicoes [A,C] e [B,D] (nenhum identico a [A,D]) → FRESH", () => {
+    const r = resumoW(avW([VELHO(), sj(A, Cc, 1), sj(B, D, 2)]));
+    assert(r.frescor === "FRESH" && r.acao === "NOOP", JSON.stringify(r));
+  });
+  t("A2-5. GAP real de reobservacao [B,C] → usa a observacao anterior (velha) → STALE so em [B,C]", () => {
+    const r = resumoW(avW([VELHO(), sj(A, B, 1), sj(Cc, D, 1)]));
+    assert(r.frescor === "STALE" && JSON.stringify(r.desat) === JSON.stringify([[B, Cc]]) && JSON.stringify(r.refresh) === JSON.stringify([[B, Cc]]), JSON.stringify(r));
+    const semNada = av(sp(SPA), "2026-10-01", "2026-10-03", [sj(A, B, 1), sj(Cc, D, 1)], { sinaisShopee: SEM_SINAIS });
+    assert(semNada.cobertura === "PARTIAL" && semNada.necessidades.some((n) => n.tipo === "discovery") && semNada.frescor === "FRESH", "trecho sem nenhuma observacao tem de ser COBERTURA, nao frescor");
+  });
+  t("A2-6. ordem/UUID/criacao dos jobs NAO mudam o resultado (6 permutacoes, 2 cenarios)", () => {
+    const perm = <T,>(xs: T[]): T[][] => (xs.length <= 1 ? [xs] : xs.flatMap((x, i) => perm([...xs.slice(0, i), ...xs.slice(i + 1)]).map((p) => [x, ...p])));
+    for (const base of [[VELHO(), sj(A, Cc, 1), sj(B, D, 2)], [VELHO(), sj(A, B, 1), sj(Cc, D, 1)]]) {
+      const ref = JSON.stringify(resumoW(avW(base)));
+      for (const p of perm(base)) {
+        const reid = p.map((j, k) => ({ ...j, id: `z${p.length - k}-${j.id}`, criadoEm: ha(100 - k) }));
+        assert(JSON.stringify(resumoW(avW(reid))) === ref, `depende da ordem: ${JSON.stringify(resumoW(avW(reid)))}`);
+      }
+    }
+  });
+  t("A2-7. jobs INVALIDOS nao entram no envelope: erro, rodando, listagem incompleta, update_time, catch-up", () => {
+    const novos: [string, Partial<JobExistenteSync>][] = [
+      ["erro", { status: "erro", listagemCompleta: false }], ["rodando", { status: "rodando", listagemCompleta: false, concluidoEm: null }],
+      ["listagem_incompleta", { listagemCompleta: false }], ["update_time", { campoTempo: ["update", "time"].join("_") }],
+      ["catchup", { campoTempo: null, janelaInicio: null, janelaFim: null, catchup: true, listagemCompleta: null }],
+    ];
+    for (const [nome, o] of novos) { const r = avW([VELHO(), sj(A, D, 1, o)]); assert(r.frescor === "STALE" && !r.definitivo, `${nome} contou como observacao: ${JSON.stringify(resumoW(r))}`); }
+  });
+  t("A2-8. helper puro: borda compartilhada [A,B]+[B,D] sem buraco; MAX por segmento; MIN entre segmentos", () => {
+    const segs = P.observacaoPorSegmento([sj(A, B, 3), sj(B, D, 1), sj(A, D, 20)], [Date.parse(A), Date.parse(D)]);
+    assert(segs.length === 2 && segs.every((s) => s.ultimaMs !== null) && segs[0].ultimaMs === Date.parse(ha(3)) && segs[1].ultimaMs === Date.parse(ha(1)), JSON.stringify(segs));
+    assert(P.observacaoEfetivaDaJanela([sj(A, B, 3), sj(B, D, 1), sj(A, D, 20)], [Date.parse(A), Date.parse(D)]) === Date.parse(ha(3)), "efetiva = min dos max");
+    assert(P.observacaoEfetivaDaJanela([sj(A, B, 3), sj(Cc, D, 1)], [Date.parse(A), Date.parse(D)]) === null, "trecho sem observacao virou observado");
+    // o helper filtra SOZINHO os invalidos (nao depende do chamador pre-filtrar)
+    const W2: [number, number] = [Date.parse(A), Date.parse(D)];
+    for (const o of [{ status: "erro", listagemCompleta: false }, { status: "rodando", listagemCompleta: false }, { listagemCompleta: false }, { campoTempo: ["update", "time"].join("_") }] as Partial<JobExistenteSync>[])
+      assert(P.observacaoEfetivaDaJanela([sj(A, D, 20), sj(A, D, 1, o)], W2) === Date.parse(ha(20)), `invalido entrou no helper: ${JSON.stringify(o)}`);
+    // job parcial NUNCA vale para a janela inteira
+    assert(P.observacaoEfetivaDaJanela([sj(A, D, 20), sj(A, M, 1)], W2) === Date.parse(ha(20)) && P.observacaoEfetivaDaJanela([sj(A, M, 1)], W2) === null, "parcial tratado como full");
+  });
+  t("A2-F-A. velho → falha → sucesso NOVO completo: a falha antiga nao conta (FRESH, NOOP)", () => {
+    const r = resumoW(avW([VELHO(), erroSP(A, D, 10), erroSP(A, D, 9), erroSP(A, D, 8), sj(A, D, 1)]));
+    assert(r.frescor === "FRESH" && r.acao === "NOOP", JSON.stringify(r));
+  });
+  t("A2-F-B. sucesso novo so em [A,M]; falhas na metade NAO resolvida [M,D] continuam contando (3 → FAILED; 1 recente → WAIT_RETRY)", () => {
+    const tres = avW([VELHO(), sj(A, M, 1), erroSP(M, D, 5), erroSP(M, D, 4), erroSP(M, D, 3)]);
+    assert(tres.proximaAcao.acao === "FAILED" && tres.cobertura === "COMPLETE" && tres.frescor === "STALE", JSON.stringify(resumoW(tres)));
+    const um = avW([VELHO(), sj(A, M, 1), erroSP(M, D, 0.1)]);
+    assert(um.proximaAcao.acao === "WAIT_RETRY", JSON.stringify(resumoW(um)));
+  });
+  t("A2-F-B2. falhas que so tocavam a metade JA resolvida [A,M] nao contam contra [M,D] (refresh de [M,D], nao FAILED)", () => {
+    const r = resumoW(avW([VELHO(), erroSP(A, M, 5), erroSP(A, M, 4), erroSP(A, M, 3), sj(A, M, 1)]));
+    assert(r.acao === "CREATE_REFRESH_JOB" && JSON.stringify(r.refresh) === JSON.stringify([[M, D]]), JSON.stringify(r));
+  });
+  t("A2-F-C. duas metades resolvidas por sucessos diferentes depois das falhas → sem FAILED (FRESH, NOOP)", () => {
+    const r = resumoW(avW([VELHO(), erroSP(A, D, 5), erroSP(A, D, 4), erroSP(A, D, 3), sj(A, M, 1), sj(M, D, 2)]));
+    assert(r.frescor === "FRESH" && r.acao === "NOOP", JSON.stringify(r));
+  });
+  t("A2-B5. cenario REAL do B5: be316ebf-like + 4d537317-like → STALE; + refresh [24/09,05/10] concluido agora → FRESH, definitivo, NOOP", () => {
+    const agora = Date.parse("2026-10-06T19:27:19Z");
+    const real = (id: string, ini: string, fim: string, concl: string): JobExistenteSync => ({ id, lojaId: SPA, marketplace: "Shopee", campoTempo: "create_time", janelaInicio: ini, janelaFim: fim,
+      status: "concluido", listagemCompleta: true, concluidoEm: concl, criadoEm: concl });
+    const jobs = [real("be316ebf-like", "2026-09-21T03:00:00+00:00", "2026-10-04T03:00:00+00:00", "2026-10-05T23:07:31.163+00:00"),
+      real("4d537317-like", "2026-10-04T03:00:00+00:00", "2026-10-05T03:00:00+00:00", "2026-10-06T19:02:48.013+00:00")];
+    const avB5 = (js: JobExistenteSync[]) => P.avaliarLoja({ loja: sp(SPA), de: "2026-10-04", ate: "2026-10-04", agoraMs: agora, jobs: js, sinaisShopee: SEM_SINAIS, politica: POL, origem: "usuario" });
+    const antes = avB5(jobs); const j = jobDa(antes)!;
+    // por segmento: o trecho do 4d537317 (concluido ha 25 min) esta FRESCO → refresh so do trecho velho
+    assert(antes.cobertura === "COMPLETE" && antes.frescor === "STALE" && j.proposito === "refresh" && j.inicio === "2026-09-24T03:00:00.000Z" && j.fim === "2026-10-04T03:00:00.000Z", JSON.stringify(resumoW(antes)));
+    for (const [ini, fim] of [["2026-09-24T03:00:00.000Z", "2026-10-05T03:00:00.000Z"], [j.inicio!, j.fim!]]) {
+      const depois = avB5([...jobs, real("refresh-like", ini, fim, new Date(agora).toISOString())]);
+      assert(depois.cobertura === "COMPLETE" && depois.frescor === "FRESH" && depois.definitivo && depois.proximaAcao.acao === "NOOP", `${ini}..${fim}: ${JSON.stringify(resumoW(depois))}`);
+    }
+  });
+  t("A2-ML. planejarML INTOCADO (texto identico ao base 6c9b56e) e semantica MAX por dia preservada", () => {
+    const fn = (s: string) => { const i = s.indexOf("function planejarML("); const f = s.indexOf("\n// ── Shopee ──", i); return s.slice(i, f); };
+    const base = execFileSync("git", ["show", "6c9b56e:lib/vendas/sync/planejamento.ts"], { cwd: RAIZ, encoding: "utf8" });
+    const atual = readFileSync(join(RAIZ, "lib/vendas/sync/planejamento.ts"), "utf8");
+    assert(fn(base).length > 500 && fn(base).replace(/\r/g, "") === fn(atual).replace(/\r/g, ""), "planejarML mudou");
+    const velho = jobML(MLA, "2026-10-05", "2026-10-05", { concluidoEm: new Date(AGORA - 20 * H).toISOString() });
+    const novo = jobML(MLA, "2026-10-05", "2026-10-05", { concluidoEm: new Date(AGORA - H).toISOString() });
+    const a = av(ml(MLA), "2026-10-05", "2026-10-05", [velho, novo]); const b = av(ml(MLA), "2026-10-05", "2026-10-05", [novo, velho]);
+    assert(a.frescor === "FRESH" && b.frescor === "FRESH" && a.proximaAcao.acao === "NOOP", JSON.stringify([a.frescor, b.frescor]));
   });
 
   console.log("\n[P. guardas de arquitetura]");
