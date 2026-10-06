@@ -475,16 +475,7 @@ export async function lerVendasShopee(
     const ancora = args.ancorasDescoberta?.[lojaId];
     // so o corpus que pode conter pagamentos do periodo (mesmo `desde` de A)
     const desdeIso = new Date(ancora ? new Date(ancora).getTime() : inicio.getTime() - LIMITE_POLITICA_PAGAMENTO_MS).toISOString();
-    let naoPagos = 0;
-    for (const sem of [false, true]) {
-      let q = cliente.from("shopee_pedidos").select("order_sn", { count: "exact", head: true })
-        .eq("user_id", userId).eq("loja_id", lojaId).is("pay_time", null).gte("create_time", desdeIso).lt("create_time", fimIso);
-      q = sem ? q.is("detail_fetched_at", null) : q.lt("detail_fetched_at", fimIso);
-      if (ESTADOS_TERMINAIS_VERIFICADOS.length) q = q.not("order_status", "in", `(${ESTADOS_TERMINAIS_VERIFICADOS.join(",")})`);
-      const { count, error } = await q;
-      if (error || count === null || count === undefined) throw new Error("leitura_falhou");
-      naoPagos += count;
-    }
+    const naoPagos = await contarNaoPagosSemObservacaoShopee(cliente, { userId, lojaId, desdeIso, fimIso });
     const av = avaliarCompletudeShopee({ inicio, fim, janelas, ancoraDescoberta: ancora ? new Date(ancora) : null,
       pedidosPagos: pedidos, itens, naoPagosSemObservacaoPosPeriodo: naoPagos });
     const extra = { dimensoes: av.dimensoes, estadoEm: av.estadoEm, baseDescoberta: av.baseDescoberta, descobertaDesde: av.descobertaDesde };
@@ -500,6 +491,37 @@ export async function lerVendasShopee(
     ? "COMPLETE" : resultados.some((r) => r.completude === "FAILED") ? "FAILED" : "PARTIAL";
   const total = completude === "COMPLETE" ? somarMetricas(resultados.map((r) => r.metricas!)) : null;
   return { marketplace: "Shopee", periodo: { de, ate, fuso: "America/Sao_Paulo" }, completude, lojas: resultados, total };
+}
+
+/**
+ * Dimensao B (contagem): pedidos do corpus relevante [desde, fim) sem
+ * pagamento conhecido cuja ultima observacao e anterior a `fim`. UMA
+ * implementacao — usada pelo leitor canonico e pelo coordenador de sync.
+ */
+export async function contarNaoPagosSemObservacaoShopee(
+  cliente: SupabaseClient, a: { userId: string; lojaId: string; desdeIso: string; fimIso: string },
+): Promise<number> {
+  let total = 0;
+  for (const sem of [false, true]) {
+    let q = cliente.from("shopee_pedidos").select("order_sn", { count: "exact", head: true })
+      .eq("user_id", a.userId).eq("loja_id", a.lojaId).is("pay_time", null).gte("create_time", a.desdeIso).lt("create_time", a.fimIso);
+    q = sem ? q.is("detail_fetched_at", null) : q.lt("detail_fetched_at", a.fimIso);
+    if (ESTADOS_TERMINAIS_VERIFICADOS.length) q = q.not("order_status", "in", `(${ESTADOS_TERMINAIS_VERIFICADOS.join(",")})`);
+    const { count, error } = await q;
+    if (error || count === null || count === undefined) throw new Error("leitura_falhou");
+    total += count;
+  }
+  return total;
+}
+
+/** Dimensao C (contagem): pagos no periodo com escrow pendente (coluna gerada escrow_pendente). */
+export async function contarEscrowPendenteShopee(
+  cliente: SupabaseClient, a: { userId: string; lojaId: string; inicioIso: string; fimIso: string },
+): Promise<number> {
+  const { count, error } = await cliente.from("shopee_pedidos").select("order_sn", { count: "exact", head: true })
+    .eq("user_id", a.userId).eq("loja_id", a.lojaId).eq("escrow_pendente", true).gte("pay_time", a.inicioIso).lt("pay_time", a.fimIso);
+  if (error || count === null || count === undefined) throw new Error("leitura_falhou");
+  return count;
 }
 
 /** Soma por loja — lojas sao conjuntos disjuntos (PK inclui loja_id). */
