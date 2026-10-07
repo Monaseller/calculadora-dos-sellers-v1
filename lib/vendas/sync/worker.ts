@@ -150,25 +150,79 @@ export async function recuperarJobsPresos(cliente: SupabaseClient, agoraMs: numb
   return n;
 }
 
-/** Candidatos CANONICOS pendentes, mais antigos primeiro. Filtro no banco E de novo no codigo. */
-async function candidatos(cliente: SupabaseClient): Promise<{ id: string; tipo: TipoTrabalhoCanonico }[]> {
-  const janelas = await cliente.from("sync_jobs").select(COLUNAS_CANDIDATO)
-    .eq("status", "pendente").in("campo_tempo", ["date_closed", "create_time"]).order("criado_em", { ascending: true }).limit(CANDIDATOS);
+/**
+ * ORDEM JUSTA ENTRE LOJAS (SALES-SYNC-D2) — round-robin aproximado, pelo banco.
+ *
+ * `iniciado_em` = inicio da ULTIMA fatia que o job recebeu: so o claim o
+ * grava (os motores gravam `heartbeat_em`; pausa, ADIADO e a recuperacao de
+ * preso nao o tocam). NULL = nunca servido. Como cada loja tem no maximo UM
+ * job ativo (idx_sync_jobs_loja_ativo), ordenar jobs assim e ordenar LOJAS:
+ *   1. nunca servidos primeiro (iniciado_em NULL);
+ *   2. depois o que esta ha mais tempo sem fatia (iniciado_em mais velho);
+ *   3. desempate estavel: criado_em, id.
+ * Um job grande que acabou de pausar (ou foi ADIADO por auth transitoria)
+ * tem o iniciado_em mais novo da fila: vai para o FIM da rotacao.
+ *
+ * Prioridade da necessidade NAO entra aqui: sync_jobs nao a persiste, e ela
+ * ja agiu no coordenador, que escolhe QUAL job cada loja tem (fila serial).
+ * Ordenar por prioridade antes da justica reproduziria a monopolizacao.
+ */
+export const ORDEM_CLAIM_JUSTA = [
+  { coluna: "iniciado_em", ascending: true, nullsFirst: true },
+  { coluna: "criado_em", ascending: true, nullsFirst: false },
+  { coluna: "id", ascending: true, nullsFirst: false },
+] as const;
+
+/** A mesma ordem, em codigo (junta as duas consultas). */
+export function compararClaimJusto(a: Record<string, any>, b: Record<string, any>): number {
+  for (const { coluna, nullsFirst } of ORDEM_CLAIM_JUSTA) {
+    const x = a[coluna] ?? null, y = b[coluna] ?? null;
+    if (x === y) continue;
+    if (x === null) return nullsFirst ? -1 : 1;
+    if (y === null) return nullsFirst ? 1 : -1;
+    const ms = (v: unknown) => (coluna === "id" ? NaN : Date.parse(String(v)));
+    const dx = ms(x), dy = ms(y);
+    const c = Number.isFinite(dx) && Number.isFinite(dy) ? dx - dy : String(x).localeCompare(String(y));
+    if (c !== 0) return c < 0 ? -1 : 1;
+  }
+  return 0;
+}
+
+function ordenarJusto<Q extends { order: (...a: any[]) => Q }>(q: Q): Q {
+  for (const o of ORDEM_CLAIM_JUSTA) q = q.order(o.coluna, { ascending: o.ascending, nullsFirst: o.nullsFirst });
+  return q;
+}
+
+interface Candidato { id: string; tipo: TipoTrabalhoCanonico; iniciadoEm: string | null }
+
+/** Candidatos CANONICOS pendentes, na ORDEM JUSTA. Filtro no banco E de novo no codigo. */
+async function candidatos(cliente: SupabaseClient): Promise<Candidato[]> {
+  const colunas = `${COLUNAS_CANDIDATO}, iniciado_em`;
+  const janelas = await ordenarJusto(cliente.from("sync_jobs").select(colunas)
+    .eq("status", "pendente").in("campo_tempo", ["date_closed", "create_time"])).limit(CANDIDATOS);
   falhaDb("candidatos", janelas.error);
-  const catchup = await cliente.from("sync_jobs").select(COLUNAS_CANDIDATO)
-    .eq("status", "pendente").is("campo_tempo", null).eq("checkpoint->>modo", "escrow_catchup").order("criado_em", { ascending: true }).limit(CANDIDATOS);
+  const catchup = await ordenarJusto(cliente.from("sync_jobs").select(colunas)
+    .eq("status", "pendente").is("campo_tempo", null).eq("checkpoint->>modo", "escrow_catchup")).limit(CANDIDATOS);
   falhaDb("candidatos_catchup", catchup.error);
   return ([...(janelas.data ?? []), ...(catchup.data ?? [])] as Record<string, any>[])
-    .sort((a, b) => String(a.criado_em).localeCompare(String(b.criado_em)))
-    .map((r) => ({ id: r.id as string, tipo: classificarJobParaWorker({ ...r, checkpoint: { modo: r.modo } } as any) }))
+    .sort(compararClaimJusto)
+    .map((r) => ({ id: r.id as string, tipo: classificarJobParaWorker({ ...r, checkpoint: { modo: r.modo } } as any), iniciadoEm: (r.iniciado_em ?? null) as string | null }))
     .filter((c) => c.tipo !== "NAO_CANONICO");
 }
 
-/** Claim otimista: so quem muda pendente → rodando na MESMA linha ganha. */
-async function reivindicar(cliente: SupabaseClient, id: string, agoraMs: number): Promise<boolean> {
+/**
+ * Claim otimista: so quem muda pendente → rodando na MESMA linha ganha.
+ * Condicionado tambem ao `iniciado_em` OBSERVADO na leitura: se o job foi
+ * servido depois disso (outro worker pegou, rodou e pausou), a visao esta
+ * velha — 0 linhas, e o worker tenta o proximo candidato em vez de dar uma
+ * segunda fatia seguida ao mesmo job.
+ */
+async function reivindicar(cliente: SupabaseClient, c: Candidato, agoraMs: number): Promise<boolean> {
   const agoraIso = new Date(agoraMs).toISOString();
-  const { data, error } = await cliente.from("sync_jobs").update({ status: "rodando", iniciado_em: agoraIso, heartbeat_em: agoraIso })
-    .eq("id", id).eq("status", "pendente").select("id");
+  let q = cliente.from("sync_jobs").update({ status: "rodando", iniciado_em: agoraIso, heartbeat_em: agoraIso })
+    .eq("id", c.id).eq("status", "pendente");
+  q = c.iniciadoEm === null ? q.is("iniciado_em", null) : q.eq("iniciado_em", c.iniciadoEm);
+  const { data, error } = await q.select("id");
   falhaDb("claim", error);
   return (data ?? []).length === 1;
 }
@@ -208,8 +262,8 @@ export async function executarWorkerCanonico(depsOuFabrica: DepsWorker | (() => 
   // ── claim (no maximo UM job) ──
   const lista = await candidatos(cliente);
   if (!lista.length) return fim({ resultado: "NO_JOB", recuperados });
-  let ganho: { id: string; tipo: TipoTrabalhoCanonico } | null = null;
-  for (const c of lista.slice(0, TENTATIVAS_CLAIM)) if (await reivindicar(cliente, c.id, relogio.agoraMs())) { ganho = c; break; }
+  let ganho: Candidato | null = null;
+  for (const c of lista.slice(0, TENTATIVAS_CLAIM)) if (await reivindicar(cliente, c, relogio.agoraMs())) { ganho = c; break; }
   if (!ganho) return fim({ resultado: "CLAIM_PERDIDO", recuperados });
 
   // ── a linha reivindicada, relida ──

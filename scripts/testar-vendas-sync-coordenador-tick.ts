@@ -398,7 +398,8 @@ async function principal() {
       "lib/vendas/sync/worker.ts", "lib/vendas/sync/worker-deps.ts", "lib/vendas/sync/worker-contrato.ts", "app/api/internal/vendas-sync/worker", "app/api/sync", "app/api/internal/sync",
       "app/api/ml/vendas", "app/api/shopee/vendas", "lib/vendas/canonico", "lib/mercado-livre/ingestao", "lib/shopee/ingestao", "lib/shopee-auth.ts", "lib/ml-auth.ts",
       "lib/marketplace", "supabase", "vercel.json", ".env.example", "lib/feature-flags.ts", "scripts/sync-worker.mjs"], { cwd: RAIZ, encoding: "utf8" }).trim()
-      .split(/\r?\n/).filter((f) => f && f !== CAP).join(",");
+      // SALES-SYNC-D2 muda DE PROPOSITO so a ordem de claim do worker (guard proprio: testar-vendas-sync-worker-fairness)
+      .split(/\r?\n/).filter((f) => f && f !== CAP && f !== "lib/vendas/sync/worker.ts").join(",");
     const novos = execFileSync("git", ["ls-files", "--others", "--exclude-standard", "--", "supabase"], { cwd: RAIZ, encoding: "utf8" }).trim();
     assert(d === "" && novos === "", `alterados: ${d} ${novos}`);
     // SALES-SYNC-D1.1: a capability so GANHA a listagem do tick — nenhuma linha existente removida/alterada
