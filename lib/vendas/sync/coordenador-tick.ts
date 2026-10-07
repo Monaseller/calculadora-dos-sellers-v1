@@ -27,13 +27,18 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { ASYNC_SYNC_JOBS_ENABLED } from "@/lib/feature-flags";
 import { diaEmSaoPaulo, somarDiasNoCalendario } from "@/lib/fuso-sao-paulo";
-import { listarLojasAtivasParaSyncCanonico } from "@/lib/marketplace/credenciais";
+import { listarLojasAtivasParaSyncCanonico, type ElegibilidadeSyncCanonico } from "@/lib/marketplace/credenciais";
 import { avaliarNecessidadeDeSync, garantirProximaAcao, lerJobsDasLojas } from "./coordenador";
 import { agregar, avaliarBootstrap, OPCOES_BACKFILL_INICIAL, POLITICA_SYNC_PROPOSTA } from "./planejamento";
 import type { AvaliacaoLojaSync, AvaliacaoSync, MarketplaceSync, PoliticaSync } from "./tipos";
 
 export type FaseBootstrap = (typeof OPCOES_BACKFILL_INICIAL)[number]["id"] | "COMPLETO";
-export type AcaoTick = "JOB_CREATED" | "WAIT_ACTIVE_JOB" | "WAIT_RETRY" | "NOOP" | "FAILED" | "STORE_FAILED" | "NAO_AVALIADA_ORCAMENTO";
+/**
+ * SKIP_CREDENTIAL_UNUSABLE (SALES-SYNC-D4): loja ativa cuja credencial o
+ * resolver existente NAO conseguiria tornar valida (precisa reconexao).
+ * Estado administrativo: sem planejamento, sem job, nao e falha.
+ */
+export type AcaoTick = "JOB_CREATED" | "WAIT_ACTIVE_JOB" | "WAIT_RETRY" | "NOOP" | "FAILED" | "STORE_FAILED" | "NAO_AVALIADA_ORCAMENTO" | "SKIP_CREDENTIAL_UNUSABLE";
 
 export interface ResultadoLojaTick {
   lojaId: string;
@@ -47,11 +52,19 @@ export interface ResultadoLojaTick {
   estado?: { cobertura: string; frescor: string; definitivo: boolean };
   /** Codigo sanitizado — nunca mensagem crua do banco. */
   motivo?: string;
+  /** Elegibilidade derivada da credencial (capability) — so o estado e o motivo tipado, nunca valor. */
+  elegibilidade?: ElegibilidadeSyncCanonico["estado"];
+  /** Loja ignorada que ainda tem job ativo: o job NAO e tocado (o worker aplica a politica dele). */
+  jobAtivoId?: string | null;
 }
 
 export interface RelatorioTick {
   resultado: "DESABILITADO" | "OK" | "ERRO";
+  /** Lojas processadas neste tick (elegiveis + ignoradas por credencial; fora as do orcamento). */
   lojasAvaliadas: number;
+  lojasElegiveis: number;
+  /** Lojas ativas com credencial irrecuperavel (SKIP_CREDENTIAL_UNUSABLE) — nao contam como falha. */
+  lojasIgnoradasCredencial: number;
   jobsCriados: number;
   aguardando: number;
   noop: number;
@@ -71,7 +84,7 @@ export interface DepsTick {
   log?: (evento: Record<string, unknown>) => void;
 }
 
-interface LojaTick { id: string; userId: string; marketplace: MarketplaceSync }
+interface LojaTick { id: string; userId: string; marketplace: MarketplaceSync; elegibilidade: ElegibilidadeSyncCanonico }
 
 const logPadrao = (e: Record<string, unknown>) => console.log(JSON.stringify(e));
 
@@ -82,12 +95,26 @@ export function criarDepsTickReais(): DepsTick {
 /**
  * Todas as lojas ativas ML/Shopee, com o dono DA PROPRIA linha — pela
  * capability de lojas (lib/marketplace/credenciais.ts), unico ponto do
- * runtime que acessa a tabela. So id/dono/marketplace, nunca credencial.
+ * runtime que acessa a tabela. So id/dono/marketplace + a ELEGIBILIDADE que
+ * a capability deriva da credencial (D4) — nunca a credencial.
  */
-export async function listarLojasElegiveis(cliente: SupabaseClient): Promise<LojaTick[]> {
-  const { linhas, erro } = await listarLojasAtivasParaSyncCanonico(cliente);
+export async function listarLojasElegiveis(cliente: SupabaseClient, agoraMs: number): Promise<LojaTick[]> {
+  const { linhas, erro } = await listarLojasAtivasParaSyncCanonico(cliente, agoraMs);
   if (erro) throw new Error("leitura_lojas_falhou");
-  return linhas.map((l) => ({ id: l.id, userId: l.user_id, marketplace: l.marketplace }));
+  return linhas.map((l) => ({ id: l.id, userId: l.user_id, marketplace: l.marketplace, elegibilidade: l.elegibilidade }));
+}
+
+/**
+ * Loja com credencial irrecuperavel: NADA de planejamento nem job. So le
+ * (pelo leitor oficial, filtrado pelo dono) se ainda ha job ativo, para
+ * reportar — sem tocar nele. Falha dessa leitura nao vira falha da loja.
+ */
+async function ignorarPorCredencial(cliente: SupabaseClient, loja: LojaTick): Promise<ResultadoLojaTick> {
+  const motivo = loja.elegibilidade.estado === "INRECUPERAVEL_SEM_CREDENCIAL" ? loja.elegibilidade.motivo : undefined;
+  let jobAtivoId: string | null | undefined;
+  try { jobAtivoId = (await lerJobsDasLojas(cliente, loja.userId, [loja.id])).find((j) => j.status === "pendente" || j.status === "rodando")?.id ?? null; }
+  catch { jobAtivoId = undefined; }
+  return { lojaId: loja.id, marketplace: loja.marketplace, acao: "SKIP_CREDENTIAL_UNUSABLE", elegibilidade: loja.elegibilidade.estado, motivo, jobAtivoId };
 }
 
 /**
@@ -147,20 +174,28 @@ export async function executarTickCoordenador(
   criarDeps: () => DepsTick, opcoes: { orcamentoMs: number; habilitado?: boolean },
 ): Promise<RelatorioTick> {
   const inicio = Date.now();
-  const vazio = { lojasAvaliadas: 0, jobsCriados: 0, aguardando: 0, noop: 0, esgotadas: 0, falhas: 0, naoAvaliadas: 0, resultados: [] as ResultadoLojaTick[] };
+  const vazio = { lojasAvaliadas: 0, lojasElegiveis: 0, lojasIgnoradasCredencial: 0, jobsCriados: 0, aguardando: 0, noop: 0, esgotadas: 0, falhas: 0, naoAvaliadas: 0, resultados: [] as ResultadoLojaTick[] };
   if (!(opcoes.habilitado ?? ASYNC_SYNC_JOBS_ENABLED)) return { resultado: "DESABILITADO", ...vazio, duracaoMs: Date.now() - inicio };
   const deps = criarDeps();
   const log = deps.log ?? logPadrao;
   const politica = deps.politica ?? POLITICA_SYNC_PROPOSTA;
   const agoraMs = deps.relogio.agoraMs();
   log({ evento: "COORDINATOR_TICK_START" });
-  const lojas = await listarLojasElegiveis(deps.cliente);
+  const lojas = await listarLojasElegiveis(deps.cliente, agoraMs);
   const resultados: ResultadoLojaTick[] = [];
   for (const loja of lojas) {
     if (Date.now() - inicio > opcoes.orcamentoMs) { resultados.push({ lojaId: loja.id, marketplace: loja.marketplace, acao: "NAO_AVALIADA_ORCAMENTO" }); continue; }
+    if (loja.elegibilidade.estado !== "ELEGIVEL") {
+      // filtrado ANTES de qualquer planejamento: sem avaliar, sem garantirProximaAcao, sem job
+      const ign = await ignorarPorCredencial(deps.cliente, loja);
+      resultados.push(ign);
+      log({ evento: "STORE_SYNC_SKIPPED_CREDENTIAL", loja_id: ign.lojaId, marketplace: ign.marketplace, motivo: ign.motivo, job_ativo: ign.jobAtivoId ? true : ign.jobAtivoId === null ? false : "desconhecido" });
+      continue;
+    }
+    log({ evento: "STORE_SYNC_ELIGIBLE", loja_id: loja.id, marketplace: loja.marketplace });
     let r: ResultadoLojaTick;
-    try { r = await avaliarUmaLoja(deps, loja, agoraMs, politica); }
-    catch (e) { r = { lojaId: loja.id, marketplace: loja.marketplace, acao: "STORE_FAILED", motivo: motivoSanitizado(e) }; }
+    try { r = { ...(await avaliarUmaLoja(deps, loja, agoraMs, politica)), elegibilidade: "ELEGIVEL" }; }
+    catch (e) { r = { lojaId: loja.id, marketplace: loja.marketplace, acao: "STORE_FAILED", motivo: motivoSanitizado(e), elegibilidade: "ELEGIVEL" }; }
     resultados.push(r);
     log({ evento: "STORE_EVALUATED", loja_id: r.lojaId, marketplace: r.marketplace, acao: r.acao, fase_bootstrap: r.faseBootstrap });
     if (r.acao === "JOB_CREATED") log({ evento: "JOB_CREATED", loja_id: r.lojaId, marketplace: r.marketplace, job_id: r.jobId, tipo: r.tipoJob });
@@ -171,13 +206,15 @@ export async function executarTickCoordenador(
   const falhas = conta("STORE_FAILED");
   const naoAvaliadas = conta("NAO_AVALIADA_ORCAMENTO");
   const lojasAvaliadas = resultados.length - naoAvaliadas;
+  const lojasIgnoradasCredencial = conta("SKIP_CREDENTIAL_UNUSABLE");
+  const lojasElegiveis = lojasAvaliadas - lojasIgnoradasCredencial;
   const rel: RelatorioTick = {
-    // todas as lojas avaliadas falharam = provavelmente infra: nao mascarar como OK
-    resultado: lojasAvaliadas > 0 && falhas === lojasAvaliadas ? "ERRO" : "OK",
-    lojasAvaliadas, jobsCriados: conta("JOB_CREATED"), aguardando: conta("WAIT_ACTIVE_JOB", "WAIT_RETRY"), noop: conta("NOOP"),
+    // todas as lojas ELEGIVEIS avaliadas falharam = provavelmente infra: nao mascarar como OK
+    resultado: lojasElegiveis > 0 && falhas === lojasElegiveis ? "ERRO" : "OK",
+    lojasAvaliadas, lojasElegiveis, lojasIgnoradasCredencial, jobsCriados: conta("JOB_CREATED"), aguardando: conta("WAIT_ACTIVE_JOB", "WAIT_RETRY"), noop: conta("NOOP"),
     esgotadas: conta("FAILED"), falhas, naoAvaliadas, duracaoMs: Date.now() - inicio, resultados,
   };
-  log({ evento: "COORDINATOR_TICK_DONE", resultado: rel.resultado, lojas_avaliadas: rel.lojasAvaliadas, jobs_criados: rel.jobsCriados, aguardando: rel.aguardando,
+  log({ evento: "COORDINATOR_TICK_DONE", resultado: rel.resultado, lojas_avaliadas: rel.lojasAvaliadas, lojas_elegiveis: rel.lojasElegiveis, lojas_ignoradas_credencial: rel.lojasIgnoradasCredencial, jobs_criados: rel.jobsCriados, aguardando: rel.aguardando,
     noop: rel.noop, esgotadas: rel.esgotadas, falhas: rel.falhas, nao_avaliadas: rel.naoAvaliadas, duracao_ms: rel.duracaoMs });
   return rel;
 }

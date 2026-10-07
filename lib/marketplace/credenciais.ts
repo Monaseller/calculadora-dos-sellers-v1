@@ -957,11 +957,74 @@ export async function listarLojasAtivasParaCron(): Promise<ResultadoLista2<Linha
   return { linhas: (Array.isArray(data) ? data : []) as LinhaLojaParaCron[], erro: null };
 }
 
-/** Loja ativa vista pelo tick do coordenador canonico: o minimo para planejar por loja. */
+/**
+ * Elegibilidade de uma loja ativa para o sync canonico (SALES-SYNC-D4).
+ * DERIVADA da credencial guardada, sem chamar provider e sem renovar nada:
+ * "o resolver de auth EXISTENTE conseguiria produzir uma credencial valida?"
+ * Nunca altera `ativo`. Reparada a credencial, a loja volta sozinha.
+ */
+export type MotivoCredencialIrrecuperavel =
+  | "sem_access_token"      // ML: getMLLojaById devolve null sem access_token
+  | "sem_seller_id"         // ML: varrerDias recusa credencial sem sellerId
+  | "sem_partner"           // Shopee: resolverCredencialShopee → sem_partner
+  | "expirado_sem_refresh"; // ambos: expirado (margem 5 min) e sem refresh_token → token morto
+
+export type ElegibilidadeSyncCanonico =
+  | { estado: "ELEGIVEL" }
+  | { estado: "INRECUPERAVEL_SEM_CREDENCIAL"; motivo: MotivoCredencialIrrecuperavel };
+
+/** Loja ativa vista pelo tick do coordenador canonico: o minimo para planejar por loja + a elegibilidade derivada. */
 export interface LinhaLojaParaSyncCanonico {
   id: string;
   user_id: string;
   marketplace: "ML" | "Shopee";
+  elegibilidade: ElegibilidadeSyncCanonico;
+}
+
+/** A mesma margem dos dois resolvers (getMLLojaById e precisaRenovarShopee). */
+const MARGEM_EXPIRACAO_SYNC_CANONICO_MS = 5 * 60 * 1000;
+
+/** Campos de credencial lidos SO para classificar — nunca saem desta funcao. */
+interface CredencialParaElegibilidade {
+  marketplace: string;
+  access_token: string | null;
+  refresh_token: string | null;
+  token_expires_at: string | null;
+  seller_id: string | null;
+  partner_id: string | number | null;
+  partner_key: string | null;
+}
+
+/**
+ * Espelho EXATO das regras dos resolvers reais (auditadas no SALES-SYNC-D4):
+ *
+ *   ML (getMLLojaById + varrerDias):
+ *     sem access_token → null; expirado (expira − 5 min < agora) COM
+ *     refresh_token → renova (CAS); expirado SEM refresh → devolve o token
+ *     morto (o provider recusa); sem seller_id → credencial_ausente.
+ *   Shopee (resolverCredencialShopee):
+ *     sem partner_id/partner_key → sem_partner; ausente/expirado COM
+ *     refresh_token → lease → renova → CAS; SEM refresh → segue com o token
+ *     que tem (morto se expirado; sem_access_token se ausente).
+ *
+ * Expiracao desconhecida (NULL) com access_token: os dois resolvers USAM o
+ * token — elegivel. Access valido sem refresh: elegivel ate vencer.
+ */
+export function classificarElegibilidadeSyncCanonico(c: CredencialParaElegibilidade, agoraMs: number): ElegibilidadeSyncCanonico {
+  const irrecuperavel = (motivo: MotivoCredencialIrrecuperavel): ElegibilidadeSyncCanonico => ({ estado: "INRECUPERAVEL_SEM_CREDENCIAL", motivo });
+  const expirado = !!c.token_expires_at && new Date(c.token_expires_at).getTime() - MARGEM_EXPIRACAO_SYNC_CANONICO_MS < agoraMs;
+  if (c.marketplace === MARKETPLACE_ML) {
+    if (!c.access_token) return irrecuperavel("sem_access_token");
+    if (!c.seller_id) return irrecuperavel("sem_seller_id");
+    if (expirado && !c.refresh_token) return irrecuperavel("expirado_sem_refresh");
+    return { estado: "ELEGIVEL" };
+  }
+  if (!c.partner_id || !c.partner_key) return irrecuperavel("sem_partner");
+  if (!c.refresh_token) {
+    if (!c.access_token) return irrecuperavel("sem_access_token");
+    if (expirado) return irrecuperavel("expirado_sem_refresh");
+  }
+  return { estado: "ELEGIVEL" };
 }
 
 /** Pagina da listagem cross-tenant do tick (o PostgREST corta em 1000). */
@@ -975,22 +1038,28 @@ const PAGINA_LOJAS_SYNC_CANONICO = 500;
  * Mesma razao da do cron legado: o tick nao tem sessao, existe para varrer
  * todo mundo, e so roda atras de CRON_SECRET (rota interna). Diferente do
  * cron, o tick planeja POR LOJA — por isso devolve o `id`, e o dono vem da
- * MESMA linha (o par loja+dono nunca e montado fora daqui). Nada alem de
- * (id, user_id, marketplace): nem token, nem `partner_key`, nem
- * `seller_id`/`shop_id`, nem `nickname`. Nao resolve credencial.
+ * MESMA linha (o par loja+dono nunca e montado fora daqui).
+ *
+ * SALES-SYNC-D4: le internamente os campos de credencial SO para derivar a
+ * `elegibilidade` (classificarElegibilidadeSyncCanonico) — e nenhum deles
+ * sai daqui. O retorno e (id, user_id, marketplace, elegibilidade): nem
+ * token, nem `partner_key`, nem `seller_id`/`shop_id`, nem `nickname`.
+ * Nao resolve credencial, nao renova, nao chama provider.
  *
  * Paginada e em ordem deterministica (id). `user_id IS NOT NULL` como no
  * cron: loja orfa nao e de ninguem que se possa sincronizar.
  */
 export async function listarLojasAtivasParaSyncCanonico(
   /** Opcional (como em lerCredencialShopeeDoDono): cliente injetado nos testes; padrão = service_role. */
-  cliente?: any
+  cliente?: any,
+  /** Relogio da classificacao (expiracao); padrão = agora. */
+  agoraMs: number = Date.now()
 ): Promise<ResultadoLista2<LinhaLojaParaSyncCanonico>> {
   const linhas: LinhaLojaParaSyncCanonico[] = [];
   for (let desde = 0; ; desde += PAGINA_LOJAS_SYNC_CANONICO) {
     const { data, error } = await (cliente ?? getSupabaseServidor())
       .from("lojas")
-      .select("id, user_id, marketplace")
+      .select("id, user_id, marketplace, access_token, refresh_token, token_expires_at, seller_id, partner_id, partner_key")
       .eq("ativo", true)
       .in("marketplace", [MARKETPLACE_ML, MARKETPLACE_SHOPEE])
       .not("user_id", "is", null)
@@ -1001,10 +1070,11 @@ export async function listarLojasAtivasParaSyncCanonico(
       console.error("[credenciais] falha ao listar lojas ativas para o sync canonico");
       return { linhas: [], erro: "erro_consulta_loja" };
     }
-    const pagina = (Array.isArray(data) ? data : []) as { id: string | null; user_id: string | null; marketplace: string }[];
+    const pagina = (Array.isArray(data) ? data : []) as ({ id: string | null; user_id: string | null } & CredencialParaElegibilidade)[];
     for (const l of pagina) {
       if (l.id && l.user_id && (l.marketplace === MARKETPLACE_ML || l.marketplace === MARKETPLACE_SHOPEE)) {
-        linhas.push({ id: l.id, user_id: l.user_id, marketplace: l.marketplace });
+        // so os 4 campos seguros saem; a credencial lida morre aqui
+        linhas.push({ id: l.id, user_id: l.user_id, marketplace: l.marketplace, elegibilidade: classificarElegibilidadeSyncCanonico(l, agoraMs) });
       }
     }
     if (pagina.length < PAGINA_LOJAS_SYNC_CANONICO) break;

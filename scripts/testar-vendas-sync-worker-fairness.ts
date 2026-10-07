@@ -261,7 +261,9 @@ async function principal() {
   t("18/19. claim legado, coordenador, planner, tick, motores, canonicos, migrations, vercel.json e env INTOCADOS desde a base", () => {
     const d = execFileSync("git", ["diff", "--name-only", BASE, "--", "supabase", "lib/vendas/sync/coordenador.ts", "lib/vendas/sync/coordenador-tick.ts", "lib/vendas/sync/planejamento.ts",
       "lib/vendas/sync/tipos.ts", "lib/vendas/sync/worker-contrato.ts", "lib/vendas/sync/worker-deps.ts", "app/api", "lib/vendas/canonico", "lib/mercado-livre", "lib/shopee", "lib/shopee-auth.ts",
-      "lib/marketplace", "scripts/sync-worker.mjs", "vercel.json", ".env.example", "lib/feature-flags.ts", "lib/middleware-rotas.ts"], { cwd: RAIZ, encoding: "utf8" }).trim();
+      "lib/marketplace", "scripts/sync-worker.mjs", "vercel.json", ".env.example", "lib/feature-flags.ts", "lib/middleware-rotas.ts"], { cwd: RAIZ, encoding: "utf8" }).trim()
+      // SALES-SYNC-D4 muda DE PROPOSITO a elegibilidade (capability + tick) — guard proprio: testar-vendas-sync-elegibilidade
+      .split(/\r?\n/).filter((f) => f && f !== "lib/marketplace/credenciais.ts" && f !== "lib/vendas/sync/coordenador-tick.ts").join(",");
     const novos = execFileSync("git", ["ls-files", "--others", "--exclude-standard", "--", "supabase"], { cwd: RAIZ, encoding: "utf8" }).trim();
     assert(d === "" && novos === "", `alterados: ${d} ${novos}`);
   });

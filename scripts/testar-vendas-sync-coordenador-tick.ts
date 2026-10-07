@@ -28,6 +28,8 @@ const AGORA = Date.parse("2026-10-06T17:00:00Z"); // hoje em SP = 06/10
 const HOJE_INICIO = "2026-10-06T03:00:00.000Z";
 const H = 3600e3;
 const SEGREDO_FALSO = "tok-NAO-PODE-VAZAR-7c1e";
+/** Projecao interna da capability (D4): credencial lida SO para classificar elegibilidade. */
+const PROJECAO_CAPABILITY = "id, user_id, marketplace, access_token, refresh_token, token_expires_at, seller_id, partner_id, partner_key";
 const DA = "dono-a", DB = "dono-b", DC = "dono-c";
 const MLA = "11111111-1111-4111-8111-111111111111", MLB = "22222222-2222-4222-8222-222222222222";
 const SPA = "33333333-3333-4333-8333-333333333333", SPB = "44444444-4444-4444-8444-444444444444";
@@ -85,7 +87,8 @@ async function principal() {
     return { cliente, regs, db, rpcs: () => rpcs };
   }
   const loja = (id: string, user_id: string, marketplace: string, o: Record<string, any> = {}) =>
-    ({ id, user_id, marketplace, ativo: true, access_token: SEGREDO_FALSO, refresh_token: SEGREDO_FALSO, partner_key: SEGREDO_FALSO, ...o });
+    ({ id, user_id, marketplace, ativo: true, access_token: SEGREDO_FALSO, refresh_token: SEGREDO_FALSO, partner_key: SEGREDO_FALSO,
+      seller_id: "seller-fixture", partner_id: 1, token_expires_at: null, ...o });
   const linhaML = (lojaId: string, userId: string, de: string, ate: string, o: Record<string, any> = {}) => { const l = JM.limitesDaJanela(de, ate)!;
     return { id: `r${++seq}`, user_id: userId, loja_id: lojaId, marketplace: "ML", campo_tempo: "date_closed", janela_inicio: l.inicio.toISOString(), janela_fim: l.fim.toISOString(),
       status: "concluido", listagem_completa: true, concluido_em: new Date(AGORA - H).toISOString(), criado_em: new Date(AGORA - 2 * H).toISOString(), checkpoint: null, ...o }; };
@@ -104,7 +107,9 @@ async function principal() {
   const toques = (b: ReturnType<typeof bancoFalso>) => {
     assert(b.rpcs() === 0, "rpc chamada (lease/credencial)");
     assert(b.regs.every((r) => ["lojas", "sync_jobs", "shopee_pedidos"].includes(r.tabela)), `tabela fora do escopo: ${[...new Set(b.regs.map((r) => r.tabela))]}`);
-    assert(b.regs.filter((r) => r.tabela === "lojas").every((r) => !/token|partner|secret|key|\*/i.test(r.colunas)), "leu coluna de credencial de lojas");
+    // D4: a capability le credencial INTERNAMENTE so para classificar — projecao fixa, nunca "*"; o que SAI e checado nos testes de saida
+    // (a outra leitura de lojas e a do coordenador reutilizado, inalterado: so "id, marketplace")
+    assert(b.regs.filter((r) => r.tabela === "lojas").every((r) => r.colunas === PROJECAO_CAPABILITY || r.colunas === "id, marketplace"), "lojas lida fora das projecoes conhecidas");
     assert(b.regs.filter((r) => r.op === "insert").every((r) => r.tabela === "sync_jobs"), "insert fora de sync_jobs");
   };
 
@@ -319,7 +324,7 @@ async function principal() {
       // da capability de lojas, SO a listagem sem credencial (D1.1): nada de ler/gravar/lease de credencial
       const imps = [...s.matchAll(/import\s*(?:type\s*)?\{([^}]*)\}\s*from\s*"@\/lib\/marketplace\/credenciais"/g)];
       const nomes = imps.flatMap((m) => m[1].split(",").map((x) => x.trim()).filter(Boolean));
-      assert((s.match(/marketplace\/credenciais/g) ?? []).length === imps.length && nomes.every((x) => x === "listarLojasAtivasParaSyncCanonico"), `${f}: importa da capability alem da listagem: ${nomes}`);
+      assert((s.match(/marketplace\/credenciais/g) ?? []).length === imps.length && nomes.every((x) => x === "listarLojasAtivasParaSyncCanonico" || x === "type ElegibilidadeSyncCanonico"), `${f}: importa da capability alem da listagem: ${nomes}`);
     }
     assert(chamadasFetch === 0, `fetch chamado ${chamadasFetch}x`);
   });
@@ -345,18 +350,21 @@ async function principal() {
   });
   t("D1.1-b. capability: projecao minima (id, user_id, marketplace), ativo, ML/Shopee, com dono, ordem por id, pagina 500, erro estavel, sem credencial", () => {
     const c = corpoCap(); const sel = (c.match(/\.select\([^)]*\)/g) ?? []).join(" ");
-    assert(c !== "" && sel === '.select("id, user_id, marketplace")', `projecao: ${sel}`);
+    assert(c !== "" && sel === `.select("${PROJECAO_CAPABILITY}")`, `projecao: ${sel}`);
+    // D4: o que SAI e so (id, user_id, marketplace, elegibilidade) — um unico push, com esses 4 campos
+    assert((c.match(/linhas\.push\(/g) ?? []).length === 1
+      && /linhas\.push\(\{ id: l\.id, user_id: l\.user_id, marketplace: l\.marketplace, elegibilidade: classificarElegibilidadeSyncCanonico\(l, agoraMs\) \}\)/.test(c), "retorno alem dos 4 campos");
     assert(/\.eq\("ativo", true\)/.test(c) && /\.in\("marketplace", \[MARKETPLACE_ML, MARKETPLACE_SHOPEE\]\)/.test(c) && /\.not\("user_id", "is", null\)/.test(c), "filtros");
     assert(/\.order\("id", \{ ascending: true \}\)/.test(c) && /PAGINA_LOJAS_SYNC_CANONICO = 500/.test(semComentarios(CAP)) && /\.range\(/.test(c), "ordem/paginacao");
     assert(/erro: "erro_consulta_loja"/.test(c) && !/error\.message/.test(c), "erro");
-    assert(!/access_token|refresh_token|partner_key|partner_id|getShopeeLojaById|resolverCredencial|gravarCredencial|adquirirLease|\.update\(|\.insert\(|\.rpc\(/.test(c), "credencial/escrita");
+    assert(!/getShopeeLojaById|getMLLojaById|resolverCredencial|gravarCredencial|adquirirLease|renovar|refreshMLToken|refreshShopeeToken|fetch\(|\.update\(|\.insert\(|\.rpc\(/.test(c), "auth/escrita");
   });
   t("D1.1-c. capability em runtime: so ativas ML/Shopee com dono, sem credencial no retorno; 1201 lojas paginadas sem perda nem duplicata; erro estavel", async () => {
     const CR = await import("../lib/marketplace/credenciais");
     const b = bancoFalso([loja(MLB, DA, "ML"), loja(MLA, DB, "Shopee"), loja(SPA, null as any, "ML"), loja(SPB, DA, "Amazon"), loja(MLC, DA, "ML", { ativo: false })]);
     const r = await CR.listarLojasAtivasParaSyncCanonico(b.cliente);
-    assert(r.erro === null && JSON.stringify(r.linhas) === JSON.stringify([{ id: MLA, user_id: DB, marketplace: "Shopee" }, { id: MLB, user_id: DA, marketplace: "ML" }]), JSON.stringify(r));
-    assert(!JSON.stringify(r).includes(SEGREDO_FALSO), "devolveu credencial");
+    assert(r.erro === null && JSON.stringify(r.linhas) === JSON.stringify([{ id: MLA, user_id: DB, marketplace: "Shopee", elegibilidade: { estado: "ELEGIVEL" } }, { id: MLB, user_id: DA, marketplace: "ML", elegibilidade: { estado: "ELEGIVEL" } }]), JSON.stringify(r));
+    assert(!JSON.stringify(r).includes(SEGREDO_FALSO) && r.linhas.every((l) => Object.keys(l).sort().join() === "elegibilidade,id,marketplace,user_id"), "devolveu credencial");
     const muitas = Array.from({ length: 1201 }, (_, i) => loja(`l${String(i).padStart(5, "0")}`, `d${i % 7}`, i % 2 ? "ML" : "Shopee"));
     const b2 = bancoFalso([...muitas].reverse());
     const r2 = await CR.listarLojasAtivasParaSyncCanonico(b2.cliente);
@@ -407,8 +415,8 @@ async function principal() {
     const removidas = dc.filter((l) => l.startsWith("-") && !l.startsWith("---"));
     const adicionadas = dc.filter((l) => l.startsWith("+") && !l.startsWith("+++") && !/^\+\s*(\*|\/\*\*|\/\/)/.test(l)).join("\n");
     assert(removidas.length === 0, `capability alterada: ${removidas.slice(0, 3).join(" | ")}`);
-    assert(adicionadas === "" || ((adicionadas.match(/export (async function|interface|const) \w+/g) ?? []).every((x) => /LinhaLojaParaSyncCanonico|listarLojasAtivasParaSyncCanonico/.test(x))
-      && !/access_token|refresh_token|partner_key|\.update\(|\.insert\(|\.rpc\(/.test(adicionadas)), "capability ganhou algo alem da listagem do tick");
+    assert(adicionadas === "" || ((adicionadas.match(/export (async function|interface|const) \w+/g) ?? []).every((x) => /LinhaLojaParaSyncCanonico|listarLojasAtivasParaSyncCanonico|MotivoCredencialIrrecuperavel|ElegibilidadeSyncCanonico|classificarElegibilidadeSyncCanonico/.test(x))
+      && !/\.update\(|\.insert\(|\.upsert\(|\.delete\(|\.rpc\(|fetch\(/.test(adicionadas)), "capability ganhou algo alem da listagem/elegibilidade do tick");
     assert(!/vendas-sync/.test(readFileSync(join(RAIZ, "vercel.json"), "utf8")), "cron criado");
   });
 
