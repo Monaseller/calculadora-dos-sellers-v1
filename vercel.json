@@ -15,6 +15,14 @@
     {
       "path": "/api/internal/agentes/monitor-ingestao",
       "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/internal/vendas-sync/coordenador",
+      "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/internal/vendas-sync/worker",
+      "schedule": "* * * * *"
     }
   ],
   "functions": {

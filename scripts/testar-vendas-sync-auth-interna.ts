@@ -148,7 +148,7 @@ async function principal() {
     assert(H.cabecalhoEsperadoSalesSync("Bearer x", "c") === "Bearer c", "fallback nao e o do cron");
   });
   t("escopo: vercel.json, legado, Vendas, Dashboard, flag, logica canonica, middleware INTOCADOS desde a base", () => {
-    const d = execFileSync("git", ["diff", "--name-only", BASE, "--", "vercel.json", "app/(app)", "app/api/sync", "app/api/ml", "app/api/shopee", "app/api/internal/sync",
+    const d = execFileSync("git", ["diff", "--name-only", BASE, "--", /* SALES-SYNC-D10: vercel.json agora agenda os crons canonicos — guard proprio: testar-vendas-sync-cron */ "app/(app)", "app/api/sync", "app/api/ml", "app/api/shopee", "app/api/internal/sync",
       "app/api/internal/agentes", "app/api/internal/estudio-anuncios", "lib/feature-flags.ts", "lib/vendas/sync/flag-canonica.ts", "lib/vendas/sync/coordenador.ts",
       "lib/vendas/sync/coordenador-tick.ts", "lib/vendas/sync/planejamento.ts", "lib/vendas/sync/worker.ts", "lib/vendas/sync/worker-deps.ts", "lib/vendas/canonico",
       "lib/marketplace", "lib/shopee-auth.ts", "lib/ml-auth.ts", "lib/mercado-livre", "lib/shopee", "lib/middleware-rotas.ts", "middleware.ts", "supabase", "scripts/sync-worker.mjs"],

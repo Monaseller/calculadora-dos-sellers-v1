@@ -222,7 +222,7 @@ async function principal() {
     const { execFileSync } = require("node:child_process") as typeof import("node:child_process");
     const d = execFileSync("git", ["diff", "--name-only", "2d2beb4", "--", "lib/shopee-auth.ts", "lib/ml-auth.ts", "lib/mercado-livre-vendas.ts", "lib/vendas/sync/worker.ts",
       "lib/vendas/sync/worker-deps.ts", "lib/vendas/sync/coordenador.ts", "lib/vendas/sync/planejamento.ts", "lib/vendas/canonico", "lib/mercado-livre/ingestao", "lib/shopee/ingestao",
-      "supabase", "vercel.json", "app", "lib/feature-flags.ts"], { cwd: RAIZ, encoding: "utf8" }).trim()
+      /* SALES-SYNC-D10: vercel.json agora agenda os crons canonicos — guard proprio: testar-vendas-sync-cron */ "supabase", "app", "lib/feature-flags.ts"], { cwd: RAIZ, encoding: "utf8" }).trim()
       // SALES-SYNC-D6: as duas rotas passam a ler a flag server-only (guard proprio: testar-vendas-sync-feature-flag)
       .split(/\r?\n/).filter((f) => f && f !== "app/api/internal/vendas-sync/coordenador/route.ts" && f !== "app/api/internal/vendas-sync/worker/route.ts").join(",");
     assert(d === "", `alterados: ${d}`);

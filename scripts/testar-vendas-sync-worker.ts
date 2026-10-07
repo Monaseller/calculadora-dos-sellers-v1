@@ -394,13 +394,13 @@ async function principal() {
       // SALES-SYNC-C8: SELECT do service_role no lease — guard proprio: testar-shopee-refresh-lease M6
       "supabase/migrations/20261031_sales_sync_c8_shopee_refresh_lease_select.sql"];
     const d = execFileSync("git", ["diff", "--name-only", BASE, "--", "scripts/sync-worker.mjs", "app/api/internal/sync", "app/api/sync", "lib/sync-ml.ts", "lib/sync-shopee.ts",
-      "lib/vendas/canonico", "lib/mercado-livre/ingestao", "lib/shopee/ingestao", "supabase", "vercel.json", ".env.example", "lib/feature-flags.ts"], { cwd: RAIZ, encoding: "utf8" })
+      "lib/vendas/canonico", "lib/mercado-livre/ingestao", "lib/shopee/ingestao", /* SALES-SYNC-D10: vercel.json agora agenda os crons canonicos — guard proprio: testar-vendas-sync-cron */ "supabase", ".env.example", "lib/feature-flags.ts"], { cwd: RAIZ, encoding: "utf8" })
       // SALES-SYNC-D6 acrescenta a flag server-only ao .env.example (guard proprio: testar-vendas-sync-feature-flag)
       .trim().split(/\r?\n/).filter((f) => f && !FENCE_C1.includes(f) && f !== ".env.example").join(",");
     const novos = execFileSync("git", ["ls-files", "--others", "--exclude-standard", "--", "supabase"], { cwd: RAIZ, encoding: "utf8" })
       .trim().split(/\r?\n/).filter((f) => f && !FENCE_C1.includes(f)).join(",");
     assert(d === "" && novos === "", `alterados: ${d} ${novos}`);
-    assert(!/vendas-sync/.test(readFileSync(join(RAIZ, "vercel.json"), "utf8")), "cron criado");
+    assert(JSON.stringify(JSON.parse(readFileSync(join(RAIZ, "vercel.json"), "utf8")).crons.filter((c: { path: string }) => /vendas-sync/.test(c.path))) === JSON.stringify([{ path: "/api/internal/vendas-sync/coordenador", schedule: "*/15 * * * *" }, { path: "/api/internal/vendas-sync/worker", schedule: "* * * * *" }]), "crons canonicos diferentes do aprovado (D10)");
   });
   t("sanitizarErro remove token, segredo e identificadores longos", () => {
     const s = W.sanitizarErro(new Error("falhou access_token=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA partner_key:zz pedido 2410021234567890 Bearer xyz"));

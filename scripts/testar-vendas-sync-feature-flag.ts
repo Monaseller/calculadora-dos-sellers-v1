@@ -181,7 +181,7 @@ async function principal() {
   t("K/L. Vendas, Dashboard, legado (/api/sync, iniciar, status, sync-on-read, worker local), flag publica e logica canonica INTOCADOS", () => {
     const d = execFileSync("git", ["diff", "--name-only", BASE, "--", "app/(app)", "app/api/sync", "app/api/ml", "app/api/shopee", "app/api/internal/sync", "lib/feature-flags.ts",
       "lib/vendas", "lib/marketplace", "lib/shopee-auth.ts", "lib/ml-auth.ts", "lib/mercado-livre", "lib/shopee", "lib/sync-ml.ts", "lib/sync-shopee.ts", "scripts/sync-worker.mjs",
-      "supabase", "vercel.json", "middleware.ts", "lib/middleware-rotas.ts"], { cwd: RAIZ, encoding: "utf8" }).trim().split(/\r?\n/)
+      /* SALES-SYNC-D10: vercel.json agora agenda os crons canonicos — guard proprio: testar-vendas-sync-cron */ "supabase", "middleware.ts", "lib/middleware-rotas.ts"], { cwd: RAIZ, encoding: "utf8" }).trim().split(/\r?\n/)
       // SALES-SYNC-D8.2: helper de auth das rotas canonicas (guard proprio: testar-vendas-sync-auth-interna)
       .filter((f) => f && f !== HELPER && f !== "lib/vendas/sync/auth-interna.ts");
     assert(d.length === 0, `alterados: ${d}`);

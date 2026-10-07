@@ -253,7 +253,7 @@ async function principal() {
       // SALES-SYNC-D8.2: auth manual das rotas canonicas (guard proprio: testar-vendas-sync-auth-interna)
       "lib/vendas/sync/auth-interna.ts"];
     const d = execFileSync("git", ["diff", "--name-only", BASE, "--", "lib/vendas", "lib/mercado-livre/ingestao", "lib/shopee/ingestao", "lib/sync-ml.ts", "lib/sync-shopee.ts",
-      "lib/ml-auth.ts", "app/api/sync", "app/api/internal", "app/api/ml/vendas", "app/api/shopee/vendas", "vercel.json", "lib/feature-flags.ts"], { cwd: RAIZ, encoding: "utf8" })
+      "lib/ml-auth.ts", "app/api/sync", "app/api/internal", "app/api/ml/vendas", /* SALES-SYNC-D10: vercel.json agora agenda os crons canonicos — guard proprio: testar-vendas-sync-cron */ "app/api/shopee/vendas", "lib/feature-flags.ts"], { cwd: RAIZ, encoding: "utf8" })
       .trim().split(/\r?\n/).filter((f) => f && !C6.includes(f)).join(",");
     assert(d === "", d);
   });

@@ -406,7 +406,7 @@ async function principal() {
     const d = execFileSync("git", ["diff", "--name-only", BASE, "--", "lib/vendas/sync/coordenador.ts", "lib/vendas/sync/planejamento.ts", "lib/vendas/sync/tipos.ts",
       "lib/vendas/sync/worker.ts", "lib/vendas/sync/worker-deps.ts", "lib/vendas/sync/worker-contrato.ts", "app/api/internal/vendas-sync/worker", "app/api/sync", "app/api/internal/sync",
       "app/api/ml/vendas", "app/api/shopee/vendas", "lib/vendas/canonico", "lib/mercado-livre/ingestao", "lib/shopee/ingestao", "lib/shopee-auth.ts", "lib/ml-auth.ts",
-      "lib/marketplace", "supabase", "vercel.json", ".env.example", "lib/feature-flags.ts", "scripts/sync-worker.mjs"], { cwd: RAIZ, encoding: "utf8" }).trim()
+      /* SALES-SYNC-D10: vercel.json agora agenda os crons canonicos — guard proprio: testar-vendas-sync-cron */ "lib/marketplace", "supabase", ".env.example", "lib/feature-flags.ts", "scripts/sync-worker.mjs"], { cwd: RAIZ, encoding: "utf8" }).trim()
       // SALES-SYNC-D2 muda DE PROPOSITO so a ordem de claim do worker (guard proprio: testar-vendas-sync-worker-fairness)
       // SALES-SYNC-D6: flag server-only na rota do worker e no .env.example (guard proprio: testar-vendas-sync-feature-flag)
       .split(/\r?\n/).filter((f) => f && f !== CAP && f !== "lib/vendas/sync/worker.ts" && f !== ".env.example" && f !== "app/api/internal/vendas-sync/worker/route.ts").join(",");
@@ -419,7 +419,7 @@ async function principal() {
     assert(removidas.length === 0, `capability alterada: ${removidas.slice(0, 3).join(" | ")}`);
     assert(adicionadas === "" || ((adicionadas.match(/export (async function|interface|const) \w+/g) ?? []).every((x) => /LinhaLojaParaSyncCanonico|listarLojasAtivasParaSyncCanonico|MotivoCredencialIrrecuperavel|ElegibilidadeSyncCanonico|classificarElegibilidadeSyncCanonico/.test(x))
       && !/\.update\(|\.insert\(|\.upsert\(|\.delete\(|\.rpc\(|fetch\(/.test(adicionadas)), "capability ganhou algo alem da listagem/elegibilidade do tick");
-    assert(!/vendas-sync/.test(readFileSync(join(RAIZ, "vercel.json"), "utf8")), "cron criado");
+    assert(JSON.stringify(JSON.parse(readFileSync(join(RAIZ, "vercel.json"), "utf8")).crons.filter((c: { path: string }) => /vendas-sync/.test(c.path))) === JSON.stringify([{ path: "/api/internal/vendas-sync/coordenador", schedule: "*/15 * * * *" }, { path: "/api/internal/vendas-sync/worker", schedule: "* * * * *" }]), "crons canonicos diferentes do aprovado (D10)");
   });
 
   await fila;
