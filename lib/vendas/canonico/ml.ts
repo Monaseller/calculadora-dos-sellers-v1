@@ -38,7 +38,8 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { diaEmSaoPaulo } from "@/lib/fuso-sao-paulo";
 import { intervaloSaoPaulo } from "./shopee";
-import type { Completude } from "./tipos";
+import { prefixoObservado } from "./periodo";
+import type { Completude, ParcialObservadoLoja } from "./tipos";
 
 /** O UNICO cancelamento que tira o pedido da venda bruta. */
 export const CANCELAMENTO_DE_PACOTE_REFEITO = "pack_splitted";
@@ -199,7 +200,25 @@ export function avaliarCompletudeML(args: { inicio: Date; fim: Date; janelas: Ja
 
 // ── Leitura do banco (server-side, dono SEMPRE explicito) ────────────
 
-export interface ResultadoVendasLojaML { lojaId: string; completude: Completude; motivos: string[]; metricas: MetricasVendasML | null; estadoEm: string | null }
+export interface ResultadoVendasLojaML {
+  lojaId: string; completude: Completude; motivos: string[]; metricas: MetricasVendasML | null; estadoEm: string | null;
+  /** SALES-CANONICAL-D14: so quando o chamador pede `parcial: true`. */
+  parcial?: ParcialObservadoLoja<MetricasVendasML>;
+}
+
+/**
+ * SALES-CANONICAL-D14 — o prefixo OBSERVADO [inicio, observadoAte) de um
+ * periodo aberto. observadoAte = alcance da cadeia date_closed (a MESMA de
+ * avaliarCompletudeML); avaliado pelas MESMAS funcoes puras. Nenhuma regra nova.
+ */
+export function parcialObservadoML(inicio: Date, fim: Date, janelas: JanelaFechamentoML[], pedidos: PedidoMLCanonico[]): ParcialObservadoLoja<MetricasVendasML> {
+  const p = prefixoObservado(alcanceFechamentoML(janelas, inicio.getTime()), inicio, fim);
+  if (p.estado !== "OBSERVADO_ATE") return { estado: p.estado, observadoAte: null, completude: null, motivos: [], metricas: null };
+  const noPrefixo = filtrarFechadosNoIntervalo(pedidos, inicio, p.ate);
+  const av = avaliarCompletudeML({ inicio, fim: p.ate, janelas, pedidos: noPrefixo });
+  return { estado: p.estado, observadoAte: p.ate.toISOString(), completude: av.completude, motivos: av.motivos,
+    metricas: av.completude === "COMPLETE" ? calcularMetricasML(noPrefixo) : null };
+}
 export interface ResultadoVendasML {
   marketplace: "ML";
   periodo: { de: string; ate: string; fuso: "America/Sao_Paulo" };
@@ -219,7 +238,8 @@ const PAGINA = 1000;
  */
 export async function lerVendasML(
   cliente: SupabaseClient,
-  args: { userId: string; de: string; ate: string; lojaIds?: string[] },
+  /** `parcial` (D14, padrao false): acrescenta `parcial` por loja; sem ele o resultado e o de sempre. */
+  args: { userId: string; de: string; ate: string; lojaIds?: string[]; parcial?: boolean },
 ): Promise<ResultadoVendasML> {
   const { userId, de, ate } = args;
   if (!userId) throw new Error("user_id_ausente");
@@ -262,7 +282,8 @@ export async function lerVendasML(
     }));
     const av = avaliarCompletudeML({ inicio, fim, janelas, pedidos });
     resultados.push({ lojaId, completude: av.completude, motivos: av.motivos, estadoEm: av.estadoEm,
-      metricas: av.completude === "COMPLETE" ? calcularMetricasML(pedidos) : null });
+      metricas: av.completude === "COMPLETE" ? calcularMetricasML(pedidos) : null,
+      ...(args.parcial === true ? { parcial: parcialObservadoML(inicio, fim, janelas, pedidos) } : {}) });
   }
   const completude: Completude = resultados.every((r) => r.completude === "COMPLETE")
     ? "COMPLETE" : resultados.some((r) => r.completude === "FAILED") ? "FAILED" : "PARTIAL";

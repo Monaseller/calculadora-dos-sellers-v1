@@ -33,8 +33,9 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { inicioDoDiaEmSaoPaulo, somarDiasNoCalendario } from "@/lib/fuso-sao-paulo";
 import type {
-  Completude, ComponentesVendasShopee, MetricasVendas, ResultadoVendas, ResultadoVendasLoja,
+  Completude, ComponentesVendasShopee, MetricasVendas, ParcialObservadoLoja, ResultadoVendas, ResultadoVendasLoja,
 } from "./tipos";
+import { prefixoObservado } from "./periodo";
 
 // ── Entradas normalizadas (o que o banco guarda) ─────────────────────
 
@@ -402,6 +403,8 @@ export async function lerVendasShopee(
   cliente: SupabaseClient,
   args: {
     userId: string; de: string; ate: string; lojaIds?: string[];
+    /** SALES-CANONICAL-D14 (padrao false): acrescenta `parcial` por loja; sem ele o resultado e o de sempre. */
+    parcial?: boolean;
     /**
      * DISCOVERY_ANCHOR por loja (ISO), explicita e comprovada. Ainda nao ha
      * onde persisti-la (proposta de schema no S2-D3-B2.1): sem ela, A e
@@ -478,7 +481,9 @@ export async function lerVendasShopee(
     const naoPagos = await contarNaoPagosSemObservacaoShopee(cliente, { userId, lojaId, desdeIso, fimIso });
     const av = avaliarCompletudeShopee({ inicio, fim, janelas, ancoraDescoberta: ancora ? new Date(ancora) : null,
       pedidosPagos: pedidos, itens, naoPagosSemObservacaoPosPeriodo: naoPagos });
-    const extra = { dimensoes: av.dimensoes, estadoEm: av.estadoEm, baseDescoberta: av.baseDescoberta, descobertaDesde: av.descobertaDesde };
+    const extra = { dimensoes: av.dimensoes, estadoEm: av.estadoEm, baseDescoberta: av.baseDescoberta, descobertaDesde: av.descobertaDesde,
+      ...(args.parcial === true ? { parcial: await parcialObservadoShopee(cliente, { userId, lojaId, inicio, fim, janelas,
+        ancora: ancora ? new Date(ancora) : null, desdeIso, pedidos, itens }) } : {}) };
     if (av.completude !== "COMPLETE") {
       resultados.push({ lojaId, completude: av.completude, motivos: av.motivos, metricas: null, componentes: null, ...extra });
       continue;
@@ -491,6 +496,27 @@ export async function lerVendasShopee(
     ? "COMPLETE" : resultados.some((r) => r.completude === "FAILED") ? "FAILED" : "PARTIAL";
   const total = completude === "COMPLETE" ? somarMetricas(resultados.map((r) => r.metricas!)) : null;
   return { marketplace: "Shopee", periodo: { de, ate, fuso: "America/Sao_Paulo" }, completude, lojas: resultados, total };
+}
+
+/**
+ * SALES-CANONICAL-D14 — o prefixo OBSERVADO [inicio, observadoAte) de um
+ * periodo aberto. observadoAte = alcance da cadeia create_time (a MESMA de
+ * avaliarCompletudeShopee, desde a ancora ou inicio − prazo publicado);
+ * avaliado pelas MESMAS funcoes (filtro por pay_time, contagem B ate o
+ * corte, completude A/B/C, calcularMetricasShopee). Nenhuma regra nova.
+ */
+async function parcialObservadoShopee(cliente: SupabaseClient, a: {
+  userId: string; lojaId: string; inicio: Date; fim: Date; janelas: JanelaListagem[]; ancora: Date | null; desdeIso: string;
+  pedidos: PedidoShopeeCanonico[]; itens: ItemShopeeCanonico[];
+}): Promise<ParcialObservadoLoja<MetricasVendas>> {
+  const p = prefixoObservado(alcanceDescobertaCriacao(a.janelas, new Date(a.desdeIso).getTime()), a.inicio, a.fim);
+  if (p.estado !== "OBSERVADO_ATE") return { estado: p.estado, observadoAte: null, completude: null, motivos: [], metricas: null };
+  const pagos = filtrarPagosNoIntervalo(a.pedidos, a.inicio, p.ate);
+  const naoPagos = await contarNaoPagosSemObservacaoShopee(cliente, { userId: a.userId, lojaId: a.lojaId, desdeIso: a.desdeIso, fimIso: p.ate.toISOString() });
+  const av = avaliarCompletudeShopee({ inicio: a.inicio, fim: p.ate, janelas: a.janelas, ancoraDescoberta: a.ancora,
+    pedidosPagos: pagos, itens: a.itens, naoPagosSemObservacaoPosPeriodo: naoPagos });
+  return { estado: p.estado, observadoAte: p.ate.toISOString(), completude: av.completude, motivos: av.motivos,
+    metricas: av.completude === "COMPLETE" ? calcularMetricasShopee(pagos, a.itens).metricas : null };
 }
 
 /**

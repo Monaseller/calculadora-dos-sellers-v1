@@ -56,6 +56,23 @@ export function diaCivilValido(dia: unknown): dia is string {
   return Number.isFinite(t) && new Date(t).toISOString().slice(0, 10) === dia;
 }
 
+/**
+ * SALES-CANONICAL-D14 — fronteiras do prefixo observado de um periodo aberto
+ * [inicio, fim), dado o ALCANCE da cadeia de janelas completas (ms, ou null):
+ *
+ *   alcance null ou <= inicio  → SEM_OBSERVACAO (inclui alcance == inicio:
+ *                                uma varredura que termina no inicio prova so
+ *                                o passado; zero nunca e inferido)
+ *   inicio < alcance < fim     → OBSERVADO_ATE alcance
+ *   alcance >= fim             → DIA_FECHADO (semantica normal de periodo fechado)
+ */
+export function prefixoObservado(alcanceMs: number | null, inicio: Date, fim: Date):
+  { estado: "SEM_OBSERVACAO" | "DIA_FECHADO" } | { estado: "OBSERVADO_ATE"; ate: Date } {
+  if (alcanceMs === null || !Number.isFinite(alcanceMs) || alcanceMs <= inicio.getTime()) return { estado: "SEM_OBSERVACAO" };
+  if (alcanceMs >= fim.getTime()) return { estado: "DIA_FECHADO" };
+  return { estado: "OBSERVADO_ATE", ate: new Date(alcanceMs) };
+}
+
 function diasEntre(de: string, ate: string): number {
   // meia-noite UTC de dias civis: a diferenca e multiplo exato de 24h (sem fuso nem arredondamento)
   return (Date.parse(`${ate}T00:00:00Z`) - Date.parse(`${de}T00:00:00Z`)) / 86400000 + 1;

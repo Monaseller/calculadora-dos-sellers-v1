@@ -51,6 +51,28 @@ export interface ResultadoVendasLoja {
   baseDescoberta?: "ANCORA" | "POLITICA_PRAZO_PAGAMENTO";
   /** Inicio exigido do corpus por create_time para este periodo. */
   descobertaDesde?: string;
+  /** SALES-CANONICAL-D14: so quando o chamador pede `parcial: true`. */
+  parcial?: ParcialObservadoLoja<MetricasVendas>;
+}
+
+/**
+ * SALES-CANONICAL-D14 — o prefixo OBSERVADO [inicio, observadoAte) de um
+ * periodo ainda aberto, avaliado com as MESMAS funcoes puras de completude
+ * e de metricas do leitor. `observadoAte` vem SO da cadeia de janelas de
+ * descoberta completas (nunca do relogio, nunca da existencia de linhas).
+ *
+ *   SEM_OBSERVACAO  a cadeia nao passa do inicio: nada provado no periodo.
+ *   OBSERVADO_ATE   inicio < observadoAte < fim: prefixo avaliavel.
+ *   DIA_FECHADO     a cadeia ja alcanca o fim: vale a semantica normal.
+ */
+export interface ParcialObservadoLoja<M> {
+  estado: "SEM_OBSERVACAO" | "OBSERVADO_ATE" | "DIA_FECHADO";
+  observadoAte: string | null;
+  /** Completude do PREFIXO (null fora de OBSERVADO_ATE). */
+  completude: Completude | null;
+  motivos: string[];
+  /** So quando o prefixo e COMPLETE. */
+  metricas: M | null;
 }
 
 export interface ResultadoVendas {

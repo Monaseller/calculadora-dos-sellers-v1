@@ -13,6 +13,8 @@ import "./_server-only-inerte";
 import { execFileSync } from "node:child_process";
 // SALES-CANONICAL-D13B: excecao EXATA — so os arquivos NOVOS do D13 em lib/vendas/canonico (D13_NEW_CANONICAL_FILES, inexistentes na base)
 import { filtrarNovosCanonicosD13 } from "./_excecao-d13-vendas-canonicas";
+// SALES-CANONICAL-D14B: excecao EXATA do patch D14 nos leitores (ATUAL − patch aprovado = bytes de 1c4fe29)
+import { filtrarExcecaoD14 } from "./_excecao-d14-vendas-canonicas";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { RelogioFake, RepoFake, ShopeeFake, type PedidoFake } from "./fakes/shopee-ingestao-fake";
@@ -400,7 +402,7 @@ async function principal() {
       // SALES-SYNC-D6 acrescenta a flag server-only ao .env.example (guard proprio: testar-vendas-sync-feature-flag)
       .trim().split(/\r?\n/).filter((f) => f && !FENCE_C1.includes(f) && f !== ".env.example");
     // SALES-CANONICAL-D13B: so os arquivos NOVOS do D13 em lib/vendas/canonico; ml.ts/shopee.ts/tipos.ts seguem travados
-    const fora = filtrarNovosCanonicosD13(RAIZ, BASE, d).join(",");
+    const fora = filtrarExcecaoD14(RAIZ, BASE, filtrarNovosCanonicosD13(RAIZ, BASE, d)).join(",");
     const novos = execFileSync("git", ["ls-files", "--others", "--exclude-standard", "--", "supabase"], { cwd: RAIZ, encoding: "utf8" })
       .trim().split(/\r?\n/).filter((f) => f && !FENCE_C1.includes(f)).join(",");
     assert(fora === "" && novos === "", `alterados: ${fora} ${novos}`);

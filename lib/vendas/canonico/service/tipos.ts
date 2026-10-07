@@ -1,18 +1,22 @@
 /**
- * Contrato da consulta canonica de vendas (SALES-CANONICAL-D13) — a fonte
- * UNICA futura de Dashboard e Vendas. Metricas, cobertura e frescor sao
- * dimensoes SEPARADAS e nunca se colapsam:
+ * Contrato da consulta canonica de vendas (SALES-CANONICAL-D13/D14) — a
+ * fonte UNICA futura de Dashboard e Vendas. Metricas, cobertura e frescor
+ * sao dimensoes SEPARADAS e nunca se colapsam:
  *
- *   metricas   so existem quando a cobertura do agregado e COMPLETE
- *              (null = sem cobertura; zero = completo e sem venda).
+ *   metricas   COMPLETE: o periodo inteiro; PARTIAL: o acumulado ate
+ *              `observadoAte` (parte fechada + parte atual OBSERVADA).
+ *              null = sem cobertura/observacao; zero = observado e sem venda.
  *   cobertura  COMPLETE so se TODAS as lojas do escopo forem completas,
- *              ativas e elegiveis. Hoje no periodo → PARTIAL.
- *   frescor    idade da observacao (politica do planejador do sync).
- *   estado     COMPLETE_FRESH | COMPLETE_STALE | PARTIAL | INCOMPLETE.
+ *              ativas e elegiveis. Periodo com hoje → no maximo PARTIAL;
+ *              buraco na parte JA FECHADA → INCOMPLETE.
+ *   frescor    idade da observacao (politica canonica do sync).
+ *   estado     COMPLETE_FRESH | COMPLETE_STALE | PARTIAL_FRESH |
+ *              PARTIAL_STALE | PARTIAL_SEM_OBSERVACAO_ATUAL | INCOMPLETE.
  */
 import type { Completude, ComponentesVendasShopee, MetricasVendas } from "../tipos";
 import type { MetricasVendasML } from "../ml";
 import type { PeriodoVendasResolvido, PresetPeriodoVendas } from "../periodo";
+import type { PoliticaSync } from "@/lib/vendas/sync/tipos";
 
 export type MarketplaceConsulta = "mercado_livre" | "shopee" | "todos";
 export type MarketplaceLoja = Exclude<MarketplaceConsulta, "todos">;
@@ -47,23 +51,46 @@ export interface MetricasCombinadas { pedidos: number; unidades: number; vendas:
 
 export type EstadoCobertura = "COMPLETE" | "PARTIAL" | "INCOMPLETE";
 export type EstadoFrescor = "FRESH" | "STALE" | "IN_PROGRESS" | "DESCONHECIDO";
-export type EstadoConsulta = "COMPLETE_FRESH" | "COMPLETE_STALE" | "PARTIAL" | "INCOMPLETE";
+export type EstadoConsulta =
+  | "COMPLETE_FRESH" | "COMPLETE_STALE"
+  | "PARTIAL_FRESH" | "PARTIAL_STALE" | "PARTIAL_SEM_OBSERVACAO_ATUAL"
+  | "INCOMPLETE";
+
+/** D14: a parte ATUAL (hoje) de um periodo aberto, por loja. */
+export interface ParteAtualLoja {
+  /** OBSERVADA = a cadeia de janelas completas prova o corpus ate `observadoAte` e o prefixo e COMPLETE. */
+  estado: "OBSERVADA" | "NAO_OBSERVADA";
+  observadoAte: string | null;
+  frescor: EstadoFrescor;
+  motivos: string[];
+}
 
 export interface LojaVendasCanonicas {
   lojaId: string;
   marketplace: MarketplaceLoja;
   ativa: boolean;
   elegibilidade: "ELEGIVEL" | "INRECUPERAVEL_SEM_CREDENCIAL";
-  /** Completude devolvida pelo leitor oficial (null = leitor nao devolveu a loja). */
+  /** Completude devolvida pelo leitor oficial para a parte FECHADA (null = sem parte fechada ou leitor nao devolveu a loja). */
   completudeLeitor: Completude | null;
   cobertura: EstadoCobertura;
   /** Motivos estruturados (servico + leitor). */
   motivos: string[];
-  /** So quando a cobertura da loja e COMPLETE. */
+  /** COMPLETE: periodo inteiro; PARTIAL: acumulado ate observadoAte; null caso contrario. */
   metricas: MetricasVendasML | MetricasVendas | null;
+  /** So em periodo fechado COMPLETE (componentes nao sao somados entre partes). */
   componentes: ComponentesVendasShopee | null;
   frescor: EstadoFrescor;
   motivosFrescor: string[];
+  /** D14: null quando o periodo nao contem hoje. */
+  parteAtual: ParteAtualLoja | null;
+}
+
+/** D14: como o periodo foi dividido — mesmas fronteiras para todos os marketplaces. */
+export interface PartesDoPeriodo {
+  /** [de, ontem] — null quando o periodo e so hoje. */
+  fechada: { de: string; ate: string } | null;
+  /** Hoje: [inicioInclusivo, fimExclusivo) — null quando o periodo nao contem hoje. */
+  atual: { dia: string; inicioInclusivo: string; fimExclusivo: string } | null;
 }
 
 export interface ResultadoVendasCanonicas {
@@ -71,12 +98,13 @@ export interface ResultadoVendasCanonicas {
   marketplace: MarketplaceConsulta;
   lojaId: string | null;
   periodo: PeriodoVendasResolvido;
+  partes: PartesDoPeriodo;
   metricas: {
     /** pedidos/unidades/vendas somados entre os marketplaces consultados (centavo exato). */
     combinadas: MetricasCombinadas | null;
     mercadoLivre: MetricasVendasML | null;
     shopee: MetricasVendas | null;
-    /** true = COMPLETE e zero pedidos; false = COMPLETE com venda; null = sem cobertura completa. */
+    /** true = coberto/observado e zero pedidos; false = com venda; null = sem metricas. */
     semVendas: boolean | null;
     /** Metricas que NAO foram somadas entre marketplaces, e por que. */
     incompatibilidades: string[];
@@ -91,10 +119,19 @@ export interface ResultadoVendasCanonicas {
   };
   frescor: { estado: EstadoFrescor; motivos: string[] };
   estado: EstadoConsulta;
+  /** O periodo contem hoje (nunca COMPLETE no mesmo dia). */
+  parcial: boolean;
+  /** estado COMPLETE_*. */
+  completo: boolean;
+  /** frescor FRESH (null quando nao ha metricas). */
+  fresco: boolean | null;
+  /** D14: o MENOR observadoAte entre as lojas (as metricas valem ate ai). null fora de PARTIAL com metricas. */
+  observadoAte: string | null;
 }
 
-/** Injecao para teste. Padrao: cliente service_role e relogio real. */
+/** Injecao para teste. Padrao: cliente service_role, relogio real e POLITICA_SYNC_PROPOSTA. */
 export interface DependenciasConsultaVendas {
   cliente?: any;
   agoraMs?: number;
+  politica?: PoliticaSync;
 }

@@ -368,11 +368,15 @@ async function principal() {
     const sem = await consultar({ userId: RD, marketplace: "todos", preset: "ONTEM" });
     assert(sem.periodo.de === "2026-10-06" && sem.estado === "INCOMPLETE" && sem.metricas.combinadas === null && sem.metricas.semVendas === null, JSON.stringify(sem.metricas));
   });
-  t("5e. HOJE / ESTE_MES: sempre PARTIAL, frescor IN_PROGRESS, metricas nulas, motivo PERIODO_INCLUI_HOJE", async () => {
-    for (const preset of ["HOJE", "ESTE_MES", "ESTE_ANO"]) {
+  // SALES-CANONICAL-D14: contrato parcial — sem janela de hoje (como em producao) a parte atual NAO e observada;
+  // e um buraco na parte ja fechada (06/10 sem janela neste mundo) e INCOMPLETE, nao PARTIAL.
+  t("5e. HOJE sem janela de hoje → PARTIAL_SEM_OBSERVACAO_ATUAL (metricas nulas); ESTE_MES/ESTE_ANO com 06/10 descoberto → INCOMPLETE", async () => {
+    const h = await consultar({ userId: RD, marketplace: "todos", preset: "HOJE" });
+    assert(h.estado === "PARTIAL_SEM_OBSERVACAO_ATUAL" && h.cobertura.estado === "PARTIAL" && h.parcial && !h.completo && h.metricas.combinadas === null && h.fresco === null, `HOJE ${h.estado}`);
+    assert(h.cobertura.lojas.every((l) => l.cobertura === "PARTIAL" && l.motivos.includes("PERIODO_INCLUI_HOJE") && l.parteAtual?.estado === "NAO_OBSERVADA"), "HOJE lojas");
+    for (const preset of ["ESTE_MES", "ESTE_ANO"]) {
       const res = await consultar({ userId: RD, marketplace: "todos", preset });
-      assert(res.estado === "PARTIAL" && res.cobertura.estado === "PARTIAL" && res.frescor.estado === "IN_PROGRESS" && res.metricas.combinadas === null, `${preset} ${res.estado}`);
-      assert(res.cobertura.lojas.every((l) => l.cobertura === "PARTIAL" && l.motivos.includes("PERIODO_INCLUI_HOJE")), preset);
+      assert(res.estado === "INCOMPLETE" && res.parcial && res.metricas.combinadas === null, `${preset} ${res.estado}`);
     }
   });
   t("5f. COMPLETE_STALE: cobertura completa com observacao velha → metricas presentes, frescor STALE (dimensoes separadas)", async () => {
