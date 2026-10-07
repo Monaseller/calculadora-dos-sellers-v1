@@ -394,7 +394,8 @@ async function principal() {
       "supabase/migrations/20261031_sales_sync_c8_shopee_refresh_lease_select.sql"];
     const d = execFileSync("git", ["diff", "--name-only", BASE, "--", "scripts/sync-worker.mjs", "app/api/internal/sync", "app/api/sync", "lib/sync-ml.ts", "lib/sync-shopee.ts",
       "lib/vendas/canonico", "lib/mercado-livre/ingestao", "lib/shopee/ingestao", "supabase", "vercel.json", ".env.example", "lib/feature-flags.ts"], { cwd: RAIZ, encoding: "utf8" })
-      .trim().split(/\r?\n/).filter((f) => f && !FENCE_C1.includes(f)).join(",");
+      // SALES-SYNC-D6 acrescenta a flag server-only ao .env.example (guard proprio: testar-vendas-sync-feature-flag)
+      .trim().split(/\r?\n/).filter((f) => f && !FENCE_C1.includes(f) && f !== ".env.example").join(",");
     const novos = execFileSync("git", ["ls-files", "--others", "--exclude-standard", "--", "supabase"], { cwd: RAIZ, encoding: "utf8" })
       .trim().split(/\r?\n/).filter((f) => f && !FENCE_C1.includes(f)).join(",");
     assert(d === "" && novos === "", `alterados: ${d} ${novos}`);

@@ -11,12 +11,17 @@
  * `Authorization: Bearer <CRON_SECRET>`; sem a variavel a rota fica fechada.
  * O segredo nunca e logado nem devolvido.
  *
- * NAO ha entrada em `crons` (vercel.json): agendar e outro gate. Com
- * ENABLE_ASYNC_SYNC_JOBS desligada (padrao), responde DESABILITADO sem
- * criar cliente, sem ler nem escrever nada.
+ * NAO ha entrada em `crons` (vercel.json): agendar e outro gate.
+ *
+ * Flag (SALES-SYNC-D6): SO a server-only ENABLE_CANONICAL_SALES_SYNC
+ * (lib/vendas/sync/flag-canonica.ts), lida a cada chamada DEPOIS da auth.
+ * Desligada (padrao), responde DESABILITADO sem criar cliente, sem ler nem
+ * escrever nada. A NEXT_PUBLIC_ENABLE_ASYNC_SYNC_JOBS (tela Vendas) nao
+ * liga esta rota.
  */
 import { NextResponse } from "next/server";
 import { criarDepsTickReais, executarTickCoordenador } from "@/lib/vendas/sync/coordenador-tick";
+import { syncCanonicoVendasHabilitado } from "@/lib/vendas/sync/flag-canonica";
 
 /** Teto padrao de app/api/** em vercel.json. */
 export const maxDuration = 60;
@@ -34,7 +39,7 @@ export async function GET(request: Request) {
     return responder({ ok: false, erro: "nao_autorizado" }, 401);
   }
   try {
-    const relatorio = await executarTickCoordenador(criarDepsTickReais, { orcamentoMs: ORCAMENTO_MS });
+    const relatorio = await executarTickCoordenador(criarDepsTickReais, { orcamentoMs: ORCAMENTO_MS, habilitado: syncCanonicoVendasHabilitado() });
     return responder({ ok: relatorio.resultado !== "ERRO", ...relatorio }, 200);
   } catch {
     // Falha de infraestrutura (listar lojas/ambiente): resposta generica, nada do erro vaza.

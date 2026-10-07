@@ -263,7 +263,9 @@ async function principal() {
       "lib/vendas/sync/tipos.ts", "lib/vendas/sync/worker-contrato.ts", "lib/vendas/sync/worker-deps.ts", "app/api", "lib/vendas/canonico", "lib/mercado-livre", "lib/shopee", "lib/shopee-auth.ts",
       "lib/marketplace", "scripts/sync-worker.mjs", "vercel.json", ".env.example", "lib/feature-flags.ts", "lib/middleware-rotas.ts"], { cwd: RAIZ, encoding: "utf8" }).trim()
       // SALES-SYNC-D4 muda DE PROPOSITO a elegibilidade (capability + tick) — guard proprio: testar-vendas-sync-elegibilidade
-      .split(/\r?\n/).filter((f) => f && f !== "lib/marketplace/credenciais.ts" && f !== "lib/vendas/sync/coordenador-tick.ts").join(",");
+      // SALES-SYNC-D6: flag server-only nas duas rotas e no .env.example (guard proprio: testar-vendas-sync-feature-flag)
+      .split(/\r?\n/).filter((f) => f && f !== "lib/marketplace/credenciais.ts" && f !== "lib/vendas/sync/coordenador-tick.ts" && f !== ".env.example"
+        && f !== "app/api/internal/vendas-sync/coordenador/route.ts" && f !== "app/api/internal/vendas-sync/worker/route.ts").join(",");
     const novos = execFileSync("git", ["ls-files", "--others", "--exclude-standard", "--", "supabase"], { cwd: RAIZ, encoding: "utf8" }).trim();
     assert(d === "" && novos === "", `alterados: ${d} ${novos}`);
   });

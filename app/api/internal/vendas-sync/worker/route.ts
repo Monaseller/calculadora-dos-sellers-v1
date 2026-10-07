@@ -11,13 +11,18 @@
  * invariante 38 de scripts/testar-middleware.ts reconhece). O segredo nunca
  * e logado nem devolvido.
  *
- * NAO ha entrada em `crons` (vercel.json): agendar e outro gate. Com
- * ENABLE_ASYNC_SYNC_JOBS desligada (padrao), a rota responde DESABILITADO
- * sem ler nem escrever nada.
+ * NAO ha entrada em `crons` (vercel.json): agendar e outro gate.
+ *
+ * Flag (SALES-SYNC-D6): SO a server-only ENABLE_CANONICAL_SALES_SYNC
+ * (lib/vendas/sync/flag-canonica.ts), lida a cada chamada DEPOIS da auth.
+ * Desligada (padrao), a rota responde DESABILITADO sem criar cliente, sem
+ * recuperar, sem claim, sem auth, sem motor. A
+ * NEXT_PUBLIC_ENABLE_ASYNC_SYNC_JOBS (tela Vendas) nao liga esta rota.
  */
 import { NextResponse } from "next/server";
 import { executarWorkerCanonico } from "@/lib/vendas/sync/worker";
 import { criarDepsWorkerReais } from "@/lib/vendas/sync/worker-deps";
+import { syncCanonicoVendasHabilitado } from "@/lib/vendas/sync/flag-canonica";
 
 /** Teto padrao de app/api/** em vercel.json. Subir exige entrada propria la. */
 export const maxDuration = 60;
@@ -35,7 +40,7 @@ export async function GET(request: Request) {
     return responder({ ok: false, erro: "nao_autorizado" }, 401);
   }
   try {
-    const relatorio = await executarWorkerCanonico(criarDepsWorkerReais, { orcamentoMs: ORCAMENTO_MS });
+    const relatorio = await executarWorkerCanonico(criarDepsWorkerReais, { orcamentoMs: ORCAMENTO_MS, habilitado: syncCanonicoVendasHabilitado() });
     console.log(JSON.stringify({ evento: "vendas_sync_worker", ...relatorio }));
     return responder({ ok: relatorio.resultado !== "ERRO", ...relatorio }, 200);
   } catch {
