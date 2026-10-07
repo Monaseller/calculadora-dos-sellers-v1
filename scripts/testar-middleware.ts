@@ -439,10 +439,14 @@ t("6. as 10 rotas com segredo estao declaradas, nem uma a mais", () => {
   // 8 depois do I4O4 (a MAIN saiu), mais 1 do `monitor-ingestao`.
   // 9 -> 10 na SALES-SYNC-B1: entrou o worker canonico de vendas (GET,
   // CRON_SECRET, ainda SEM entrada em `crons`).
-  assert(Object.keys(ROTAS_COM_SEGREDO).length === 10,
-    `esperado 10 rotas com segredo, encontrado ${Object.keys(ROTAS_COM_SEGREDO).length}`);
+  // 10 -> 11 na SALES-SYNC-D1: entrou o tick do coordenador canonico (GET,
+  // CRON_SECRET, ainda SEM entrada em `crons`).
+  assert(Object.keys(ROTAS_COM_SEGREDO).length === 11,
+    `esperado 11 rotas com segredo, encontrado ${Object.keys(ROTAS_COM_SEGREDO).length}`);
   assert(JSON.stringify(ROTAS_COM_SEGREDO["/api/internal/vendas-sync/worker"]) === '["GET"]',
     "o worker canonico de vendas nao esta declarado com exatamente [GET]");
+  assert(JSON.stringify(ROTAS_COM_SEGREDO["/api/internal/vendas-sync/coordenador"]) === '["GET"]',
+    "o tick do coordenador canonico nao esta declarado com exatamente [GET]");
   // E o conjunto, nominalmente: contagem sozinha nao distingue "a MAIN
   // voltou e o monitor saiu" de "esta tudo certo".
   assert(!("/api/internal/agentes/acoes" in ROTAS_COM_SEGREDO),

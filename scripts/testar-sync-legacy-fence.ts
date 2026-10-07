@@ -244,7 +244,10 @@ async function principal() {
     // SALES-SYNC-C6 muda DE PROPOSITO o tratamento de auth Shopee do worker canonico
     // (lib/vendas/sync/worker.ts e worker-deps.ts) — guardados por testar-shopee-auth-transient
     // e testar-vendas-sync-worker. Coordenador, planner, canonicos e motores seguem intocados.
-    const C6 = ["lib/vendas/sync/worker.ts", "lib/vendas/sync/worker-deps.ts"];
+    // SALES-SYNC-D1 ACRESCENTA (arquivos novos, nada existente muda) o tick do coordenador
+    // canonico e a rota dele — guardados por testar-vendas-sync-coordenador-tick.
+    const C6 = ["lib/vendas/sync/worker.ts", "lib/vendas/sync/worker-deps.ts",
+      "lib/vendas/sync/coordenador-tick.ts", "app/api/internal/vendas-sync/coordenador/route.ts"];
     const d = execFileSync("git", ["diff", "--name-only", BASE, "--", "lib/vendas", "lib/mercado-livre/ingestao", "lib/shopee/ingestao", "lib/sync-ml.ts", "lib/sync-shopee.ts",
       "lib/ml-auth.ts", "app/api/sync", "app/api/internal", "app/api/ml/vendas", "app/api/shopee/vendas", "vercel.json", "lib/feature-flags.ts"], { cwd: RAIZ, encoding: "utf8" })
       .trim().split(/\r?\n/).filter((f) => f && !C6.includes(f)).join(",");

@@ -154,6 +154,9 @@ export const ROTAS_COM_SEGREDO: Readonly<Record<string, readonly string[]>> = {
   // fail-closed. Sem entrada em `crons` (vercel.json) ainda: agendar e
   // outro gate. So GET, porque so GET e exportado.
   "/api/internal/vendas-sync/worker": ["GET"], // Vercel Cron — NAO agendado
+  // SALES-SYNC-D1: tick do coordenador canonico (planeja/cria, nao executa).
+  // Mesmo regime do worker: CRON_SECRET na rota, fail-closed, so GET, sem `crons`.
+  "/api/internal/vendas-sync/coordenador": ["GET"], // Vercel Cron — NAO agendado
 };
 
 /**
