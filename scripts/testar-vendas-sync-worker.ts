@@ -389,7 +389,9 @@ async function principal() {
     // e a migration do claim — os dois validados linha a linha por scripts/testar-sync-legacy-fence.ts.
     const FENCE_C1 = ["scripts/sync-worker.mjs", "supabase/migrations/20261029_sales_sync_c1_legacy_claim_fence.sql",
       // SALES-SYNC-C4: lease do refresh Shopee — guard proprio: testar-shopee-refresh-lease
-      "supabase/migrations/20261030_sales_sync_c4_shopee_refresh_lease.sql"];
+      "supabase/migrations/20261030_sales_sync_c4_shopee_refresh_lease.sql",
+      // SALES-SYNC-C8: SELECT do service_role no lease — guard proprio: testar-shopee-refresh-lease M6
+      "supabase/migrations/20261031_sales_sync_c8_shopee_refresh_lease_select.sql"];
     const d = execFileSync("git", ["diff", "--name-only", BASE, "--", "scripts/sync-worker.mjs", "app/api/internal/sync", "app/api/sync", "lib/sync-ml.ts", "lib/sync-shopee.ts",
       "lib/vendas/canonico", "lib/mercado-livre/ingestao", "lib/shopee/ingestao", "supabase", "vercel.json", ".env.example", "lib/feature-flags.ts"], { cwd: RAIZ, encoding: "utf8" })
       .trim().split(/\r?\n/).filter((f) => f && !FENCE_C1.includes(f)).join(",");

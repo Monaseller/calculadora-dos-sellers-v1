@@ -286,6 +286,14 @@ async function principal() {
     assert(/adquirirLease: \(portador\) => adquirirLeaseRefreshShopee\(loja\.id, userId, portador, inj\.cliente\)/.test(sa) && /liberarLease: \(portador\) => liberarLeaseRefreshShopee\(loja\.id, userId, portador, inj\.cliente\)/.test(sa), "portas reais do lease");
     assert(/finally \{\s*try \{ await portas\.liberarLease\(portador\); \}/.test(sa), "liberacao fora do finally");
   });
+  t("M6. SALES-SYNC-C8: a migration de correcao concede SO SELECT ao service_role — nada de DELETE/TRUNCATE/anon/authenticated/PUBLIC, sem tocar RPC/tabela/RLS", () => {
+    const c8 = readFileSync(join(RAIZ, "supabase/migrations/20261031_sales_sync_c8_shopee_refresh_lease_select.sql"), "utf8").replace(/\r/g, "");
+    const cod = c8.replace(/^--.*$/gm, "").split("\n").map((l) => l.trim()).filter(Boolean);
+    assert(JSON.stringify(cod) === JSON.stringify(["BEGIN;", "SET LOCAL lock_timeout = '5s';", `${GR} SELECT ON TABLE public.credencial_refresh_lease TO service_role;`, "COMMIT;"]), cod.join(" | "));
+    // sensivel a caixa: o papel PUBLIC (maiusculo) nao pode casar com o schema `public.`
+    assert(!new RegExp(`${RV}|DELETE|TRUNCATE|REFERENCES|TRIGGER|\\banon\\b|\\bauthenticated\\b|\\bPUBLIC\\b|CREATE|ALTER|DROP|POLICY`).test(cod.join("\n")), "migration faz mais que o SELECT");
+    assert(/ROLLBACK EXATO/.test(c8) && new RegExp(`${RV} SELECT ON TABLE public\\.credencial_refresh_lease FROM service_role;`).test(c8), "rollback ausente");
+  });
 
   await fila;
   console.log(`\n${falhou === 0 ? "✓" : "✗"} SHOPEE-REFRESH-LEASE — ${passou} passaram, ${falhou} falharam`);

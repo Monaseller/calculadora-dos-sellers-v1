@@ -256,7 +256,9 @@ async function principal() {
     const todos = [...new Set([...novos, ...naoRastreados])];
     // SALES-SYNC-C4 acrescenta a migration do lease Shopee (guard proprio: testar-shopee-refresh-lease); nenhuma outra.
     const C4 = "supabase/migrations/20261030_sales_sync_c4_shopee_refresh_lease.sql";
-    assert(todos.includes(MIGRATION) && todos.every((f) => f === MIGRATION || f === C4), todos.join(", "));
+    // SALES-SYNC-C8: SELECT do service_role no lease (guard proprio: testar-shopee-refresh-lease M6)
+    const C8 = "supabase/migrations/20261031_sales_sync_c8_shopee_refresh_lease_select.sql";
+    assert(todos.includes(MIGRATION) && todos.every((f) => f === MIGRATION || f === C4 || f === C8), todos.join(", "));
     assert(!/idx_sync_jobs_loja_ativo/.test(sql.replace(/^--.*$/gm, "")), "migration toca o indice");
   });
 
