@@ -249,7 +249,9 @@ async function principal() {
     const C6 = ["lib/vendas/sync/worker.ts", "lib/vendas/sync/worker-deps.ts",
       "lib/vendas/sync/coordenador-tick.ts", "app/api/internal/vendas-sync/coordenador/route.ts",
       // SALES-SYNC-D6: a rota do worker passa a ler a flag server-only (guard proprio: testar-vendas-sync-feature-flag)
-      "app/api/internal/vendas-sync/worker/route.ts", "lib/vendas/sync/flag-canonica.ts"];
+      "app/api/internal/vendas-sync/worker/route.ts", "lib/vendas/sync/flag-canonica.ts",
+      // SALES-SYNC-D8.2: auth manual das rotas canonicas (guard proprio: testar-vendas-sync-auth-interna)
+      "lib/vendas/sync/auth-interna.ts"];
     const d = execFileSync("git", ["diff", "--name-only", BASE, "--", "lib/vendas", "lib/mercado-livre/ingestao", "lib/shopee/ingestao", "lib/sync-ml.ts", "lib/sync-shopee.ts",
       "lib/ml-auth.ts", "app/api/sync", "app/api/internal", "app/api/ml/vendas", "app/api/shopee/vendas", "vercel.json", "lib/feature-flags.ts"], { cwd: RAIZ, encoding: "utf8" })
       .trim().split(/\r?\n/).filter((f) => f && !C6.includes(f)).join(",");

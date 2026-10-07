@@ -150,7 +150,8 @@ async function principal() {
       const s = semComentarios(f);
       assert(/import \{ syncCanonicoVendasHabilitado \} from "@\/lib\/vendas\/sync\/flag-canonica";/.test(s) && /habilitado: syncCanonicoVendasHabilitado\(\) \}\)/.test(s), `${f}: sem a flag nova`);
       assert(!/NEXT_PUBLIC|ASYNC_SYNC_JOBS|feature-flags/.test(s), `${f}: usa a flag publica`);
-      assert(/if \(!segredo \|\| !auth \|\| auth !== `Bearer \$\{segredo\}`\)/.test(s) && s.indexOf("auth !== `Bearer") < s.indexOf("syncCanonicoVendasHabilitado()"), `${f}: auth depois da flag`);
+      // SALES-SYNC-D8.2: a comparacao passa pelo helper (CRON_SECRET OU segredo manual) — guard proprio: testar-vendas-sync-auth-interna
+      assert(/if \(!segredo \|\| !auth \|\| auth !== cabecalhoEsperadoSalesSync\(auth, segredo\)\)/.test(s) && s.indexOf("auth !== cabecalhoEsperadoSalesSync") < s.indexOf("syncCanonicoVendasHabilitado()"), `${f}: auth depois da flag`);
       assert(!/console\.\w+\([^)]*(syncCanonicoVendasHabilitado|ENABLE_CANONICAL)/.test(s) && !/ENABLE_CANONICAL_SALES_SYNC/.test(s), `${f}: expoe/loga a flag`);
     }
   });
@@ -160,8 +161,13 @@ async function principal() {
         .filter((l) => /^[-+]/.test(l) && !/^(---|\+\+\+)/.test(l)).filter((l) => !/^[-+]\s*(\*|\/\*\*|\/\/)/.test(l) && l.trim() !== "+" && l.trim() !== "-");
       const add = dc.filter((l) => l.startsWith("+")), rem = dc.filter((l) => l.startsWith("-"));
       const chamada = /^[-+]\s+const relatorio = await executar(TickCoordenador|WorkerCanonico)\(criarDeps(Tick|Worker)Reais, \{ orcamentoMs: ORCAMENTO_MS(, habilitado: syncCanonicoVendasHabilitado\(\))? \}\);$/;
-      assert(rem.length === 1 && chamada.test(rem[0]) && !rem[0].includes("habilitado"), `${f} removeu: ${rem}`);
-      assert(add.length === 2 && add.some((l) => l === '+import { syncCanonicoVendasHabilitado } from "@/lib/vendas/sync/flag-canonica";') && add.some((l) => chamada.test(l) && l.includes("habilitado")), `${f} acrescentou: ${add}`);
+      // SALES-SYNC-D8.2 troca SO a linha da guarda (e importa o helper de auth) — exatamente estas duas linhas a mais
+      const guardaAntiga = "-  if (!segredo || !auth || auth !== `Bearer ${segredo}`) {", guardaNova = "+  if (!segredo || !auth || auth !== cabecalhoEsperadoSalesSync(auth, segredo)) {";
+      const importAuth = '+import { cabecalhoEsperadoSalesSync } from "@/lib/vendas/sync/auth-interna";';
+      const remG = rem.filter((l) => l !== guardaAntiga), addG = add.filter((l) => l !== guardaNova && l !== importAuth);
+      assert(rem.includes(guardaAntiga) && add.includes(guardaNova) && add.includes(importAuth), `${f}: troca de auth D8.2 ausente`);
+      assert(remG.length === 1 && chamada.test(remG[0]) && !remG[0].includes("habilitado"), `${f} removeu: ${rem}`);
+      assert(addG.length === 2 && addG.some((l) => l === '+import { syncCanonicoVendasHabilitado } from "@/lib/vendas/sync/flag-canonica";') && addG.some((l) => chamada.test(l) && l.includes("habilitado")), `${f} acrescentou: ${add}`);
     }
   });
   t("I. helper server-only; nenhum client component (nem a Vendas) importa a flag canonica", () => {
@@ -175,7 +181,9 @@ async function principal() {
   t("K/L. Vendas, Dashboard, legado (/api/sync, iniciar, status, sync-on-read, worker local), flag publica e logica canonica INTOCADOS", () => {
     const d = execFileSync("git", ["diff", "--name-only", BASE, "--", "app/(app)", "app/api/sync", "app/api/ml", "app/api/shopee", "app/api/internal/sync", "lib/feature-flags.ts",
       "lib/vendas", "lib/marketplace", "lib/shopee-auth.ts", "lib/ml-auth.ts", "lib/mercado-livre", "lib/shopee", "lib/sync-ml.ts", "lib/sync-shopee.ts", "scripts/sync-worker.mjs",
-      "supabase", "vercel.json", "middleware.ts", "lib/middleware-rotas.ts"], { cwd: RAIZ, encoding: "utf8" }).trim().split(/\r?\n/).filter((f) => f && f !== HELPER);
+      "supabase", "vercel.json", "middleware.ts", "lib/middleware-rotas.ts"], { cwd: RAIZ, encoding: "utf8" }).trim().split(/\r?\n/)
+      // SALES-SYNC-D8.2: helper de auth das rotas canonicas (guard proprio: testar-vendas-sync-auth-interna)
+      .filter((f) => f && f !== HELPER && f !== "lib/vendas/sync/auth-interna.ts");
     assert(d.length === 0, `alterados: ${d}`);
     const vendas = readFileSync(join(RAIZ, "app/(app)/vendas/page.tsx"), "utf8");
     assert(/import \{ ASYNC_SYNC_JOBS_ENABLED \} from "@\/lib\/feature-flags";/.test(vendas) && /if \(!ASYNC_SYNC_JOBS_ENABLED\) \{\s*dispararSincronizarInline\(\);/.test(vendas), "Vendas mudou de flag");
@@ -184,7 +192,9 @@ async function principal() {
     const dc = execFileSync("git", ["diff", "-U0", BASE, "--", ".env.example"], { cwd: RAIZ, encoding: "utf8" }).split(/\r?\n/);
     const rem = dc.filter((l) => l.startsWith("-") && !l.startsWith("---")), add = dc.filter((l) => l.startsWith("+") && !l.startsWith("+++"));
     const vars = add.filter((l) => /^\+[A-Z_]+=/.test(l));
-    assert(rem.length === 0 && vars.length === 1 && vars[0] === "+ENABLE_CANONICAL_SALES_SYNC=false" && add.every((l) => l === "+" || /^\+#/.test(l) || l === vars[0]), dc.join("\n"));
+    // SALES-SYNC-D8.2 acrescenta SO o nome do segredo manual, VAZIO (nunca um valor)
+    assert(rem.length === 0 && vars.join() === "+ENABLE_CANONICAL_SALES_SYNC=false,+CANONICAL_SALES_SYNC_MANUAL_SECRET="
+      && add.every((l) => l === "+" || /^\+#/.test(l) || vars.includes(l)), dc.join("\n"));
   });
 
   await fila;

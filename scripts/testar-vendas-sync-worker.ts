@@ -360,7 +360,8 @@ async function principal() {
       assert(!tudo.includes(SEG), "segredo vazou");
     } finally { console.log = log; console.error = err; }
     const fonte = readFileSync(join(RAIZ, "app/api/internal/vendas-sync/worker/route.ts"), "utf8").replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
-    assert(/if \(!segredo \|\| !auth \|\| auth !== `Bearer \$\{segredo\}`\)/.test(fonte) && /process\.env\.CRON_SECRET/.test(fonte) && !/console\.\w+\([^)]*segredo/.test(fonte) && !/export async function POST/.test(fonte), "auth da rota");
+    // SALES-SYNC-D8.2: comparacao via helper (CRON_SECRET OU segredo manual) — guard proprio: testar-vendas-sync-auth-interna
+    assert(/if \(!segredo \|\| !auth \|\| auth !== cabecalhoEsperadoSalesSync\(auth, segredo\)\)/.test(fonte) && /process\.env\.CRON_SECRET/.test(fonte) && !/console\.\w+\([^)]*segredo/.test(fonte) && !/export async function POST/.test(fonte), "auth da rota");
   });
   t("middleware deixa so GET chegar a rota (a autorizacao e da rota)", () => {
     assert(MW.decidirAcesso("/api/internal/vendas-sync/worker", "GET", false) === "liberar", "GET bloqueado no middleware");

@@ -13,6 +13,10 @@
  *
  * NAO ha entrada em `crons` (vercel.json): agendar e outro gate.
  *
+ * Auth (SALES-SYNC-D8.2): `Bearer CRON_SECRET` (Vercel Cron) OU `Bearer
+ * CANONICAL_SALES_SYNC_MANUAL_SECRET` (operacao manual) — helper unico
+ * lib/vendas/sync/auth-interna.ts; CRON_SECRET ausente = fechado.
+ *
  * Flag (SALES-SYNC-D6): SO a server-only ENABLE_CANONICAL_SALES_SYNC
  * (lib/vendas/sync/flag-canonica.ts), lida a cada chamada DEPOIS da auth.
  * Desligada (padrao), responde DESABILITADO sem criar cliente, sem ler nem
@@ -21,6 +25,7 @@
  */
 import { NextResponse } from "next/server";
 import { criarDepsTickReais, executarTickCoordenador } from "@/lib/vendas/sync/coordenador-tick";
+import { cabecalhoEsperadoSalesSync } from "@/lib/vendas/sync/auth-interna";
 import { syncCanonicoVendasHabilitado } from "@/lib/vendas/sync/flag-canonica";
 
 /** Teto padrao de app/api/** em vercel.json. */
@@ -35,7 +40,7 @@ function responder(corpo: unknown, status: number): NextResponse {
 export async function GET(request: Request) {
   const segredo = process.env.CRON_SECRET;
   const auth = request.headers.get("authorization");
-  if (!segredo || !auth || auth !== `Bearer ${segredo}`) {
+  if (!segredo || !auth || auth !== cabecalhoEsperadoSalesSync(auth, segredo)) {
     return responder({ ok: false, erro: "nao_autorizado" }, 401);
   }
   try {

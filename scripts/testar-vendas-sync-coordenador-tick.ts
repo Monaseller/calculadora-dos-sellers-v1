@@ -391,7 +391,8 @@ async function principal() {
       assert(!(saidas.join("\n") + JSON.stringify(corpoW) + JSON.stringify(await u.json())).includes(SEG), "segredo vazou");
     } finally { console.log = log; console.error = err; }
     const fonte = semComentarios(ARQS[1]);
-    assert(/if \(!segredo \|\| !auth \|\| auth !== `Bearer \$\{segredo\}`\)/.test(fonte) && !/console\.\w+\([^)]*segredo/.test(fonte) && !/export async function POST/.test(fonte), "auth da rota");
+    // SALES-SYNC-D8.2: comparacao via helper (CRON_SECRET OU segredo manual) — guard proprio: testar-vendas-sync-auth-interna
+    assert(/if \(!segredo \|\| !auth \|\| auth !== cabecalhoEsperadoSalesSync\(auth, segredo\)\)/.test(fonte) && !/console\.\w+\([^)]*segredo/.test(fonte) && !/export async function POST/.test(fonte), "auth da rota");
     const max = Number(/export const maxDuration = (\d+);/.exec(fonte)![1]); const orc = Number(/const ORCAMENTO_MS = ([\d_]+);/.exec(fonte)![1].replace(/_/g, ""));
     assert(max <= 60 && orc <= 0.8 * max * 1000, `${max} ${orc}`);
   });
