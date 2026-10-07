@@ -96,8 +96,10 @@ async function principal() {
     assert(!SA.precisaRenovarShopee({ access_token: "A0", token_expires_at: null }, AGORA), "semantica antiga: expira ausente + access = nao renovar");
     const src = readFileSync(join(RAIZ, "lib/shopee-auth.ts"), "utf8");
     // C4: os getters entram pelo lease, que envolve o CAS (renovarShopeeComLease → renovarShopeeComCas).
-    const usos = src.match(/if \(expiredOrMissing && loja\.refresh_token\) \{[\s\S]*?renovarShopeeComLease\(loja\.id, loja\.refresh_token, portasReaisShopee\(loja, userId\)\)/g) ?? [];
-    assert(usos.length === 2, `getters sem o lease+CAS sob a guarda (${usos.length})`);
+    // C6: os dois getters sao invólucros do resolvedor detalhado, que entra UMA vez no lease (que envolve o CAS).
+    const usos = src.match(/if \(expiredOrMissing && loja\.refresh_token\) \{[\s\S]*?renovarShopeeComLease\(loja\.id, loja\.refresh_token, portasReaisShopee\(loja, userId, inj\), \{ modo \}\)/g) ?? [];
+    assert(usos.length === 1, `resolvedor sem o lease+CAS sob a guarda (${usos.length})`);
+    assert(/resolverCredencialShopee\(userId, null, "compativel"\)/.test(src) && /resolverCredencialShopee\(userId, lojaId, "compativel"\)/.test(src), "getters fora do resolvedor");
     assert((src.match(/return comoResultado\(await renovarShopeeComCas\(/g) ?? []).length === 2, "o lease nao delega ao CAS do C3");
   });
 
@@ -204,7 +206,7 @@ async function principal() {
   });
   t("callers: TODO caminho de refresh Shopee passa pelo CAS (getShopeeLojaById e getShopeeLojaAtiva); nenhuma outra gravacao; sem mutex em memoria", () => {
     const sa = readFileSync(join(RAIZ, "lib/shopee-auth.ts"), "utf8").replace(/\/\/[^\n]*|\/\*[\s\S]*?\*\//g, "");
-    assert((sa.match(/gravarCredencialShopee\(/g) ?? []).length === 1 && /gravarCas: \(campos, anterior\) => gravarCredencialShopee\(loja\.id, userId, campos, anterior\)/.test(sa), "gravacao fora das portas reais");
+    assert((sa.match(/gravarCredencialShopee\(/g) ?? []).length === 1 && /gravarCas: \(campos, anterior\) => gravarCredencialShopee\(loja\.id, userId, campos, anterior, inj\.cliente\)/.test(sa), "gravacao fora das portas reais");
     assert((sa.match(/refreshShopeeToken\(/g) ?? []).length === 2, "refresh chamado fora do CAS"); // definicao + porta
     assert(!/new Map\(|emVoo|mutex|Mutex|singleton/.test(sa), "mutex/coalescencia em memoria");
     // nenhum outro modulo grava credencial Shopee

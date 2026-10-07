@@ -44,7 +44,11 @@ const RECUPERACOES_POR_INVOCACAO = 5;
 const COLUNAS_CANDIDATO = "id, marketplace, campo_tempo, janela_inicio, janela_fim, criado_em, modo:checkpoint->>modo";
 const COLUNAS_JOB = "id, user_id, loja_id, marketplace, campo_tempo, janela_inicio, janela_fim, date_from, date_to, checkpoint, progresso, status, tentativas, max_tentativas, heartbeat_em, iniciado_em";
 
-export type ResultadoWorker = "DESABILITADO" | "NO_JOB" | "CLAIM_PERDIDO" | "EXECUTADO" | "RECUSADO" | "ERRO";
+/** ADIADO = auth Shopee TRANSITORIA (refresh em andamento / lease indisponivel): job de volta a pendente, sem erro. */
+export type ResultadoWorker = "DESABILITADO" | "NO_JOB" | "CLAIM_PERDIDO" | "EXECUTADO" | "RECUSADO" | "ADIADO" | "ERRO";
+
+/** Auth Shopee transitoria (SALES-SYNC-C6): contencao/infra, NUNCA falha de credencial. */
+export interface AuthShopeeTransitoria { transitorio: "refresh_em_andamento" | "lease_indisponivel"; retryAfterMs?: number }
 
 export interface RelatorioWorker {
   resultado: ResultadoWorker;
@@ -79,8 +83,12 @@ export interface DepsWorker {
   relogio: { agoraMs(): number };
   /** Portas do motor ML para um job JA validado. */
   portasML(job: JobReivindicado): Promise<{ transporte: TransporteML; repo: RepositorioML }>;
-  /** Portas Shopee; null = credencial indisponivel (job vira erro auth). */
-  portasShopee(job: JobReivindicado): Promise<{ api: ShopeeApi; repo: Repositorio } | null>;
+  /**
+   * Portas Shopee. null = credencial REALMENTE indisponivel (job vira erro auth);
+   * { transitorio } = outra execucao renovando / lease indisponivel → job ADIADO
+   * (volta a pendente, checkpoint intacto, nada conta como falha).
+   */
+  portasShopee(job: JobReivindicado): Promise<{ api: ShopeeApi; repo: Repositorio } | AuthShopeeTransitoria | null>;
   motores?: MotoresCanonicos;
 }
 
@@ -240,6 +248,14 @@ export async function executarWorkerCanonico(depsOuFabrica: DepsWorker | (() => 
     } else {
       const p = await deps.portasShopee(job);
       if (!p) return recusar("credencial_indisponivel", "auth");
+      if ("transitorio" in p) {
+        // Contencao normal (outro processo renovando o token) ou infra do lease:
+        // NAO e erro do job. rodando → pendente; checkpoint/progresso/tentativas
+        // e erro_mensagem intocados (o coordenador so conta jobs em erro). Uma
+        // resolucao de auth por fatia: o proximo tick tenta de novo.
+        const ok = await transicionar(cliente, job.id, { status: "pendente", heartbeat_em: new Date(relogio.agoraMs()).toISOString() });
+        return fim({ ...base, tipo, resultado: "ADIADO", fatia: "auth_transitoria", motivo: `auth_transitoria:${p.transitorio}`, status_posterior: ok ? "pendente" : "desconhecido" });
+      }
       res = tipo === "SHOPEE_CREATE_TIME"
         ? await motores.shopee({ id: job.id, userId: job.userId, lojaId: job.lojaId, campoTempo: "create_time", janelaInicio: r.janela_inicio, janelaFim: r.janela_fim,
           checkpoint: (r.checkpoint ?? null) as CheckpointShopee | null, progresso: (r.progresso ?? null) as ProgressoShopee | null }, { ...p, relogio }, opMotor)

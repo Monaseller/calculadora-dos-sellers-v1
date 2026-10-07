@@ -1192,12 +1192,14 @@ export const LEASE_REFRESH_SHOPEE_TTL_S = 30;
 
 /**
  * ADQUIRIDO = esta tentativa detém o direito de chamar o provider;
- * OCUPADO   = outra tentativa detém lease válido (ou o banco falhou: não
- *             chamar o provider é o lado seguro);
- * INDISPONIVEL = a RPC não existe (migration não aplicada / revertida):
- *             quem chama cai no modo C3 (só CAS), que já é seguro no banco.
+ * OCUPADO   = outra tentativa detém lease válido;
+ * INDISPONIVEL = a RPC não existe (migration não aplicada / revertida);
+ * LOJA_OU_DONO_INVALIDO = o banco recusou o par (FK 23503) ou faltou
+ *             loja/dono/portador — NUNCA é "refresh em andamento";
+ * ERRO      = outra falha do banco: não chamar o provider é o lado seguro
+ *             (SALES-SYNC-C6: classificação pelo CÓDIGO, não pela mensagem).
  */
-export type ResultadoLeaseShopee = "ADQUIRIDO" | "OCUPADO" | "INDISPONIVEL";
+export type ResultadoLeaseShopee = "ADQUIRIDO" | "OCUPADO" | "INDISPONIVEL" | "LOJA_OU_DONO_INVALIDO" | "ERRO";
 
 const rpcInexistente = (e: { code?: string; message?: string } | null) =>
   !!e && (e.code === "PGRST202" || e.code === "42883" || /could not find the function|does not exist/i.test(e.message ?? ""));
@@ -1208,11 +1210,15 @@ export async function adquirirLeaseRefreshShopee(
   portador: string,
   cliente?: any
 ): Promise<ResultadoLeaseShopee> {
-  if (!lojaId || !userId || !portador) return "OCUPADO";
+  if (!lojaId || !userId || !portador) return "LOJA_OU_DONO_INVALIDO";
   const { data, error } = await (cliente ?? getSupabaseServidor()).rpc("adquirir_lease_refresh_credencial", {
     p_user_id: String(userId), p_loja_id: lojaId, p_marketplace: MARKETPLACE_SHOPEE, p_portador: portador, p_ttl_segundos: LEASE_REFRESH_SHOPEE_TTL_S,
   });
-  if (error) return rpcInexistente(error) ? "INDISPONIVEL" : "OCUPADO";
+  if (error) {
+    if (rpcInexistente(error)) return "INDISPONIVEL";
+    if ((error as { code?: string }).code === "23503") return "LOJA_OU_DONO_INVALIDO";
+    return "ERRO";
+  }
   return data === true ? "ADQUIRIDO" : "OCUPADO";
 }
 

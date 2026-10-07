@@ -241,8 +241,13 @@ async function principal() {
     // SALES-SYNC-C3 muda DE PROPOSITO a camada de credencial Shopee (CAS do refresh):
     // lib/shopee-auth.ts e lib/marketplace/credenciais.ts saem desta lista — quem os
     // guarda agora e scripts/testar-shopee-token-cas.ts (+ testar-credenciais-marketplace).
+    // SALES-SYNC-C6 muda DE PROPOSITO o tratamento de auth Shopee do worker canonico
+    // (lib/vendas/sync/worker.ts e worker-deps.ts) — guardados por testar-shopee-auth-transient
+    // e testar-vendas-sync-worker. Coordenador, planner, canonicos e motores seguem intocados.
+    const C6 = ["lib/vendas/sync/worker.ts", "lib/vendas/sync/worker-deps.ts"];
     const d = execFileSync("git", ["diff", "--name-only", BASE, "--", "lib/vendas", "lib/mercado-livre/ingestao", "lib/shopee/ingestao", "lib/sync-ml.ts", "lib/sync-shopee.ts",
-      "lib/ml-auth.ts", "app/api/sync", "app/api/internal", "app/api/ml/vendas", "app/api/shopee/vendas", "vercel.json", "lib/feature-flags.ts"], { cwd: RAIZ, encoding: "utf8" }).trim();
+      "lib/ml-auth.ts", "app/api/sync", "app/api/internal", "app/api/ml/vendas", "app/api/shopee/vendas", "vercel.json", "lib/feature-flags.ts"], { cwd: RAIZ, encoding: "utf8" })
+      .trim().split(/\r?\n/).filter((f) => f && !C6.includes(f)).join(",");
     assert(d === "", d);
   });
   t("I4. a unica migration nova e a do fence, e ela nao toca idx_sync_jobs_loja_ativo (so comentario)", () => {

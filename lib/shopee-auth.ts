@@ -9,6 +9,7 @@ import {
   gravarCredencialShopee,
   adquirirLeaseRefreshShopee,
   liberarLeaseRefreshShopee,
+  LEASE_REFRESH_SHOPEE_TTL_S,
   type LinhaCredencialShopee,
   type ResultadoLeaseShopee,
 } from "@/lib/marketplace/credenciais";
@@ -158,8 +159,23 @@ export interface PortasLeaseShopee {
 
 export type ResultadoRenovacaoShopee =
   | { ok: true; accessToken: string }
-  /** refresh_em_andamento = outra execução detém o lease (transitório, NÃO reconectar). */
-  | { ok: false; motivo: "refresh_em_andamento" | "credencial_indisponivel" };
+  /**
+   * refresh_em_andamento = outra execução detém o lease (transitório, NÃO reconectar);
+   * lease_indisponivel   = infraestrutura do lease ausente/falhou no modo canônico
+   *                        (transitório, de infra — não da conta);
+   * loja_ou_dono_invalido / credencial_indisponivel = indisponibilidade REAL.
+   */
+  | { ok: false; motivo: "refresh_em_andamento" | "lease_indisponivel" | "loja_ou_dono_invalido" | "credencial_indisponivel" };
+
+/**
+ * Modo da renovação (SALES-SYNC-C6):
+ *   canonico   — worker automático: lease ausente/erro = FAIL-CLOSED
+ *                (lease_indisponivel, provider NUNCA chamado; sem CAS-only);
+ *   compativel — callers legados/manuais: comportamento do C4 preservado
+ *                (RPC ausente → modo C3, só CAS; erro do banco → tratado
+ *                como ocupado, sem chamar o provider).
+ */
+export type ModoAuthShopee = "canonico" | "compativel";
 
 const comoResultado = (r: { accessToken: string } | null): ResultadoRenovacaoShopee =>
   r ? { ok: true, accessToken: r.accessToken } : { ok: false, motivo: "credencial_indisponivel" };
@@ -167,11 +183,26 @@ const comoResultado = (r: { accessToken: string } | null): ResultadoRenovacaoSho
 export async function renovarShopeeComLease(
   lojaId: string,
   refreshObservado: string,
-  portas: PortasRenovacaoShopee & PortasLeaseShopee
+  portas: PortasRenovacaoShopee & PortasLeaseShopee,
+  opcoes: { modo?: ModoAuthShopee } = {}
 ): Promise<ResultadoRenovacaoShopee> {
+  const modo = opcoes.modo ?? "compativel";
   const agora = portas.agoraMs ?? (() => Date.now());
   const portador = portas.novoPortador?.() ?? randomUUID();
-  const lease = await portas.adquirirLease(portador);
+  const resultadoLease = await portas.adquirirLease(portador);
+
+  if (resultadoLease === "LOJA_OU_DONO_INVALIDO") {
+    // O banco recusou o par loja/dono: indisponibilidade REAL, nunca "em andamento".
+    console.log("[shopee-auth] SHOPEE_LEASE_INVALID_STORE_OR_OWNER loja:", lojaId);
+    return { ok: false, motivo: "loja_ou_dono_invalido" };
+  }
+  if (modo === "canonico" && (resultadoLease === "INDISPONIVEL" || resultadoLease === "ERRO")) {
+    // Worker automático: sem lease confiável NÃO há refresh (nem CAS-only). Transitório de infra.
+    console.log("[shopee-auth] SHOPEE_LEASE_UNAVAILABLE loja:", lojaId);
+    return { ok: false, motivo: "lease_indisponivel" };
+  }
+  // compatível: erro do banco segue o comportamento do C4 (= ocupado)
+  const lease = resultadoLease === "ERRO" ? "OCUPADO" : resultadoLease;
 
   if (lease === "OCUPADO") {
     // Outra execução está renovando: NÃO chamar o provider; esperar (limitado) a vencedora.
@@ -203,24 +234,138 @@ export async function renovarShopeeComLease(
   }
 }
 
+/**
+ * Pontos de injeção (SALES-SYNC-C6): em produção TODOS ficam vazios e as
+ * portas usam o banco real e o endpoint oficial; a suíte injeta o duplo do
+ * banco e o provider falso para exercitar o código REAL do resolvedor.
+ */
+export interface InjecaoAuthShopee {
+  cliente?: any;
+  renovar?: (refreshToken: string) => Promise<ShopeeTokenResult | null>;
+  esperar?: (ms: number) => Promise<void>;
+  agoraMs?: () => number;
+  novoPortador?: () => string;
+}
+
 /** Portas reais: endpoint oficial + CAS em `lojas` + lease no banco + releitura da MESMA loja do dono. */
-function portasReaisShopee(loja: LinhaCredencialShopee, userId: string): PortasRenovacaoShopee & PortasLeaseShopee {
+function portasReaisShopee(loja: LinhaCredencialShopee, userId: string, inj: InjecaoAuthShopee = {}): PortasRenovacaoShopee & PortasLeaseShopee {
   return {
-    renovar: (rt) => refreshShopeeToken(loja.partner_id as string, loja.partner_key as string, Number(loja.shop_id), rt),
-    gravarCas: (campos, anterior) => gravarCredencialShopee(loja.id, userId, campos, anterior),
-    reler: async () => (await lerCredencialShopeeDoDono(userId, loja.id)).linha,
-    adquirirLease: (portador) => adquirirLeaseRefreshShopee(loja.id, userId, portador),
-    liberarLease: (portador) => liberarLeaseRefreshShopee(loja.id, userId, portador),
+    renovar: inj.renovar ?? ((rt) => refreshShopeeToken(loja.partner_id as string, loja.partner_key as string, Number(loja.shop_id), rt)),
+    gravarCas: (campos, anterior) => gravarCredencialShopee(loja.id, userId, campos, anterior, inj.cliente),
+    reler: async () => (await lerCredencialShopeeDoDono(userId, loja.id, inj.cliente)).linha,
+    adquirirLease: (portador) => adquirirLeaseRefreshShopee(loja.id, userId, portador, inj.cliente),
+    liberarLease: (portador) => liberarLeaseRefreshShopee(loja.id, userId, portador, inj.cliente),
+    ...(inj.esperar ? { esperar: inj.esperar } : {}),
+    ...(inj.agoraMs ? { agoraMs: inj.agoraMs } : {}),
+    ...(inj.novoPortador ? { novoPortador: inj.novoPortador } : {}),
   };
 }
 
-/** Mensagem de log do getter quando a renovação não devolve credencial. */
-function logFalhaRenovacao(r: { ok: false; motivo: string }, lojaId: string, rotulo: string) {
-  if (r.motivo === "refresh_em_andamento") {
-    console.error(`[shopee-auth] refresh em andamento por outra execução${rotulo} para loja:`, lojaId, "- tente novamente (NÃO é preciso reconectar)");
-  } else {
-    console.error(`[shopee-auth] refresh FALHOU${rotulo} para loja:`, lojaId, "- reconecte a Shopee");
+// ── Contrato DETALHADO da credencial Shopee (SALES-SYNC-C6) ──────────
+//
+// Fonte de verdade de TODA resolução de credencial Shopee. Os getters
+// públicos (credencial | null) são invólucros finos sobre ele; o worker
+// canônico o usa direto para separar contenção/infra (transitório,
+// retomável) de indisponibilidade real (erro de auth).
+
+export interface CredencialShopee {
+  lojaId:      string;
+  partnerId:   string;
+  partnerKey:  string;
+  accessToken: string;
+  shopId:      number;
+  nickname:    string;
+}
+
+export type MotivoCredencialIndisponivelShopee =
+  | "erro_leitura" | "loja_nao_encontrada" | "sem_partner" | "sem_access_token" | "refresh_falhou" | "loja_ou_dono_invalido";
+
+export type ResultadoCredencialShopee =
+  | { status: "OK"; credencial: CredencialShopee }
+  /** Outra execução está renovando (lease ocupado): transitório. NÃO é preciso reconectar. */
+  | { status: "REFRESH_EM_ANDAMENTO"; retryAfterMs: number }
+  /** Infra do lease ausente/falhou no modo canônico: transitório de infra, não da conta. */
+  | { status: "LEASE_INDISPONIVEL"; retryAfterMs: number }
+  /** Indisponibilidade REAL — só este caminho leva a "reconecte". */
+  | { status: "CREDENCIAL_INDISPONIVEL"; motivo: MotivoCredencialIndisponivelShopee };
+
+/** Depois de quanto tempo vale tentar de novo: o lease vence sozinho em LEASE_TTL. */
+const RETRY_REFRESH_EM_ANDAMENTO_MS = LEASE_REFRESH_SHOPEE_TTL_S * 1000;
+const RETRY_LEASE_INDISPONIVEL_MS = 60_000;
+
+export async function resolverCredencialShopee(
+  userId: string,
+  /** null = "a mais recente ATIVA" do dono (semântica de getShopeeLojaAtiva). */
+  lojaId: string | null,
+  modo: ModoAuthShopee,
+  inj: InjecaoAuthShopee = {}
+): Promise<ResultadoCredencialShopee> {
+  const rotulo = lojaId ? " (getShopeeLojaById)" : "";
+  const indisponivel = (motivo: MotivoCredencialIndisponivelShopee): ResultadoCredencialShopee => {
+    console.log(`[shopee-auth] SHOPEE_CREDENTIAL_UNAVAILABLE${rotulo} motivo:`, motivo);
+    return { status: "CREDENCIAL_INDISPONIVEL", motivo };
+  };
+
+  const { linha: loja, erro: dbErr } = await lerCredencialShopeeDoDono(userId, lojaId, inj.cliente);
+  if (dbErr) {
+    console.error(`[shopee-auth] db error${rotulo}:`, dbErr, lojaId ? `lojaId: ${lojaId}` : `userId: ${userId}`);
+    return indisponivel("erro_leitura");
   }
+  if (!loja) {
+    console.error(`[shopee-auth] loja não encontrada${rotulo}:`, lojaId ?? `userId ${userId}`);
+    return indisponivel("loja_nao_encontrada");
+  }
+  if (!loja.partner_id || !loja.partner_key) {
+    console.error("[shopee-auth] loja sem partner_id/partner_key:", loja.id);
+    return indisponivel("sem_partner");
+  }
+
+  // `?? ""` preserva o comportamento anterior: a variável era tipada como
+  // `string` mas podia chegar nula; string vazia é falsy do mesmo modo.
+  let accessToken: string = loja.access_token ?? "";
+
+  // Verifica se token expirou (com 5 min de margem). `loja` veio de uma
+  // leitura com marketplace = 'Shopee' (filtrosShopeeDoDono): o id que vai
+  // para o lease é SEMPRE de loja Shopee do dono.
+  const expiredOrMissing = precisaRenovarShopee(loja, inj.agoraMs?.() ?? Date.now());
+
+  if (expiredOrMissing && loja.refresh_token) {
+    console.log("[shopee-auth] token expirado, tentando refresh para loja:", loja.id);
+    // SALES-SYNC-C4: lease distribuído → reler → provider → CAS (C3) → liberar.
+    const renovada = await renovarShopeeComLease(loja.id, loja.refresh_token, portasReaisShopee(loja, userId, inj), { modo });
+    if (!renovada.ok) {
+      if (renovada.motivo === "refresh_em_andamento") {
+        console.error(`[shopee-auth] SHOPEE_REFRESH_IN_PROGRESS — refresh em andamento por outra execução${rotulo} para loja:`, loja.id, "- tente novamente (NÃO é preciso reconectar)");
+        return { status: "REFRESH_EM_ANDAMENTO", retryAfterMs: RETRY_REFRESH_EM_ANDAMENTO_MS };
+      }
+      if (renovada.motivo === "lease_indisponivel") {
+        console.error(`[shopee-auth] SHOPEE_LEASE_UNAVAILABLE — lease de refresh indisponível${rotulo} para loja:`, loja.id, "- infraestrutura, NÃO é preciso reconectar");
+        return { status: "LEASE_INDISPONIVEL", retryAfterMs: RETRY_LEASE_INDISPONIVEL_MS };
+      }
+      // Sem credencial utilizável → não tenta usar token inválido.
+      console.error(`[shopee-auth] refresh FALHOU${rotulo} para loja:`, loja.id, "- reconecte a Shopee");
+      return indisponivel(renovada.motivo === "loja_ou_dono_invalido" ? "loja_ou_dono_invalido" : "refresh_falhou");
+    }
+    accessToken = renovada.accessToken;
+  }
+
+  if (!accessToken) {
+    console.error("[shopee-auth] sem accessToken para loja:", loja.id, "expirado:", expiredOrMissing, "tem_refresh:", !!loja.refresh_token);
+    return indisponivel("sem_access_token");
+  }
+
+  console.log("[shopee-auth] SHOPEE_AUTH_OK loja:", loja.id);
+  return {
+    status: "OK",
+    credencial: {
+      lojaId:     loja.id,
+      partnerId:  loja.partner_id,
+      partnerKey: loja.partner_key,
+      accessToken,
+      shopId:     Number(loja.shop_id),
+      nickname:   loja.nickname ?? `Shopee ${loja.shop_id}`,
+    },
+  };
 }
 
 /**
@@ -288,56 +433,10 @@ export async function getShopeeLojaAtiva(userId: string): Promise<{
   shopId:      number;
   nickname:    string;
 } | null> {
-  const { linha: loja, erro: dbErr } = await lerCredencialShopeeDoDono(userId);
-
-  if (dbErr) {
-    console.error("[shopee-auth] db error:", dbErr, "userId:", userId);
-    return null;
-  }
-  if (!loja) {
-    console.error("[shopee-auth] loja não encontrada para userId:", userId);
-    return null;
-  }
-  if (!loja.partner_id || !loja.partner_key) {
-    console.error("[shopee-auth] loja sem partner_id/partner_key:", loja.id);
-    return null;
-  }
-
-  // `?? ""` preserva o comportamento anterior: a variável era tipada como
-  // `string` mas podia chegar nula, e a guarda `if (!accessToken)` adiante
-  // tratava isso. String vazia é falsy do mesmo modo.
-  let accessToken: string = loja.access_token ?? "";
-
-  // Verifica se token expirou (com 5 min de margem)
-  const expiredOrMissing = precisaRenovarShopee(loja);
-
-  if (expiredOrMissing && loja.refresh_token) {
-    console.log("[shopee-auth] token expirado, tentando refresh para loja:", loja.id);
-    // SALES-SYNC-C4: lease distribuído → reler → provider → CAS (C3) → liberar.
-    const renovada = await renovarShopeeComLease(loja.id, loja.refresh_token, portasReaisShopee(loja, userId));
-    if (renovada.ok) {
-      accessToken = renovada.accessToken;
-    } else {
-      // Sem credencial utilizável → não tenta usar token inválido. O log
-      // distingue "outra execução está renovando" de "reconecte".
-      logFalhaRenovacao(renovada, loja.id, "");
-      return null;
-    }
-  }
-
-  if (!accessToken) {
-    console.error("[shopee-auth] sem accessToken para loja:", loja.id, "expirado:", expiredOrMissing, "tem_refresh:", !!loja.refresh_token);
-    return null;
-  }
-
-  return {
-    lojaId:     loja.id,
-    partnerId:  loja.partner_id,
-    partnerKey: loja.partner_key,
-    accessToken,
-    shopId:     Number(loja.shop_id),
-    nickname:   loja.nickname ?? `Shopee ${loja.shop_id}`,
-  };
+  // SALES-SYNC-C6: invólucro fino e COMPATÍVEL (credencial | null) sobre o
+  // contrato detalhado — mesma lógica de leitura, lease, CAS e logs.
+  const r = await resolverCredencialShopee(userId, null, "compativel");
+  return r.status === "OK" ? r.credencial : null;
 }
 
 /**
@@ -363,47 +462,8 @@ export async function getShopeeLojaById(lojaId: string, userId: string): Promise
   shopId:      number;
   nickname:    string;
 } | null> {
-  const { linha: loja, erro: dbErr } = await lerCredencialShopeeDoDono(userId, lojaId);
-
-  if (dbErr) {
-    console.error("[shopee-auth] db error (getShopeeLojaById):", dbErr, "lojaId:", lojaId);
-    return null;
-  }
-  if (!loja) {
-    console.error("[shopee-auth] loja não encontrada (getShopeeLojaById):", lojaId);
-    return null;
-  }
-  if (!loja.partner_id || !loja.partner_key) {
-    console.error("[shopee-auth] loja sem partner_id/partner_key:", loja.id);
-    return null;
-  }
-
-  // `?? ""` preserva o comportamento anterior: a variável era tipada como
-  // `string` mas podia chegar nula, e a guarda `if (!accessToken)` adiante
-  // tratava isso. String vazia é falsy do mesmo modo.
-  let accessToken: string = loja.access_token ?? "";
-
-  const expiredOrMissing = precisaRenovarShopee(loja);
-
-  if (expiredOrMissing && loja.refresh_token) {
-    // SALES-SYNC-C4: lease distribuído → reler → provider → CAS (C3) → liberar.
-    const renovada = await renovarShopeeComLease(loja.id, loja.refresh_token, portasReaisShopee(loja, userId));
-    if (renovada.ok) {
-      accessToken = renovada.accessToken;
-    } else {
-      logFalhaRenovacao(renovada, loja.id, " (getShopeeLojaById)");
-      return null;
-    }
-  }
-
-  if (!accessToken) return null;
-
-  return {
-    lojaId:     loja.id,
-    partnerId:  loja.partner_id,
-    partnerKey: loja.partner_key,
-    accessToken,
-    shopId:     Number(loja.shop_id),
-    nickname:   loja.nickname ?? `Shopee ${loja.shop_id}`,
-  };
+  // SALES-SYNC-C6: invólucro fino e COMPATÍVEL (credencial | null) sobre o
+  // contrato detalhado — mesma lógica de leitura, lease, CAS e logs.
+  const r = await resolverCredencialShopee(userId, lojaId, "compativel");
+  return r.status === "OK" ? r.credencial : null;
 }

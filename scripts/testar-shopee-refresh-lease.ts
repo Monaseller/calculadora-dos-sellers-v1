@@ -210,7 +210,8 @@ async function principal() {
     db.relogio.agora += 60_000;
     assert(await CR.adquirirLeaseRefreshShopee(LOJA_A, DONO_B, "x", db.cliente) === "OCUPADO", "dono errado tomou lease vencido");
     const db2 = bancoFalso([lojaShopee(LOJA_A, DONO_A)]);
-    assert(await CR.adquirirLeaseRefreshShopee(LOJA_A, DONO_B, "x", db2.cliente) === "OCUPADO", "dono errado criou lease (FK)");
+    // C6: a recusa de FK e classificada como loja/dono invalido — nunca "ocupado"
+    assert(await CR.adquirirLeaseRefreshShopee(LOJA_A, DONO_B, "x", db2.cliente) === "LOJA_OU_DONO_INVALIDO", "dono errado criou lease (FK) ou foi chamado de ocupado");
   });
 
   console.log("\n[defesa em profundidade e degradacao]");
@@ -280,8 +281,9 @@ async function principal() {
   t("M5. sem lock em memoria e sem chamada ao provider fora do lease; os getters entram so pelo lease", () => {
     const sa = readFileSync(join(RAIZ, "lib/shopee-auth.ts"), "utf8").replace(/\/\/[^\n]*|\/\*[\s\S]*?\*\//g, "");
     assert(!/new Map\(|new Set\(|emVoo|let\s+\w+\s*:\s*Promise|globalThis/.test(sa), "estado de processo para exclusao");
-    assert((sa.match(/renovarShopeeComLease\(loja\.id, loja\.refresh_token, portasReaisShopee\(loja, userId\)\)/g) ?? []).length === 2, "getter fora do lease");
-    assert(/adquirirLease: \(portador\) => adquirirLeaseRefreshShopee\(loja\.id, userId, portador\)/.test(sa) && /liberarLease: \(portador\) => liberarLeaseRefreshShopee\(loja\.id, userId, portador\)/.test(sa), "portas reais do lease");
+    assert((sa.match(/renovarShopeeComLease\(loja\.id, loja\.refresh_token, portasReaisShopee\(loja, userId, inj\), \{ modo \}\)/g) ?? []).length === 1, "resolvedor fora do lease");
+    assert(/resolverCredencialShopee\(userId, null, "compativel"\)/.test(sa) && /resolverCredencialShopee\(userId, lojaId, "compativel"\)/.test(sa), "getter fora do resolvedor");
+    assert(/adquirirLease: \(portador\) => adquirirLeaseRefreshShopee\(loja\.id, userId, portador, inj\.cliente\)/.test(sa) && /liberarLease: \(portador\) => liberarLeaseRefreshShopee\(loja\.id, userId, portador, inj\.cliente\)/.test(sa), "portas reais do lease");
     assert(/finally \{\s*try \{ await portas\.liberarLease\(portador\); \}/.test(sa), "liberacao fora do finally");
   });
 
