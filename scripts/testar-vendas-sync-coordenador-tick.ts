@@ -10,7 +10,10 @@
  */
 import "./_server-only-inerte";
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+// SALES-CANONICAL-D13A: excecao minima e exata (capability owner-scoped + arquivos novos do D13)
+import { blocoD13Credenciais, filtrarExcecaoD13 } from "./_excecao-d13-vendas-canonicas";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 let passou = 0, falhou = 0;
@@ -409,11 +412,22 @@ async function principal() {
       /* SALES-SYNC-D10: vercel.json agora agenda os crons canonicos — guard proprio: testar-vendas-sync-cron */ "lib/marketplace", "supabase", ".env.example", "lib/feature-flags.ts", "scripts/sync-worker.mjs"], { cwd: RAIZ, encoding: "utf8" }).trim()
       // SALES-SYNC-D2 muda DE PROPOSITO so a ordem de claim do worker (guard proprio: testar-vendas-sync-worker-fairness)
       // SALES-SYNC-D6: flag server-only na rota do worker e no .env.example (guard proprio: testar-vendas-sync-feature-flag)
-      .split(/\r?\n/).filter((f) => f && f !== CAP && f !== "lib/vendas/sync/worker.ts" && f !== ".env.example" && f !== "app/api/internal/vendas-sync/worker/route.ts").join(",");
+      .split(/\r?\n/).filter((f) => f && f !== CAP && f !== "lib/vendas/sync/worker.ts" && f !== ".env.example" && f !== "app/api/internal/vendas-sync/worker/route.ts");
+    // SALES-CANONICAL-D13A: SO os arquivos NOVOS do D13 em lib/vendas/canonico (leitores existentes continuam travados)
+    const dForaD13 = filtrarExcecaoD13(RAIZ, BASE, d, false).join(",");
     const novos = execFileSync("git", ["ls-files", "--others", "--exclude-standard", "--", "supabase"], { cwd: RAIZ, encoding: "utf8" }).trim();
-    assert(d === "" && novos === "", `alterados: ${d} ${novos}`);
+    assert(dForaD13 === "" && novos === "", `alterados: ${dForaD13} ${novos}`);
     // SALES-SYNC-D1.1: a capability so GANHA a listagem do tick — nenhuma linha existente removida/alterada
-    const dc = execFileSync("git", ["diff", "-U0", BASE, "--", CAP], { cwd: RAIZ, encoding: "utf8" }).split(/\r?\n/);
+    // SALES-CANONICAL-D13A: o bloco D13 (validado por blocoD13Credenciais) sai ANTES desta regra; todo o resto continua sob ela
+    const d13 = blocoD13Credenciais(RAIZ);
+    assert(d13.valido, `bloco D13 de credenciais.ts invalido: ${d13.motivo}`);
+    const tmp = mkdtempSync(join(tmpdir(), "d13a-"));
+    writeFileSync(join(tmp, "base.ts"), execFileSync("git", ["show", `${BASE}:${CAP}`], { cwd: RAIZ, encoding: "utf8" }).replace(/\r\n/g, "\n"));
+    writeFileSync(join(tmp, "atual.ts"), d13.semBloco);
+    let saidaDiff = "";
+    try { saidaDiff = execFileSync("git", ["diff", "--no-index", "-U0", join(tmp, "base.ts"), join(tmp, "atual.ts")], { encoding: "utf8" }); } catch (e: any) { saidaDiff = String(e.stdout ?? ""); }
+    rmSync(tmp, { recursive: true, force: true });
+    const dc = saidaDiff.split(/\r?\n/);
     const removidas = dc.filter((l) => l.startsWith("-") && !l.startsWith("---"));
     const adicionadas = dc.filter((l) => l.startsWith("+") && !l.startsWith("+++") && !/^\+\s*(\*|\/\*\*|\/\/)/.test(l)).join("\n");
     assert(removidas.length === 0, `capability alterada: ${removidas.slice(0, 3).join(" | ")}`);

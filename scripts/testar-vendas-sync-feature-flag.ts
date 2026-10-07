@@ -12,6 +12,8 @@
  */
 import "./_server-only-inerte";
 import { execFileSync } from "node:child_process";
+// SALES-CANONICAL-D13A: excecao minima e exata (capability owner-scoped + arquivos novos do D13)
+import { filtrarExcecaoD13 } from "./_excecao-d13-vendas-canonicas";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
@@ -184,7 +186,9 @@ async function principal() {
       /* SALES-SYNC-D10: vercel.json agora agenda os crons canonicos — guard proprio: testar-vendas-sync-cron */ "supabase", "middleware.ts", "lib/middleware-rotas.ts"], { cwd: RAIZ, encoding: "utf8" }).trim().split(/\r?\n/)
       // SALES-SYNC-D8.2: helper de auth das rotas canonicas (guard proprio: testar-vendas-sync-auth-interna)
       .filter((f) => f && f !== HELPER && f !== "lib/vendas/sync/auth-interna.ts");
-    assert(d.length === 0, `alterados: ${d}`);
+    // SALES-CANONICAL-D13A: SO o bloco D13 de credenciais.ts e os arquivos novos do D13
+    const fora = filtrarExcecaoD13(RAIZ, BASE, d);
+    assert(fora.length === 0, `alterados: ${fora}`);
     const vendas = readFileSync(join(RAIZ, "app/(app)/vendas/page.tsx"), "utf8");
     assert(/import \{ ASYNC_SYNC_JOBS_ENABLED \} from "@\/lib\/feature-flags";/.test(vendas) && /if \(!ASYNC_SYNC_JOBS_ENABLED\) \{\s*dispararSincronizarInline\(\);/.test(vendas), "Vendas mudou de flag");
   });

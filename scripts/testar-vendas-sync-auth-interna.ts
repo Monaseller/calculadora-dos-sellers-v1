@@ -11,6 +11,8 @@
  */
 import "./_server-only-inerte";
 import { execFileSync } from "node:child_process";
+// SALES-CANONICAL-D13A: excecao minima e exata (capability owner-scoped + arquivos novos do D13)
+import { filtrarExcecaoD13 } from "./_excecao-d13-vendas-canonicas";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
@@ -152,8 +154,10 @@ async function principal() {
       "app/api/internal/agentes", "app/api/internal/estudio-anuncios", "lib/feature-flags.ts", "lib/vendas/sync/flag-canonica.ts", "lib/vendas/sync/coordenador.ts",
       "lib/vendas/sync/coordenador-tick.ts", "lib/vendas/sync/planejamento.ts", "lib/vendas/sync/worker.ts", "lib/vendas/sync/worker-deps.ts", "lib/vendas/canonico",
       "lib/marketplace", "lib/shopee-auth.ts", "lib/ml-auth.ts", "lib/mercado-livre", "lib/shopee", "lib/middleware-rotas.ts", "middleware.ts", "supabase", "scripts/sync-worker.mjs"],
-      { cwd: RAIZ, encoding: "utf8" }).trim();
-    assert(d === "", `alterados: ${d}`);
+      { cwd: RAIZ, encoding: "utf8" }).trim().split(/\r?\n/).filter(Boolean);
+    // SALES-CANONICAL-D13A: SO o bloco D13 de credenciais.ts e os arquivos novos do D13
+    const fora = filtrarExcecaoD13(RAIZ, BASE, d).join(",");
+    assert(fora === "", `alterados: ${fora}`);
     const dc = execFileSync("git", ["diff", "-U0", BASE, "--", ".env.example"], { cwd: RAIZ, encoding: "utf8" }).split(/\r?\n/);
     const add = dc.filter((l) => l.startsWith("+") && !l.startsWith("+++")), rem = dc.filter((l) => l.startsWith("-") && !l.startsWith("---"));
     assert(rem.length === 0 && add.filter((l) => /^\+[A-Z_]+=/.test(l)).join() === "+CANONICAL_SALES_SYNC_MANUAL_SECRET=", ".env.example com valor/variavel extra");

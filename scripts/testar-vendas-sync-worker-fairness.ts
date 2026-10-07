@@ -11,6 +11,8 @@
  */
 import "./_server-only-inerte";
 import { execFileSync } from "node:child_process";
+// SALES-CANONICAL-D13B: excecao EXATA — so os arquivos NOVOS do D13 em lib/vendas/canonico (D13_NEW_CANONICAL_FILES, inexistentes na base)
+import { filtrarNovosCanonicosD13 } from "./_excecao-d13-vendas-canonicas";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -265,9 +267,11 @@ async function principal() {
       // SALES-SYNC-D4 muda DE PROPOSITO a elegibilidade (capability + tick) — guard proprio: testar-vendas-sync-elegibilidade
       // SALES-SYNC-D6: flag server-only nas duas rotas e no .env.example (guard proprio: testar-vendas-sync-feature-flag)
       .split(/\r?\n/).filter((f) => f && f !== "lib/marketplace/credenciais.ts" && f !== "lib/vendas/sync/coordenador-tick.ts" && f !== ".env.example"
-        && f !== "app/api/internal/vendas-sync/coordenador/route.ts" && f !== "app/api/internal/vendas-sync/worker/route.ts").join(",");
+        && f !== "app/api/internal/vendas-sync/coordenador/route.ts" && f !== "app/api/internal/vendas-sync/worker/route.ts");
+    // SALES-CANONICAL-D13B: so os arquivos NOVOS do D13 em lib/vendas/canonico; ml.ts/shopee.ts/tipos.ts seguem travados
+    const fora = filtrarNovosCanonicosD13(RAIZ, BASE, d).join(",");
     const novos = execFileSync("git", ["ls-files", "--others", "--exclude-standard", "--", "supabase"], { cwd: RAIZ, encoding: "utf8" }).trim();
-    assert(d === "" && novos === "", `alterados: ${d} ${novos}`);
+    assert(fora === "" && novos === "", `alterados: ${fora} ${novos}`);
   });
 
   await fila;

@@ -21,6 +21,8 @@
  */
 import "./_server-only-inerte";
 import { execFileSync } from "node:child_process";
+// SALES-CANONICAL-D13A: excecao minima e exata (capability owner-scoped + arquivos novos do D13)
+import { filtrarExcecaoD13 } from "./_excecao-d13-vendas-canonicas";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -140,11 +142,14 @@ async function principal() {
   console.log("\n[23. escopo]");
   t("23. so vercel.json e scripts de teste mudaram desde a base: rotas, coordenador, worker, elegibilidade, motores, auth, Vendas, Dashboard INTOCADOS", () => {
     const d = execFileSync("git", ["diff", "--name-only", BASE], { cwd: RAIZ, encoding: "utf8" }).trim().split(/\r?\n/).filter(Boolean);
-    const fora = d.filter((f) => f !== "vercel.json" && !/^scripts\/testar-[a-z0-9-]+\.ts$/.test(f));
+    // SALES-CANONICAL-D13A: alem disso, SO o bloco D13 de credenciais.ts e os arquivos novos do D13 (inclui scripts/_excecao-d13-vendas-canonicas.ts)
+    const fora = filtrarExcecaoD13(RAIZ, BASE, d.filter((f) => f !== "vercel.json" && !/^scripts\/testar-[a-z0-9-]+\.ts$/.test(f)));
     assert(fora.length === 0, `alterados fora do escopo: ${fora}`);
     const novos = execFileSync("git", ["ls-files", "--others", "--exclude-standard"], { cwd: RAIZ, encoding: "utf8" }).trim().split(/\r?\n/).filter(Boolean)
       .filter((f) => !/^scripts\/testar-[a-z0-9-]+\.ts$/.test(f));
-    assert(novos.length === 0, `arquivos novos fora do escopo: ${novos}`);
+    // SALES-CANONICAL-D13A: SO os arquivos novos do D13 (lista exata, inexistentes na base)
+    const novosFora = filtrarExcecaoD13(RAIZ, BASE, novos, false);
+    assert(novosFora.length === 0, `arquivos novos fora do escopo: ${novosFora}`);
   });
 
   await fila;

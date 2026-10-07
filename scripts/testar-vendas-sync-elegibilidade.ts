@@ -11,6 +11,8 @@
 import "./_server-only-inerte";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+// SALES-CANONICAL-D13B: excecao EXATA — so os arquivos NOVOS do D13 em lib/vendas/canonico (D13_NEW_CANONICAL_FILES, inexistentes na base)
+import { filtrarNovosCanonicosD13 } from "./_excecao-d13-vendas-canonicas";
 
 let passou = 0, falhou = 0;
 let fila: Promise<void> = Promise.resolve();
@@ -224,8 +226,10 @@ async function principal() {
       "lib/vendas/sync/worker-deps.ts", "lib/vendas/sync/coordenador.ts", "lib/vendas/sync/planejamento.ts", "lib/vendas/canonico", "lib/mercado-livre/ingestao", "lib/shopee/ingestao",
       /* SALES-SYNC-D10: vercel.json agora agenda os crons canonicos — guard proprio: testar-vendas-sync-cron */ "supabase", "app", "lib/feature-flags.ts"], { cwd: RAIZ, encoding: "utf8" }).trim()
       // SALES-SYNC-D6: as duas rotas passam a ler a flag server-only (guard proprio: testar-vendas-sync-feature-flag)
-      .split(/\r?\n/).filter((f) => f && f !== "app/api/internal/vendas-sync/coordenador/route.ts" && f !== "app/api/internal/vendas-sync/worker/route.ts").join(",");
-    assert(d === "", `alterados: ${d}`);
+      .split(/\r?\n/).filter((f) => f && f !== "app/api/internal/vendas-sync/coordenador/route.ts" && f !== "app/api/internal/vendas-sync/worker/route.ts");
+    // SALES-CANONICAL-D13B: so os arquivos NOVOS do D13 em lib/vendas/canonico; ml.ts/shopee.ts/tipos.ts seguem travados
+    const fora = filtrarNovosCanonicosD13(RAIZ, "2d2beb4", d).join(",");
+    assert(fora === "", `alterados: ${fora}`);
   });
 
   await fila;

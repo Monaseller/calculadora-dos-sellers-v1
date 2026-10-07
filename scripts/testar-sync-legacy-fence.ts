@@ -12,6 +12,8 @@
  */
 import "./_server-only-inerte";
 import { execFileSync } from "node:child_process";
+// SALES-CANONICAL-D13B: excecao EXATA — so os arquivos NOVOS do D13 em lib/vendas/canonico (D13_NEW_CANONICAL_FILES, inexistentes na base)
+import { filtrarNovosCanonicosD13 } from "./_excecao-d13-vendas-canonicas";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -254,8 +256,10 @@ async function principal() {
       "lib/vendas/sync/auth-interna.ts"];
     const d = execFileSync("git", ["diff", "--name-only", BASE, "--", "lib/vendas", "lib/mercado-livre/ingestao", "lib/shopee/ingestao", "lib/sync-ml.ts", "lib/sync-shopee.ts",
       "lib/ml-auth.ts", "app/api/sync", "app/api/internal", "app/api/ml/vendas", /* SALES-SYNC-D10: vercel.json agora agenda os crons canonicos — guard proprio: testar-vendas-sync-cron */ "app/api/shopee/vendas", "lib/feature-flags.ts"], { cwd: RAIZ, encoding: "utf8" })
-      .trim().split(/\r?\n/).filter((f) => f && !C6.includes(f)).join(",");
-    assert(d === "", d);
+      .trim().split(/\r?\n/).filter((f) => f && !C6.includes(f));
+    // SALES-CANONICAL-D13B: so os arquivos NOVOS do D13 em lib/vendas/canonico; ml.ts/shopee.ts/tipos.ts seguem travados
+    const fora = filtrarNovosCanonicosD13(RAIZ, BASE, d).join(",");
+    assert(fora === "", fora);
   });
   t("I4. a unica migration nova e a do fence, e ela nao toca idx_sync_jobs_loja_ativo (so comentario)", () => {
     const novos = execFileSync("git", ["diff", "--name-only", BASE, "--", "supabase"], { cwd: RAIZ, encoding: "utf8" }).trim().split(/\r?\n/).filter(Boolean);

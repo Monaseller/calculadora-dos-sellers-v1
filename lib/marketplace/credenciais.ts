@@ -1082,6 +1082,58 @@ export async function listarLojasAtivasParaSyncCanonico(
   return { linhas, erro: null };
 }
 
+/** Loja do dono vista pela consulta canonica de vendas: escopo + elegibilidade derivada, sem credencial. */
+export interface LinhaLojaParaVendasCanonicas {
+  id: string;
+  marketplace: "ML" | "Shopee";
+  ativo: boolean;
+  elegibilidade: ElegibilidadeSyncCanonico;
+}
+
+/**
+ * TODAS as lojas ML/Shopee de UM dono — ativas E inativas — para a
+ * consulta canonica de vendas (SALES-CANONICAL-D13).
+ *
+ * Owner-scoped (`user_id = dono`), nunca cross-tenant: duas lojas com o
+ * mesmo seller_id sob donos diferentes sao independentes e uma nunca
+ * aparece para o outro. Inativas entram de proposito: os leitores
+ * canonicos as incluem, e a consulta precisa EXPLICAR por que o agregado
+ * nao e COMPLETE em vez de exclui-las em silencio.
+ *
+ * Mesma regra do tick (classificarElegibilidadeSyncCanonico): os campos de
+ * credencial sao lidos SO para classificar e morrem aqui. Nao resolve
+ * credencial, nao renova, nao chama provider.
+ */
+export async function listarLojasDoDonoParaVendasCanonicas(
+  userId: string,
+  /** Opcional: cliente injetado nos testes; padrão = service_role. */
+  cliente?: any,
+  /** Relogio da classificacao (expiracao); padrão = agora. */
+  agoraMs: number = Date.now()
+): Promise<ResultadoLista2<LinhaLojaParaVendasCanonicas>> {
+  if (!userId) return { linhas: [], erro: null };
+
+  const { data, error } = await (cliente ?? getSupabaseServidor())
+    .from("lojas")
+    .select("id, marketplace, ativo, access_token, refresh_token, token_expires_at, seller_id, partner_id, partner_key")
+    .eq("user_id", String(userId))
+    .in("marketplace", [MARKETPLACE_ML, MARKETPLACE_SHOPEE])
+    .order("id", { ascending: true });
+
+  if (error) {
+    console.error("[credenciais] falha ao listar lojas do dono para vendas canonicas");
+    return { linhas: [], erro: "erro_consulta_loja" };
+  }
+  const linhas: LinhaLojaParaVendasCanonicas[] = [];
+  for (const l of (Array.isArray(data) ? data : []) as ({ id: string | null; ativo: boolean | null } & CredencialParaElegibilidade)[]) {
+    if (l.id && (l.marketplace === MARKETPLACE_ML || l.marketplace === MARKETPLACE_SHOPEE)) {
+      // so os 4 campos seguros saem; a credencial lida morre aqui
+      linhas.push({ id: l.id, marketplace: l.marketplace, ativo: l.ativo === true, elegibilidade: classificarElegibilidadeSyncCanonico(l, agoraMs) });
+    }
+  }
+  return { linhas, erro: null };
+}
+
 export interface LinhaLojaParaJob {
   id: string;
   user_id: string | null;

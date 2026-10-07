@@ -11,6 +11,8 @@
  */
 import "./_server-only-inerte";
 import { execFileSync } from "node:child_process";
+// SALES-CANONICAL-D13B: excecao EXATA — so os arquivos NOVOS do D13 em lib/vendas/canonico (D13_NEW_CANONICAL_FILES, inexistentes na base)
+import { filtrarNovosCanonicosD13 } from "./_excecao-d13-vendas-canonicas";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { RelogioFake, RepoFake, ShopeeFake, type PedidoFake } from "./fakes/shopee-ingestao-fake";
@@ -396,10 +398,12 @@ async function principal() {
     const d = execFileSync("git", ["diff", "--name-only", BASE, "--", "scripts/sync-worker.mjs", "app/api/internal/sync", "app/api/sync", "lib/sync-ml.ts", "lib/sync-shopee.ts",
       "lib/vendas/canonico", "lib/mercado-livre/ingestao", "lib/shopee/ingestao", /* SALES-SYNC-D10: vercel.json agora agenda os crons canonicos — guard proprio: testar-vendas-sync-cron */ "supabase", ".env.example", "lib/feature-flags.ts"], { cwd: RAIZ, encoding: "utf8" })
       // SALES-SYNC-D6 acrescenta a flag server-only ao .env.example (guard proprio: testar-vendas-sync-feature-flag)
-      .trim().split(/\r?\n/).filter((f) => f && !FENCE_C1.includes(f) && f !== ".env.example").join(",");
+      .trim().split(/\r?\n/).filter((f) => f && !FENCE_C1.includes(f) && f !== ".env.example");
+    // SALES-CANONICAL-D13B: so os arquivos NOVOS do D13 em lib/vendas/canonico; ml.ts/shopee.ts/tipos.ts seguem travados
+    const fora = filtrarNovosCanonicosD13(RAIZ, BASE, d).join(",");
     const novos = execFileSync("git", ["ls-files", "--others", "--exclude-standard", "--", "supabase"], { cwd: RAIZ, encoding: "utf8" })
       .trim().split(/\r?\n/).filter((f) => f && !FENCE_C1.includes(f)).join(",");
-    assert(d === "" && novos === "", `alterados: ${d} ${novos}`);
+    assert(fora === "" && novos === "", `alterados: ${fora} ${novos}`);
     assert(JSON.stringify(JSON.parse(readFileSync(join(RAIZ, "vercel.json"), "utf8")).crons.filter((c: { path: string }) => /vendas-sync/.test(c.path))) === JSON.stringify([{ path: "/api/internal/vendas-sync/coordenador", schedule: "*/15 * * * *" }, { path: "/api/internal/vendas-sync/worker", schedule: "* * * * *" }]), "crons canonicos diferentes do aprovado (D10)");
   });
   t("sanitizarErro remove token, segredo e identificadores longos", () => {
