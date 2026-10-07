@@ -33,6 +33,7 @@ import type { CheckpointML, ProgressoML, RepositorioML, TransporteML } from "@/l
 import { executarFatiaCatchUpEscrow, executarFatiaShopee } from "@/lib/shopee/ingestao/motor";
 import type { CheckpointCatchUpEscrow, CheckpointShopee, ProgressoShopee, Repositorio, ShopeeApi } from "@/lib/shopee/ingestao/tipos";
 import { classificarJobParaWorker, type TipoTrabalhoCanonico } from "./worker-contrato";
+import { ehJobIntraday } from "./intraday";
 
 /** Batimento mais velho que isto = processo morto. Muito maior que qualquer maxDuration (60–300 s). */
 export const LEASE_MS = 10 * 60 * 1000;
@@ -42,7 +43,7 @@ const TENTATIVAS_CLAIM = 3;
 const RECUPERACOES_POR_INVOCACAO = 5;
 
 const COLUNAS_CANDIDATO = "id, marketplace, campo_tempo, janela_inicio, janela_fim, criado_em, modo:checkpoint->>modo";
-const COLUNAS_JOB = "id, user_id, loja_id, marketplace, campo_tempo, janela_inicio, janela_fim, date_from, date_to, checkpoint, progresso, status, tentativas, max_tentativas, heartbeat_em, iniciado_em";
+const COLUNAS_JOB = "id, user_id, loja_id, marketplace, tipo, campo_tempo, janela_inicio, janela_fim, date_from, date_to, checkpoint, progresso, status, tentativas, max_tentativas, heartbeat_em, iniciado_em";
 
 /** ADIADO = auth Shopee TRANSITORIA (refresh em andamento / lease indisponivel): job de volta a pendente, sem erro. */
 export type ResultadoWorker = "DESABILITADO" | "NO_JOB" | "CLAIM_PERDIDO" | "EXECUTADO" | "RECUSADO" | "ADIADO" | "ERRO";
@@ -277,6 +278,8 @@ export async function executarWorkerCanonico(depsOuFabrica: DepsWorker | (() => 
     return fim({ ...base, tipo, resultado: "RECUSADO", motivo, status_posterior: ok ? "erro" : "desconhecido" });
   };
   if (tipo === "NAO_CANONICO" || tipo !== ganho.tipo) return recusar("tipo_mudou_apos_claim", "validation");
+  // D15B (fail-closed): nenhum motor intraday existe ainda (D15C/D15D) — nunca executar como janela normal
+  if (ehJobIntraday({ tipo: r.tipo, campoTempo: r.campo_tempo, janelaInicio: r.janela_inicio, janelaFim: r.janela_fim, dateFrom: r.date_from, dateTo: r.date_to })) return recusar("intraday_sem_motor", "validation");
 
   // ── dono, loja e marketplace vem do BANCO (lojas), nunca do checkpoint ──
   const { data: loja, error: eLoja } = await cliente.from("lojas").select("id, user_id, marketplace, ativo")

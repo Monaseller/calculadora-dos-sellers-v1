@@ -23,6 +23,9 @@ import { diaEmSaoPaulo, somarDiasNoCalendario } from "@/lib/fuso-sao-paulo";
 import { diasDaJanela, limitesDaJanela } from "@/lib/mercado-livre/ingestao/janelas";
 import { planejarJanelasCriacao } from "@/lib/shopee/ingestao/janelas";
 import { LIMITE_POLITICA_PAGAMENTO_MS } from "@/lib/vendas/canonico/shopee";
+import {
+  alvoIntradayMs, CADENCIA_INTRADAY_MS, chaveIntraday, ehJobIntraday, ehJobIntradayDoDia, limitesDoDiaMs, PRIORIDADE_INTRADAY,
+} from "./intraday";
 import type {
   AvaliacaoLojaSync, AvaliacaoSync, Cobertura, Frescor, Intervalo, JobExistenteSync, JobPlanejado, LojaAtivaSync, Necessidade,
   OrigemPedido, PoliticaSync, ProximaAcao, SinaisShopeeSync, Sincronizacao,
@@ -152,7 +155,8 @@ interface Parcial {
 
 // ── Mercado Livre ──
 function planejarML(loja: LojaAtivaSync, de: string, ate: string, agoraMs: number, jobs: JobExistenteSync[], pol: PoliticaSync, origem: OrigemPedido): Parcial {
-  const meus = jobs.filter((j) => j.lojaId === loja.id && j.marketplace === "ML" && j.campoTempo === "date_closed" && j.janelaInicio && j.janelaFim);
+  // D15B: intraday prova so OBSERVED_THROUGH — nunca cobertura de dia fechado
+  const meus = jobs.filter((j) => j.lojaId === loja.id && j.marketplace === "ML" && j.campoTempo === "date_closed" && j.janelaInicio && j.janelaFim && !ehJobIntraday(j));
   const faltam: string[] = [], velhos: string[] = [], refreshaveis: string[] = [], esgotado: string[] = [], andamento = new Set<string>();
   let descobrindo = 0, esperaDescoberta = false, refreshEsgotado = 0; let espera: string | null = null;
   const anotarEspera = (ate: string) => { espera = espera && espera > ate ? espera : ate; };
@@ -212,7 +216,8 @@ function planejarML(loja: LojaAtivaSync, de: string, ate: string, agoraMs: numbe
 function planejarShopee(loja: LojaAtivaSync, de: string, ate: string, agoraMs: number, jobs: JobExistenteSync[], sinais: SinaisShopeeSync, pol: PoliticaSync, origem: OrigemPedido): Parcial {
   const l = limitesDaJanela(de, ate)!;
   const necessario: Iv = [l.inicio.getTime() - LIMITE_POLITICA_PAGAMENTO_MS, l.fim.getTime()];
-  const meus = jobs.filter((j) => j.lojaId === loja.id && j.marketplace === "Shopee");
+  // D15B: intraday prova so OBSERVED_THROUGH — nunca cobertura de periodo fechado
+  const meus = jobs.filter((j) => j.lojaId === loja.id && j.marketplace === "Shopee" && !ehJobIntraday(j));
   const descoberta = meus.filter((j) => j.campoTempo === "create_time" && j.janelaInicio && j.janelaFim);
   const feitos = descoberta.filter(completo);
   const ativos = descoberta.filter((j) => ATIVOS.has(j.status));
@@ -362,4 +367,58 @@ export function avaliarBootstrap(args: { loja: LojaAtivaSync; agoraMs: number; j
   const op = OPCOES_BACKFILL_INICIAL.find((o) => o.id === args.horizonte)!;
   const de = op.dias === null ? `${hoje.slice(0, 4)}-01-01` : somarDiasNoCalendario(hoje, -op.dias);
   return avaliarLoja({ loja: args.loja, de, ate: somarDiasNoCalendario(hoje, -1), agoraMs: args.agoraMs, jobs: args.jobs, politica: args.politica, origem: "bootstrap" });
+}
+
+// ── Intraday (SALES-SYNC-D15B) ──
+
+/** Estado do intraday de uma loja, para relatorio (a acao continua sendo decidida por escolherProximaAcao). */
+export type EstadoIntraday =
+  | "NEED_INTRADAY" | "WAIT_INTRADAY_CADENCE" | "INTRADAY_ALREADY_AT_TARGET" | "INTRADAY_SEM_ALVO"
+  | "WAIT_ACTIVE_JOB" | "WAIT_RETRY" | "FAILED";
+
+/**
+ * Necessidade INTRADAY de UMA loja: observar o dia corrente ate T (grade de
+ * 15 min), no maximo a cada 30 min (pelo T da ultima observacao CONCLUIDA —
+ * zero linhas tambem e observacao: so o job conta, nunca as linhas). Entra na
+ * MESMA fila serial (escolherProximaAcao): job ativo → espera; falhas → a
+ * MESMA politica (avaliarFalhas). Nunca vira cobertura fechada.
+ *
+ *   ML      [inicio do dia, T]           (relista o dia ate T — check B)
+ *   Shopee  [ultimo T concluido, T]      (create_time incremental; REDETAIL no D15D)
+ */
+export function avaliarIntradayLoja(args: { loja: LojaAtivaSync; agoraMs: number; jobs: JobExistenteSync[]; politica: PoliticaSync }): { estado: EstadoIntraday; avaliacao: AvaliacaoLojaSync } {
+  const { loja, agoraMs, jobs, politica } = args;
+  const hoje = diaEmSaoPaulo(isoDe(agoraMs))!;
+  const dia = limitesDoDiaMs(hoje)!;
+  const campo = loja.marketplace === "ML" ? "date_closed" : "create_time";
+  const alvo = alvoIntradayMs(agoraMs);
+  const meus = jobs.filter((j) => j.lojaId === loja.id && j.marketplace === loja.marketplace && j.campoTempo === campo && ehJobIntradayDoDia(j, hoje));
+  const ativo = jobs.find((j) => j.lojaId === loja.id && ATIVOS.has(j.status))?.id ?? null;
+  const concluidos = meus.filter(completo);
+  const ultimoT = Math.max(...concluidos.map((j) => t(j.janelaFim)).filter(Number.isFinite), -Infinity);
+  const ultimoSucesso = Math.max(...concluidos.map((j) => t(j.concluidoEm)).filter(Number.isFinite), -Infinity);
+
+  const resultado = (estado: EstadoIntraday, necessidades: Necessidade[], esperaAte: string | null = null, esgotado: string[] = []) => ({
+    estado: ativo && necessidades.length ? "WAIT_ACTIVE_JOB" as const : estado,
+    avaliacao: {
+      lojaId: loja.id, marketplace: loja.marketplace, cobertura: "PARTIAL" as Cobertura, frescor: "IN_PROGRESS" as Frescor, definitivo: false,
+      sincronizacao: (ativo ? "SYNCING" : esperaAte ? "WAITING_RETRY" : "IDLE") as Sincronizacao,
+      motivos: [`intraday:${estado}`], faltando: [], desatualizado: [], necessidades,
+      proximaAcao: escolherProximaAcao({ necessidades, jobAtivoDaLoja: ativo, esperaAte, esgotado }), jobsEmAndamento: ativo ? [ativo] : [],
+    },
+  });
+
+  if (alvo <= dia.inicio) return resultado("INTRADAY_SEM_ALVO", []);
+  if (ultimoT >= alvo) return resultado("INTRADAY_ALREADY_AT_TARGET", []);
+  if (ultimoT > alvo - CADENCIA_INTRADAY_MS) return resultado("WAIT_INTRADAY_CADENCE", []);
+  const f = avaliarFalhas(meus, [dia.inicio, dia.fim], ultimoSucesso, politica, agoraMs);
+  if (f.estado === "esgotado") return resultado("FAILED", [], null, ["intraday_falhas_repetidas"]);
+  if (f.estado === "esperar") return resultado("WAIT_RETRY", [], f.ate!);
+
+  const inicio = campo === "date_closed" ? dia.inicio : Math.max(dia.inicio, ultimoT);
+  const job: JobPlanejado = {
+    chave: chaveIntraday(loja.marketplace, loja.id, campo, isoDe(dia.inicio), isoDe(alvo)), marketplace: loja.marketplace, lojaId: loja.id,
+    campoTempo: campo, inicio: isoDe(inicio), fim: isoDe(alvo), de: hoje, ate: hoje, proposito: "intraday",
+  };
+  return resultado("NEED_INTRADAY", [{ job, tipo: "refresh", prioridade: PRIORIDADE_INTRADAY }]);
 }

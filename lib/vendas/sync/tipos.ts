@@ -38,6 +38,10 @@ export interface JobExistenteSync {
   criadoEm: string;
   /** Catch-up de escrow (checkpoint.modo = escrow_catchup) — distingue do job legado, que tambem tem campo/janela NULL. */
   catchup?: boolean;
+  /** SALES-SYNC-D15B: tipo e dias date_from/date_to — so para classificar intraday (ehJobIntraday). */
+  tipo?: string | null;
+  dateFrom?: string | null;
+  dateTo?: string | null;
 }
 
 /** Sinais de estado da Shopee (contagens do servico canonico, sem valores). */
@@ -46,7 +50,8 @@ export interface SinaisShopeeSync {
   naoObservadosAposPeriodo: number;
 }
 
-export type PropositoJob = "descoberta" | "refresh" | "catchup_escrow";
+/** intraday (D15B): observacao do dia corrente ate T — nunca cobertura de periodo fechado. */
+export type PropositoJob = "descoberta" | "refresh" | "catchup_escrow" | "intraday";
 
 export interface JobPlanejado {
   /** Chave logica: marketplace|loja|campo|inicio|fim|proposito. */

@@ -20,6 +20,7 @@ import { criarJobFechamentoML } from "@/lib/mercado-livre/ingestao/persistencia"
 import { limitesDaJanela } from "@/lib/mercado-livre/ingestao/janelas";
 import { checkpointCatchUpInicial } from "@/lib/shopee/ingestao/motor";
 import { contarEscrowPendenteShopee, contarNaoPagosSemObservacaoShopee, LIMITE_POLITICA_PAGAMENTO_MS } from "@/lib/vendas/canonico/shopee";
+import { ehJobIntraday } from "./intraday";
 import { agregar, avaliarLoja, proximaAcaoCombinada } from "./planejamento";
 import type {
   AvaliacaoLojaSync, AvaliacaoSync, JobExistenteSync, JobPlanejado, LojaAtivaSync, MarketplaceSync, OrigemPedido, PoliticaSync, ProximaAcao, SinaisShopeeSync,
@@ -28,13 +29,15 @@ import type {
 export async function lerJobsDasLojas(cliente: SupabaseClient, userId: string, lojaIds: string[]): Promise<JobExistenteSync[]> {
   if (!lojaIds.length) return [];
   const { data, error } = await cliente.from("sync_jobs")
-    .select("id, loja_id, marketplace, campo_tempo, janela_inicio, janela_fim, status, listagem_completa, concluido_em, criado_em, modo:checkpoint->>modo")
+    .select("id, loja_id, marketplace, campo_tempo, janela_inicio, janela_fim, status, listagem_completa, concluido_em, criado_em, tipo, date_from, date_to, modo:checkpoint->>modo")
     .eq("user_id", userId).in("loja_id", lojaIds);
   if (error) throw new Error("leitura_falhou");
   return ((data ?? []) as Record<string, any>[]).map((r) => ({ id: r.id, lojaId: r.loja_id, marketplace: r.marketplace, campoTempo: r.campo_tempo ?? null,
     janelaInicio: r.janela_inicio ?? null, janelaFim: r.janela_fim ?? null, status: r.status, listagemCompleta: r.listagem_completa ?? null,
     concluidoEm: r.concluido_em ?? null, criadoEm: r.criado_em,
-    catchup: r.campo_tempo == null && r.janela_inicio == null && r.modo === "escrow_catchup" }));
+    catchup: r.campo_tempo == null && r.janela_inicio == null && r.modo === "escrow_catchup",
+    // D15B: so para classificar intraday (ehJobIntraday)
+    tipo: r.tipo ?? null, dateFrom: r.date_from ?? null, dateTo: r.date_to ?? null }));
 }
 
 export async function avaliarNecessidadeDeSync(
@@ -98,6 +101,17 @@ export async function garantirProximaAcao(
 /** Insere o job (dono vem do chamador, nunca do plano). null = ja ha job ativo na loja (23505). */
 async function criarJob(cliente: SupabaseClient, userId: string, j: JobPlanejado): Promise<string | null> {
   try {
+    if (j.proposito === "intraday") {
+      // D15B: tipo 'incremental' + janela de UM dia civil = intraday (ehJobIntraday). Fail-closed: so insere o que o classificador reconhece.
+      const linha = { user_id: userId, loja_id: j.lojaId, marketplace: j.marketplace, status: "pendente", date_from: j.de, date_to: j.ate,
+        tipo: "incremental", campo_tempo: j.campoTempo, janela_inicio: j.inicio, janela_fim: j.fim, listagem_completa: false };
+      if (!ehJobIntraday({ tipo: linha.tipo, campoTempo: linha.campo_tempo, janelaInicio: linha.janela_inicio, janelaFim: linha.janela_fim, dateFrom: linha.date_from, dateTo: linha.date_to })) {
+        throw new Error("criar_job:intraday_invalido");
+      }
+      const { data, error } = await cliente.from("sync_jobs").insert(linha).select("id").single();
+      if (error) { if ((error as { code?: string }).code === "23505") return null; throw new Error(`criar_job:${error.message}`); }
+      return (data as { id: string }).id;
+    }
     if (j.marketplace === "ML") return await criarJobFechamentoML(cliente, { userId, lojaId: j.lojaId, de: j.de, ate: j.ate });
     const catchup = j.proposito === "catchup_escrow";
     const linha: Record<string, unknown> = { user_id: userId, loja_id: j.lojaId, marketplace: "Shopee", status: "pendente", date_from: j.de, date_to: j.ate,

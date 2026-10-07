@@ -29,7 +29,8 @@ import { ASYNC_SYNC_JOBS_ENABLED } from "@/lib/feature-flags";
 import { diaEmSaoPaulo, somarDiasNoCalendario } from "@/lib/fuso-sao-paulo";
 import { listarLojasAtivasParaSyncCanonico, type ElegibilidadeSyncCanonico } from "@/lib/marketplace/credenciais";
 import { avaliarNecessidadeDeSync, garantirProximaAcao, lerJobsDasLojas } from "./coordenador";
-import { agregar, avaliarBootstrap, OPCOES_BACKFILL_INICIAL, POLITICA_SYNC_PROPOSTA } from "./planejamento";
+import { INTRADAY_CANONICO_HABILITADO } from "./intraday";
+import { agregar, avaliarBootstrap, avaliarIntradayLoja, OPCOES_BACKFILL_INICIAL, POLITICA_SYNC_PROPOSTA, type EstadoIntraday } from "./planejamento";
 import type { AvaliacaoLojaSync, AvaliacaoSync, MarketplaceSync, PoliticaSync } from "./tipos";
 
 export type FaseBootstrap = (typeof OPCOES_BACKFILL_INICIAL)[number]["id"] | "COMPLETO";
@@ -56,6 +57,8 @@ export interface ResultadoLojaTick {
   elegibilidade?: ElegibilidadeSyncCanonico["estado"];
   /** Loja ignorada que ainda tem job ativo: o job NAO e tocado (o worker aplica a politica dele). */
   jobAtivoId?: string | null;
+  /** D15B: estado da necessidade intraday (so quando o intraday esta habilitado). */
+  intraday?: EstadoIntraday;
 }
 
 export interface RelatorioTick {
@@ -82,6 +85,8 @@ export interface DepsTick {
   relogio: { agoraMs: () => number };
   politica?: PoliticaSync;
   log?: (evento: Record<string, unknown>) => void;
+  /** D15B: planejar a observacao intraday do dia corrente. Padrao: INTRADAY_CANONICO_HABILITADO (false ate D15C/D15D). */
+  intraday?: boolean;
 }
 
 interface LojaTick { id: string; userId: string; marketplace: MarketplaceSync; elegibilidade: ElegibilidadeSyncCanonico }
@@ -151,9 +156,13 @@ async function avaliarUmaLoja(deps: DepsTick, loja: LojaTick, agoraMs: number, p
     { agoraMs, politica });
   const jobs = await lerJobsDasLojas(cliente, loja.userId, [loja.id]);
   const { fase, avaliacao: boot } = faseDoBootstrap(loja, jobs, agoraMs, politica);
-  const avaliacoes: AvaliacaoSync[] = [manutencao, ...(boot ? [agregar([boot])] : [])];
+  // D15B: intraday entra na MESMA escolha por prioridade (interleave), so se habilitado
+  const intraday = (deps.intraday ?? INTRADAY_CANONICO_HABILITADO)
+    ? avaliarIntradayLoja({ loja: { id: loja.id, marketplace: loja.marketplace }, agoraMs, jobs, politica }) : null;
+  const avaliacoes: AvaliacaoSync[] = [manutencao, ...(boot ? [agregar([boot])] : []), ...(intraday ? [agregar([intraday.avaliacao])] : [])];
   const lm = manutencao.lojas[0];
-  const base = { lojaId: loja.id, marketplace: loja.marketplace, faseBootstrap: fase, estado: lm ? { cobertura: lm.cobertura, frescor: lm.frescor, definitivo: lm.definitivo } : undefined };
+  const base = { lojaId: loja.id, marketplace: loja.marketplace, faseBootstrap: fase, estado: lm ? { cobertura: lm.cobertura, frescor: lm.frescor, definitivo: lm.definitivo } : undefined,
+    ...(intraday ? { intraday: intraday.estado } : {}) };
   const g = await garantirProximaAcao(cliente, loja.userId, avaliacoes, { habilitado: true });
   const criado = g.criados.find((c) => c.lojaId === loja.id);
   if (criado) return { ...base, acao: "JOB_CREATED", jobId: criado.jobId, tipoJob: criado.acao };

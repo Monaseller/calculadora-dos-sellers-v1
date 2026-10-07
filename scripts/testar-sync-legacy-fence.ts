@@ -16,6 +16,8 @@ import { execFileSync } from "node:child_process";
 import { filtrarNovosCanonicosD13 } from "./_excecao-d13-vendas-canonicas";
 // SALES-CANONICAL-D14B: excecao EXATA do patch D14 nos leitores (ATUAL − patch aprovado = bytes de 1c4fe29)
 import { filtrarExcecaoD14 } from "./_excecao-d14-vendas-canonicas";
+// SALES-SYNC-D15B2: excecao EXATA do patch D15B nos arquivos de sync (ATUAL − patch aprovado = bytes de d631748)
+import { filtrarExcecaoD15B } from "./_excecao-d15b-intraday";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -260,7 +262,7 @@ async function principal() {
       "lib/ml-auth.ts", "app/api/sync", "app/api/internal", "app/api/ml/vendas", /* SALES-SYNC-D10: vercel.json agora agenda os crons canonicos — guard proprio: testar-vendas-sync-cron */ "app/api/shopee/vendas", "lib/feature-flags.ts"], { cwd: RAIZ, encoding: "utf8" })
       .trim().split(/\r?\n/).filter((f) => f && !C6.includes(f));
     // SALES-CANONICAL-D13B: so os arquivos NOVOS do D13 em lib/vendas/canonico; ml.ts/shopee.ts/tipos.ts seguem travados
-    const fora = filtrarExcecaoD14(RAIZ, BASE, filtrarNovosCanonicosD13(RAIZ, BASE, d)).join(",");
+    const fora = filtrarExcecaoD15B(RAIZ, BASE, filtrarExcecaoD14(RAIZ, BASE, filtrarNovosCanonicosD13(RAIZ, BASE, d))).join(",");
     assert(fora === "", fora);
   });
   t("I4. a unica migration nova e a do fence, e ela nao toca idx_sync_jobs_loja_ativo (so comentario)", () => {

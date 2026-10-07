@@ -10,6 +10,8 @@ import "./_server-only-inerte";
 import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+// SALES-SYNC-D15B2: excecao EXATA do patch D15B — A2-ML so tolera o hunk de exclusao de intraday (HUNK_A2_ML)
+import { planejarMLSemD15B } from "./_excecao-d15b-intraday";
 import type { AvaliacaoLojaSync, JobExistenteSync, LojaAtivaSync, PoliticaSync } from "../lib/vendas/sync/tipos";
 
 let passou = 0, falhou = 0;
@@ -412,7 +414,9 @@ async function principal() {
     const fn = (s: string) => { const i = s.indexOf("function planejarML("); const f = s.indexOf("\n// ── Shopee ──", i); return s.slice(i, f); };
     const base = execFileSync("git", ["show", "6c9b56e:lib/vendas/sync/planejamento.ts"], { cwd: RAIZ, encoding: "utf8" });
     const atual = readFileSync(join(RAIZ, "lib/vendas/sync/planejamento.ts"), "utf8");
-    assert(fn(base).length > 500 && fn(base).replace(/\r/g, "") === fn(atual).replace(/\r/g, ""), "planejarML mudou");
+    // D15B2: identico ao base OU identico apos reverter SO o hunk aprovado (exclusao de intraday da cobertura fechada)
+    const baseTxt = fn(base).replace(/\r/g, ""), atualTxt = fn(atual).replace(/\r/g, "");
+    assert(baseTxt.length > 500 && (baseTxt === atualTxt || baseTxt === planejarMLSemD15B(atualTxt)), "planejarML mudou");
     const velho = jobML(MLA, "2026-10-05", "2026-10-05", { concluidoEm: new Date(AGORA - 20 * H).toISOString() });
     const novo = jobML(MLA, "2026-10-05", "2026-10-05", { concluidoEm: new Date(AGORA - H).toISOString() });
     const a = av(ml(MLA), "2026-10-05", "2026-10-05", [velho, novo]); const b = av(ml(MLA), "2026-10-05", "2026-10-05", [novo, velho]);
