@@ -149,7 +149,10 @@ export async function consultarVendasCanonicas(
     if (l.elegibilidade.estado !== "ELEGIVEL") motivos.push(`CREDENCIAL_INUTILIZAVEL:${l.elegibilidade.motivo}`);
     const semLeitor = (fechada !== null && !rf) || (hoje !== null && !ra);
     if (semLeitor) motivos.push("LOJA_SEM_RESULTADO_DO_LEITOR");
-    const falhou = rf?.completude === "FAILED" || ra?.completude === "FAILED";
+    // D14.1: na parte ATUAL so o PREFIXO observado decide. A avaliacao normal do dia
+    // corrente inteiro nunca alcanca amanha 00:00, entao uma tentativa intraday que
+    // falhou a tornaria FAILED o dia todo — mesmo com um prefixo valido anterior.
+    const falhou = rf?.completude === "FAILED" || ra?.parcial?.completude === "FAILED";
     if (falhou) motivos.push("LEITURA_FAILED");
     if (rf) motivos.push(...rf.motivos.map((m) => `leitor:${m}`));
 

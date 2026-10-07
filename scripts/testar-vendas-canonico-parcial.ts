@@ -306,6 +306,61 @@ async function principal() {
     assert(sh.lojas[0].parcial!.metricas!.vendas === 100 && sh.lojas[0].parcial!.metricas!.pedidos === 2, JSON.stringify(sh.lojas[0].parcial));
   });
 
+  console.log("\n[D14.1. falha intraday posterior nao envenena o dia corrente]");
+  const T1 = "2026-10-07T13:00:00.000Z", T2 = "2026-10-07T13:30:00.000Z", T3 = "2026-10-07T14:00:00.000Z";
+  const falhaML = (id: string, dono: string, fim: string) => job(id, dono, "ML", HOJE0, fim, fim, { id: `falha-${id}-${fim}`, status: "erro", listagem_completa: false });
+  const falhaSH = (id: string, dono: string, ini: string, fim: string) => job(id, dono, "Shopee", ini, fim, fim, { id: `falha-${id}-${fim}`, status: "erro", listagem_completa: false });
+  t("F1. T1 ok → T2 falha (erro) → T3 ok: watermark T1 sobrevive a falha (nao INCOMPLETE) e T3 avanca", async () => {
+    const d = mundo({ asOf: { [ML1]: T1 } });
+    const r1 = await q({ userId: DONO, marketplace: "mercado_livre", preset: "HOJE" }, d, Date.parse("2026-10-07T13:05:00.000Z"));
+    assert(r1.estado === "PARTIAL_FRESH" && r1.observadoAte === T1 && r1.metricas.mercadoLivre!.vendas === 200, `T1 ${r1.estado} ${r1.observadoAte}`);
+    d.sync_jobs.push(falhaML(ML1, DONO, T2));
+    const r2 = await q({ userId: DONO, marketplace: "mercado_livre", preset: "HOJE" }, d, Date.parse("2026-10-07T13:40:00.000Z"));
+    assert(r2.estado === "PARTIAL_FRESH" && r2.observadoAte === T1 && r2.metricas.mercadoLivre!.vendas === 200, `T2 ${r2.estado} ${r2.observadoAte} ${JSON.stringify(r2.metricas.mercadoLivre)}`);
+    d.sync_jobs.push(job(ML1, DONO, "ML", HOJE0, T3, mais(T3, 5), { id: "t3" }));
+    for (const p of d.ml_pedidos) if (p.loja_id === ML1) p.fetched_at = mais(T3, 5);
+    const r3 = await q({ userId: DONO, marketplace: "mercado_livre", preset: "HOJE" }, d, Date.parse("2026-10-07T14:10:00.000Z"));
+    assert(r3.estado === "PARTIAL_FRESH" && r3.observadoAte === T3, `T3 ${r3.estado} ${r3.observadoAte}`);
+  });
+  t("F1-A. SEM observacao anterior + primeira tentativa falha → metricas null, observadoAte null (nada fabricado)", async () => {
+    const d = mundo({ asOf: { [ML1]: null } }); d.sync_jobs.push(falhaML(ML1, DONO, T2));
+    const r = await q({ userId: DONO, marketplace: "mercado_livre", preset: "HOJE" }, d, Date.parse("2026-10-07T13:40:00.000Z"));
+    assert(r.metricas.combinadas === null && r.metricas.mercadoLivre === null && r.observadoAte === null && r.metricas.semVendas === null && !r.completo, `${r.estado} ${JSON.stringify(r.metricas)}`);
+  });
+  t("F1-B. falha na parte FECHADA continua bloqueando (INCOMPLETE + LEITURA_FAILED)", async () => {
+    const d = mundo({ buracoML: true });
+    d.sync_jobs.push(job(ML1, DONO, "ML", "2026-10-03T03:00:00.000Z", "2026-10-04T03:00:00.000Z", "2026-10-04T05:00:00.000Z", { id: "fech-erro", status: "erro", listagem_completa: false }));
+    const r = await q({ userId: DONO, marketplace: "mercado_livre", preset: "ESTE_MES" }, d);
+    assert(r.estado === "INCOMPLETE" && r.metricas.combinadas === null && r.cobertura.lojas[0].motivos.includes("LEITURA_FAILED"), `${r.estado} ${JSON.stringify(r.cobertura.lojas[0].motivos)}`);
+  });
+  t("F1-C. o PREFIXO observado invalido continua bloqueando (mesmo com falha posterior)", async () => {
+    const d = mundo(); d.ml_pedidos.find((p) => p.loja_id === ML1 && p.order_id === "3")!.fetched_at = mais(HOJE0, 40);
+    d.sync_jobs.push(falhaML(ML1, DONO, "2026-10-07T14:30:00.000Z"));
+    const r = await q({ userId: DONO, marketplace: "mercado_livre", preset: "HOJE" }, d);
+    assert(r.metricas.combinadas === null && r.observadoAte === null && r.cobertura.lojas[0].parteAtual!.estado === "NAO_OBSERVADA", `${r.estado}`);
+  });
+  t("F1-D. watermark anterior VELHO + falha posterior → PARTIAL_STALE com metricas (nunca INCOMPLETE)", async () => {
+    const velho = "2026-10-07T05:00:00.000Z";
+    const d = mundo({ asOf: { [ML1]: velho } }); d.sync_jobs.push(falhaML(ML1, DONO, T2));
+    const r = await q({ userId: DONO, marketplace: "mercado_livre", preset: "HOJE" }, d);
+    assert(r.estado === "PARTIAL_STALE" && r.observadoAte === velho && r.metricas.mercadoLivre!.vendas === 200 && r.fresco === false, `${r.estado}`);
+  });
+  t("F1-E. ZERO vendas observado ate T1 + falha posterior → zero continua valido ate T1", async () => {
+    const d = mundo({ asOf: { [ML1]: T1 }, semVendasHoje: true }); d.sync_jobs.push(falhaML(ML1, DONO, T2));
+    const r = await q({ userId: DONO, marketplace: "mercado_livre", preset: "HOJE" }, d, Date.parse("2026-10-07T13:40:00.000Z"));
+    assert(r.estado === "PARTIAL_FRESH" && r.observadoAte === T1 && r.metricas.combinadas!.vendas === 0 && r.metricas.semVendas === true, `${r.estado} ${JSON.stringify(r.metricas.combinadas)}`);
+  });
+  t("F1-K. multi-loja: SH1 observada 10:00 + tentativa 10:30 falhou, SH2 observada 10:00 → agregado ate 10:00 (nao INCOMPLETE)", async () => {
+    const d = mundo({ asOf: { [SH1]: T1, [SH2]: T1 } }); d.sync_jobs.push(falhaSH(SH1, DONO, T1, T2));
+    const r = await q({ userId: DONO, marketplace: "shopee", preset: "HOJE" }, d, Date.parse("2026-10-07T13:40:00.000Z"));
+    assert(r.estado === "PARTIAL_FRESH" && r.observadoAte === T1 && r.metricas.shopee!.vendas === 150, `${r.estado} ${r.observadoAte} ${JSON.stringify(r.metricas.shopee)}`);
+  });
+  t("F1-M. 'todos': falha posterior em ML nao invalida o prefixo comum comprovado (ML + Shopee ate 10:00)", async () => {
+    const d = mundo({ asOf: { [ML1]: T1, [SH1]: T1, [SH2]: T1 } }); d.sync_jobs.push(falhaML(ML1, DONO, T2));
+    const r = await q({ userId: DONO, marketplace: "todos", preset: "HOJE" }, d, Date.parse("2026-10-07T13:40:00.000Z"));
+    assert(r.estado === "PARTIAL_FRESH" && r.observadoAte === T1 && r.metricas.combinadas!.vendas === 350, `${r.estado} ${JSON.stringify(r.metricas.combinadas)}`);
+  });
+
   console.log("\n[read-only]");
   t("RO. nenhuma escrita, nenhuma rede em todos os cenarios", () => {
     assert(escritas.length === 0, escritas.join());
