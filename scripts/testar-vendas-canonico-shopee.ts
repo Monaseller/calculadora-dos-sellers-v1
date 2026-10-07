@@ -21,6 +21,8 @@ import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import type { PedidoShopeeCanonico, ItemShopeeCanonico, JanelaListagem } from "../lib/vendas/canonico/shopee";
+// SALES-SYNC-D15D3: o motor intraday Shopee consulta shopee_pedidos SO para candidatos a re-detail (conteudo pinado por sha256)
+import { MOTOR_INTRADAY_SHOPEE, motorIntradayShopeeExato } from "./_excecao-d15d-shopee-intraday";
 
 let passou = 0, falhou = 0;
 let fila: Promise<void> = Promise.resolve();
@@ -446,7 +448,10 @@ async function principal() {
     // servico canonico e CALCULO com eles.
     const ARMAZENAM = ["lib/vendas/canonico/shopee.ts", "lib/shopee/ingestao/tipos.ts",
       "lib/shopee/ingestao/normalizar.ts", "lib/shopee/ingestao/persistencia.ts"];
-    const fora = arqs.filter((f) => !ARMAZENAM.includes(f) &&
+    // D15D3: excecao EXATA — so o motor intraday Shopee, so com o conteudo aprovado (sha256 do helper D15D2).
+    // A verificacao de CALCULO abaixo continua valendo para ele.
+    const consultaCandidatos = (f: string) => f === MOTOR_INTRADAY_SHOPEE && motorIntradayShopeeExato(RAIZ);
+    const fora = arqs.filter((f) => !ARMAZENAM.includes(f) && !consultaCandidatos(f) &&
       /escrow_voucher_seller|escrow_voucher_shopee|escrow_coin|shopee_pedidos/.test(readFileSync(join(RAIZ, f), "utf8")));
     assert(fora.length === 0, fora.join(", "));
     const calculo = /[-+*]\s*[\w.!?()]*\b(pix_discount|original_shopee_discount|escrow_voucher_seller|escrow_voucher_shopee|escrow_coin|pixDiscount|originalShopeeDiscount|voucherVendedor|voucherShopee|moedas)\b/;

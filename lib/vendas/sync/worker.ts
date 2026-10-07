@@ -31,6 +31,7 @@ import { limitesDaJanela } from "@/lib/mercado-livre/ingestao/janelas";
 import { executarFatiaMLIntraday } from "@/lib/mercado-livre/ingestao/intraday";
 import { executarFatiaML } from "@/lib/mercado-livre/ingestao/motor";
 import type { CheckpointML, ProgressoML, RepositorioML, TransporteML } from "@/lib/mercado-livre/ingestao/tipos";
+import { criarCandidatosRedetalheShopee, executarFatiaShopeeIntraday } from "@/lib/shopee/ingestao/intraday";
 import { executarFatiaCatchUpEscrow, executarFatiaShopee } from "@/lib/shopee/ingestao/motor";
 import type { CheckpointCatchUpEscrow, CheckpointShopee, ProgressoShopee, Repositorio, ShopeeApi } from "@/lib/shopee/ingestao/tipos";
 import { classificarJobParaWorker, type TipoTrabalhoCanonico } from "./worker-contrato";
@@ -73,6 +74,8 @@ export interface MotoresCanonicos {
   ml: typeof executarFatiaML;
   /** D15C: observacao intraday ML (so com o intraday habilitado). */
   mlIntraday?: typeof executarFatiaMLIntraday;
+  /** D15D: observacao intraday Shopee (so com o intraday habilitado). */
+  shopeeIntraday?: typeof executarFatiaShopeeIntraday;
   shopee: typeof executarFatiaShopee;
   catchup: typeof executarFatiaCatchUpEscrow;
 }
@@ -102,11 +105,11 @@ export interface OpcoesWorker {
   leaseMs?: number;
   /** Sobrescreve ENABLE_ASYNC_SYNC_JOBS (testes / execucao controlada). */
   habilitado?: boolean;
-  /** D15C: executar intraday ML. Padrao: INTRADAY_CANONICO_HABILITADO (false). Shopee intraday e sempre recusado. */
+  /** D15C/D15D: executar intraday (ML e Shopee). Padrao: INTRADAY_CANONICO_HABILITADO (false). */
   intraday?: boolean;
 }
 
-const MOTORES_REAIS: MotoresCanonicos = { ml: executarFatiaML, mlIntraday: executarFatiaMLIntraday, shopee: executarFatiaShopee, catchup: executarFatiaCatchUpEscrow };
+const MOTORES_REAIS: MotoresCanonicos = { ml: executarFatiaML, mlIntraday: executarFatiaMLIntraday, shopee: executarFatiaShopee, shopeeIntraday: executarFatiaShopeeIntraday, catchup: executarFatiaCatchUpEscrow };
 
 /** Mensagem de erro gravavel: curta, sem segredo, sem identificador longo. */
 export function sanitizarErro(e: unknown): string {
@@ -283,10 +286,11 @@ export async function executarWorkerCanonico(depsOuFabrica: DepsWorker | (() => 
     return fim({ ...base, tipo, resultado: "RECUSADO", motivo, status_posterior: ok ? "erro" : "desconhecido" });
   };
   if (tipo === "NAO_CANONICO" || tipo !== ganho.tipo) return recusar("tipo_mudou_apos_claim", "validation");
-  // D15B/D15C (fail-closed): intraday so com o intraday habilitado E so ML (D15C); Shopee intraday
-  // nao tem motor (D15D). Nunca executar intraday como janela normal.
+  // D15B/D15C/D15D (fail-closed): intraday so com o intraday habilitado, e so para o tipo com motor
+  // intraday proprio (ML → mlIntraday; Shopee create_time → shopeeIntraday). Nunca como janela normal.
   const intraday = ehJobIntraday({ tipo: r.tipo, campoTempo: r.campo_tempo, janelaInicio: r.janela_inicio, janelaFim: r.janela_fim, dateFrom: r.date_from, dateTo: r.date_to });
-  if (intraday && (!(opcoes.intraday ?? INTRADAY_CANONICO_HABILITADO) || tipo !== "ML_DATE_CLOSED" || !motores.mlIntraday)) return recusar("intraday_sem_motor", "validation");
+  const motorIntraday = tipo === "ML_DATE_CLOSED" ? motores.mlIntraday : tipo === "SHOPEE_CREATE_TIME" ? motores.shopeeIntraday : undefined;
+  if (intraday && (!(opcoes.intraday ?? INTRADAY_CANONICO_HABILITADO) || !motorIntraday)) return recusar("intraday_sem_motor", "validation");
 
   // ── dono, loja e marketplace vem do BANCO (lojas), nunca do checkpoint ──
   const { data: loja, error: eLoja } = await cliente.from("lojas").select("id, user_id, marketplace, ativo")
@@ -329,7 +333,11 @@ export async function executarWorkerCanonico(depsOuFabrica: DepsWorker | (() => 
         const ok = await transicionar(cliente, job.id, { status: "pendente", heartbeat_em: new Date(relogio.agoraMs()).toISOString() });
         return fim({ ...base, tipo, resultado: "ADIADO", fatia: "auth_transitoria", motivo: `auth_transitoria:${p.transitorio}`, status_posterior: ok ? "pendente" : "desconhecido" });
       }
-      res = tipo === "SHOPEE_CREATE_TIME"
+      res = tipo === "SHOPEE_CREATE_TIME" && intraday
+        ? await motores.shopeeIntraday!({ id: job.id, userId: job.userId, lojaId: job.lojaId, dia: String(r.date_from), alvoIso: String(r.janela_fim),
+          checkpoint: (r.checkpoint ?? null) as CheckpointShopee | null, progresso: (r.progresso ?? null) as ProgressoShopee | null },
+          { ...p, relogio, candidatos: criarCandidatosRedetalheShopee(cliente) }, opMotor)
+        : tipo === "SHOPEE_CREATE_TIME"
         ? await motores.shopee({ id: job.id, userId: job.userId, lojaId: job.lojaId, campoTempo: "create_time", janelaInicio: r.janela_inicio, janelaFim: r.janela_fim,
           checkpoint: (r.checkpoint ?? null) as CheckpointShopee | null, progresso: (r.progresso ?? null) as ProgressoShopee | null }, { ...p, relogio }, opMotor)
         : await motores.catchup({ id: job.id, userId: job.userId, lojaId: job.lojaId,

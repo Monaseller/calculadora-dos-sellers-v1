@@ -17,6 +17,8 @@ import { filtrarNovosCanonicosD13 } from "./_excecao-d13-vendas-canonicas";
 import { filtrarExcecaoD14 } from "./_excecao-d14-vendas-canonicas";
 // SALES-SYNC-D15C2: excecao EXATA do motor intraday ML (worker.ts − hunks D15C = b260583; intraday.ts por sha256)
 import { filtrarExcecaoD15C } from "./_excecao-d15c-ml-intraday";
+// SALES-SYNC-D15D2: excecao EXATA do motor intraday Shopee (worker.ts − hunks D15D = e90557e; intraday.ts por sha256)
+import { filtrarExcecaoD15D } from "./_excecao-d15d-shopee-intraday";
 // SALES-SYNC-D15B2: excecao EXATA do patch D15B nos arquivos de sync (ATUAL − patch aprovado = bytes de d631748)
 import { filtrarExcecaoD15B } from "./_excecao-d15b-intraday";
 import { readFileSync } from "node:fs";
@@ -275,7 +277,7 @@ async function principal() {
       .split(/\r?\n/).filter((f) => f && f !== "lib/marketplace/credenciais.ts" && f !== "lib/vendas/sync/coordenador-tick.ts" && f !== ".env.example"
         && f !== "app/api/internal/vendas-sync/coordenador/route.ts" && f !== "app/api/internal/vendas-sync/worker/route.ts");
     // SALES-CANONICAL-D13B: so os arquivos NOVOS do D13 em lib/vendas/canonico; ml.ts/shopee.ts/tipos.ts seguem travados
-    const fora = filtrarExcecaoD15C(RAIZ, BASE, filtrarExcecaoD15B(RAIZ, BASE, filtrarExcecaoD14(RAIZ, BASE, filtrarNovosCanonicosD13(RAIZ, BASE, d)))).join(",");
+    const fora = filtrarExcecaoD15D(RAIZ, BASE, filtrarExcecaoD15C(RAIZ, BASE, filtrarExcecaoD15B(RAIZ, BASE, filtrarExcecaoD14(RAIZ, BASE, filtrarNovosCanonicosD13(RAIZ, BASE, d))))).join(",");
     const novos = execFileSync("git", ["ls-files", "--others", "--exclude-standard", "--", "supabase"], { cwd: RAIZ, encoding: "utf8" }).trim();
     assert(fora === "" && novos === "", `alterados: ${fora} ${novos}`);
   });

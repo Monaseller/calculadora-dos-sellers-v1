@@ -270,11 +270,12 @@ async function principal() {
     const r = await worker(d, pv, H("10:40"), {});
     assert(r.resultado === "RECUSADO" && (r as any).motivo === "intraday_sem_motor" && pv.chamadas.length === 0 && d.ml_pedidos.length === 0, JSON.stringify(r));
   });
-  t("M. Shopee intraday segue BLOQUEADO mesmo com o intraday ligado (intraday_sem_motor)", async () => {
-    const d = mundo();
+  // D15D: Shopee intraday passou a ter motor proprio — o invariante e que ele NUNCA cai no motor/provedor ML
+  t("M. Shopee intraday nunca cai no motor ML (vai ao caminho Shopee; sem credencial Shopee → recusa de auth)", async () => {
+    const d = mundo(); const pv = provedor([ordem("1", ISO(H("08:00")), 10)]);
     d.sync_jobs.push({ ...jobIntraday(LOJA.SH1, "dono-a", "2026-10-07", DIA0, ISO(H("10:30"))), marketplace: "Shopee", campo_tempo: "create_time" });
-    const r = await worker(d, provedor(), H("10:40"));
-    assert(r.resultado === "RECUSADO" && (r as any).motivo === "intraday_sem_motor", JSON.stringify(r));
+    const r = await worker(d, pv, H("10:40"));
+    assert(r.resultado === "RECUSADO" && (r as any).motivo === "credencial_indisponivel" && pv.chamadas.length === 0 && d.ml_pedidos.length === 0, JSON.stringify(r));
   });
   t("N. intraday concluido (mesmo cobrindo o dia inteiro) NAO e cobertura fechada do planner", async () => {
     const d = mundo(); const pv = provedor([ordem("1", ISO(H("08:00", "2026-10-06")), 10)]);
