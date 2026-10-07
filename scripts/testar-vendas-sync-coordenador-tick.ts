@@ -53,8 +53,9 @@ async function principal() {
       rpc: async () => { rpcs++; return { data: null, error: { code: "PROIBIDO" } }; },
       from(tabela: string) {
         const r: Reg = { tabela, op: "select", colunas: "", filtros: [] }; regs.push(r); let head = false; let inserir: any = null;
+        let ordem: string | null = null; let faixa: [number, number] | null = null;
         const casa = (l: any) => r.filtros.every(([op, c, v]: any) => op === "eq" ? String(l[c]) === String(v) : op === "in" ? v.map(String).includes(String(l[c]))
-          : op === "is" ? (l[c] ?? null) === v : op === "gte" ? l[c] >= v : op === "lt" ? l[c] < v : true);
+          : op === "is" ? (l[c] ?? null) === v : op === "notnull" ? (l[c] ?? null) !== null : op === "gte" ? l[c] >= v : op === "lt" ? l[c] < v : true);
         const q: any = new Proxy({}, { get(_a, p: string) {
           if (p === "then") return (ok: any) => {
             if (o.falhar?.(tabela, r.filtros)) return ok({ data: null, error: { code: "XX000", message: `falha interna ${SEGREDO_FALSO}` } });
@@ -65,12 +66,17 @@ async function principal() {
               db.sync_jobs.push(novo);
               return ok({ data: { id: novo.id }, error: null });
             }
-            const d = (db[tabela] ?? []).filter(casa).map((l: any) => (tabela === "sync_jobs" ? { ...l, modo: l.checkpoint?.modo ?? null } : l));
+            let d = (db[tabela] ?? []).filter(casa).map((l: any) => (tabela === "sync_jobs" ? { ...l, modo: l.checkpoint?.modo ?? null } : l));
+            if (ordem) d = [...d].sort((x: any, y: any) => String(x[ordem!]).localeCompare(String(y[ordem!])));
+            if (faixa) d = d.slice(faixa[0], faixa[1] + 1);
             return ok(head ? { data: null, count: d.length, error: null } : { data: d, error: null });
           };
           if (p === "select") return (c: string, op?: any) => { r.colunas = c; if (op?.head) head = true; return q; };
           if (p === "insert") return (linha: any) => { r.op = "insert"; inserir = { ...linha }; return q; };
           if (p === "single") return () => q;
+          if (p === "order") return (c: string) => { ordem = c; return q; };
+          if (p === "range") return (a: number, z: number) => { faixa = [a, z]; return q; };
+          if (p === "not") return (c: string, o: string, v: unknown) => { if (o === "is" && v === null) r.filtros.push(["notnull", c, null]); return q; };
           return (...a: any[]) => { if (["eq", "in", "is", "gte", "lt"].includes(p)) r.filtros.push([p, a[0], a[1]]); return q; };
         } });
         return q;
@@ -309,7 +315,11 @@ async function principal() {
     for (const f of ARQS) {
       const s = semComentarios(f);
       assert(!/resolverCredencialShopee|getShopeeLojaById|getShopeeLojaAtiva|getMLLojaById|getMLLojaAtiva|getMLToken|refreshMLToken|refreshShopeeToken|renovar|lease|access_token|refresh_token|partner_key/i.test(s), `${f}: auth`);
-      assert(!/shopee-auth|ml-auth|marketplace\/credenciais|transporte|\bfetch\(|\.rpc\(/.test(s), `${f}: import/rede`);
+      assert(!/shopee-auth|ml-auth|transporte|\bfetch\(|\.rpc\(/.test(s), `${f}: import/rede`);
+      // da capability de lojas, SO a listagem sem credencial (D1.1): nada de ler/gravar/lease de credencial
+      const imps = [...s.matchAll(/import\s*(?:type\s*)?\{([^}]*)\}\s*from\s*"@\/lib\/marketplace\/credenciais"/g)];
+      const nomes = imps.flatMap((m) => m[1].split(",").map((x) => x.trim()).filter(Boolean));
+      assert((s.match(/marketplace\/credenciais/g) ?? []).length === imps.length && nomes.every((x) => x === "listarLojasAtivasParaSyncCanonico"), `${f}: importa da capability alem da listagem: ${nomes}`);
     }
     assert(chamadasFetch === 0, `fetch chamado ${chamadasFetch}x`);
   });
@@ -322,6 +332,38 @@ async function principal() {
     assert(/avaliarNecessidadeDeSync/.test(tick) && /garantirProximaAcao/.test(tick) && /avaliarBootstrap/.test(tick), "nao reutiliza o coordenador");
     assert(!/prioridadeDe|escolherProximaAcao|intervaloDeFrescor|maxFalhasPorNecessidade|esperaAposFalhaMs|planejarJanelasCriacao|insert\(/.test(tick), "tick recria regra do planner / insere direto");
     assert(!/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|MONAMOR|shop_id|seller_id/i.test(tick + semComentarios(ARQS[1])), "loja fixa");
+  });
+
+  console.log("\n[D1.1 descoberta pela capability]");
+  const CAP = "lib/marketplace/credenciais.ts";
+  const corpoCap = () => { const c = semComentarios(CAP); const i = c.indexOf("export async function listarLojasAtivasParaSyncCanonico"); const j = c.indexOf("\nexport ", i + 1); return i < 0 ? "" : c.slice(i, j < 0 ? undefined : j); };
+  t("D1.1-a. o tick NAO acessa `lojas` direto: so pela capability listarLojasAtivasParaSyncCanonico", () => {
+    const s = semComentarios(ARQS[0]);
+    assert(!/\.from\(\s*["'`]lojas["'`]\s*\)/.test(s) && !/["'`]lojas["'`]/.test(s), "acesso direto a lojas no tick");
+    assert(/listarLojasAtivasParaSyncCanonico\(/.test(s) && /from "@\/lib\/marketplace\/credenciais"/.test(s), "tick nao usa a capability");
+    assert(!/["'`]lojas["'`]/.test(semComentarios(ARQS[1])), "rota acessa lojas");
+  });
+  t("D1.1-b. capability: projecao minima (id, user_id, marketplace), ativo, ML/Shopee, com dono, ordem por id, pagina 500, erro estavel, sem credencial", () => {
+    const c = corpoCap(); const sel = (c.match(/\.select\([^)]*\)/g) ?? []).join(" ");
+    assert(c !== "" && sel === '.select("id, user_id, marketplace")', `projecao: ${sel}`);
+    assert(/\.eq\("ativo", true\)/.test(c) && /\.in\("marketplace", \[MARKETPLACE_ML, MARKETPLACE_SHOPEE\]\)/.test(c) && /\.not\("user_id", "is", null\)/.test(c), "filtros");
+    assert(/\.order\("id", \{ ascending: true \}\)/.test(c) && /PAGINA_LOJAS_SYNC_CANONICO = 500/.test(semComentarios(CAP)) && /\.range\(/.test(c), "ordem/paginacao");
+    assert(/erro: "erro_consulta_loja"/.test(c) && !/error\.message/.test(c), "erro");
+    assert(!/access_token|refresh_token|partner_key|partner_id|getShopeeLojaById|resolverCredencial|gravarCredencial|adquirirLease|\.update\(|\.insert\(|\.rpc\(/.test(c), "credencial/escrita");
+  });
+  t("D1.1-c. capability em runtime: so ativas ML/Shopee com dono, sem credencial no retorno; 1201 lojas paginadas sem perda nem duplicata; erro estavel", async () => {
+    const CR = await import("../lib/marketplace/credenciais");
+    const b = bancoFalso([loja(MLB, DA, "ML"), loja(MLA, DB, "Shopee"), loja(SPA, null as any, "ML"), loja(SPB, DA, "Amazon"), loja(MLC, DA, "ML", { ativo: false })]);
+    const r = await CR.listarLojasAtivasParaSyncCanonico(b.cliente);
+    assert(r.erro === null && JSON.stringify(r.linhas) === JSON.stringify([{ id: MLA, user_id: DB, marketplace: "Shopee" }, { id: MLB, user_id: DA, marketplace: "ML" }]), JSON.stringify(r));
+    assert(!JSON.stringify(r).includes(SEGREDO_FALSO), "devolveu credencial");
+    const muitas = Array.from({ length: 1201 }, (_, i) => loja(`l${String(i).padStart(5, "0")}`, `d${i % 7}`, i % 2 ? "ML" : "Shopee"));
+    const b2 = bancoFalso([...muitas].reverse());
+    const r2 = await CR.listarLojasAtivasParaSyncCanonico(b2.cliente);
+    assert(r2.linhas.length === 1201 && new Set(r2.linhas.map((l) => l.id)).size === 1201 && r2.linhas.every((l, i) => l.id === `l${String(i).padStart(5, "0")}` && l.user_id === `d${i % 7}`), `${r2.linhas.length}`);
+    assert(b2.regs.filter((x) => x.tabela === "lojas").length === 3, "paginas != 3");
+    const ruim = await CR.listarLojasAtivasParaSyncCanonico(bancoFalso([loja(MLA, DA, "ML")], [], { falhar: (tab) => tab === "lojas" }).cliente);
+    assert(ruim.erro === "erro_consulta_loja" && ruim.linhas.length === 0 && !JSON.stringify(ruim).includes(SEGREDO_FALSO), JSON.stringify(ruim));
   });
 
   console.log("\n[3. auth da rota]");
@@ -355,9 +397,17 @@ async function principal() {
     const d = execFileSync("git", ["diff", "--name-only", BASE, "--", "lib/vendas/sync/coordenador.ts", "lib/vendas/sync/planejamento.ts", "lib/vendas/sync/tipos.ts",
       "lib/vendas/sync/worker.ts", "lib/vendas/sync/worker-deps.ts", "lib/vendas/sync/worker-contrato.ts", "app/api/internal/vendas-sync/worker", "app/api/sync", "app/api/internal/sync",
       "app/api/ml/vendas", "app/api/shopee/vendas", "lib/vendas/canonico", "lib/mercado-livre/ingestao", "lib/shopee/ingestao", "lib/shopee-auth.ts", "lib/ml-auth.ts",
-      "lib/marketplace", "supabase", "vercel.json", ".env.example", "lib/feature-flags.ts", "scripts/sync-worker.mjs"], { cwd: RAIZ, encoding: "utf8" }).trim();
+      "lib/marketplace", "supabase", "vercel.json", ".env.example", "lib/feature-flags.ts", "scripts/sync-worker.mjs"], { cwd: RAIZ, encoding: "utf8" }).trim()
+      .split(/\r?\n/).filter((f) => f && f !== CAP).join(",");
     const novos = execFileSync("git", ["ls-files", "--others", "--exclude-standard", "--", "supabase"], { cwd: RAIZ, encoding: "utf8" }).trim();
     assert(d === "" && novos === "", `alterados: ${d} ${novos}`);
+    // SALES-SYNC-D1.1: a capability so GANHA a listagem do tick — nenhuma linha existente removida/alterada
+    const dc = execFileSync("git", ["diff", "-U0", BASE, "--", CAP], { cwd: RAIZ, encoding: "utf8" }).split(/\r?\n/);
+    const removidas = dc.filter((l) => l.startsWith("-") && !l.startsWith("---"));
+    const adicionadas = dc.filter((l) => l.startsWith("+") && !l.startsWith("+++") && !/^\+\s*(\*|\/\*\*|\/\/)/.test(l)).join("\n");
+    assert(removidas.length === 0, `capability alterada: ${removidas.slice(0, 3).join(" | ")}`);
+    assert(adicionadas === "" || ((adicionadas.match(/export (async function|interface|const) \w+/g) ?? []).every((x) => /LinhaLojaParaSyncCanonico|listarLojasAtivasParaSyncCanonico/.test(x))
+      && !/access_token|refresh_token|partner_key|\.update\(|\.insert\(|\.rpc\(/.test(adicionadas)), "capability ganhou algo alem da listagem do tick");
     assert(!/vendas-sync/.test(readFileSync(join(RAIZ, "vercel.json"), "utf8")), "cron criado");
   });
 

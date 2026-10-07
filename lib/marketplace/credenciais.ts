@@ -957,6 +957,61 @@ export async function listarLojasAtivasParaCron(): Promise<ResultadoLista2<Linha
   return { linhas: (Array.isArray(data) ? data : []) as LinhaLojaParaCron[], erro: null };
 }
 
+/** Loja ativa vista pelo tick do coordenador canonico: o minimo para planejar por loja. */
+export interface LinhaLojaParaSyncCanonico {
+  id: string;
+  user_id: string;
+  marketplace: "ML" | "Shopee";
+}
+
+/** Pagina da listagem cross-tenant do tick (o PostgREST corta em 1000). */
+const PAGINA_LOJAS_SYNC_CANONICO = 500;
+
+/**
+ * TODAS as lojas ativas ML/Shopee com dono, de TODOS os tenants, para o
+ * tick do coordenador canonico de vendas (SALES-SYNC-D1.1).
+ *
+ * ── A segunda leitura cross-tenant deste modulo, e e proposital ────────
+ * Mesma razao da do cron legado: o tick nao tem sessao, existe para varrer
+ * todo mundo, e so roda atras de CRON_SECRET (rota interna). Diferente do
+ * cron, o tick planeja POR LOJA — por isso devolve o `id`, e o dono vem da
+ * MESMA linha (o par loja+dono nunca e montado fora daqui). Nada alem de
+ * (id, user_id, marketplace): nem token, nem `partner_key`, nem
+ * `seller_id`/`shop_id`, nem `nickname`. Nao resolve credencial.
+ *
+ * Paginada e em ordem deterministica (id). `user_id IS NOT NULL` como no
+ * cron: loja orfa nao e de ninguem que se possa sincronizar.
+ */
+export async function listarLojasAtivasParaSyncCanonico(
+  /** Opcional (como em lerCredencialShopeeDoDono): cliente injetado nos testes; padrão = service_role. */
+  cliente?: any
+): Promise<ResultadoLista2<LinhaLojaParaSyncCanonico>> {
+  const linhas: LinhaLojaParaSyncCanonico[] = [];
+  for (let desde = 0; ; desde += PAGINA_LOJAS_SYNC_CANONICO) {
+    const { data, error } = await (cliente ?? getSupabaseServidor())
+      .from("lojas")
+      .select("id, user_id, marketplace")
+      .eq("ativo", true)
+      .in("marketplace", [MARKETPLACE_ML, MARKETPLACE_SHOPEE])
+      .not("user_id", "is", null)
+      .order("id", { ascending: true })
+      .range(desde, desde + PAGINA_LOJAS_SYNC_CANONICO - 1);
+
+    if (error) {
+      console.error("[credenciais] falha ao listar lojas ativas para o sync canonico");
+      return { linhas: [], erro: "erro_consulta_loja" };
+    }
+    const pagina = (Array.isArray(data) ? data : []) as { id: string | null; user_id: string | null; marketplace: string }[];
+    for (const l of pagina) {
+      if (l.id && l.user_id && (l.marketplace === MARKETPLACE_ML || l.marketplace === MARKETPLACE_SHOPEE)) {
+        linhas.push({ id: l.id, user_id: l.user_id, marketplace: l.marketplace });
+      }
+    }
+    if (pagina.length < PAGINA_LOJAS_SYNC_CANONICO) break;
+  }
+  return { linhas, erro: null };
+}
+
 export interface LinhaLojaParaJob {
   id: string;
   user_id: string | null;

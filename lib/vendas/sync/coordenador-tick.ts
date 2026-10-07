@@ -27,12 +27,10 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { ASYNC_SYNC_JOBS_ENABLED } from "@/lib/feature-flags";
 import { diaEmSaoPaulo, somarDiasNoCalendario } from "@/lib/fuso-sao-paulo";
+import { listarLojasAtivasParaSyncCanonico } from "@/lib/marketplace/credenciais";
 import { avaliarNecessidadeDeSync, garantirProximaAcao, lerJobsDasLojas } from "./coordenador";
 import { agregar, avaliarBootstrap, OPCOES_BACKFILL_INICIAL, POLITICA_SYNC_PROPOSTA } from "./planejamento";
 import type { AvaliacaoLojaSync, AvaliacaoSync, MarketplaceSync, PoliticaSync } from "./tipos";
-
-/** Lojas lidas por pagina (o PostgREST corta em 1000). */
-const PAGINA_LOJAS = 500;
 
 export type FaseBootstrap = (typeof OPCOES_BACKFILL_INICIAL)[number]["id"] | "COMPLETO";
 export type AcaoTick = "JOB_CREATED" | "WAIT_ACTIVE_JOB" | "WAIT_RETRY" | "NOOP" | "FAILED" | "STORE_FAILED" | "NAO_AVALIADA_ORCAMENTO";
@@ -81,18 +79,15 @@ export function criarDepsTickReais(): DepsTick {
   return { cliente: getSupabaseServidor(), relogio: { agoraMs: () => Date.now() } };
 }
 
-/** Todas as lojas ativas ML/Shopee, com o dono DA PROPRIA linha. So id/dono/marketplace — nunca colunas de credencial. */
+/**
+ * Todas as lojas ativas ML/Shopee, com o dono DA PROPRIA linha — pela
+ * capability de lojas (lib/marketplace/credenciais.ts), unico ponto do
+ * runtime que acessa a tabela. So id/dono/marketplace, nunca credencial.
+ */
 export async function listarLojasElegiveis(cliente: SupabaseClient): Promise<LojaTick[]> {
-  const out: LojaTick[] = [];
-  for (let desde = 0; ; desde += PAGINA_LOJAS) {
-    const { data, error } = await cliente.from("lojas").select("id, user_id, marketplace").eq("ativo", true).in("marketplace", ["ML", "Shopee"])
-      .order("id", { ascending: true }).range(desde, desde + PAGINA_LOJAS - 1);
-    if (error) throw new Error("leitura_lojas_falhou");
-    const linhas = (data ?? []) as { id: string | null; user_id: string | null; marketplace: string }[];
-    for (const l of linhas) if (l.id && l.user_id && (l.marketplace === "ML" || l.marketplace === "Shopee")) out.push({ id: l.id, userId: l.user_id, marketplace: l.marketplace });
-    if (linhas.length < PAGINA_LOJAS) break;
-  }
-  return out;
+  const { linhas, erro } = await listarLojasAtivasParaSyncCanonico(cliente);
+  if (erro) throw new Error("leitura_lojas_falhou");
+  return linhas.map((l) => ({ id: l.id, userId: l.user_id, marketplace: l.marketplace }));
 }
 
 /**
