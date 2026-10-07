@@ -28,12 +28,13 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { ASYNC_SYNC_JOBS_ENABLED } from "@/lib/feature-flags";
 import { limitesDaJanela } from "@/lib/mercado-livre/ingestao/janelas";
+import { executarFatiaMLIntraday } from "@/lib/mercado-livre/ingestao/intraday";
 import { executarFatiaML } from "@/lib/mercado-livre/ingestao/motor";
 import type { CheckpointML, ProgressoML, RepositorioML, TransporteML } from "@/lib/mercado-livre/ingestao/tipos";
 import { executarFatiaCatchUpEscrow, executarFatiaShopee } from "@/lib/shopee/ingestao/motor";
 import type { CheckpointCatchUpEscrow, CheckpointShopee, ProgressoShopee, Repositorio, ShopeeApi } from "@/lib/shopee/ingestao/tipos";
 import { classificarJobParaWorker, type TipoTrabalhoCanonico } from "./worker-contrato";
-import { ehJobIntraday } from "./intraday";
+import { ehJobIntraday, INTRADAY_CANONICO_HABILITADO } from "./intraday";
 
 /** Batimento mais velho que isto = processo morto. Muito maior que qualquer maxDuration (60–300 s). */
 export const LEASE_MS = 10 * 60 * 1000;
@@ -70,6 +71,8 @@ export interface RelatorioWorker {
 
 export interface MotoresCanonicos {
   ml: typeof executarFatiaML;
+  /** D15C: observacao intraday ML (so com o intraday habilitado). */
+  mlIntraday?: typeof executarFatiaMLIntraday;
   shopee: typeof executarFatiaShopee;
   catchup: typeof executarFatiaCatchUpEscrow;
 }
@@ -99,9 +102,11 @@ export interface OpcoesWorker {
   leaseMs?: number;
   /** Sobrescreve ENABLE_ASYNC_SYNC_JOBS (testes / execucao controlada). */
   habilitado?: boolean;
+  /** D15C: executar intraday ML. Padrao: INTRADAY_CANONICO_HABILITADO (false). Shopee intraday e sempre recusado. */
+  intraday?: boolean;
 }
 
-const MOTORES_REAIS: MotoresCanonicos = { ml: executarFatiaML, shopee: executarFatiaShopee, catchup: executarFatiaCatchUpEscrow };
+const MOTORES_REAIS: MotoresCanonicos = { ml: executarFatiaML, mlIntraday: executarFatiaMLIntraday, shopee: executarFatiaShopee, catchup: executarFatiaCatchUpEscrow };
 
 /** Mensagem de erro gravavel: curta, sem segredo, sem identificador longo. */
 export function sanitizarErro(e: unknown): string {
@@ -278,8 +283,10 @@ export async function executarWorkerCanonico(depsOuFabrica: DepsWorker | (() => 
     return fim({ ...base, tipo, resultado: "RECUSADO", motivo, status_posterior: ok ? "erro" : "desconhecido" });
   };
   if (tipo === "NAO_CANONICO" || tipo !== ganho.tipo) return recusar("tipo_mudou_apos_claim", "validation");
-  // D15B (fail-closed): nenhum motor intraday existe ainda (D15C/D15D) — nunca executar como janela normal
-  if (ehJobIntraday({ tipo: r.tipo, campoTempo: r.campo_tempo, janelaInicio: r.janela_inicio, janelaFim: r.janela_fim, dateFrom: r.date_from, dateTo: r.date_to })) return recusar("intraday_sem_motor", "validation");
+  // D15B/D15C (fail-closed): intraday so com o intraday habilitado E so ML (D15C); Shopee intraday
+  // nao tem motor (D15D). Nunca executar intraday como janela normal.
+  const intraday = ehJobIntraday({ tipo: r.tipo, campoTempo: r.campo_tempo, janelaInicio: r.janela_inicio, janelaFim: r.janela_fim, dateFrom: r.date_from, dateTo: r.date_to });
+  if (intraday && (!(opcoes.intraday ?? INTRADAY_CANONICO_HABILITADO) || tipo !== "ML_DATE_CLOSED" || !motores.mlIntraday)) return recusar("intraday_sem_motor", "validation");
 
   // ── dono, loja e marketplace vem do BANCO (lojas), nunca do checkpoint ──
   const { data: loja, error: eLoja } = await cliente.from("lojas").select("id, user_id, marketplace, ativo")
@@ -289,16 +296,25 @@ export async function executarWorkerCanonico(depsOuFabrica: DepsWorker | (() => 
   if ((loja as any).marketplace !== r.marketplace) return recusar("marketplace_divergente", "loja");
   if ((loja as any).ativo !== true) return recusar("loja_inativa", "loja");
   if (!checkpointCompativel(tipo, r.checkpoint)) return recusar("checkpoint_incompativel", "validation");
-  if (tipo === "ML_DATE_CLOSED") {
+  if (tipo === "ML_DATE_CLOSED" && !intraday) {
     const l = limitesDaJanela(String(r.date_from), String(r.date_to));
     if (!l || l.inicio.getTime() !== Date.parse(r.janela_inicio) || l.fim.getTime() !== Date.parse(r.janela_fim)) return recusar("janela_inconsistente", "validation");
+  }
+  if (tipo === "ML_DATE_CLOSED" && intraday) {
+    // D15C: o intraday ML relista o dia INTEIRO ate T — a janela comeca no inicio do dia do job
+    const l = limitesDaJanela(String(r.date_from), String(r.date_from));
+    if (!l || l.inicio.getTime() !== Date.parse(r.janela_inicio)) return recusar("janela_inconsistente", "validation");
   }
 
   const job: JobReivindicado = { id: r.id, userId: r.user_id, lojaId: r.loja_id, marketplace: r.marketplace, tipo };
   const opMotor = { prazoMs, habilitado: true as const };
   let res: { estado: string; motivo?: string; progresso?: unknown };
   try {
-    if (tipo === "ML_DATE_CLOSED") {
+    if (tipo === "ML_DATE_CLOSED" && intraday) {
+      const p = await deps.portasML(job);
+      res = await motores.mlIntraday!({ id: job.id, userId: job.userId, lojaId: job.lojaId, dia: String(r.date_from), alvoIso: String(r.janela_fim),
+        checkpoint: (r.checkpoint ?? null) as CheckpointML | null, progresso: (r.progresso ?? null) as ProgressoML | null }, { ...p, relogio }, opMotor);
+    } else if (tipo === "ML_DATE_CLOSED") {
       const p = await deps.portasML(job);
       res = await motores.ml({ id: job.id, userId: job.userId, lojaId: job.lojaId, de: String(r.date_from), ate: String(r.date_to),
         checkpoint: (r.checkpoint ?? null) as CheckpointML | null, progresso: (r.progresso ?? null) as ProgressoML | null }, { ...p, relogio }, opMotor);

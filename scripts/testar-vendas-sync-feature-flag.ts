@@ -16,6 +16,8 @@ import { execFileSync } from "node:child_process";
 import { filtrarExcecaoD13 } from "./_excecao-d13-vendas-canonicas";
 // SALES-CANONICAL-D14B: excecao EXATA do patch D14 nos leitores (ATUAL − patch aprovado = bytes de 1c4fe29)
 import { filtrarExcecaoD14 } from "./_excecao-d14-vendas-canonicas";
+// SALES-SYNC-D15C2: excecao EXATA do motor intraday ML (worker.ts − hunks D15C = b260583; intraday.ts por sha256)
+import { filtrarExcecaoD15C } from "./_excecao-d15c-ml-intraday";
 // SALES-SYNC-D15B2: excecao EXATA do patch D15B nos arquivos de sync (ATUAL − patch aprovado = bytes de d631748)
 import { filtrarExcecaoD15B } from "./_excecao-d15b-intraday";
 import { readFileSync, readdirSync, statSync } from "node:fs";
@@ -191,7 +193,7 @@ async function principal() {
       // SALES-SYNC-D8.2: helper de auth das rotas canonicas (guard proprio: testar-vendas-sync-auth-interna)
       .filter((f) => f && f !== HELPER && f !== "lib/vendas/sync/auth-interna.ts");
     // SALES-CANONICAL-D13A: SO o bloco D13 de credenciais.ts e os arquivos novos do D13
-    const fora = filtrarExcecaoD15B(RAIZ, BASE, filtrarExcecaoD14(RAIZ, BASE, filtrarExcecaoD13(RAIZ, BASE, d)));
+    const fora = filtrarExcecaoD15C(RAIZ, BASE, filtrarExcecaoD15B(RAIZ, BASE, filtrarExcecaoD14(RAIZ, BASE, filtrarExcecaoD13(RAIZ, BASE, d))));
     assert(fora.length === 0, `alterados: ${fora}`);
     const vendas = readFileSync(join(RAIZ, "app/(app)/vendas/page.tsx"), "utf8");
     assert(/import \{ ASYNC_SYNC_JOBS_ENABLED \} from "@\/lib\/feature-flags";/.test(vendas) && /if \(!ASYNC_SYNC_JOBS_ENABLED\) \{\s*dispararSincronizarInline\(\);/.test(vendas), "Vendas mudou de flag");
