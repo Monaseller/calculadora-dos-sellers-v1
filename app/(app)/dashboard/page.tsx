@@ -20,6 +20,11 @@ type Anuncio = {
 type Loja = {
   id: string; nome: string; marketplace: string; nickname: string | null; ativo: boolean;
 };
+/** D16: GET /api/vendas/resumo-canonico — so os campos que os 4 cards principais usam. */
+type ResumoCanonicoDashboard = {
+  estado: string; parcial: boolean; observadoAte: string | null;
+  metricas: { faturamento: number; pedidos: number; unidades: number; ticket: number } | null;
+};
 type DiaData = {
   data: string; label: string; faturamento: number; lucro: number;
   custo: number; comissao: number; frete: number;
@@ -623,6 +628,14 @@ export default function DashboardPage() {
     faturamento: 0, pedidos: 0, ticket: 0, lucro: 0,
     margem: 0, unidades: 0, roi: 0, comissoes: 0,
   });
+  // D16: Faturamento, Pedidos, Unidades e Ticket vem da camada canonica (null = indisponivel)
+  const [resumoCanonico, setResumoCanonico] = useState<ResumoCanonicoDashboard | null>(null);
+  // Sem metrica canonica (periodo incompleto / sem observacao) o card mostra "—", nunca 0 nem o legado.
+  const mc = resumoCanonico?.metricas ?? null;
+  const ateCanonico = resumoCanonico?.parcial && resumoCanonico.observadoAte
+    ? new Date(resumoCanonico.observadoAte).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", timeZone: "America/Sao_Paulo" })
+    : null;
+  const subSemCanonico = resumoCanonico ? "sincronizando" : "indisponivel";
   const [dias,     setDias]     = useState<DiaData[]>([]);
   const [tops,       setTops]       = useState<TopProduto[]>([]);
   const [loss,       setLoss]       = useState<TopProduto[]>([]);
@@ -714,11 +727,21 @@ export default function DashboardPage() {
       urlShopee: buscarShopee ? `/api/shopee/vendas?date_from=${from}&date_to=${to}&date_field=${dateField}&_reqid=${reqId}` : null,
     });
 
+    // D16: filtro canonico dos 4 cards principais — a mesma selecao do dropdown
+    // (uma loja → o marketplace dela + loja_id; todas → "todos"). O dono e a sessao no servidor.
+    const todasSelecionadas = lojasArr.length === 0 || sel.size === 0 || sel.size === lojasArr.length;
+    const lojaUnica = !todasSelecionadas && selecionadasArr.length === 1 ? selecionadasArr[0] : null;
+    const qCanonico = new URLSearchParams({
+      marketplace: lojaUnica ? (lojaUnica.marketplace === "Shopee" ? "shopee" : "mercado_livre") : "todos",
+      de: from, ate: to, ...(lojaUnica ? { loja_id: lojaUnica.id } : {}),
+    });
+
     try {
       // Fase D (2026-07-06): date_field propagado às duas APIs (Fase C já suporta o parâmetro)
-      const [mlData, shopeeData] = await Promise.all([
+      const [mlData, shopeeData, canonData] = await Promise.all([
         buscarML     ? fetch(`/api/ml/vendas?date_from=${from}&date_to=${to}&date_field=${dateField}&_reqid=${reqId}`, { signal: controller.signal }).then(r => r.json()).catch(err => { if (err?.name === "AbortError") throw err; return null; })     : Promise.resolve(null),
         buscarShopee ? fetch(`/api/shopee/vendas?date_from=${from}&date_to=${to}&date_field=${dateField}&_reqid=${reqId}`, { signal: controller.signal }).then(r => r.json()).catch(err => { if (err?.name === "AbortError") throw err; return null; }) : Promise.resolve(null),
+        fetch(`/api/vendas/resumo-canonico?${qCanonico}`, { signal: controller.signal }).then(r => (r.ok ? r.json() : null)).catch(err => { if (err?.name === "AbortError") throw err; return null; }) as Promise<ResumoCanonicoDashboard | null>,
       ]);
 
       // [DIAG-DATAS] temporário
@@ -735,6 +758,8 @@ export default function DashboardPage() {
         console.log(`[DIAG-DATAS] carregar() #${reqId} DESCARTADO no checkpoint 1 (obsoleto)`);
         return;
       }
+
+      setResumoCanonico(canonData);
 
       const mlOk     = mlData     && !mlData.erro;
       const shopeeOk = shopeeData && !shopeeData.erro && !shopeeData.semConexao;
@@ -1106,14 +1131,14 @@ export default function DashboardPage() {
             gridTemplateColumns: "repeat(auto-fill, minmax(175px, 1fr))",
             gap: 14, marginBottom: 24, animationDelay: "0.05s",
           }}>
-            <KpiCard icon="💰" label="Faturamento"   value={fmtBRL(kpis.faturamento, true)} sub={`${kpis.unidades} unid.`} color="#FF7A00" spark={sparkFat} />
+            <KpiCard icon="💰" label="Faturamento"   value={mc ? fmtBRL(mc.faturamento) : "—"} sub={mc ? `${mc.unidades} unid.${ateCanonico ? ` · até ${ateCanonico}` : ""}` : subSemCanonico} color="#FF7A00" spark={sparkFat} />
             <KpiCard icon="✨" label="Lucro Liquido" value={fmtBRL(kpis.lucro, true)}        color={kpis.lucro >= 0 ? "#22C55E" : "#EF4444"} spark={sparkLuc} sub="apos custos" />
             <KpiCard icon="📊" label="Margem Media"  value={`${kpis.margem.toFixed(1)}%`}    color={kpis.margem >= 20 ? "#22C55E" : kpis.margem >= 10 ? "#FFB000" : "#EF4444"} sub="contribuicao" />
-            <KpiCard icon="📦" label="Pedidos"       value={String(kpis.pedidos)}             color="#6366F1" sub="pagos" />
-            <KpiCard icon="🎯" label="Ticket Medio"  value={fmtBRL(kpis.ticket, true)}       color="#FFB000" sub="por pedido" />
+            <KpiCard icon="📦" label="Pedidos"       value={mc ? String(mc.pedidos) : "—"}    color="#6366F1" sub={mc ? "pagos" : subSemCanonico} />
+            <KpiCard icon="🎯" label="Ticket Medio"  value={mc ? fmtBRL(mc.ticket) : "—"} color="#FFB000" sub={mc ? "por pedido" : subSemCanonico} />
             <KpiCard icon="🔄" label="ROI"           value={`${kpis.roi.toFixed(0)}%`}       color={kpis.roi >= 50 ? "#22C55E" : "#FFB000"} sub="retorno s/ custo" />
             <KpiCard icon="🏷️" label="Comissoes"    value={fmtBRL(kpis.comissoes, true)}     color="#EF4444" sub="taxas marketplace" />
-            <KpiCard icon="📈" label="Unidades"      value={String(kpis.unidades)}            color="#06B6D4" sub="vendidas" />
+            <KpiCard icon="📈" label="Unidades"      value={mc ? String(mc.unidades) : "—"}   color="#06B6D4" sub={mc ? "vendidas" : subSemCanonico} />
           </div>
 
           {/* EVOLUCAO + BALANCETE */}

@@ -24,6 +24,8 @@ import { filtrarExcecaoD15D } from "./_excecao-d15d-shopee-intraday";
 import { filtrarExcecaoD15B } from "./_excecao-d15b-intraday";
 // SALES-SYNC-D15F2B: excecao EXATA do enable (intraday.ts = 34d982f com SO a linha false → true)
 import { filtrarExcecaoD15F2 } from "./_excecao-d15f2-enable-intraday";
+// SALES-CANONICAL-D16B: excecao EXATA do cutover dos 4 cards do Dashboard (dashboard − hunks D16 = 1d6e573; novos por sha256)
+import { filtrarExcecaoD16 } from "./_excecao-d16-dashboard-canonico";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
@@ -197,7 +199,7 @@ async function principal() {
       // SALES-SYNC-D8.2: helper de auth das rotas canonicas (guard proprio: testar-vendas-sync-auth-interna)
       .filter((f) => f && f !== HELPER && f !== "lib/vendas/sync/auth-interna.ts");
     // SALES-CANONICAL-D13A: SO o bloco D13 de credenciais.ts e os arquivos novos do D13
-    const fora = filtrarExcecaoD15F2(RAIZ, BASE, filtrarExcecaoD15D(RAIZ, BASE, filtrarExcecaoD15C(RAIZ, BASE, filtrarExcecaoD15B(RAIZ, BASE, filtrarExcecaoD14(RAIZ, BASE, filtrarExcecaoD13(RAIZ, BASE, d))))));
+    const fora = filtrarExcecaoD16(RAIZ, BASE, filtrarExcecaoD15F2(RAIZ, BASE, filtrarExcecaoD15D(RAIZ, BASE, filtrarExcecaoD15C(RAIZ, BASE, filtrarExcecaoD15B(RAIZ, BASE, filtrarExcecaoD14(RAIZ, BASE, filtrarExcecaoD13(RAIZ, BASE, d)))))));
     assert(fora.length === 0, `alterados: ${fora}`);
     const vendas = readFileSync(join(RAIZ, "app/(app)/vendas/page.tsx"), "utf8");
     assert(/import \{ ASYNC_SYNC_JOBS_ENABLED \} from "@\/lib\/feature-flags";/.test(vendas) && /if \(!ASYNC_SYNC_JOBS_ENABLED\) \{\s*dispararSincronizarInline\(\);/.test(vendas), "Vendas mudou de flag");

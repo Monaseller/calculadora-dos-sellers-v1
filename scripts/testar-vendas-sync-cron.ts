@@ -33,6 +33,8 @@ import { filtrarExcecaoD15D } from "./_excecao-d15d-shopee-intraday";
 import { filtrarExcecaoD15B } from "./_excecao-d15b-intraday";
 // SALES-SYNC-D15F2C: excecao EXATA do enable (intraday.ts = 34d982f com SO a linha false → true; + o helper)
 import { filtrarExcecaoD15F2 } from "./_excecao-d15f2-enable-intraday";
+// SALES-CANONICAL-D16B: excecao EXATA do cutover dos 4 cards do Dashboard (dashboard − hunks D16 = 1d6e573; novos por sha256)
+import { filtrarExcecaoD16 } from "./_excecao-d16-dashboard-canonico";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -153,12 +155,12 @@ async function principal() {
   t("23. so vercel.json e scripts de teste mudaram desde a base: rotas, coordenador, worker, elegibilidade, motores, auth, Vendas, Dashboard INTOCADOS", () => {
     const d = execFileSync("git", ["diff", "--name-only", BASE], { cwd: RAIZ, encoding: "utf8" }).trim().split(/\r?\n/).filter(Boolean);
     // SALES-CANONICAL-D13A: alem disso, SO o bloco D13 de credenciais.ts e os arquivos novos do D13 (inclui scripts/_excecao-d13-vendas-canonicas.ts)
-    const fora = filtrarExcecaoD15F2(RAIZ, BASE, filtrarExcecaoD15D(RAIZ, BASE, filtrarExcecaoD15C(RAIZ, BASE, filtrarExcecaoD15B(RAIZ, BASE, filtrarExcecaoD14(RAIZ, BASE, filtrarExcecaoD13(RAIZ, BASE, d.filter((f) => f !== "vercel.json" && !/^scripts\/testar-[a-z0-9-]+\.ts$/.test(f))))))));
+    const fora = filtrarExcecaoD16(RAIZ, BASE, filtrarExcecaoD15F2(RAIZ, BASE, filtrarExcecaoD15D(RAIZ, BASE, filtrarExcecaoD15C(RAIZ, BASE, filtrarExcecaoD15B(RAIZ, BASE, filtrarExcecaoD14(RAIZ, BASE, filtrarExcecaoD13(RAIZ, BASE, d.filter((f) => f !== "vercel.json" && !/^scripts\/testar-[a-z0-9-]+\.ts$/.test(f)))))))));
     assert(fora.length === 0, `alterados fora do escopo: ${fora}`);
     const novos = execFileSync("git", ["ls-files", "--others", "--exclude-standard"], { cwd: RAIZ, encoding: "utf8" }).trim().split(/\r?\n/).filter(Boolean)
       .filter((f) => !/^scripts\/testar-[a-z0-9-]+\.ts$/.test(f));
     // SALES-CANONICAL-D13A: SO os arquivos novos do D13 (lista exata, inexistentes na base)
-    const novosFora = filtrarExcecaoD15F2(RAIZ, BASE, filtrarExcecaoD15D(RAIZ, BASE, filtrarExcecaoD15C(RAIZ, BASE, filtrarExcecaoD15B(RAIZ, BASE, filtrarExcecaoD14(RAIZ, BASE, filtrarExcecaoD13(RAIZ, BASE, novos, false))))));
+    const novosFora = filtrarExcecaoD16(RAIZ, BASE, filtrarExcecaoD15F2(RAIZ, BASE, filtrarExcecaoD15D(RAIZ, BASE, filtrarExcecaoD15C(RAIZ, BASE, filtrarExcecaoD15B(RAIZ, BASE, filtrarExcecaoD14(RAIZ, BASE, filtrarExcecaoD13(RAIZ, BASE, novos, false)))))));
     assert(novosFora.length === 0, `arquivos novos fora do escopo: ${novosFora}`);
   });
 

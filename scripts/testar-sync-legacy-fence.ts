@@ -24,6 +24,8 @@ import { filtrarExcecaoD15D } from "./_excecao-d15d-shopee-intraday";
 import { filtrarExcecaoD15B } from "./_excecao-d15b-intraday";
 // SALES-SYNC-D15F2B: excecao EXATA do enable (intraday.ts = 34d982f com SO a linha false → true)
 import { filtrarExcecaoD15F2 } from "./_excecao-d15f2-enable-intraday";
+// SALES-CANONICAL-D16B: excecao EXATA do cutover dos 4 cards do Dashboard (dashboard − hunks D16 = 1d6e573; novos por sha256)
+import { filtrarExcecaoD16 } from "./_excecao-d16-dashboard-canonico";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -268,7 +270,7 @@ async function principal() {
       "lib/ml-auth.ts", "app/api/sync", "app/api/internal", "app/api/ml/vendas", /* SALES-SYNC-D10: vercel.json agora agenda os crons canonicos — guard proprio: testar-vendas-sync-cron */ "app/api/shopee/vendas", "lib/feature-flags.ts"], { cwd: RAIZ, encoding: "utf8" })
       .trim().split(/\r?\n/).filter((f) => f && !C6.includes(f));
     // SALES-CANONICAL-D13B: so os arquivos NOVOS do D13 em lib/vendas/canonico; ml.ts/shopee.ts/tipos.ts seguem travados
-    const fora = filtrarExcecaoD15F2(RAIZ, BASE, filtrarExcecaoD15D(RAIZ, BASE, filtrarExcecaoD15C(RAIZ, BASE, filtrarExcecaoD15B(RAIZ, BASE, filtrarExcecaoD14(RAIZ, BASE, filtrarNovosCanonicosD13(RAIZ, BASE, d)))))).join(",");
+    const fora = filtrarExcecaoD16(RAIZ, BASE, filtrarExcecaoD15F2(RAIZ, BASE, filtrarExcecaoD15D(RAIZ, BASE, filtrarExcecaoD15C(RAIZ, BASE, filtrarExcecaoD15B(RAIZ, BASE, filtrarExcecaoD14(RAIZ, BASE, filtrarNovosCanonicosD13(RAIZ, BASE, d))))))).join(",");
     assert(fora === "", fora);
   });
   t("I4. a unica migration nova e a do fence, e ela nao toca idx_sync_jobs_loja_ativo (so comentario)", () => {

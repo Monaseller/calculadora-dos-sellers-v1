@@ -20,6 +20,8 @@ import { filtrarExcecaoD15C } from "./_excecao-d15c-ml-intraday";
 import { filtrarExcecaoD15D } from "./_excecao-d15d-shopee-intraday";
 // SALES-SYNC-D15B2: excecao EXATA do patch D15B nos arquivos de sync (ATUAL − patch aprovado = bytes de d631748)
 import { filtrarExcecaoD15B } from "./_excecao-d15b-intraday";
+// SALES-CANONICAL-D16B: excecao EXATA do cutover dos 4 cards do Dashboard (dashboard − hunks D16 = 1d6e573; novos por sha256)
+import { filtrarExcecaoD16 } from "./_excecao-d16-dashboard-canonico";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -423,7 +425,7 @@ async function principal() {
       // SALES-SYNC-D6: flag server-only na rota do worker e no .env.example (guard proprio: testar-vendas-sync-feature-flag)
       .split(/\r?\n/).filter((f) => f && f !== CAP && f !== "lib/vendas/sync/worker.ts" && f !== ".env.example" && f !== "app/api/internal/vendas-sync/worker/route.ts");
     // SALES-CANONICAL-D13A: SO os arquivos NOVOS do D13 em lib/vendas/canonico (leitores existentes continuam travados)
-    const dForaD13 = filtrarExcecaoD15D(RAIZ, BASE, filtrarExcecaoD15C(RAIZ, BASE, filtrarExcecaoD15B(RAIZ, BASE, filtrarExcecaoD14(RAIZ, BASE, filtrarExcecaoD13(RAIZ, BASE, d, false))))).join(",");
+    const dForaD13 = filtrarExcecaoD16(RAIZ, BASE, filtrarExcecaoD15D(RAIZ, BASE, filtrarExcecaoD15C(RAIZ, BASE, filtrarExcecaoD15B(RAIZ, BASE, filtrarExcecaoD14(RAIZ, BASE, filtrarExcecaoD13(RAIZ, BASE, d, false)))))).join(",");
     const novos = execFileSync("git", ["ls-files", "--others", "--exclude-standard", "--", "supabase"], { cwd: RAIZ, encoding: "utf8" }).trim();
     assert(dForaD13 === "" && novos === "", `alterados: ${dForaD13} ${novos}`);
     // SALES-SYNC-D1.1: a capability so GANHA a listagem do tick — nenhuma linha existente removida/alterada

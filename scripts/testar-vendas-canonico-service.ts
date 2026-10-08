@@ -446,9 +446,11 @@ async function principal() {
       assert(!/seller_id|shop_id|nickname|sellerId|shopId/.test(s), `${f}: chave de dedup`);
     }
   });
-  t("7e. nenhuma tela ligada ainda (Dashboard/Vendas nao importam o servico neste gate)", () => {
-    const ligados = [...arquivos("app"), ...arquivos("components")].filter((f) => /vendas\/canonico\/(service|periodo)/.test(fonte(f)));
-    assert(ligados.length === 0, ligados.join(", "));
+  // SALES-CANONICAL-D16B: o UNICO importador autorizado e a rota do resumo canonico dos 4 cards do Dashboard.
+  // Vendas, Dashboard (direto) e qualquer outra rota/pagina/componente seguem proibidos.
+  t("7e. so a rota /api/vendas/resumo-canonico importa o servico canonico (Vendas/Dashboard/outras telas nao)", () => {
+    const ligados = [...arquivos("app"), ...arquivos("components")].filter((f) => /vendas\/canonico\/(service|periodo|dashboard-resumo)/.test(fonte(f)));
+    assert(ligados.join(",") === "app/api/vendas/resumo-canonico/route.ts", ligados.join(", "));
   });
   t("7f. o resolvedor de periodo e unico: nenhum outro modulo de lib/vendas define presets canonicos", () => {
     // planejamento.ts: OPCOES_BACKFILL_INICIAL usa "ULTIMOS_7_DIAS" como id de HORIZONTE de bootstrap do sync — nao e periodo de exibicao
