@@ -227,8 +227,11 @@ console.log("── Superfície privilegiada e cookies legados ─────�
   ok("39. callback usa a capability", /registrarLojaShopeeOAuth/.test(cb));
   ok("40. fallback shopee_partner_id por cookie removido", !/shopee_partner_id/.test(cb));
   ok("41. fallback shopee_partner_key por cookie removido", !/shopee_partner_key/.test(cb));
-  ok("42. partner_id/key vêm só de env",
-    /process\.env\.SHOPEE_PARTNER_ID/.test(cb) && /process\.env\.SHOPEE_PARTNER_KEY/.test(cb));
+  // Shopee multi-app V2: continua "so de env" — mas via o registro server-side
+  // (lib/shopee-apps.ts), escolhido pelo app do ESTADO verificado, nunca pela query.
+  ok("42. partner_id/key vêm só de env (registro allowlisted, app do estado verificado)",
+    /resolverAppShopee\(estado\.app\)/.test(cb) && !/process\.env\.SHOPEE_PARTNER_(ID|KEY)/.test(cb) &&
+    /SHOPEE_PARTNER_ID/.test(fonte("lib/shopee-apps.ts")) && /SHOPEE_PARTNER_KEY/.test(fonte("lib/shopee-apps.ts")));
   ok("43. helper getCookie local removido", !/function getCookie/.test(cb));
   ok("44. capability não expõe SupabaseClient", !/SupabaseClient/.test(cred));
   ok("45. capability não usa select(\"*\")", !/select\("\*"\)/.test(cred));

@@ -26,6 +26,8 @@ import { filtrarExcecaoD15B } from "./_excecao-d15b-intraday";
 import { filtrarExcecaoD15F2 } from "./_excecao-d15f2-enable-intraday";
 // SALES-CANONICAL-D16B: excecao EXATA do cutover dos 4 cards do Dashboard (dashboard − hunks D16 = 1d6e573; novos por sha256)
 import { filtrarExcecaoD16 } from "./_excecao-d16-dashboard-canonico";
+// SHOPEE MULTI-APP: excecao EXATA do OAuth multi-app (rotas/Configuracoes/.env.example − hunks = eca183a; novos por sha256)
+import { filtrarExcecaoShopeeMultiApp, varsEnvExemploAprovadas } from "./_excecao-shopee-multi-app";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
@@ -199,7 +201,7 @@ async function principal() {
       // SALES-SYNC-D8.2: helper de auth das rotas canonicas (guard proprio: testar-vendas-sync-auth-interna)
       .filter((f) => f && f !== HELPER && f !== "lib/vendas/sync/auth-interna.ts");
     // SALES-CANONICAL-D13A: SO o bloco D13 de credenciais.ts e os arquivos novos do D13
-    const fora = filtrarExcecaoD16(RAIZ, BASE, filtrarExcecaoD15F2(RAIZ, BASE, filtrarExcecaoD15D(RAIZ, BASE, filtrarExcecaoD15C(RAIZ, BASE, filtrarExcecaoD15B(RAIZ, BASE, filtrarExcecaoD14(RAIZ, BASE, filtrarExcecaoD13(RAIZ, BASE, d)))))));
+    const fora = filtrarExcecaoShopeeMultiApp(RAIZ, BASE, filtrarExcecaoD16(RAIZ, BASE, filtrarExcecaoD15F2(RAIZ, BASE, filtrarExcecaoD15D(RAIZ, BASE, filtrarExcecaoD15C(RAIZ, BASE, filtrarExcecaoD15B(RAIZ, BASE, filtrarExcecaoD14(RAIZ, BASE, filtrarExcecaoD13(RAIZ, BASE, d))))))));
     assert(fora.length === 0, `alterados: ${fora}`);
     const vendas = readFileSync(join(RAIZ, "app/(app)/vendas/page.tsx"), "utf8");
     assert(/import \{ ASYNC_SYNC_JOBS_ENABLED \} from "@\/lib\/feature-flags";/.test(vendas) && /if \(!ASYNC_SYNC_JOBS_ENABLED\) \{\s*dispararSincronizarInline\(\);/.test(vendas), "Vendas mudou de flag");
@@ -207,10 +209,12 @@ async function principal() {
   t("env template: so ACRESCENTA ENABLE_CANONICAL_SALES_SYNC=false (sem segredo); nada removido", () => {
     const dc = execFileSync("git", ["diff", "-U0", BASE, "--", ".env.example"], { cwd: RAIZ, encoding: "utf8" }).split(/\r?\n/);
     const rem = dc.filter((l) => l.startsWith("-") && !l.startsWith("---")), add = dc.filter((l) => l.startsWith("+") && !l.startsWith("+++"));
-    const vars = add.filter((l) => /^\+[A-Z_]+=/.test(l));
+    // SHOPEE MULTI-APP: SO os dois nomes VAZIOS do app rd, e SO com .env.example exato (helper)
+    const aprovadasMultiApp = varsEnvExemploAprovadas(RAIZ);
+    const vars = add.filter((l) => /^\+[A-Z_]+=/.test(l) && !aprovadasMultiApp.includes(l));
     // SALES-SYNC-D8.2 acrescenta SO o nome do segredo manual, VAZIO (nunca um valor)
     assert(rem.length === 0 && vars.join() === "+ENABLE_CANONICAL_SALES_SYNC=false,+CANONICAL_SALES_SYNC_MANUAL_SECRET="
-      && add.every((l) => l === "+" || /^\+#/.test(l) || vars.includes(l)), dc.join("\n"));
+      && add.every((l) => l === "+" || /^\+#/.test(l) || vars.includes(l) || aprovadasMultiApp.includes(l)), dc.join("\n"));
   });
 
   await fila;

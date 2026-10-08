@@ -156,6 +156,8 @@ export default function ConfiguracoesPage() {
   const [lojas,        setLojas]        = useState<Loja[]>([]);
   const [lojaAtiva,    setLojaAtiva]    = useState<string | null>(null);
   const [shopeeAtiva,  setShopeeAtiva]  = useState<string | null>(null);
+  // Apps Shopee alem do padrao, so os CONFIGURADOS no servidor (sem credencial no navegador)
+  const [appsShopeeExtras, setAppsShopeeExtras] = useState<{ chave: string; rotulo: string }[]>([]);
   const [loading,   setLoading]   = useState(true);
   const [msg,       setMsg]       = useState<{ ok: boolean; texto: string } | null>(null);
 
@@ -196,6 +198,13 @@ export default function ConfiguracoesPage() {
   }
 
   useEffect(() => { carregarLojas(); carregarPerfil(); }, []);
+  useEffect(() => {
+    fetch("/api/auth/shopee/apps").then((r) => (r.ok ? r.json() : null)).then((d) => {
+      const apps = Array.isArray(d?.apps) ? d.apps : [];
+      setAppsShopeeExtras(apps.filter((a: { chave: string; configurado: boolean }) => a.chave !== "default" && a.configurado === true)
+        .map((a: { chave: string; rotulo: string }) => ({ chave: String(a.chave), rotulo: String(a.rotulo) })));
+    }).catch(() => setAppsShopeeExtras([]));
+  }, []);
 
   /**
    * Retorno do OAuth do Mercado Livre — F0.c.6e.
@@ -506,6 +515,15 @@ export default function ConfiguracoesPage() {
               Adicionar conta Shopee
             </div>
           </a>
+
+          {/* Shopee — outros apps configurados no servidor (ex.: R.D.) */}
+          {appsShopeeExtras.map((app) => (
+            <a key={app.chave} href={`/api/auth/shopee?app=${encodeURIComponent(app.chave)}`}
+              style={{ display: "block", textDecoration: "none", background: "rgba(238,77,45,0.05)", border: "1px solid rgba(238,77,45,0.18)", borderRadius: "14px", padding: "24px", cursor: "pointer" }}>
+              <div style={{ fontWeight: 800, fontSize: "15px", color: "#EE4D2D", marginBottom: "6px" }}>{app.rotulo}</div>
+              <div style={{ fontSize: "13px", color: "#EE4D2D", fontWeight: 700 }}>Conectar {app.rotulo}</div>
+            </a>
+          ))}
 
         </div>
       </section>

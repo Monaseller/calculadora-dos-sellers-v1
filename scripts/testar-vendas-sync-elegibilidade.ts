@@ -23,6 +23,8 @@ import { filtrarExcecaoD15D } from "./_excecao-d15d-shopee-intraday";
 import { filtrarExcecaoD15B } from "./_excecao-d15b-intraday";
 // SALES-CANONICAL-D16B: excecao EXATA do cutover dos 4 cards do Dashboard (dashboard − hunks D16 = 1d6e573; novos por sha256)
 import { filtrarExcecaoD16 } from "./_excecao-d16-dashboard-canonico";
+// SHOPEE MULTI-APP: excecao EXATA do OAuth multi-app (rotas/Configuracoes/.env.example − hunks = eca183a; novos por sha256)
+import { filtrarExcecaoShopeeMultiApp } from "./_excecao-shopee-multi-app";
 
 let passou = 0, falhou = 0;
 let fila: Promise<void> = Promise.resolve();
@@ -238,7 +240,7 @@ async function principal() {
       // SALES-SYNC-D6: as duas rotas passam a ler a flag server-only (guard proprio: testar-vendas-sync-feature-flag)
       .split(/\r?\n/).filter((f) => f && f !== "app/api/internal/vendas-sync/coordenador/route.ts" && f !== "app/api/internal/vendas-sync/worker/route.ts");
     // SALES-CANONICAL-D13B: so os arquivos NOVOS do D13 em lib/vendas/canonico; ml.ts/shopee.ts/tipos.ts seguem travados
-    const fora = filtrarExcecaoD16(RAIZ, "2d2beb4", filtrarExcecaoD15D(RAIZ, "2d2beb4", filtrarExcecaoD15C(RAIZ, "2d2beb4", filtrarExcecaoD15B(RAIZ, "2d2beb4", filtrarExcecaoD14(RAIZ, "2d2beb4", filtrarNovosCanonicosD13(RAIZ, "2d2beb4", d)))))).join(",");
+    const fora = filtrarExcecaoShopeeMultiApp(RAIZ, "2d2beb4", filtrarExcecaoD16(RAIZ, "2d2beb4", filtrarExcecaoD15D(RAIZ, "2d2beb4", filtrarExcecaoD15C(RAIZ, "2d2beb4", filtrarExcecaoD15B(RAIZ, "2d2beb4", filtrarExcecaoD14(RAIZ, "2d2beb4", filtrarNovosCanonicosD13(RAIZ, "2d2beb4", d))))))).join(",");
     assert(fora === "", `alterados: ${fora}`);
   });
 

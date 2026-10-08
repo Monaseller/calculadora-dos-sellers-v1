@@ -23,6 +23,8 @@ import { filtrarExcecaoD15D } from "./_excecao-d15d-shopee-intraday";
 import { filtrarExcecaoD15B } from "./_excecao-d15b-intraday";
 // SALES-CANONICAL-D16B: excecao EXATA do cutover dos 4 cards do Dashboard (dashboard − hunks D16 = 1d6e573; novos por sha256)
 import { filtrarExcecaoD16 } from "./_excecao-d16-dashboard-canonico";
+// SHOPEE MULTI-APP: excecao EXATA do OAuth multi-app (rotas/Configuracoes/.env.example − hunks = eca183a; novos por sha256)
+import { filtrarExcecaoShopeeMultiApp, varsEnvExemploAprovadas } from "./_excecao-shopee-multi-app";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
@@ -166,11 +168,13 @@ async function principal() {
       "lib/marketplace", "lib/shopee-auth.ts", "lib/ml-auth.ts", "lib/mercado-livre", "lib/shopee", "lib/middleware-rotas.ts", "middleware.ts", "supabase", "scripts/sync-worker.mjs"],
       { cwd: RAIZ, encoding: "utf8" }).trim().split(/\r?\n/).filter(Boolean);
     // SALES-CANONICAL-D13A: SO o bloco D13 de credenciais.ts e os arquivos novos do D13
-    const fora = filtrarExcecaoD16(RAIZ, BASE, filtrarExcecaoD15D(RAIZ, BASE, filtrarExcecaoD15C(RAIZ, BASE, filtrarExcecaoD15B(RAIZ, BASE, filtrarExcecaoD14(RAIZ, BASE, filtrarExcecaoD13(RAIZ, BASE, d)))))).join(",");
+    const fora = filtrarExcecaoShopeeMultiApp(RAIZ, BASE, filtrarExcecaoD16(RAIZ, BASE, filtrarExcecaoD15D(RAIZ, BASE, filtrarExcecaoD15C(RAIZ, BASE, filtrarExcecaoD15B(RAIZ, BASE, filtrarExcecaoD14(RAIZ, BASE, filtrarExcecaoD13(RAIZ, BASE, d))))))).join(",");
     assert(fora === "", `alterados: ${fora}`);
     const dc = execFileSync("git", ["diff", "-U0", BASE, "--", ".env.example"], { cwd: RAIZ, encoding: "utf8" }).split(/\r?\n/);
     const add = dc.filter((l) => l.startsWith("+") && !l.startsWith("+++")), rem = dc.filter((l) => l.startsWith("-") && !l.startsWith("---"));
-    assert(rem.length === 0 && add.filter((l) => /^\+[A-Z_]+=/.test(l)).join() === "+CANONICAL_SALES_SYNC_MANUAL_SECRET=", ".env.example com valor/variavel extra");
+    // SHOPEE MULTI-APP: SO os dois nomes VAZIOS do app rd, e SO com .env.example exato (helper)
+    const aprovadasMultiApp = varsEnvExemploAprovadas(RAIZ);
+    assert(rem.length === 0 && add.filter((l) => /^\+[A-Z_]+=/.test(l) && !aprovadasMultiApp.includes(l)).join() === "+CANONICAL_SALES_SYNC_MANUAL_SECRET=", ".env.example com valor/variavel extra");
   });
 
   await fila;

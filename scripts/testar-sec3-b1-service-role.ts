@@ -31,6 +31,8 @@ import Module from "node:module";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join, dirname, normalize } from "node:path";
+// SHOPEE MULTI-APP: excecao EXATA — Configuracoes so sai da J2 pelos hunks aprovados (pagina − hunks = eca183a)
+import { filtrarExcecaoShopeeMultiApp } from "./_excecao-shopee-multi-app";
 
 let passou = 0, falhou = 0;
 let fila: Promise<void> = Promise.resolve();
@@ -549,7 +551,8 @@ async function principal() {
     assert(d === "", d);
   });
   t("J2. os unicos arquivos 'use client' alterados sao as 4 telas do SEC-3-B2", () => {
-    const d = git("diff", "--name-only", BASE, "--", "app", "components", "lib").split(/\r?\n/).filter(Boolean);
+    // SHOPEE MULTI-APP: a lista generica (BROWSER_PENDENTE) NAO muda; Configuracoes sai SO pela excecao exata
+    const d = filtrarExcecaoShopeeMultiApp(RAIZ, BASE, git("diff", "--name-only", BASE, "--", "app", "components", "lib").split(/\r?\n/).filter(Boolean));
     const cliente = d.filter((f) => fonte.has(f) && browser.has(f) && !BROWSER_PENDENTE.includes(f));
     assert(cliente.length === 0, cliente.join(", "));
   });

@@ -27,18 +27,31 @@
  *    codigo morto (nada os emitia) e um vetor de injecao;
  *  • nenhum log recebe token, chave ou corpo bruto do provedor.
  *
- * ── DIVIDA REGISTRADA, FORA DESTA PR ────────────────────────────────
- * Este fluxo NAO tem `state`. Sem ele, um atacante pode induzir um
+ * ── STATE OBRIGATORIO E MULTI-APP (Shopee multi-app V2) ────────────
+ * Antes este fluxo NAO tinha `state`: um atacante podia induzir um
  * usuario autenticado a visitar este callback com `code`/`shop_id` da
- * conta DELE, associando a loja do atacante a conta da vitima. Corrigir
- * exige comprovar que a Shopee preserva parametros no `redirect` do
- * `auth_partner` — gate proprio. PKCE nao se aplica: o fluxo usado e um
- * redirect assinado por parceiro, nao authorization-code OAuth2.
+ * conta DELE, associando a loja do atacante a conta da vitima. Agora o
+ * inicio (/api/auth/shopee) grava um estado ASSINADO {uid, app, nonce,
+ * exp} num cookie httpOnly (lib/shopee-oauth-estado.ts) e este callback:
+ *   • exige a sessao (como antes) E o estado valido — sem ele, REJEITA;
+ *   • exige uid do estado == uid da sessao;
+ *   • usa o app (partner_id/partner_key) SO do estado verificado, resolvido
+ *     na allowlist server-side (lib/shopee-apps.ts) — `?app=` aqui nunca e
+ *     autoridade, e app sem credencial nunca cai para outro;
+ *   • limpa o cookie em QUALQUER desfecho (estado limpo no callback; a
+ *     protecao e assinatura + uid + expiracao + httpOnly + o `code` da
+ *     Shopee, de uso unico no provedor — nao um "uso unico absoluto").
+ * O estado viaja em cookie, nao na URL: nao foi provado que a Shopee
+ * preserva parametros no `redirect` do `auth_partner`.
+ * PKCE nao se aplica: o fluxo usado e um redirect assinado por parceiro,
+ * nao authorization-code OAuth2.
  */
 import { NextResponse } from "next/server";
 import { createHmac } from "crypto";
-import { autenticarRequisicao } from "@/lib/autenticacao";
+import { agoraEmSegundos, autenticarRequisicao, lerCookie } from "@/lib/autenticacao";
 import { registrarLojaShopeeOAuth } from "@/lib/marketplace/credenciais";
+import { resolverAppShopee } from "@/lib/shopee-apps";
+import { NOME_COOKIE_ESTADO_SHOPEE, opcoesCookieEstadoShopee, verificarEstadoShopee } from "@/lib/shopee-oauth-estado";
 
 // Shopee espera a chave completa como string UTF-8
 function getHmacKey(partnerKey: string): string {
@@ -51,7 +64,7 @@ function shopeeSign(partnerId: string, path: string, timestamp: number, partnerK
     .digest("hex");
 }
 
-export async function GET(request: Request) {
+async function processarCallback(request: Request) {
   const url    = new URL(request.url);
   const code   = url.searchParams.get("code");
   const shopId = Number(url.searchParams.get("shop_id") ?? 0);
@@ -67,12 +80,24 @@ export async function GET(request: Request) {
   }
   const userId = auth.uid;
 
-  // Credenciais centrais do servidor. SOMENTE env: o fallback por
+  // ── Estado (binding obrigatorio) ──────────────────────────────────
+  // Tambem ANTES da troca: sem o estado assinado desta mesma sessao, o
+  // `code` nao e trocado. Qualquer falha e a MESMA recusa (sem detalhe).
+  const segredo = process.env.SESSION_SECRET;
+  const estado = segredo
+    ? await verificarEstadoShopee(lerCookie(request, NOME_COOKIE_ESTADO_SHOPEE), { segredo, agoraSegundos: agoraEmSegundos() })
+    : null;
+  if (!estado || estado.uid !== userId) {
+    return NextResponse.redirect(new URL("/configuracoes?erro=shopee_estado", request.url));
+  }
+
+  // Credenciais do app QUE INICIOU o fluxo: so do estado verificado, pela
+  // allowlist server-side. SOMENTE env (via registro): o fallback por
   // cookie foi removido — nenhum codigo emitia `shopee_partner_*`, e
-  // aceita-los deixaria um atacante injetar partner_key pelo navegador
-  // caso a env faltasse.
-  const partnerId  = process.env.SHOPEE_PARTNER_ID;
-  const partnerKey = process.env.SHOPEE_PARTNER_KEY;
+  // aceita-los deixaria um atacante injetar partner_key pelo navegador.
+  const app = resolverAppShopee(estado.app);
+  const partnerId  = app?.partnerId;
+  const partnerKey = app?.partnerKey;
   const baseUrl    = process.env.SHOPEE_BASE_URL ?? "https://partner.shopeemobile.com";
 
   if (!code || !shopId || !partnerId || !partnerKey) {
@@ -180,5 +205,12 @@ export async function GET(request: Request) {
     });
   }
 
+  return res;
+}
+
+// Estado LIMPO NO CALLBACK em qualquer desfecho (sucesso, erro ou recusa).
+export async function GET(request: Request) {
+  const res = await processarCallback(request);
+  res.cookies.set(NOME_COOKIE_ESTADO_SHOPEE, "", opcoesCookieEstadoShopee(process.env.NODE_ENV === "production", 0));
   return res;
 }
