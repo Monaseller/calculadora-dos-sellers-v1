@@ -403,7 +403,13 @@ t("20. filtros de segurança preservados", () => {
   assert(/\.eq\("user_id",\s*userId\)/.test(FONTE), "user_id não vem da sessão");
   assert(/\.eq\("marketplace",\s*"Shopee"\)/.test(FONTE), "marketplace não fixado");
   assert(/\.eq\("status_shopee_raw",\s*"COMPLETED"\)/.test(FONTE), "status_shopee_raw não fixado");
-  assert(/getShopeeLojaAtiva\(userId\)/.test(FONTE), "loja não vem de getShopeeLojaAtiva");
+  // MULTI-LOJA V1: contrato novo — loja_id OBRIGATORIO, conferido contra as
+  // lojas Shopee ATIVAS do dono da sessao; nunca "a mais recente".
+  assert(!/getShopeeLojaAtiva/.test(FONTE), "loja voltou a vir de getShopeeLojaAtiva (loja implicita)");
+  assert(/selecionarLojaShopee\(userId, \{ lojaIdExplicito: url\.searchParams\.get\("loja_id"\), usarCookie: false, exigirExplicita: true \}\)/.test(FONTE),
+    "loja_id deixou de ser obrigatorio/explicito");
+  assert(/getShopeeLojaById\(selecaoLoja\.lojaId, userId\)/.test(FONTE), "loja nao e carregada pelo dono da sessao");
+  assert(!/\.eq\("marketplace",\s*"Shopee"\)(?!\.eq\("loja_id", loja\.lojaId\))/.test(FONTE), "consulta Shopee sem filtro de loja");
   assert(/\.gte\("data_pagamento",\s*dateFrom!\)/.test(FONTE), "período não filtra data_pagamento");
 });
 t("21. dry_run continua o padrão seguro", () => {

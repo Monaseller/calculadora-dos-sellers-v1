@@ -39,7 +39,6 @@ import {
 import { lerCursorSyncShopee, avancarCursorSyncShopee } from "./marketplace/credenciais";
 import { shopeeGet } from "@/lib/shopee-api";
 import { obterFaixaShopee, TAXA_CAMPANHA_SHOPEE } from "@/lib/comissoes-shopee";
-import { getShopeeLojaAtiva } from "@/lib/shopee-auth";
 import { LojaIdIntegrityError } from "@/lib/sync-errors";
 import { atualizarResumosDosDias } from "@/lib/resumos-diarios";
 import {
@@ -910,8 +909,9 @@ export async function syncShopeeForUserV2(
 
   // ── Modo incremental ───────────────────────────────────────────────
   // A loja e resolvida AQUI e repassada, para nao consultar duas vezes.
-  const loja = lojaOverride ?? await getShopeeLojaAtiva(userId);
-  if (!loja) return RESULTADO_VAZIO();
+  // MULTI-LOJA V1: a loja e OBRIGATORIA — nenhum fallback para "a mais recente" do dono.
+  const loja = lojaOverride;
+  if (!loja) return { ...RESULTADO_VAZIO(), syncIncompleto: true, motivoFalha: "loja_obrigatoria" };
 
   // Congelado UMA vez, antes de qualquer chamada a Shopee. Tudo o que
   // mudar depois deste instante fica, por construcao, para a proxima
@@ -977,8 +977,9 @@ async function executarSyncShopee(
   },
   chunksIncrementais?: JanelaEpoch[]
 ): Promise<SyncShopeeResult> {
-  const loja = lojaOverride ?? await getShopeeLojaAtiva(userId);
-  if (!loja) return { found: 0, inserted: 0, upsertErrors: 0, resumoAtualizado: false, resumoPendente: false, diasAfetados: 0, motivoResumoPendente: null };
+  // MULTI-LOJA V1: a loja e OBRIGATORIA — nenhum fallback para "a mais recente" do dono.
+  const loja = lojaOverride;
+  if (!loja) return { found: 0, inserted: 0, upsertErrors: 0, resumoAtualizado: false, resumoPendente: false, diasAfetados: 0, motivoResumoPendente: null, syncIncompleto: true, motivoFalha: "loja_obrigatoria" };
 
   const { partnerId: partner_id, partnerKey: partner_key, accessToken: access_token, shopId, nickname, lojaId } = loja;
 

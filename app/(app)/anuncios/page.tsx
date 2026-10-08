@@ -78,6 +78,8 @@ export default function AnunciosPage() {
   const [msgImport,          setMsgImport]          = useState<{ ok: boolean; texto: string } | null>(null);
   const [importandoShopee,   setImportandoShopee]   = useState(false);
   const [msgImportShopee,    setMsgImportShopee]    = useState<{ ok: boolean; texto: string } | null>(null);
+  // MULTI-LOJA V1: lojas Shopee para escolher quando o dono tem mais de uma (a API responde 409)
+  const [lojasShopeeEscolha, setLojasShopeeEscolha] = useState<{ id: string; rotulo: string }[] | null>(null);
 
   async function carregar(uid?: string | null) {
     setLoading(true);
@@ -255,14 +257,32 @@ export default function AnunciosPage() {
     setImportando(false);
   }
 
-  async function importarDaShopee() {
+  async function importarDaShopee(lojaId?: string) {
     setImportandoShopee(true);
     setMsgImportShopee(null);
+    setLojasShopeeEscolha(null);
     try {
-      const res = await fetch("/api/shopee/importar-anuncios", { method: "POST" });
+      // MULTI-LOJA V1: importa de UMA loja explicita; sem loja_id a API decide so
+      // quando ha uma unica loja Shopee ativa (senao 409 STORE_SELECTION_REQUIRED).
+      const res = await fetch("/api/shopee/importar-anuncios", {
+        method: "POST",
+        ...(lojaId ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify({ loja_id: lojaId }) } : {}),
+      });
+      const corpoTexto = await res.text();
+      if (res.status === 409) {
+        let escolha: { id: string; rotulo: string }[] = [];
+        try {
+          const d = JSON.parse(corpoTexto);
+          if (d?.codigo === "STORE_SELECTION_REQUIRED" && Array.isArray(d.lojas)) {
+            escolha = d.lojas.filter((l: { id?: unknown; rotulo?: unknown }) => typeof l?.id === "string")
+              .map((l: { id: string; rotulo?: unknown }) => ({ id: l.id, rotulo: String(l.rotulo ?? "Shopee") }));
+          }
+        } catch { /* corpo nao-JSON: cai na classificacao padrao abaixo */ }
+        if (escolha.length) { setLojasShopeeEscolha(escolha); setImportandoShopee(false); return; }
+      }
       // Ver comentário em importarDoML: o corpo cru é que distingue
       // timeout nosso de erro do marketplace.
-      const r = classificarRespostaImportacao(res.status, await res.text(), "Shopee");
+      const r = classificarRespostaImportacao(res.status, corpoTexto, "Shopee");
       if (r.classe !== "SUCESSO") {
         setMsgImportShopee({ ok: false, texto: r.mensagem });
       } else {
@@ -529,7 +549,7 @@ export default function AnunciosPage() {
 
           {/* Botão Importar da Shopee */}
           <button
-            onClick={importarDaShopee}
+            onClick={() => importarDaShopee()}
             disabled={importandoShopee}
             title="Importa todos os anúncios ativos da Shopee automaticamente"
             style={{
@@ -923,6 +943,27 @@ export default function AnunciosPage() {
       )}
 
       {/* ── Feedback Importar da Shopee ──────────────────────── */}
+      {lojasShopeeEscolha && (
+        <div role="dialog" aria-label="Escolha a loja Shopee para importar" style={{
+          background: "rgba(238,77,45,0.06)", border: "1px solid rgba(238,77,45,0.25)",
+          borderRadius: "14px", padding: "14px 18px", marginBottom: "16px",
+        }}>
+          <div style={{ color: "#EE4D2D", fontWeight: 800, fontSize: "14px", marginBottom: "10px" }}>Escolha a loja Shopee para importar</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+            {lojasShopeeEscolha.map(l => (
+              <button key={l.id} type="button" onClick={() => importarDaShopee(l.id)}
+                style={{ background: "rgba(238,77,45,0.15)", border: "1px solid rgba(238,77,45,0.3)", borderRadius: "8px", padding: "7px 14px", color: "#EE4D2D", fontWeight: 700, fontSize: "13px", cursor: "pointer" }}>
+                {l.rotulo}
+              </button>
+            ))}
+            <button type="button" onClick={() => setLojasShopeeEscolha(null)}
+              style={{ background: "transparent", border: "1px solid rgba(255,255,255,0.15)", borderRadius: "8px", padding: "7px 14px", color: "#9099aa", fontSize: "13px", cursor: "pointer" }}>
+              Cancelar
+            </button>
+          </div>
+        </div>
+      )}
+
       {msgImportShopee && (
         <div style={{
           background: msgImportShopee.ok ? "rgba(238,77,45,0.06)" : "rgba(255,60,60,0.07)",

@@ -5,6 +5,8 @@
  */
 import { NextResponse } from "next/server";
 import { syncShopeeForUserV2 } from "@/lib/sync-shopee";
+import { getShopeeLojaById } from "@/lib/shopee-auth";
+import { lojasShopeeAtivasDoDono } from "@/lib/shopee-loja-selecao";
 import { listarLojasAtivasParaCron } from "@/lib/marketplace/credenciais";
 import { syncMLForUser } from "@/lib/sync-ml";
 
@@ -95,11 +97,13 @@ export async function GET(request: Request) {
       // que precisa continuar em modo intervalo. Mexer nele ativaria os
       // dois de uma vez.
       //
-      // `undefined` em `lojaOverride` é deliberado e igual ao de antes:
-      // o cron não escolhe loja, quem resolve é `getShopeeLojaAtiva`.
+      // MULTI-LOJA V1: acao GLOBAL ao dono → enumera TODAS as lojas Shopee
+      // ativas e sincroniza CADA UMA explicitamente (nunca "a mais recente").
+      // Em SEQUENCIA (sem concorrencia nova); falha de uma loja fica registrada
+      // nela e nao pula as outras.
       marketplaces.has("Shopee")
-        ? syncShopeeForUserV2(userId, ontem, hoje, false, undefined, { modo: "incremental" })
-            .then(r  => { results[userId].shopee = r.inserted; })
+        ? sincronizarTodasAsLojasShopee(userId, ontem, hoje)
+            .then(r  => { results[userId].shopee = r.inserted; results[userId].shopee_lojas = r.porLoja; })
             .catch(e => { results[userId].shopee_err = String(e?.message ?? e); })
         : Promise.resolve(),
 
@@ -112,4 +116,23 @@ export async function GET(request: Request) {
   }
 
   return NextResponse.json({ ok: true, from: ontem, to: hoje, synced: results });
+}
+
+/** Nightly multi-loja: cada loja Shopee ATIVA do dono, explicitamente, uma por vez. */
+async function sincronizarTodasAsLojasShopee(userId: string, ontem: string, hoje: string) {
+  const lojas = await lojasShopeeAtivasDoDono(userId);
+  if (lojas === null) throw new Error("leitura_lojas_falhou");
+  const porLoja: Record<string, number | string> = {};
+  let inserted = 0;
+  for (const l of lojas) {
+    try {
+      const loja = await getShopeeLojaById(l.id, userId);
+      if (!loja) { porLoja[l.id] = "credencial_indisponivel"; continue; }
+      const r = await syncShopeeForUserV2(userId, ontem, hoje, false, loja, { modo: "incremental" });
+      porLoja[l.id] = r.inserted; inserted += r.inserted;
+    } catch (e: any) {
+      porLoja[l.id] = `erro:${String(e?.message ?? e).slice(0, 80)}`;
+    }
+  }
+  return { inserted, porLoja };
 }

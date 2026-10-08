@@ -7,8 +7,9 @@
 import { NextResponse } from "next/server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
-import { autenticarRequisicao } from "@/lib/autenticacao";
-import { getShopeeLojaAtiva } from "@/lib/shopee-auth";
+import { autenticarRequisicao, lerCookie } from "@/lib/autenticacao";
+import { getShopeeLojaById } from "@/lib/shopee-auth";
+import { corpoSelecaoRecusada, NOME_COOKIE_LOJA_SHOPEE, selecionarLojaShopee } from "@/lib/shopee-loja-selecao";
 import { syncShopeeForUserV2 } from "@/lib/sync-shopee";
 
 // SEC-3-B1: dados sensiveis (SEC-3) so por service_role, server-side.
@@ -85,8 +86,19 @@ export async function GET(request: Request) {
   const dateField: "pagamento" | "criacao" =
     searchParams.get("date_field") === "criacao" ? "criacao" : "pagamento";
 
-  // Verifica conexão Shopee
-  const loja = await getShopeeLojaAtiva(userId);
+  // MULTI-LOJA V1: a loja e EXPLICITA (?loja_id=) ou o "Usar esta" re-conferido no
+  // servidor, ou a UNICA loja Shopee ativa — nunca "a mais recente". Leitura e
+  // sync ficam restritos a ELA (nada de outra loja do mesmo dono aparece aqui).
+  const selecao = await selecionarLojaShopee(userId, {
+    lojaIdExplicito: searchParams.get("loja_id"), lojaIdCookie: lerCookie(request, NOME_COOKIE_LOJA_SHOPEE), usarCookie: true,
+  });
+  if (!selecao.ok) {
+    if (selecao.motivo === "SEM_LOJA_SHOPEE") return NextResponse.json({ erro: true, semConexao: true, mensagem: "Conta Shopee não conectada." });
+    const { status, corpo } = corpoSelecaoRecusada(selecao);
+    return NextResponse.json(corpo, { status });
+  }
+  const lojaId = selecao.lojaId;
+  const loja = await getShopeeLojaById(lojaId, userId);
   if (!loja) {
     return NextResponse.json({ erro: true, semConexao: true, mensagem: "Conta Shopee não conectada." });
   }
@@ -131,7 +143,7 @@ export async function GET(request: Request) {
       ontem.setDate(ontem.getDate() - 1);
       const ontemISO = ontem.toISOString().split("T")[0];
       const syncFrom = dateFrom > ontemISO ? dateFrom : ontemISO;
-      const r = await syncShopeeForUserV2(userId, syncFrom, hoje, true); // noBuffer=true → create_time
+      const r = await syncShopeeForUserV2(userId, syncFrom, hoje, true, loja); // noBuffer=true → create_time
       resumoSyncInfo = {
         sync_concluido: true,
         resumo_atualizado: r.resumoAtualizado,
@@ -148,7 +160,7 @@ export async function GET(request: Request) {
       // por pagamento. Sem linha de hoje ainda → lastSync=0 → sincroniza.
       const { data: probeHoje } = await supabase()
         .from("pedidos").select("synced_at")
-        .eq("user_id", userId).eq("marketplace", "Shopee")
+        .eq("user_id", userId).eq("marketplace", "Shopee").eq("loja_id", lojaId)
         .or(`data_criacao.eq.${hoje},data_pagamento.eq.${hoje}`)
         .order("synced_at", { ascending: false }).limit(1);
 
@@ -170,7 +182,7 @@ export async function GET(request: Request) {
         // (criado hoje e criado antes/pago hoje). A CLASSIFICAÇÃO da linha
         // continua vindo do pay_time do próprio pedido (data_pagamento), nunca
         // da janela de busca — busca e exibição são dimensões separadas.
-        const r = await syncShopeeForUserV2(userId, hoje, hoje, false); // noBuffer=false -> update_time
+        const r = await syncShopeeForUserV2(userId, hoje, hoje, false, loja); // noBuffer=false -> update_time
         resumoSyncInfo = {
           sync_concluido: true,
           resumo_atualizado: r.resumoAtualizado,
@@ -219,7 +231,8 @@ export async function GET(request: Request) {
       .from("pedidos")
       .select(selectArg, opts as any)
       .eq("user_id", userId)
-      .eq("marketplace", "Shopee");
+      .eq("marketplace", "Shopee")
+      .eq("loja_id", lojaId);
 
     if (dateField === "pagamento") {
       q = q.or(

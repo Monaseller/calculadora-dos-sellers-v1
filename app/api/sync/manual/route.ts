@@ -4,8 +4,9 @@
  * Body: { dateFrom: "YYYY-MM-DD", dateTo: "YYYY-MM-DD", marketplace?: "ML" | "Shopee" | "todos" }
  */
 import { NextResponse } from "next/server";
-import { autenticarRequisicao } from "@/lib/autenticacao";
-import { getShopeeLojaAtiva } from "@/lib/shopee-auth";
+import { autenticarRequisicao, lerCookie } from "@/lib/autenticacao";
+import { getShopeeLojaById } from "@/lib/shopee-auth";
+import { NOME_COOKIE_LOJA_SHOPEE, selecionarLojaShopee } from "@/lib/shopee-loja-selecao";
 import { getMLLojaAtiva } from "@/lib/ml-auth";
 import { syncShopeeForUser } from "@/lib/sync-shopee";
 import { syncMLForUser } from "@/lib/sync-ml";
@@ -30,6 +31,16 @@ export async function POST(request: Request) {
 
   const results: { ml?: number; shopee?: number; mlErro?: string; shopeeErro?: string } = {};
 
+  // MULTI-LOJA V1: Shopee so na loja EXPLICITA (body.loja_id) ou no "Usar esta" re-conferido,
+  // ou na UNICA ativa — nunca "a mais recente". Ambiguidade vira STORE_SELECTION_REQUIRED.
+  const lojaShopee = async () => {
+    const sel = await selecionarLojaShopee(userId, {
+      lojaIdExplicito: (body as { loja_id?: string }).loja_id ?? null, lojaIdCookie: lerCookie(request, NOME_COOKIE_LOJA_SHOPEE), usarCookie: true,
+    });
+    if (!sel.ok) { if (sel.motivo !== "SEM_LOJA_SHOPEE") results.shopeeErro = sel.motivo; return null; }
+    return getShopeeLojaById(sel.lojaId, userId);
+  };
+
   try {
     await Promise.all([
       // ── Mercado Livre ────────────────────────────────────────────────────────
@@ -46,9 +57,9 @@ export async function POST(request: Request) {
 
       // ── Shopee ───────────────────────────────────────────────────────────────
       (marketplace === "todos" || marketplace === "Shopee")
-        ? getShopeeLojaAtiva(userId)
+        ? lojaShopee()
             .then(loja => {
-              if (!loja) { results.shopeeErro = "Shopee não conectada"; return; }
+              if (!loja) { results.shopeeErro = results.shopeeErro ?? "Shopee não conectada"; return; }
               // Timeout global 55s: máximo seguro no Vercel Hobby (maxDuration=60).
               // Passa loja direto p/ evitar 2ª chamada getShopeeLojaAtiva (~800ms).
               const limitTimer = new Promise<never>((_, reject) =>

@@ -18,6 +18,8 @@ import { createHmac } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+// SHOPEE MULTI-STORE V1B: excecao EXATA da camada multi-loja (arquivos − hunks = 5fdb51f; novos por sha256)
+import { filtrarExcecaoShopeeMultiStore } from "./_excecao-shopee-multi-store";
 
 const RAIZ = join(__dirname, "..");
 const BASE = "eca183a";
@@ -318,7 +320,9 @@ async function principal() {
       "lib/vendas", "lib/marketplace/credenciais.ts", "app/api/admin/shopee", "app/api/shopee", "lib/agentes",
       // Vendas, Dashboard, Meus Produtos e rotas de vendas: fora do escopo do multi-app
       "app/(app)/vendas", "app/(app)/dashboard", "app/(app)/anuncios", "app/api/ml", "app/api/anuncios", "lib/vendas-estrutura.ts", "lib/mercado-livre"], { cwd: RAIZ, encoding: "utf8" }).trim();
-    assert(d === "", d);
+    // SHOPEE MULTI-STORE V1B: SO os arquivos da camada multi-loja, revertidos hunk a hunk ate 5fdb51f (excecao exata); o resto segue travado
+    const fora = filtrarExcecaoShopeeMultiStore(RAIZ, BASE, d.split(/\r?\n/).filter(Boolean)).join("\n");
+    assert(fora === "", fora);
   });
   t("Q3. env global so no registro: nenhuma rota/lib fora de lib/shopee-apps.ts le SHOPEE_PARTNER_*", () => {
     // git grep sai com 1 quando NAO ha ocorrencia — que e o esperado aqui

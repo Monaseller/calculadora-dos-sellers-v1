@@ -19,6 +19,8 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+// SHOPEE MULTI-STORE V1B: excecao EXATA da camada multi-loja (arquivos − hunks = 5fdb51f; novos por sha256)
+import { filtrarExcecaoShopeeMultiStore } from "./_excecao-shopee-multi-store";
 import { decidirConexaoShopee, lerAppsShopee, MENSAGEM_APPS_INDISPONIVEIS, MENSAGEM_NENHUM_APP, urlConexaoShopee } from "../lib/shopee-conexao-ui";
 
 const RAIZ = join(__dirname, "..");
@@ -121,7 +123,9 @@ t("M. OAuth core, pipeline Shopee, Vendas, Dashboard e Meus Produtos byte-identi
   const d = execFileSync("git", ["diff", "--name-only", BASE, "--", "app/api/auth", "lib/shopee-apps.ts", "lib/shopee-oauth-estado.ts", "lib/shopee-auth.ts", "lib/sync-shopee.ts",
     "lib/shopee", "lib/shopee-api.ts", "lib/marketplace", "lib/vendas", "lib/vendas-estrutura.ts", "app/(app)/vendas", "app/(app)/dashboard", "app/(app)/anuncios",
     "app/api/shopee", "app/api/ml", "app/api/anuncios", "app/api/lojas", "lib/mercado-livre", "middleware.ts", "lib/middleware-rotas.ts"], { cwd: RAIZ, encoding: "utf8" }).trim();
-  assert(d === "", d);
+  // SHOPEE MULTI-STORE V1B: SO os arquivos da camada multi-loja (inclui Meus Produtos), revertidos hunk a hunk ate 5fdb51f; o resto segue travado
+  const fora = filtrarExcecaoShopeeMultiStore(RAIZ, BASE, d.split(/\r?\n/).filter(Boolean)).join("\n");
+  assert(fora === "", fora);
 });
 
 console.log(`\n${falhou === 0 ? "✓" : "✗"} SHOPEE-UX — ${passou} passaram, ${falhou} falharam`);

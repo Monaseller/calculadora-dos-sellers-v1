@@ -335,9 +335,15 @@ const T1505 = iso("2026-08-24T15:05:00Z");
   const cronSrc = codigo("app/api/sync/route.ts");
 
   ok("58. cron (app/api/sync/route.ts) ATIVA incremental", /modo:\s*["']incremental["']/.test(cronSrc));
+  // MULTI-LOJA V1: contrato novo — o cron ENUMERA todas as lojas Shopee
+  // ativas do dono e chama a V2 EXPLICITAMENTE por loja (nunca "uma loja
+  // implicita"). Antes: "cron chama a V2 com os 5 argumentos historicos".
   ok(
-    "58b. cron chama a V2 com os 5 argumentos historicos + opcoes",
-    /syncShopeeForUserV2\(userId, ontem, hoje, false, undefined, \{ modo: "incremental" \}\)/.test(cronSrc)
+    "58b. cron enumera TODAS as lojas Shopee ativas e chama a V2 por loja (5 argumentos + opcoes)",
+    /const lojas = await lojasShopeeAtivasDoDono\(userId\);/.test(cronSrc) &&
+      /for \(const l of lojas\) \{/.test(cronSrc) &&
+      /const loja = await getShopeeLojaById\(l\.id, userId\);/.test(cronSrc) &&
+      /syncShopeeForUserV2\(userId, ontem, hoje, false, loja, \{ modo: "incremental" \}\)/.test(cronSrc)
   );
   // `noBuffer = false` -> time_range_field = update_time. Incremental com
   // `create_time` seria semanticamente errado: a janela mede MUDANCA, nao
@@ -347,9 +353,13 @@ const T1505 = iso("2026-08-24T15:05:00Z");
     /syncShopeeForUserV2\(userId, ontem, hoje, false,/.test(cronSrc) &&
       !/syncShopeeForUserV2\(userId, ontem, hoje, true,/.test(cronSrc)
   );
+  // MULTI-LOJA V1: contrato novo — o cron SEMPRE passa a loja explicita
+  // (lojaOverride); nunca undefined, nunca getShopeeLojaAtiva.
   ok(
-    "58d. cron NAO passa lojaOverride (quem resolve e getShopeeLojaAtiva)",
-    /syncShopeeForUserV2\(userId, ontem, hoje, false, undefined,/.test(cronSrc)
+    "58d. cron passa a loja EXPLICITA (lojaOverride) — nunca undefined nem getShopeeLojaAtiva",
+    /syncShopeeForUserV2\(userId, ontem, hoje, false, loja,/.test(cronSrc) &&
+      !/syncShopeeForUserV2\([^)]*undefined/.test(cronSrc) &&
+      !/getShopeeLojaAtiva/.test(cronSrc)
   );
   ok("58e. cron usa r.inserted (a V2 devolve objeto, nao numero)", /results\[userId\]\.shopee = r\.inserted;/.test(cronSrc));
   ok("58f. cron preserva o .catch em shopee_err", /results\[userId\]\.shopee_err = String\(e\?\.message \?\? e\);/.test(cronSrc));

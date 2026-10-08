@@ -47,7 +47,8 @@ import { NextResponse } from "next/server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { autenticarRequisicao } from "@/lib/autenticacao";
-import { getShopeeLojaAtiva } from "@/lib/shopee-auth";
+import { getShopeeLojaById } from "@/lib/shopee-auth";
+import { corpoSelecaoRecusada, selecionarLojaShopee } from "@/lib/shopee-loja-selecao";
 import { shopeeGet } from "@/lib/shopee-api";
 import { atualizarResumosDosDias } from "@/lib/resumos-diarios";
 import {
@@ -223,10 +224,15 @@ export async function GET(request: Request) {
   const limit          = Math.min(limitValido, tetoLimit);
   const limitFoiReduzido = limitValido > tetoLimit;
 
-  const loja = await getShopeeLojaAtiva(userId);
-  if (!loja) {
-    return NextResponse.json({ ok: false, erro: "Shopee nao conectada ou token invalido." }, { status: 400 });
+  // MULTI-LOJA V1: rota admin SEMPRE com loja EXPLICITA (loja_id), conferida contra as
+  // lojas Shopee ATIVAS do dono — nunca "a mais recente". Sem loja_id → recusa.
+  const selecaoLoja = await selecionarLojaShopee(userId, { lojaIdExplicito: url.searchParams.get("loja_id"), usarCookie: false, exigirExplicita: true });
+  if (!selecaoLoja.ok) {
+    const { status, corpo } = corpoSelecaoRecusada(selecaoLoja);
+    return NextResponse.json({ ok: false, ...corpo }, { status: status === 409 ? 400 : status });
   }
+  const loja = await getShopeeLojaById(selecaoLoja.lojaId, userId);
+  if (!loja) return NextResponse.json({ ok: false, erro: "Shopee nao conectada ou token invalido." }, { status: 400 });
 
   // ── Selecao dos pedidos-alvo ─────────────────────────────────────────────
   // Ordenacao: data_pagamento ASC, depois order_id ASC — reconciliacao sempre
@@ -243,7 +249,7 @@ export async function GET(request: Request) {
     .from("pedidos")
     .select(COLUNAS_SELECAO)
     .eq("user_id", userId)
-    .eq("marketplace", "Shopee")
+    .eq("marketplace", "Shopee").eq("loja_id", loja.lojaId)
     .in("status_shopee_raw", ELEGIVEIS_FINANCEIRO)
     .order("data_pagamento", { ascending: true })
     .order("order_id", { ascending: true });
@@ -311,7 +317,7 @@ export async function GET(request: Request) {
         .from("pedidos")
         .select(COLUNAS_SELECAO)
         .eq("user_id", userId)
-        .eq("marketplace", "Shopee")
+        .eq("marketplace", "Shopee").eq("loja_id", loja.lojaId)
         .eq("status_shopee_raw", "COMPLETED")
         .in("order_id", orderIds)
         .order("data_pagamento", { ascending: true })

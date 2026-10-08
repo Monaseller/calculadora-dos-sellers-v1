@@ -40,7 +40,8 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { autenticarRequisicao } from "@/lib/autenticacao";
-import { getShopeeLojaAtiva } from "@/lib/shopee-auth";
+import { getShopeeLojaById } from "@/lib/shopee-auth";
+import { corpoSelecaoRecusada, selecionarLojaShopee } from "@/lib/shopee-loja-selecao";
 import { shopeeGet } from "@/lib/shopee-api";
 import { mapStatus, withRetry } from "@/lib/sync-shopee";
 import type { GrupoDeStatus } from "@/lib/shopee-financeiro";
@@ -108,8 +109,15 @@ export async function POST(request: Request) {
   // Default SEGURO: so grava com dry_run === false explicito.
   const dryRun = (body as any).dry_run !== false;
 
-  const loja = await getShopeeLojaAtiva(userId);
-  if (!loja) return NextResponse.json({ ok: false, erro: "Shopee nao conectada." }, { status: 400 });
+  // MULTI-LOJA V1: rota admin SEMPRE com loja EXPLICITA (loja_id), conferida contra as
+  // lojas Shopee ATIVAS do dono — nunca "a mais recente". Sem loja_id → recusa.
+  const selecaoLoja = await selecionarLojaShopee(userId, { lojaIdExplicito: (body as { loja_id?: string }).loja_id ?? null, usarCookie: false, exigirExplicita: true });
+  if (!selecaoLoja.ok) {
+    const { status, corpo } = corpoSelecaoRecusada(selecaoLoja);
+    return NextResponse.json({ ok: false, ...corpo }, { status: status === 409 ? 400 : status });
+  }
+  const loja = await getShopeeLojaById(selecaoLoja.lojaId, userId);
+  if (!loja) return NextResponse.json({ ok: false, erro: "Shopee nao conectada ou token invalido." }, { status: 400 });
 
   const supabase = supabaseServidor();
   const agoraMs = Date.now();               // relogio do SERVIDOR, nunca do cliente
@@ -148,7 +156,7 @@ export async function POST(request: Request) {
             .from("pedidos")
             .select("order_id, status_shopee_raw")
             .eq("user_id", userId)            // isolamento entre usuarios
-            .eq("marketplace", "Shopee")      // isolamento entre marketplaces
+            .eq("marketplace", "Shopee").eq("loja_id", loja.lojaId)      // isolamento entre marketplaces
             .in("order_id", lote);
           // Erro aqui NUNCA vira "nao existe": reescreveria status a esmo.
           if (error) throw new Error(`consulta de status existentes falhou: ${error.message}`);
@@ -164,7 +172,7 @@ export async function POST(request: Request) {
           // comercial entra nesta instrucao — a protecao e estrutural.
           .update({ status: g.statusComercial, status_shopee_raw: g.statusRaw })
           .eq("user_id", userId)
-          .eq("marketplace", "Shopee")
+          .eq("marketplace", "Shopee").eq("loja_id", loja.lojaId)
           .in("order_id", g.orderSns);
         if (error) console.error(`[shopee-status] chunk falhou (${g.statusRaw}, ${g.orderSns.length} pedidos):`, error.message);
         return { erro: error ? error.message : null };
