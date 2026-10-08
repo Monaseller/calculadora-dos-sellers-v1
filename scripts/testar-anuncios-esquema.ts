@@ -28,6 +28,8 @@ import "./_server-only-inerte";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+// ANUNCIOS SHOPEE MULTI-STORE V1B: colunas da migration pendente, so se ela for byte-exata
+import { colunasPendentesAprovadasAnuncios } from "./_excecao-anuncios-multi-store";
 
 let passou = 0, falhou = 0;
 function t(nome: string, fn: () => void) {
@@ -39,6 +41,10 @@ function assert(c: unknown, m: string): asserts c { if (!c) throw new Error(m); 
 const RAIZ = join(__dirname, "..");
 const SNAPSHOT = JSON.parse(readFileSync(join(RAIZ, "docs/schema/anuncios.colunas.json"), "utf8"));
 const COLUNAS = new Set<string>(SNAPSHOT.colunas.map((c: { nome: string }) => c.nome));
+// ANUNCIOS SHOPEE MULTI-STORE V1B: o snapshot continua sendo o de PRODUCAO. As cadeias
+// do codigo (#5) tambem aceitam as colunas da migration PENDENTE da fase 1 (loja_id) —
+// SO via excecao exata (migration byte-exata por sha256); listas/projecoes (#1-#4) nao.
+const COLUNAS_COM_PENDENTES = new Set<string>([...COLUNAS, ...colunasPendentesAprovadasAnuncios(RAIZ)]);
 
 // ── Scanner: cadeias `.from("anuncios")` ─────────────────────────────
 
@@ -141,8 +147,13 @@ async function principal() {
 
   console.log("\n[5. toda cadeia .from(\"anuncios\") do código]");
   t("5. nenhuma coluna fora do schema em select literal, filtro ou ordem", () => {
-    const achados = varrer(arquivos, COLUNAS);
+    const achados = varrer(arquivos, COLUNAS_COM_PENDENTES);
     assert(achados.length === 0, achados.map((a) => `${a.arquivo}:${a.linha} ${a.onde}(${a.coluna})`).join(" | "));
+  });
+  t("5c. snapshot = PRODUCAO (sem loja_id); pendente aceita SO loja_id e SO via migration exata da fase 1", () => {
+    assert(!COLUNAS.has("loja_id"), "snapshot ja tem loja_id (fase 1 nao foi aplicada em producao)");
+    const pend = colunasPendentesAprovadasAnuncios(RAIZ);
+    assert(JSON.stringify(pend) === JSON.stringify(["loja_id"]), JSON.stringify(pend));
   });
   t("5b. o scanner de fato encontrou as cadeias conhecidas (não está cego)", () => {
     const comCadeia = [...arquivos].filter(([, s]) => /\.from\(\s*["'`]anuncios["'`]\s*\)/.test(s)).map(([f]) => f);
@@ -161,8 +172,9 @@ async function principal() {
     assert(a.map((x) => x.coluna).sort().join() === "lucro_liquido,margem_contribuicao", JSON.stringify(a));
   });
   t("6c. filtro e ordem por coluna inexistente são pegos", () => {
-    const a = varrer(new Map([["lib/z.ts", `c.from("anuncios").select("id").eq("loja_id", x).order("atualizado_em", { ascending: false });`]]), COLUNAS);
-    assert(a.map((x) => `${x.onde}:${x.coluna}`).sort().join() === "eq:loja_id,order:atualizado_em", JSON.stringify(a));
+    // (loja_id deixou de ser o exemplo negativo: e coluna do contrato multi-loja — migration pendente)
+    const a = varrer(new Map([["lib/z.ts", `c.from("anuncios").select("id").eq("coluna_inexistente_guard_test", x).order("atualizado_em", { ascending: false });`]]), COLUNAS_COM_PENDENTES);
+    assert(a.map((x) => `${x.onde}:${x.coluna}`).sort().join() === "eq:coluna_inexistente_guard_test,order:atualizado_em", JSON.stringify(a));
   });
   t("6d. alias, cast e * são aceitos; outras tabelas são ignoradas", () => {
     const a = varrer(new Map([["lib/w.ts",

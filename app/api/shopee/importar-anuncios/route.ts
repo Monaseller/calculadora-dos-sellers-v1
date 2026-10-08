@@ -36,6 +36,19 @@ export async function POST(request: Request) {
     const { status, corpo } = corpoSelecaoRecusada(selecao);
     return NextResponse.json(corpo, { status });
   }
+  // ANUNCIOS MULTI-LOJA: anuncio Shopee historico SEM loja_id (backfill ambiguo)
+  // ainda nao tem dono de loja definido. Importar agora criaria uma segunda
+  // linha do mesmo item ao lado dela → recusa ANTES de qualquer chamada a Shopee.
+  const { count: semLoja, error: erroSemLoja } = await supabase()
+    .from("anuncios").select("id", { count: "exact", head: true })
+    .eq("user_id", userId).eq("marketplace", "Shopee").is("loja_id", null);
+  if (erroSemLoja) {
+    return NextResponse.json({ erro: true, mensagem: "Não foi possível ler seus anúncios agora." }, { status: 503 });
+  }
+  if ((semLoja ?? 0) > 0) {
+    return NextResponse.json({ erro: true, codigo: "ANUNCIOS_SEM_LOJA",
+      mensagem: "Há anúncios Shopee antigos ainda sem loja associada. A importação fica bloqueada até essa associação ser concluída." }, { status: 409 });
+  }
   // Busca a loja ESCOLHIDA com refresh automático de token
   const lojaAtiva = await getShopeeLojaById(selecao.lojaId, userId);
   if (!lojaAtiva) {
@@ -67,12 +80,19 @@ export async function POST(request: Request) {
     return NextResponse.json({ importados: 0, atualizados: 0, total: 0 });
   }
 
-  // ── 2. Busca existentes no Supabase (apenas deste usuário) ──────────────
-  const { data: existentes } = await supabase()
+  // ── 2. Busca existentes no Supabase (apenas deste usuário E desta loja) ──
+  // ANUNCIOS MULTI-LOJA: a chave `item|variacao` so vale DENTRO de uma loja.
+  // Leitura falha → para (mapa vazio reinseriria tudo como novo).
+  const lojaId = selecao.lojaId;
+  const { data: existentes, error: erroExistentes } = await supabase()
     .from("anuncios")
     .select("id, ml_item_id, variation_id, sku, custo_produto, insumos, custo_frete, imposto")
     .eq("marketplace", "Shopee")
-    .eq("user_id", userId);
+    .eq("user_id", userId)
+    .eq("loja_id", lojaId);
+  if (erroExistentes) {
+    return NextResponse.json({ erro: true, mensagem: "Não foi possível ler seus anúncios agora." }, { status: 503 });
+  }
 
   const existMap = new Map<string, any>();
   for (const row of (existentes ?? [])) {
@@ -83,6 +103,7 @@ export async function POST(request: Request) {
   // ── 3. Detalhes em lotes de 50 ───────────────────────────────────────────
   let importados = 0;
   let atualizados = 0;
+  let conflitos = 0;
   const BATCH = 50;
 
   for (let i = 0; i < allItemIds.length; i += BATCH) {
@@ -105,7 +126,10 @@ export async function POST(request: Request) {
 
       if (!hasModels) {
         // ── Sem variação ──────────────────────────────────────────────────
-        const preco = (item.price_info?.[0]?.current_price ?? item.price ?? 0) / 100000;
+        // Open API v2: price_info.current_price ja vem em REAIS decimais (ex.: 18.23) —
+        // mesma unidade de model_discounted_price usada pelo sync de pedidos. O "/100000"
+        // era a convencao da API v1 e gravava 0.0001823 (auditoria: preco×100000 = preco vendido).
+        const preco = Number(item.price_info?.[0]?.current_price ?? item.price ?? 0);
         const sku   = item.sku ?? null;
         const key   = `${itemId}|`;
         const existente = existMap.get(key);
@@ -117,18 +141,19 @@ export async function POST(request: Request) {
           // dados atualizados e permanece `ativo=false`.
           const upd: any = { nome: titulo, preco_anuncio: preco, thumbnail };
           if (!existente.sku && sku) upd.sku = sku;
-          await supabase().from("anuncios").update(upd).eq("id", existente.id);
+          // loja_id NAO entra no update (preservado) e o WHERE prende dono + loja.
+          await supabase().from("anuncios").update(upd).eq("id", existente.id).eq("user_id", userId).eq("loja_id", lojaId);
           atualizados++;
         } else {
-          await supabase().from("anuncios").insert({
+          const { error: erroInsert } = await supabase().from("anuncios").insert({
             marketplace: "Shopee", nome: titulo,
             ml_item_id: itemId, variation_id: null,
             preco_anuncio: preco, sku, thumbnail,
             custo_produto: 0, insumos: 0, custo_frete: 0, imposto: 0,
             margem_desejada: 0, frete_gratis: false, ativo: true,
-            user_id: userId,
+            user_id: userId, loja_id: lojaId,
           });
-          importados++;
+          if (erroInsert) conflitos++; else importados++;
         }
       } else {
         // ── Com variações: busca modelos ──────────────────────────────────
@@ -140,7 +165,7 @@ export async function POST(request: Request) {
         for (const model of models) {
           const variationId = String(model.model_id);
           const nomeVar     = model.model_name ? `${titulo} - ${model.model_name}` : titulo;
-          const preco       = (model.price_info?.[0]?.current_price ?? 0) / 100000;
+          const preco       = Number(model.price_info?.[0]?.current_price ?? 0);   // reais (ver acima)
           const sku         = model.model_sku ?? null;
           const key         = `${itemId}|${variationId}`;
           const existente   = existMap.get(key);
@@ -149,18 +174,19 @@ export async function POST(request: Request) {
             // Ver comentário acima: `ativo` fora do update.
             const upd: any = { nome: nomeVar, preco_anuncio: preco, thumbnail };
             if (!existente.sku && sku) upd.sku = sku;
-            await supabase().from("anuncios").update(upd).eq("id", existente.id);
+            await supabase().from("anuncios").update(upd).eq("id", existente.id).eq("user_id", userId).eq("loja_id", lojaId);
             atualizados++;
           } else {
-            await supabase().from("anuncios").insert({
+            const { error: erroInsert } = await supabase().from("anuncios").insert({
               marketplace: "Shopee", nome: nomeVar,
               ml_item_id: itemId, variation_id: variationId,
               preco_anuncio: preco, sku, thumbnail,
               custo_produto: 0, insumos: 0, custo_frete: 0, imposto: 0,
               margem_desejada: 0, frete_gratis: false, ativo: true,
-              user_id: userId,
+              user_id: userId, loja_id: lojaId,
             });
-            importados++;
+            // UNIQUE da fase 2: importacao concorrente da MESMA loja → conflito, nunca segunda linha
+            if (erroInsert) conflitos++; else importados++;
           }
         }
       }
@@ -171,5 +197,5 @@ export async function POST(request: Request) {
     }
   }
 
-  return NextResponse.json({ importados, atualizados, total: allItemIds.length });
+  return NextResponse.json({ importados, atualizados, conflitos, total: allItemIds.length, loja_id: lojaId });
 }

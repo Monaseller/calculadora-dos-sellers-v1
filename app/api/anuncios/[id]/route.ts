@@ -42,6 +42,9 @@ export async function PATCH(request: Request, { params }: { params: { id: string
   if (alterou === null) {
     return NextResponse.json({ erro: "Falha ao salvar anúncio." }, { status: 500 });
   }
+  if (alterou === "identidade_recusada") {
+    return NextResponse.json({ erro: "Anúncio Shopee é criado pela importação da loja Shopee." }, { status: 400 });
+  }
   if (!alterou) {
     return NextResponse.json({ erro: "Anúncio não encontrado." }, { status: 404 });
   }

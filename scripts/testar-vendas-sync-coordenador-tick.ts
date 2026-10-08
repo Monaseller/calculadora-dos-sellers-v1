@@ -24,6 +24,8 @@ import { filtrarExcecaoD15B } from "./_excecao-d15b-intraday";
 import { filtrarExcecaoD16 } from "./_excecao-d16-dashboard-canonico";
 // SHOPEE MULTI-STORE V1B: excecao EXATA da camada multi-loja (arquivos − hunks = 5fdb51f; novos por sha256)
 import { filtrarExcecaoShopeeMultiStore } from "./_excecao-shopee-multi-store";
+// ANUNCIOS SHOPEE MULTI-STORE V1B: excecao EXATA (arquivos − hunks = bb8f7ea; migrations/novos por sha256)
+import { filtrarExcecaoAnunciosMultiStore } from "./_excecao-anuncios-multi-store";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -427,7 +429,7 @@ async function principal() {
       // SALES-SYNC-D6: flag server-only na rota do worker e no .env.example (guard proprio: testar-vendas-sync-feature-flag)
       .split(/\r?\n/).filter((f) => f && f !== CAP && f !== "lib/vendas/sync/worker.ts" && f !== ".env.example" && f !== "app/api/internal/vendas-sync/worker/route.ts");
     // SALES-CANONICAL-D13A: SO os arquivos NOVOS do D13 em lib/vendas/canonico (leitores existentes continuam travados)
-    const dForaD13 = filtrarExcecaoShopeeMultiStore(RAIZ, BASE, filtrarExcecaoD16(RAIZ, BASE, filtrarExcecaoD15D(RAIZ, BASE, filtrarExcecaoD15C(RAIZ, BASE, filtrarExcecaoD15B(RAIZ, BASE, filtrarExcecaoD14(RAIZ, BASE, filtrarExcecaoD13(RAIZ, BASE, d, false))))))).join(",");
+    const dForaD13 = filtrarExcecaoAnunciosMultiStore(RAIZ, BASE, filtrarExcecaoShopeeMultiStore(RAIZ, BASE, filtrarExcecaoD16(RAIZ, BASE, filtrarExcecaoD15D(RAIZ, BASE, filtrarExcecaoD15C(RAIZ, BASE, filtrarExcecaoD15B(RAIZ, BASE, filtrarExcecaoD14(RAIZ, BASE, filtrarExcecaoD13(RAIZ, BASE, d, false)))))))).join(",");
     const novos = execFileSync("git", ["ls-files", "--others", "--exclude-standard", "--", "supabase"], { cwd: RAIZ, encoding: "utf8" }).trim();
     assert(dForaD13 === "" && novos === "", `alterados: ${dForaD13} ${novos}`);
     // SALES-SYNC-D1.1: a capability so GANHA a listagem do tick — nenhuma linha existente removida/alterada

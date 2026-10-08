@@ -160,7 +160,9 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
   // ── Auto-fetch ML ao editar ──────────────────────────────────────────────
   // Quando abre em modo edição com ml_item_id, re-busca dados frescos do ML
   useEffect(() => {
-    if (!modoEdicao || !inicial?.ml_item_id) return;
+    // Anúncio Shopee: o item_id não é do ML — nada a re-buscar lá (os dados do
+    // ML sobrescreveriam título/preço/foto do anúncio Shopee).
+    if (!modoEdicao || !inicial?.ml_item_id || inicial.marketplace === "Shopee") return;
     const varId = inicial.variation_id ?? "";
     const varQuery = varId ? `&variationId=${encodeURIComponent(varId)}` : "";
     fetch(`/api/anuncio?link=${encodeURIComponent(inicial.ml_item_id)}${varQuery}`)
@@ -420,6 +422,13 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
     );
     // Garante margem_desejada do calcResultado quando disponível
     if (r) (payload as any).margem_desejada = Math.round(r.margem * 100) / 100;
+    // Edição: a identidade (marketplace / item / variação) é a da row no banco —
+    // o PATCH não a envia (antes ia "ML" fixo e convertia anúncio Shopee em ML).
+    if (inicial) {
+      delete (payload as any).marketplace;
+      delete (payload as any).ml_item_id;
+      delete (payload as any).variation_id;
+    }
 
     await gravarAnuncio(payload, inicial?.id);
     setSalvando(false);

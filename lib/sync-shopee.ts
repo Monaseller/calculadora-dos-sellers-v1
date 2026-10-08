@@ -495,14 +495,20 @@ export interface SyncShopeeResult {
  * montagem de linhas. Extraída de dentro de `syncShopeeForUserV2` em
  * 2026-07-14 (mesma motivação de `montarLinhasDoPedido`: reaproveitar sem
  * duplicar na rota de backfill pontual). Mesma query, mesmo resultado.
+ *
+ * ANUNCIOS MULTI-LOJA: o mapa e SEMPRE de UMA loja Shopee (dono + loja_id).
+ * Nunca junta anuncios de todas as lojas do dono — o mesmo item/model em
+ * outra loja e outro anuncio (outro custo). Sem loja → erro (fail-closed).
  */
-export async function carregarMapaAnuncios(userId: string): Promise<Map<string, any>> {
+export async function carregarMapaAnuncios(userId: string, lojaId: string): Promise<Map<string, any>> {
+  if (!lojaId) throw new Error("carregarMapaAnuncios: loja_obrigatoria");
   const { data: anuncios } = await supabase()
     .from("anuncios")
     .select("id, ml_item_id, variation_id, sku, custo_produto, insumos, custo_frete, imposto")
     .eq("marketplace", "Shopee")
     .eq("ativo", true)
-    .eq("user_id", userId);
+    .eq("user_id", userId)
+    .eq("loja_id", lojaId);
 
   const mapaAnuncios = new Map<string, any>();
   for (const a of (anuncios ?? [])) {
@@ -1301,7 +1307,7 @@ async function executarSyncShopee(
   // pedidos de 07/07) — mesma query, zero mudança de comportamento, só
   // reaproveitável pela rota de backfill sem duplicar.
   const _etapa2InicioMs = Date.now();
-  const mapaAnuncios = await carregarMapaAnuncios(userId);
+  const mapaAnuncios = await carregarMapaAnuncios(userId, lojaId);
   console.log("[DIAG-SYNC-SHOPEE] etapa2_anuncios", { tempoMs: Date.now() - _etapa2InicioMs });
 
   // ── ETAPA 3: Buscar detalhes em paralelo (50/batch, 10 concurrent) ─────────

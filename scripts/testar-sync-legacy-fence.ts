@@ -28,6 +28,8 @@ import { filtrarExcecaoD15F2 } from "./_excecao-d15f2-enable-intraday";
 import { filtrarExcecaoD16 } from "./_excecao-d16-dashboard-canonico";
 // SHOPEE MULTI-STORE V1B: excecao EXATA da camada multi-loja (arquivos − hunks = 5fdb51f; novos por sha256)
 import { filtrarExcecaoShopeeMultiStore } from "./_excecao-shopee-multi-store";
+// ANUNCIOS SHOPEE MULTI-STORE V1B: excecao EXATA (arquivos − hunks = bb8f7ea; migrations/novos por sha256)
+import { filtrarExcecaoAnunciosMultiStore } from "./_excecao-anuncios-multi-store";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -272,13 +274,14 @@ async function principal() {
       "lib/ml-auth.ts", "app/api/sync", "app/api/internal", "app/api/ml/vendas", /* SALES-SYNC-D10: vercel.json agora agenda os crons canonicos — guard proprio: testar-vendas-sync-cron */ "app/api/shopee/vendas", "lib/feature-flags.ts"], { cwd: RAIZ, encoding: "utf8" })
       .trim().split(/\r?\n/).filter((f) => f && !C6.includes(f));
     // SALES-CANONICAL-D13B: so os arquivos NOVOS do D13 em lib/vendas/canonico; ml.ts/shopee.ts/tipos.ts seguem travados
-    const fora = filtrarExcecaoShopeeMultiStore(RAIZ, BASE, filtrarExcecaoD16(RAIZ, BASE, filtrarExcecaoD15F2(RAIZ, BASE, filtrarExcecaoD15D(RAIZ, BASE, filtrarExcecaoD15C(RAIZ, BASE, filtrarExcecaoD15B(RAIZ, BASE, filtrarExcecaoD14(RAIZ, BASE, filtrarNovosCanonicosD13(RAIZ, BASE, d)))))))).join(",");
+    const fora = filtrarExcecaoAnunciosMultiStore(RAIZ, BASE, filtrarExcecaoShopeeMultiStore(RAIZ, BASE, filtrarExcecaoD16(RAIZ, BASE, filtrarExcecaoD15F2(RAIZ, BASE, filtrarExcecaoD15D(RAIZ, BASE, filtrarExcecaoD15C(RAIZ, BASE, filtrarExcecaoD15B(RAIZ, BASE, filtrarExcecaoD14(RAIZ, BASE, filtrarNovosCanonicosD13(RAIZ, BASE, d))))))))).join(",");
     assert(fora === "", fora);
   });
   t("I4. a unica migration nova e a do fence, e ela nao toca idx_sync_jobs_loja_ativo (so comentario)", () => {
     const novos = execFileSync("git", ["diff", "--name-only", BASE, "--", "supabase"], { cwd: RAIZ, encoding: "utf8" }).trim().split(/\r?\n/).filter(Boolean);
     const naoRastreados = execFileSync("git", ["ls-files", "--others", "--exclude-standard", "--", "supabase"], { cwd: RAIZ, encoding: "utf8" }).trim().split(/\r?\n/).filter(Boolean);
-    const todos = [...new Set([...novos, ...naoRastreados])];
+    // ANUNCIOS SHOPEE MULTI-STORE V1B: as 2 migrations de anuncios.loja_id saem SO pela excecao exata (sha256)
+    const todos = filtrarExcecaoAnunciosMultiStore(RAIZ, BASE, [...new Set([...novos, ...naoRastreados])]);
     // SALES-SYNC-C4 acrescenta a migration do lease Shopee (guard proprio: testar-shopee-refresh-lease); nenhuma outra.
     const C4 = "supabase/migrations/20261030_sales_sync_c4_shopee_refresh_lease.sql";
     // SALES-SYNC-C8: SELECT do service_role no lease (guard proprio: testar-shopee-refresh-lease M6)

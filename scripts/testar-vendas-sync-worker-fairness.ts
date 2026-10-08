@@ -27,6 +27,8 @@ import { filtrarExcecaoD16 } from "./_excecao-d16-dashboard-canonico";
 import { filtrarExcecaoShopeeMultiApp } from "./_excecao-shopee-multi-app";
 // SHOPEE MULTI-STORE V1B: excecao EXATA da camada multi-loja (arquivos − hunks = 5fdb51f; novos por sha256)
 import { filtrarExcecaoShopeeMultiStore } from "./_excecao-shopee-multi-store";
+// ANUNCIOS SHOPEE MULTI-STORE V1B: excecao EXATA (arquivos − hunks = bb8f7ea; migrations/novos por sha256)
+import { filtrarExcecaoAnunciosMultiStore } from "./_excecao-anuncios-multi-store";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -283,7 +285,7 @@ async function principal() {
       .split(/\r?\n/).filter((f) => f && f !== "lib/marketplace/credenciais.ts" && f !== "lib/vendas/sync/coordenador-tick.ts" && f !== ".env.example"
         && f !== "app/api/internal/vendas-sync/coordenador/route.ts" && f !== "app/api/internal/vendas-sync/worker/route.ts");
     // SALES-CANONICAL-D13B: so os arquivos NOVOS do D13 em lib/vendas/canonico; ml.ts/shopee.ts/tipos.ts seguem travados
-    const fora = filtrarExcecaoShopeeMultiStore(RAIZ, BASE, filtrarExcecaoShopeeMultiApp(RAIZ, BASE, filtrarExcecaoD16(RAIZ, BASE, filtrarExcecaoD15D(RAIZ, BASE, filtrarExcecaoD15C(RAIZ, BASE, filtrarExcecaoD15B(RAIZ, BASE, filtrarExcecaoD14(RAIZ, BASE, filtrarNovosCanonicosD13(RAIZ, BASE, d)))))))).join(",");
+    const fora = filtrarExcecaoAnunciosMultiStore(RAIZ, BASE, filtrarExcecaoShopeeMultiStore(RAIZ, BASE, filtrarExcecaoShopeeMultiApp(RAIZ, BASE, filtrarExcecaoD16(RAIZ, BASE, filtrarExcecaoD15D(RAIZ, BASE, filtrarExcecaoD15C(RAIZ, BASE, filtrarExcecaoD15B(RAIZ, BASE, filtrarExcecaoD14(RAIZ, BASE, filtrarNovosCanonicosD13(RAIZ, BASE, d))))))))).join(",");
     const novos = execFileSync("git", ["ls-files", "--others", "--exclude-standard", "--", "supabase"], { cwd: RAIZ, encoding: "utf8" }).trim();
     assert(fora === "" && novos === "", `alterados: ${fora} ${novos}`);
   });

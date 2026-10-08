@@ -23,6 +23,8 @@ import { filtrarExcecaoD15D } from "./_excecao-d15d-shopee-intraday";
 import { filtrarExcecaoD16 } from "./_excecao-d16-dashboard-canonico";
 // SHOPEE MULTI-STORE V1B: excecao EXATA da camada multi-loja (arquivos − hunks = 5fdb51f; novos por sha256)
 import { filtrarExcecaoShopeeMultiStore } from "./_excecao-shopee-multi-store";
+// ANUNCIOS SHOPEE MULTI-STORE V1B: excecao EXATA (arquivos − hunks = bb8f7ea; migrations/novos por sha256)
+import { filtrarExcecaoAnunciosMultiStore } from "./_excecao-anuncios-multi-store";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { RelogioFake, RepoFake, ShopeeFake, type PedidoFake } from "./fakes/shopee-ingestao-fake";
@@ -410,7 +412,7 @@ async function principal() {
       // SALES-SYNC-D6 acrescenta a flag server-only ao .env.example (guard proprio: testar-vendas-sync-feature-flag)
       .trim().split(/\r?\n/).filter((f) => f && !FENCE_C1.includes(f) && f !== ".env.example");
     // SALES-CANONICAL-D13B: so os arquivos NOVOS do D13 em lib/vendas/canonico; ml.ts/shopee.ts/tipos.ts seguem travados
-    const fora = filtrarExcecaoShopeeMultiStore(RAIZ, BASE, filtrarExcecaoD16(RAIZ, BASE, filtrarExcecaoD15D(RAIZ, BASE, filtrarExcecaoD15C(RAIZ, BASE, filtrarExcecaoD14(RAIZ, BASE, filtrarNovosCanonicosD13(RAIZ, BASE, d)))))).join(",");
+    const fora = filtrarExcecaoAnunciosMultiStore(RAIZ, BASE, filtrarExcecaoShopeeMultiStore(RAIZ, BASE, filtrarExcecaoD16(RAIZ, BASE, filtrarExcecaoD15D(RAIZ, BASE, filtrarExcecaoD15C(RAIZ, BASE, filtrarExcecaoD14(RAIZ, BASE, filtrarNovosCanonicosD13(RAIZ, BASE, d))))))).join(",");
     const novos = execFileSync("git", ["ls-files", "--others", "--exclude-standard", "--", "supabase"], { cwd: RAIZ, encoding: "utf8" })
       .trim().split(/\r?\n/).filter((f) => f && !FENCE_C1.includes(f)).join(",");
     assert(fora === "" && novos === "", `alterados: ${fora} ${novos}`);

@@ -126,7 +126,7 @@ export async function GET(request: Request) {
   }
 
   // ── 2) get_order_detail só para os novos (nunca get_order_list) ─────────
-  const mapaAnuncios = await carregarMapaAnuncios(userId);
+  const mapaAnuncios = await carregarMapaAnuncios(userId, loja.lojaId);
 
   const batches: string[][] = [];
   for (let i = 0; i < novos.length; i += DETAIL_BATCH) {

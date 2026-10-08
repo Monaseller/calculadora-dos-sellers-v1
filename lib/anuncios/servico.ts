@@ -104,6 +104,12 @@ export function montarCamposGravaveis(corpo: unknown, parcial: boolean): Resulta
     if (!valido(tipo, valor)) return { ok: false, erro: `Valor inválido para ${chave}.` };
     campos[chave] = valor;
   }
+  // ANUNCIOS MULTI-LOJA: anuncio Shopee pertence a UMA loja, e a loja nunca vem
+  // do browser. Ele nasce (e ganha a loja) SO pela importacao da loja escolhida;
+  // criar Shopee à mao geraria linha sem loja. (Edicao: ver atualizarAnuncioDoDono.)
+  if (!parcial && campos.marketplace === "Shopee") {
+    return { ok: false, erro: "Anúncio Shopee é criado pela importação da loja Shopee." };
+  }
   if (parcial) {
     if (Object.keys(campos).length === 0) return { ok: false, erro: "Nada para atualizar." };
   } else {
@@ -145,22 +151,54 @@ export async function criarAnuncio(
   return (data as { id: string }).id;
 }
 
+/** Identidade de um anuncio Shopee: vem SEMPRE do banco, nunca do browser (loja_id nem e gravavel). */
+const IDENTIDADE_SHOPEE = ["marketplace", "ml_item_id", "variation_id"] as const;
+
 /**
  * Edita UM anúncio do dono. `id` E `user_id` na MESMA escrita — nunca
  * `WHERE id = :id` sozinho. Anúncio alheio ou inexistente devolve `false`
  * do mesmo jeito: a rota responde 404 sem revelar se ele existe.
+ *
+ * ANUNCIOS MULTI-LOJA: a identidade de um anuncio Shopee (marketplace / item /
+ * variacao — e a loja, que nem e gravavel) e a do BANCO. Toda escrita continua
+ * com `id` E `user_id`; quando o payload traz campo de identidade, a escrita
+ * tambem prende o marketplace da row:
+ *   - row Shopee: grava SO os campos de negocio (identidade enviada ignorada);
+ *   - row ML: comportamento de sempre, mas nunca vira Shopee
+ *     ("identidade_recusada" → 400, nada gravado).
  */
 export async function atualizarAnuncioDoDono(
   cliente: SupabaseClient, dono: string, id: string, campos: Record<string, unknown>
-): Promise<boolean | null> {
-  const { data, error } = await cliente
+): Promise<boolean | null | "identidade_recusada"> {
+  const escrever = async (payload: Record<string, unknown>, marketplace?: "Shopee" | "ML") => {
+    let q = cliente.from("anuncios").update(payload).eq("id", id).eq("user_id", dono);
+    if (marketplace) q = q.eq("marketplace", marketplace);
+    const { data, error } = await q.select("id");
+    return error ? null : (data ?? []).length > 0;
+  };
+  if (!IDENTIDADE_SHOPEE.some((c) => c in campos)) return escrever(campos);
+
+  const semIdentidade: Record<string, unknown> = { ...campos };
+  for (const c of IDENTIDADE_SHOPEE) delete semIdentidade[c];
+  if (Object.keys(semIdentidade).length > 0) {
+    const shopee = await escrever(semIdentidade, "Shopee");
+    if (shopee !== false) return shopee;
+  }
+  if (campos.marketplace !== "Shopee") {
+    const ml = await escrever(campos, "ML");
+    if (ml !== false) return ml;
+  }
+  // Nada gravado: anuncio Shopee so com identidade (no-op), ML virando Shopee
+  // (recusa) ou anuncio alheio/inexistente (404 identico, nao revela existencia).
+  const { data: atual, error } = await cliente
     .from("anuncios")
-    .update(campos)
+    .select("id, marketplace")
     .eq("id", id)
     .eq("user_id", dono)
-    .select("id");
+    .maybeSingle();
   if (error) return null;
-  return (data ?? []).length > 0;
+  if (!atual) return false;
+  return (atual as { marketplace: string }).marketplace === "Shopee" ? true : "identidade_recusada";
 }
 
 /**

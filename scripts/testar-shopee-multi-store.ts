@@ -19,6 +19,8 @@ import Module from "node:module";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+// ANUNCIOS SHOPEE MULTI-STORE V1B: excecao EXATA (migrations de anuncios.loja_id por sha256)
+import { filtrarExcecaoAnunciosMultiStore } from "./_excecao-anuncios-multi-store";
 
 const RAIZ = join(__dirname, "..");
 const BASE = "5fdb51f";
@@ -270,7 +272,9 @@ async function principal() {
   t("S1. canonical, OAuth, tokens, Dashboard e formulas intocados; Vendas so ganhou filtro/selecao de loja", () => {
     const d = execFileSync("git", ["diff", "--name-only", BASE, "--", "lib/vendas", "lib/shopee", "lib/mercado-livre", "app/api/auth", "lib/shopee-apps.ts", "lib/shopee-oauth-estado.ts",
       "lib/shopee-auth.ts", "lib/marketplace", "app/(app)/dashboard", "app/(app)/vendas", "app/api/ml", "lib/vendas-estrutura.ts", "app/api/internal", "supabase"], { cwd: RAIZ, encoding: "utf8" }).trim();
-    assert(d === "", d);
+    // ANUNCIOS SHOPEE MULTI-STORE V1B: SO as 2 migrations de anuncios.loja_id saem, e SO pela excecao exata (sha256)
+    const foraAnuncios = filtrarExcecaoAnunciosMultiStore(RAIZ, BASE, d.split(/\r?\n/).filter(Boolean)).join("\n");
+    assert(foraAnuncios === "", foraAnuncios);
     const dv = execFileSync("git", ["diff", "-U0", BASE, "--", "app/api/shopee/vendas/route.ts"], { cwd: RAIZ, encoding: "utf8" }).split(/\r?\n/)
       .filter((l) => /^[+-][^+-]/.test(l));
     // removidas: SO a selecao antiga ("a mais recente"), as 2 chamadas de sync (agora com a loja) e os 2 filtros de pedidos (agora com loja_id)

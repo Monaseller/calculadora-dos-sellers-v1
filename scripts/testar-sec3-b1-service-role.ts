@@ -35,6 +35,8 @@ import { join, dirname, normalize } from "node:path";
 import { filtrarExcecaoShopeeMultiApp } from "./_excecao-shopee-multi-app";
 // SHOPEE UX V4: excecao EXATA do painel unico Shopee (Configuracoes − hunks UX = cdeb7af; novos por sha256)
 import { filtrarExcecaoShopeeUX } from "./_excecao-shopee-ux";
+// ANUNCIOS SHOPEE MULTI-STORE V1B: excecao EXATA (migrations de anuncios.loja_id por sha256)
+import { filtrarExcecaoAnunciosMultiStore } from "./_excecao-anuncios-multi-store";
 
 let passou = 0, falhou = 0;
 let fila: Promise<void> = Promise.resolve();
@@ -561,8 +563,9 @@ async function principal() {
   // SEC-3-C: a migration de lockdown e a unica mudanca aprovada em
   // supabase/ (validada por scripts/testar-sec3-c-lockdown.ts).
   t("K1. nenhuma migration / arquivo em supabase/ mudou (alem da migration SEC-3-C)", () => {
-    const d = git("diff", "--name-only", BASE, "--", "supabase").split(/\r?\n/)
-      .filter((f) => f && !MIGRACOES_APROVADAS.includes(f));
+    // ANUNCIOS SHOPEE MULTI-STORE V1B: as 2 migrations de anuncios.loja_id saem SO pela excecao exata (sha256)
+    const d = filtrarExcecaoAnunciosMultiStore(RAIZ, BASE, git("diff", "--name-only", BASE, "--", "supabase").split(/\r?\n/)
+      .filter((f) => f && !MIGRACOES_APROVADAS.includes(f)));
     assert(d.length === 0, d.join(", "));
   });
   // ── K2: mudanca de banco no diff ──────────────────────────────────

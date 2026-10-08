@@ -27,6 +27,8 @@ import Module from "node:module";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join, dirname, normalize } from "node:path";
+// ANUNCIOS SHOPEE MULTI-STORE V1B: excecao EXATA (migrations de anuncios.loja_id por sha256)
+import { filtrarExcecaoAnunciosMultiStore } from "./_excecao-anuncios-multi-store";
 
 let passou = 0, falhou = 0;
 let fila: Promise<void> = Promise.resolve();
@@ -558,8 +560,9 @@ async function principal() {
   ];
   const FORA_DA_VARREDURA = [...APROVADAS, "scripts/testar-s2d1-migracao.ts", "scripts/testar-ml-corpus-migracao.ts"];
   t("M1. nada em supabase/ mudou desde a base (alem da migration SEC-3-C)", () => {
-    const d = git("diff", "--name-only", BASE, "--", "supabase").split(/\r?\n/).filter((f) => f && !APROVADAS.includes(f));
-    const novos = git("ls-files", "--others", "--exclude-standard", "supabase").split(/\r?\n/).filter((f) => f && !APROVADAS.includes(f));
+    // ANUNCIOS SHOPEE MULTI-STORE V1B: as 2 migrations de anuncios.loja_id saem SO pela excecao exata (sha256)
+    const d = filtrarExcecaoAnunciosMultiStore(RAIZ, BASE, git("diff", "--name-only", BASE, "--", "supabase").split(/\r?\n/).filter((f) => f && !APROVADAS.includes(f)));
+    const novos = filtrarExcecaoAnunciosMultiStore(RAIZ, BASE, git("ls-files", "--others", "--exclude-standard", "supabase").split(/\r?\n/).filter((f) => f && !APROVADAS.includes(f)));
     assert(d.length === 0 && novos.length === 0, `${d} ${novos}`);
   });
   t("M2. nenhum GRANT/REVOKE/RLS/POLICY introduzido", () => {
