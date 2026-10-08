@@ -28,6 +28,8 @@ import { filtrarExcecaoD15F2 } from "./_excecao-d15f2-enable-intraday";
 import { filtrarExcecaoD16 } from "./_excecao-d16-dashboard-canonico";
 // SHOPEE MULTI-APP: excecao EXATA do OAuth multi-app (rotas/Configuracoes/.env.example − hunks = eca183a; novos por sha256)
 import { filtrarExcecaoShopeeMultiApp, varsEnvExemploAprovadas } from "./_excecao-shopee-multi-app";
+// SHOPEE UX V4: excecao EXATA do painel unico Shopee (Configuracoes − hunks UX = cdeb7af; novos por sha256)
+import { filtrarExcecaoShopeeUX } from "./_excecao-shopee-ux";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
@@ -201,7 +203,7 @@ async function principal() {
       // SALES-SYNC-D8.2: helper de auth das rotas canonicas (guard proprio: testar-vendas-sync-auth-interna)
       .filter((f) => f && f !== HELPER && f !== "lib/vendas/sync/auth-interna.ts");
     // SALES-CANONICAL-D13A: SO o bloco D13 de credenciais.ts e os arquivos novos do D13
-    const fora = filtrarExcecaoShopeeMultiApp(RAIZ, BASE, filtrarExcecaoD16(RAIZ, BASE, filtrarExcecaoD15F2(RAIZ, BASE, filtrarExcecaoD15D(RAIZ, BASE, filtrarExcecaoD15C(RAIZ, BASE, filtrarExcecaoD15B(RAIZ, BASE, filtrarExcecaoD14(RAIZ, BASE, filtrarExcecaoD13(RAIZ, BASE, d))))))));
+    const fora = filtrarExcecaoShopeeUX(RAIZ, BASE, filtrarExcecaoShopeeMultiApp(RAIZ, BASE, filtrarExcecaoD16(RAIZ, BASE, filtrarExcecaoD15F2(RAIZ, BASE, filtrarExcecaoD15D(RAIZ, BASE, filtrarExcecaoD15C(RAIZ, BASE, filtrarExcecaoD15B(RAIZ, BASE, filtrarExcecaoD14(RAIZ, BASE, filtrarExcecaoD13(RAIZ, BASE, d)))))))));
     assert(fora.length === 0, `alterados: ${fora}`);
     const vendas = readFileSync(join(RAIZ, "app/(app)/vendas/page.tsx"), "utf8");
     assert(/import \{ ASYNC_SYNC_JOBS_ENABLED \} from "@\/lib\/feature-flags";/.test(vendas) && /if \(!ASYNC_SYNC_JOBS_ENABLED\) \{\s*dispararSincronizarInline\(\);/.test(vendas), "Vendas mudou de flag");

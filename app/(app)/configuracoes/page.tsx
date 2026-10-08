@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { interpretarRetornoOAuthML } from "@/lib/conexao-ml-cliente";
+import { decidirConexaoShopee, MENSAGEM_APPS_INDISPONIVEIS, type OpcaoAppShopee } from "@/lib/shopee-conexao-ui";
 
 type Loja = {
   id: string;
@@ -156,8 +157,11 @@ export default function ConfiguracoesPage() {
   const [lojas,        setLojas]        = useState<Loja[]>([]);
   const [lojaAtiva,    setLojaAtiva]    = useState<string | null>(null);
   const [shopeeAtiva,  setShopeeAtiva]  = useState<string | null>(null);
-  // Apps Shopee alem do padrao, so os CONFIGURADOS no servidor (sem credencial no navegador)
-  const [appsShopeeExtras, setAppsShopeeExtras] = useState<{ chave: string; rotulo: string }[]>([]);
+  // Painel unico "Gerenciar contas Shopee": toda nova conexao Shopee comeca por ele (Shopee UX V4)
+  const [painelShopee, setPainelShopee] = useState(false);
+  const [etapaShopee, setEtapaShopee] = useState<
+    { tipo: "inicio" } | { tipo: "carregando" } | { tipo: "escolher"; opcoes: readonly OpcaoAppShopee[] } | { tipo: "erro"; mensagem: string }
+  >({ tipo: "inicio" });
   const [loading,   setLoading]   = useState(true);
   const [msg,       setMsg]       = useState<{ ok: boolean; texto: string } | null>(null);
 
@@ -198,13 +202,6 @@ export default function ConfiguracoesPage() {
   }
 
   useEffect(() => { carregarLojas(); carregarPerfil(); }, []);
-  useEffect(() => {
-    fetch("/api/auth/shopee/apps").then((r) => (r.ok ? r.json() : null)).then((d) => {
-      const apps = Array.isArray(d?.apps) ? d.apps : [];
-      setAppsShopeeExtras(apps.filter((a: { chave: string; configurado: boolean }) => a.chave !== "default" && a.configurado === true)
-        .map((a: { chave: string; rotulo: string }) => ({ chave: String(a.chave), rotulo: String(a.rotulo) })));
-    }).catch(() => setAppsShopeeExtras([]));
-  }, []);
 
   /**
    * Retorno do OAuth do Mercado Livre — F0.c.6e.
@@ -283,6 +280,21 @@ export default function ConfiguracoesPage() {
   }
 
   const conectarML = () => { window.location.href = "/api/auth/mercadolivre"; };
+
+  // ── Shopee: um card, um painel. default/rd sao so apps OAuth internos ──
+  const abrirPainelShopee = () => { setEtapaShopee({ tipo: "inicio" }); setPainelShopee(true); };
+  const fecharPainelShopee = () => { setPainelShopee(false); setEtapaShopee({ tipo: "inicio" }); };
+  async function adicionarLojaShopee() {
+    setEtapaShopee({ tipo: "carregando" });
+    try {
+      const r = await fetch("/api/auth/shopee/apps", { cache: "no-store" });
+      const d = decidirConexaoShopee(r.ok ? await r.json() : null);
+      if (d.tipo === "direto") { window.location.href = d.url; return; }
+      setEtapaShopee(d.tipo === "escolher" ? { tipo: "escolher", opcoes: d.opcoes } : { tipo: "erro", mensagem: d.mensagem });
+    } catch {
+      setEtapaShopee({ tipo: "erro", mensagem: MENSAGEM_APPS_INDISPONIVEIS });
+    }
+  }
 
   return (
     <div style={{ padding: "32px", maxWidth: "860px", margin: "0 auto" }}>
@@ -488,9 +500,12 @@ export default function ConfiguracoesPage() {
             </div>
           </a>
 
-          {/* Shopee */}
-          <a
-            href="/api/auth/shopee"
+          {/* Shopee — UM card; abre o painel unico de contas Shopee */}
+          <div
+            role="button"
+            tabIndex={0}
+            onClick={abrirPainelShopee}
+            onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); abrirPainelShopee(); } }}
             style={{
               display: "block", textDecoration: "none",
               background: "rgba(238,77,45,0.05)", border: "1px solid rgba(238,77,45,0.18)",
@@ -514,19 +529,61 @@ export default function ConfiguracoesPage() {
               </svg>
               Adicionar conta Shopee
             </div>
-          </a>
-
-          {/* Shopee — outros apps configurados no servidor (ex.: R.D.) */}
-          {appsShopeeExtras.map((app) => (
-            <a key={app.chave} href={`/api/auth/shopee?app=${encodeURIComponent(app.chave)}`}
-              style={{ display: "block", textDecoration: "none", background: "rgba(238,77,45,0.05)", border: "1px solid rgba(238,77,45,0.18)", borderRadius: "14px", padding: "24px", cursor: "pointer" }}>
-              <div style={{ fontWeight: 800, fontSize: "15px", color: "#EE4D2D", marginBottom: "6px" }}>{app.rotulo}</div>
-              <div style={{ fontSize: "13px", color: "#EE4D2D", fontWeight: 700 }}>Conectar {app.rotulo}</div>
-            </a>
-          ))}
+          </div>
 
         </div>
       </section>
+
+      {/* ── Painel "Gerenciar contas Shopee" ── */}
+      {painelShopee && (
+        <div role="dialog" aria-modal="true" aria-label="Gerenciar contas Shopee" onClick={fecharPainelShopee}
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: "16px" }}>
+          <div onClick={e => e.stopPropagation()}
+            style={{ background: "#14161c", border: "1px solid rgba(238,77,45,0.25)", borderRadius: "14px", padding: "24px", width: "100%", maxWidth: "420px" }}>
+            <div style={{ fontWeight: 800, fontSize: "16px", color: "#fff", marginBottom: "14px" }}>Gerenciar contas Shopee</div>
+
+            <div style={{ fontSize: "12px", color: "#9099aa", marginBottom: "8px" }}>Contas Shopee conectadas</div>
+            {lojas.filter(l => l.marketplace === "Shopee").length === 0 ? (
+              <div style={{ fontSize: "13px", color: "#9099aa", marginBottom: "16px" }}>Nenhuma conta Shopee conectada.</div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: "6px", marginBottom: "16px" }}>
+                {lojas.filter(l => l.marketplace === "Shopee").map(l => (
+                  <div key={l.id} style={{ fontSize: "13px", color: "#fff" }}>🛍️ {l.nickname || l.nome}</div>
+                ))}
+              </div>
+            )}
+
+            {etapaShopee.tipo === "escolher" ? (
+              <div>
+                <div style={{ fontSize: "13px", color: "#fff", fontWeight: 700, marginBottom: "10px" }}>Escolha como conectar esta loja Shopee</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginBottom: "16px" }}>
+                  {etapaShopee.opcoes.map(o => (
+                    <button key={o.chave} type="button" onClick={() => { window.location.href = o.url; }}
+                      style={{ textAlign: "left", background: "rgba(238,77,45,0.10)", border: "1px solid rgba(238,77,45,0.3)", borderRadius: "8px", padding: "10px 14px", color: "#EE4D2D", fontWeight: 700, fontSize: "13px", cursor: "pointer" }}>
+                      {o.rotulo}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <button type="button" onClick={adicionarLojaShopee} disabled={etapaShopee.tipo === "carregando"}
+                style={{ background: "rgba(238,77,45,0.15)", border: "1px solid rgba(238,77,45,0.3)", borderRadius: "8px", padding: "10px 14px", color: "#EE4D2D", fontWeight: 700, fontSize: "13px", cursor: "pointer", marginBottom: "12px" }}>
+                {etapaShopee.tipo === "carregando" ? "Carregando..." : "+ Adicionar nova loja Shopee"}
+              </button>
+            )}
+            {etapaShopee.tipo === "erro" && (
+              <div role="alert" style={{ fontSize: "12px", color: "#ff8a80", marginBottom: "12px" }}>{etapaShopee.mensagem}</div>
+            )}
+
+            <div style={{ display: "flex", justifyContent: "flex-end" }}>
+              <button type="button" onClick={fecharPainelShopee}
+                style={{ background: "transparent", border: "1px solid rgba(255,255,255,0.15)", borderRadius: "8px", padding: "8px 14px", color: "#9099aa", fontSize: "13px", cursor: "pointer" }}>
+                Cancelar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );
