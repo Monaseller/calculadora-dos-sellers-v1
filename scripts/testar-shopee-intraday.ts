@@ -4,8 +4,8 @@
  * API Shopee FALSA → job intraday → worker REAL → executarFatiaShopeeIntraday
  * (motor Shopee existente por baixo) → repositorio Shopee REAL sobre banco em
  * memoria → consultarVendasCanonicas (D14). Data de negocio = pay_time;
- * create_time e so descoberta. Intraday segue DESLIGADO em producao: aqui
- * ligado so pela opcao `intraday: true` do worker.
+ * create_time e so descoberta. D15F2: intraday LIGADO por padrao em producao
+ * (W); `intraday: false` explicito continua recusando (W2).
  *
  * Uso: npx tsx scripts/testar-shopee-intraday.ts
  */
@@ -372,11 +372,21 @@ async function principal() {
       d.sync_jobs.push({ ...jobIntra(L.SH1, "dono-a", H("00:00", "2026-10-06"), H("00:00", "2026-10-07"), "2026-10-06"), tipo: "backfill" });
     }
   });
-  t("W. intraday DESLIGADO (padrao de producao): worker recusa ANTES do provedor", async () => {
+  t("W. intraday LIGADO (padrao de producao, sem opcao): create_time vai ao motor Shopee intraday (re-detail do corpus), nunca ao ML", async () => {
+    const d = mundo(); const pv = prov(H("10:40"));
+    add(pv, { sn: "a", loja: L.SH1, create: H("08:00"), pay: H("08:05"), status: "READY_TO_SHIP", itens: [{ itemId: "i1", preco: 100, qtd: 1 }] });
+    // criado ONTEM (nao pago no corpus) e pago hoje: so o re-detail do motor intraday o enxerga
+    corpusUnpaid(d, L.SH1, "dono-a", "Y", H("23:00", "2026-10-06"), H("23:30", "2026-10-06"));
+    add(pv, { sn: "Y", loja: L.SH1, create: H("23:00", "2026-10-06"), pay: H("10:00"), status: "READY_TO_SHIP", itens: [{ itemId: "iy", preco: 40, qtd: 1 }] });
+    d.sync_jobs.push(jobIntra(L.SH1, "dono-a", DIA0, H("10:30")));
+    const s = await ate(d, pv, 30, {});
+    assert(s[s.length - 1] === "concluido" && job(d).status === "concluido" && pv.detalhados.includes("a") && pv.detalhados.includes("Y") && d.ml_pedidos.length === 0, `${s} ${job(d).status}`);
+  });
+  t("W2. intraday DESLIGADO explicito (intraday:false): worker recusa ANTES do provedor", async () => {
     const d = mundo(); const pv = prov(H("10:40"));
     add(pv, { sn: "a", loja: L.SH1, create: H("08:00"), pay: H("08:05"), status: "READY_TO_SHIP", itens: [{ itemId: "i1", preco: 100, qtd: 1 }] });
     d.sync_jobs.push(jobIntra(L.SH1, "dono-a", DIA0, H("10:30")));
-    const r = await worker(d, pv, {});
+    const r = await worker(d, pv, { intraday: false });
     assert(r.resultado === "RECUSADO" && (r as any).motivo === "intraday_sem_motor" && pv.cont.list + pv.cont.detail + pv.cont.escrow === 0, JSON.stringify(r));
   });
   t("Y. intraday Shopee concluido (dia inteiro) NAO e cobertura fechada: 06/10 ainda pede o fechamento normal desde 00:00", async () => {

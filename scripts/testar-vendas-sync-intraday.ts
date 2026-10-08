@@ -228,10 +228,19 @@ async function principal() {
   });
 
   console.log("\n[tick: elegibilidade, donos, taxa, interleave, producao]");
-  t("P. PRODUCAO (sem opcao): intraday DESLIGADO — nenhum job intraday, nenhum estado intraday", async () => {
-    assert(I.INTRADAY_CANONICO_HABILITADO === false, "constante ligada");
+  t("P. PRODUCAO (sem opcao): intraday LIGADO — um job intraday por loja (ML date_closed, Shopee create_time), dia de hoje, alvo na grade", async () => {
+    assert(I.INTRADAY_CANONICO_HABILITADO === true, "constante desligada");
     const d = mundo([lojaRow(L.ML_A, "a", "ML"), lojaRow(L.SH_A, "a", "Shopee")]);
     const r = await tick(d, H("10:30"));
+    const c = intradayCriados(d);
+    const ml = c.filter((j) => j.loja_id === L.ML_A), sh = c.filter((j) => j.loja_id === L.SH_A);
+    assert(ml.length === 1 && sh.length === 1 && ml[0].campo_tempo === "date_closed" && sh[0].campo_tempo === "create_time"
+      && c.every((j) => j.date_from === "2026-10-07" && j.date_to === "2026-10-07" && j.janela_fim === ISO(H("10:30")))
+      && r.resultados.every((x) => x.intraday !== undefined), JSON.stringify({ c, r: r.resultados }));
+  });
+  t("P2. intraday DESLIGADO explicito (intraday:false) — nenhum job intraday, nenhum estado intraday", async () => {
+    const d = mundo([lojaRow(L.ML_A, "a", "ML"), lojaRow(L.SH_A, "a", "Shopee")]);
+    const r = await tick(d, H("10:30"), false);
     assert(intradayCriados(d).length === 0 && r.resultados.every((x) => x.intraday === undefined), JSON.stringify(r.resultados));
   });
   t("E. loja inelegivel (credencial morta) → SKIP, nenhum intraday", async () => {

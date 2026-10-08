@@ -3,8 +3,8 @@
  *
  * provedor ML FALSO → job intraday → worker REAL → executarFatiaMLIntraday →
  * repositorio ML REAL sobre um banco em memoria → consultarVendasCanonicas
- * (D14). Sem rede, sem banco real. O intraday segue DESLIGADO em producao:
- * aqui ele e ligado so pela opcao `intraday: true` do worker.
+ * (D14). Sem rede, sem banco real. D15F2: o intraday e LIGADO por padrao em
+ * producao (L); `intraday: false` explicito continua recusando (L2).
  *
  * Uso: npx tsx scripts/testar-ml-intraday.ts
  */
@@ -264,10 +264,17 @@ async function principal() {
       assert(r.fatia === "concluido" && d.ml_pedidos.length === 2 && d.sync_jobs[0].listagem_completa === true, `intraday=${intraday} ${JSON.stringify(r)}`);
     }
   });
-  t("L. intraday DESLIGADO (padrao de producao): worker recusa ANTES do provedor", async () => {
-    const d = mundo(); const pv = provedor([ordem("1", ISO(H("08:00")), 10)]);
+  t("L. intraday LIGADO (padrao de producao, sem opcao): worker despacha ao motor ML intraday (corte local date_closed < T)", async () => {
+    const d = mundo(); const pv = provedor([ordem("1", ISO(H("08:00")), 10), ordem("2", ISO(H("10:35")), 20)]);
     d.sync_jobs.push(jobIntraday(LOJA.ML1, "dono-a", "2026-10-07", DIA0, ISO(H("10:30"))));
     const r = await worker(d, pv, H("10:40"), {});
+    // so o motor intraday corta em T: o motor normal gravaria o dia inteiro (2 pedidos)
+    assert(r.fatia === "concluido" && pv.chamadas.length > 0 && d.ml_pedidos.length === 1 && d.ml_pedidos[0].order_id === "1" && d.sync_jobs[0].listagem_completa === true, JSON.stringify(r));
+  });
+  t("L2. intraday DESLIGADO explicito (intraday:false): worker recusa ANTES do provedor", async () => {
+    const d = mundo(); const pv = provedor([ordem("1", ISO(H("08:00")), 10)]);
+    d.sync_jobs.push(jobIntraday(LOJA.ML1, "dono-a", "2026-10-07", DIA0, ISO(H("10:30"))));
+    const r = await worker(d, pv, H("10:40"), { intraday: false });
     assert(r.resultado === "RECUSADO" && (r as any).motivo === "intraday_sem_motor" && pv.chamadas.length === 0 && d.ml_pedidos.length === 0, JSON.stringify(r));
   });
   // D15D: Shopee intraday passou a ter motor proprio — o invariante e que ele NUNCA cai no motor/provedor ML

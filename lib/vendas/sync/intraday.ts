@@ -29,7 +29,7 @@
 import { inicioDoDiaEmSaoPaulo, somarDiasNoCalendario } from "@/lib/fuso-sao-paulo";
 
 /** Producao: nenhum job intraday e criado antes dos motores intraday (D15C/D15D). */
-export const INTRADAY_CANONICO_HABILITADO = false;
+export const INTRADAY_CANONICO_HABILITADO = true;
 
 export const GRADE_INTRADAY_MS = 15 * 60 * 1000;
 export const CADENCIA_INTRADAY_MS = 30 * 60 * 1000;

@@ -108,8 +108,9 @@ async function principal() {
     return { id: `r${++seq}`, user_id: userId, loja_id: lojaId, marketplace: "Shopee", campo_tempo: "create_time",
       janela_inicio: new Date(l.inicio.getTime() - CS.LIMITE_POLITICA_PAGAMENTO_MS).toISOString(), janela_fim: l.fim.toISOString(),
       status: "concluido", listagem_completa: true, concluido_em: new Date(AGORA - H).toISOString(), criado_em: new Date(AGORA - 2 * H).toISOString(), checkpoint: null, ...o }; };
-  const rodar = async (b: ReturnType<typeof bancoFalso>, o: { agoraMs?: number; orcamentoMs?: number; logs?: Record<string, unknown>[] } = {}) =>
-    T.executarTickCoordenador(() => ({ cliente: b.cliente, relogio: { agoraMs: () => o.agoraMs ?? AGORA }, log: (e) => o.logs?.push(e) }), { orcamentoMs: o.orcamentoMs ?? 45_000, habilitado: true });
+  // D15F2: producao liga o intraday por padrao; cenarios SO de background/backfill/fechamento/NOOP passam intraday:false explicito.
+  const rodar = async (b: ReturnType<typeof bancoFalso>, o: { agoraMs?: number; orcamentoMs?: number; logs?: Record<string, unknown>[]; intraday?: boolean } = {}) =>
+    T.executarTickCoordenador(() => ({ cliente: b.cliente, relogio: { agoraMs: () => o.agoraMs ?? AGORA }, log: (e) => o.logs?.push(e), ...(o.intraday === undefined ? {} : { intraday: o.intraday }) }), { orcamentoMs: o.orcamentoMs ?? 45_000, habilitado: true });
   const criados = (b: ReturnType<typeof bancoFalso>) => b.db.sync_jobs.filter((j) => j.status === "pendente" && String(j.id).startsWith("db"));
   const de = (r: Awaited<ReturnType<typeof rodar>>, id: string) => r.resultados.find((x) => x.lojaId === id)!;
   const ativosPorLoja = (b: ReturnType<typeof bancoFalso>) => { const m = new Map<string, number>();
@@ -198,39 +199,39 @@ async function principal() {
   console.log("\n[31-33. NOOP / STALE / FAILED]");
   t("31. COMPLETE + FRESH (ML e Shopee, ano inteiro) → NOOP, 0 job, fase COMPLETO, definitivo", async () => {
     const b = bancoFalso([loja(MLA, DA, "ML"), loja(SPA, DA, "Shopee")], [linhaML(MLA, DA, "2026-01-01", "2026-10-05"), linhaSP(SPA, DA, "2026-01-01", "2026-10-05")]);
-    const r = await rodar(b);
+    const r = await rodar(b, { intraday: false });
     for (const id of [MLA, SPA]) { const x = de(r, id); assert(x.acao === "NOOP" && x.faseBootstrap === "COMPLETO" && x.estado?.definitivo === true, JSON.stringify(x)); }
     assert(r.noop === 2 && r.jobsCriados === 0 && criados(b).length === 0, JSON.stringify(r));
   });
   t("32. COMPLETE + STALE → o coordenador decide refresh; a rota cria no maximo 1", async () => {
     const velho = { concluido_em: new Date(AGORA - 10 * H).toISOString() }; // faixa <=7d exige 6h
     const b = bancoFalso([loja(MLA, DA, "ML"), loja(SPA, DA, "Shopee")], [linhaML(MLA, DA, "2026-01-01", "2026-10-05", velho), linhaSP(SPA, DA, "2026-01-01", "2026-10-05", velho)]);
-    const r = await rodar(b); const j = criados(b);
+    const r = await rodar(b, { intraday: false }); const j = criados(b);
     assert(r.jobsCriados === 2 && j.length === 2 && r.resultados.every((x) => x.tipoJob === "CREATE_REFRESH_JOB" && x.estado?.frescor === "STALE" && x.estado.cobertura === "COMPLETE"), JSON.stringify(r));
     assert(j.every(semHoje), "refresh sobre hoje");
-    const r2 = await rodar(b);
+    const r2 = await rodar(b, { intraday: false });
     assert(r2.jobsCriados === 0 && r2.resultados.every((x) => x.acao === "WAIT_ACTIVE_JOB"), "segundo tick criou outro");
   });
   t("33. necessidade no limite de falhas → FAILED, 0 job (e continua 0 nos ticks seguintes)", async () => {
     const erro = (h: number) => ({ ...linhaML(MLA, DA, "2026-10-05", "2026-10-05"), status: "erro", listagem_completa: false, concluido_em: new Date(AGORA - h * H).toISOString(), criado_em: new Date(AGORA - h * H).toISOString() });
     const b = bancoFalso([loja(MLA, DA, "ML")], [linhaML(MLA, DA, "2026-01-01", "2026-10-04"), erro(3), erro(2), erro(1)]);
-    const r = await rodar(b); const r2 = await rodar(b);
+    const r = await rodar(b, { intraday: false }); const r2 = await rodar(b, { intraday: false });
     assert(de(r, MLA).acao === "FAILED" && r.esgotadas === 1 && r.falhas === 0 && criados(b).length === 0 && de(r2, MLA).acao === "FAILED", JSON.stringify(r));
   });
   t("33b. uma falha recente → WAIT_RETRY (cooldown do planner), 0 job", async () => {
     const e = { ...linhaML(MLA, DA, "2026-10-05", "2026-10-05"), status: "erro", listagem_completa: false, concluido_em: new Date(AGORA - 0.1 * H).toISOString() };
     const b = bancoFalso([loja(MLA, DA, "ML")], [linhaML(MLA, DA, "2026-01-01", "2026-10-04"), e]);
-    const r = await rodar(b);
+    const r = await rodar(b, { intraday: false });
     assert(de(r, MLA).acao === "WAIT_RETRY" && criados(b).length === 0, JSON.stringify(r));
   });
 
   console.log("\n[8/19-20. bootstrap progressivo / virada do ano]");
   t("19. fase derivada do corpus: 7d completo → ULTIMOS_30_DIAS; 30d completo → ANO_CORRENTE; sempre o mais recente que falta", async () => {
     const b = bancoFalso([loja(MLA, DA, "ML")], [linhaML(MLA, DA, "2026-09-29", "2026-10-05")]);
-    const r = await rodar(b); const j = criados(b)[0];
+    const r = await rodar(b, { intraday: false }); const j = criados(b)[0];
     assert(de(r, MLA).faseBootstrap === "ULTIMOS_30_DIAS" && j.date_to === "2026-09-28", JSON.stringify({ r: de(r, MLA), j }));
     const b2 = bancoFalso([loja(MLA, DA, "ML")], [linhaML(MLA, DA, "2026-09-06", "2026-10-05")]);
-    const r2 = await rodar(b2); const j2 = criados(b2)[0];
+    const r2 = await rodar(b2, { intraday: false }); const j2 = criados(b2)[0];
     assert(de(r2, MLA).faseBootstrap === "ANO_CORRENTE" && j2.date_to === "2026-09-05" && r2.jobsCriados === 1, JSON.stringify({ r: de(r2, MLA), j2 }));
   });
   t("19b. bootstrap NAO cria varios jobs: N ticks com o job anterior pendente → sempre 1 ativo", async () => {
@@ -255,7 +256,7 @@ async function principal() {
   });
   t("19d. janela de manutencao (90d) completa e fresca, ano incompleto → so o BOOTSTRAP pede trabalho: dia anterior a janela, mais recente primeiro", async () => {
     const b = bancoFalso([loja(MLA, DA, "ML"), loja(SPA, DA, "Shopee")], [linhaML(MLA, DA, "2026-07-08", "2026-10-05"), linhaSP(SPA, DA, "2026-07-08", "2026-10-05")]);
-    const r = await rodar(b);
+    const r = await rodar(b, { intraday: false });
     const jm = criados(b).find((j) => j.loja_id === MLA)!, js = criados(b).find((j) => j.loja_id === SPA)!;
     assert(de(r, MLA).faseBootstrap === "ANO_CORRENTE" && de(r, MLA).estado?.definitivo === true && jm?.date_to === "2026-07-07", JSON.stringify({ r: de(r, MLA), jm }));
     assert(de(r, SPA).faseBootstrap === "ANO_CORRENTE" && js?.campo_tempo === "create_time" && js.janela_fim <= linhaSP(SPA, DA, "2026-07-08", "2026-07-08").janela_inicio, JSON.stringify({ r: de(r, SPA), js }));
@@ -263,14 +264,14 @@ async function principal() {
   t("20. virada do ano automatica: 01/01 nao quebra (ano sem dia fechado) e 05/01 ja pede o ano novo", async () => {
     const jan1 = Date.parse("2027-01-01T15:00:00Z"), jan5 = Date.parse("2027-01-05T15:00:00Z");
     const b = bancoFalso([loja(MLA, DA, "ML")]);
-    const r = await rodar(b, { agoraMs: jan1 });
+    const r = await rodar(b, { agoraMs: jan1, intraday: false });
     assert(de(r, MLA).acao === "JOB_CREATED" && criados(b)[0].date_to === "2026-12-31", JSON.stringify(r));
     const ano = { concluido_em: new Date(jan1 - H).toISOString() };
     const c = bancoFalso([loja(MLA, DA, "ML")], [linhaML(MLA, DA, "2026-01-01", "2026-12-31", ano)]);
-    const rc = await rodar(c, { agoraMs: jan1 });
+    const rc = await rodar(c, { agoraMs: jan1, intraday: false });
     assert(de(rc, MLA).acao === "NOOP" && de(rc, MLA).faseBootstrap === "COMPLETO", JSON.stringify(rc));
     const d = bancoFalso([loja(MLA, DA, "ML")], [linhaML(MLA, DA, "2026-01-01", "2026-12-31", { concluido_em: new Date(jan5 - H).toISOString() })]);
-    const rd = await rodar(d, { agoraMs: jan5 }); const jd = criados(d)[0];
+    const rd = await rodar(d, { agoraMs: jan5, intraday: false }); const jd = criados(d)[0];
     assert(de(rd, MLA).acao === "JOB_CREATED" && jd.date_from === "2027-01-01" && jd.date_to === "2027-01-04", JSON.stringify({ rd, jd }));
   });
 
@@ -312,7 +313,7 @@ async function principal() {
     const b = bancoFalso([loja(MLA, DA, "ML"), loja(MLB, DA, "ML"), loja(SPA, DA, "Shopee")],
       [{ ...linhaML(MLB, DA, "2026-10-05", "2026-10-05"), status: "rodando" }, linhaSP(SPA, DA, "2026-01-01", "2026-10-05")]);
     const logs: Record<string, unknown>[] = [];
-    await rodar(b, { logs });
+    await rodar(b, { logs, intraday: false });
     const ev = logs.map((e) => e.evento);
     for (const x of ["COORDINATOR_TICK_START", "STORE_EVALUATED", "JOB_CREATED", "WAIT_ACTIVE_JOB", "NOOP", "COORDINATOR_TICK_DONE"]) assert(ev.includes(x), `falta ${x}: ${ev}`);
     const s = JSON.stringify(logs);
