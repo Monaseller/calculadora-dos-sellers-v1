@@ -31,7 +31,7 @@ export const PROIBIDO = /(^|-)(live|banco|producao)(-|$)/i;
 export const SUITES_OFFLINE = [
   "guard-v2-nucleo", "ml-sync-skus-isolamento", "ml-catalogo-variacoes", "lojas-identidade", "lojas-identidade-externa", "ml-callback",
   "ml-credenciais-por-loja", "ownership-ml", "conexao-ml", "lojas-ativar",
-  "anuncios-shopee-multi-store", "shopee-importacao-retomavel", "anuncios-esquema", "importacao-anuncios",
+  "anuncios-shopee-multi-store", "anuncios-ml-loja-fase1", "shopee-importacao-retomavel", "anuncios-esquema", "importacao-anuncios",
   "shopee-multi-store", "shopee-ux", "shopee-multi-app", "shopee-callback", "shopee-status", "shopee-sync-cursor", "sync-shopee-recuperacao",
   "cron-sync", "reconciliacao-periodo", "status-e-protecao-financeira", "rotas-erro", "cutover-rotas-ml", "anuncios-esquema",
   "agentes-analise-vendas", "ia-ui", "ia-ui-1c", "ia-ui-1cb", "ia-ui-1d", "validacao-oficial", "s2d1-migracao",
