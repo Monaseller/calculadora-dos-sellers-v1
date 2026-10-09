@@ -67,9 +67,12 @@ export async function POST(request: Request) {
   // Busca anúncios com ml_item_id mas sem SKU (ou SKU vazio) — apenas deste usuário.
   // CDS V2 Fase 0: TODAS as páginas (o PostgREST corta em 1000 sem erro); falha de
   // leitura é 5xx — antes virava "nada para atualizar" em silêncio.
+  // CDS V2 Fase 0C: SÓ anúncios ML — row Shopee (mesmo dono, ativa, sem SKU) nunca vira
+  // candidata nem tem o id enviado ao Mercado Livre. Sem loja_id: ML ainda não tem (Fase 2).
   const leitura = await lerTodasAsPaginas<any>(() => supabase()
     .from("anuncios")
     .select("id, ml_item_id, nome, sku")
+    .eq("marketplace", "ML")
     .eq("ativo", true)
     .eq("user_id", userId)
     .not("ml_item_id", "is", null)
