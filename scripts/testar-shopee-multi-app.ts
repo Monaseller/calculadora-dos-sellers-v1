@@ -22,6 +22,8 @@ import { join } from "node:path";
 import { filtrarExcecaoShopeeMultiStore } from "./_excecao-shopee-multi-store";
 // ANUNCIOS SHOPEE MULTI-STORE V1B: excecao EXATA da camada de anuncios por loja (arquivos − hunks = bb8f7ea)
 import { filtrarExcecaoAnunciosMultiStore } from "./_excecao-anuncios-multi-store";
+// SHOPEE IMPORT V2: excecao EXATA da importacao em fatias (rota + page − hunks = d872390; novos por sha256)
+import { filtrarExcecaoShopeeImportV2 } from "./_excecao-shopee-import-v2";
 
 const RAIZ = join(__dirname, "..");
 const BASE = "eca183a";
@@ -324,7 +326,7 @@ async function principal() {
       "app/(app)/vendas", "app/(app)/dashboard", "app/(app)/anuncios", "app/api/ml", "app/api/anuncios", "lib/vendas-estrutura.ts", "lib/mercado-livre"], { cwd: RAIZ, encoding: "utf8" }).trim();
     // SHOPEE MULTI-STORE V1B: SO os arquivos da camada multi-loja, revertidos hunk a hunk ate 5fdb51f (excecao exata); o resto segue travado
     // ANUNCIOS SHOPEE MULTI-STORE V1B: idem para a camada de anuncios por loja (revertida hunk a hunk ate bb8f7ea)
-    const fora = filtrarExcecaoAnunciosMultiStore(RAIZ, BASE, filtrarExcecaoShopeeMultiStore(RAIZ, BASE, d.split(/\r?\n/).filter(Boolean))).join("\n");
+    const fora = filtrarExcecaoShopeeImportV2(RAIZ, BASE, filtrarExcecaoAnunciosMultiStore(RAIZ, BASE, filtrarExcecaoShopeeMultiStore(RAIZ, BASE, d.split(/\r?\n/).filter(Boolean)))).join("\n");
     assert(fora === "", fora);
   });
   t("Q3. env global so no registro: nenhuma rota/lib fora de lib/shopee-apps.ts le SHOPEE_PARTNER_*", () => {

@@ -24,6 +24,7 @@ import {
   MENSAGEM_FALHA_DE_REDE,
   type ResultadoDesativacao,
 } from "./paginacao";
+import { importarShopeeEmFatias } from "./importacao-shopee";
 
 export default function AnunciosPage() {
   const [anuncios,    setAnuncios]    = useState<Anuncio[]>([]);
@@ -264,32 +265,24 @@ export default function AnunciosPage() {
     try {
       // MULTI-LOJA V1: importa de UMA loja explicita; sem loja_id a API decide so
       // quando ha uma unica loja Shopee ativa (senao 409 STORE_SELECTION_REQUIRED).
-      const res = await fetch("/api/shopee/importar-anuncios", {
-        method: "POST",
-        ...(lojaId ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify({ loja_id: lojaId }) } : {}),
-      });
-      const corpoTexto = await res.text();
-      if (res.status === 409) {
-        let escolha: { id: string; rotulo: string }[] = [];
-        try {
-          const d = JSON.parse(corpoTexto);
-          if (d?.codigo === "STORE_SELECTION_REQUIRED" && Array.isArray(d.lojas)) {
-            escolha = d.lojas.filter((l: { id?: unknown; rotulo?: unknown }) => typeof l?.id === "string")
-              .map((l: { id: string; rotulo?: unknown }) => ({ id: l.id, rotulo: String(l.rotulo ?? "Shopee") }));
-          }
-        } catch { /* corpo nao-JSON: cai na classificacao padrao abaixo */ }
-        if (escolha.length) { setLojasShopeeEscolha(escolha); setImportandoShopee(false); return; }
-      }
-      // Ver comentário em importarDoML: o corpo cru é que distingue
-      // timeout nosso de erro do marketplace.
-      const r = classificarRespostaImportacao(res.status, corpoTexto, "Shopee");
-      if (r.classe !== "SUCESSO") {
+      // IMPORT V2: em fatias — enquanto `parcial`, continua com o cursor do servidor.
+      const r = await importarShopeeEmFatias(async (corpo) => {
+        const res = await fetch("/api/shopee/importar-anuncios", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(corpo),
+        });
+        // Ver comentário em importarDoML: o corpo cru é que distingue
+        // timeout nosso de erro do marketplace.
+        return { status: res.status, texto: await res.text() };
+      }, lojaId, (p) => setMsgImportShopee({ ok: true, texto: `🟠 Importando produtos Shopee... ${p.itensProcessados} de ${p.total} processados` }));
+      if (r.tipo === "escolher_loja") { setLojasShopeeEscolha(r.lojas); setImportandoShopee(false); return; }
+      if (r.tipo === "erro") {
         setMsgImportShopee({ ok: false, texto: r.mensagem });
+        if (r.progresso.importados + r.progresso.atualizados > 0) await carregar();
       } else {
-        const data = r.dados;
+        const p = r.progresso;
         setMsgImportShopee({
           ok: true,
-          texto: `🟠 ${data.importados} importados, ${data.atualizados} atualizados — total ${data.total} anúncios na Shopee`,
+          texto: `🟠 ${p.importados} importados, ${p.atualizados} atualizados, ${p.ignorados} sem mudança — total ${p.total} anúncios na Shopee`,
         });
         // Simétrico ao import do ML. Só no caminho de SUCESSO.
         setFiltroMarketplace("Shopee");

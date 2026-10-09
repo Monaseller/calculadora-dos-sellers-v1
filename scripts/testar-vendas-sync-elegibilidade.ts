@@ -31,6 +31,8 @@ import { filtrarExcecaoShopeeUX } from "./_excecao-shopee-ux";
 import { filtrarExcecaoShopeeMultiStore } from "./_excecao-shopee-multi-store";
 // ANUNCIOS SHOPEE MULTI-STORE V1B: excecao EXATA (arquivos − hunks = bb8f7ea; migrations/novos por sha256)
 import { filtrarExcecaoAnunciosMultiStore } from "./_excecao-anuncios-multi-store";
+// SHOPEE IMPORT V2: excecao EXATA (rota + page − hunks = d872390; motor/helper/suite por sha256)
+import { filtrarExcecaoShopeeImportV2 } from "./_excecao-shopee-import-v2";
 
 let passou = 0, falhou = 0;
 let fila: Promise<void> = Promise.resolve();
@@ -246,7 +248,7 @@ async function principal() {
       // SALES-SYNC-D6: as duas rotas passam a ler a flag server-only (guard proprio: testar-vendas-sync-feature-flag)
       .split(/\r?\n/).filter((f) => f && f !== "app/api/internal/vendas-sync/coordenador/route.ts" && f !== "app/api/internal/vendas-sync/worker/route.ts");
     // SALES-CANONICAL-D13B: so os arquivos NOVOS do D13 em lib/vendas/canonico; ml.ts/shopee.ts/tipos.ts seguem travados
-    const fora = filtrarExcecaoAnunciosMultiStore(RAIZ, "2d2beb4", filtrarExcecaoShopeeMultiStore(RAIZ, "2d2beb4", filtrarExcecaoShopeeUX(RAIZ, "2d2beb4", filtrarExcecaoShopeeMultiApp(RAIZ, "2d2beb4", filtrarExcecaoD16(RAIZ, "2d2beb4", filtrarExcecaoD15D(RAIZ, "2d2beb4", filtrarExcecaoD15C(RAIZ, "2d2beb4", filtrarExcecaoD15B(RAIZ, "2d2beb4", filtrarExcecaoD14(RAIZ, "2d2beb4", filtrarNovosCanonicosD13(RAIZ, "2d2beb4", d)))))))))).join(",");
+    const fora = filtrarExcecaoShopeeImportV2(RAIZ, "2d2beb4", filtrarExcecaoAnunciosMultiStore(RAIZ, "2d2beb4", filtrarExcecaoShopeeMultiStore(RAIZ, "2d2beb4", filtrarExcecaoShopeeUX(RAIZ, "2d2beb4", filtrarExcecaoShopeeMultiApp(RAIZ, "2d2beb4", filtrarExcecaoD16(RAIZ, "2d2beb4", filtrarExcecaoD15D(RAIZ, "2d2beb4", filtrarExcecaoD15C(RAIZ, "2d2beb4", filtrarExcecaoD15B(RAIZ, "2d2beb4", filtrarExcecaoD14(RAIZ, "2d2beb4", filtrarNovosCanonicosD13(RAIZ, "2d2beb4", d))))))))))).join(",");
     assert(fora === "", `alterados: ${fora}`);
   });
 

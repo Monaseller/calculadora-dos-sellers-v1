@@ -195,7 +195,8 @@ async function principal() {
     const antesB = JSON.stringify(daLoja(LOJA_B));
     chamadas = [];
     const r = await importarLoja(LOJA_A); const d = await r.json();
-    assert(r.status === 200 && d.atualizados === 3 && d.importados === 0 && d.loja_id === LOJA_A, JSON.stringify(d));
+    // IMPORT V2: linha igual a da Shopee nao e regravada (ignorados)
+    assert(r.status === 200 && d.parcial === false && d.ignorados === 3 && d.atualizados === 0 && d.importados === 0 && d.loja_id === LOJA_A, JSON.stringify(d));
     assert(JSON.stringify(daLoja(LOJA_B)) === antesB, "importar A alterou B");
     assert(chamadas.every((c) => c.shopId === SHOP[LOJA_A]), "import A chamou outra loja");
   });
@@ -205,7 +206,8 @@ async function principal() {
     const antesA = JSON.stringify(daLoja(LOJA_A));
     chamadas = [];
     const r = await importarLoja(LOJA_B); const d = await r.json();
-    assert(r.status === 200 && d.atualizados === 2 && d.importados === 0, JSON.stringify(d));
+    // nome editado na B volta ao da Shopee (atualizado); 8001/81 igual (ignorado)
+    assert(r.status === 200 && d.atualizados === 1 && d.ignorados === 1 && d.importados === 0, JSON.stringify(d));
     assert(JSON.stringify(daLoja(LOJA_A)) === antesA, "importar B alterou A");
     assert(db.anuncios.find((a) => a.loja_id === LOJA_B && a.ml_item_id === "7001")!.custo_produto === 20, "custo da B perdido");
   });
@@ -260,6 +262,9 @@ async function principal() {
       for (const m of s.matchAll(/\.from\("anuncios"\)\.insert\(\{([\s\S]*?)\}\)/g)) if (/marketplace: "Shopee"/.test(m[1]) && !/loja_id:/.test(m[1])) semLoja.push(f);
     }
     assert(semLoja.length === 0, `insert Shopee sem loja_id: ${semLoja.join(", ")}`);
+    // IMPORT V2: o motor insere em lote — toda linha nova nasce Shopee, da loja e ativa
+    const linhaNova = /novas\.push\(\{([\s\S]*?)\}\);/.exec(fonte("lib/anuncios/importacao-shopee.ts"))?.[1] ?? "";
+    assert(/marketplace: "Shopee"/.test(linhaNova) && /loja_id: lojaId/.test(linhaNova) && /user_id: userId/.test(linhaNova) && /ativo: true/.test(linhaNova), "linha nova do lote sem marketplace/loja/dono/ativo");
   });
   t("I. query Shopee de anuncios sem loja_id → FALHA (todo SELECT Shopee filtra loja; mapa sem loja lanca)", async () => {
     const arquivos = execFileSync("git", ["grep", "-l", "from(\"anuncios\")", "--", "app", "lib"], { cwd: RAIZ, encoding: "utf8" }).trim().split(/\r?\n/);
@@ -273,11 +278,14 @@ async function principal() {
       }
     }
     assert(fora.length === 0, `SELECT Shopee sem loja: ${fora.join(", ")}`);
-    // UPDATE do importador: WHERE prende id + dono + loja; payload nunca mexe em loja_id (preservada)
-    const imp = fonte("app/api/shopee/importar-anuncios/route.ts");
+    // UPDATE do importador (IMPORT V2: motor em lib/anuncios/importacao-shopee.ts): WHERE prende
+    // id + dono + loja; payload so com campos da Shopee — nunca loja_id/ativo/campos do usuario
+    const imp = fonte("lib/anuncios/importacao-shopee.ts");
     const updates = [...imp.matchAll(/\.from\("anuncios"\)\.update\(([^)]*)\)([^;]*);/g)];
-    assert(updates.length === 2 && updates.every((u) => u[1] === "upd" && u[2] === `.eq("id", existente.id).eq("user_id", userId).eq("loja_id", lojaId)`), updates.map((u) => u[0]).join(" | "));
-    assert(!/upd\.loja_id|loja_id:\s*[^,}]*\}?\s*;?\s*\n\s*if \(!existente\.sku/.test(imp) && [...imp.matchAll(/const upd: any = \{([^}]*)\}/g)].every((m) => !/loja_id/.test(m[1])), "update altera loja_id");
+    assert(updates.length === 1 && updates[0][1] === "m.upd" && updates[0][2] === `.eq("id", m.id).eq("user_id", userId).eq("loja_id", lojaId)`, updates.map((u) => u[0]).join(" | "));
+    const chavesUpd = [...imp.matchAll(/\bupd\.(\w+) =/g)].map((m) => m[1]);
+    assert(chavesUpd.length > 0 && chavesUpd.every((c) => ["nome", "preco_anuncio", "thumbnail", "sku"].includes(c)), `update toca campo fora da Shopee: ${chavesUpd}`);
+    assert(!/\.(insert|update|upsert)\(/.test(fonte("app/api/shopee/importar-anuncios/route.ts")), "rota voltou a escrever em anuncios fora do motor");
     let lancou = false;
     try { await SS.carregarMapaAnuncios(DONO_X, ""); } catch { lancou = true; }
     assert(lancou, "carregarMapaAnuncios sem loja nao falhou");
@@ -297,7 +305,7 @@ async function principal() {
   });
 
   console.log("\n[K-L. identidade]");
-  t("K/V. identidade duplicada na MESMA loja → UNIQUE impede (importacao concorrente vira conflito, nunca 2a linha)", async () => {
+  t("K/V. identidade duplicada na MESMA loja → UNIQUE impede (importacao concorrente: fatia para fail-closed, nunca 2a linha)", async () => {
     const existente = db.anuncios.find((a) => a.loja_id === LOJA_A && a.ml_item_id === "7001")!;
     assert(regraBanco({ user_id: DONO_X, loja_id: LOJA_A, marketplace: "Shopee", ml_item_id: "7001", variation_id: null }) === "23505 identidade", "duplicata aceita");
     // corrida: outra importacao gravou 8001/81 na B DEPOIS que esta leu os existentes → esta tenta inserir de novo
@@ -312,8 +320,9 @@ async function principal() {
       return fetchOriginal(url, init);
     }) as any;
     try {
-      const d = await (await importarLoja(LOJA_B)).json();
-      assert(d.conflitos === 1 && db.anuncios.filter((a) => a.loja_id === LOJA_B).length === antes, JSON.stringify(d));
+      // IMPORT V2: INSERT em lote recusado pela UNIQUE → a fatia para (502), sem segunda linha
+      const rr = await importarLoja(LOJA_B); const d = await rr.json();
+      assert(rr.status === 502 && d.codigo === "FALHA_BANCO" && db.anuncios.filter((a) => a.loja_id === LOJA_B).length === antes, `${rr.status} ${JSON.stringify(d)}`);
     } finally { globalThis.fetch = fetchOriginal; }
     assert(existente.loja_id === LOJA_A, "existente mudou de loja");
     const sql = fonte("supabase/migrations/20261104_anuncios_loja_fase2.sql").replace(/\s+/g, " ");
@@ -361,9 +370,11 @@ async function principal() {
     assert(it.preco_anuncio === 31.91 && md.preco_anuncio === 12.5, `${it.preco_anuncio} / ${md.preco_anuncio}`);
   });
   t("R. conversao /100000 (convencao da API v1) ausente do importador", () => {
-    const imp = fonte("app/api/shopee/importar-anuncios/route.ts").replace(/\/\/.*$/gm, "");
-    assert(!/\/\s*1e5|\/\s*100_?000|\*\s*0?\.00001/.test(imp), "conversao /100000 reintroduzida");
-    assert((imp.match(/Number\((item|model)\.price_info\?\.\[0\]\?\.current_price/g) ?? []).length === 2, "preco nao lido direto de current_price");
+    for (const arq of ["app/api/shopee/importar-anuncios/route.ts", "lib/anuncios/importacao-shopee.ts"]) {
+      assert(!/\/\s*1e5|\/\s*100_?000|\*\s*0?\.00001/.test(fonte(arq).replace(/\/\/.*$/gm, "")), `conversao /100000 reintroduzida em ${arq}`);
+    }
+    const imp = fonte("lib/anuncios/importacao-shopee.ts").replace(/\/\/.*$/gm, "");
+    assert((imp.match(/Number\((item|m)\.price_info\?\.\[0\]\?\.current_price/g) ?? []).length === 2, "preco nao lido direto de current_price");
   });
 
   console.log("\n[X. migrations]");

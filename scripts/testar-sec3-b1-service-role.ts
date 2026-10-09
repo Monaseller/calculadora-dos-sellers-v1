@@ -37,6 +37,8 @@ import { filtrarExcecaoShopeeMultiApp } from "./_excecao-shopee-multi-app";
 import { filtrarExcecaoShopeeUX } from "./_excecao-shopee-ux";
 // ANUNCIOS SHOPEE MULTI-STORE V1B: excecao EXATA (migrations de anuncios.loja_id por sha256)
 import { filtrarExcecaoAnunciosMultiStore } from "./_excecao-anuncios-multi-store";
+// SHOPEE IMPORT V2: excecao EXATA (helper do laco de fatias por sha256) — SO na J2
+import { filtrarExcecaoShopeeImportV2 } from "./_excecao-shopee-import-v2";
 
 let passou = 0, falhou = 0;
 let fila: Promise<void> = Promise.resolve();
@@ -556,7 +558,8 @@ async function principal() {
   });
   t("J2. os unicos arquivos 'use client' alterados sao as 4 telas do SEC-3-B2", () => {
     // SHOPEE MULTI-APP: a lista generica (BROWSER_PENDENTE) NAO muda; Configuracoes sai SO pela excecao exata
-    const d = filtrarExcecaoShopeeUX(RAIZ, BASE, filtrarExcecaoShopeeMultiApp(RAIZ, BASE, git("diff", "--name-only", BASE, "--", "app", "components", "lib").split(/\r?\n/).filter(Boolean)));
+    // SHOPEE IMPORT V2: o helper do laco de fatias (importado pela tela "use client") sai SO pela excecao exata (sha256)
+    const d = filtrarExcecaoShopeeImportV2(RAIZ, BASE, filtrarExcecaoShopeeUX(RAIZ, BASE, filtrarExcecaoShopeeMultiApp(RAIZ, BASE, git("diff", "--name-only", BASE, "--", "app", "components", "lib").split(/\r?\n/).filter(Boolean))));
     const cliente = d.filter((f) => fonte.has(f) && browser.has(f) && !BROWSER_PENDENTE.includes(f));
     assert(cliente.length === 0, cliente.join(", "));
   });

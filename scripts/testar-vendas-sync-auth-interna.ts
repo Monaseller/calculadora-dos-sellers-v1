@@ -31,6 +31,8 @@ import { filtrarExcecaoShopeeUX } from "./_excecao-shopee-ux";
 import { filtrarExcecaoShopeeMultiStore } from "./_excecao-shopee-multi-store";
 // ANUNCIOS SHOPEE MULTI-STORE V1B: excecao EXATA (arquivos − hunks = bb8f7ea; migrations/novos por sha256)
 import { filtrarExcecaoAnunciosMultiStore } from "./_excecao-anuncios-multi-store";
+// SHOPEE IMPORT V2: excecao EXATA (rota + page − hunks = d872390; motor/helper/suite por sha256)
+import { filtrarExcecaoShopeeImportV2 } from "./_excecao-shopee-import-v2";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
@@ -174,7 +176,7 @@ async function principal() {
       "lib/marketplace", "lib/shopee-auth.ts", "lib/ml-auth.ts", "lib/mercado-livre", "lib/shopee", "lib/middleware-rotas.ts", "middleware.ts", "supabase", "scripts/sync-worker.mjs"],
       { cwd: RAIZ, encoding: "utf8" }).trim().split(/\r?\n/).filter(Boolean);
     // SALES-CANONICAL-D13A: SO o bloco D13 de credenciais.ts e os arquivos novos do D13
-    const fora = filtrarExcecaoAnunciosMultiStore(RAIZ, BASE, filtrarExcecaoShopeeMultiStore(RAIZ, BASE, filtrarExcecaoShopeeUX(RAIZ, BASE, filtrarExcecaoShopeeMultiApp(RAIZ, BASE, filtrarExcecaoD16(RAIZ, BASE, filtrarExcecaoD15D(RAIZ, BASE, filtrarExcecaoD15C(RAIZ, BASE, filtrarExcecaoD15B(RAIZ, BASE, filtrarExcecaoD14(RAIZ, BASE, filtrarExcecaoD13(RAIZ, BASE, d)))))))))).join(",");
+    const fora = filtrarExcecaoShopeeImportV2(RAIZ, BASE, filtrarExcecaoAnunciosMultiStore(RAIZ, BASE, filtrarExcecaoShopeeMultiStore(RAIZ, BASE, filtrarExcecaoShopeeUX(RAIZ, BASE, filtrarExcecaoShopeeMultiApp(RAIZ, BASE, filtrarExcecaoD16(RAIZ, BASE, filtrarExcecaoD15D(RAIZ, BASE, filtrarExcecaoD15C(RAIZ, BASE, filtrarExcecaoD15B(RAIZ, BASE, filtrarExcecaoD14(RAIZ, BASE, filtrarExcecaoD13(RAIZ, BASE, d))))))))))).join(",");
     assert(fora === "", `alterados: ${fora}`);
     const dc = execFileSync("git", ["diff", "-U0", BASE, "--", ".env.example"], { cwd: RAIZ, encoding: "utf8" }).split(/\r?\n/);
     const add = dc.filter((l) => l.startsWith("+") && !l.startsWith("+++")), rem = dc.filter((l) => l.startsWith("-") && !l.startsWith("---"));

@@ -60,6 +60,16 @@ function semComentarios(arquivo: string): string {
 const CODIGO_TELA = semComentarios(TELA);
 const CODIGO_ML   = semComentarios(ROTA_ML);
 const CODIGO_SP   = semComentarios(ROTA_SP);
+// SHOPEE IMPORT V2: a escrita da Shopee mora no MOTOR (fatias retomaveis) e o laco da tela
+// no helper. O contrato e verificado ONDE a responsabilidade esta — mesmas regras, sem afrouxar.
+const MOTOR_SP        = path.join(RAIZ, "lib", "anuncios", "importacao-shopee.ts");
+const HELPER_TELA_SP  = path.join(RAIZ, "app", "(app)", "anuncios", "importacao-shopee.ts");
+const CODIGO_MOTOR_SP = semComentarios(MOTOR_SP);
+const CODIGO_HELPER_SP = semComentarios(HELPER_TELA_SP);
+/** Os UNICOS campos que a importacao Shopee pode atualizar numa linha ja existente. */
+const CAMPOS_DA_SHOPEE = ["nome", "preco_anuncio", "thumbnail", "sku"];
+/** Bloco `novas.push({...})` do lote de INSERT do motor. */
+const linhaNovaSP = () => /novas\.push\(\{([\s\S]*?)\}\);/.exec(CODIGO_MOTOR_SP)?.[1] ?? "";
 
 /**
  * Blocos `.update({...})` de uma fonte, com o objeto literal que os
@@ -96,7 +106,7 @@ async function principal() {
   // ── A / B / C — a regra do soft delete no código de servidor ──────
   secao("\n[1. A/B/C — importação não reativa anúncio excluído]");
 
-  for (const [nome, codigo] of [["Mercado Livre", CODIGO_ML], ["Shopee", CODIGO_SP]] as const) {
+  for (const [nome, codigo] of [["Mercado Livre", CODIGO_ML]] as const) {
     t(`A/B. ${nome}: nenhum UPDATE de importação escreve 'ativo'`, () => {
       const updates = payloadsDeUpdate(codigo);
       assert(updates.length >= 2, `esperava ao menos 2 payloads de update, achei ${updates.length}`);
@@ -126,10 +136,41 @@ async function principal() {
     });
   }
 
+  // Shopee (IMPORT V2): as mesmas regras, verificadas no MOTOR.
+  t("A/B. Shopee (motor): nenhum UPDATE de importação escreve 'ativo' — só campos da Shopee", () => {
+    const chaves = [...CODIGO_MOTOR_SP.matchAll(/\bupd\.(\w+)\s*=/g)].map((m) => m[1]);
+    assert(chaves.length >= 3, `esperava os campos da Shopee no update, achei ${chaves}`);
+    assert(!chaves.includes("ativo"), "🔴 payload de UPDATE voltou a escrever 'ativo' — import reativaria anúncio excluído");
+    assert(chaves.every((c) => CAMPOS_DA_SHOPEE.includes(c)),
+      `🔴 UPDATE toca campo que não é da Shopee (custo/imposto/insumos/loja/dono): ${chaves}`);
+    const updates = CODIGO_MOTOR_SP.match(/\.update\(/g) ?? [];
+    assert(updates.length === 1 && /\.update\(m\.upd\)/.test(CODIGO_MOTOR_SP), "o motor deve ter UM update, com o payload montado campo a campo");
+    assert(!/\.(insert|update|upsert)\(/.test(CODIGO_SP), "🔴 a rota voltou a escrever em anuncios fora do motor");
+  });
+  t("C/G. Shopee (motor): todo INSERT do lote nasce ativo, Shopee, do dono e da loja, com identidade e preço", () => {
+    const l = linhaNovaSP();
+    assert(/\bativo\s*:\s*true\b/.test(l), "anúncio novo deveria entrar ativo");
+    for (const campo of [/marketplace:\s*"Shopee"/, /user_id:\s*userId/, /loja_id:\s*lojaId/, /ml_item_id:\s*l\.ml_item_id/,
+      /variation_id:\s*l\.variation_id/, /preco_anuncio:\s*l\.preco_anuncio/]) {
+      assert(campo.test(l), `linha nova do lote sem ${campo}`);
+    }
+    assert(/await banco\.from\("anuncios"\)\.insert\(novas\)/.test(CODIGO_MOTOR_SP), "o lote não é um INSERT único");
+    assert(/if \(error\) throw new ErroImportacaoShopee\("BANCO", "insercao em lote recusada pelo banco"\)/.test(CODIGO_MOTOR_SP),
+      "🔴 falha do lote não fecha a fatia");
+  });
+  t("G. Shopee (motor): a busca de existentes NÃO filtra por ativo e prende dono + loja", () => {
+    const i = CODIGO_MOTOR_SP.indexOf('from("anuncios")');
+    assert(i >= 0, "não achei a consulta de existentes no motor");
+    const trecho = CODIGO_MOTOR_SP.slice(i, CODIGO_MOTOR_SP.indexOf(";", i));
+    assert(!/\.eq\("ativo"/.test(trecho), "🔴 a busca de existentes passou a filtrar ativo — soft-deleted seria reinserido");
+    assert(/\.eq\("loja_id",\s*lojaId\)/.test(trecho), "🔴 existentes sem escopo de loja — outra loja seria casada");
+    assert(!/\.(gt|gte|lt|lte|range|limit)\(/.test(trecho), "🔴 o cursor/paginação não pode restringir os existentes (identidade)");
+  });
+
   secao("\n[2. D/E — identidade do anúncio]");
 
   t("D. a busca de existentes é escopada por marketplace E user_id", () => {
-    for (const [nome, codigo, mkt] of [["ML", CODIGO_ML, "ML"], ["Shopee", CODIGO_SP, "Shopee"]] as const) {
+    for (const [nome, codigo, mkt] of [["ML", CODIGO_ML, "ML"], ["Shopee", CODIGO_MOTOR_SP, "Shopee"]] as const) {
       const i = codigo.indexOf('from("anuncios")');
       const trecho = codigo.slice(i, i + 400);
       assert(new RegExp(`\\.eq\\("marketplace",\\s*"${mkt}"\\)`).test(trecho),
@@ -140,7 +181,7 @@ async function principal() {
   });
 
   t("E. a chave de identidade inclui a variação", () => {
-    for (const [nome, codigo] of [["ML", CODIGO_ML], ["Shopee", CODIGO_SP]] as const) {
+    for (const [nome, codigo] of [["ML", CODIGO_ML], ["Shopee", CODIGO_MOTOR_SP]] as const) {
       assert(/`\$\{row\.ml_item_id\}\|\$\{row\.variation_id\s*\?\?\s*""\}`/.test(codigo),
         `${nome}: chave do mapa de existentes não combina item + variação`);
     }
@@ -196,17 +237,24 @@ async function principal() {
   });
 
   t("I. Shopee só insere marketplace 'Shopee'", () => {
-    for (const p of payloadsDeInsert(CODIGO_SP)) {
-      assert(/marketplace:\s*"Shopee"/.test(p), "insert da Shopee sem marketplace Shopee");
-      assert(!/marketplace:\s*"ML"/.test(p), "🔴 rota da Shopee inserindo ML");
-    }
+    const l = linhaNovaSP();
+    assert(/marketplace:\s*"Shopee"/.test(l), "insert da Shopee sem marketplace Shopee");
+    assert(!/marketplace:\s*"ML"/.test(CODIGO_MOTOR_SP), "🔴 motor da Shopee inserindo ML");
   });
 
-  t("H/I. os dois updates alcançam só a linha já casada, por id", () => {
-    for (const [nome, codigo] of [["ML", CODIGO_ML], ["Shopee", CODIGO_SP]] as const) {
-      const n = (codigo.match(/\.update\(upd\)\.eq\("id",\s*existente\.id\)/g) ?? []).length;
-      assert(n >= 2, `${nome}: updates deveriam mirar existente.id (achei ${n})`);
-    }
+  t("H/I. os updates alcançam só a linha já casada, por id (Shopee: + dono + loja)", () => {
+    const n = (CODIGO_ML.match(/\.update\(upd\)\.eq\("id",\s*existente\.id\)/g) ?? []).length;
+    assert(n >= 2, `ML: updates deveriam mirar existente.id (achei ${n})`);
+    assert(/mudancas\.push\(\{ id: existente\.id, upd \}\)/.test(CODIGO_MOTOR_SP), "Shopee: update não nasce da linha casada (existente.id)");
+    assert(/\.update\(m\.upd\)\.eq\("id", m\.id\)\.eq\("user_id", userId\)\.eq\("loja_id", lojaId\)/.test(CODIGO_MOTOR_SP),
+      "🔴 Shopee: update não está preso a id + dono + loja");
+  });
+
+  t("H. o cursor só escolhe QUAIS itens processar — a identidade (dono + loja + item|variação) não muda", () => {
+    assert(/const restantes = ultimoItem === null \? todos : todos\.filter\(\(id\) => cmpItem\(id, ultimoItem\) > 0\);/.test(CODIGO_MOTOR_SP),
+      "o cursor deveria só filtrar a lista ordenada de item_id");
+    assert((CODIGO_MOTOR_SP.match(/existMap\.(get|set)\(`\$\{\w+\.ml_item_id\}\|\$\{\w+\.variation_id \?\? ""\}`/g) ?? []).length >= 2,
+      "a chave usada na leitura e na comparação deveria ser item|variação");
   });
 
   secao("\n[5. J — a tela não culpa o marketplace por timeout nosso]");
@@ -261,8 +309,12 @@ async function principal() {
     assert(!/Falha na conex[aã]o com a Shopee/.test(CODIGO_TELA),
       "🔴 a mensagem enganosa voltou");
     assert(!/Falha na conex[aã]o\./.test(CODIGO_TELA), "🔴 a mensagem genérica do ML voltou");
-    const n = (CODIGO_TELA.match(/classificarRespostaImportacao\(/g) ?? []).length;
-    assert(n === 2, `esperava os 2 imports usando a classificação, achei ${n}`);
+    // SHOPEE IMPORT V2: o ML classifica na tela; a Shopee classifica CADA fatia no helper do laço
+    const nTela = (CODIGO_TELA.match(/classificarRespostaImportacao\(/g) ?? []).length;
+    const nHelper = (CODIGO_HELPER_SP.match(/classificarRespostaImportacao\(/g) ?? []).length;
+    assert(nTela === 1 && nHelper === 1, `esperava ML na tela e Shopee no helper usando a classificação, achei ${nTela}/${nHelper}`);
+    assert(/await importarShopeeEmFatias\(/.test(corpoDaFuncao(CODIGO_TELA, "importarDaShopee")), "importarDaShopee não usa o laço de fatias");
+    assert(!/Falha na conex[aã]o/.test(CODIGO_HELPER_SP), "🔴 a mensagem enganosa voltou no helper");
     assert(/MENSAGEM_FALHA_DE_REDE/.test(CODIGO_TELA), "o caso de rede não usa a mensagem dedicada");
   });
 
@@ -284,6 +336,34 @@ async function principal() {
       "constante de rede ausente");
     assert(!/marketplace|Shopee|Mercado Livre/i.test(MENSAGEM_FALHA_DE_REDE),
       "a mensagem de rede não deve culpar marketplace");
+  });
+
+  t("J11. laço da Shopee: sucesso encerra; parcial continua com o cursor/loja devolvidos; erro, timeout e cursor parado encerram sem continuar", async () => {
+    const { importarShopeeEmFatias } = await import(pathToFileURL(HELPER_TELA_SP).href);
+    const LOJA = "22222222-2222-4222-8222-222222222222";
+    const roteiro = (respostas: { status: number; corpo: unknown }[]) => {
+      const pedidos: Record<string, unknown>[] = [];
+      let i = 0;
+      return { pedidos, postar: async (corpo: Record<string, unknown>) => { pedidos.push(corpo); const r = respostas[i++]; return { status: r.status, texto: typeof r.corpo === "string" ? r.corpo : JSON.stringify(r.corpo) }; } };
+    };
+    const fatiaOk = (extra: object) => ({ importados: 2, atualizados: 1, ignorados: 3, itens_processados: 4, total: 9, loja_id: LOJA, ...extra });
+    // parcial → continua com EXATAMENTE cursor + loja; final soma tudo
+    const a = roteiro([{ status: 200, corpo: fatiaOk({ parcial: true, cursor: "c1" }) }, { status: 200, corpo: fatiaOk({ parcial: false, cursor: null }) }]);
+    const ra = await importarShopeeEmFatias(a.postar, LOJA);
+    assert(ra.tipo === "ok" && a.pedidos.length === 2 && JSON.stringify(a.pedidos[1]) === JSON.stringify({ loja_id: LOJA, cursor: "c1" }), JSON.stringify(a.pedidos));
+    assert(ra.progresso.importados === 4 && ra.progresso.atualizados === 2 && ra.progresso.ignorados === 6 && ra.progresso.itensProcessados === 8 && ra.progresso.total === 9, JSON.stringify(ra.progresso));
+    // erro do backend no meio → para, sem continuar
+    const b = roteiro([{ status: 200, corpo: fatiaOk({ parcial: true, cursor: "c1" }) }, { status: 502, corpo: { erro: true, mensagem: "falhou" } }, { status: 200, corpo: fatiaOk({ parcial: false }) }]);
+    const rb = await importarShopeeEmFatias(b.postar, LOJA);
+    assert(rb.tipo === "erro" && rb.mensagem === "falhou" && b.pedidos.length === 2, JSON.stringify(rb));
+    // corpo ilegível (timeout nosso) → mensagem que NÃO culpa a Shopee, sem continuar
+    const c = roteiro([{ status: 504, corpo: "<html>Gateway Timeout</html>" }]);
+    const rc = await importarShopeeEmFatias(c.postar, LOJA);
+    assert(rc.tipo === "erro" && !/falha na conex[aã]o com a shopee/i.test(rc.mensagem) && c.pedidos.length === 1, JSON.stringify(rc));
+    // cursor que não avança → erro controlado (nunca laço infinito)
+    const d = roteiro([{ status: 200, corpo: fatiaOk({ parcial: true, cursor: "c1" }) }, { status: 200, corpo: fatiaOk({ parcial: true, cursor: "c1" }) }, { status: 200, corpo: fatiaOk({ parcial: false }) }]);
+    const rd = await importarShopeeEmFatias(d.postar, LOJA);
+    assert(rd.tipo === "erro" && d.pedidos.length === 2, JSON.stringify(rd));
   });
 
   await fila;
