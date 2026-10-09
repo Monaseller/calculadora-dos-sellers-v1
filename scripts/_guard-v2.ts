@@ -13,8 +13,8 @@
  *   I3  nenhuma seleção implícita de loja nova: Shopee "mais recente" = 0 chamadores; os usos ML
  *       ainda existentes (dívida da Fase 1) são uma lista FECHADA — chamador novo = falha;
  *   I4  toda rota em app/api/internal/** exige segredo (CRON_SECRET ou x-worker-secret);
- *   I5  ML_SKU_SYNC_NEVER_USES_SHOPEE_ROWS (Fase 0C): toda leitura paginada de anuncios dos
- *       caminhos ML filtra marketplace = "ML" no banco — row Shopee nunca chega ao provider ML;
+ *   I5  ML_SKU_SYNC_NEVER_READS_OR_WRITES_SHOPEE_ROWS (Fase 0C/0C.1): toda leitura paginada de anuncios dos
+ *       caminhos ML e todo UPDATE do sync-skus filtram marketplace = "ML" — row Shopee nunca chega ao provider ML nem é escrita por ele;
  *   Z   ZONAS PROTEGIDAS sem suíte comportamental própria (telas legadas de Vendas/Dashboard,
  *       constantes financeiras, supabase/**, vercel.json, .env.example, sync-worker.mjs): mudar
  *       exige re-baseline EXPLÍCITO de scripts/zonas-protegidas.json (aparece no diff), nunca
@@ -140,9 +140,10 @@ export function rotasInternasSemSegredo(raiz = RAIZ_V2): string[] {
     .filter((f) => !/CRON_SECRET|x-worker-secret|autenticarRotaInterna|validarSegredo/.test(ler(raiz, f)));
 }
 
-// ── I5: leitores ML de anuncios filtram marketplace no banco ───────────
+// ── I5: leitores ML (e escritor sync-skus) de anuncios filtram marketplace no banco ──
 export const LEITORES_ML_ANUNCIOS = ["app/api/ml/sync-skus/route.ts", "app/api/ml/sync-precos/route.ts",
   "app/api/ml/importar-anuncios/route.ts", "lib/sync-ml.ts"];
+export const ESCRITORES_ML_ANUNCIOS = ["app/api/ml/sync-skus/route.ts"];
 export function leitoresMLSemMarketplace(raiz = RAIZ_V2): string[] {
   const erros: string[] = [];
   for (const f of LEITORES_ML_ANUNCIOS) {
@@ -150,6 +151,12 @@ export function leitoresMLSemMarketplace(raiz = RAIZ_V2): string[] {
       .filter((b) => b.includes('.from("anuncios")'));
     if (!blocos.length) erros.push(`${f}: nenhuma leitura paginada de anuncios encontrada`);
     for (const b of blocos) if (!b.includes('.eq("marketplace", "ML")')) erros.push(`${f}: leitura de anuncios sem marketplace = "ML"`);
+  }
+  // WRITE (Fase 0C.1): todo UPDATE de anuncios do sync-skus ML exige marketplace = "ML"
+  for (const f of ESCRITORES_ML_ANUNCIOS) {
+    const escritas = ler(raiz, f).match(/\.from\("anuncios"\)\s*\.update\([\s\S]*?;/g) ?? [];
+    if (!escritas.length) erros.push(`${f}: nenhum UPDATE de anuncios encontrado`);
+    for (const w of escritas) if (!w.includes('.eq("marketplace", "ML")')) erros.push(`${f}: UPDATE de anuncios sem marketplace = "ML"`);
   }
   return erros;
 }
@@ -184,7 +191,7 @@ export function invariantesV2(raiz = RAIZ_V2, opcoes: { zonas?: boolean } = {}):
   for (const v of legadoMexeEmJobCanonico(raiz)) erros.push(`I2 job canônico fora de lib/vendas/sync: ${v}`);
   for (const v of seletoresImplicitosNovos(raiz)) erros.push(`I3 seleção implícita nova: ${v}`);
   for (const v of rotasInternasSemSegredo(raiz)) erros.push(`I4 rota interna sem segredo: ${v}`);
-  for (const v of leitoresMLSemMarketplace(raiz)) erros.push(`I5 ML_SKU_SYNC_NEVER_USES_SHOPEE_ROWS: ${v}`);
+  for (const v of leitoresMLSemMarketplace(raiz)) erros.push(`I5 ML_SKU_SYNC_NEVER_READS_OR_WRITES_SHOPEE_ROWS: ${v}`);
   if (opcoes.zonas !== false) for (const v of verificarZonas(raiz)) erros.push(`Z zona protegida sem re-baseline: ${v}`);
   return erros;
 }

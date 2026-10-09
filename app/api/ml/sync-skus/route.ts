@@ -180,9 +180,12 @@ export async function POST(request: Request) {
 
         if (Object.keys(updates).length === 0) continue;
 
+        // CDS V2 Fase 0C.1: o provider ML só escreve em row ML — nunca numa row Shopee
+        // do mesmo dono que por acaso tenha o mesmo ml_item_id.
         const { error: updateError } = await supabase()
           .from("anuncios")
           .update(updates)
+          .eq("marketplace", "ML")
           .eq("ml_item_id", body.id)
           .eq("user_id", userId);
 

@@ -1,10 +1,11 @@
 /**
  * CDS V2 — Fase 0C: POST /api/ml/sync-skus isolado por marketplace.
  *
- * Invariante (ML_SKU_SYNC_NEVER_USES_SHOPEE_ROWS): a rota ML nunca envia ao
+ * Invariante (ML_SKU_SYNC_NEVER_READS_OR_WRITES_SHOPEE_ROWS): a rota ML nunca envia ao
  * provider ML um item de row marketplace = Shopee — mesmo do mesmo dono, ativa,
  * sem SKU, com ml_item_id preenchido (até com cara de MLB) e vindo ANTES das
- * rows ML na paginação.
+ * rows ML na paginação — e nunca ESCREVE numa row Shopee, nem quando ela colide
+ * com uma row ML no mesmo dono + ml_item_id (Fase 0C.1).
  *
  * Prova pelo que o duplo do Mercado Livre RECEBE (`/items?ids=`), não pela
  * resposta. Duplo do banco interpreta eq/not/or/order/range como o PostgREST
@@ -46,12 +47,14 @@ let anuncios: any[] = [];
 /** Página (0-based) de anuncios cuja leitura falha; null = nenhuma. */
 let falharPagina: number | null = null;
 let paginasLidas = 0;
+/** Todo UPDATE em anuncios: filtros eq aplicados e ids das linhas alcançadas. */
+let atualizacoes: Array<{ filtros: Record<string, unknown>; ids: string[] }> = [];
 
 function reiniciar(linhas: any[]) {
   lojas = [{ id: LOJA_ML_A, user_id: UID_A, marketplace: "ML", ativo: true, nickname: "LojaA", seller_id: "<seller-A>",
     access_token: TOKEN_A, refresh_token: "<refresh-A>", token_expires_at: new Date(Date.now() + 3600_000).toISOString(), created_at: "2026-01-01" }];
   anuncios = linhas.map((l) => ({ ...l }));
-  falharPagina = null; paginasLidas = 0; idsEnviados = []; chamadasRede = [];
+  falharPagina = null; paginasLidas = 0; idsEnviados = []; chamadasRede = []; atualizacoes = [];
 }
 /** Linha de anuncio. `id` ordena a paginação (ordem lexicográfica, como uuid em texto). */
 function an(id: string, user_id: string, marketplace: "ML" | "Shopee", ml_item_id: string | null, sku: string | null, ativo = true) {
@@ -62,6 +65,7 @@ function an(id: string, user_id: string, marketplace: "ML" | "Shopee", ml_item_i
 function clienteFalso() {
   const cadeia = (tabela: string) => {
     const preds: Array<(l: any) => boolean> = [];
+    const filtrosEq: Record<string, unknown> = {};
     let tipo: "select" | "update" = "select";
     let patch: Record<string, unknown> = {};
     let ordem: string | null = null;
@@ -69,7 +73,7 @@ function clienteFalso() {
     const linhas = () => (tabela === "lojas" ? lojas : anuncios);
     const executar = () => {
       let alvo = linhas().filter((l) => preds.every((p) => p(l)));
-      if (tipo === "update") { for (const l of alvo) Object.assign(l, patch); return { data: alvo.map((l) => ({ id: l.id })), error: null }; }
+      if (tipo === "update") { if (tabela === "anuncios") atualizacoes.push({ filtros: { ...filtrosEq }, ids: alvo.map((l) => l.id) }); for (const l of alvo) Object.assign(l, patch); return { data: alvo.map((l) => ({ id: l.id })), error: null }; }
       if (ordem) alvo = [...alvo].sort((a, b) => (String(a[ordem!]) < String(b[ordem!]) ? -1 : String(a[ordem!]) > String(b[ordem!]) ? 1 : 0));
       if (tabela === "anuncios" && faixa) {
         const pagina = Math.floor(faixa[0] / PAGINA);
@@ -83,7 +87,7 @@ function clienteFalso() {
     const c: any = {
       select: () => c,
       update: (p: Record<string, unknown>) => { tipo = "update"; patch = p; return c; },
-      eq: (col: string, v: unknown) => { preds.push((l) => l[col] === v); return c; },
+      eq: (col: string, v: unknown) => { filtrosEq[col] = v; preds.push((l) => l[col] === v); return c; },
       not: (col: string, op: string, v: unknown) => { if (op === "is" && v === null) preds.push((l) => l[col] !== null && l[col] !== undefined); else throw new Error(`not(${op}) nao suportado`); return c; },
       or: (expr: string) => {
         if (expr !== "sku.is.null,sku.eq.") throw new Error(`or(${expr}) nao suportado`);
@@ -205,7 +209,22 @@ async function principal() {
     assert(r.corpo.total === 1, JSON.stringify(r.corpo));
   });
 
-  t("G. Guard V2 I5 ML_SKU_SYNC_NEVER_USES_SHOPEE_ROWS limpo (leitores ML filtram marketplace no banco)", () => {
+  t("H. COLISÃO artificial: row Shopee do MESMO dono com o MESMO ml_item_id de uma row ML (ativa, SKU vazio) → só a ML é escrita; o UPDATE filtra marketplace = ML", async () => {
+    reiniciar([an("0shopee", UID_A, "Shopee", "MLB500", ""), an("ml", UID_A, "ML", "MLB500", null)]);
+    const r = await chamar();
+    assert(r.status === 200 && r.corpo.atualizados === 1, JSON.stringify(r.corpo));
+    assert(mesmoConjunto(idsEnviados, ["MLB500"]), `enviados=${idsEnviados}`);
+    assert(atualizacoes.length >= 1, "nenhum UPDATE registrado");
+    for (const u of atualizacoes) {
+      assert(u.filtros.marketplace === "ML" && u.filtros.user_id === UID_A && u.filtros.ml_item_id === "MLB500", `filtros do UPDATE: ${JSON.stringify(u.filtros)}`);
+      assert(!u.ids.includes("0shopee"), `UPDATE alcançou a row Shopee: ${u.ids}`);
+    }
+    const shopee = anuncios.find((l) => l.id === "0shopee"), ml = anuncios.find((l) => l.id === "ml");
+    assert(shopee.sku === "" && shopee.marketplace === "Shopee", `row Shopee alterada: sku=${shopee.sku}`);
+    assert(ml.sku === "SKU-MLB500", `row ML nao recebeu SKU: ${ml.sku}`);
+  });
+
+  t("G. Guard V2 I5 ML_SKU_SYNC_NEVER_READS_OR_WRITES_SHOPEE_ROWS limpo (READ e WRITE do sync-skus filtram marketplace = ML)", () => {
     const i5 = leitoresMLSemMarketplace();
     assert(i5.length === 0, i5.join(" | "));
     const v2 = invariantesV2();
