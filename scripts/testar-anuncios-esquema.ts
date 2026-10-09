@@ -16,7 +16,7 @@
  *
  *  1. DB_ANUNCIO_COLUMNS == colunas do snapshot
  *  2. DERIVED_UI_FIELDS não são colunas
- *  3. projeções (tela, dashboard) ⊆ snapshot; a da tela sem user_id
+ *  3. projeções (tela, dashboard) ⊆ snapshot; a da tela sem user_id e sem loja_id
  *  4. whitelist de escrita ⊆ snapshot
  *  5. TODA cadeia `.from("anuncios")` do código (app/lib/components):
  *     colunas de select(...) literal e de filtros/ordem ⊆ snapshot
@@ -131,6 +131,13 @@ async function principal() {
     assert(fora.length === 0, `fora do schema: ${fora}`);
     assert(!cols.includes("user_id"), "tela devolve user_id");
   });
+  t("3d. loja_id e coluna (DB_ANUNCIO_COLUMNS) mas NAO vai a tela: projecao sem user_id e sem loja_id", () => {
+    assert((colunas.DB_ANUNCIO_COLUMNS as readonly string[]).includes("loja_id"), "DB_ANUNCIO_COLUMNS sem loja_id");
+    const cols = colunasDoSelect(servico.COLUNAS_ANUNCIO_TELA);
+    assert(!cols.includes("user_id") && !cols.includes("loja_id"), `tela expoe: ${cols.filter((c) => c === "user_id" || c === "loja_id")}`);
+    // tudo o mais continua na tela (payload inalterado): DB − {user_id, loja_id}, na ordem do banco
+    assert(cols.join() === colunas.DB_ANUNCIO_COLUMNS.filter((c) => c !== "user_id" && c !== "loja_id").join(), "projecao da tela mudou");
+  });
   t("3b. projeção do DASHBOARD ⊆ snapshot", () => {
     const fora = colunasDoSelect(servico.COLUNAS_ANUNCIO_DASHBOARD).filter((c) => !COLUNAS.has(c));
     assert(fora.length === 0, `fora do schema: ${fora}`);
@@ -150,10 +157,13 @@ async function principal() {
     const achados = varrer(arquivos, COLUNAS_COM_PENDENTES);
     assert(achados.length === 0, achados.map((a) => `${a.arquivo}:${a.linha} ${a.onde}(${a.coluna})`).join(" | "));
   });
-  t("5c. snapshot = PRODUCAO (sem loja_id); pendente aceita SO loja_id e SO via migration exata da fase 1", () => {
-    assert(!COLUNAS.has("loja_id"), "snapshot ja tem loja_id (fase 1 nao foi aplicada em producao)");
+  t("5c. snapshot = PRODUCAO com a fase 1 aplicada: loja_id uuid, nulo, sem default, ultima coluna; nada pendente fora do snapshot", () => {
+    const loja = SNAPSHOT.colunas.find((c: { nome: string }) => c.nome === "loja_id");
+    assert(loja && loja.tipo === "uuid" && loja.nulo === true && loja.default === false, JSON.stringify(loja));
+    assert(SNAPSHOT.colunas[SNAPSHOT.colunas.length - 1].nome === "loja_id", "loja_id fora da posicao do banco (25, ultima)");
+    // a excecao da migration (ainda pinada) nao acrescenta nada alem do snapshot real
     const pend = colunasPendentesAprovadasAnuncios(RAIZ);
-    assert(JSON.stringify(pend) === JSON.stringify(["loja_id"]), JSON.stringify(pend));
+    assert(pend.every((c) => COLUNAS.has(c)), `pendente fora do snapshot: ${pend}`);
   });
   t("5b. o scanner de fato encontrou as cadeias conhecidas (não está cego)", () => {
     const comCadeia = [...arquivos].filter(([, s]) => /\.from\(\s*["'`]anuncios["'`]\s*\)/.test(s)).map(([f]) => f);

@@ -22,6 +22,8 @@ export const DB_ANUNCIO_COLUMNS = [
   "custo_produto", "insumos", "custo_frete", "frete_gratis", "imposto", "margem_desejada",
   "preco_ideal", "ativo", "ml_item_id", "sku", "preco_anuncio", "thumbnail", "permalink",
   "peso_kg", "variation_id", "logistic_type", "user_id",
+  // ANUNCIOS MULTI-LOJA (fase 1 aplicada em producao): loja Shopee do anuncio
+  "loja_id",
 ] as const;
 
 export type ColunaAnuncio = (typeof DB_ANUNCIO_COLUMNS)[number];
@@ -32,9 +34,12 @@ export type ColunaAnuncio = (typeof DB_ANUNCIO_COLUMNS)[number];
  */
 export const DERIVED_UI_FIELDS = ["lucro_liquido", "margem_contribuicao"] as const;
 
-/** Meus Produtos (lista + edição): todas as colunas físicas, menos o dono. */
+/**
+ * Meus Produtos (lista + edição): todas as colunas físicas, menos o dono e a
+ * loja (`loja_id` não vai ao browser sem decisão própria — payload inalterado).
+ */
 export const COLUNAS_ANUNCIO_TELA: string = DB_ANUNCIO_COLUMNS
-  .filter((c) => c !== "user_id")
+  .filter((c) => c !== "user_id" && c !== "loja_id")
   .join(", ");
 
 /**

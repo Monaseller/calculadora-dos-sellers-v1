@@ -27,6 +27,7 @@
     { "nome": "peso_kg", "tipo": "numeric", "nulo": true, "default": false },
     { "nome": "variation_id", "tipo": "text", "nulo": true, "default": false },
     { "nome": "logistic_type", "tipo": "text", "nulo": true, "default": false },
-    { "nome": "user_id", "tipo": "text", "nulo": true, "default": false }
+    { "nome": "user_id", "tipo": "text", "nulo": true, "default": false },
+    { "nome": "loja_id", "tipo": "uuid", "nulo": true, "default": false }
   ]
 }
