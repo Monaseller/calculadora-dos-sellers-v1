@@ -31,14 +31,8 @@ import Module from "node:module";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join, dirname, normalize } from "node:path";
-// SHOPEE MULTI-APP: excecao EXATA — Configuracoes so sai da J2 pelos hunks aprovados (pagina − hunks = eca183a)
-import { filtrarExcecaoShopeeMultiApp } from "./_excecao-shopee-multi-app";
-// SHOPEE UX V4: excecao EXATA do painel unico Shopee (Configuracoes − hunks UX = cdeb7af; novos por sha256)
-import { filtrarExcecaoShopeeUX } from "./_excecao-shopee-ux";
 // ANUNCIOS SHOPEE MULTI-STORE V1B: excecao EXATA (migrations de anuncios.loja_id por sha256)
 import { filtrarExcecaoAnunciosMultiStore } from "./_excecao-anuncios-multi-store";
-// SHOPEE IMPORT V2: excecao EXATA (helper do laco de fatias por sha256) — SO na J2
-import { filtrarExcecaoShopeeImportV2 } from "./_excecao-shopee-import-v2";
 
 let passou = 0, falhou = 0;
 let fila: Promise<void> = Promise.resolve();
@@ -196,6 +190,28 @@ const browser = new Set<string>();
 }
 const contextoDe = (f: string): Contexto =>
   f.startsWith("scripts/") ? "TEST" : browser.has(f) ? "BROWSER" : "SERVER";
+
+/**
+ * CDS V2 Fase 1A.1 (J2): nada no alcance de browser tem acesso privilegiado — nem cliente de servidor,
+ * nem `server-only`, nem a capability de credenciais, nem service role, nem segredo de provider/servidor.
+ * Pura, para o controle negativo do proprio J2. Comentarios nao contam.
+ */
+function acessoPrivilegiadoNoBrowser(arquivos: Map<string, string>, alcance: Set<string>): string[] {
+  const PROIBIDOS: [RegExp, string][] = [
+    [/\bgetSupabaseServidor\b/, "getSupabaseServidor"],
+    [/["'][^"']*supabase-servidor["']/, "cliente Supabase privilegiado"],
+    [/["']server-only["']/, "server-only"],
+    [/["'][^"']*marketplace\/credenciais["']/, "capability de credenciais"],
+    [/SUPABASE_SERVICE_ROLE_KEY|\bservice_role\b/, "service role"],
+    [/process\.env\.(SHOPEE_\w*PARTNER_KEY|ML_CLIENT_SECRET|SESSION_SECRET|CRON_SECRET|CANONICAL_SALES_SYNC_MANUAL_SECRET)\b/, "segredo de provider/servidor"],
+  ];
+  const v: string[] = [];
+  for (const f of alcance) {
+    const s = (arquivos.get(f) ?? "").replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+    for (const [re, rotulo] of PROIBIDOS) if (re.test(s)) v.push(`${f}: ${rotulo}`);
+  }
+  return v;
+}
 
 // ─────────────────────────────────────────────────────────────────────
 // Duplo do Supabase: registra cada cadeia (tabela, operacao, filtros) e
@@ -556,12 +572,16 @@ async function principal() {
     const d = git("diff", "--name-only", BASE, "--", "lib/supabase.ts").trim();
     assert(d === "", d);
   });
-  t("J2. os unicos arquivos 'use client' alterados sao as 4 telas do SEC-3-B2", () => {
-    // SHOPEE MULTI-APP: a lista generica (BROWSER_PENDENTE) NAO muda; Configuracoes sai SO pela excecao exata
-    // SHOPEE IMPORT V2: o helper do laco de fatias (importado pela tela "use client") sai SO pela excecao exata (sha256)
-    const d = filtrarExcecaoShopeeImportV2(RAIZ, BASE, filtrarExcecaoShopeeUX(RAIZ, BASE, filtrarExcecaoShopeeMultiApp(RAIZ, BASE, git("diff", "--name-only", BASE, "--", "app", "components", "lib").split(/\r?\n/).filter(Boolean))));
-    const cliente = d.filter((f) => fonte.has(f) && browser.has(f) && !BROWSER_PENDENTE.includes(f));
-    assert(cliente.length === 0, cliente.join(", "));
+  t("J2. V2: CLIENT_CODE_HAS_PRIVILEGED_ACCESS = NO em todo o alcance de browser (sem whitelist por arquivo)", () => {
+    // CDS V2 Fase 1A.1: a cerca "so estes arquivos 'use client' podem mudar desde c075653" (+3 excecoes exatas)
+    // virou invariante semantico sobre TODO arquivo "use client" e tudo que ele importa, transitivamente.
+    const v = acessoPrivilegiadoNoBrowser(fonte, browser);
+    assert(v.length === 0, v.join(", "));
+    for (const f of ["components/TopBar.tsx", "app/(app)/configuracoes/page.tsx"]) assert(browser.has(f), `${f} fora do alcance auditado`);
+    // controle negativo: a guarda PEGA um import privilegiado artificial num arquivo "use client"
+    const sujo = new Map(fonte);
+    sujo.set("components/TopBar.tsx", `${fonte.get("components/TopBar.tsx")}\nimport { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";\n`);
+    assert(acessoPrivilegiadoNoBrowser(sujo, browser).some((x) => x.startsWith("components/TopBar.tsx")), "guarda nao pegou import privilegiado artificial");
   });
   // SEC-3-C: a migration de lockdown e a unica mudanca aprovada em
   // supabase/ (validada por scripts/testar-sec3-c-lockdown.ts).

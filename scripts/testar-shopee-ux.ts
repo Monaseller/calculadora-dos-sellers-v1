@@ -20,6 +20,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { decidirConexaoShopee, lerAppsShopee, MENSAGEM_APPS_INDISPONIVEIS, MENSAGEM_NENHUM_APP, urlConexaoShopee } from "../lib/shopee-conexao-ui";
+import { nomeExibicaoDaLoja } from "../lib/lojas/identidade";
 // CDS GUARD V2 (Fase 0B): invariantes estruturais + zonas protegidas no lugar da cerca "arquivo nao mudou desde a base"
 import { invariantesV2 } from "./_guard-v2";
 
@@ -107,11 +108,25 @@ t("J. so chave/rotulo/configurado sao usados; credencial na resposta e descartad
 });
 
 console.log("\n[K-M. o resto intacto]");
-t("K. 'Minhas contas' intacta: cada loja continua listada (LojaCard), sem marcador de app", () => {
-  const base = execFileSync("git", ["show", `${BASE}:${PAGINA}`], { cwd: RAIZ, encoding: "utf8" }).replace(/\r\n/g, "\n");
-  const trecho = (s: string) => s.slice(s.indexOf("{/* ── Minhas contas ── */}"), s.indexOf("{/* ── Adicionar conta ── */}"));
-  assert(trecho(base).length > 500 && trecho(base) === trecho(fonte(PAGINA)), "secao Minhas contas mudou");
-  assert(/\{lojas\.filter\(l => l\.marketplace === "Shopee"\)\.map\(l => \(/.test(pg) && /\{l\.nickname \|\| l\.nome\}/.test(pg), "painel nao lista as contas Shopee existentes");
+t("K. V2: 'Minhas contas' lista TODAS as lojas (LojaCard, sem filtro, sem marcador de app); painel Shopee lista todas as contas Shopee; nome so pela fonte canonica", () => {
+  // CDS V2 Fase 1A.1: o literal "{l.nickname || l.nome}" e a secao byte-identica a cdeb7af viraram invariante
+  // de produto — cada conta continua listada, nenhuma some, e o nome vem de nomeExibicaoDaLoja.
+  const f = fonte(PAGINA);
+  const minhas = f.slice(f.indexOf("{/* ── Minhas contas ── */}"), f.indexOf("{/* ── Adicionar conta ── */}"));
+  assert(minhas.length > 500, "secao Minhas contas ausente");
+  assert(/\{lojas\.map\(\s*l\s*=>\s*\(\s*<LojaCard\b[\s\S]{0,200}loja=\{l\}/.test(minhas), "Minhas contas nao lista cada loja via LojaCard");
+  assert(!/lojas\.filter\(/.test(minhas), "Minhas contas filtra lojas (alguma conta sumiria)");
+  assert(!/partner|\bapp\b|rotulo|R\.D\./.test(minhas), "marcador de app em Minhas contas");
+  assert(/\{lojas\.filter\(\s*l\s*=>\s*l\.marketplace === "Shopee"\s*\)\.map\(\s*l\s*=>\s*\([\s\S]{0,300}nomeExibicaoDaLoja\(l\)/.test(pg), "painel nao lista as contas Shopee pela fonte canonica");
+  assert(/nomeExibicaoDaLoja\(loja\)/.test(pg) && /from "@\/lib\/lojas\/identidade"/.test(pg), "LojaCard fora da fonte canonica");
+  assert(!/\.(nickname|nome)\s*(\|\||\?\?)|(\|\||\?\?)\s*\w+\.(nickname|nome)\b/.test(pg), "nome de loja montado fora do helper canonico");
+  // o helper: nome real → nickname real → shop_id so como fallback tecnico
+  const exemplos = [
+    { nome: "Loja Real", nickname: "Loja Real", marketplace: "Shopee", seller_id: "7100001" },
+    { nome: "Shopee 7100002", nickname: "Apelido Real", marketplace: "Shopee", seller_id: "7100002" },
+    { nome: "Shopee 7100003", nickname: "Shopee 7100003", marketplace: "Shopee", seller_id: "7100003" },
+  ];
+  assert(exemplos.map(nomeExibicaoDaLoja).join("|") === "Loja Real|Apelido Real|Shopee 7100003", exemplos.map(nomeExibicaoDaLoja).join("|"));
 });
 t("L. Mercado Livre intacto (card, conectarML e retorno OAuth ML)", () => {
   const base = execFileSync("git", ["show", `${BASE}:${PAGINA}`], { cwd: RAIZ, encoding: "utf8" }).replace(/\r\n/g, "\n");

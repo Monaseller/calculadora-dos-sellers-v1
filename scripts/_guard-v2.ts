@@ -15,6 +15,11 @@
  *   I4  toda rota em app/api/internal/** exige segredo (CRON_SECRET ou x-worker-secret);
  *   I5  ML_SKU_SYNC_NEVER_READS_OR_WRITES_SHOPEE_ROWS (Fase 0C/0C.1): toda leitura paginada de anuncios dos
  *       caminhos ML e todo UPDATE do sync-skus filtram marketplace = "ML" — row Shopee nunca chega ao provider ML nem é escrita por ele;
+ *   I6  I6_STORE_IDENTITY_IS_EXPLICIT (Fase 1A): o fallback técnico "<Marketplace> <id>" só nasce em
+ *       lib/lojas/identidade.ts; nome de loja só é gravado via camposDeNomeParaGravar na capability
+ *       (nunca por rota/navegador, nunca dados.nome cru); callbacks extraem nome só pelos parsers
+ *       canônicos; o callback Shopee não troca a loja em uso; nenhum runtime decide por
+ *       shop_id/seller_id literal nem traz nome de loja embutido ("mais recente" segue em I3);
  *   Z   ZONAS PROTEGIDAS sem suíte comportamental própria (telas legadas de Vendas/Dashboard,
  *       constantes financeiras, supabase/**, vercel.json, .env.example, sync-worker.mjs): mudar
  *       exige re-baseline EXPLÍCITO de scripts/zonas-protegidas.json (aparece no diff), nunca
@@ -161,6 +166,54 @@ export function leitoresMLSemMarketplace(raiz = RAIZ_V2): string[] {
   return erros;
 }
 
+// ── I6: identidade de loja explícita ─────────────────────────────────────
+const semComentarios = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+export const ARQUIVO_IDENTIDADE = "lib/lojas/identidade.ts";
+export const CALLBACK_SHOPEE = "app/api/auth/shopee/callback/route.ts";
+export const CALLBACK_ML = "app/api/auth/mercadolivre/callback/route.ts";
+export const CAPABILITY_LOJAS = "lib/marketplace/credenciais.ts";
+/** Superfícies de identidade/seleção: aqui não pode haver nome nem id de loja embutido. */
+export const SUPERFICIES_IDENTIDADE = [ARQUIVO_IDENTIDADE, "lib/lojas/resolver.ts", CAPABILITY_LOJAS, "lib/shopee-loja-selecao.ts",
+  CALLBACK_SHOPEE, CALLBACK_ML, "app/api/lojas/route.ts", "app/api/lojas/ativar/route.ts", "components/TopBar.tsx", "app/(app)/configuracoes/page.tsx"];
+export function identidadeDeLojaNaoExplicita(raiz = RAIZ_V2): string[] {
+  const erros: string[] = [];
+  const runtime = listar(raiz, "app", "lib", "components").filter((f) => /\.(ts|tsx)$/.test(f));
+  for (const f of runtime) {
+    const src = semComentarios(ler(raiz, f));
+    if (f !== ARQUIVO_IDENTIDADE && /`(Shopee|Mercado Livre) \$\{/.test(src)) erros.push(`${f}: monta fallback técnico fora de ${ARQUIVO_IDENTIDADE}`);
+    if (/\b(shop_?[iI]d|seller_?[iI]d)\s*[!=]==?\s*["'\d]/.test(src)) erros.push(`${f}: decisão por shop_id/seller_id literal`);
+    if (f.startsWith("app/") && /\.from\(["']lojas["']\)/.test(src)) erros.push(`${f}: rota acessa lojas fora da capability`);
+    if (f !== ARQUIVO_IDENTIDADE && /\.shop_name\b/.test(src)) erros.push(`${f}: lê shop_name fora do parser canônico`);
+    // browser nunca dita nome real: só os callbacks OAuth (metadata vinda do provider) chamam registro/refresh de nome
+    if (f.startsWith("app/") && f !== CALLBACK_SHOPEE && f !== CALLBACK_ML && /\b(atualizarMetadataDaLoja|registrarLojaShopeeOAuth|registrarCredencialMLOAuth)\(/.test(src))
+      erros.push(`${f}: rota grava nome de loja (navegador não é autoridade de nome)`);
+  }
+  for (const f of SUPERFICIES_IDENTIDADE) {
+    if (/monamor|r\.d\.|\b\d{8,}\b/i.test(semComentarios(ler(raiz, f)))) erros.push(`${f}: nome/id de loja embutido`);
+  }
+  const cap = semComentarios(ler(raiz, CAPABILITY_LOJAS));
+  if (/\b(nome|nickname)\s*:\s*dados\./.test(cap)) erros.push(`${CAPABILITY_LOJAS}: grava nome de loja cru (fora de camposDeNomeParaGravar)`);
+  if ((cap.match(/camposDeNomeParaGravar\(/g) ?? []).length < 5) erros.push(`${CAPABILITY_LOJAS}: registro/refresh de nome não passa por camposDeNomeParaGravar`);
+  const cbS = semComentarios(ler(raiz, CALLBACK_SHOPEE)), cbM = semComentarios(ler(raiz, CALLBACK_ML));
+  if (!/extrairNomeLojaShopee\(/.test(cbS)) erros.push(`${CALLBACK_SHOPEE}: nome sem o parser canônico`);
+  if (!/extrairMetadataContaML\(/.test(cbM)) erros.push(`${CALLBACK_ML}: metadata sem o parser canônico`);
+  if (/cookies\.set\(\s*["'](shopee_loja_id|loja_ativa_id)["']/.test(cbS)) erros.push(`${CALLBACK_SHOPEE}: conectar troca a loja em uso`);
+  // metadata owner- e marketplace-scoped (leitura e escrita pelo par id+user_id; escrita também por marketplace)
+  const iMeta = cap.indexOf("export async function atualizarMetadataDaLoja(");
+  const meta = iMeta < 0 ? "" : cap.slice(iMeta, cap.indexOf("\nexport ", iMeta + 1));
+  if (!meta) erros.push(`${CAPABILITY_LOJAS}: atualizarMetadataDaLoja ausente`);
+  else {
+    if ((meta.match(/\.eq\("user_id", dono\)/g) ?? []).length < 2) erros.push(`${CAPABILITY_LOJAS}: metadata sem escopo de dono na leitura e na escrita`);
+    if (!/\.update\(campos\)[\s\S]{0,200}\.eq\("marketplace", marketplace\)/.test(meta)) erros.push(`${CAPABILITY_LOJAS}: escrita de metadata sem escopo de marketplace`);
+  }
+  // resolvedor explícito: sem ordenação/limite; loja única só sob opt-in
+  const resolver = semComentarios(ler(raiz, "lib/lojas/resolver.ts"));
+  if (/\.order\(|\.limit\(|created_at|\.sort\(/.test(resolver)) erros.push("lib/lojas/resolver.ts: resolvedor ordena/limita (seleção implícita)");
+  if ((resolver.match(/doMarketplace\[0\]/g) ?? []).length !== 1 || !/pedido\.permitirUnica && doMarketplace\.length === 1\) return \{ ok: true, loja: paraResolvida\(doMarketplace\[0\]/.test(resolver))
+    erros.push("lib/lojas/resolver.ts: loja escolhida sem pedido explícito");
+  return erros;
+}
+
 // ── Z: zonas protegidas ────────────────────────────────────────────────
 export const ARQUIVO_ZONAS = "scripts/zonas-protegidas.json";
 export const ZONAS = ["app/(app)/dashboard/page.tsx", "app/(app)/vendas/page.tsx", "lib/comissoes-shopee.ts", "lib/comissoes-mercado-livre.ts",
@@ -192,6 +245,7 @@ export function invariantesV2(raiz = RAIZ_V2, opcoes: { zonas?: boolean } = {}):
   for (const v of seletoresImplicitosNovos(raiz)) erros.push(`I3 seleção implícita nova: ${v}`);
   for (const v of rotasInternasSemSegredo(raiz)) erros.push(`I4 rota interna sem segredo: ${v}`);
   for (const v of leitoresMLSemMarketplace(raiz)) erros.push(`I5 ML_SKU_SYNC_NEVER_READS_OR_WRITES_SHOPEE_ROWS: ${v}`);
+  for (const v of identidadeDeLojaNaoExplicita(raiz)) erros.push(`I6 I6_STORE_IDENTITY_IS_EXPLICIT: ${v}`);
   if (opcoes.zonas !== false) for (const v of verificarZonas(raiz)) erros.push(`Z zona protegida sem re-baseline: ${v}`);
   return erros;
 }

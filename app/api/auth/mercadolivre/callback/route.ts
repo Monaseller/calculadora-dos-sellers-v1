@@ -29,6 +29,7 @@
 import { NextResponse } from "next/server";
 import { autenticarRequisicao, agoraEmSegundos, lerCookie } from "@/lib/autenticacao";
 import { verificarEstado, verifierConfere, nomeCookiePkce } from "@/lib/estado-oauth";
+import { extrairMetadataContaML } from "@/lib/lojas/identidade";
 import {
   lerLojaMLDoDonoParaReconexao,
   listarLojasMLDoDonoPorSeller,
@@ -221,7 +222,7 @@ async function persistir(
   const { lojaId: gravada } = await registrarCredencialMLOAuth(userId, {
     lojaId,
     sellerId: identidade.sellerId,
-    nickname: identidade.nickname,
+    nickname: identidade.nomeReal,
     accessToken: credencial.accessToken,
     refreshToken: credencial.refreshToken,
     expiraEm,
@@ -315,7 +316,8 @@ async function lerErroEnumerado(res: Response): Promise<string> {
 
 interface IdentidadeML {
   sellerId: string;
-  nickname: string;
+  /** nickname REAL do /users/me, ou null (CDS V2 Fase 1A: nunca first_name nem "Loja ML"). */
+  nomeReal: string | null;
 }
 
 /** `GET /users/me` — quem autorizou. O token só aparece no header. */
@@ -331,15 +333,10 @@ async function obterIdentidadeML(accessToken: string): Promise<IdentidadeML | nu
       console.error(`[callback ML] /users/me respondeu ${res.status}`);
       return null;
     }
-    const me = await res.json();
-    const sellerId = me?.id === undefined || me?.id === null ? "" : String(me.id);
-    if (!sellerId) return null;
-    return {
-      sellerId,
-      nickname: typeof me.nickname === "string" && me.nickname
-        ? me.nickname
-        : (typeof me.first_name === "string" && me.first_name ? me.first_name : "Loja ML"),
-    };
+    // Caminho canonico de metadata ML (lib/lojas/identidade.ts): id externo + nickname real.
+    const metadata = extrairMetadataContaML(await res.json());
+    if (!metadata) return null;
+    return { sellerId: metadata.idExterno, nomeReal: metadata.nomeReal };
   } catch (e: any) {
     console.error("[callback ML] falha de comunicação em /users/me:", e?.name ?? "erro");
     return null;

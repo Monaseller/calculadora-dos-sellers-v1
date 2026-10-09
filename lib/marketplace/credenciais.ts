@@ -42,6 +42,7 @@
  */
 import "server-only";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
+import { camposDeNomeParaGravar } from "@/lib/lojas/identidade";
 
 /** Marketplaces tratados. Definidos aqui para não importar `ml-conexao` (ciclo). */
 const MARKETPLACE_ML = "ML";
@@ -546,7 +547,11 @@ export interface DadosCredencialMLOAuth {
   lojaId?: string | null;
   /** Usado somente no INSERT — o UPDATE nunca reescreve `seller_id`. */
   sellerId: string;
-  nickname: string;
+  /**
+   * Nickname REAL do /users/me (extrairMetadataContaML), ou null. Fase 1A: null nunca
+   * reescreve o nome de loja existente; loja nova sem nome recebe o fallback técnico.
+   */
+  nickname: string | null;
   accessToken: string;
   refreshToken: string | null;
   expiraEm: string;
@@ -564,8 +569,7 @@ export async function registrarCredencialMLOAuth(
     const atualizacao: Record<string, unknown> = {
       access_token: dados.accessToken,
       token_expires_at: dados.expiraEm,
-      nickname: dados.nickname,
-      nome: dados.nickname,
+      ...camposDeNomeParaGravar(dados.nickname, { lojaNova: false, marketplace: MARKETPLACE_ML, idExterno: dados.sellerId }),
       ativo: true,
     };
     if (dados.refreshToken) atualizacao.refresh_token = dados.refreshToken;
@@ -589,8 +593,7 @@ export async function registrarCredencialMLOAuth(
   const novaLinha: Record<string, unknown> = {
     marketplace: MARKETPLACE_ML,
     seller_id: dados.sellerId,
-    nickname: dados.nickname,
-    nome: dados.nickname,
+    ...camposDeNomeParaGravar(dados.nickname, { lojaNova: true, marketplace: MARKETPLACE_ML, idExterno: dados.sellerId }),
     access_token: dados.accessToken,
     token_expires_at: dados.expiraEm,
     ativo: true,
@@ -656,8 +659,11 @@ export async function registrarCredencialMLOAuth(
  */
 export interface DadosRegistroShopee {
   shopId: string;
-  nickname: string;
-  nome: string;
+  /**
+   * Nome REAL vindo de get_shop_info (extrairNomeLojaShopee), ou null. Fase 1A: null nunca
+   * reescreve o nome de loja existente (reconexão preserva); só loja nova recebe fallback.
+   */
+  nomeReal: string | null;
   partnerId: string;
   partnerKey: string;
   accessToken: string;
@@ -688,14 +694,15 @@ export async function registrarLojaShopeeOAuth(
   // do banco. Remove-la e frente propria (ela e um segredo GLOBAL de
   // ambiente replicado por linha, nao dado por loja).
   const credenciais = {
-    nickname: dados.nickname,
-    nome: dados.nome,
     partner_id: dados.partnerId,
     partner_key: dados.partnerKey,
     access_token: dados.accessToken,
     refresh_token: dados.refreshToken,
     token_expires_at: dados.expiraEm,
     ativo: true,
+    // CDS V2 Fase 1A: nome so com nome REAL; sem ele, a linha existente preserva o que tem
+    // (o INSERT de loja nova acrescenta o fallback tecnico abaixo).
+    ...camposDeNomeParaGravar(dados.nomeReal, { lojaNova: false, marketplace: MARKETPLACE_SHOPEE, idExterno: sellerId }),
   };
 
   /** Busca escopada. `marketplace` entra SEMPRE — ver "Por que NAO usa upsert". */
@@ -747,6 +754,7 @@ export async function registrarLojaShopeeOAuth(
       seller_id: sellerId,
       shop_id: sellerId,
       ...credenciais,
+      ...camposDeNomeParaGravar(dados.nomeReal, { lojaNova: true, marketplace: MARKETPLACE_SHOPEE, idExterno: sellerId }),
     })
     .select("id");
 
@@ -775,6 +783,63 @@ export async function registrarLojaShopeeOAuth(
     return { lojaId: null, erro: "conflito sem linha correspondente" };
   }
   return atualizar(relido.ids[0]);
+}
+
+// ─── Metadata da conta — CDS V2 Fase 1A ───────────────────────────────
+//
+// Refresh EXPLÍCITO de metadata (nome real) de uma loja que já existe. A metadata vem
+// do provider no servidor — o navegador nunca é autoridade de nome. Valida, nesta
+// ordem: loja do dono (par id+user_id), marketplace igual, id externo igual. Só grava
+// nome REAL; ausência de nome nunca rebaixa um nome real para o fallback técnico.
+
+export type MotivoMetadataLoja =
+  | "entrada_invalida" | "loja_nao_encontrada" | "marketplace_divergente" | "id_externo_divergente" | "erro_persistencia";
+
+export interface ResultadoMetadataLoja {
+  ok: boolean;
+  /** true só quando o banco confirmou a linha alterada. */
+  atualizado: boolean;
+  motivo?: MotivoMetadataLoja;
+}
+
+export async function atualizarMetadataDaLoja(
+  userId: string,
+  lojaId: string,
+  marketplace: "Shopee" | "ML",
+  metadata: { idExterno: string; nomeReal: string | null },
+): Promise<ResultadoMetadataLoja> {
+  const idExterno = metadata?.idExterno === undefined || metadata?.idExterno === null ? "" : String(metadata.idExterno).trim();
+  if (!userId || !lojaId || !idExterno || (marketplace !== MARKETPLACE_SHOPEE && marketplace !== MARKETPLACE_ML)) {
+    return { ok: false, atualizado: false, motivo: "entrada_invalida" };
+  }
+  const supabase = getSupabaseServidor();
+  const dono = String(userId);
+
+  const { data, error } = await supabase
+    .from("lojas")
+    .select("id, marketplace, seller_id, shop_id")
+    .eq("id", lojaId)
+    .eq("user_id", dono);
+  if (error) return { ok: false, atualizado: false, motivo: "erro_persistencia" };
+  const linha = (Array.isArray(data) ? data[0] : null) as { marketplace?: string; seller_id?: string | null; shop_id?: string | null } | null;
+  if (!linha) return { ok: false, atualizado: false, motivo: "loja_nao_encontrada" };
+  if (linha.marketplace !== marketplace) return { ok: false, atualizado: false, motivo: "marketplace_divergente" };
+  const externoDaLoja = String((marketplace === MARKETPLACE_SHOPEE ? (linha.shop_id ?? linha.seller_id) : linha.seller_id) ?? "").trim();
+  if (externoDaLoja !== idExterno) return { ok: false, atualizado: false, motivo: "id_externo_divergente" };
+
+  const campos = camposDeNomeParaGravar(metadata.nomeReal, { lojaNova: false, marketplace, idExterno });
+  if (Object.keys(campos).length === 0) return { ok: true, atualizado: false };
+
+  const { data: alteradas, error: erroUpdate } = await supabase
+    .from("lojas")
+    .update(campos)
+    .eq("id", lojaId)
+    .eq("user_id", dono)
+    .eq("marketplace", marketplace)
+    .select("id");
+  if (erroUpdate) return { ok: false, atualizado: false, motivo: "erro_persistencia" };
+  if (!Array.isArray(alteradas) || alteradas.length !== 1) return { ok: false, atualizado: false, motivo: "loja_nao_encontrada" };
+  return { ok: true, atualizado: true };
 }
 
 // ─── Cursor de cobertura do sync Shopee — TIMEOUT1a ───────────────────

@@ -21,6 +21,7 @@
 import { NextResponse } from "next/server";
 import { autenticarRequisicao } from "@/lib/autenticacao";
 import { listarLojasAtivasDoDono } from "@/lib/marketplace/credenciais";
+import { nomeExibicaoDaLoja } from "@/lib/lojas/identidade";
 
 // LOJAS-ANON-SELECT: o cliente ANON de módulo foi REMOVIDO — esta rota
 // não tem mais nenhuma consulta própria.
@@ -45,7 +46,9 @@ export async function GET(request: Request) {
     }
 
     // Sucesso: array, mesmo vazio. Zero lojas é resposta legítima.
-    return NextResponse.json(data ?? []);
+    // CDS V2 Fase 1A: `nome_exibicao` é a fonte ÚNICA do nome mostrado (nome real →
+    // nickname real → fallback técnico), calculada no servidor — campos crus preservados.
+    return NextResponse.json((data ?? []).map((l) => ({ ...l, nome_exibicao: nomeExibicaoDaLoja(l) })));
   } catch (err: any) {
     console.error("[GET /api/lojas] erro inesperado:", err?.message);
     return NextResponse.json({ erro: "Não foi possível carregar as lojas." }, { status: 500 });

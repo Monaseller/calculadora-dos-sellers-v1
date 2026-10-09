@@ -2,6 +2,7 @@
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { useDateField } from "@/lib/date-field-context";
+import { nomeExibicaoDaLoja } from "@/lib/lojas/identidade";
 
 const PAGE_INFO: Record<string, { title: string; desc: string }> = {
   "/dashboard":     { title: "Dashboard",     desc: "Visão geral dos seus anúncios e resultados." },
@@ -11,7 +12,7 @@ const PAGE_INFO: Record<string, { title: string; desc: string }> = {
   "/configuracoes": { title: "Configurações", desc: "Gerencie suas lojas e conexões." },
 };
 
-type Loja = { id: string; nome: string; marketplace: string; nickname: string | null };
+type Loja = { id: string; nome: string; marketplace: string; nickname: string | null; seller_id?: string | null };
 
 function getCookieClient(name: string): string | null {
   if (typeof document === "undefined") return null;
@@ -94,7 +95,7 @@ export default function TopBar() {
   }
   function lojaLabel(loja: Loja | undefined): string {
     if (!loja) return "";
-    const nick = toTitleCase(loja.nickname || loja.nome || "");
+    const nick = toTitleCase(nomeExibicaoDaLoja(loja));
     const mkt  = loja.marketplace === "ML" ? "Mercado Livre" : loja.marketplace;
     return `${nick} ${mkt}`;
   }
@@ -199,7 +200,7 @@ export default function TopBar() {
                       <span style={{ fontSize: "16px" }}>{l.marketplace === "ML" ? "🛒" : "🛍️"}</span>
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ fontSize: "13px", fontWeight: 700, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {l.nickname || l.nome}
+                          {nomeExibicaoDaLoja(l)}
                         </div>
                         <div style={{ fontSize: "11px", color: "#9099aa" }}>{l.marketplace}</div>
                       </div>

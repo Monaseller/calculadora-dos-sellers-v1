@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { interpretarRetornoOAuthML } from "@/lib/conexao-ml-cliente";
 import { decidirConexaoShopee, MENSAGEM_APPS_INDISPONIVEIS, type OpcaoAppShopee } from "@/lib/shopee-conexao-ui";
+import { nomeExibicaoDaLoja } from "@/lib/lojas/identidade";
 
 type Loja = {
   id: string;
@@ -50,7 +51,7 @@ function LojaCard({ loja, ativa, onAtivar, onDesconectar }: {
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "4px" }}>
           <span style={{ fontWeight: 800, fontSize: "15px", color: "#fff" }}>
-            {loja.nickname || loja.nome}
+            {nomeExibicaoDaLoja(loja)}
           </span>
           <span style={{
             fontSize: "11px", fontWeight: 700, padding: "2px 8px", borderRadius: "6px",
@@ -548,7 +549,7 @@ export default function ConfiguracoesPage() {
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: "6px", marginBottom: "16px" }}>
                 {lojas.filter(l => l.marketplace === "Shopee").map(l => (
-                  <div key={l.id} style={{ fontSize: "13px", color: "#fff" }}>🛍️ {l.nickname || l.nome}</div>
+                  <div key={l.id} style={{ fontSize: "13px", color: "#fff" }}>🛍️ {nomeExibicaoDaLoja(l)}</div>
                 ))}
               </div>
             )}

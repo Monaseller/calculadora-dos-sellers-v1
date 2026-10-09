@@ -19,6 +19,7 @@
  */
 import "server-only";
 import { listarLojasAtivasDoDono } from "@/lib/marketplace/credenciais";
+import { nomeExibicaoDaLoja } from "@/lib/lojas/identidade";
 
 export const NOME_COOKIE_LOJA_SHOPEE = "shopee_loja_id";
 
@@ -60,7 +61,7 @@ export async function lojasShopeeAtivasDoDono(userId: string): Promise<LojaShope
   const { linhas, erro } = await listarLojasAtivasDoDono(userId);
   if (erro) return null;
   return linhas.filter((l) => l.marketplace === "Shopee" && l.id)
-    .map((l) => ({ id: String(l.id), rotulo: String(l.nickname || l.nome || "Shopee") }));
+    .map((l) => ({ id: String(l.id), rotulo: nomeExibicaoDaLoja(l) }));
 }
 
 /** Selecao store-scoped com as lojas lidas do banco (dono vem da SESSAO, nunca do pedido). */

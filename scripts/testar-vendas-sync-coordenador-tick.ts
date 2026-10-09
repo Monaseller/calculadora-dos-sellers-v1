@@ -9,26 +9,10 @@
  * Uso: npx tsx scripts/testar-vendas-sync-coordenador-tick.ts
  */
 import "./_server-only-inerte";
-import { execFileSync } from "node:child_process";
-// SALES-CANONICAL-D13A: excecao minima e exata (capability owner-scoped + arquivos novos do D13)
-import { blocoD13Credenciais, filtrarExcecaoD13 } from "./_excecao-d13-vendas-canonicas";
-// SALES-CANONICAL-D14B: excecao EXATA do patch D14 nos leitores (ATUAL − patch aprovado = bytes de 1c4fe29)
-import { filtrarExcecaoD14 } from "./_excecao-d14-vendas-canonicas";
-// SALES-SYNC-D15C2: excecao EXATA do motor intraday ML (worker.ts − hunks D15C = b260583; intraday.ts por sha256)
-import { filtrarExcecaoD15C } from "./_excecao-d15c-ml-intraday";
-// SALES-SYNC-D15D2: excecao EXATA do motor intraday Shopee (worker.ts − hunks D15D = e90557e; intraday.ts por sha256)
-import { filtrarExcecaoD15D } from "./_excecao-d15d-shopee-intraday";
-// SALES-SYNC-D15B2: excecao EXATA do patch D15B nos arquivos de sync (ATUAL − patch aprovado = bytes de d631748)
-import { filtrarExcecaoD15B } from "./_excecao-d15b-intraday";
-// SALES-CANONICAL-D16B: excecao EXATA do cutover dos 4 cards do Dashboard (dashboard − hunks D16 = 1d6e573; novos por sha256)
-import { filtrarExcecaoD16 } from "./_excecao-d16-dashboard-canonico";
-// SHOPEE MULTI-STORE V1B: excecao EXATA da camada multi-loja (arquivos − hunks = 5fdb51f; novos por sha256)
-import { filtrarExcecaoShopeeMultiStore } from "./_excecao-shopee-multi-store";
-// ANUNCIOS SHOPEE MULTI-STORE V1B: excecao EXATA (arquivos − hunks = bb8f7ea; migrations/novos por sha256)
-import { filtrarExcecaoAnunciosMultiStore } from "./_excecao-anuncios-multi-store";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
+// CDS GUARD V2 (Fase 1A.1): invariantes estruturais + zonas protegidas no lugar da cerca "INTOCADOS desde a base"
+import { invariantesV2 } from "./_guard-v2";
 
 let passou = 0, falhou = 0;
 let fila: Promise<void> = Promise.resolve();
@@ -40,7 +24,6 @@ function t(nome: string, fn: () => void | Promise<void>) {
 }
 function assert(c: unknown, m: string): asserts c { if (!c) throw new Error(m); }
 const RAIZ = join(__dirname, "..");
-const BASE = "76cf613";
 const AGORA = Date.parse("2026-10-06T17:00:00Z"); // hoje em SP = 06/10
 const HOJE_INICIO = "2026-10-06T03:00:00.000Z";
 const H = 3600e3;
@@ -420,34 +403,25 @@ async function principal() {
   });
 
   console.log("\n[escopo]");
-  t("sem cron, sem flag, sem migration; coordenador/planner/worker/legado/sync-on-read INTOCADOS desde a base", () => {
-    const d = execFileSync("git", ["diff", "--name-only", BASE, "--", "lib/vendas/sync/coordenador.ts", "lib/vendas/sync/planejamento.ts", "lib/vendas/sync/tipos.ts",
-      "lib/vendas/sync/worker.ts", "lib/vendas/sync/worker-deps.ts", "lib/vendas/sync/worker-contrato.ts", "app/api/internal/vendas-sync/worker", "app/api/sync", "app/api/internal/sync",
-      "app/api/ml/vendas", "app/api/shopee/vendas", "lib/vendas/canonico", "lib/mercado-livre/ingestao", "lib/shopee/ingestao", "lib/shopee-auth.ts", "lib/ml-auth.ts",
-      /* SALES-SYNC-D10: vercel.json agora agenda os crons canonicos — guard proprio: testar-vendas-sync-cron */ "lib/marketplace", "supabase", ".env.example", "lib/feature-flags.ts", "scripts/sync-worker.mjs"], { cwd: RAIZ, encoding: "utf8" }).trim()
-      // SALES-SYNC-D2 muda DE PROPOSITO so a ordem de claim do worker (guard proprio: testar-vendas-sync-worker-fairness)
-      // SALES-SYNC-D6: flag server-only na rota do worker e no .env.example (guard proprio: testar-vendas-sync-feature-flag)
-      .split(/\r?\n/).filter((f) => f && f !== CAP && f !== "lib/vendas/sync/worker.ts" && f !== ".env.example" && f !== "app/api/internal/vendas-sync/worker/route.ts");
-    // SALES-CANONICAL-D13A: SO os arquivos NOVOS do D13 em lib/vendas/canonico (leitores existentes continuam travados)
-    const dForaD13 = filtrarExcecaoAnunciosMultiStore(RAIZ, BASE, filtrarExcecaoShopeeMultiStore(RAIZ, BASE, filtrarExcecaoD16(RAIZ, BASE, filtrarExcecaoD15D(RAIZ, BASE, filtrarExcecaoD15C(RAIZ, BASE, filtrarExcecaoD15B(RAIZ, BASE, filtrarExcecaoD14(RAIZ, BASE, filtrarExcecaoD13(RAIZ, BASE, d, false)))))))).join(",");
-    const novos = execFileSync("git", ["ls-files", "--others", "--exclude-standard", "--", "supabase"], { cwd: RAIZ, encoding: "utf8" }).trim();
-    assert(dForaD13 === "" && novos === "", `alterados: ${dForaD13} ${novos}`);
-    // SALES-SYNC-D1.1: a capability so GANHA a listagem do tick — nenhuma linha existente removida/alterada
-    // SALES-CANONICAL-D13A: o bloco D13 (validado por blocoD13Credenciais) sai ANTES desta regra; todo o resto continua sob ela
-    const d13 = blocoD13Credenciais(RAIZ);
-    assert(d13.valido, `bloco D13 de credenciais.ts invalido: ${d13.motivo}`);
-    const tmp = mkdtempSync(join(tmpdir(), "d13a-"));
-    writeFileSync(join(tmp, "base.ts"), execFileSync("git", ["show", `${BASE}:${CAP}`], { cwd: RAIZ, encoding: "utf8" }).replace(/\r\n/g, "\n"));
-    writeFileSync(join(tmp, "atual.ts"), d13.semBloco);
-    let saidaDiff = "";
-    try { saidaDiff = execFileSync("git", ["diff", "--no-index", "-U0", join(tmp, "base.ts"), join(tmp, "atual.ts")], { encoding: "utf8" }); } catch (e: any) { saidaDiff = String(e.stdout ?? ""); }
-    rmSync(tmp, { recursive: true, force: true });
-    const dc = saidaDiff.split(/\r?\n/);
-    const removidas = dc.filter((l) => l.startsWith("-") && !l.startsWith("---"));
-    const adicionadas = dc.filter((l) => l.startsWith("+") && !l.startsWith("+++") && !/^\+\s*(\*|\/\*\*|\/\/)/.test(l)).join("\n");
-    assert(removidas.length === 0, `capability alterada: ${removidas.slice(0, 3).join(" | ")}`);
-    assert(adicionadas === "" || ((adicionadas.match(/export (async function|interface|const) \w+/g) ?? []).every((x) => /LinhaLojaParaSyncCanonico|listarLojasAtivasParaSyncCanonico|MotivoCredencialIrrecuperavel|ElegibilidadeSyncCanonico|classificarElegibilidadeSyncCanonico/.test(x))
-      && !/\.update\(|\.insert\(|\.upsert\(|\.delete\(|\.rpc\(|fetch\(/.test(adicionadas)), "capability ganhou algo alem da listagem/elegibilidade do tick");
+  t("V2: canonico isolado do legado, sem migration/env/cron novos, capability do tick so le; credenciais provadas por comportamento", () => {
+    // CDS V2 Fase 1A.1: a cerca "INTOCADOS desde 76cf613" (+ 8 excecoes exatas + "credenciais.ts so ganha
+    // linhas") virou invariante. A. I1 (canonico nunca alcanca o legado); B/C/D. zonas protegidas
+    // (supabase/** inclusive nao rastreado, vercel.json, .env.example); F. I3; G. I1-I6.
+    const errosV2 = invariantesV2(RAIZ);
+    assert(errosV2.length === 0, `V2: ${errosV2.join(" | ")}`);
+    // E/H. o contrato de credenciais e provado pelas suites comportamentais — obrigatorias no runner offline
+    const { SUITES_OFFLINE } = require("./rodar-bateria-offline") as { SUITES_OFFLINE: string[] };
+    for (const suite of ["vendas-sync-coordenador-tick", "credenciais-marketplace", "shopee-callback", "ml-callback", "lojas-identidade"])
+      assert(SUITES_OFFLINE.includes(suite), `suite comportamental fora do runner offline: ${suite}`);
+    // SALES-SYNC-D1.1 (invariante real): a listagem/elegibilidade do tick na capability so LE — nunca escreve nem chama rede
+    const cap = readFileSync(join(RAIZ, CAP), "utf8").replace(/\r\n/g, "\n");
+    for (const nome of ["listarLojasAtivasParaSyncCanonico", "classificarElegibilidadeSyncCanonico"]) {
+      const i = cap.search(new RegExp(`export (async )?function ${nome}\\(`));
+      assert(i >= 0, `capability perdeu ${nome}`);
+      const fimFn = cap.indexOf("\nexport ", i + 1);
+      const corpo = cap.slice(i, fimFn < 0 ? undefined : fimFn);
+      assert(!/\.update\(|\.insert\(|\.upsert\(|\.delete\(|\.rpc\(|fetch\(/.test(corpo), `${nome} escreve ou chama rede`);
+    }
     assert(JSON.stringify(JSON.parse(readFileSync(join(RAIZ, "vercel.json"), "utf8")).crons.filter((c: { path: string }) => /vendas-sync/.test(c.path))) === JSON.stringify([{ path: "/api/internal/vendas-sync/coordenador", schedule: "*/15 * * * *" }, { path: "/api/internal/vendas-sync/worker", schedule: "* * * * *" }]), "crons canonicos diferentes do aprovado (D10)");
   });
 

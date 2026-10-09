@@ -4,6 +4,7 @@
  */
 import { shopeeSign, SHOPEE_BASE } from "@/lib/shopee-api";
 import { randomUUID } from "crypto";
+import { nomeExibicaoDaLoja } from "@/lib/lojas/identidade";
 import {
   lerCredencialShopeeDoDono,
   gravarCredencialShopee,
@@ -363,7 +364,7 @@ export async function resolverCredencialShopee(
       partnerKey: loja.partner_key,
       accessToken,
       shopId:     Number(loja.shop_id),
-      nickname:   loja.nickname ?? `Shopee ${loja.shop_id}`,
+      nickname:   nomeExibicaoDaLoja({ nickname: loja.nickname, marketplace: "Shopee", shop_id: loja.shop_id }),
     },
   };
 }

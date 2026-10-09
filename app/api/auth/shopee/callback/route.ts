@@ -50,6 +50,7 @@ import { NextResponse } from "next/server";
 import { createHmac } from "crypto";
 import { agoraEmSegundos, autenticarRequisicao, lerCookie } from "@/lib/autenticacao";
 import { registrarLojaShopeeOAuth } from "@/lib/marketplace/credenciais";
+import { extrairNomeLojaShopee } from "@/lib/lojas/identidade";
 import { resolverAppShopee } from "@/lib/shopee-apps";
 import { NOME_COOKIE_ESTADO_SHOPEE, opcoesCookieEstadoShopee, verificarEstadoShopee } from "@/lib/shopee-oauth-estado";
 
@@ -130,8 +131,10 @@ async function processarCallback(request: Request) {
 
   const { access_token, refresh_token, expire_in } = tokenData;
 
-  // 2. Busca nome da loja (assinatura correta para endpoints autenticados: pid+path+ts+token+shopId)
-  let nickname = `Shopee ${shopId}`;
+  // 2. Busca nome REAL da loja (assinatura correta para endpoints autenticados: pid+path+ts+token+shopId).
+  // CDS V2 Fase 1A: sem nome real fica null — a capability preserva o nome que a loja ja tem
+  // e so uma loja NOVA recebe o fallback tecnico. Nunca "Shopee <shop_id>" por cima de nome real.
+  let nomeReal: string | null = null;
   try {
     const ts2    = Math.floor(Date.now() / 1000);
     const iPath  = "/api/v2/shop/get_shop_info";
@@ -144,14 +147,12 @@ async function processarCallback(request: Request) {
     const info = await infoRes.json();
     // Loga so o nome resolvido — nunca o corpo bruto, que carrega o
     // access_token na propria URL assinada da chamada.
-    if (info?.response?.shop_name) {
-      nickname = info.response.shop_name;
-      console.log("[shopee callback] get_shop_info ok — nome resolvido");
-    }
+    nomeReal = extrairNomeLojaShopee(info);
+    if (nomeReal) console.log("[shopee callback] get_shop_info ok — nome resolvido");
   } catch {
     // Sem detalhe do erro: a excecao pode carregar a URL da requisicao,
     // que contem access_token no query string.
-    console.error("[shopee callback] get_shop_info falhou — usando nome padrao");
+    console.error("[shopee callback] get_shop_info falhou — nome existente preservado");
   }
 
   // 3. Persistencia — via capability server-only, tenant-aware.
@@ -165,8 +166,7 @@ async function processarCallback(request: Request) {
 
   const registro = await registrarLojaShopeeOAuth(userId, {
     shopId:       String(shopId),
-    nickname,
-    nome:         nickname,
+    nomeReal,
     partnerId,
     partnerKey,
     accessToken:  access_token,
@@ -187,7 +187,10 @@ async function processarCallback(request: Request) {
   const lojaId = registro.lojaId;
 
   // 4. Seta cookies e redireciona
-  const res = NextResponse.redirect(new URL("/configuracoes?ok=shopee", request.url));
+  // A loja conectada e IDENTIFICADA no retorno (?loja=), sem virar a loja em uso.
+  const destino = new URL("/configuracoes?ok=shopee", request.url);
+  destino.searchParams.set("loja", lojaId);
+  const res = NextResponse.redirect(destino);
 
   // Salva token ativo
   const isProd = process.env.NODE_ENV === "production";
@@ -198,13 +201,9 @@ async function processarCallback(request: Request) {
     httpOnly: false, secure: isProd, sameSite: "lax", path: "/", maxAge: 86400 * 30,
   });
 
-  if (lojaId) {
-    // Cookie específico da Shopee — não sobrescreve loja_ativa_id do ML
-    res.cookies.set("shopee_loja_id", lojaId, {
-      httpOnly: false, secure: isProd, sameSite: "lax", path: "/", maxAge: 86400 * 30,
-    });
-  }
-
+  // CDS V2 Fase 1A: conectar uma conta NAO troca a loja Shopee em uso. O callback nao grava
+  // `shopee_loja_id`: a loja corrente so muda pelo "Usar esta" (/api/lojas/ativar). Com uma
+  // unica loja Shopee a selecao ja e inequivoca; com varias, a escolha e explicita.
   return res;
 }
 
