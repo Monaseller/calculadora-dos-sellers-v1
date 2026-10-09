@@ -71,7 +71,7 @@
     "scripts/testar-agentes-skills-memoria.ts": "980c9ab38289c5364d9e6ea2a1ce7fb74e6530a2214958f8bb158c78772f000c",
     "scripts/testar-agentes-vendas-capability.ts": "aa77822cc59fe7c2c100b7c38f01536ad837c7a42522922f57c7c7df8f70751d",
     "scripts/testar-anuncios-esquema.ts": "11a0ac8103c260f2286e3d721bb8de0ad9365fe591d92298b66658f590ed04ef",
-    "scripts/testar-anuncios-ml-loja-fase1.ts": "13529cfe678fa4087d52da7ffe868e43680b7a86dddd49235b1368740b7228cf",
+    "scripts/testar-anuncios-ml-loja-fase1.ts": "3584f2c7f69773dcb9e664d12eb1d173b484ea9d294660ca07b47bc605f3a6dd",
     "scripts/testar-anuncios-shopee-multi-store.ts": "dafe5de8a6a56af3a7d0640aa82be0ecb93c8c9dce93dd492bc5650d4358f4f9",
     "scripts/testar-apresentacao-vendas-ml.ts": "3ccb480890cd4faa3998c3be59953ad009f72cbc4eeda97964a52ebb7ab0af5c",
     "scripts/testar-aprovacao-retomada-live.ts": "341add6bfe57c7350add58fc17531858a4da9a741e725dce509c074fa827a606",

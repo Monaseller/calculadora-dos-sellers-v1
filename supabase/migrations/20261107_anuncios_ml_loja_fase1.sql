@@ -16,8 +16,16 @@
 --   O runtime publicado (d570ff8) ainda tem caminhos de catalogo de UMA conta ML que inserem row ML
 --   sem loja_id. Sem a ponte, um import posterior recriaria ML_WITHOUT_LOJA_ID > 0 e o estado 3 nao
 --   seria estavel. Enquanto a Fase 2D nao estiver publicada, o trigger resolve uma row ML sem
---   loja_id SO por cardinalidade exata: dono com exatamente 1 loja ML -> essa loja; 0 ou 2+ -> RAISE.
+--   loja_id SO por cardinalidade exata de lojas ML ATIVAS do dono (o mesmo criterio da barreira
+--   multi-ML do runtime): exatamente 1 ativa -> essa loja; 0 ou 2+ ativas -> RAISE.
 --   Nunca por created_at, "mais recente", primeira, LIMIT ou seller arbitrario.
+--   `ativo` entra SO aqui. O BACKFILL historico (passo 3) conta TODAS as lojas ML do dono (identidade
+--   historica, nao selecao operacional), e loja_id EXPLICITO e validado por existencia + dono +
+--   marketplace, sem exigir loja ativa (loja inativa continua identidade valida de rows vinculadas).
+--
+-- Locks: lock_timeout/statement_timeout LOCAIS a esta transacao (SET LOCAL). Sem o lock em 5s, a
+-- migration falha inteira (nada aplicado) e pode ser tentada de novo. anuncios: SHARE ROW EXCLUSIVE
+-- (bloqueia escrita concorrente e outra migration; leitura segue); lojas: SHARE (bloqueia escrita).
 --   A 20261108 (depois do deploy da 2D, quando todo writer ML grava loja_id explicito) REMOVE este
 --   autofill: no estado final o runtime fornece loja_id, o banco VALIDA e nunca escolhe a loja.
 --
@@ -50,6 +58,10 @@
 --      Nunca tocar rows Shopee.
 
 begin;
+
+-- Limites LOCAIS (so esta transacao): nunca esperar lock indefinidamente em producao.
+set local lock_timeout = '5s';
+set local statement_timeout = '60s';
 
 -- Nada escreve em anuncios/lojas durante a migration (o backfill e o snapshot ficam consistentes).
 lock table public.anuncios in share row exclusive mode;
@@ -130,13 +142,13 @@ declare
   v_loja uuid;
 begin
   -- TRANSITIONAL_COMPATIBILITY_ONLY (20261107 -> deploy 2D; removido pela 20261108):
-  -- row ML sem loja_id recebe a loja ML do dono SO se ela for a UNICA. 0 ou 2+ -> RAISE.
+  -- row ML sem loja_id recebe a loja ML ATIVA do dono SO se ela for a UNICA ativa. 0 ou 2+ -> RAISE.
   if new.marketplace = 'ML' and new.loja_id is null then
-    select count(*) into v_lojas from public.lojas l where l.user_id = new.user_id and l.marketplace = 'ML';
+    select count(*) into v_lojas from public.lojas l where l.user_id = new.user_id and l.marketplace = 'ML' and l.ativo = true;
     if v_lojas <> 1 then
-      raise exception 'anuncio ML sem loja_id: o dono tem % loja(s) ML — a loja nao pode ser deduzida', v_lojas using errcode = '23514';
+      raise exception 'anuncio ML sem loja_id: o dono tem % loja(s) ML ativa(s) — a loja nao pode ser deduzida', v_lojas using errcode = '23514';
     end if;
-    select l.id into strict v_loja from public.lojas l where l.user_id = new.user_id and l.marketplace = 'ML';
+    select l.id into strict v_loja from public.lojas l where l.user_id = new.user_id and l.marketplace = 'ML' and l.ativo = true;
     new.loja_id := v_loja;
   end if;
 

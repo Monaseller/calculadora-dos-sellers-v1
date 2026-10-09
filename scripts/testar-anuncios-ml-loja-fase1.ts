@@ -17,6 +17,10 @@
  * validações (GROUP BY/JOIN) são conferidos pela presença/ordem dos blocos rotulados e reproduzidos.
  * Sem banco real, sem rede.
  *
+ * LIMITE (honesto): este interpretador NÃO substitui o Postgres. Offline NÃO prova o parser real do
+ * PostgreSQL, locks reais (lock_timeout/statement_timeout), temp table ON COMMIT DROP nem to_jsonb.
+ * Isso só é provado no gate de aplicação (precheck por SELECT + migration numa transação).
+ *
  * Uso: npx tsx scripts/testar-anuncios-ml-loja-fase1.ts
  */
 import { readFileSync } from "node:fs";
@@ -416,6 +420,18 @@ function suite(sql: string, rotuloSecao = true) {
     assert(!/^\s*(drop\s+function|update\s+public\.anuncios\s+set\s+loja_id\s*=\s*null)/im.test(SQL), "rollback executável no arquivo");
   });
 
+  t("S7. limites LOCAIS logo após o begin e antes dos locks; lock modes exatos; validação explícita não exige ativo", () => {
+    const iBegin = sql.search(/^\s*begin\s*;/im), iLock = sql.search(/lock\s+table/i);
+    const iLt = sql.search(/set\s+local\s+lock_timeout\s*=\s*'5s'\s*;/i), iSt = sql.search(/set\s+local\s+statement_timeout\s*=\s*'60s'\s*;/i);
+    assert(iLt > iBegin && iSt > iBegin && iLt < iLock && iSt < iLock, "lock_timeout/statement_timeout locais ausentes ou depois dos locks");
+    assert(!/(^|;)\s*set\s+(session\s+)?(lock_timeout|statement_timeout)\b/im.test(sql) && !/alter\s+(system|database|role)/i.test(sql), "timeout global/de sessão");
+    const locks = [...sql.matchAll(/lock\s+table\s+public\.(\w+)\s+in\s+([\w\s]+?)\s+mode\s*;/gi)].map((m) => `${m[1]}:${m[2].toLowerCase().replace(/\s+/g, " ")}`);
+    assert(JSON.stringify(locks) === JSON.stringify(["anuncios:share row exclusive", "lojas:share"]), `locks: ${locks}`);
+    const fn = /create\s+or\s+replace\s+function[\s\S]*?\$\$\s*;/i.exec(sql)![0];
+    const permanente = /if\s+new\.loja_id\s+is\s+not\s+null\s+and\s+not\s+exists\s*\(([\s\S]*?)\)\s*then/i.exec(fn)?.[1] ?? "";
+    assert(permanente && !/\bativo\b/i.test(permanente), `validação explícita depende de ativo: ${permanente}`);
+  });
+
   if (rotuloSecao) imprimir("\n[2. backfill por cardinalidade]");
 
   t("B1. formato de produção: toda row ML recebe a loja ML ÚNICA do dono; contagem = esperada; só loja_id muda; Shopee intocada", () => {
@@ -480,8 +496,6 @@ function suite(sql: string, rotuloSecao = true) {
     const { db, gatilho } = estado3();
     const novo = inserir(db, gatilho, anuncio(D(1), "ML", "MLB100", null));
     assert(novo.loja_id === L(1), `loja atribuída: ${novo.loja_id}`);
-    const outro = inserir(db, gatilho, anuncio(D(3), "ML", "MLB101", null));
-    assert(outro.loja_id === L(5), `dono com 1 ML inativa: ${outro.loja_id}`);
   });
 
   t("R2. ML sem loja_id, dono com 0 lojas ML → REJEITADO", () => {
@@ -540,6 +554,64 @@ function suite(sql: string, rotuloSecao = true) {
     const { db, gatilho } = estado3();
     const a = atualizar(db, gatilho, "an-0002", { sku: "X" });
     assert(a.loja_id === L(1) && a.sku === "X", JSON.stringify(a));
+  });
+
+  if (rotuloSecao) imprimir("\n[4. ponte por lojas ML ATIVAS; loja explícita não depende de ativo]");
+
+  /** Estado 3 + um dono D(7) só com as lojas ML pedidas (sem anúncios: não afeta o backfill). */
+  const comLojas = (...ativos: boolean[]) => {
+    const r = estado3();
+    ativos.forEach((a, i) => r.db.lojas.push(loja(70 + i, D(7), "ML", { id: `70000000-0000-4000-8000-00000000000${i}`, ativo: a })));
+    return r;
+  };
+  const L7 = (i: number) => `70000000-0000-4000-8000-00000000000${i}`;
+
+  t("T1. 1 loja ML ATIVA → NULL recebe essa loja", () => {
+    const { db, gatilho } = comLojas(true);
+    assert(inserir(db, gatilho, anuncio(D(7), "ML", "MLB300", null)).loja_id === L7(0), "não atribuiu a ativa");
+  });
+
+  t("T2. 0 lojas ML ativas (nenhuma loja) → rejeita", () => {
+    const { db, gatilho } = comLojas();
+    assert(tenta(() => inserir(db, gatilho, anuncio(D(7), "ML", "MLB301", null))) !== null, "aceitou sem loja ativa");
+  });
+
+  t("T3. 2 lojas ML ATIVAS → rejeita (nenhuma escolhida)", () => {
+    const { db, gatilho } = comLojas(true, true); const n = db.anuncios.length;
+    assert(tenta(() => inserir(db, gatilho, anuncio(D(7), "ML", "MLB302", null))) !== null && db.anuncios.length === n, "escolheu entre 2 ativas");
+  });
+
+  t("T4. 1 ativa + 1 inativa → escolhe EXATAMENTE a ativa (em qualquer ordem)", () => {
+    for (const ordem of [[true, false], [false, true]]) {
+      const { db, gatilho } = comLojas(...ordem);
+      const esperada = L7(ordem.indexOf(true));
+      assert(inserir(db, gatilho, anuncio(D(7), "ML", "MLB303", null)).loja_id === esperada, `ordem ${ordem}: não escolheu a ativa`);
+    }
+  });
+
+  t("T5. 0 ativas + 2 inativas (reconexão pendente) → rejeita; e dono com 1 só inativa → rejeita", () => {
+    const a = comLojas(false, false);
+    assert(tenta(() => inserir(a.db, a.gatilho, anuncio(D(7), "ML", "MLB304", null))) !== null, "aceitou com 2 inativas");
+    const b = comLojas(false);
+    assert(tenta(() => inserir(b.db, b.gatilho, anuncio(D(7), "ML", "MLB305", null))) !== null, "ponte aceitou loja inativa sem ativa");
+  });
+
+  t("T6. loja_id EXPLÍCITA de loja ML INATIVA do mesmo dono → aceita, e o trigger não troca pela ativa", () => {
+    const { db, gatilho } = comLojas(false, true);
+    const a = inserir(db, gatilho, anuncio(D(7), "ML", "MLB306", null, { loja_id: L7(0) }));
+    assert(a.loja_id === L7(0), `trocou a loja explícita: ${a.loja_id}`);
+    const upd = atualizar(db, gatilho, a.id, { loja_id: L7(0), user_id: D(7) });
+    assert(upd.loja_id === L7(0), "UPDATE explícito trocou a loja");
+  });
+
+  t("B6. backfill continua por TODAS as lojas ML: dono com 1 única loja ML total, INATIVA, é backfillado; a ponte não muda isso", () => {
+    const r = aplicar(sql, bancoProducao());
+    assert(r.ok, `abortou: ${(r as any).erro}`);
+    assert(lojaDe(r.db, "an-0006") === L(5) && r.db.lojas.find((l) => l.id === L(5))!.ativo === false, "backfill deixou de usar a loja inativa única");
+    const bloco = blocoCom(sql, /update\s+public\.anuncios/i)!;
+    assert(!/\bativo\b/i.test(bloco), "backfill passou a filtrar ativo");
+    // depois do backfill, um NOVO anúncio desse dono (0 ativas) é recusado pela ponte
+    assert(tenta(() => inserir(r.db, r.gatilho, anuncio(D(3), "ML", "MLB307", null))) !== null, "ponte aceitou dono sem loja ativa");
   });
 
   t("N1. estado 3 não tem UNIQUE ML: a migration não impõe identidade ML (fica para a 20261108)", () => {
