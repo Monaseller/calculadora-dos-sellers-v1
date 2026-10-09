@@ -2,13 +2,11 @@
   "versao": 1,
   "arquivos": {
     "scripts/_excecao-anuncios-multi-store.ts": "e6a24fd64f90db081ac0711529c88e9427eec22b52c9549fd7b2e8a32649d467",
-    "scripts/_excecao-anuncios-schema-snapshot.ts": "a137e4bc46743e83ebaef49e979e836cc10e2e0dabf46501589224770cfc3899",
     "scripts/_excecao-d13-vendas-canonicas.ts": "442a2030b3d61874126b93baf046505ef2fb89affb0ed77dd6378a65a930ebba",
     "scripts/_excecao-d14-vendas-canonicas.ts": "35d3152c9d8d6374fca4b2af96baa084d2a3cb674ecf6cafcf6b02c502321477",
     "scripts/_excecao-d15b-intraday.ts": "e10c12acd79f3804be59aab371e17ab0b6b79a93ed7175e67b5ca51c5cbade15",
     "scripts/_excecao-d15c-ml-intraday.ts": "473f4dd0007c90c3e0b219ae62b144bb24532583aad4169411d9851c1cfa9109",
     "scripts/_excecao-d15d-shopee-intraday.ts": "85d325a7dfc37bacee2838336aba08d25bd08e7cdbc8f3949f7ae9b8ee293b94",
-    "scripts/_excecao-d15f2-enable-intraday.ts": "99c917371c3bfecfef454353563f44607cb9c2b55492c783ab27b1989746b0d7",
     "scripts/_excecao-d16-dashboard-canonico.ts": "5ee28376c023e3459b0c6cff2fb642965e18ecf3ef3f878092699cc206bb77e0",
     "scripts/_excecao-shopee-import-v2.ts": "20e06c6a454629afeec6d250198bd76d1a13bb2176cc885285358131390916ee",
     "scripts/_excecao-shopee-multi-app.ts": "75d2f69ee70e298bbac99a0469de4a1f989ff9a7bcd44a6e448ea5397c5536cc",
