@@ -2,8 +2,9 @@
  * CDS V2 — Fase 2B0: escritas do catálogo ML presas à row EXATA (hotfix antes do schema por loja).
  *
  *   sync-skus:   o UPDATE alcança UMA row (id + dono + ML + item) — nunca as variações irmãs;
- *                SKU/preço vêm só do item (row sem variação) ou da variação de MESMO id;
- *                SKU já preenchido (manual) nunca é sobrescrito.
+ *                o SKU vem só do item (row sem variação) ou da variação de MESMO id;
+ *                SKU já preenchido (manual) nunca é sobrescrito; o UPDATE leva SÓ `sku`
+ *                (Fase 2B0.1: nada de preço de lista nem thumbnail do item pai).
  *   sync-precos: o UPDATE só leva colunas FÍSICAS de `anuncios` (lucro/margem são derivados de
  *                tela) e erro do banco nunca vira "atualizado" (fail-closed, 503).
  *   A barreira MULTI_ML_CATALOG_NOT_READY continua antes de provider/escrita.
@@ -213,18 +214,48 @@ async function principal() {
     const antes = foto();
     const r = await skus();
     assert(r.status === 200 && r.corpo.atualizados === 1, JSON.stringify(r.corpo));
-    assert(linha("y").sku === "SKU_PROVIDER_Y" && linha("y").preco_anuncio === 77, `y=${JSON.stringify(linha("y"))}`);
+    assert(linha("y").sku === "SKU_PROVIDER_Y" && linha("y").preco_anuncio === 10, `y=${JSON.stringify(linha("y"))}`);
     for (const l of antes.filter((x: any) => x.id !== "y")) assert(JSON.stringify(linha(l.id)) === JSON.stringify(l), `row ${l.id} mudou`);
     escritasExatas();
   });
 
-  t("S5. preço do sync-skus vai só na row exata: variação recebe o preço DELA (nunca o do item nem o da irmã); item sem variação, o do item", async () => {
+  t("S5. payload de TODO UPDATE do sync-skus é exatamente { sku } (variação e item sem variação)", async () => {
     reiniciar([an("a", "MLB1000", "501", null), an("b", "MLB1000", "502", null), an("y", "MLB2000", null, null)],
       { ...itemX(), MLB2000: { id: "MLB2000", price: 77, thumbnail: "thumb-y", seller_custom_field: "SKU_PROVIDER_Y" } });
     await skus();
-    assert(linha("a").preco_anuncio === 51 && linha("b").preco_anuncio === 52, `a=${linha("a").preco_anuncio} b=${linha("b").preco_anuncio}`);
-    assert(linha("y").preco_anuncio === 77, `y=${linha("y").preco_anuncio}`);
+    assert(atualizacoes.length === 3, `updates=${atualizacoes.length}`);
+    for (const u of atualizacoes) assert(JSON.stringify(Object.keys(u.patch)) === JSON.stringify(["sku"]), `payload além de sku: ${Object.keys(u.patch)}`);
     escritasExatas();
+  });
+
+  t("S10. sync-skus não altera preco_anuncio (row 79.90, provider price 99.90 → continua 79.90; só o SKU muda)", async () => {
+    reiniciar([an("p", "MLB5000", null, null, { preco_anuncio: 79.90 }), an("v", "MLB1000", "501", null, { preco_anuncio: 79.90 })],
+      { ...itemX(), MLB5000: { id: "MLB5000", price: 99.90, thumbnail: "thumb-item", seller_custom_field: "SKU_PROVIDER_P" } });
+    const r = await skus();
+    assert(r.status === 200 && r.corpo.atualizados === 2, JSON.stringify(r.corpo));
+    assert(linha("p").preco_anuncio === 79.90 && linha("v").preco_anuncio === 79.90, `p=${linha("p").preco_anuncio} v=${linha("v").preco_anuncio}`);
+    assert(linha("p").sku === "SKU_PROVIDER_P" && linha("v").sku === "SKU_PROVIDER_A", `p=${linha("p").sku} v=${linha("v").sku}`);
+  });
+
+  t("S11. sync-skus não altera thumbnail: VAR-A=THUMB_A e VAR-B=THUMB_B continuam (item = THUMB_ITEM)", async () => {
+    const corpo = itemX(); corpo.MLB1000.thumbnail = "THUMB_ITEM";
+    reiniciar([an("a", "MLB1000", "501", null, { thumbnail: "THUMB_A" }), an("b", "MLB1000", "502", null, { thumbnail: "THUMB_B" })], corpo);
+    await skus();
+    assert(linha("a").thumbnail === "THUMB_A" && linha("b").thumbnail === "THUMB_B", `a=${linha("a").thumbnail} b=${linha("b").thumbnail}`);
+    assert(linha("a").sku === "SKU_PROVIDER_A" && linha("b").sku === "SKU_PROVIDER_B", "SKU não sincronizado");
+  });
+
+  t("S12. alteração legítima de SKU não muda nenhum outro campo da row", async () => {
+    const extra = { preco_anuncio: 79.90, thumbnail: "THUMB_A", nome: "nome-cds", custo_produto: 30, insumos: 2, custo_frete: 12,
+      imposto: 8, tipo_anuncio: "Clássico", logistic_type: "me2", frete_gratis: true, peso_kg: 0.5, permalink: "perm-cds", categoria: "Cat" };
+    const corpo = itemX(); Object.assign(corpo.MLB1000, { title: "outro título", listing_type_id: "gold_pro", permalink: "perm-ml",
+      shipping: { logistic_type: "fulfillment", free_shipping: false } });
+    reiniciar([an("a", "MLB1000", "501", null, extra)], corpo);
+    const antes = JSON.parse(JSON.stringify(linha("a")));
+    await skus();
+    const depois = linha("a");
+    const mudaram = Object.keys(depois).filter((k) => JSON.stringify(depois[k]) !== JSON.stringify(antes[k]));
+    assert(JSON.stringify(mudaram) === JSON.stringify(["sku"]) && depois.sku === "SKU_PROVIDER_A", `campos alterados: ${mudaram}`);
   });
 
   t("S6. variação sem SKU no ML → não herda o SKU da primeira variação nem o de outra", async () => {

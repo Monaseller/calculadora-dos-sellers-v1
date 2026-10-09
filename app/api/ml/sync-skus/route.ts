@@ -133,7 +133,7 @@ export async function POST(request: Request) {
 
     try {
       const res = await fetch(
-        `https://api.mercadolibre.com/items?ids=${ids}&attributes=id,title,price,thumbnail,seller_custom_field,variations,catalog_product_id`,
+        `https://api.mercadolibre.com/items?ids=${ids}&attributes=id,seller_custom_field,variations,catalog_product_id`,
         { headers: { Authorization: `Bearer ${token}` } }
       );
 
@@ -171,18 +171,15 @@ export async function POST(request: Request) {
         const variationId = anuncio.variation_id ? String(anuncio.variation_id) : null;
 
         let sku: string | null = null;
-        let preco: number | null = null;
         if (variationId) {
-          // Row de VARIAÇÃO: só a variação de mesmo id. Sem match → nada de SKU/preço.
+          // Row de VARIAÇÃO: só a variação de mesmo id. Sem match → nada de SKU.
           const variacao = ((body.variations ?? []) as any[]).find((v) => String(v.id) === variationId);
           sku = variacao?.seller_custom_field || null;
-          preco = typeof variacao?.price === "number" ? variacao.price : null;
           // Fallback: a mesma variação na resposta completa
           if (!sku && mlUserId) sku = skuDaVariacao(await buscarCompleto(body.id), variationId);
         } else {
           // Row SEM variação: só o nível do item.
           sku = body.seller_custom_field || null;
-          preco = body.price ?? null;
           // Fallback: resposta completa e, para item sem variações, user_products pelo catalog_product_id
           if (!sku && mlUserId) {
             const fullData = await buscarCompleto(body.id);
@@ -192,15 +189,13 @@ export async function POST(request: Request) {
             }
           }
         }
-        const thumbnail = body.thumbnail ?? null;
 
-        const updates: Record<string, any> = {};
         // SKU é campo do usuário: só preenche row ainda vazia (a leitura já só traz vazias).
-        if (sku && !String(anuncio.sku ?? "").trim()) updates.sku = sku;
-        if (preco)     updates.preco_anuncio = preco;
-        if (thumbnail) updates.thumbnail     = thumbnail;
-
-        if (Object.keys(updates).length === 0) continue;
+        if (!sku || String(anuncio.sku ?? "").trim()) continue;
+        // CDS V2 Fase 2B0.1: sync-skus sincroniza SÓ o SKU. Preço (aqui seria o de LISTA,
+        // desfazendo a promoção gravada pelo sync-precos/import) e thumbnail (a do item pai
+        // sobre a da variação) NÃO entram — nenhum outro campo de catálogo é tocado.
+        const updates = { sku };
 
         // CDS V2 Fase 0C.1: o provider ML só escreve em row ML — nunca numa row Shopee
         // do mesmo dono que por acaso tenha o mesmo ml_item_id.

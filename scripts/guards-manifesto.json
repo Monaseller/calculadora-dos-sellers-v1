@@ -166,7 +166,7 @@
     "scripts/testar-ml-auth-refresh-cas.ts": "efce7fabbb4de2d3e06d9e766e7543044985d22988ffa2ef0350d1893355ae41",
     "scripts/testar-ml-auth-refresh-timeout.ts": "eb39b822e494e4a967dc7968a90cd3eafb39dc363c59cea134040a897136a3e7",
     "scripts/testar-ml-callback.ts": "63810be9017ae135d429d6e8ad6f11ecddf26a457c9cbc09bdadf5b051a5605f",
-    "scripts/testar-ml-catalogo-variacoes.ts": "75a5e96d37c44febb2db761be51d54e219e59d1fd84015314c237b81597cfd7e",
+    "scripts/testar-ml-catalogo-variacoes.ts": "1d2e9d39769edf5e357e167f916e01dc105437d7556f3407433202646c08cabf",
     "scripts/testar-ml-completude-live.ts": "9b03bed0e7e8d3e270f3fbdaa2078a3de963e2be5507e9ba9866167f5e75ee3b",
     "scripts/testar-ml-corpus-migracao.ts": "b0abc3cbe9c8e63079558b7669989b80181969aa1ae69c5a8373c9a6368958ea",
     "scripts/testar-ml-credenciais-por-loja.ts": "40a02cb5e7882ab967882121fefe9151d3c873557fb1061969aac7835a7a3f62",
