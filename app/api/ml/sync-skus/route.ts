@@ -77,7 +77,7 @@ export async function POST(request: Request) {
   // candidata nem tem o id enviado ao Mercado Livre. Sem loja_id: ML ainda não tem (Fase 2).
   const leitura = await lerTodasAsPaginas<any>(() => supabase()
     .from("anuncios")
-    .select("id, ml_item_id, nome, sku")
+    .select("id, ml_item_id, variation_id, nome, sku")
     .eq("marketplace", "ML")
     .eq("ativo", true)
     .eq("user_id", userId)
@@ -118,11 +118,18 @@ export async function POST(request: Request) {
   let atualizados = 0;
   const erros: string[] = [];
 
+  // CDS V2 Fase 2B0: cada row é a sua identidade exata — item sem variação (variation_id
+  // nulo) ou UMA variação (variation_id). SKU/preço vêm SÓ do item ou da variação daquela
+  // row; nunca "o SKU da primeira variação", nunca o dado de uma variação na irmã.
+  const skuDaVariacao = (fonte: any, variationId: string): string | null =>
+    ((fonte?.variations ?? []) as any[]).find((v) => String(v.id) === variationId)?.seller_custom_field || null;
+
   // Busca em lotes de 20
   const LOTE = 20;
   for (let i = 0; i < candidatos.length; i += LOTE) {
     const lote = candidatos.slice(i, i + LOTE);
-    const ids  = lote.map(a => a.ml_item_id).join(",");
+    // Variações irmãs no mesmo lote: o item vai UMA vez ao provider.
+    const ids  = [...new Set(lote.map(a => a.ml_item_id))].join(",");
 
     try {
       const res = await fetch(
@@ -136,51 +143,60 @@ export async function POST(request: Request) {
       }
 
       const resultados: Array<{ code: number; body: any }> = await res.json();
-
+      const corpos = new Map<string, any>();
       for (const item of resultados) {
-        if (item.code !== 200 || !item.body) continue;
+        if (item.code === 200 && item.body?.id) corpos.set(String(item.body.id), item.body);
+      }
 
-        const body = item.body;
-
-        // 1. Tenta seller_custom_field no nível do item
-        let sku: string | null = body.seller_custom_field ?? null;
-
-        // 2. Tenta nas variações
-        if (!sku) {
-          sku = (body.variations ?? [])
-            .map((v: { seller_custom_field?: string }) => v.seller_custom_field)
-            .find(Boolean) ?? null;
+      // Busca individual completa: no máximo uma vez por item (cache por lote).
+      const completos = new Map<string, Promise<any | null>>();
+      const buscarCompleto = (itemId: string) => {
+        if (!completos.has(itemId)) {
+          completos.set(itemId, (async () => {
+            try {
+              const fullRes = await fetch(
+                `https://api.mercadolibre.com/items/${itemId}`,
+                { headers: { Authorization: `Bearer ${token}` } }
+              );
+              return fullRes.ok ? await fullRes.json() : null;
+            } catch { return null; }
+          })());
         }
+        return completos.get(itemId)!;
+      };
 
-        // 3. Fallback: busca individual completa para obter catalog_product_id
-        if (!sku && mlUserId) {
-          try {
-            const fullRes = await fetch(
-              `https://api.mercadolibre.com/items/${body.id}`,
-              { headers: { Authorization: `Bearer ${token}` } }
-            );
-            if (fullRes.ok) {
-              const fullData = await fullRes.json();
-              // Tenta seller_custom_field e variações na resposta completa
-              sku = fullData.seller_custom_field ?? null;
-              if (!sku) {
-                sku = (fullData.variations ?? [])
-                  .map((v: { seller_custom_field?: string }) => v.seller_custom_field)
-                  .find(Boolean) ?? null;
-              }
-              // Tenta user_products com catalog_product_id da resposta completa
-              if (!sku && fullData.catalog_product_id) {
-                sku = await buscarSkuUserProducts(fullData.catalog_product_id, mlUserId!, token);
-              }
+      for (const anuncio of lote) {
+        const body = corpos.get(anuncio.ml_item_id);
+        if (!body) continue;
+        const variationId = anuncio.variation_id ? String(anuncio.variation_id) : null;
+
+        let sku: string | null = null;
+        let preco: number | null = null;
+        if (variationId) {
+          // Row de VARIAÇÃO: só a variação de mesmo id. Sem match → nada de SKU/preço.
+          const variacao = ((body.variations ?? []) as any[]).find((v) => String(v.id) === variationId);
+          sku = variacao?.seller_custom_field || null;
+          preco = typeof variacao?.price === "number" ? variacao.price : null;
+          // Fallback: a mesma variação na resposta completa
+          if (!sku && mlUserId) sku = skuDaVariacao(await buscarCompleto(body.id), variationId);
+        } else {
+          // Row SEM variação: só o nível do item.
+          sku = body.seller_custom_field || null;
+          preco = body.price ?? null;
+          // Fallback: resposta completa e, para item sem variações, user_products pelo catalog_product_id
+          if (!sku && mlUserId) {
+            const fullData = await buscarCompleto(body.id);
+            sku = fullData?.seller_custom_field || null;
+            if (!sku && fullData?.catalog_product_id && !(fullData.variations?.length)) {
+              sku = await buscarSkuUserProducts(fullData.catalog_product_id, mlUserId!, token);
             }
-          } catch {}
+          }
         }
-
-        const preco     = body.price ?? null;
         const thumbnail = body.thumbnail ?? null;
 
         const updates: Record<string, any> = {};
-        if (sku)       updates.sku           = sku;
+        // SKU é campo do usuário: só preenche row ainda vazia (a leitura já só traz vazias).
+        if (sku && !String(anuncio.sku ?? "").trim()) updates.sku = sku;
         if (preco)     updates.preco_anuncio = preco;
         if (thumbnail) updates.thumbnail     = thumbnail;
 
@@ -188,14 +204,24 @@ export async function POST(request: Request) {
 
         // CDS V2 Fase 0C.1: o provider ML só escreve em row ML — nunca numa row Shopee
         // do mesmo dono que por acaso tenha o mesmo ml_item_id.
-        const { error: updateError } = await supabase()
+        // CDS V2 Fase 2B0: UMA row — `id` (+ dono + ML + item) — nunca o item inteiro
+        // (as variações irmãs). SKU preenchido por fora entre a leitura e aqui não é sobrescrito.
+        const { data: gravadas, error: updateError } = await supabase()
           .from("anuncios")
           .update(updates)
+          .eq("id", anuncio.id)
+          .eq("user_id", userId)
           .eq("marketplace", "ML")
-          .eq("ml_item_id", body.id)
-          .eq("user_id", userId);
+          .eq("ml_item_id", anuncio.ml_item_id)
+          .or("sku.is.null,sku.eq.")
+          .select("id");
 
-        if (!updateError) atualizados++;
+        if (updateError) {
+          console.error("[POST /api/ml/sync-skus] falha ao gravar anúncio:", updateError.message);
+          erros.push(`Anúncio ${anuncio.ml_item_id}${variationId ? `/${variationId}` : ""}: falha ao gravar`);
+        } else if ((gravadas ?? []).length > 0) {
+          atualizados++;
+        }
       }
     } catch (e) {
       erros.push(`Lote ${i / LOTE + 1}: ${e}`);

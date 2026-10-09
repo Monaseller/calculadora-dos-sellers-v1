@@ -2,7 +2,6 @@ import { NextResponse } from "next/server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { calcularFreteMl, calcularFreteFullMl, calcularFreteFlexMl } from "@/lib/tabela-frete-ml";
-import { CATEGORIAS_ML } from "@/lib/comissoes-mercado-livre";
 import { autenticarRequisicao, lerCookie } from "@/lib/autenticacao";
 import { contarLojasMLAtivasDoDono, MULTI_ML_CATALOG_NOT_READY, resolverContaML } from "@/lib/ml-conexao";
 import { getActivePromoPrice } from "@/lib/ml-promotions";
@@ -97,29 +96,6 @@ async function resolverMLBU(mlbuId: string, token: string): Promise<{ mlbId: str
   return null;
 }
 
-// Recalcula lucro e margem com os novos valores
-function recalcularLucroMargem(
-  preco: number | null,
-  custoFrete: number,
-  custoProduto: number | null,
-  impostoPorc: number | null,
-  categoria: string | null,
-  tipoAnuncio: string | null
-): { lucro_liquido: number; margem_contribuicao: number } | null {
-  if (!preco || preco <= 0 || !custoProduto || custoProduto <= 0) return null;
-  const cat = CATEGORIAS_ML.find(c => c.nome.toLowerCase() === (categoria ?? "").toLowerCase());
-  const comissaoRate = tipoAnuncio === "Premium" ? (cat?.premium ?? 0.18) : (cat?.classico ?? 0.13);
-  const imp          = (impostoPorc ?? 0) / 100;
-  const comissaoVal  = preco * comissaoRate;
-  const impostoVal   = preco * imp;
-  const lucro        = preco - comissaoVal - impostoVal - custoFrete - custoProduto;
-  const margem       = (lucro / preco) * 100;
-  return {
-    lucro_liquido:       Math.round(lucro  * 100) / 100,
-    margem_contribuicao: Math.round(margem * 100) / 100,
-  };
-}
-
 export async function POST(request: Request) {
   // A sessão vem PRIMEIRO: o token do ML só é resolvido para uma loja que
   // pertence a este usuário (F0.c.4).
@@ -174,9 +150,12 @@ export async function POST(request: Request) {
   if (!anuncios.length) return NextResponse.json({ erro: false, atualizados: 0, mensagem: "Nenhum anúncio ML encontrado." });
 
   let atualizados = 0;
+  let falhaGravacao = false;
   const detalhes: string[] = [];
 
   for (const anuncio of anuncios) {
+    // Detalhes só entram na resposta depois que o UPDATE da row foi aceito pelo banco.
+    const pendentes: string[] = [];
     try {
       let resolvedId: string = anuncio.ml_item_id!;
       let body: any = null;
@@ -221,7 +200,7 @@ export async function POST(request: Request) {
       if (novoPreco !== null && novoPreco !== anuncio.preco_anuncio) {
         mudancas.preco_anuncio = novoPreco;
         const nomeExib = (anuncio.nome ?? "").substring(0, 35);
-        detalhes.push(`💰 ${nomeExib}: R$ ${(anuncio.preco_anuncio ?? 0).toFixed(2).replace(".", ",")} → R$ ${novoPreco.toFixed(2).replace(".", ",")}`);
+        pendentes.push(`💰 ${nomeExib}: R$ ${(anuncio.preco_anuncio ?? 0).toFixed(2).replace(".", ",")} → R$ ${novoPreco.toFixed(2).replace(".", ",")}`);
       }
 
       // ── Logistic type + Peso ────────────────────────────────────────────────
@@ -268,31 +247,29 @@ export async function POST(request: Request) {
           if (diff > 0.005) {
             mudancas.custo_frete = novoCustoFrete;
             const nomeExib = (anuncio.nome ?? "").substring(0, 30);
-            detalhes.push(`🚚 ${nomeExib}: frete R$ ${(anuncio.custo_frete ?? 0).toFixed(2).replace(".", ",")} → R$ ${novoCustoFrete.toFixed(2).replace(".", ",")}`);
+            pendentes.push(`🚚 ${nomeExib}: frete R$ ${(anuncio.custo_frete ?? 0).toFixed(2).replace(".", ",")} → R$ ${novoCustoFrete.toFixed(2).replace(".", ",")}`);
           }
         }
       }
 
-      // ── Lucro e margem: recalcula se preço ou frete mudaram ────────────────
-      const algumaMudanca = ["preco_anuncio", "custo_frete", "tipo_anuncio"].some(k => k in mudancas);
-      if (algumaMudanca) {
-        const recalc = recalcularLucroMargem(
-          (mudancas.preco_anuncio  as number | undefined) ?? anuncio.preco_anuncio  ?? null,
-          (mudancas.custo_frete   as number | undefined) ?? anuncio.custo_frete    ?? 0,
-          anuncio.custo_produto ?? null,
-          anuncio.imposto       ?? null,
-          anuncio.categoria     ?? null,
-          (mudancas.tipo_anuncio as string | undefined) ?? anuncio.tipo_anuncio    ?? "Clássico",
-        );
-        if (recalc) {
-          mudancas.lucro_liquido       = recalc.lucro_liquido;
-          mudancas.margem_contribuicao = recalc.margem_contribuicao;
-        }
-      }
-
+      // CDS V2 Fase 2B0: lucro/margem NÃO são colunas de `anuncios` (DERIVED_UI_FIELDS) —
+      // a tela deriva dos campos gravados aqui. Antes iam no UPDATE, que então falhava
+      // inteiro (preço/frete incluídos) e mesmo assim contava como atualizado.
       if (Object.keys(mudancas).length > 0) {
-        await supabase().from("anuncios").update(mudancas).eq("id", anuncio.id);
+        const { error: erroGravacao } = await supabase()
+          .from("anuncios")
+          .update(mudancas)
+          .eq("id", anuncio.id)
+          .eq("user_id", userId)
+          .eq("marketplace", "ML");
+        if (erroGravacao) {
+          // Fail-closed: para aqui. O que já foi gravado fica; nada mais é tentado.
+          console.error("[POST /api/ml/sync-precos] falha ao gravar anúncio:", erroGravacao.message);
+          falhaGravacao = true;
+          break;
+        }
         atualizados++;
+        detalhes.push(...pendentes);
       }
 
       // Pequena pausa para não bater no rate limit da API ML
@@ -301,6 +278,14 @@ export async function POST(request: Request) {
     } catch (e) {
       console.log(`[sync] erro em ${anuncio.ml_item_id}: ${e}`);
     }
+  }
+
+  if (falhaGravacao) {
+    // Mesmo contrato da falha de leitura: 5xx, `erro`/`mensagem` para a tela, sem mensagem crua do banco.
+    return NextResponse.json({
+      erro: true, atualizados, detalhes,
+      mensagem: "Não foi possível salvar os anúncios agora. O que já foi atualizado foi mantido; tente novamente.",
+    }, { status: 503 });
   }
 
   const mensagem = atualizados === 0
