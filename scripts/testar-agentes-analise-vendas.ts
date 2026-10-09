@@ -2082,6 +2082,37 @@ function migrationsHead(): string[] {
     .map((l) => l.slice(l.lastIndexOf("/") + 1))
     .sort();
 }
+/**
+ * CDS V2 Fase 1A-SCHEMA (G11/G12b): objetos do DOMINIO DE AGENTES, derivados da propria suite — tudo o
+ * que as migrations declaradas aqui CRIAM — mais o prefixo `agente`/`agentes`. So migration que
+ * referencia algum deles (comentario nao conta) precisa estar declarada; uma migration de outro dominio
+ * (ex.: lojas) nao entra em whitelist de nomes. Migration ilegivel conta como "toca" (fail-closed).
+ */
+function objetosDoDominioAgentes(): Set<string> {
+  const declaradas = [
+    ...MIGRATIONS_NO_DISCO_NAO_COMMITADAS, ...MIGRATIONS_DA_SKILL_1DF4, ...MIGRATIONS_DA_SKILL_1DG, ...MIGRATIONS_DA_SKILL_1D_PERFIL,
+    ...MIGRATIONS_DA_SKILL_1D_TOOL_CALL, ...MIGRATIONS_DA_APPROVAL_B1B, ...MIGRATIONS_DO_FUNCTION_RUNTIME_P0, ...MIGRATIONS_DO_TASK_FENCING_B0,
+    ...MIGRATIONS_DO_TASK_FENCING_B0_CLEANUP, ...MIGRATIONS_DO_APPROVAL_RESUME_D1, ...MIGRATIONS_DO_APPROVAL_PAUSE_D3_CLEANUP,
+    ...MIGRATIONS_DO_APPROVAL_DECISION_D4, ...MIGRATIONS_DO_RESUME_D5_C3_I2, ...MIGRATIONS_DO_POLLING_A7, ...MIGRATIONS_DA_F7B4,
+  ];
+  const objs = new Set<string>();
+  for (const nome of declaradas) {
+    let sql = "";
+    try { sql = readFileSync(join(RAIZ, "supabase/migrations", nome), "utf8").replace(/--.*$/gm, ""); } catch { continue; }
+    for (const m of sql.matchAll(/create\s+(?:or\s+replace\s+)?(?:unique\s+)?(?:table|function|index|view|trigger|type|sequence)\s+(?:if\s+not\s+exists\s+)?(?:public\.)?"?(\w+)"?/gi))
+      objs.add(m[1].toLowerCase());
+  }
+  return objs;
+}
+function sqlTocaAgentes(sql: string, objetos: Set<string>): boolean {
+  const s = sql.replace(/--.*$/gm, "");
+  if (/\bagentes?_\w+|\bagentes\b/i.test(s)) return true;
+  for (const o of objetos) if (new RegExp(`\\b${o}\\b`, "i").test(s)) return true;
+  return false;
+}
+function migrationTocaAgentes(nome: string, objetos: Set<string>): boolean {
+  try { return sqlTocaAgentes(readFileSync(join(RAIZ, "supabase/migrations", nome), "utf8"), objetos); } catch { return true; }
+}
 /** Itens de `a` ausentes em `b`. Pura, para o controle negativo. */
 const soEmA = (a: string[], b: string[]) => a.filter((x) => !b.includes(x));
 
@@ -3174,7 +3205,11 @@ async function main() {
     // precisa estar declarado — que e o que G11 sempre quis dizer.
     const saida = git("status", "--porcelain", "--untracked-files=all", "--", ...ESCOPO_AGENTES);
     const caminhos = caminhosDeStatus(saida);
-    const foraDoEsperado = caminhos.filter((p) => !ARQUIVOS_ESPERADOS.includes(p));
+    // CDS V2 Fase 1A-SCHEMA: migration que NAO toca objeto do dominio de agentes nao e escopo dos agentes
+    // (nao precisa de whitelist de nome); a que toca continua tendo de ser declarada.
+    const objetosAgentesG11 = objetosDoDominioAgentes();
+    const foraDoEsperado = caminhos.filter((p) => !ARQUIVOS_ESPERADOS.includes(p)
+      && !(p.startsWith("supabase/migrations/") && p.endsWith(".sql") && !migrationTocaAgentes(p.slice(p.lastIndexOf("/") + 1), objetosAgentesG11)));
 
     ok("G11 no escopo dos agentes so aparecem arquivos autorizados (1D-d + correcao 1D-a)", foraDoEsperado.length === 0);
 
@@ -3593,10 +3628,18 @@ async function main() {
       MIGRATIONS_DO_POLLING_A7.includes(m) ||
       MIGRATIONS_DA_F7B4.includes(m);
 
-    ok(`G12b nenhuma migration nao declarada no disco (${novasNoDisco.join(", ") || "nenhuma"})`,
-       novasNoDisco.every(declarada));
+    // CDS V2 Fase 1A-SCHEMA: so a migration que TOCA o dominio de agentes precisa estar declarada.
+    const objetosAgentes = objetosDoDominioAgentes();
+    const novasDeAgentes = novasNoDisco.filter((m) => migrationTocaAgentes(m, objetosAgentes));
+    ok("G12 ANCORA: os objetos do dominio de agentes foram derivados das migrations declaradas", objetosAgentes.size > 20);
+    ok(`G12b nenhuma migration nao declarada toca o dominio de agentes (${novasDeAgentes.join(", ") || "nenhuma"})`,
+       novasDeAgentes.every(declarada));
     ok("G12b1 CONTROLE NEGATIVO: uma migration nao declarada reprovaria",
        !["99999999_intrusa.sql"].every(declarada));
+    ok("G12b5 CONTROLE NEGATIVO: migration nao declarada que altera tabela de agentes exige declaracao",
+       sqlTocaAgentes("alter table public.agente_tarefas add column x int;", objetosAgentes) &&
+       sqlTocaAgentes("create or replace function public.concluir_tarefa() returns void as $$ $$;", objetosAgentes) &&
+       !sqlTocaAgentes("-- agente_tarefas so em comentario\nalter table public.lojas add column y int;", objetosAgentes));
     ok("G12b3 a migration do P0 e aceita pelo predicado, nome a nome",
        declarada("20261007_retomada_fila_e_reconciliacao.sql") &&
        !declarada("20261007_retomada_fila_e_reconciliacao.sql.bak") &&

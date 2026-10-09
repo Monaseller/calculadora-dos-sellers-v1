@@ -14,8 +14,6 @@ import "./_server-only-inerte";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-// ANUNCIOS SHOPEE MULTI-STORE V1B: excecao EXATA (arquivos − hunks = bb8f7ea; migrations/novos por sha256)
-import { filtrarExcecaoAnunciosMultiStore } from "./_excecao-anuncios-multi-store";
 // CDS GUARD V2 (Fase 0B): invariantes estruturais + zonas protegidas no lugar da cerca "arquivo nao mudou desde a base"
 import { invariantesV2 } from "./_guard-v2";
 
@@ -245,16 +243,20 @@ async function principal() {
     const errosV2 = invariantesV2(RAIZ);
     assert(errosV2.length === 0, `I3: ${errosV2.join(" | ")}`);
   });
-  t("I4. a unica migration nova e a do fence, e ela nao toca idx_sync_jobs_loja_ativo (so comentario)", () => {
+  t("I4. V2: nenhuma migration desde a base, alem da do proprio fence, toca sync_jobs / idx_sync_jobs_loja_ativo / claim_next_sync_job; a do fence nao toca o indice", () => {
+    // CDS V2 Fase 1A-SCHEMA: a lista fechada "a unica migration nova e a do fence (+C4/C8 + excecao exata)"
+    // virou checagem semantica sobre o conteudo de TODA migration nova (rastreada ou nao).
     const novos = execFileSync("git", ["diff", "--name-only", BASE, "--", "supabase"], { cwd: RAIZ, encoding: "utf8" }).trim().split(/\r?\n/).filter(Boolean);
     const naoRastreados = execFileSync("git", ["ls-files", "--others", "--exclude-standard", "--", "supabase"], { cwd: RAIZ, encoding: "utf8" }).trim().split(/\r?\n/).filter(Boolean);
-    // ANUNCIOS SHOPEE MULTI-STORE V1B: as 2 migrations de anuncios.loja_id saem SO pela excecao exata (sha256)
-    const todos = filtrarExcecaoAnunciosMultiStore(RAIZ, BASE, [...new Set([...novos, ...naoRastreados])]);
-    // SALES-SYNC-C4 acrescenta a migration do lease Shopee (guard proprio: testar-shopee-refresh-lease); nenhuma outra.
-    const C4 = "supabase/migrations/20261030_sales_sync_c4_shopee_refresh_lease.sql";
-    // SALES-SYNC-C8: SELECT do service_role no lease (guard proprio: testar-shopee-refresh-lease M6)
-    const C8 = "supabase/migrations/20261031_sales_sync_c8_shopee_refresh_lease_select.sql";
-    assert(todos.includes(MIGRATION) && todos.every((f) => f === MIGRATION || f === C4 || f === C8), todos.join(", "));
+    const todos = [...new Set([...novos, ...naoRastreados])].filter((f) => f.endsWith(".sql"));
+    const OBJETOS_DO_FENCE = /\b(sync_jobs|idx_sync_jobs_loja_ativo|claim_next_sync_job)\b/i;
+    const tocaFence = (sqlDaMigration: string) => OBJETOS_DO_FENCE.test(sqlDaMigration.replace(/--.*$/gm, ""));
+    assert(todos.includes(MIGRATION), "ANCORA: migration do fence ausente");
+    const invasoras = todos.filter((f) => f !== MIGRATION && tocaFence(readFileSync(join(RAIZ, f), "utf8")));
+    assert(invasoras.length === 0, `migration nova toca objeto do fence: ${invasoras.join(", ")}`);
+    // controle negativo: migration artificial que altera objeto protegido e rejeitada; comentario nao conta
+    assert(tocaFence("alter table public.sync_jobs add column x int;") && tocaFence("create or replace function public.claim_next_sync_job() returns void as $$ $$;")
+      && !tocaFence("-- menciona sync_jobs so em comentario\nselect 1;"), "controle negativo do I4");
     assert(!/idx_sync_jobs_loja_ativo/.test(sql.replace(/^--.*$/gm, "")), "migration toca o indice");
   });
 

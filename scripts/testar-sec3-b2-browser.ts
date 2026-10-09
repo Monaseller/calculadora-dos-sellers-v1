@@ -27,8 +27,8 @@ import Module from "node:module";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join, dirname, normalize } from "node:path";
-// ANUNCIOS SHOPEE MULTI-STORE V1B: excecao EXATA (migrations de anuncios.loja_id por sha256)
-import { filtrarExcecaoAnunciosMultiStore } from "./_excecao-anuncios-multi-store";
+// CDS GUARD V2 (Fase 1A-SCHEMA): supabase/ e zona protegida — M1 confere o baseline de zonas
+import { ARQUIVO_ZONAS, calcularZonas } from "./_guard-v2";
 
 let passou = 0, falhou = 0;
 let fila: Promise<void> = Promise.resolve();
@@ -559,11 +559,29 @@ async function principal() {
     "supabase/migrations/20261031_sales_sync_c8_shopee_refresh_lease_select.sql",
   ];
   const FORA_DA_VARREDURA = [...APROVADAS, "scripts/testar-s2d1-migracao.ts", "scripts/testar-ml-corpus-migracao.ts"];
-  t("M1. nada em supabase/ mudou desde a base (alem da migration SEC-3-C)", () => {
-    // ANUNCIOS SHOPEE MULTI-STORE V1B: as 2 migrations de anuncios.loja_id saem SO pela excecao exata (sha256)
-    const d = filtrarExcecaoAnunciosMultiStore(RAIZ, BASE, git("diff", "--name-only", BASE, "--", "supabase").split(/\r?\n/).filter((f) => f && !APROVADAS.includes(f)));
-    const novos = filtrarExcecaoAnunciosMultiStore(RAIZ, BASE, git("ls-files", "--others", "--exclude-standard", "supabase").split(/\r?\n/).filter((f) => f && !APROVADAS.includes(f)));
-    assert(d.length === 0 && novos.length === 0, `${d} ${novos}`);
+  t("M1. V2: mudanca de banco nunca e silenciosa — supabase/ inteiro em zona protegida (re-baseline explicito no diff) e toda migration nova desde a base tem contrato/teste proprio", () => {
+    // CDS V2 Fase 1A-SCHEMA: a cerca "nada em supabase/ desde c075653, salvo lista fixa (+ excecao exata)"
+    // virou contrato: (1) cada arquivo de supabase/ esta no baseline de zonas — arquivo novo/alterado so
+    // passa com re-baseline explicito de scripts/zonas-protegidas.json; (2) cada migration nova desde a base
+    // e citada pelo nome por uma suite scripts/testar-*.ts (contrato proprio). M2 segue varrendo GRANT/RLS.
+    const gravado: Record<string, string> = JSON.parse(readFileSync(join(RAIZ, ARQUIVO_ZONAS), "utf8")).arquivos ?? {};
+    const atual = calcularZonas(RAIZ);
+    const foraDoBaseline = (g: Record<string, string>) => Object.keys(atual).filter((f) => f.startsWith("supabase/") && g[f] !== atual[f]);
+    assert(Object.keys(atual).some((f) => f.startsWith("supabase/migrations/")), "ANCORA: zonas sem migrations");
+    assert(foraDoBaseline(gravado).length === 0, `supabase/ fora do baseline de zonas: ${foraDoBaseline(gravado).join(", ")}`);
+    const novos = [...new Set([...git("diff", "--name-only", BASE, "--", "supabase").split(/\r?\n/),
+      ...git("ls-files", "--others", "--exclude-standard", "supabase").split(/\r?\n/)])].filter((f) => f && f.endsWith(".sql"));
+    const suites = git("ls-files", "--cached", "--others", "--exclude-standard", "scripts").split(/\r?\n/)
+      .filter((f) => /^scripts\/testar-.*\.ts$/.test(f)).map((f) => readFileSync(join(RAIZ, f), "utf8"));
+    const semContrato = (lista: string[]) => lista.filter((f) => { const nome = f.split("/").pop()!; return !suites.some((s) => s.includes(nome)); });
+    assert(semContrato(novos).length === 0, `migration sem contrato/teste proprio: ${semContrato(novos).join(", ")}`);
+    // controles negativos: arquivo fora do baseline e migration sem suite sao pegos
+    const algum = Object.keys(atual).find((f) => f.startsWith("supabase/migrations/"))!;
+    const semEle = { ...gravado }; delete semEle[algum];
+    assert(foraDoBaseline(semEle).includes(algum), "controle negativo: arquivo novo em supabase/ passaria sem revisao");
+    // nome gerado aqui (nenhuma suite pode cita-lo) — um nome fixo podia aparecer no controle negativo de outra suite
+    const intrusa = `supabase/migrations/99999999_sem_contrato_${process.pid}_${Date.now().toString(36)}.sql`;
+    assert(semContrato([intrusa]).length === 1, "controle negativo: migration sem contrato passaria");
   });
   t("M2. nenhum GRANT/REVOKE/RLS/POLICY introduzido", () => {
     const d = git("diff", BASE, "--", ".", ":(exclude)scripts/testar-sec3-*.ts", ...FORA_DA_VARREDURA.map((f) => `:(exclude)${f}`));

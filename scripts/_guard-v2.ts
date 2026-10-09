@@ -206,11 +206,37 @@ export function identidadeDeLojaNaoExplicita(raiz = RAIZ_V2): string[] {
     if ((meta.match(/\.eq\("user_id", dono\)/g) ?? []).length < 2) erros.push(`${CAPABILITY_LOJAS}: metadata sem escopo de dono na leitura e na escrita`);
     if (!/\.update\(campos\)[\s\S]{0,200}\.eq\("marketplace", marketplace\)/.test(meta)) erros.push(`${CAPABILITY_LOJAS}: escrita de metadata sem escopo de marketplace`);
   }
+  // EXTERNAL_IDENTITY_IS_MARKETPLACE_SCOPED (Fase 1A-SCHEMA): seller_id é id externo POR marketplace
+  for (const v of identidadeExternaSemMarketplace(raiz)) erros.push(`EXTERNAL_IDENTITY_IS_MARKETPLACE_SCOPED: ${v}`);
   // resolvedor explícito: sem ordenação/limite; loja única só sob opt-in
   const resolver = semComentarios(ler(raiz, "lib/lojas/resolver.ts"));
   if (/\.order\(|\.limit\(|created_at|\.sort\(/.test(resolver)) erros.push("lib/lojas/resolver.ts: resolvedor ordena/limita (seleção implícita)");
   if ((resolver.match(/doMarketplace\[0\]/g) ?? []).length !== 1 || !/pedido\.permitirUnica && doMarketplace\.length === 1\) return \{ ok: true, loja: paraResolvida\(doMarketplace\[0\]/.test(resolver))
     erros.push("lib/lojas/resolver.ts: loja escolhida sem pedido explícito");
+  return erros;
+}
+
+/**
+ * Identidade externa de loja = (user_id, marketplace, seller_id). Ids de marketplaces diferentes são
+ * namespaces diferentes: nenhuma busca por seller_id sem marketplace, nenhum ON CONFLICT por seller_id,
+ * nenhuma UNIQUE nova em lojas com seller_id sem marketplace — e a identidade escopada precisa existir.
+ */
+export function identidadeExternaSemMarketplace(raiz = RAIZ_V2): string[] {
+  const erros: string[] = [];
+  for (const f of listar(raiz, "app", "lib", "components").filter((x) => /\.(ts|tsx)$/.test(x))) {
+    const src = semComentarios(ler(raiz, f));
+    for (const m of src.matchAll(/\.from\(["']lojas["']\)[\s\S]*?;/g))
+      if (/\.eq\(\s*["']seller_id["']/.test(m[0]) && !/\.eq\(\s*["']marketplace["']/.test(m[0])) erros.push(`${f}: busca loja por seller_id sem marketplace`);
+    if (/onConflict\s*:\s*["'`][^"'`]*seller_id/.test(src)) erros.push(`${f}: ON CONFLICT por seller_id (identidade global)`);
+  }
+  const colunasUnicasLojas: string[][] = [];
+  for (const f of listar(raiz, "supabase/migrations").filter((x) => x.endsWith(".sql"))) {
+    const sql = ler(raiz, f).replace(/--.*$/gm, "");
+    for (const m of sql.matchAll(/create\s+unique\s+index\s+(?:if\s+not\s+exists\s+)?\w+\s+on\s+(?:public\.)?lojas\s*\(([^)]*)\)/gi)) colunasUnicasLojas.push(m[1].split(",").map((c) => c.trim().toLowerCase()));
+    for (const m of sql.matchAll(/alter\s+table\s+(?:public\.)?lojas[\s\S]*?unique\s*\(([^)]*)\)/gi)) colunasUnicasLojas.push(m[1].split(",").map((c) => c.trim().toLowerCase()));
+  }
+  for (const cols of colunasUnicasLojas) if (cols.includes("seller_id") && !cols.includes("marketplace")) erros.push(`migration cria UNIQUE em lojas (${cols.join(", ")}) sem marketplace`);
+  if (!colunasUnicasLojas.some((c) => c.join(",") === "user_id,marketplace,seller_id")) erros.push("identidade (user_id, marketplace, seller_id) não declarada nas migrations");
   return erros;
 }
 

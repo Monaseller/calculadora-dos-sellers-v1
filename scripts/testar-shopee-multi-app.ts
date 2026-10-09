@@ -32,6 +32,14 @@ function t(nome: string, fn: () => void | Promise<void>) {
   });
 }
 function assert(c: unknown, m: string): asserts c { if (!c) throw new Error(m); }
+/**
+ * Adultera a assinatura base64url trocando o PRIMEIRO caractere: "A" se ele for outro, "B" se for "A".
+ * Nunca devolve o original e sempre muda bits significativos (o ULTIMO caractere de um HMAC-SHA256 em
+ * base64url carrega 2 bits de padding — trocar ali pode decodificar para os mesmos bytes).
+ */
+function adulterarAssinatura(sig: string): string {
+  return (sig[0] === "A" ? "B" : "A") + sig.slice(1);
+}
 
 process.env.NEXT_PUBLIC_SUPABASE_URL = "https://placeholder-de-teste.invalid";
 process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = "chave-de-teste-invalida";
@@ -192,11 +200,27 @@ async function principal() {
     const [p, s] = v.split(".");
     const forjado = JSON.parse(Buffer.from(p.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString()); forjado.app = "default";
     const p2 = Buffer.from(JSON.stringify(forjado)).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-    for (const ruim of [`${p2}.${s}`, `${p}.${s.slice(0, -2)}AA`, `${p}`, `x.y.z`, "lixo"]) {
+    // CDS V2 Fase 1A-SCHEMA: adulteracao DETERMINISTICA (antes: `s.slice(0, -2) + "AA"`, um no-op quando a
+    // assinatura ja terminava em "AA" — ~1/1024 de falso negativo).
+    const assinaturaAdulterada = adulterarAssinatura(s);
+    assert(assinaturaAdulterada !== s && assinaturaAdulterada.length === s.length, "adulteracao nao mudou a assinatura");
+    for (const ruim of [`${p2}.${s}`, `${p}.${assinaturaAdulterada}`, `${p}`, `x.y.z`, "lixo"]) {
+      assert(ruim !== v, "estado 'adulterado' identico ao original");
       const r = await callback.GET(req(`/api/auth/shopee/callback?code=C&shop_id=${SHOP_X}`, { cds_session: sessaoA, [est.NOME_COOKIE_ESTADO_SHOPEE]: ruim }));
       assert(erroCfg(r) === "shopee_estado", `aceitou ${ruim.slice(0, 20)}`);
     }
     assert(chamadas.length === 0 && lojas.length === 0, "trocou token com estado ruim");
+  });
+  t("F2. estabilidade: 4096 estados recem-emitidos, adulterados de forma deterministica → sempre diferentes e sempre rejeitados", async () => {
+    let falhas = 0;
+    for (let i = 0; i < 4096; i++) {
+      const original = await est.emitirEstadoShopee(UID_A, i % 2 ? "rd" : "default", { segredo: process.env.SESSION_SECRET!, agoraSegundos: auth.agoraEmSegundos() });
+      const [p, s] = original.split(".");
+      const adulterado = `${p}.${adulterarAssinatura(s)}`;
+      const aceito = await est.verificarEstadoShopee(adulterado, { segredo: process.env.SESSION_SECRET!, agoraSegundos: auth.agoraEmSegundos() });
+      if (adulterado === original || aceito) falhas++;
+    }
+    assert(falhas === 0, `FLAKY_FAILURES=${falhas}`);
   });
   t("G. estado expirado → rejeitado; TTL acima do teto nunca e emitido/aceito", async () => {
     reiniciar();
