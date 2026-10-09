@@ -217,11 +217,26 @@ async function principal() {
     assert(!r.ok && r.motivo === "SEM_LOJA", `esperado SEM_LOJA, veio ${JSON.stringify(r)}`);
   });
 
-  t("B. exatamente 1 loja válida -> resolve a própria, sem lojaId", async () => {
+  // CDS V2 Fase 1B: a loja ÚNICA só é resolvida sem lojaId com opt-in EXPLÍCITO (permitirUnica).
+  t("B. 1 loja válida: sem opt-in -> LOJA_NAO_DEFINIDA; com permitirUnica -> resolve a própria", async () => {
     apenasUmaLojaA({});
-    const r = await M.resolverContaML(UID_A);
+    const semOptIn = await M.resolverContaML(UID_A);
+    assert(!semOptIn.ok && semOptIn.motivo === "LOJA_NAO_DEFINIDA", `sem opt-in escolheu sozinho: ${JSON.stringify(semOptIn)}`);
+    const r = await M.resolverContaML(UID_A, null, { permitirUnica: true });
     assert(r.ok, `esperado ok, veio ${JSON.stringify(r)}`);
     assert(r.ok && r.lojaId === LOJA_A1 && r.accessToken === "<access-A1>", "resolveu loja/token errados");
+  });
+
+  t("B2. permitirUnica com 2 lojas -> LOJA_NAO_DEFINIDA (nunca 'a primeira'/'a mais recente')", async () => {
+    reset();
+    const r = await M.resolverContaML(UID_A, null, { permitirUnica: true });
+    assert(!r.ok && r.motivo === "LOJA_NAO_DEFINIDA" && r.lojas.length === 2, `escolheu uma loja: ${JSON.stringify(r)}`);
+  });
+
+  t("B3. lojaId inválido com 1 loja e permitirUnica -> LOJA_INVALIDA, NUNCA cai para a única", async () => {
+    apenasUmaLojaA({});
+    const r = await M.resolverContaML(UID_A, LOJA_INEXISTENTE, { permitirUnica: true });
+    assert(!r.ok && r.motivo === "LOJA_INVALIDA", `caiu para a única: ${JSON.stringify(r)}`);
   });
 
   t("C. 2 lojas e nenhum lojaId -> LOJA_NAO_DEFINIDA, sem escolher sozinho", async () => {

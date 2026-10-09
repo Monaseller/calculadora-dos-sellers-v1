@@ -17,12 +17,6 @@ import { tetoEfetivoMs, type LimiteExterno } from "@/lib/controle-tempo";
  * desativado, removido, para que ninguém volte a usá-lo por engano.
  */
 
-function getCookie(request: Request, name: string): string | null {
-  const header = request.headers.get("cookie") || "";
-  const entry = header.split("; ").find(c => c.startsWith(`${name}=`));
-  return entry ? entry.slice(name.length + 1) : null;
-}
-
 export interface MLTokenResult {
   token: string;
   newAccessToken?: string;
@@ -31,93 +25,11 @@ export interface MLTokenResult {
   lojaId?: string;
 }
 
-const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 /**
- * A loja indicada pelo cookie pertence a este usuário?
- *
- * Devolve o id só quando a linha existe, é de marketplace ML e tem
- * `user_id` igual ao da sessão. Loja de outro dono, loja órfã
- * (`user_id NULL`), loja de outro marketplace, id inexistente e id
- * malformado produzem o MESMO resultado: `null`. Quem chama não
- * consegue distinguir os casos, então não há enumeração.
+ * CDS V2 Fase 1B: `getMLToken` (que devolvia o cookie `ml_access_token` como credencial) e
+ * `applyMLCookies` (que gravava access/refresh token no navegador) foram REMOVIDOS. A credencial
+ * ML é resolvida só no servidor, por loja: `resolverContaML` (lib/ml-conexao.ts) e `getMLLojaById`.
  */
-async function resolverLojaDoUsuario(lojaIdBruto: string, userId: string): Promise<string | null> {
-  if (!UUID_REGEX.test(lojaIdBruto)) return null;
-
-  // LOJAS-ANON-SELECT: era leitura com o cliente ANON. A capability
-  // aplica exatamente os mesmos tres filtros (id + user_id + ML) e
-  // devolve `linha: null` em erro — o fail-closed de antes, preservado.
-  const { linha } = await lerCredencialMLPorLojaEDono(lojaIdBruto, userId);
-
-  return linha?.id ? String(linha.id) : null;
-}
-
-/**
- * Tenta obter um token ML válido, com fallback para refresh automático.
- *
- * ── ISOLAMENTO DE PROPRIEDADE (F0.c.4) ──────────────────────────────
- * `userId` é OBRIGATÓRIO e vem da sessão — nunca do cliente. Antes desta
- * correção, a função resolvia a loja apenas por `loja_ativa_id`, um
- * cookie que qualquer cliente pode enviar com qualquer valor, e
- * consultava `lojas` só por `id`. Um usuário autenticado que informasse
- * o id da loja de outro recebia o **token de Mercado Livre alheio** — e,
- * pelo caminho de refresh, ainda **sobrescrevia os tokens daquela loja**
- * no banco.
- *
- * Agora a propriedade é validada UMA vez, antes de qualquer uso, e o
- * fracasso é fechado: cookie apontando para loja que não é do usuário
- * não cai em outra loja nem segue adiante — devolve `null`, e a rota
- * responde o mesmo "Conta do ML não conectada" de sempre.
- */
-export async function getMLToken(request: Request, userId: string): Promise<MLTokenResult | null> {
-  if (!userId) return null;
-
-  const lojaIdCookie = getCookie(request, "loja_ativa_id");
-  let lojaId: string | null = null;
-  if (lojaIdCookie) {
-    lojaId = await resolverLojaDoUsuario(lojaIdCookie, userId);
-    // Loja declarada mas não pertencente ao usuário: nega tudo. Ignorar o
-    // cookie e seguir seria aceitar uma tentativa de usar loja alheia.
-    if (!lojaId) return null;
-  }
-
-  // 1. Cookie ml_access_token presente → usa direto
-  const existing = getCookie(request, "ml_access_token");
-  if (existing) return { token: existing };
-
-  const refreshCookie = getCookie(request, "ml_refresh_token");
-
-  // 2. Tenta refresh pelo cookie ml_refresh_token
-  if (refreshCookie) {
-    const result = await refreshMLToken(refreshCookie);
-    if (result) {
-      // Só grava na loja já validada como do usuário.
-      if (lojaId) await saveTokensToDB(lojaId, userId, result);
-      return { ...result, lojaId: lojaId ?? undefined };
-    }
-  }
-
-  // 3. Fallback: lê access_token/refresh_token do banco pela loja ativa
-  if (lojaId) {
-    const { linha: loja } = await lerCredencialMLPorLojaEDono(lojaId, userId);
-
-    if (loja?.access_token && new Date(loja.token_expires_at as string) > new Date()) {
-      // Token do banco ainda válido → usa e re-emite o cookie
-      return { token: loja.access_token, newAccessToken: loja.access_token, lojaId };
-    }
-
-    if (loja?.refresh_token) {
-      const result = await refreshMLToken(loja.refresh_token);
-      if (result) {
-        await saveTokensToDB(lojaId, userId, result);
-        return { ...result, lojaId };
-      }
-    }
-  }
-
-  return null;
-}
 
 /**
  * Margem aplicada à expiração: um token que vence em menos de 5 minutos é
@@ -563,20 +475,4 @@ export async function getMLLojaById(
     sellerId:    loja.seller_id ?? "",
     nickname:    loja.nickname ?? "ML",
   };
-}
-
-/** Aplica cookies novos numa NextResponse após refresh */
-export function applyMLCookies(res: any, result: MLTokenResult) {
-  if (!result.newAccessToken) return;
-  const isProd = process.env.NODE_ENV === "production";
-  res.cookies.set("ml_access_token", result.newAccessToken, {
-    httpOnly: true, secure: isProd, sameSite: "lax", path: "/",
-    maxAge: result.expires ?? 21600,
-  });
-  if (result.newRefreshToken) {
-    res.cookies.set("ml_refresh_token", result.newRefreshToken, {
-      httpOnly: true, secure: isProd, sameSite: "lax", path: "/",
-      maxAge: 86400 * 180,
-    });
-  }
 }

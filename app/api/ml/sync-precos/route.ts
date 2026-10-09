@@ -4,8 +4,7 @@ import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { calcularFreteMl, calcularFreteFullMl, calcularFreteFlexMl } from "@/lib/tabela-frete-ml";
 import { CATEGORIAS_ML } from "@/lib/comissoes-mercado-livre";
 import { autenticarRequisicao, lerCookie } from "@/lib/autenticacao";
-import { applyMLCookies } from "@/lib/ml-auth";
-import { resolverContaML } from "@/lib/ml-conexao";
+import { contarLojasMLAtivasDoDono, MULTI_ML_CATALOG_NOT_READY, resolverContaML } from "@/lib/ml-conexao";
 import { getActivePromoPrice } from "@/lib/ml-promotions";
 import { lerTodasAsPaginas } from "@/lib/anuncios/leitura-paginada";
 
@@ -132,7 +131,13 @@ export async function POST(request: Request) {
   // ── CREDENCIAL RESOLVIDA NO SERVIDOR (F0.c.5) ─────────────────────
   // Mesma troca de `importar-anuncios`: a loja e a credencial passam a
   // sair do mesmo resolvedor que responde à tela, em vez do cookie.
-  const conta = await resolverContaML(userId, lerCookie(request, "loja_ativa_id"));
+  // CDS V2 Fase 1B: `anuncios` ML ainda nao tem loja_id (Fase 2). Com 2+ contas ML do dono o
+  // catalogo falha fechado ANTES de provider/escrita — mesmo com loja_ativa_id apontando uma delas.
+  if (await contarLojasMLAtivasDoDono(userId) > 1) {
+    return NextResponse.json({ erro: true, codigo: MULTI_ML_CATALOG_NOT_READY,
+      mensagem: "Catálogo com mais de uma conta do Mercado Livre ainda não é suportado." }, { status: 409 });
+  }
+  const conta = await resolverContaML(userId, lerCookie(request, "loja_ativa_id"), { permitirUnica: true });
   if (!conta.ok) {
     // Status 200 preservado: a tela lê `data.erro`/`data.mensagem`. A
     // dívida do "200 para erro" é registrada, não corrigida aqui.
@@ -303,10 +308,6 @@ export async function POST(request: Request) {
     : `${atualizados} anúncio${atualizados !== 1 ? "s" : ""} atualizado${atualizados !== 1 ? "s" : ""}!`;
 
   const res = NextResponse.json({ erro: false, atualizados, mensagem, detalhes });
-  // COMPATIBILIDADE TEMPORÁRIA (decisão 2). Ver o comentário equivalente
-  // em `importar-anuncios`. Some na fase E.
-  if (lerCookie(request, "ml_access_token") !== token) {
-    applyMLCookies(res, { token, newAccessToken: token });
-  }
+  // CDS V2 Fase 1B: nenhum cookie de credencial ML e emitido (o token nunca vai ao navegador).
   return res;
 }

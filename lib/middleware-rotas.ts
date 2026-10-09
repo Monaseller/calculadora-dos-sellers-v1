@@ -180,15 +180,11 @@ export const ROTAS_COM_SEGREDO: Readonly<Record<string, readonly string[]>> = {
  * OAuth deixou de escrever na F0.c.6c, de modo que quem acabara de
  * conectar era informado do contrário.
  *
- * RESTA APENAS `/api/ml/item-thumbnails`, que continua autorizando pelo
- * cookie legado e ainda não foi migrada.
- *
- * F0.c só é dada por concluída quando este objeto estiver VAZIO. O teste
- * trava o tamanho para impedir que a exceção cresça.
+ * CDS V2 Fase 1B: `/api/ml/item-thumbnails`, a última entrada, migrou — exige
+ * sessão e resolve a credencial por loja no servidor. O objeto ficou VAZIO
+ * (F0.c concluída) e o teste trava esse tamanho: nenhuma exceção anônima volta.
  */
-export const EXCECOES_TEMPORARIAS_F0C: Readonly<Record<string, readonly string[]>> = {
-  "/api/ml/item-thumbnails": ["GET"],
-};
+export const EXCECOES_TEMPORARIAS_F0C: Readonly<Record<string, readonly string[]>> = {};
 
 function casa(
   tabela: Readonly<Record<string, readonly string[]>>,

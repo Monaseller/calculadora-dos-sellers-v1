@@ -579,20 +579,17 @@ t("20. /api/auth/status NAO e mais excecao — rota removida em F0.c.16", () => 
     "com sessao o caminho deveria seguir o fluxo normal");
 });
 
-t("21. /api/ml/item-thumbnails continua acessivel sem cds_session", () => {
-  assert(sem("/api/ml/item-thumbnails") === "liberar", "comportamento legado foi alterado em F0.b");
+// CDS V2 Fase 1B: /api/ml/item-thumbnails migrou (sessão + credencial ML por loja no servidor).
+t("21. /api/ml/item-thumbnails EXIGE cds_session (deixou de ser exceção anônima)", () => {
+  assert(sem("/api/ml/item-thumbnails") === "bloquear_api", "🔴 item-thumbnails voltou a ser acessível sem sessão");
+  assert(com("/api/ml/item-thumbnails") === "liberar", "com sessão o caminho deveria seguir o fluxo normal");
 });
 
-t("22. a excecao temporaria tem EXATAMENTE 1 entrada", () => {
-  // Trava contra crescimento silencioso. F0.c so termina com este objeto
-  // vazio. 3 → 2 no cutover de Meus Produtos (so /api/anuncio saiu);
-  // 2 → 1 em F0.c.16 (/api/auth/status migrada para /api/ml/conexao e
-  // deletada). A entrada restante e nomeada de proposito: reduzir a
-  // contagem trocando UMA rota por outra passaria despercebido.
+t("22. a excecao temporaria esta VAZIA (F0.c concluida) — nenhuma rota anonima volta", () => {
+  // Trava contra crescimento silencioso. 3 → 2 (Meus Produtos), 2 → 1 (F0.c.16),
+  // 1 → 0 na CDS V2 Fase 1B (/api/ml/item-thumbnails passou a exigir sessão).
   const n = Object.keys(EXCECOES_TEMPORARIAS_F0C).length;
-  assert(n === 1, `excecao temporaria tem ${n} — F0.c.16 deixou exatamente 1`);
-  assert("/api/ml/item-thumbnails" in EXCECOES_TEMPORARIAS_F0C,
-    "a unica entrada restante deveria ser /api/ml/item-thumbnails");
+  assert(n === 0, `excecao temporaria tem ${n} — a Fase 1B a deixou vazia`);
 });
 
 // ────────────────────────────────────────────────────────────────────
@@ -714,7 +711,7 @@ const INVENTARIO: [string, string, Decisao][] = [
   // — excecao temporaria F0.c (1; era 3 ate o cutover F0.c.5 e 2 ate a
   //   F0.c.16, quando /api/auth/status saiu do inventario por ter sido
   //   DELETADA — o caminho segue coberto pelo teste 20)
-  ["/api/ml/item-thumbnails", "GET", "liberar"],
+  ["/api/ml/item-thumbnails", "GET", "bloquear_api"],
   // — migrada em F0.c.5: exige sessao como qualquer rota de API
   ["/api/anuncio", "GET", "bloquear_api"],
   // — protegidas: auth e perfil (3)

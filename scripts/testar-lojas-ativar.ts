@@ -410,31 +410,27 @@ async function principal() {
     assert(sc.includes(`loja_ativa_id=${LOJA_ML}`), `não emitiu loja_ativa_id: ${sc}`);
   });
 
-  t("29. ML COM access_token emite ml_access_token", async () => {
+  // CDS V2 Fase 1B: "selecionar loja" = selecionar CONTEXTO. A rota NUNCA copia credencial
+  // para o navegador (antes: 29/31 exigiam o cookie ml_access_token com o token da loja).
+  t("29. ML COM access_token NÃO emite ml_access_token (a credencial fica no servidor)", async () => {
     reiniciar();
     const sc = setCookies(await rotaPOST(req(LOJA_ML, { cds_session: tokenA })));
-    const linhaCookie = sc.split("\n").find(l => l.startsWith("ml_access_token=")) ?? "";
-    assert(linhaCookie !== "", `não emitiu ml_access_token: ${sc}`);
-    // O valor trafega percent-encoded (`<` → `%3C`), como já era antes.
-    const valor = decodeURIComponent(linhaCookie.split(";")[0].slice("ml_access_token=".length));
-    assert(valor === "<access>", `🔴 valor do token mudou: ${valor}`);
+    assert(!/(^|\n)ml_(access|refresh)_token=/.test(sc), `🔴 emitiu cookie de credencial ML: ${sc}`);
+    assert(!sc.includes("%3Caccess%3E") && !sc.includes("<access>"), "🔴 o token da loja apareceu em Set-Cookie");
+    assert(sc.includes(`loja_ativa_id=${LOJA_ML}`), `perdeu loja_ativa_id: ${sc}`);
   });
 
   t("30. ML SEM access_token não emite ml_access_token, mas mantém loja_ativa_id", async () => {
     reiniciar();
     const sc = setCookies(await rotaPOST(req(LOJA_ML_SEM_TOKEN, { cds_session: tokenA })));
-    assert(!sc.includes("ml_access_token"), "🔴 emitiu cookie de token vazio");
+    assert(!sc.includes("ml_access_token"), "🔴 emitiu cookie de token");
     assert(sc.includes(`loja_ativa_id=${LOJA_ML_SEM_TOKEN}`), "perdeu loja_ativa_id");
   });
 
-  t("31. flags e maxAge preservados — ml_access_token", async () => {
+  t("31. o corpo da resposta também não carrega credencial (só o contexto público da loja)", async () => {
     reiniciar();
-    const sc = setCookies(await rotaPOST(req(LOJA_ML, { cds_session: tokenA })));
-    const linhaCookie = sc.split("\n").find(l => l.startsWith("ml_access_token=")) ?? "";
-    assert(/httponly/i.test(linhaCookie), "🔴 ml_access_token perdeu HttpOnly");
-    assert(/max-age=21600/i.test(linhaCookie), `maxAge mudou: ${linhaCookie}`);
-    assert(/samesite=lax/i.test(linhaCookie), "sameSite mudou");
-    assert(/path=\//i.test(linhaCookie), "path mudou");
+    const corpo = JSON.stringify(await (await rotaPOST(req(LOJA_ML, { cds_session: tokenA }))).json());
+    assert(!/access_token|refresh_token|<access>|<refresh>/i.test(corpo), `🔴 credencial no corpo: ${corpo}`);
   });
 
   t("32. flags e maxAge preservados — loja_ativa_id e shopee_loja_id", async () => {

@@ -510,9 +510,23 @@ async function principal() {
     const r = await vendasHoje.GET(req("/api/ml/vendas-hoje", { sessao: sessaoA.slice(0, -2) + "xx", extraCookie: "ml_access_token=tok" }));
     assert(r.status === 401 && chamadas.length === 0, `status ${r.status}`);
   });
-  t("G3. com sessao A (e ?user_id=B forjado): anuncios SEMPRE filtrados pelo dono da sessao", async () => {
+  t("G3. com sessao A (e ?user_id=B forjado): anuncios SEMPRE filtrados pelo dono da sessao; credencial do SERVIDOR, cookie ignorado", async () => {
     reset();
-    const r = await vendasHoje.GET(req(`/api/ml/vendas-hoje?user_id=${UID_B}`, { sessao: sessaoA, extraCookie: "ml_access_token=tok" }));
+    // CDS V2 Fase 1B: a credencial vem do banco (loja ML do dono A), nunca do cookie. O cookie de
+    // token enviado e FALSO: o ML precisa receber SO o token do servidor (controle negativo).
+    const lojaA = BANCO.lojas.find((l) => l.id === LOJA_A)!;
+    Object.assign(lojaA, { access_token: "<TOKEN_REAL>", token_expires_at: new Date(Date.now() + 3600_000).toISOString(), seller_id: "999" });
+    const autorizacoes: string[] = [];
+    const fetchOriginal = (globalThis as any).fetch;
+    (globalThis as any).fetch = async (url: string, init?: { headers?: Record<string, string> }) => {
+      autorizacoes.push(String(init?.headers?.Authorization ?? init?.headers?.authorization ?? ""));
+      return fetchOriginal(url, init);
+    };
+    let r: Response;
+    try {
+      r = await vendasHoje.GET(req(`/api/ml/vendas-hoje?user_id=${UID_B}`, { sessao: sessaoA, extraCookie: "ml_access_token=<TOKEN_FALSO>" }));
+    } finally { (globalThis as any).fetch = fetchOriginal; }
+    assert(autorizacoes.length > 0 && autorizacoes.every((a) => a === "Bearer <TOKEN_REAL>"), `🔴 ML recebeu: ${autorizacoes.join(" | ")}`);
     assert(r.status === 200, `status ${r.status}`);
     const c = chamadas.find((x) => x.tabela === "anuncios");
     assert(c && filtroDono(c) === UID_A, `filtro de dono: ${c && filtroDono(c)}`);

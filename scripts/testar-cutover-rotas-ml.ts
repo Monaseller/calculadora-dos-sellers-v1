@@ -136,9 +136,9 @@ function clienteFalso() {
 
     const cadeia: any = {
       select: () => cadeia,
-      update: (p: Record<string, unknown>) => { tipo = "update"; patch = p; return cadeia; },
-      upsert: () => cadeia,
-      insert: () => cadeia,
+      update: (p: Record<string, unknown>) => { escritas++; tipo = "update"; patch = p; return cadeia; },
+      upsert: () => { escritas++; return cadeia; },
+      insert: () => { escritas++; return cadeia; },
       eq: (c: string, v: unknown) => { filtros[c] = v; return cadeia; },
       // Filtros que este duplo não precisa interpretar para o que se testa.
       not: () => cadeia,
@@ -165,6 +165,8 @@ const requireOriginal = (Module as any).prototype.require;
 // ── Duplo do Mercado Livre ───────────────────────────────────────────
 interface ChamadaML { url: string; autorizacao: string | null; refreshEnviado: string | null }
 let chamadas: ChamadaML[] = [];
+/** CDS V2 Fase 1B: toda escrita no banco falso (update/upsert/insert), para provar "0 escritas" nos bloqueios. */
+let escritas = 0;
 /** Resposta do refresh; `null` = o ML recusa. */
 let respostaRefresh: { access_token: string; refresh_token?: string } | null = null;
 /**
@@ -236,6 +238,7 @@ async function capturarLogs<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 function reiniciar() {
+  escritas = 0;
   semear();
   chamadas = [];
   respostaRefresh = null;
@@ -337,14 +340,29 @@ async function principal() {
   // ══════════════════════════════════════════════════════════════════
   secao("\n[B. cross-store: cookie da loja A + loja_ativa_id = B]");
 
+  // CDS V2 Fase 1B: `anuncios` ML ainda não tem loja_id (Fase 2). Com 2+ contas ML do dono, as
+  // rotas de CATÁLOGO falham fechado MESMO com contexto válido: 409 + código estruturado, 0
+  // chamadas ao ML e 0 escritas. `/api/anuncio` só LÊ o item no ML (não persiste catálogo):
+  // segue provando o isolamento de credencial — opera B, nunca A.
   for (const [nome, chamar] of AS_QUATRO) {
-    t(`B. ${nome} opera B, nunca A`, async () => {
+    if (nome === "/api/anuncio") {
+      t(`B. ${nome} opera B, nunca A`, async () => {
+        reiniciar();
+        await chamar({ cds_session: tokenSessaoA, loja_ativa_id: LOJA_B, ml_access_token: TOKEN_A });
+        const usados = tokensDeUsuario();
+        assert(usados.length > 0, "não falou com o ML");
+        assert(!usados.includes(TOKEN_A), `🔴 operou a loja A: ${usados.join(", ")}`);
+        assert(usados.every(x => x === TOKEN_B), `não operou B: ${usados.join(", ")}`);
+      });
+      continue;
+    }
+    t(`B. ${nome}: 2 lojas ML + contexto válido (B) -> 409 MULTI_ML_CATALOG_NOT_READY, 0 ML, 0 escritas`, async () => {
       reiniciar();
-      await chamar({ cds_session: tokenSessaoA, loja_ativa_id: LOJA_B, ml_access_token: TOKEN_A });
-      const usados = tokensDeUsuario();
-      assert(usados.length > 0, "não falou com o ML");
-      assert(!usados.includes(TOKEN_A), `🔴 operou a loja A: ${usados.join(", ")}`);
-      assert(usados.every(x => x === TOKEN_B), `não operou B: ${usados.join(", ")}`);
+      const res = await chamar({ cds_session: tokenSessaoA, loja_ativa_id: LOJA_B, ml_access_token: TOKEN_A });
+      const corpo = await res.json();
+      assert(res.status === 409 && corpo.erro === true && corpo.codigo === "MULTI_ML_CATALOG_NOT_READY", `${res.status} ${JSON.stringify(corpo)}`);
+      assert(tokensDeUsuario().length === 0 && chamadas.length === 0, `🔴 chamou o ML com catálogo bloqueado: ${chamadas.map(c => c.url).join(", ")}`);
+      assert(escritas === 0, `🔴 gravou ${escritas}x antes do bloqueio`);
     });
   }
 
@@ -376,9 +394,11 @@ async function principal() {
       const res = await chamar({ cds_session: tokenSessaoA });
       assert(tokensDeUsuario().length === 0, `🔴 escolheu uma loja arbitrariamente: ${tokensDeUsuario().join(", ")}`);
       if (nome !== "/api/anuncio") {
+        // CDS V2 Fase 1B: catálogo com 2+ contas ML = bloqueio estruturado (não escolhe loja).
         const corpo = await res.json();
-        assert(corpo.erro === true && /selecione a loja/i.test(corpo.mensagem ?? ""),
-          `mensagem não orienta a escolher: ${JSON.stringify(corpo)}`);
+        assert(res.status === 409 && corpo.erro === true && corpo.codigo === "MULTI_ML_CATALOG_NOT_READY",
+          `esperado 409 MULTI_ML_CATALOG_NOT_READY: ${res.status} ${JSON.stringify(corpo)}`);
+        assert(chamadas.length === 0 && escritas === 0, `🔴 ML=${chamadas.length} escritas=${escritas} com catálogo bloqueado`);
       }
     });
   }
@@ -512,56 +532,48 @@ async function principal() {
   });
 
   // ══════════════════════════════════════════════════════════════════
-  secao("\n[K. compatibilidade de cookie — decisão 2]");
+  // CDS V2 Fase 1B: a "compatibilidade de cookie" (decisão 2 do cutover) acabou. Nenhuma rota ML
+  // grava credencial no navegador nem a aceita dele — a credencial é resolvida no servidor por loja.
+  secao("\n[K. nenhum cookie de credencial — Fase 1B]");
 
-  t("K. o Set-Cookie de compatibilidade carrega o token RESOLVIDO, não o antigo", async () => {
-    apenasLojaA();
-    resultadosBusca = ["MLB111"];   // sem anúncios a rota retorna antes do cookie
-    const res = await rotas["importar"](req("/api/ml/importar-anuncios",
-      { cds_session: tokenSessaoA, ml_access_token: "<cookie-obsoleto>" }));
-    const setCookie = lerSetCookie(res);
-    assert(setCookie.includes("ml_access_token"),
-      `parou de emitir o cookie de compatibilidade — headers: ${[...res.headers.keys()].join(", ")}`);
-    assert(!setCookie.includes("<cookie-obsoleto>"), "reemitiu o cookie velho");
-  });
-
-  t("K2. cookie já correto -> nenhum Set-Cookie desnecessário", async () => {
+  t("K. nenhuma rota emite Set-Cookie de credencial ML, mesmo recebendo um cookie obsoleto", async () => {
     apenasLojaA();
     resultadosBusca = ["MLB111"];
-    const res = await rotas["importar"](req("/api/ml/importar-anuncios",
-      { cds_session: tokenSessaoA, ml_access_token: TOKEN_A }));
-    assert(!lerSetCookie(res).includes("ml_access_token"),
-      "reescreveu credencial no navegador sem necessidade");
+    for (const [nome, chamar] of AS_QUATRO) {
+      const res = await chamar({ cds_session: tokenSessaoA, ml_access_token: "<cookie-obsoleto>", ml_refresh_token: "<refresh-obsoleto>" });
+      const sc = lerSetCookie(res);
+      assert(!/ml_(access|refresh)_token=/.test(sc), `🔴 ${nome} gravou credencial no navegador: ${sc}`);
+      assert(!sc.includes(TOKEN_A) && !sc.includes("<cookie-obsoleto>"), `🔴 ${nome} devolveu token em Set-Cookie`);
+    }
+  });
+
+  t("K2. cookie de token FALSO nunca vira credencial: o ML recebe só o token do servidor (TOKEN_A)", async () => {
+    apenasLojaA();
+    resultadosBusca = ["MLB111"];
+    for (const [nome, chamar] of AS_QUATRO) {
+      chamadas = [];
+      await chamar({ cds_session: tokenSessaoA, ml_access_token: "<TOKEN_FALSO>" });
+      const usados = tokensDeUsuario();
+      assert(usados.length > 0 && usados.every((x) => x === TOKEN_A), `🔴 ${nome} usou ${usados.join(",") || "nenhum"} (esperado só TOKEN_A)`);
+    }
   });
 
   // ══════════════════════════════════════════════════════════════════
   secao("\n[L. o cookie deixou de ser fonte de credencial no código]");
 
-  t("L. nenhuma das quatro rotas lê ml_access_token ou ml_refresh_token", async () => {
+  t("L. nenhuma rota ML (todas, sem lista fixa) lê ou grava cookie de token; todas resolvem a conta no servidor", async () => {
     const fs = await import("node:fs");
-    // `emiteCookieCompat` distingue as duas rotas que, por decisão 2 do
-    // cutover, AINDA emitem o cookie por compatibilidade — nelas uma única
-    // menção é legítima (a comparação que evita Set-Cookie redundante).
-    const arquivos: Array<{ caminho: string; emiteCookieCompat: boolean }> = [
-      { caminho: "app/api/ml/sync-skus/route.ts",          emiteCookieCompat: false },
-      { caminho: "app/api/anuncio/route.ts",               emiteCookieCompat: false },
-      { caminho: "app/api/ml/importar-anuncios/route.ts",  emiteCookieCompat: true  },
-      { caminho: "app/api/ml/sync-precos/route.ts",        emiteCookieCompat: true  },
-    ];
-    for (const { caminho, emiteCookieCompat } of arquivos) {
+    const { execFileSync } = await import("node:child_process");
+    const rotasML = execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard", "--", "app/api/ml", "app/api/anuncio"], { encoding: "utf8" })
+      .split(/\r?\n/).filter((f) => /route\.ts$/.test(f));
+    assert(rotasML.length >= 8, `ANCORA: poucas rotas ML encontradas (${rotasML.length})`);
+    for (const caminho of rotasML) {
       const fonte = fs.readFileSync(caminho, "utf8")
         .replace(/\/\*[\s\S]*?\*\//g, "")
         .replace(/(^|[^:])\/\/.*$/gm, "$1");
-      assert(!/ml_refresh_token/.test(fonte), `🔴 ${caminho} lê o refresh do navegador`);
-      assert(!/getMLToken/.test(fonte), `🔴 ${caminho} ainda resolve credencial por getMLToken`);
-      assert(/resolverContaML/.test(fonte), `${caminho} não usa o resolvedor server-side`);
-
-      const usos = (fonte.match(/ml_access_token/g) ?? []).length;
-      if (emiteCookieCompat) {
-        assert(usos <= 1, `🔴 ${caminho} menciona o cookie ${usos} vezes — mais que a comparação de compatibilidade`);
-      } else {
-        assert(usos === 0, `🔴 ${caminho} ainda lê o cookie de credencial`);
-      }
+      assert(!/ml_(access|refresh)_token/.test(fonte), `🔴 ${caminho} lê/grava cookie de credencial ML`);
+      assert(!/getMLToken|applyMLCookies|getMLLojaAtiva|lerIdLojaMLAtivaMaisRecenteDoDono/.test(fonte), `🔴 ${caminho} usa helper legado de credencial/seleção`);
+      if (/api\.mercadolibre\.com/.test(fonte)) assert(/resolverContaML|getMLLojaById/.test(fonte), `${caminho} chama o ML sem resolver a conta no servidor`);
     }
   });
 

@@ -20,8 +20,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { CATEGORIAS_ML } from "@/lib/comissoes-mercado-livre";
-import { getMLLojaAtiva } from "@/lib/ml-auth";
-import { listarLojasMLDoDonoPorSeller } from "@/lib/marketplace/credenciais";
 import { LojaIdIntegrityError } from "@/lib/sync-errors";
 import { lerTodasAsPaginas } from "@/lib/anuncios/leitura-paginada";
 
@@ -184,15 +182,19 @@ export interface SyncMLResult {
   inserted: number;
 }
 
+/** Loja ML já resolvida no servidor (dono + marketplace + credencial). */
+export interface LojaMLResolvida { lojaId: string; accessToken: string; sellerId: string; nickname: string }
+
 export async function syncMLForUser(
   userId:      string,
   dateFrom:    string,
   dateTo:      string,
-  cookieToken?: string,
+  // CDS V2 Fase 1B: posição preservada, mas token do navegador NÃO é mais aceito.
+  _semTokenDeCookie?: undefined,
   noBuffer     = false,
-  lojaOverride?: { lojaId: string; accessToken: string; sellerId: string; nickname: string }
+  lojaOverride?: LojaMLResolvida
 ): Promise<number> {
-  const result = await syncMLForUserV2(userId, dateFrom, dateTo, cookieToken, noBuffer, lojaOverride);
+  const result = await syncMLForUserV2(userId, dateFrom, dateTo, undefined, noBuffer, lojaOverride);
   return result.inserted;
 }
 
@@ -200,7 +202,8 @@ export async function syncMLForUserV2(
   userId:      string,
   dateFrom:    string,
   dateTo:      string,
-  cookieToken?: string,
+  // CDS V2 Fase 1B: posição preservada, mas token do navegador NÃO é mais aceito.
+  _semTokenDeCookie?: undefined,
   noBuffer     = false,
   // Adicionado 2026-07-11 (worker de sync_jobs): quando informado, sincroniza
   // EXATAMENTE esta loja (id conhecido, já resolvido por getMLLojaById),
@@ -209,75 +212,20 @@ export async function syncMLForUserV2(
   // específica quando o usuário tem mais de uma loja ML. Não afeta nenhum
   // caller existente (cron, rota legada por cookie), que continuam sem
   // passar este argumento.
-  lojaOverride?: { lojaId: string; accessToken: string; sellerId: string; nickname: string }
+  // CDS V2 Fase 1B: OBRIGATÓRIA na prática — sem ela o sync falha fechado (ver abaixo).
+  lojaOverride?: LojaMLResolvida
 ): Promise<SyncMLResult> {
-  let token    = cookieToken;
-  let sellerId = "";
-  let conta    = "ML";
-  let lojaId: string | null = null;
-
-  // Regra de integridade (aprovada 2026-07-11): loja_id é obrigatório para
-  // gravar qualquer pedido, resolvido pelo identificador oficial do ML
-  // (seller_id = me.id via /users/me), NUNCA por access_token (credencial
-  // rotativa, muda em refresh/reconexão). Se não achar exatamente 1 loja
-  // correspondente, o sync PARA (lança erro) — nenhum upsert parcial,
-  // nenhum pedido com loja_id NULL. LojaIdIntegrityError agora vem de
-  // lib/sync-errors.ts (2026-07-11) — precisa ser reconhecível fora
-  // deste arquivo por app/api/internal/sync/executar/route.ts, que usa
-  // `instanceof` para decidir se o erro é permanente (sem retry) ou
-  // transitório (retry via sync_jobs.tentativas).
-
-  if (lojaOverride) {
-    // Caminho do worker (job com loja_id explícito) — pula cookie e
-    // getMLLojaAtiva por completo. Nada de ambiguidade: a loja já foi
-    // resolvida e seu token já validado/atualizado por getMLLojaById.
-    token    = lojaOverride.accessToken;
-    sellerId = lojaOverride.sellerId;
-    conta    = lojaOverride.nickname;
-    lojaId   = lojaOverride.lojaId;
-  } else if (token) {
-    try {
-      const me = await mlFetch("https://api.mercadolibre.com/users/me", token);
-      sellerId = String(me.id);
-      conta    = me.nickname || me.first_name || "ML";
-
-      // LOJAS-ANON-SELECT: era leitura com o cliente ANON. A capability
-      // ja existia (PR #2b-4) com os tres filtros identicos e devolve os
-      // ids SEM `maybeSingle()`, de proposito: duplicidade precisa
-      // continuar visivel para a checagem de "exatamente 1" abaixo.
-      const { ids: lojasEncontradas, erro: lojaErr } = await listarLojasMLDoDonoPorSeller(userId, sellerId);
-
-      if (lojaErr) {
-        throw new LojaIdIntegrityError(`[sync-ml] erro ao resolver loja_id via seller_id=${sellerId}`);
-      }
-      if (lojasEncontradas.length !== 1) {
-        throw new LojaIdIntegrityError(
-          `[sync-ml] loja_id nao resolvido (fluxo cookie legado): seller_id=${sellerId} encontrou ${lojasEncontradas.length} loja(s) em vez de exatamente 1 — sync interrompido, nenhum pedido gravado.`
-        );
-      }
-      lojaId = lojasEncontradas[0];
-    } catch (err) {
-      // Erro de integridade de loja_id nunca cai para o fallback abaixo —
-      // usar getMLLojaAtiva aqui poderia resolver para uma loja DIFERENTE
-      // da que o token do cookie realmente pertence. Só falha de rede/auth
-      // do /users/me (token invalido/expirado) cai no fallback por banco.
-      if (err instanceof LojaIdIntegrityError) throw err;
-      token = undefined;
-    }
+  // CDS V2 Fase 1B: a loja é SEMPRE explícita — já resolvida por quem chama (resolverContaML /
+  // getMLLojaById: dono + marketplace + credencial do servidor). Sem ela, falha fechado: nunca token
+  // de cookie, nunca /users/me para adivinhar a loja, nunca "a mais recente" (getMLLojaAtiva).
+  // Regra de integridade (2026-07-11) preservada: nenhum pedido é gravado sem loja_id.
+  if (!lojaOverride?.lojaId || !lojaOverride.accessToken) {
+    throw new LojaIdIntegrityError(`[sync-ml] loja ML explicita obrigatoria (userId=${userId}) — sync interrompido, nenhum pedido gravado.`);
   }
-
-  if (!token) {
-    const loja = await getMLLojaAtiva(userId);
-    if (!loja) return { found: 0, inserted: 0 };
-    token    = loja.accessToken;
-    sellerId = loja.sellerId;
-    conta    = loja.nickname;
-    lojaId   = loja.lojaId;
-  }
-
-  if (!lojaId) {
-    throw new LojaIdIntegrityError(`[sync-ml] loja_id ausente apos resolucao para userId=${userId} — sync interrompido, nenhum pedido gravado.`);
-  }
+  const token    = lojaOverride.accessToken;
+  const sellerId = lojaOverride.sellerId;
+  const conta    = lojaOverride.nickname;
+  const lojaId   = lojaOverride.lojaId;
 
   // CORRECAO BUG 2:
   // noBuffer=true  (Historico): busca EXATAMENTE o range pedido

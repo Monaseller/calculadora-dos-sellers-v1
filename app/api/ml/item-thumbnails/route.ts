@@ -1,18 +1,24 @@
 import { NextResponse } from "next/server";
+import { autenticarRequisicao, lerCookie } from "@/lib/autenticacao";
+import { resolverContaML } from "@/lib/ml-conexao";
 
-function getToken(request: Request): string | null {
-  const cookieHeader = request.headers.get("cookie") || "";
-  const entry = cookieHeader.split("; ").find(c => c.startsWith("ml_access_token="));
-  return entry ? entry.slice("ml_access_token=".length) : null;
-}
-
-// GET /api/ml/item-thumbnails?ids=MLB1,MLB2,...
+// GET /api/ml/item-thumbnails?ids=MLB1,MLB2,...[&loja_id=<uuid>]
 // Retorna { MLB1: "https://...", MLB2: "https://..." }
+//
+// CDS V2 Fase 1B: era a última rota ANÔNIMA que autorizava pelo cookie `ml_access_token`.
+// Agora exige sessão; a loja vem de `?loja_id` ou do contexto `loja_ativa_id` (sempre
+// revalidados por dono + marketplace ML no servidor), ou é a loja ML ÚNICA por opt-in
+// explícito. Loja de outro dono, Shopee ou id inválido é recusada ANTES do provider.
 export async function GET(request: Request) {
-  const token = getToken(request);
-  if (!token) return NextResponse.json({}, { status: 401 });
+  const auth = await autenticarRequisicao(request);
+  if (!auth.autenticado) return NextResponse.json({}, { status: 401 });
 
   const { searchParams } = new URL(request.url);
+  const lojaIndicada = searchParams.get("loja_id") || lerCookie(request, "loja_ativa_id");
+  const conta = await resolverContaML(auth.uid, lojaIndicada, { permitirUnica: true });
+  if (!conta.ok) return NextResponse.json({}, { status: conta.motivo === "LOJA_NAO_DEFINIDA" ? 409 : 403 });
+  const token = conta.accessToken;
+
   const ids = (searchParams.get("ids") ?? "").split(",").map(s => s.trim()).filter(Boolean);
   if (!ids.length) return NextResponse.json({});
 

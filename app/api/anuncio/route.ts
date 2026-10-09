@@ -439,7 +439,7 @@ export async function GET(request: Request) {
   // fallback público/scraping segue existindo exatamente como antes — mas
   // agora isso só acontece quando realmente NÃO há credencial, nunca por
   // um cookie vencido.
-  const conta = await resolverContaML(userId, lerCookie(request, "loja_ativa_id"));
+  const conta = await resolverContaML(userId, lerCookie(request, "loja_ativa_id"), { permitirUnica: true });
   const token = conta.ok ? conta.accessToken : null;
 
   let itemId = parsed.primaryId;

@@ -38,12 +38,8 @@ export async function POST(request: Request) {
       httpOnly: false, secure: isProd, sameSite: "lax", path: "/", maxAge: 86400 * 30,
     });
   } else {
-    // ML ou outros
-    if (loja.access_token) {
-      res.cookies.set("ml_access_token", loja.access_token, {
-        httpOnly: true, secure: isProd, sameSite: "lax", path: "/", maxAge: 21600,
-      });
-    }
+    // ML ou outros. CDS V2 Fase 1B: selecionar loja = selecionar CONTEXTO (loja_ativa_id,
+    // sempre revalidado no servidor). A credencial nunca é copiada para o navegador.
     res.cookies.set("loja_ativa_id", loja.id, {
       httpOnly: false, secure: isProd, sameSite: "lax", path: "/", maxAge: 86400 * 30,
     });

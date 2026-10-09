@@ -20,6 +20,10 @@
  *       (nunca por rota/navegador, nunca dados.nome cru); callbacks extraem nome só pelos parsers
  *       canônicos; o callback Shopee não troca a loja em uso; nenhum runtime decide por
  *       shop_id/seller_id literal nem traz nome de loja embutido ("mais recente" segue em I3);
+ *   I7  I7_ML_CREDENTIALS_ARE_STORE_SCOPED (Fase 1B): cookie de token ML não é fonte nem destino de
+ *       credencial (só DELETE legado); nenhum seletor implícito tem chamador; toda rota ML resolve a conta
+ *       por loja no servidor; loja única só por opt-in; sync ML exige loja; catálogo e vendas legadas
+ *       multi-ML falham fechado antes de provider/escrita; item-thumbnails exige sessão;
  *   Z   ZONAS PROTEGIDAS sem suíte comportamental própria (telas legadas de Vendas/Dashboard,
  *       constantes financeiras, supabase/**, vercel.json, .env.example, sync-worker.mjs): mudar
  *       exige re-baseline EXPLÍCITO de scripts/zonas-protegidas.json (aparece no diff), nunca
@@ -284,6 +288,64 @@ export function mudancasDeBancoSemRevisao(raiz: string, base: string, opcoes: { 
   return erros;
 }
 
+// ── I7: credenciais ML escopadas por loja (Fase 1B) ──────────────────────
+/** Rotas de catálogo ML: com 2+ contas ML falham fechado (anuncios ML ainda sem loja_id — Fase 2). */
+export const ROTAS_CATALOGO_ML = ["app/api/ml/importar-anuncios/route.ts", "app/api/ml/sync-precos/route.ts", "app/api/ml/sync-skus/route.ts"];
+/** Rotas de vendas legadas ML (cache/dados não escopados por loja): 2+ contas ML falham fechado. */
+export const ROTAS_VENDAS_LEGADAS_ML = ["app/api/ml/vendas/route.ts", "app/api/ml/vendas-hoje/route.ts"];
+/**
+ * I7_ML_CREDENTIALS_ARE_STORE_SCOPED: o cookie de token ML não é fonte nem destino de credencial (só
+ * DELETE legado em desconectar); nenhum seletor implícito ("mais recente"/primeira ativa) tem chamador;
+ * toda rota que fala com o ML resolve a conta no servidor por loja; a loja única é opt-in; o sync ML
+ * exige loja explícita; catálogo e vendas legadas multi-ML falham fechado antes de provider/escrita;
+ * item-thumbnails exige sessão; resposta HTTP nunca carrega accessToken/refreshToken.
+ */
+export function credenciaisMLNaoEscopadasPorLoja(raiz = RAIZ_V2): string[] {
+  const erros: string[] = [];
+  const runtime = listar(raiz, "app", "lib", "components").filter((f) => /\.(ts|tsx)$/.test(f));
+  if (existsSync(join(raiz, "middleware.ts"))) runtime.push("middleware.ts");
+  for (const f of runtime) {
+    const src = semComentarios(ler(raiz, f));
+    const semDelete = src.replace(/limparCookie\(\s*\w+\s*,\s*["']ml_(access|refresh)_token["']\s*\)/g, "");
+    if (/ml_(access|refresh)_token/.test(semDelete)) erros.push(`${f}: lê/grava cookie de token ML (só DELETE legado é permitido)`);
+    if (/\b(getMLToken|applyMLCookies)\b/.test(src)) erros.push(`${f}: helper de cookie de token ML voltou`);
+    for (const m of src.matchAll(/\b(getMLLojaAtiva|lerIdLojaMLAtivaMaisRecenteDoDono)\(/g)) {
+      const antes = src.slice(Math.max(0, m.index! - 30), m.index!);
+      if (!/function\s+$/.test(antes)) erros.push(`${f}: chama seletor implícito ${m[1]}`);
+    }
+    if (f !== "lib/ml-auth.ts" && f !== CAPABILITY_LOJAS && /\blerCredencialMLAtivaDoDono\(/.test(src)) erros.push(`${f}: usa lerCredencialMLAtivaDoDono (loja "mais recente")`);
+    if (f.startsWith("app/api/") && /NextResponse\.json\(\s*\{[^;]*\b(accessToken|refreshToken|access_token|refresh_token)\b\s*[:,}]/.test(src)) erros.push(`${f}: resposta HTTP carrega credencial`);
+  }
+  for (const f of listar(raiz, "app/api/ml", "app/api/anuncio", "app/api/sync").filter((x) => /route\.ts$/.test(x))) {
+    const src = semComentarios(ler(raiz, f));
+    if (/api\.mercadolibre\.com|syncMLForUser/.test(src) && !/resolverContaML\(|getMLLojaById\(/.test(src)) erros.push(`${f}: fala com o ML sem resolver a conta por loja no servidor`);
+  }
+  const conexao = semComentarios(ler(raiz, "lib/ml-conexao.ts"));
+  if (!/opcoes\.permitirUnica !== true/.test(conexao)) erros.push("lib/ml-conexao.ts: loja única deixou de ser opt-in explícito");
+  if (!/lojaIndicada \? "LOJA_INVALIDA"/.test(conexao)) erros.push("lib/ml-conexao.ts: loja indicada inválida pode cair para outra");
+  const sync = semComentarios(ler(raiz, "lib/sync-ml.ts"));
+  if (!/if \(!lojaOverride\?\.lojaId \|\| !lojaOverride\.accessToken\) \{\s*throw new LojaIdIntegrityError/.test(sync)) erros.push("lib/sync-ml.ts: sync ML sem loja explícita não falha fechado");
+  const parametrosToken = (sync.match(/_semTokenDeCookie\?:/g) ?? []).length;
+  if (parametrosToken !== 2 || (sync.match(/_semTokenDeCookie\?:\s*undefined\b/g) ?? []).length !== parametrosToken) erros.push("lib/sync-ml.ts: sync ML voltou a aceitar token do navegador");
+  const barreira = (f: string, codigo: string) => {
+    const todo = semComentarios(ler(raiz, f));
+    const iHandler = todo.search(/export async function (GET|POST)\(/);
+    if (iHandler < 0) { erros.push(`${f}: handler não encontrado`); return; }
+    const src = todo.slice(iHandler);   // só o fluxo do handler (helpers acima não são efeito ainda)
+    const iBarreira = src.search(new RegExp(`contarLojasMLAtivasDoDono\\(userId\\) > 1\\) \\{\\s*return NextResponse\\.json\\(\\{ erro: true, codigo: ${codigo}`));
+    if (iBarreira < 0) { erros.push(`${f}: sem barreira ${codigo}`); return; }
+    const iPrimeiroEfeito = src.search(/resolverContaML\(|fetch\(|\.update\(|\.insert\(|\.upsert\(|syncMLForUser\(/);
+    if (iPrimeiroEfeito >= 0 && iPrimeiroEfeito < iBarreira) erros.push(`${f}: provider/escrita antes da barreira ${codigo}`);
+  };
+  for (const f of ROTAS_CATALOGO_ML) barreira(f, "MULTI_ML_CATALOG_NOT_READY");
+  for (const f of ROTAS_VENDAS_LEGADAS_ML) barreira(f, "MULTI_ML_VENDAS_NOT_READY");
+  const thumbs = semComentarios(ler(raiz, "app/api/ml/item-thumbnails/route.ts"));
+  const iAuth = thumbs.search(/autenticarRequisicao\(/), iConta = thumbs.search(/resolverContaML\(/), iFetch = thumbs.search(/fetch\(/);
+  if (!(iAuth >= 0 && iConta > iAuth && iFetch > iConta)) erros.push("app/api/ml/item-thumbnails/route.ts: sessão → conta por loja → provider fora de ordem");
+  if (/item-thumbnails/.test(semComentarios(ler(raiz, "lib/middleware-rotas.ts")))) erros.push("lib/middleware-rotas.ts: item-thumbnails voltou a ser exceção anônima");
+  return erros;
+}
+
 /** Pacote usado pelos guards reescritos: [] = tudo íntegro. */
 export function invariantesV2(raiz = RAIZ_V2, opcoes: { zonas?: boolean } = {}): string[] {
   const erros: string[] = [];
@@ -293,6 +355,7 @@ export function invariantesV2(raiz = RAIZ_V2, opcoes: { zonas?: boolean } = {}):
   for (const v of rotasInternasSemSegredo(raiz)) erros.push(`I4 rota interna sem segredo: ${v}`);
   for (const v of leitoresMLSemMarketplace(raiz)) erros.push(`I5 ML_SKU_SYNC_NEVER_READS_OR_WRITES_SHOPEE_ROWS: ${v}`);
   for (const v of identidadeDeLojaNaoExplicita(raiz)) erros.push(`I6 I6_STORE_IDENTITY_IS_EXPLICIT: ${v}`);
+  for (const v of credenciaisMLNaoEscopadasPorLoja(raiz)) erros.push(`I7 I7_ML_CREDENTIALS_ARE_STORE_SCOPED: ${v}`);
   if (opcoes.zonas !== false) for (const v of verificarZonas(raiz)) erros.push(`Z zona protegida sem re-baseline: ${v}`);
   return erros;
 }

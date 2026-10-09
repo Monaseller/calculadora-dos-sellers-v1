@@ -7,8 +7,9 @@ import { NextResponse } from "next/server";
 import { syncShopeeForUserV2 } from "@/lib/sync-shopee";
 import { getShopeeLojaById } from "@/lib/shopee-auth";
 import { lojasShopeeAtivasDoDono } from "@/lib/shopee-loja-selecao";
-import { listarLojasAtivasParaCron } from "@/lib/marketplace/credenciais";
+import { listarLojasAtivasDoDono, listarLojasAtivasParaCron } from "@/lib/marketplace/credenciais";
 import { syncMLForUser } from "@/lib/sync-ml";
+import { getMLLojaById } from "@/lib/ml-auth";
 
 // LOJAS-ANON-SELECT: o cliente ANON de módulo foi REMOVIDO — o cron não
 // tem mais nenhuma consulta própria.
@@ -107,15 +108,36 @@ export async function GET(request: Request) {
             .catch(e => { results[userId].shopee_err = String(e?.message ?? e); })
         : Promise.resolve(),
 
+      // CDS V2 Fase 1B: acao GLOBAL ao dono → enumera TODAS as lojas ML ativas e sincroniza
+      // CADA UMA com a propria credencial (getMLLojaById: dono + loja) — nunca "a mais recente".
       marketplaces.has("ML")
-        ? syncMLForUser(userId, ontem, hoje)
-            .then(n  => { results[userId].ml = n; })
+        ? sincronizarTodasAsLojasML(userId, ontem, hoje)
+            .then(r  => { results[userId].ml = r.inserted; results[userId].ml_lojas = r.porLoja; })
             .catch(e => { results[userId].ml_err = String(e?.message ?? e); })
         : Promise.resolve(),
     ]);
   }
 
   return NextResponse.json({ ok: true, from: ontem, to: hoje, synced: results });
+}
+
+/** CDS V2 Fase 1B — nightly ML: cada loja ML ATIVA do dono, explicitamente, uma por vez; falha de uma nao contamina as outras. */
+async function sincronizarTodasAsLojasML(userId: string, ontem: string, hoje: string) {
+  const { linhas, erro } = await listarLojasAtivasDoDono(userId);
+  if (erro) throw new Error("leitura_lojas_falhou");
+  const porLoja: Record<string, number | string> = {};
+  let inserted = 0;
+  for (const l of linhas.filter((x) => x.marketplace === "ML" && x.id)) {
+    try {
+      const loja = await getMLLojaById(String(l.id), userId);
+      if (!loja) { porLoja[l.id] = "credencial_indisponivel"; continue; }
+      const n = await syncMLForUser(userId, ontem, hoje, undefined, false, loja);
+      porLoja[l.id] = n; inserted += n;
+    } catch (e: any) {
+      porLoja[l.id] = `erro:${String(e?.message ?? e).slice(0, 80)}`;
+    }
+  }
+  return { inserted, porLoja };
 }
 
 /** Nightly multi-loja: cada loja Shopee ATIVA do dono, explicitamente, uma por vez. */

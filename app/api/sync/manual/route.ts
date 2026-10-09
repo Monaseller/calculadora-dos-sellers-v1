@@ -7,7 +7,7 @@ import { NextResponse } from "next/server";
 import { autenticarRequisicao, lerCookie } from "@/lib/autenticacao";
 import { getShopeeLojaById } from "@/lib/shopee-auth";
 import { NOME_COOKIE_LOJA_SHOPEE, selecionarLojaShopee } from "@/lib/shopee-loja-selecao";
-import { getMLLojaAtiva } from "@/lib/ml-auth";
+import { resolverContaML } from "@/lib/ml-conexao";
 import { syncShopeeForUser } from "@/lib/sync-shopee";
 import { syncMLForUser } from "@/lib/sync-ml";
 
@@ -44,13 +44,17 @@ export async function POST(request: Request) {
   try {
     await Promise.all([
       // ── Mercado Livre ────────────────────────────────────────────────────────
+      // CDS V2 Fase 1B: loja ML EXPLICITA (body.loja_id) ou o contexto loja_ativa_id — ambos
+      // revalidados por dono + marketplace no servidor — ou a UNICA por opt-in explicito.
+      // Nunca "a mais recente" (getMLLojaAtiva); com 2+ e sem escolha valida, nao sincroniza.
       (marketplace === "todos" || marketplace === "ML")
-        ? getMLLojaAtiva(userId)
-            .then(loja => loja
-              ? syncMLForUser(userId, dateFrom, dateTo, undefined, noBuffer)
+        ? resolverContaML(userId, (body as { loja_id?: string }).loja_id || lerCookie(request, "loja_ativa_id"), { permitirUnica: true })
+            .then(conta => conta.ok
+              ? syncMLForUser(userId, dateFrom, dateTo, undefined, noBuffer,
+                  { lojaId: conta.lojaId, accessToken: conta.accessToken, sellerId: conta.sellerId, nickname: conta.nickname })
                   .then(n => { results.ml = n; })
                   .catch(e => { results.mlErro = String(e?.message ?? e); })
-              : void (results.mlErro = "ML não conectada")
+              : void (results.mlErro = conta.motivo === "LOJA_NAO_DEFINIDA" ? "Selecione a loja do Mercado Livre." : "ML não conectada")
             )
             .catch(e => { results.mlErro = String(e?.message ?? e); })
         : Promise.resolve(),

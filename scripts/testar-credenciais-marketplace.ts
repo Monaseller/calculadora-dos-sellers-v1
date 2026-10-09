@@ -312,14 +312,21 @@ console.log("── 9 a 13. Superfície privilegiada ─────────
     !/createClient/.test(mlAuth) &&
     !/NEXT_PUBLIC_SUPABASE_ANON_KEY/.test(mlAuth) &&
     /lerCredencialMLPorLojaEDono/.test(mlAuth));
-  // A INTENÇÃO do 52 não mudou: `resolverLojaDoUsuario` não pode passar a
-  // manusear credencial. O que mudou é onde a query mora, então o assert
-  // deixa de exigir `.from("lojas")` aqui e prova o mesmo pela borda que
-  // importa — o que a função DEVOLVE continua sendo só o id.
-  ok("52. resolverLojaDoUsuario resolve posse pela capability e devolve só o id",
-    /resolverLojaDoUsuario/.test(mlAuth) &&
-    /lerCredencialMLPorLojaEDono\(lojaIdBruto, userId\)/.test(mlAuth) &&
-    /return linha\?\.id \? String\(linha\.id\) : null;/.test(mlAuth));
+  // CDS V2 Fase 1B: `resolverLojaDoUsuario` existia só para `getMLToken`, que (com o cookie de
+  // token) foi REMOVIDO. A intenção do 52 — resolver a posse da loja nunca manuseia credencial do
+  // navegador e sempre respeita o dono — passa a ser provada no caminho REAL, `resolverContaML`
+  // (comportamento: scripts/testar-ownership-ml.ts, na bateria offline).
+  {
+    const conexao = codigo("lib/ml-conexao.ts");
+    const capML = codigo("lib/marketplace/credenciais.ts");
+    ok("52. posse da loja ML pela capability real: userId obrigatório, dono+marketplace no filtro, id inválido recusado, sem cookie de token",
+      /if \(!userId\) return \{ ok: false, motivo: "LOJA_INVALIDA" \};/.test(conexao) &&
+      /!UUID_REGEX\.test\(lojaId\)\) \{\s*return \{ ok: false, motivo: "LOJA_INVALIDA" \};/.test(conexao) &&
+      /listarCredenciaisMLDoDono\(\s*userId,/.test(conexao) &&
+      /return \{ user_id: String\(userId\), marketplace: MARKETPLACE_ML, ativo: true \};/.test(capML) &&
+      !/ml_access_token|ml_refresh_token|lerCookie|getCookie/.test(conexao) &&
+      !/ml_access_token|ml_refresh_token|getCookie|getMLToken|resolverLojaDoUsuario/.test(codigo("lib/ml-auth.ts")));
+  }
 
   // 10 — barreira server-only, agora em tempo de BUILD.
   const credSemComentarios = codigo("lib/marketplace/credenciais.ts");

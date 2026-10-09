@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { autenticarRequisicao, lerCookie } from "@/lib/autenticacao";
-import { resolverContaML } from "@/lib/ml-conexao";
+import { contarLojasMLAtivasDoDono, MULTI_ML_CATALOG_NOT_READY, resolverContaML } from "@/lib/ml-conexao";
 import { lerTodasAsPaginas } from "@/lib/anuncios/leitura-paginada";
 
 // SEC-3-B1: dados sensiveis (SEC-3) so por service_role, server-side.
@@ -49,7 +49,13 @@ export async function POST(request: Request) {
   // falhava sempre — mesmo com credencial válida em `lojas` e com
   // `/api/ml/conexao` respondendo CONECTADO. Era a inconsistência que o
   // cutover existe para fechar.
-  const conta = await resolverContaML(userId, lerCookie(request, "loja_ativa_id"));
+  // CDS V2 Fase 1B: `anuncios` ML ainda nao tem loja_id (Fase 2). Com 2+ contas ML do dono o
+  // catalogo falha fechado ANTES de provider/escrita — mesmo com loja_ativa_id apontando uma delas.
+  if (await contarLojasMLAtivasDoDono(userId) > 1) {
+    return NextResponse.json({ erro: true, codigo: MULTI_ML_CATALOG_NOT_READY,
+      mensagem: "Catálogo com mais de uma conta do Mercado Livre ainda não é suportado." }, { status: 409 });
+  }
+  const conta = await resolverContaML(userId, lerCookie(request, "loja_ativa_id"), { permitirUnica: true });
   if (!conta.ok) {
     // Status 200 preservado DE PROPÓSITO nesta etapa: a tela lê
     // `data.erro`/`data.mensagem` e ignora o status. Trocar para 4xx aqui

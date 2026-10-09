@@ -30,6 +30,7 @@ export const PROIBIDO = /(^|-)(live|banco|producao)(-|$)/i;
 /** A bateria offline vetada (nenhuma lê .env real, chama rede ou banco). */
 export const SUITES_OFFLINE = [
   "guard-v2-nucleo", "ml-sync-skus-isolamento", "lojas-identidade", "lojas-identidade-externa", "ml-callback",
+  "ml-credenciais-por-loja", "ownership-ml", "conexao-ml", "lojas-ativar",
   "anuncios-shopee-multi-store", "shopee-importacao-retomavel", "anuncios-esquema", "importacao-anuncios",
   "shopee-multi-store", "shopee-ux", "shopee-multi-app", "shopee-callback", "shopee-status", "shopee-sync-cursor", "sync-shopee-recuperacao",
   "cron-sync", "reconciliacao-periodo", "status-e-protecao-financeira", "rotas-erro", "cutover-rotas-ml", "anuncios-esquema",

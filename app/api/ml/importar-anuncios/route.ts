@@ -4,8 +4,7 @@ import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { calcularFreteMl, calcularFreteFullMl, calcularFreteFlexMl } from "@/lib/tabela-frete-ml";
 import { CATEGORIAS_ML } from "@/lib/comissoes-mercado-livre";
 import { autenticarRequisicao, lerCookie } from "@/lib/autenticacao";
-import { applyMLCookies } from "@/lib/ml-auth";
-import { resolverContaML } from "@/lib/ml-conexao";
+import { contarLojasMLAtivasDoDono, MULTI_ML_CATALOG_NOT_READY, resolverContaML } from "@/lib/ml-conexao";
 import { lerTodasAsPaginas } from "@/lib/anuncios/leitura-paginada";
 
 // SEC-3-B1: dados sensiveis (SEC-3) so por service_role, server-side.
@@ -92,7 +91,13 @@ export async function POST(request: Request) {
   //
   // Agora a loja e a credencial saem do mesmo resolvedor que responde à
   // tela, então as duas nunca discordam.
-  const conta = await resolverContaML(userId, lerCookie(request, "loja_ativa_id"));
+  // CDS V2 Fase 1B: `anuncios` ML ainda nao tem loja_id (Fase 2). Com 2+ contas ML do dono o
+  // catalogo falha fechado ANTES de provider/escrita — mesmo com loja_ativa_id apontando uma delas.
+  if (await contarLojasMLAtivasDoDono(userId) > 1) {
+    return NextResponse.json({ erro: true, codigo: MULTI_ML_CATALOG_NOT_READY,
+      mensagem: "Catálogo com mais de uma conta do Mercado Livre ainda não é suportado." }, { status: 409 });
+  }
+  const conta = await resolverContaML(userId, lerCookie(request, "loja_ativa_id"), { permitirUnica: true });
   if (!conta.ok) {
     return NextResponse.json({
       erro: true,
@@ -356,14 +361,7 @@ export async function POST(request: Request) {
   }
 
   const res = NextResponse.json({ importados, atualizados, erros, total: allItemIds.length });
-  // COMPATIBILIDADE TEMPORÁRIA (decisão 2 do cutover). A rota não confia
-  // mais no cookie para decidir NADA, mas continua emitindo-o porque
-  // Dashboard e Vendas ainda dependem dele. Só grava quando o valor mudou
-  // — emitir Set-Cookie a cada requisição seria escrever mais credencial
-  // no navegador do que o código antigo escrevia. Some na fase E.
-  if (lerCookie(request, "ml_access_token") !== token) {
-    applyMLCookies(res, { token, newAccessToken: token });
-  }
+  // CDS V2 Fase 1B: nenhum cookie de credencial ML e emitido (o token nunca vai ao navegador).
   return res;
 }
 

@@ -26,12 +26,10 @@
  *   • F0.c.16 — Precificação migrou e `/api/auth/status`, sem consumidor,
  *     foi REMOVIDA do repositório.
  *
- * O que AINDA não migrou, e continua autorizando pelo cookie legado
- * `ml_access_token`: `/api/ml/item-thumbnails` (última entrada de
- * `EXCECOES_TEMPORARIAS_F0C`). `getMLToken` e `applyMLCookies` seguem
- * existindo para os consumidores restantes — `getMLToken` mantém o
- * caminho que devolve o cookie ANTES de verificar de qual loja ele é,
- * razão pela qual código novo usa `resolverContaML`, nunca ele.
+ * CDS V2 Fase 1B: o cookie `ml_access_token` deixou de existir como fonte ou
+ * destino de credencial. Toda rota ML (inclusive `/api/ml/item-thumbnails`,
+ * `vendas`, `vendas-hoje` e o sync legado) resolve a conta aqui, por loja,
+ * no servidor; `getMLToken` e `applyMLCookies` foram removidos.
  *
  * ── O que é reusado, e por quê ──────────────────────────────────────
  * `refreshMLToken`, `saveTokensToDB` e `credencialExpirada` vêm de
@@ -208,13 +206,21 @@ async function relerLoja(lojaId: string, userId: string): Promise<LinhaLoja | nu
  * gerar chamada ao Mercado Livre.
  *
  * ── MÚLTIPLAS LOJAS ─────────────────────────────────────────────────
- * Sem `lojaId`: zero lojas é SEM_LOJA, uma loja é resolvida, e **duas ou
- * mais é LOJA_NAO_DEFINIDA** — não "a mais recente". Escolher sozinho
- * seria operar na loja errada calado, que é pior que pedir para escolher.
+ * Sem `lojaId`: zero lojas é SEM_LOJA; uma loja é resolvida SÓ com
+ * `permitirUnica: true` (Fase 1B), senão LOJA_NAO_DEFINIDA; e **duas ou
+ * mais é sempre LOJA_NAO_DEFINIDA** — não "a mais recente". Escolher
+ * sozinho seria operar na loja errada calado, que é pior que pedir para escolher.
  */
 export async function resolverContaML(
   userId: string,
-  lojaId?: string | null
+  lojaId?: string | null,
+  /**
+   * CDS V2 Fase 1B: a loja ÚNICA só é resolvida sem `lojaId` quando o chamador
+   * PEDE (`permitirUnica: true`). Sem o opt-in, ausência de loja é sempre
+   * LOJA_NAO_DEFINIDA — mesmo com uma loja só. `lojaId` indicado e inválido
+   * nunca cai para a única: é LOJA_INVALIDA.
+   */
+  opcoes: { permitirUnica?: boolean } = {}
 ): Promise<ResultadoContaML> {
   // Sem sessão não há consulta. Nunca confiar em string vazia.
   if (!userId) return { ok: false, motivo: "LOJA_INVALIDA" };
@@ -242,12 +248,28 @@ export async function resolverContaML(
     return { ok: false, motivo: lojaIndicada ? "LOJA_INVALIDA" : "SEM_LOJA" };
   }
 
-  if (!lojaIndicada && linhas.length > 1) {
+  if (!lojaIndicada && (linhas.length > 1 || opcoes.permitirUnica !== true)) {
     return { ok: false, motivo: "LOJA_NAO_DEFINIDA", lojas: linhas.map(publica) };
   }
 
   return resolverCredencial(linhas[0], userId);
 }
+
+/**
+ * Quantas lojas ML ATIVAS o dono tem (sem token na resposta). Usado pelas barreiras
+ * da Fase 1B: catálogo (`anuncios` ML ainda sem `loja_id`) e vendas legadas (cache de
+ * `pedidos` não escopado por loja) falham fechado com 2+ contas ML até a Fase 2.
+ */
+export async function contarLojasMLAtivasDoDono(userId: string): Promise<number> {
+  if (!userId) return 0;
+  const { linhas, erro } = await listarCredenciaisMLDoDono(userId, null);
+  if (erro) throw new ErroConsultaConexaoML(erro);
+  return linhas.length;
+}
+
+/** Código das barreiras multi-ML (Fase 1B → Fase 2). */
+export const MULTI_ML_CATALOG_NOT_READY = "MULTI_ML_CATALOG_NOT_READY";
+export const MULTI_ML_VENDAS_NOT_READY = "MULTI_ML_VENDAS_NOT_READY";
 
 /** CASOS A–D da especificação, nesta ordem. */
 async function resolverCredencial(loja: LinhaLoja, userId: string): Promise<ResultadoContaML> {

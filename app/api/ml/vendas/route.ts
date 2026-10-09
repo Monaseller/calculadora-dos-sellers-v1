@@ -6,9 +6,9 @@
 import { NextResponse } from "next/server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
-import { autenticarRequisicao } from "@/lib/autenticacao";
-import { syncMLForUser } from "@/lib/sync-ml";
-import { lerIdLojaMLAtivaMaisRecenteDoDono } from "@/lib/marketplace/credenciais";
+import { autenticarRequisicao, lerCookie } from "@/lib/autenticacao";
+import { syncMLForUser, type LojaMLResolvida } from "@/lib/sync-ml";
+import { contarLojasMLAtivasDoDono, MULTI_ML_VENDAS_NOT_READY, resolverContaML } from "@/lib/ml-conexao";
 
 // SEC-3-B1: dados sensiveis (SEC-3) so por service_role, server-side.
 // O cliente nasce sob demanda — nunca no import — a partir do helper
@@ -16,12 +16,6 @@ import { lerIdLojaMLAtivaMaisRecenteDoDono } from "@/lib/marketplace/credenciais
 let clienteServidor: SupabaseClient | null = null;
 function supabase(): SupabaseClient {
   return (clienteServidor ??= getSupabaseServidor());
-}
-
-function getToken(request: Request): string | null {
-  const cookieHeader = request.headers.get("cookie") || "";
-  const entry = cookieHeader.split("; ").find(c => c.startsWith("ml_access_token="));
-  return entry ? entry.slice("ml_access_token=".length) : null;
 }
 
 function hojeISO() {
@@ -67,7 +61,6 @@ function pedidoToRow(p: any) {
 }
 
 export async function GET(request: Request) {
-  const token  = getToken(request);
   const auth = await autenticarRequisicao(request);
   const userId = auth.autenticado ? auth.uid : null;
 
@@ -87,9 +80,19 @@ export async function GET(request: Request) {
   // docs/DECISIONS.md, redesenho do botão Sincronizar, 2026-07-11).
   // LOJAS-ANON-SELECT: era leitura com o cliente ANON. So o `id` sai do
   // banco — a rota nunca usou token aqui.
-  const { lojaId: lojaIdAtiva } = await lerIdLojaMLAtivaMaisRecenteDoDono(userId);
-  const lojaRow = lojaIdAtiva ? { id: lojaIdAtiva } : null;
-  const lojaId = lojaRow?.id ?? null;
+  // CDS V2 Fase 1B: a loja e a credencial saem do resolvedor do servidor — contexto
+  // `loja_ativa_id` revalidado por dono + marketplace, ou a loja ML ÚNICA por opt-in
+  // explícito. Nunca o cookie de token, nunca "a mais recente". O cache de `pedidos`
+  // desta rota não é escopado por loja: com 2+ contas ML, falha fechado (não mistura).
+  if (await contarLojasMLAtivasDoDono(userId) > 1) {
+    return NextResponse.json({ erro: true, codigo: MULTI_ML_VENDAS_NOT_READY,
+      mensagem: "Vendas com mais de uma conta do Mercado Livre ainda não são suportadas." }, { status: 409 });
+  }
+  const contaML = await resolverContaML(userId, lerCookie(request, "loja_ativa_id"), { permitirUnica: true });
+  const lojaML: LojaMLResolvida | null = contaML.ok
+    ? { lojaId: contaML.lojaId, accessToken: contaML.accessToken, sellerId: contaML.sellerId, nickname: contaML.nickname }
+    : null;
+  const lojaId = lojaML?.lojaId ?? null;
 
   // Fase C (2026-07-06): date_field decide se o relatório é filtrado por
   // data_pagamento (visão financeira, padrão) ou data_criacao (visão operacional).
@@ -122,8 +125,8 @@ export async function GET(request: Request) {
   const hasData = probe && probe.length > 0;
   const hoje    = hojeISO();
 
-  // Sem token de cookie E sem cache → ML não conectada
-  if (!token && !hasData) {
+  // Sem conta ML resolvida E sem cache → ML não conectada
+  if (!lojaML && !hasData) {
     // [DIAG-DATAS] temporário — remover após a auditoria
     console.log(`[DIAG-DATAS][ml/vendas] req #${_reqid} RESPOSTA (semConexao)`, {
       dateFrom, dateTo, dateField, tempoMs: Date.now() - _inicioMs,
@@ -150,10 +153,10 @@ export async function GET(request: Request) {
   try {
     if (forceSync) {
       // Botão Sincronizar (fluxo antigo): re-sincroniza o range inteiro
-      await syncMLForUser(userId, dateFrom, dateTo, token ?? undefined);
+      await (lojaML && syncMLForUser(userId, dateFrom, dateTo, undefined, false, lojaML));
     } else if (!hasData) {
       // Sem cache: sync completo (primeira vez)
-      await syncMLForUser(userId, dateFrom, dateTo, token ?? undefined);
+      await (lojaML && syncMLForUser(userId, dateFrom, dateTo, undefined, false, lojaML));
     } else {
       // Tem cache: só atualiza hoje se o range inclui hoje (barato, 1 dia)
       const rangeIncludeHoje = dateFrom <= hoje && hoje <= dateTo;
@@ -172,7 +175,7 @@ export async function GET(request: Request) {
         });
         if (Date.now() - lastSyncHoje > 30 * 60 * 1000) { // stale > 30 min
           console.log(`[DIAG-DATAS][ml/vendas] req #${_reqid} disparando auto-sync de hoje (stale)`);
-          await syncMLForUser(userId, hoje, hoje, token ?? undefined);
+          await (lojaML && syncMLForUser(userId, hoje, hoje, undefined, false, lojaML));
           console.log(`[DIAG-DATAS][ml/vendas] req #${_reqid} auto-sync de hoje concluido`);
         }
       }

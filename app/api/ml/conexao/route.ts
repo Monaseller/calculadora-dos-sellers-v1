@@ -57,7 +57,8 @@ export async function GET(request: Request) {
   const lojaIndicada = lerCookie(request, COOKIE_LOJA_ATIVA);
 
   try {
-    const resultado = await resolverContaML(auth.uid, lojaIndicada);
+    // Fase 1B: a tela de conexao aceita a loja unica por opt-in explicito (sem "mais recente").
+    const resultado = await resolverContaML(auth.uid, lojaIndicada, { permitirUnica: true });
     return NextResponse.json(montarRespostaConexao(resultado));
   } catch (err: any) {
     // Falha de infraestrutura NÃO é "desconectado": responder 200 com

@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
-import { autenticarRequisicao } from "@/lib/autenticacao";
+import { autenticarRequisicao, lerCookie } from "@/lib/autenticacao";
+import { contarLojasMLAtivasDoDono, MULTI_ML_VENDAS_NOT_READY, resolverContaML } from "@/lib/ml-conexao";
 
 // SEC-3-B1: dados sensiveis (SEC-3) so por service_role, server-side.
 // O cliente nasce sob demanda — nunca no import — a partir do helper
@@ -12,12 +13,6 @@ function supabase(): SupabaseClient {
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
-
-function getToken(request: Request): string | null {
-  const cookieHeader = request.headers.get("cookie") || "";
-  const entry = cookieHeader.split("; ").find(c => c.startsWith("ml_access_token="));
-  return entry ? entry.slice("ml_access_token=".length) : null;
-}
 
 function hojeISO() {
   // Retorna YYYY-MM-DD no horário de Brasília (UTC-3)
@@ -38,11 +33,19 @@ export async function GET(request: Request) {
     return NextResponse.json({ erro: true, mensagem: "Sessao invalida." }, { status: 401 });
   }
   const userId = auth.uid;
-  const token  = getToken(request);
 
-  if (!token) {
+  // CDS V2 Fase 1B: credencial por loja, resolvida no servidor (nunca o cookie de token).
+  // `vendas_dia` é gravado por anúncio e `anuncios` ML ainda não tem loja_id (Fase 2):
+  // com 2+ contas ML do dono, falha fechado antes de provider/escrita.
+  if (await contarLojasMLAtivasDoDono(userId) > 1) {
+    return NextResponse.json({ erro: true, codigo: MULTI_ML_VENDAS_NOT_READY,
+      mensagem: "Vendas com mais de uma conta do Mercado Livre ainda não são suportadas." }, { status: 409 });
+  }
+  const conta = await resolverContaML(userId, lerCookie(request, "loja_ativa_id"), { permitirUnica: true });
+  if (!conta.ok) {
     return NextResponse.json({ erro: true, semConexao: true, mensagem: "Conta do Mercado Livre não conectada." });
   }
+  const token = conta.accessToken;
 
   // 1. Busca dados do usuário ML para obter o seller_id
   const meRes = await fetch("https://api.mercadolibre.com/users/me", {

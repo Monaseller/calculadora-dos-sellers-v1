@@ -247,13 +247,18 @@ const RUNTIME = arquivosRuntime();
 // 36-38 — CLASSE A: capabilities existentes, sem ampliar projecao
 // ══════════════════════════════════════════════════════════════════════
 {
+  // CDS V2 Fase 1B: `resolverLojaDoUsuario` (só servia ao removido `getMLToken`) e a busca por
+  // seller do caminho de COOKIE do sync-ml saíram. O invariante continua: `lojas` só pela
+  // capability no servidor — I6/I7 (scripts/_guard-v2.ts) e os SEC-3 cobrem o resto.
   ok(
-    "36. ml-auth usa lerCredencialMLPorLojaEDono (capability existente)",
-    /lerCredencialMLPorLojaEDono\(lojaIdBruto, userId\)/.test(codigo("lib/ml-auth.ts"))
+    "36. ml-auth lê lojas SÓ pela capability (lerCredencialMLPorLojaEDono por loja+dono), sem query própria",
+    /lerCredencialMLPorLojaEDono\(\s*lojaId, userId/.test(codigo("lib/ml-auth.ts")) &&
+      !/\.from\(\s*["']lojas["']/.test(codigo("lib/ml-auth.ts"))
   );
   ok(
-    "37. sync-ml usa listarLojasMLDoDonoPorSeller (capability existente)",
-    /listarLojasMLDoDonoPorSeller\(userId, sellerId\)/.test(codigo("lib/sync-ml.ts"))
+    "37. sync-ml NÃO reconstrói a loja (token/seller/mais recente): exige loja explícita e não toca `lojas`",
+    /if \(!lojaOverride\?\.lojaId \|\| !lojaOverride\.accessToken\) \{\s*throw new LojaIdIntegrityError/.test(codigo("lib/sync-ml.ts")) &&
+      !/getMLLojaAtiva|listarLojasMLDoDonoPorSeller|users\/me|\.from\(\s*["']lojas["']/.test(codigo("lib/sync-ml.ts"))
   );
   // A projecao de credencial nao pode ter crescido para acomodar ninguem.
   ok(
