@@ -86,7 +86,9 @@ function validar(sqlBruto: string): string[] {
   return erros;
 }
 
-const SQL = readFileSync(join(RAIZ, ARQUIVO), "utf8");
+// CDS V2 Fase 0: forma LF (a do repositorio). Com core.autocrlf=true a copia de trabalho
+// vem em CRLF e os mutantes 3a/3i (que removem um trecho terminado em "\n") viravam no-op.
+const SQL = readFileSync(join(RAIZ, ARQUIVO), "utf8").replace(/\r\n/g, "\n");
 
 console.log("\n[1. a migration real]");
 t("1. a migration SEC-3-C e valida (15 exatas, REVOKE anon+authenticated, ENABLE RLS, sem policy/grant/force/disable)", () => {

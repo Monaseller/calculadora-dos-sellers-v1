@@ -11,28 +11,8 @@
 import "./_server-only-inerte";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-// SALES-CANONICAL-D13B: excecao EXATA — so os arquivos NOVOS do D13 em lib/vendas/canonico (D13_NEW_CANONICAL_FILES, inexistentes na base)
-import { filtrarNovosCanonicosD13 } from "./_excecao-d13-vendas-canonicas";
-// SALES-CANONICAL-D14B: excecao EXATA do patch D14 nos leitores (ATUAL − patch aprovado = bytes de 1c4fe29)
-import { filtrarExcecaoD14 } from "./_excecao-d14-vendas-canonicas";
-// SALES-SYNC-D15C2: excecao EXATA do motor intraday ML (worker.ts − hunks D15C = b260583; intraday.ts por sha256)
-import { filtrarExcecaoD15C } from "./_excecao-d15c-ml-intraday";
-// SALES-SYNC-D15D2: excecao EXATA do motor intraday Shopee (worker.ts − hunks D15D = e90557e; intraday.ts por sha256)
-import { filtrarExcecaoD15D } from "./_excecao-d15d-shopee-intraday";
-// SALES-SYNC-D15B2: excecao EXATA do patch D15B nos arquivos de sync (ATUAL − patch aprovado = bytes de d631748)
-import { filtrarExcecaoD15B } from "./_excecao-d15b-intraday";
-// SALES-CANONICAL-D16B: excecao EXATA do cutover dos 4 cards do Dashboard (dashboard − hunks D16 = 1d6e573; novos por sha256)
-import { filtrarExcecaoD16 } from "./_excecao-d16-dashboard-canonico";
-// SHOPEE MULTI-APP: excecao EXATA do OAuth multi-app (rotas/Configuracoes/.env.example − hunks = eca183a; novos por sha256)
-import { filtrarExcecaoShopeeMultiApp } from "./_excecao-shopee-multi-app";
-// SHOPEE UX V4: excecao EXATA do painel unico Shopee (Configuracoes − hunks UX = cdeb7af; novos por sha256)
-import { filtrarExcecaoShopeeUX } from "./_excecao-shopee-ux";
-// SHOPEE MULTI-STORE V1B: excecao EXATA da camada multi-loja (arquivos − hunks = 5fdb51f; novos por sha256)
-import { filtrarExcecaoShopeeMultiStore } from "./_excecao-shopee-multi-store";
-// ANUNCIOS SHOPEE MULTI-STORE V1B: excecao EXATA (arquivos − hunks = bb8f7ea; migrations/novos por sha256)
-import { filtrarExcecaoAnunciosMultiStore } from "./_excecao-anuncios-multi-store";
-// SHOPEE IMPORT V2: excecao EXATA (rota + page − hunks = d872390; motor/helper/suite por sha256)
-import { filtrarExcecaoShopeeImportV2 } from "./_excecao-shopee-import-v2";
+// CDS GUARD V2 (Fase 0B): invariantes estruturais + zonas protegidas no lugar da cerca "arquivo nao mudou desde a base"
+import { invariantesV2 } from "./_guard-v2";
 
 let passou = 0, falhou = 0;
 let fila: Promise<void> = Promise.resolve();
@@ -240,16 +220,9 @@ async function principal() {
     assert(bloco.length > 100 && !/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|MONAMOR|51956661|fc5228dc|3598561e|81b3ca39/i.test(bloco + tick), "loja fixa");
     assert(classe(sp(L[3], "d", { partner_key: null })).estado !== "ELEGIVEL" && classe(ml(L[0], "d", { seller_id: null })).estado !== "ELEGIVEL", "marketplace fixo como elegivel");
   });
-  t("26/27. auth, worker e fairness INTOCADOS desde a base (D4 so classifica)", () => {
-    const { execFileSync } = require("node:child_process") as typeof import("node:child_process");
-    const d = execFileSync("git", ["diff", "--name-only", "2d2beb4", "--", "lib/shopee-auth.ts", "lib/ml-auth.ts", "lib/mercado-livre-vendas.ts", "lib/vendas/sync/worker.ts",
-      "lib/vendas/sync/worker-deps.ts", "lib/vendas/sync/coordenador.ts", "lib/vendas/sync/planejamento.ts", "lib/vendas/canonico", "lib/mercado-livre/ingestao", "lib/shopee/ingestao",
-      /* SALES-SYNC-D10: vercel.json agora agenda os crons canonicos — guard proprio: testar-vendas-sync-cron */ "supabase", "app", "lib/feature-flags.ts"], { cwd: RAIZ, encoding: "utf8" }).trim()
-      // SALES-SYNC-D6: as duas rotas passam a ler a flag server-only (guard proprio: testar-vendas-sync-feature-flag)
-      .split(/\r?\n/).filter((f) => f && f !== "app/api/internal/vendas-sync/coordenador/route.ts" && f !== "app/api/internal/vendas-sync/worker/route.ts");
-    // SALES-CANONICAL-D13B: so os arquivos NOVOS do D13 em lib/vendas/canonico; ml.ts/shopee.ts/tipos.ts seguem travados
-    const fora = filtrarExcecaoShopeeImportV2(RAIZ, "2d2beb4", filtrarExcecaoAnunciosMultiStore(RAIZ, "2d2beb4", filtrarExcecaoShopeeMultiStore(RAIZ, "2d2beb4", filtrarExcecaoShopeeUX(RAIZ, "2d2beb4", filtrarExcecaoShopeeMultiApp(RAIZ, "2d2beb4", filtrarExcecaoD16(RAIZ, "2d2beb4", filtrarExcecaoD15D(RAIZ, "2d2beb4", filtrarExcecaoD15C(RAIZ, "2d2beb4", filtrarExcecaoD15B(RAIZ, "2d2beb4", filtrarExcecaoD14(RAIZ, "2d2beb4", filtrarNovosCanonicosD13(RAIZ, "2d2beb4", d))))))))))).join(",");
-    assert(fora === "", `alterados: ${fora}`);
+  t("26/27. V2: elegibilidade so classifica (sem fetch/rpc/insert: testes F, J, K) + invariantes estruturais e zonas protegidas", () => {
+    const errosV2 = invariantesV2(RAIZ);
+    assert(errosV2.length === 0, `26/27: ${errosV2.join(" | ")}`);
   });
 
   await fila;

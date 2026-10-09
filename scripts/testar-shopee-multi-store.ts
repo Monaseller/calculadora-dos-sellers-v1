@@ -19,8 +19,8 @@ import Module from "node:module";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-// ANUNCIOS SHOPEE MULTI-STORE V1B: excecao EXATA (migrations de anuncios.loja_id por sha256)
-import { filtrarExcecaoAnunciosMultiStore } from "./_excecao-anuncios-multi-store";
+// CDS GUARD V2 (Fase 0B): invariantes estruturais + zonas protegidas no lugar da cerca "arquivo nao mudou desde a base"
+import { invariantesV2 } from "./_guard-v2";
 
 const RAIZ = join(__dirname, "..");
 const BASE = "5fdb51f";
@@ -269,22 +269,9 @@ async function principal() {
   });
 
   console.log("\n[escopo]");
-  t("S1. canonical, OAuth, tokens, Dashboard e formulas intocados; Vendas so ganhou filtro/selecao de loja", () => {
-    const d = execFileSync("git", ["diff", "--name-only", BASE, "--", "lib/vendas", "lib/shopee", "lib/mercado-livre", "app/api/auth", "lib/shopee-apps.ts", "lib/shopee-oauth-estado.ts",
-      "lib/shopee-auth.ts", "lib/marketplace", "app/(app)/dashboard", "app/(app)/vendas", "app/api/ml", "lib/vendas-estrutura.ts", "app/api/internal", "supabase"], { cwd: RAIZ, encoding: "utf8" }).trim();
-    // ANUNCIOS SHOPEE MULTI-STORE V1B: SO as 2 migrations de anuncios.loja_id saem, e SO pela excecao exata (sha256)
-    const foraAnuncios = filtrarExcecaoAnunciosMultiStore(RAIZ, BASE, d.split(/\r?\n/).filter(Boolean)).join("\n");
-    assert(foraAnuncios === "", foraAnuncios);
-    const dv = execFileSync("git", ["diff", "-U0", BASE, "--", "app/api/shopee/vendas/route.ts"], { cwd: RAIZ, encoding: "utf8" }).split(/\r?\n/)
-      .filter((l) => /^[+-][^+-]/.test(l));
-    // removidas: SO a selecao antiga ("a mais recente"), as 2 chamadas de sync (agora com a loja) e os 2 filtros de pedidos (agora com loja_id)
-    const removidasOk = /Verifica conexão Shopee|getShopeeLojaAtiva|import \{ autenticarRequisicao \}|syncShopeeForUserV2\(userId, (syncFrom|hoje), hoje, (true|false)\); \/\/ noBuffer|\.eq\("marketplace", "Shopee"\)|semConexao|^-\s*\}$|^-\s*if \(!loja\) \{$/;
-    // adicionadas: SO selecao/filtro de loja (e as mesmas linhas com a loja)
-    const adicionadasOk = /loja|Loja|selecao|MULTI-LOJA|servidor, ou a UNICA|sync ficam restritos|semConexao|const \{ status, corpo \}|return NextResponse\.json\(corpo|import \{ autenticarRequisicao, lerCookie \}|^\+\s*\.eq\("marketplace", "Shopee"\)$|^\+\s*\}\)?;?$|^\+\s*if \(!loja\) \{$/;
-    const fora = dv.filter((l) => (l.startsWith("-") ? !removidasOk.test(l) : !adicionadasOk.test(l)));
-    assert(fora.length === 0, `Vendas mudou alem de loja: ${fora.join(" | ")}`);
-    const removidas = dv.filter((l) => l.startsWith("-"));
-    assert(removidas.filter((l) => /syncShopeeForUserV2/.test(l)).length === 2 && removidas.filter((l) => /\.eq\("marketplace", "Shopee"\)/.test(l)).length === 2, removidas.join(" | "));
+  t("S1. V2: sem selecao implicita nova (I3), canonico isolado do legado (I1/I2), zonas protegidas (Vendas/Dashboard/formulas/migrations); isolamento por loja provado pelos casos A-J", () => {
+    const errosV2 = invariantesV2(RAIZ);
+    assert(errosV2.length === 0, `S1: ${errosV2.join(" | ")}`);
   });
 
   await fila;

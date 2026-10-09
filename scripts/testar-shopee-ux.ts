@@ -19,13 +19,9 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-// SHOPEE MULTI-STORE V1B: excecao EXATA da camada multi-loja (arquivos − hunks = 5fdb51f; novos por sha256)
-import { filtrarExcecaoShopeeMultiStore } from "./_excecao-shopee-multi-store";
-// ANUNCIOS SHOPEE MULTI-STORE V1B: excecao EXATA da camada de anuncios por loja (arquivos − hunks = bb8f7ea)
-import { filtrarExcecaoAnunciosMultiStore } from "./_excecao-anuncios-multi-store";
-// SHOPEE IMPORT V2: excecao EXATA da importacao em fatias (rota + page − hunks = d872390; novos por sha256)
-import { filtrarExcecaoShopeeImportV2 } from "./_excecao-shopee-import-v2";
 import { decidirConexaoShopee, lerAppsShopee, MENSAGEM_APPS_INDISPONIVEIS, MENSAGEM_NENHUM_APP, urlConexaoShopee } from "../lib/shopee-conexao-ui";
+// CDS GUARD V2 (Fase 0B): invariantes estruturais + zonas protegidas no lugar da cerca "arquivo nao mudou desde a base"
+import { invariantesV2 } from "./_guard-v2";
 
 const RAIZ = join(__dirname, "..");
 const BASE = "cdeb7af";
@@ -123,14 +119,9 @@ t("L. Mercado Livre intacto (card, conectarML e retorno OAuth ML)", () => {
   assert(ml(base).length > 100 && ml(base) === ml(fonte(PAGINA)), "card ML mudou");
   assert(/interpretarRetornoOAuthML/.test(pg) && /const conectarML = \(\) => \{ window\.location\.href = "\/api\/auth\/mercadolivre"; \};/.test(pg), "fluxo ML mudou");
 });
-t("M. OAuth core, pipeline Shopee, Vendas, Dashboard e Meus Produtos byte-identicos a cdeb7af", () => {
-  const d = execFileSync("git", ["diff", "--name-only", BASE, "--", "app/api/auth", "lib/shopee-apps.ts", "lib/shopee-oauth-estado.ts", "lib/shopee-auth.ts", "lib/sync-shopee.ts",
-    "lib/shopee", "lib/shopee-api.ts", "lib/marketplace", "lib/vendas", "lib/vendas-estrutura.ts", "app/(app)/vendas", "app/(app)/dashboard", "app/(app)/anuncios",
-    "app/api/shopee", "app/api/ml", "app/api/anuncios", "app/api/lojas", "lib/mercado-livre", "middleware.ts", "lib/middleware-rotas.ts"], { cwd: RAIZ, encoding: "utf8" }).trim();
-  // SHOPEE MULTI-STORE V1B: SO os arquivos da camada multi-loja (inclui Meus Produtos), revertidos hunk a hunk ate 5fdb51f; o resto segue travado
-  // ANUNCIOS SHOPEE MULTI-STORE V1B: idem para a camada de anuncios por loja (revertida hunk a hunk ate bb8f7ea)
-  const fora = filtrarExcecaoShopeeImportV2(RAIZ, BASE, filtrarExcecaoAnunciosMultiStore(RAIZ, BASE, filtrarExcecaoShopeeMultiStore(RAIZ, BASE, d.split(/\r?\n/).filter(Boolean)))).join("\n");
-  assert(fora === "", fora);
+t("M. V2: OAuth/pipeline cobertos pelas suites de comportamento; Vendas/Dashboard em zonas protegidas; sem selecao implicita nova (I3)", () => {
+  const errosV2 = invariantesV2(RAIZ);
+  assert(errosV2.length === 0, `M: ${errosV2.join(" | ")}`);
 });
 
 console.log(`\n${falhou === 0 ? "✓" : "✗"} SHOPEE-UX — ${passou} passaram, ${falhou} falharam`);

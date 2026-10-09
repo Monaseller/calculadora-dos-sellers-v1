@@ -12,26 +12,12 @@
  */
 import "./_server-only-inerte";
 import { execFileSync } from "node:child_process";
-// SALES-CANONICAL-D13B: excecao EXATA — so os arquivos NOVOS do D13 em lib/vendas/canonico (D13_NEW_CANONICAL_FILES, inexistentes na base)
-import { filtrarNovosCanonicosD13 } from "./_excecao-d13-vendas-canonicas";
-// SALES-CANONICAL-D14B: excecao EXATA do patch D14 nos leitores (ATUAL − patch aprovado = bytes de 1c4fe29)
-import { filtrarExcecaoD14 } from "./_excecao-d14-vendas-canonicas";
-// SALES-SYNC-D15C2: excecao EXATA do motor intraday ML (worker.ts − hunks D15C = b260583; intraday.ts por sha256)
-import { filtrarExcecaoD15C } from "./_excecao-d15c-ml-intraday";
-// SALES-SYNC-D15D2: excecao EXATA do motor intraday Shopee (worker.ts − hunks D15D = e90557e; intraday.ts por sha256)
-import { filtrarExcecaoD15D } from "./_excecao-d15d-shopee-intraday";
-// SALES-SYNC-D15B2: excecao EXATA do patch D15B nos arquivos de sync (ATUAL − patch aprovado = bytes de d631748)
-import { filtrarExcecaoD15B } from "./_excecao-d15b-intraday";
-// SALES-SYNC-D15F2B: excecao EXATA do enable (intraday.ts = 34d982f com SO a linha false → true)
-import { filtrarExcecaoD15F2 } from "./_excecao-d15f2-enable-intraday";
-// SALES-CANONICAL-D16B: excecao EXATA do cutover dos 4 cards do Dashboard (dashboard − hunks D16 = 1d6e573; novos por sha256)
-import { filtrarExcecaoD16 } from "./_excecao-d16-dashboard-canonico";
-// SHOPEE MULTI-STORE V1B: excecao EXATA da camada multi-loja (arquivos − hunks = 5fdb51f; novos por sha256)
-import { filtrarExcecaoShopeeMultiStore } from "./_excecao-shopee-multi-store";
-// ANUNCIOS SHOPEE MULTI-STORE V1B: excecao EXATA (arquivos − hunks = bb8f7ea; migrations/novos por sha256)
-import { filtrarExcecaoAnunciosMultiStore } from "./_excecao-anuncios-multi-store";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+// ANUNCIOS SHOPEE MULTI-STORE V1B: excecao EXATA (arquivos − hunks = bb8f7ea; migrations/novos por sha256)
+import { filtrarExcecaoAnunciosMultiStore } from "./_excecao-anuncios-multi-store";
+// CDS GUARD V2 (Fase 0B): invariantes estruturais + zonas protegidas no lugar da cerca "arquivo nao mudou desde a base"
+import { invariantesV2 } from "./_guard-v2";
 
 let passou = 0, falhou = 0;
 let fila: Promise<void> = Promise.resolve();
@@ -255,27 +241,9 @@ async function principal() {
     const s = ler("app/api/sync/route.ts").replace(/\/\/[^\n]*|\/\*[\s\S]*?\*\//g, "");
     assert(!/sync_jobs|claim_next_sync_job/.test(s), "cron diario passou a usar sync_jobs");
   });
-  t("I3. worker canonico, coordenador, planner, motores, canonicos, rotas legadas e sync-on-read INTOCADOS desde a base", () => {
-    // SALES-SYNC-C3 muda DE PROPOSITO a camada de credencial Shopee (CAS do refresh):
-    // lib/shopee-auth.ts e lib/marketplace/credenciais.ts saem desta lista — quem os
-    // guarda agora e scripts/testar-shopee-token-cas.ts (+ testar-credenciais-marketplace).
-    // SALES-SYNC-C6 muda DE PROPOSITO o tratamento de auth Shopee do worker canonico
-    // (lib/vendas/sync/worker.ts e worker-deps.ts) — guardados por testar-shopee-auth-transient
-    // e testar-vendas-sync-worker. Coordenador, planner, canonicos e motores seguem intocados.
-    // SALES-SYNC-D1 ACRESCENTA (arquivos novos, nada existente muda) o tick do coordenador
-    // canonico e a rota dele — guardados por testar-vendas-sync-coordenador-tick.
-    const C6 = ["lib/vendas/sync/worker.ts", "lib/vendas/sync/worker-deps.ts",
-      "lib/vendas/sync/coordenador-tick.ts", "app/api/internal/vendas-sync/coordenador/route.ts",
-      // SALES-SYNC-D6: a rota do worker passa a ler a flag server-only (guard proprio: testar-vendas-sync-feature-flag)
-      "app/api/internal/vendas-sync/worker/route.ts", "lib/vendas/sync/flag-canonica.ts",
-      // SALES-SYNC-D8.2: auth manual das rotas canonicas (guard proprio: testar-vendas-sync-auth-interna)
-      "lib/vendas/sync/auth-interna.ts"];
-    const d = execFileSync("git", ["diff", "--name-only", BASE, "--", "lib/vendas", "lib/mercado-livre/ingestao", "lib/shopee/ingestao", "lib/sync-ml.ts", "lib/sync-shopee.ts",
-      "lib/ml-auth.ts", "app/api/sync", "app/api/internal", "app/api/ml/vendas", /* SALES-SYNC-D10: vercel.json agora agenda os crons canonicos — guard proprio: testar-vendas-sync-cron */ "app/api/shopee/vendas", "lib/feature-flags.ts"], { cwd: RAIZ, encoding: "utf8" })
-      .trim().split(/\r?\n/).filter((f) => f && !C6.includes(f));
-    // SALES-CANONICAL-D13B: so os arquivos NOVOS do D13 em lib/vendas/canonico; ml.ts/shopee.ts/tipos.ts seguem travados
-    const fora = filtrarExcecaoAnunciosMultiStore(RAIZ, BASE, filtrarExcecaoShopeeMultiStore(RAIZ, BASE, filtrarExcecaoD16(RAIZ, BASE, filtrarExcecaoD15F2(RAIZ, BASE, filtrarExcecaoD15D(RAIZ, BASE, filtrarExcecaoD15C(RAIZ, BASE, filtrarExcecaoD15B(RAIZ, BASE, filtrarExcecaoD14(RAIZ, BASE, filtrarNovosCanonicosD13(RAIZ, BASE, d))))))))).join(",");
-    assert(fora === "", fora);
+  t("I3. V2: canonico nunca importa/chama o legado alem da ponte nominal {mapStatus} (I1); legado nunca define job canonico (I2); sem seletor implicito novo (I3)", () => {
+    const errosV2 = invariantesV2(RAIZ);
+    assert(errosV2.length === 0, `I3: ${errosV2.join(" | ")}`);
   });
   t("I4. a unica migration nova e a do fence, e ela nao toca idx_sync_jobs_loja_ativo (so comentario)", () => {
     const novos = execFileSync("git", ["diff", "--name-only", BASE, "--", "supabase"], { cwd: RAIZ, encoding: "utf8" }).trim().split(/\r?\n/).filter(Boolean);

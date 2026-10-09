@@ -11,30 +11,11 @@
  */
 import "./_server-only-inerte";
 import { execFileSync } from "node:child_process";
-// SALES-CANONICAL-D13A: excecao minima e exata (capability owner-scoped + arquivos novos do D13)
-import { filtrarExcecaoD13 } from "./_excecao-d13-vendas-canonicas";
-// SALES-CANONICAL-D14B: excecao EXATA do patch D14 nos leitores (ATUAL − patch aprovado = bytes de 1c4fe29)
-import { filtrarExcecaoD14 } from "./_excecao-d14-vendas-canonicas";
-// SALES-SYNC-D15C2: excecao EXATA do motor intraday ML (worker.ts − hunks D15C = b260583; intraday.ts por sha256)
-import { filtrarExcecaoD15C } from "./_excecao-d15c-ml-intraday";
-// SALES-SYNC-D15D2: excecao EXATA do motor intraday Shopee (worker.ts − hunks D15D = e90557e; intraday.ts por sha256)
-import { filtrarExcecaoD15D } from "./_excecao-d15d-shopee-intraday";
-// SALES-SYNC-D15B2: excecao EXATA do patch D15B nos arquivos de sync (ATUAL − patch aprovado = bytes de d631748)
-import { filtrarExcecaoD15B } from "./_excecao-d15b-intraday";
-// SALES-CANONICAL-D16B: excecao EXATA do cutover dos 4 cards do Dashboard (dashboard − hunks D16 = 1d6e573; novos por sha256)
-import { filtrarExcecaoD16 } from "./_excecao-d16-dashboard-canonico";
-// SHOPEE MULTI-APP: excecao EXATA do OAuth multi-app (rotas/Configuracoes/.env.example − hunks = eca183a; novos por sha256)
-import { filtrarExcecaoShopeeMultiApp, varsEnvExemploAprovadas } from "./_excecao-shopee-multi-app";
-// SHOPEE UX V4: excecao EXATA do painel unico Shopee (Configuracoes − hunks UX = cdeb7af; novos por sha256)
-import { filtrarExcecaoShopeeUX } from "./_excecao-shopee-ux";
-// SHOPEE MULTI-STORE V1B: excecao EXATA da camada multi-loja (arquivos − hunks = 5fdb51f; novos por sha256)
-import { filtrarExcecaoShopeeMultiStore } from "./_excecao-shopee-multi-store";
-// ANUNCIOS SHOPEE MULTI-STORE V1B: excecao EXATA (arquivos − hunks = bb8f7ea; migrations/novos por sha256)
-import { filtrarExcecaoAnunciosMultiStore } from "./_excecao-anuncios-multi-store";
-// SHOPEE IMPORT V2: excecao EXATA (rota + page − hunks = d872390; motor/helper/suite por sha256)
-import { filtrarExcecaoShopeeImportV2 } from "./_excecao-shopee-import-v2";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { varsEnvExemploAprovadas } from "./_excecao-shopee-multi-app";
+// CDS GUARD V2 (Fase 0B): invariantes estruturais + zonas protegidas no lugar da cerca "arquivo nao mudou desde a base"
+import { invariantesV2 } from "./_guard-v2";
 
 let passou = 0, falhou = 0;
 let fila: Promise<void> = Promise.resolve();
@@ -169,15 +150,9 @@ async function principal() {
     }
     assert(H.cabecalhoEsperadoSalesSync("Bearer x", "c") === "Bearer c", "fallback nao e o do cron");
   });
-  t("escopo: vercel.json, legado, Vendas, Dashboard, flag, logica canonica, middleware INTOCADOS desde a base", () => {
-    const d = execFileSync("git", ["diff", "--name-only", BASE, "--", /* SALES-SYNC-D10: vercel.json agora agenda os crons canonicos — guard proprio: testar-vendas-sync-cron */ "app/(app)", "app/api/sync", "app/api/ml", "app/api/shopee", "app/api/internal/sync",
-      "app/api/internal/agentes", "app/api/internal/estudio-anuncios", "lib/feature-flags.ts", "lib/vendas/sync/flag-canonica.ts", "lib/vendas/sync/coordenador.ts",
-      "lib/vendas/sync/coordenador-tick.ts", "lib/vendas/sync/planejamento.ts", "lib/vendas/sync/worker.ts", "lib/vendas/sync/worker-deps.ts", "lib/vendas/canonico",
-      "lib/marketplace", "lib/shopee-auth.ts", "lib/ml-auth.ts", "lib/mercado-livre", "lib/shopee", "lib/middleware-rotas.ts", "middleware.ts", "supabase", "scripts/sync-worker.mjs"],
-      { cwd: RAIZ, encoding: "utf8" }).trim().split(/\r?\n/).filter(Boolean);
-    // SALES-CANONICAL-D13A: SO o bloco D13 de credenciais.ts e os arquivos novos do D13
-    const fora = filtrarExcecaoShopeeImportV2(RAIZ, BASE, filtrarExcecaoAnunciosMultiStore(RAIZ, BASE, filtrarExcecaoShopeeMultiStore(RAIZ, BASE, filtrarExcecaoShopeeUX(RAIZ, BASE, filtrarExcecaoShopeeMultiApp(RAIZ, BASE, filtrarExcecaoD16(RAIZ, BASE, filtrarExcecaoD15D(RAIZ, BASE, filtrarExcecaoD15C(RAIZ, BASE, filtrarExcecaoD15B(RAIZ, BASE, filtrarExcecaoD14(RAIZ, BASE, filtrarExcecaoD13(RAIZ, BASE, d))))))))))).join(",");
-    assert(fora === "", `alterados: ${fora}`);
+  t("escopo V2: toda rota interna exige segredo (I4) + invariantes estruturais e zonas protegidas; .env.example so acrescenta o segredo manual", () => {
+    const errosV2 = invariantesV2(RAIZ);
+    assert(errosV2.length === 0, `escopo: ${errosV2.join(" | ")}`);
     const dc = execFileSync("git", ["diff", "-U0", BASE, "--", ".env.example"], { cwd: RAIZ, encoding: "utf8" }).split(/\r?\n/);
     const add = dc.filter((l) => l.startsWith("+") && !l.startsWith("+++")), rem = dc.filter((l) => l.startsWith("-") && !l.startsWith("---"));
     // SHOPEE MULTI-APP: SO os dois nomes VAZIOS do app rd, e SO com .env.example exato (helper)

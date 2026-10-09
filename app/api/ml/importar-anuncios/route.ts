@@ -6,6 +6,7 @@ import { CATEGORIAS_ML } from "@/lib/comissoes-mercado-livre";
 import { autenticarRequisicao, lerCookie } from "@/lib/autenticacao";
 import { applyMLCookies } from "@/lib/ml-auth";
 import { resolverContaML } from "@/lib/ml-conexao";
+import { lerTodasAsPaginas } from "@/lib/anuncios/leitura-paginada";
 
 // SEC-3-B1: dados sensiveis (SEC-3) so por service_role, server-side.
 // O cliente nasce sob demanda — nunca no import — a partir do helper
@@ -156,15 +157,20 @@ export async function POST(request: Request) {
   }
 
   // ── 3. Busca anúncios existentes no Supabase (apenas deste usuário) ──────
-  const { data: existentes } = await supabase()
+  // CDS V2 Fase 0: TODAS as páginas (o PostgREST corta em 1000 sem erro — linha
+  // fora da janela virava "nova" e era duplicada). Leitura falha → para.
+  const existentes = await lerTodasAsPaginas<any>(() => supabase()
     .from("anuncios")
     .select("id, ml_item_id, variation_id, sku, custo_produto, insumos, custo_frete, imposto, peso_kg, preco_anuncio")
     .eq("marketplace", "ML")
-    .eq("user_id", userId);
+    .eq("user_id", userId));
+  if (!existentes.ok) {
+    return NextResponse.json({ erro: true, mensagem: "Não foi possível ler seus anúncios agora." }, { status: 503 });
+  }
 
   // Mapa: "ml_item_id|variation_id" → row
   const existMap = new Map<string, any>();
-  for (const row of (existentes ?? [])) {
+  for (const row of existentes.linhas) {
     const key = `${row.ml_item_id}|${row.variation_id ?? ""}`;
     existMap.set(key, row);
   }

@@ -7,6 +7,7 @@ import { autenticarRequisicao, lerCookie } from "@/lib/autenticacao";
 import { applyMLCookies } from "@/lib/ml-auth";
 import { resolverContaML } from "@/lib/ml-conexao";
 import { getActivePromoPrice } from "@/lib/ml-promotions";
+import { lerTodasAsPaginas } from "@/lib/anuncios/leitura-paginada";
 
 // SEC-3-B1: dados sensiveis (SEC-3) so por service_role, server-side.
 // O cliente nasce sob demanda — nunca no import — a partir do helper
@@ -144,26 +145,28 @@ export async function POST(request: Request) {
   }
   const token = conta.accessToken;
 
-  const { data: anuncios, error } = await supabase()
+  // CDS V2 Fase 0: TODAS as páginas (o PostgREST corta em 1000 sem erro).
+  const leitura = await lerTodasAsPaginas<any>(() => supabase()
     .from("anuncios")
     .select("id, ml_item_id, nome, preco_anuncio, frete_gratis, tipo_anuncio, thumbnail, permalink, variation_id, custo_frete, peso_kg, custo_produto, imposto, categoria, sku")
     .eq("ativo", true)
     .eq("marketplace", "ML")
     .eq("user_id", userId)
-    .not("ml_item_id", "is", null);
+    .not("ml_item_id", "is", null));
 
-  if (error) {
+  if (!leitura.ok) {
     // A mensagem crua do Supabase pode conter nome de tabela, coluna e
     // esquema — fica no log, nunca na resposta. E falha de banco e 5xx,
     // não 200 com `erro:true` (o corpo é preservado porque a tela lê
     // `data.erro` e `data.mensagem`).
-    console.error("[POST /api/ml/sync-precos] falha ao ler anúncios:", error.message);
+    console.error("[POST /api/ml/sync-precos] falha ao ler anúncios:", leitura.motivo);
     return NextResponse.json(
       { erro: true, mensagem: "Não foi possível carregar os anúncios agora." },
       { status: 503 }
     );
   }
-  if (!anuncios?.length) return NextResponse.json({ erro: false, atualizados: 0, mensagem: "Nenhum anúncio ML encontrado." });
+  const anuncios = leitura.linhas;
+  if (!anuncios.length) return NextResponse.json({ erro: false, atualizados: 0, mensagem: "Nenhum anúncio ML encontrado." });
 
   let atualizados = 0;
   const detalhes: string[] = [];

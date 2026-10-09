@@ -122,12 +122,14 @@ function clienteFalso() {
     const filtros: Record<string, unknown> = {};
     let tipo: "select" | "update" = "select";
     let patch: Record<string, unknown> = {};
+    // CDS V2 Fase 0: leituras de anuncios agora paginam (.order("id").range) — o duplo recorta como o PostgREST
+    let faixa: [number, number] | null = null;
 
     const linhasDe = () => (tabela === "lojas" ? lojas : anuncios) as any[];
 
     const executar = () => {
       const alvo = linhasDe().filter(l => casa(l, filtros));
-      if (tipo === "select") return { data: alvo, error: null };
+      if (tipo === "select") return { data: faixa ? alvo.slice(faixa[0], faixa[1] + 1) : alvo, error: null };
       for (const l of alvo) Object.assign(l, patch);
       return { data: alvo.map(l => ({ id: l.id })), error: null };
     };
@@ -144,6 +146,7 @@ function clienteFalso() {
       in: () => cadeia,
       order: () => cadeia,
       limit: () => cadeia,
+      range: (de: number, ate: number) => { faixa = [de, ate]; return cadeia; },
       single: async () => { const r = executar(); return { data: (r.data as any[])[0] ?? null, error: null }; },
       maybeSingle: async () => { const r = executar(); return { data: (r.data as any[])[0] ?? null, error: null }; },
       then: (resolve: any) => resolve(executar()),

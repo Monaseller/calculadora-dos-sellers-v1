@@ -24,6 +24,7 @@
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { shopeeGet } from "@/lib/shopee-api";
+import { lerTodasAsPaginas } from "@/lib/anuncios/leitura-paginada";
 
 export const ORCAMENTO_FATIA_MS = 35_000;
 export const CONCORRENCIA_MODELOS = 3;
@@ -129,16 +130,17 @@ export async function importarFatiaShopee(args: {
   const todos = await listarItens(cred);
   const restantes = ultimoItem === null ? todos : todos.filter((id) => cmpItem(id, ultimoItem) > 0);
 
-  // Existentes SO desta loja (chave item|variacao vale dentro dela). Leitura falha → para.
-  const { data: existentes, error: erroExistentes } = await banco
+  // Existentes SO desta loja (chave item|variacao vale dentro dela), TODAS as paginas
+  // (o PostgREST corta em 1000 sem erro). Leitura falha ou incompleta → para.
+  const existentes = await lerTodasAsPaginas<any>(() => banco
     .from("anuncios")
     .select("id, ml_item_id, variation_id, nome, preco_anuncio, thumbnail, sku")
     .eq("marketplace", "Shopee")
     .eq("user_id", userId)
-    .eq("loja_id", lojaId);
-  if (erroExistentes) throw new ErroImportacaoShopee("BANCO", "leitura dos anuncios existentes falhou");
+    .eq("loja_id", lojaId));
+  if (!existentes.ok) throw new ErroImportacaoShopee("BANCO", "leitura dos anuncios existentes falhou");
   const existMap = new Map<string, any>();
-  for (const row of (existentes ?? [])) existMap.set(`${row.ml_item_id}|${row.variation_id ?? ""}`, row);
+  for (const row of existentes.linhas) existMap.set(`${row.ml_item_id}|${row.variation_id ?? ""}`, row);
 
   const r: ResultadoFatia = { parcial: false, cursor: null, importados: 0, atualizados: 0, ignorados: 0, itensProcessados: 0, total: todos.length };
   let cursorItem: string | null = ultimoItem;

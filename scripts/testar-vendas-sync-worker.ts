@@ -11,24 +11,12 @@
  */
 import "./_server-only-inerte";
 import { execFileSync } from "node:child_process";
-// SALES-CANONICAL-D13B: excecao EXATA — so os arquivos NOVOS do D13 em lib/vendas/canonico (D13_NEW_CANONICAL_FILES, inexistentes na base)
-import { filtrarNovosCanonicosD13 } from "./_excecao-d13-vendas-canonicas";
-// SALES-CANONICAL-D14B: excecao EXATA do patch D14 nos leitores (ATUAL − patch aprovado = bytes de 1c4fe29)
-import { filtrarExcecaoD14 } from "./_excecao-d14-vendas-canonicas";
-// SALES-SYNC-D15C2: excecao EXATA do motor intraday ML (worker.ts − hunks D15C = b260583; intraday.ts por sha256)
-import { filtrarExcecaoD15C } from "./_excecao-d15c-ml-intraday";
-// SALES-SYNC-D15D2: excecao EXATA do motor intraday Shopee (worker.ts − hunks D15D = e90557e; intraday.ts por sha256)
-import { filtrarExcecaoD15D } from "./_excecao-d15d-shopee-intraday";
-// SALES-CANONICAL-D16B: excecao EXATA do cutover dos 4 cards do Dashboard (dashboard − hunks D16 = 1d6e573; novos por sha256)
-import { filtrarExcecaoD16 } from "./_excecao-d16-dashboard-canonico";
-// SHOPEE MULTI-STORE V1B: excecao EXATA da camada multi-loja (arquivos − hunks = 5fdb51f; novos por sha256)
-import { filtrarExcecaoShopeeMultiStore } from "./_excecao-shopee-multi-store";
-// ANUNCIOS SHOPEE MULTI-STORE V1B: excecao EXATA (arquivos − hunks = bb8f7ea; migrations/novos por sha256)
-import { filtrarExcecaoAnunciosMultiStore } from "./_excecao-anuncios-multi-store";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { RelogioFake, RepoFake, ShopeeFake, type PedidoFake } from "./fakes/shopee-ingestao-fake";
 import type { TransporteML } from "../lib/mercado-livre/ingestao/tipos";
+// CDS GUARD V2 (Fase 0B): invariantes estruturais + zonas protegidas no lugar da cerca "arquivo nao mudou desde a base"
+import { invariantesV2 } from "./_guard-v2";
 
 process.env.NEXT_PUBLIC_SUPABASE_URL ??= "http://127.0.0.1:9";
 process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ??= "anon-de-teste";
@@ -399,24 +387,9 @@ async function principal() {
     assert((w.match(/await reivindicar\(/g) ?? []).length === 1 && /TENTATIVAS_CLAIM = 3/.test(w), "mais de um ponto de claim");
     assert(/executarFatiaML/.test(w) && /executarFatiaShopee/.test(w) && /executarFatiaCatchUpEscrow/.test(w) && /classificarJobParaWorker/.test(w), "roteamento");
   });
-  t("legado, canonicos, migrations, vercel.json e env INTOCADOS desde a base", () => {
-    // SALES-SYNC-C1 muda DE PROPOSITO so o fence legado: scripts/sync-worker.mjs (recuperacao)
-    // e a migration do claim — os dois validados linha a linha por scripts/testar-sync-legacy-fence.ts.
-    const FENCE_C1 = ["scripts/sync-worker.mjs", "supabase/migrations/20261029_sales_sync_c1_legacy_claim_fence.sql",
-      // SALES-SYNC-C4: lease do refresh Shopee — guard proprio: testar-shopee-refresh-lease
-      "supabase/migrations/20261030_sales_sync_c4_shopee_refresh_lease.sql",
-      // SALES-SYNC-C8: SELECT do service_role no lease — guard proprio: testar-shopee-refresh-lease M6
-      "supabase/migrations/20261031_sales_sync_c8_shopee_refresh_lease_select.sql"];
-    const d = execFileSync("git", ["diff", "--name-only", BASE, "--", "scripts/sync-worker.mjs", "app/api/internal/sync", "app/api/sync", "lib/sync-ml.ts", "lib/sync-shopee.ts",
-      "lib/vendas/canonico", "lib/mercado-livre/ingestao", "lib/shopee/ingestao", /* SALES-SYNC-D10: vercel.json agora agenda os crons canonicos — guard proprio: testar-vendas-sync-cron */ "supabase", ".env.example", "lib/feature-flags.ts"], { cwd: RAIZ, encoding: "utf8" })
-      // SALES-SYNC-D6 acrescenta a flag server-only ao .env.example (guard proprio: testar-vendas-sync-feature-flag)
-      .trim().split(/\r?\n/).filter((f) => f && !FENCE_C1.includes(f) && f !== ".env.example");
-    // SALES-CANONICAL-D13B: so os arquivos NOVOS do D13 em lib/vendas/canonico; ml.ts/shopee.ts/tipos.ts seguem travados
-    const fora = filtrarExcecaoAnunciosMultiStore(RAIZ, BASE, filtrarExcecaoShopeeMultiStore(RAIZ, BASE, filtrarExcecaoD16(RAIZ, BASE, filtrarExcecaoD15D(RAIZ, BASE, filtrarExcecaoD15C(RAIZ, BASE, filtrarExcecaoD14(RAIZ, BASE, filtrarNovosCanonicosD13(RAIZ, BASE, d))))))).join(",");
-    const novos = execFileSync("git", ["ls-files", "--others", "--exclude-standard", "--", "supabase"], { cwd: RAIZ, encoding: "utf8" })
-      .trim().split(/\r?\n/).filter((f) => f && !FENCE_C1.includes(f)).join(",");
-    assert(fora === "" && novos === "", `alterados: ${fora} ${novos}`);
-    assert(JSON.stringify(JSON.parse(readFileSync(join(RAIZ, "vercel.json"), "utf8")).crons.filter((c: { path: string }) => /vendas-sync/.test(c.path))) === JSON.stringify([{ path: "/api/internal/vendas-sync/coordenador", schedule: "*/15 * * * *" }, { path: "/api/internal/vendas-sync/worker", schedule: "* * * * *" }]), "crons canonicos diferentes do aprovado (D10)");
+  t("V2: worker canonico nunca alcanca o legado (I1), legado nao cria job canonico (I2); migrations/vercel/env/sync-worker.mjs em zonas protegidas", () => {
+    const errosV2 = invariantesV2(RAIZ);
+    assert(errosV2.length === 0, `worker: ${errosV2.join(" | ")}`);
   });
   t("sanitizarErro remove token, segredo e identificadores longos", () => {
     const s = W.sanitizarErro(new Error("falhou access_token=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA partner_key:zz pedido 2410021234567890 Bearer xyz"));

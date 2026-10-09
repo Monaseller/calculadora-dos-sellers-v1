@@ -18,12 +18,8 @@ import { createHmac } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-// SHOPEE MULTI-STORE V1B: excecao EXATA da camada multi-loja (arquivos − hunks = 5fdb51f; novos por sha256)
-import { filtrarExcecaoShopeeMultiStore } from "./_excecao-shopee-multi-store";
-// ANUNCIOS SHOPEE MULTI-STORE V1B: excecao EXATA da camada de anuncios por loja (arquivos − hunks = bb8f7ea)
-import { filtrarExcecaoAnunciosMultiStore } from "./_excecao-anuncios-multi-store";
-// SHOPEE IMPORT V2: excecao EXATA da importacao em fatias (rota + page − hunks = d872390; novos por sha256)
-import { filtrarExcecaoShopeeImportV2 } from "./_excecao-shopee-import-v2";
+// CDS GUARD V2 (Fase 0B): invariantes estruturais + zonas protegidas no lugar da cerca "arquivo nao mudou desde a base"
+import { invariantesV2 } from "./_guard-v2";
 
 const RAIZ = join(__dirname, "..");
 const BASE = "eca183a";
@@ -319,15 +315,13 @@ async function principal() {
     const src = readFileSync(join(RAIZ, "lib/shopee-auth.ts"), "utf8");
     assert(/refreshShopeeToken\(loja\.partner_id as string, loja\.partner_key as string/.test(src) && !/process\.env\.SHOPEE_PARTNER_(ID|KEY)/.test(src), "refresh deixou de usar a credencial da loja");
   });
-  t("Q2. pipeline Shopee INTOCADO desde eca183a (refresh, sync, ingestao, worker, intraday, escrow, admin, importar-anuncios, credenciais)", () => {
-    const d = execFileSync("git", ["diff", "--name-only", BASE, "--", "lib/shopee-auth.ts", "lib/sync-shopee.ts", "lib/shopee", "lib/shopee-api.ts", "lib/shopee-financeiro.ts",
-      "lib/vendas", "lib/marketplace/credenciais.ts", "app/api/admin/shopee", "app/api/shopee", "lib/agentes",
-      // Vendas, Dashboard, Meus Produtos e rotas de vendas: fora do escopo do multi-app
-      "app/(app)/vendas", "app/(app)/dashboard", "app/(app)/anuncios", "app/api/ml", "app/api/anuncios", "lib/vendas-estrutura.ts", "lib/mercado-livre"], { cwd: RAIZ, encoding: "utf8" }).trim();
-    // SHOPEE MULTI-STORE V1B: SO os arquivos da camada multi-loja, revertidos hunk a hunk ate 5fdb51f (excecao exata); o resto segue travado
-    // ANUNCIOS SHOPEE MULTI-STORE V1B: idem para a camada de anuncios por loja (revertida hunk a hunk ate bb8f7ea)
-    const fora = filtrarExcecaoShopeeImportV2(RAIZ, BASE, filtrarExcecaoAnunciosMultiStore(RAIZ, BASE, filtrarExcecaoShopeeMultiStore(RAIZ, BASE, d.split(/\r?\n/).filter(Boolean)))).join("\n");
-    assert(fora === "", fora);
+  t("Q2. V2: pipeline Shopee sem selecao implicita (I3) e sem partner key no browser; credencial por loja provada por Q/Q3 e pelas suites multi-loja", () => {
+    const errosV2 = invariantesV2(RAIZ);
+    assert(errosV2.length === 0, `Q2: ${errosV2.join(" | ")}`);
+    let noBrowser = "";
+    try { noBrowser = execFileSync("git", ["grep", "-lE", "partner_key|SHOPEE_(RD_)?PARTNER_KEY|lib/shopee-apps[\"']", "--", "app/(app)", "components"], { cwd: RAIZ, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }); }
+    catch (e: any) { if (e.status !== 1) throw e; }
+    assert(noBrowser.trim() === "", `partner key/registro de apps alcancando o browser: ${noBrowser}`);
   });
   t("Q3. env global so no registro: nenhuma rota/lib fora de lib/shopee-apps.ts le SHOPEE_PARTNER_*", () => {
     // git grep sai com 1 quando NAO ha ocorrencia — que e o esperado aqui

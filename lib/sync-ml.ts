@@ -23,6 +23,30 @@ import { CATEGORIAS_ML } from "@/lib/comissoes-mercado-livre";
 import { getMLLojaAtiva } from "@/lib/ml-auth";
 import { listarLojasMLDoDonoPorSeller } from "@/lib/marketplace/credenciais";
 import { LojaIdIntegrityError } from "@/lib/sync-errors";
+import { lerTodasAsPaginas } from "@/lib/anuncios/leitura-paginada";
+
+/**
+ * Mapa de custo por item ML (CDS V2 Fase 0): SO anuncios do Mercado Livre do
+ * dono — nunca Shopee (antes nao havia filtro de marketplace) — e TODAS as
+ * paginas (o PostgREST corta em 1000 sem erro). Leitura falha → erro: um mapa
+ * parcial gravaria custo 0 em silencio. Ainda sem loja: anuncios ML nao tem
+ * loja_id (Fase 2); o item_id do ML e do vendedor, entao nao colide entre contas.
+ */
+export async function carregarMapaAnunciosML(userId: string): Promise<Map<string, any>> {
+  const leitura = await lerTodasAsPaginas<any>(() => supabase()
+    .from("anuncios")
+    .select("id, ml_item_id, nome, sku, custo_produto, insumos, custo_frete, frete_gratis, imposto, tipo_anuncio, categoria")
+    .eq("marketplace", "ML")
+    .eq("ativo", true)
+    .not("ml_item_id", "is", null)
+    .eq("user_id", userId));
+  if (!leitura.ok) throw new Error(`carregarMapaAnunciosML: ${leitura.motivo}`);
+  const mapaAnuncios = new Map<string, any>();
+  for (const a of leitura.linhas) {
+    if (a.ml_item_id) mapaAnuncios.set(a.ml_item_id, a);
+  }
+  return mapaAnuncios;
+}
 // import { atualizarResumosDosDias } from "@/lib/resumos-diarios"; — desativado
 // temporariamente 2026-07-13 (ver bloco de chamada removido mais abaixo).
 
@@ -308,17 +332,7 @@ export async function syncMLForUserV2(
   const found = allOrders.length;
   if (found === 0) return { found: 0, inserted: 0 };
 
-  const { data: anuncios } = await supabase()
-    .from("anuncios")
-    .select("id, ml_item_id, nome, sku, custo_produto, insumos, custo_frete, frete_gratis, imposto, tipo_anuncio, categoria")
-    .eq("ativo", true)
-    .not("ml_item_id", "is", null)
-    .eq("user_id", userId);
-
-  const mapaAnuncios = new Map<string, any>();
-  for (const a of (anuncios ?? [])) {
-    if (a.ml_item_id) mapaAnuncios.set(a.ml_item_id, a);
-  }
+  const mapaAnuncios = await carregarMapaAnunciosML(userId);
 
   const rows: any[] = [];
   const now = new Date().toISOString();

@@ -338,7 +338,12 @@ console.log("── 9 a 13. Superfície privilegiada ─────────
   // por isso `saveTokensToDB` mede 4, e `lerCredencialMLPorLojaEDono`
   // mede 2 (o 3º tem `= {}`). O que cada assert afirma é sempre o mesmo:
   // a função deixou de ser chamável só com `lojaId`.
-  ok("56. getMLLojaById exige lojaId + userId", getMLLojaById.length === 2);
+  // CDS V2 Fase 0: `limiteExterno?` e `signalDoBanco?` (OPCIONAIS) entraram depois e
+  // levaram o Function.length a 4 — o invariante nao mudou: lojaId E userId sao
+  // OBRIGATORIOS (sem `?`, sem default) e vem nessa ordem.
+  ok("56. getMLLojaById exige lojaId + userId",
+    /export async function getMLLojaById\(\s*lojaId: string,\s*userId: string,/.test(fonte("lib/ml-auth.ts").replace(/\r\n/g, "\n"))
+      && getMLLojaById.length >= 2);
   ok("57. getShopeeLojaById exige lojaId + userId", getShopeeLojaById.length === 2);
   ok("58. saveTokensToDB exige lojaId + userId + result (+CAS opcional)",
     saveTokensToDB.length === 4);

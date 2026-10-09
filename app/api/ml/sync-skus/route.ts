@@ -3,6 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { autenticarRequisicao, lerCookie } from "@/lib/autenticacao";
 import { resolverContaML } from "@/lib/ml-conexao";
+import { lerTodasAsPaginas } from "@/lib/anuncios/leitura-paginada";
 
 // SEC-3-B1: dados sensiveis (SEC-3) so por service_role, server-side.
 // O cliente nasce sob demanda — nunca no import — a partir do helper
@@ -63,16 +64,23 @@ export async function POST(request: Request) {
   }
   const token = conta.accessToken;
 
-  // Busca anúncios com ml_item_id mas sem SKU (ou SKU vazio) — apenas deste usuário
-  const { data: anuncios, error } = await supabase()
+  // Busca anúncios com ml_item_id mas sem SKU (ou SKU vazio) — apenas deste usuário.
+  // CDS V2 Fase 0: TODAS as páginas (o PostgREST corta em 1000 sem erro); falha de
+  // leitura é 5xx — antes virava "nada para atualizar" em silêncio.
+  const leitura = await lerTodasAsPaginas<any>(() => supabase()
     .from("anuncios")
     .select("id, ml_item_id, nome, sku")
     .eq("ativo", true)
     .eq("user_id", userId)
     .not("ml_item_id", "is", null)
-    .or("sku.is.null,sku.eq.");
+    .or("sku.is.null,sku.eq."));
 
-  if (error || !anuncios?.length) {
+  if (!leitura.ok) {
+    console.error("[POST /api/ml/sync-skus] falha ao ler anúncios:", leitura.motivo);
+    return NextResponse.json({ erro: true, mensagem: "Não foi possível carregar os anúncios agora." }, { status: 503 });
+  }
+  const anuncios = leitura.linhas;
+  if (!anuncios.length) {
     return NextResponse.json({ atualizados: 0, mensagem: "Nenhum anúncio para atualizar." });
   }
 

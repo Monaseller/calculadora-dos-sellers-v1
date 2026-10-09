@@ -41,6 +41,7 @@ import { shopeeGet } from "@/lib/shopee-api";
 import { obterFaixaShopee, TAXA_CAMPANHA_SHOPEE } from "@/lib/comissoes-shopee";
 import { LojaIdIntegrityError } from "@/lib/sync-errors";
 import { atualizarResumosDosDias } from "@/lib/resumos-diarios";
+import { lerTodasAsPaginas } from "@/lib/anuncios/leitura-paginada";
 import {
   protegerSnapshotFinanceiro,
   decidirAtualizacaoDeStatus,
@@ -502,16 +503,19 @@ export interface SyncShopeeResult {
  */
 export async function carregarMapaAnuncios(userId: string, lojaId: string): Promise<Map<string, any>> {
   if (!lojaId) throw new Error("carregarMapaAnuncios: loja_obrigatoria");
-  const { data: anuncios } = await supabase()
+  // CDS V2 Fase 0: TODAS as paginas (o PostgREST corta em 1000 sem erro). Leitura
+  // falha ou incompleta → erro: um mapa parcial gravaria custo 0 em silencio.
+  const leitura = await lerTodasAsPaginas<any>(() => supabase()
     .from("anuncios")
     .select("id, ml_item_id, variation_id, sku, custo_produto, insumos, custo_frete, imposto")
     .eq("marketplace", "Shopee")
     .eq("ativo", true)
     .eq("user_id", userId)
-    .eq("loja_id", lojaId);
+    .eq("loja_id", lojaId));
+  if (!leitura.ok) throw new Error(`carregarMapaAnuncios: ${leitura.motivo}`);
 
   const mapaAnuncios = new Map<string, any>();
-  for (const a of (anuncios ?? [])) {
+  for (const a of leitura.linhas) {
     const key = a.variation_id ? `${a.ml_item_id}|${a.variation_id}` : `${a.ml_item_id}|`;
     mapaAnuncios.set(key, a);
     if (!mapaAnuncios.has(`${a.ml_item_id}|`)) mapaAnuncios.set(`${a.ml_item_id}|`, a);

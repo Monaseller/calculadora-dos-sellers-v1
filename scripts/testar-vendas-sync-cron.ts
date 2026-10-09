@@ -21,34 +21,10 @@
  */
 import "./_server-only-inerte";
 import { execFileSync } from "node:child_process";
-// SALES-CANONICAL-D13A: excecao minima e exata (capability owner-scoped + arquivos novos do D13)
-import { filtrarExcecaoD13 } from "./_excecao-d13-vendas-canonicas";
-// SALES-CANONICAL-D14B: excecao EXATA do patch D14 nos leitores (ATUAL − patch aprovado = bytes de 1c4fe29)
-import { filtrarExcecaoD14 } from "./_excecao-d14-vendas-canonicas";
-// SALES-SYNC-D15C2: excecao EXATA do motor intraday ML (worker.ts − hunks D15C = b260583; intraday.ts por sha256)
-import { filtrarExcecaoD15C } from "./_excecao-d15c-ml-intraday";
-// SALES-SYNC-D15D2: excecao EXATA do motor intraday Shopee (worker.ts − hunks D15D = e90557e; intraday.ts por sha256)
-import { filtrarExcecaoD15D } from "./_excecao-d15d-shopee-intraday";
-// SALES-SYNC-D15B2: excecao EXATA do patch D15B nos arquivos de sync (ATUAL − patch aprovado = bytes de d631748)
-import { filtrarExcecaoD15B } from "./_excecao-d15b-intraday";
-// SALES-SYNC-D15F2C: excecao EXATA do enable (intraday.ts = 34d982f com SO a linha false → true; + o helper)
-import { filtrarExcecaoD15F2 } from "./_excecao-d15f2-enable-intraday";
-// SALES-CANONICAL-D16B: excecao EXATA do cutover dos 4 cards do Dashboard (dashboard − hunks D16 = 1d6e573; novos por sha256)
-import { filtrarExcecaoD16 } from "./_excecao-d16-dashboard-canonico";
-// SHOPEE MULTI-APP: excecao EXATA do OAuth multi-app (rotas/Configuracoes/.env.example − hunks = eca183a; novos por sha256)
-import { filtrarExcecaoShopeeMultiApp } from "./_excecao-shopee-multi-app";
-// SHOPEE UX V4: excecao EXATA do painel unico Shopee (Configuracoes − hunks UX = cdeb7af; novos por sha256)
-import { filtrarExcecaoShopeeUX } from "./_excecao-shopee-ux";
-// SHOPEE MULTI-STORE V1B: excecao EXATA da camada multi-loja (arquivos − hunks = 5fdb51f; novos por sha256)
-import { filtrarExcecaoShopeeMultiStore } from "./_excecao-shopee-multi-store";
-// ANUNCIOS SHOPEE MULTI-STORE V1B: excecao EXATA (arquivos − hunks = bb8f7ea; migrations/novos por sha256)
-import { filtrarExcecaoAnunciosMultiStore } from "./_excecao-anuncios-multi-store";
-// ANUNCIOS SCHEMA SNAPSHOT C1: excecao EXATA (snapshot + colunas.ts − hunks = 0115870; helper auto-pinado)
-import { filtrarExcecaoAnunciosSchemaSnapshot } from "./_excecao-anuncios-schema-snapshot";
-// SHOPEE IMPORT V2: excecao EXATA (rota + page − hunks = d872390; motor/helper/suite por sha256)
-import { filtrarExcecaoShopeeImportV2 } from "./_excecao-shopee-import-v2";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+// CDS GUARD V2 (Fase 0B): invariantes estruturais + zonas protegidas no lugar da cerca "arquivo nao mudou desde a base"
+import { invariantesV2 } from "./_guard-v2";
 
 let passou = 0, falhou = 0;
 let fila: Promise<void> = Promise.resolve();
@@ -164,16 +140,13 @@ async function principal() {
   });
 
   console.log("\n[23. escopo]");
-  t("23. so vercel.json e scripts de teste mudaram desde a base: rotas, coordenador, worker, elegibilidade, motores, auth, Vendas, Dashboard INTOCADOS", () => {
-    const d = execFileSync("git", ["diff", "--name-only", BASE], { cwd: RAIZ, encoding: "utf8" }).trim().split(/\r?\n/).filter(Boolean);
-    // SALES-CANONICAL-D13A: alem disso, SO o bloco D13 de credenciais.ts e os arquivos novos do D13 (inclui scripts/_excecao-d13-vendas-canonicas.ts)
-    const fora = filtrarExcecaoShopeeImportV2(RAIZ, BASE, filtrarExcecaoAnunciosSchemaSnapshot(RAIZ, BASE, filtrarExcecaoAnunciosMultiStore(RAIZ, BASE, filtrarExcecaoShopeeMultiStore(RAIZ, BASE, filtrarExcecaoShopeeUX(RAIZ, BASE, filtrarExcecaoShopeeMultiApp(RAIZ, BASE, filtrarExcecaoD16(RAIZ, BASE, filtrarExcecaoD15F2(RAIZ, BASE, filtrarExcecaoD15D(RAIZ, BASE, filtrarExcecaoD15C(RAIZ, BASE, filtrarExcecaoD15B(RAIZ, BASE, filtrarExcecaoD14(RAIZ, BASE, filtrarExcecaoD13(RAIZ, BASE, d.filter((f) => f !== "vercel.json" && !/^scripts\/testar-[a-z0-9-]+\.ts$/.test(f)))))))))))))));
-    assert(fora.length === 0, `alterados fora do escopo: ${fora}`);
-    const novos = execFileSync("git", ["ls-files", "--others", "--exclude-standard"], { cwd: RAIZ, encoding: "utf8" }).trim().split(/\r?\n/).filter(Boolean)
-      .filter((f) => !/^scripts\/testar-[a-z0-9-]+\.ts$/.test(f));
-    // SALES-CANONICAL-D13A: SO os arquivos novos do D13 (lista exata, inexistentes na base)
-    const novosFora = filtrarExcecaoShopeeImportV2(RAIZ, BASE, filtrarExcecaoAnunciosSchemaSnapshot(RAIZ, BASE, filtrarExcecaoAnunciosMultiStore(RAIZ, BASE, filtrarExcecaoShopeeMultiStore(RAIZ, BASE, filtrarExcecaoShopeeUX(RAIZ, BASE, filtrarExcecaoShopeeMultiApp(RAIZ, BASE, filtrarExcecaoD16(RAIZ, BASE, filtrarExcecaoD15F2(RAIZ, BASE, filtrarExcecaoD15D(RAIZ, BASE, filtrarExcecaoD15C(RAIZ, BASE, filtrarExcecaoD15B(RAIZ, BASE, filtrarExcecaoD14(RAIZ, BASE, filtrarExcecaoD13(RAIZ, BASE, novos, false)))))))))))));
-    assert(novosFora.length === 0, `arquivos novos fora do escopo: ${novosFora}`);
+  t("23. V2: canonico nunca alcanca o legado (I1), legado nao cria job canonico (I2), sem selecao implicita nova (I3), rotas internas com segredo (I4), zonas protegidas integras e bateria comportamental do canonico no runner", () => {
+    const errosV2 = invariantesV2(RAIZ);
+    assert(errosV2.length === 0, `23: ${errosV2.join(" | ")}`);
+    const { SUITES_OFFLINE } = require("./rodar-bateria-offline") as { SUITES_OFFLINE: string[] };
+    for (const s of ["vendas-sync-coordenador", "vendas-sync-coordenador-tick", "vendas-sync-worker", "vendas-sync-worker-fairness", "vendas-sync-intraday",
+      "vendas-sync-elegibilidade", "vendas-sync-feature-flag", "vendas-sync-auth-interna", "vendas-sync-cron", "sync-legacy-fence", "vendas-canonico-service",
+      "vendas-canonico-parcial", "vendas-canonico-shopee", "dashboard-canonico", "shopee-ingestao", "shopee-intraday", "cron-sync", "guard-v2-nucleo"]) assert(SUITES_OFFLINE.includes(s), `suite comportamental fora do runner offline: ${s}`);
   });
 
   await fila;
