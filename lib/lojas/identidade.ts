@@ -4,9 +4,10 @@
  * Usuário → Marketplace → Loja → Credencial → Metadata.
  *
  * `lojas` é o agregado de identidade (sem tabela nova):
- *   identidade técnica  = (user_id, marketplace, seller_id); no Shopee seller_id = shop_id
- *                         (UNIQUE (seller_id, user_id) já existe no banco — mais estrita
- *                         que owner+marketplace+external);
+ *   identidade técnica  = (user_id, marketplace, seller_id); no Shopee seller_id = shop_id.
+ *                         A identidade externa é POR marketplace: ids de marketplaces diferentes
+ *                         são namespaces diferentes (UNIQUE alvo: lojas_identidade_externa_uq,
+ *                         migrations 20261105/20261106 — substitui a legada (seller_id, user_id));
  *   nome real           = `nome` (e `nickname`) QUANDO confirmados pelo marketplace;
  *   fallback técnico    = "<Marketplace> <id externo>" — reconhecido por igualdade EXATA
  *                         com o fallback calculado para AQUELA loja, nunca por nome de loja.

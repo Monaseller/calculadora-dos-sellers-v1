@@ -31,8 +31,8 @@ import Module from "node:module";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join, dirname, normalize } from "node:path";
-// ANUNCIOS SHOPEE MULTI-STORE V1B: excecao EXATA (migrations de anuncios.loja_id por sha256)
-import { filtrarExcecaoAnunciosMultiStore } from "./_excecao-anuncios-multi-store";
+// CDS GUARD V2 (Fase 1A-SCHEMA.1): contrato unico de mudanca de banco (K1) — o mesmo do sec3-b2 M1
+import { ARQUIVO_ZONAS, mudancasDeBancoSemRevisao } from "./_guard-v2";
 
 let passou = 0, falhou = 0;
 let fila: Promise<void> = Promise.resolve();
@@ -583,13 +583,19 @@ async function principal() {
     sujo.set("components/TopBar.tsx", `${fonte.get("components/TopBar.tsx")}\nimport { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";\n`);
     assert(acessoPrivilegiadoNoBrowser(sujo, browser).some((x) => x.startsWith("components/TopBar.tsx")), "guarda nao pegou import privilegiado artificial");
   });
-  // SEC-3-C: a migration de lockdown e a unica mudanca aprovada em
-  // supabase/ (validada por scripts/testar-sec3-c-lockdown.ts).
-  t("K1. nenhuma migration / arquivo em supabase/ mudou (alem da migration SEC-3-C)", () => {
-    // ANUNCIOS SHOPEE MULTI-STORE V1B: as 2 migrations de anuncios.loja_id saem SO pela excecao exata (sha256)
-    const d = filtrarExcecaoAnunciosMultiStore(RAIZ, BASE, git("diff", "--name-only", BASE, "--", "supabase").split(/\r?\n/)
-      .filter((f) => f && !MIGRACOES_APROVADAS.includes(f)));
-    assert(d.length === 0, d.join(", "));
+  // CDS V2 Fase 1A-SCHEMA.1: a cerca "nada em supabase/ desde c075653, salvo lista fixa (+ excecao exata)"
+  // virou o contrato unico do Guard V2 (o mesmo do sec3-b2 M1): supabase/ inteiro em zona protegida e
+  // migration nova so com contrato/teste proprio. K2 (GRANT/REVOKE/RLS/POLICY) segue intacto.
+  t("K1. V2: mudanca de banco nunca entra sem revisao — supabase/ no baseline de zonas e toda migration nova com contrato proprio", () => {
+    const v = mudancasDeBancoSemRevisao(RAIZ, BASE);
+    assert(v.length === 0, v.join(" | "));
+    // controles negativos: arquivo de supabase/ fora do baseline e migration nova sem contrato sao pegos
+    const gravado: Record<string, string> = JSON.parse(readFileSync(join(RAIZ, ARQUIVO_ZONAS), "utf8")).arquivos ?? {};
+    const algum = Object.keys(gravado).find((f) => f.startsWith("supabase/migrations/"))!;
+    const semEle = { ...gravado }; delete semEle[algum];
+    assert(mudancasDeBancoSemRevisao(RAIZ, BASE, { gravado: semEle }).some((x) => x.endsWith(algum)), "controle negativo: arquivo novo em supabase/ passaria sem revisao");
+    const intrusa = `supabase/migrations/99999999_sem_contrato_${process.pid}_${Date.now().toString(36)}.sql`;
+    assert(mudancasDeBancoSemRevisao(RAIZ, BASE, { extras: [intrusa] }).some((x) => x.endsWith(intrusa)), "controle negativo: migration sem contrato passaria");
   });
   // ── K2: mudanca de banco no diff ──────────────────────────────────
   // As suites SEC-3 (esta e a do B2) CONTEM o proprio padrao de busca, e

@@ -263,6 +263,27 @@ export function rebaselinarZonas(raiz = RAIZ_V2): void {
   writeFileSync(join(raiz, ARQUIVO_ZONAS), JSON.stringify({ versao: 1, zonas: ZONAS, arquivos: calcularZonas(raiz) }, null, 2) + "\n");
 }
 
+/**
+ * MUDANÇA DE BANCO NUNCA ENTRA SEM REVISÃO (Fase 1A-SCHEMA; contrato único de sec3-b1 K1 e sec3-b2 M1).
+ * Violações: (1) arquivo de supabase/ fora do baseline de zonas — arquivo novo/alterado só passa com
+ * re-baseline explícito de scripts/zonas-protegidas.json (aparece no diff); (2) migration .sql nova desde
+ * `base` (rastreada ou não) que nenhuma suíte scripts/testar-*.ts cita pelo nome (contrato próprio).
+ * `opcoes` existe para os controles negativos: baseline sem um arquivo, migrations extras simuladas.
+ */
+export function mudancasDeBancoSemRevisao(raiz: string, base: string, opcoes: { gravado?: Record<string, string>; extras?: string[] } = {}): string[] {
+  const erros: string[] = [];
+  const atual = calcularZonas(raiz);
+  if (!Object.keys(atual).some((f) => f.startsWith("supabase/migrations/"))) erros.push("ANCORA: supabase/ fora das zonas protegidas");
+  const gravado = opcoes.gravado ?? (JSON.parse(readFileSync(join(raiz, ARQUIVO_ZONAS), "utf8")).arquivos ?? {});
+  for (const f of Object.keys(atual)) if (f.startsWith("supabase/") && gravado[f] !== atual[f]) erros.push(`supabase/ fora do baseline de zonas: ${f}`);
+  const git = (...a: string[]) => execFileSync("git", a, { cwd: raiz, encoding: "utf8" }).split(/\r?\n/).filter(Boolean);
+  const novas = [...new Set([...git("diff", "--name-only", base, "--", "supabase"), ...git("ls-files", "--others", "--exclude-standard", "--", "supabase"), ...(opcoes.extras ?? [])])]
+    .filter((f) => f.endsWith(".sql"));
+  const suites = listar(raiz, "scripts").filter((f) => /^scripts\/testar-.*\.ts$/.test(f)).map((f) => ler(raiz, f));
+  for (const f of novas) { const nome = f.split("/").pop()!; if (!suites.some((s) => s.includes(nome))) erros.push(`migration sem contrato/teste próprio: ${f}`); }
+  return erros;
+}
+
 /** Pacote usado pelos guards reescritos: [] = tudo íntegro. */
 export function invariantesV2(raiz = RAIZ_V2, opcoes: { zonas?: boolean } = {}): string[] {
   const erros: string[] = [];

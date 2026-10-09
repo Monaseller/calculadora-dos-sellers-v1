@@ -28,7 +28,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join, dirname, normalize } from "node:path";
 // CDS GUARD V2 (Fase 1A-SCHEMA): supabase/ e zona protegida — M1 confere o baseline de zonas
-import { ARQUIVO_ZONAS, calcularZonas } from "./_guard-v2";
+import { ARQUIVO_ZONAS, mudancasDeBancoSemRevisao } from "./_guard-v2";
 
 let passou = 0, falhou = 0;
 let fila: Promise<void> = Promise.resolve();
@@ -564,24 +564,17 @@ async function principal() {
     // virou contrato: (1) cada arquivo de supabase/ esta no baseline de zonas — arquivo novo/alterado so
     // passa com re-baseline explicito de scripts/zonas-protegidas.json; (2) cada migration nova desde a base
     // e citada pelo nome por uma suite scripts/testar-*.ts (contrato proprio). M2 segue varrendo GRANT/RLS.
+    // Fase 1A-SCHEMA.1: o contrato vive num helper unico do Guard V2 (o mesmo do sec3-b1 K1).
+    const v = mudancasDeBancoSemRevisao(RAIZ, BASE);
+    assert(v.length === 0, v.join(" | "));
+    // controles negativos: arquivo de supabase/ fora do baseline e migration nova sem contrato sao pegos
     const gravado: Record<string, string> = JSON.parse(readFileSync(join(RAIZ, ARQUIVO_ZONAS), "utf8")).arquivos ?? {};
-    const atual = calcularZonas(RAIZ);
-    const foraDoBaseline = (g: Record<string, string>) => Object.keys(atual).filter((f) => f.startsWith("supabase/") && g[f] !== atual[f]);
-    assert(Object.keys(atual).some((f) => f.startsWith("supabase/migrations/")), "ANCORA: zonas sem migrations");
-    assert(foraDoBaseline(gravado).length === 0, `supabase/ fora do baseline de zonas: ${foraDoBaseline(gravado).join(", ")}`);
-    const novos = [...new Set([...git("diff", "--name-only", BASE, "--", "supabase").split(/\r?\n/),
-      ...git("ls-files", "--others", "--exclude-standard", "supabase").split(/\r?\n/)])].filter((f) => f && f.endsWith(".sql"));
-    const suites = git("ls-files", "--cached", "--others", "--exclude-standard", "scripts").split(/\r?\n/)
-      .filter((f) => /^scripts\/testar-.*\.ts$/.test(f)).map((f) => readFileSync(join(RAIZ, f), "utf8"));
-    const semContrato = (lista: string[]) => lista.filter((f) => { const nome = f.split("/").pop()!; return !suites.some((s) => s.includes(nome)); });
-    assert(semContrato(novos).length === 0, `migration sem contrato/teste proprio: ${semContrato(novos).join(", ")}`);
-    // controles negativos: arquivo fora do baseline e migration sem suite sao pegos
-    const algum = Object.keys(atual).find((f) => f.startsWith("supabase/migrations/"))!;
+    const algum = Object.keys(gravado).find((f) => f.startsWith("supabase/migrations/"))!;
     const semEle = { ...gravado }; delete semEle[algum];
-    assert(foraDoBaseline(semEle).includes(algum), "controle negativo: arquivo novo em supabase/ passaria sem revisao");
+    assert(mudancasDeBancoSemRevisao(RAIZ, BASE, { gravado: semEle }).some((x) => x.endsWith(algum)), "controle negativo: arquivo novo em supabase/ passaria sem revisao");
     // nome gerado aqui (nenhuma suite pode cita-lo) — um nome fixo podia aparecer no controle negativo de outra suite
     const intrusa = `supabase/migrations/99999999_sem_contrato_${process.pid}_${Date.now().toString(36)}.sql`;
-    assert(semContrato([intrusa]).length === 1, "controle negativo: migration sem contrato passaria");
+    assert(mudancasDeBancoSemRevisao(RAIZ, BASE, { extras: [intrusa] }).some((x) => x.endsWith(intrusa)), "controle negativo: migration sem contrato passaria");
   });
   t("M2. nenhum GRANT/REVOKE/RLS/POLICY introduzido", () => {
     const d = git("diff", BASE, "--", ".", ":(exclude)scripts/testar-sec3-*.ts", ...FORA_DA_VARREDURA.map((f) => `:(exclude)${f}`));
