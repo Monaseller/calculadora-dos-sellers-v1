@@ -7,7 +7,7 @@
  *                (Fase 2B0.1: nada de preço de lista nem thumbnail do item pai).
  *   sync-precos: o UPDATE só leva colunas FÍSICAS de `anuncios` (lucro/margem são derivados de
  *                tela) e erro do banco nunca vira "atualizado" (fail-closed, 503).
- *   A barreira MULTI_ML_CATALOG_NOT_READY continua antes de provider/escrita.
+ *   Fase 2F: multi-ML liberado; 2+ lojas sem loja escolhida → ML_STORE_SELECTION_REQUIRED antes de provider/escrita.
  *
  * Duplo do banco recusa coluna inexistente como o PostgREST real (PGRST204) e pode falhar
  * o UPDATE de uma row. Duplo do Mercado Livre por item. Sem rede, sem banco, sem credencial real.
@@ -351,14 +351,14 @@ async function principal() {
     assert(/const lucro\s+= precoAtual - comissaoVal - impostoVal - freteVal - a\.custo_produto - a\.insumos/.test(card), "CardAnuncio não deriva mais o lucro dos campos gravados");
   });
 
-  imprimir("\n[3. barreira multi-ML intacta]");
+  imprimir("\n[3. multi-ML (Fase 2F): sem loja escolhida não escolhe sozinho]");
 
-  t("B. dono com 2 lojas ML → 409 MULTI_ML_CATALOG_NOT_READY nas duas rotas, sem provider e sem escrita", async () => {
+  t("B. dono com 2 lojas ML e SEM loja escolhida → 409 ML_STORE_SELECTION_REQUIRED nas duas rotas, sem provider e sem escrita", async () => {
     for (const [nome, chamada] of [["sync-skus", skus], ["sync-precos", precos]] as const) {
       reiniciar([an("a", "MLB1000", "501", null), comCusto("c", "MLB4000")], { ...itemX(), MLB4000: corpoPreco("MLB4000") });
       lojas.push(loja(LOJA_B));
       const r = await chamada();
-      assert(r.status === 409 && r.corpo.codigo === "MULTI_ML_CATALOG_NOT_READY", `${nome}: ${r.status} ${JSON.stringify(r.corpo)}`);
+      assert(r.status === 409 && r.corpo.codigo === "ML_STORE_SELECTION_REQUIRED", `${nome}: ${r.status} ${JSON.stringify(r.corpo)}`);
       assert(chamadasRede.length === 0 && atualizacoes.length === 0, `${nome}: rede=${chamadasRede.length} escritas=${atualizacoes.length}`);
     }
   });

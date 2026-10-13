@@ -25,7 +25,7 @@ import {
   type ResultadoDesativacao,
 } from "./paginacao";
 import { importarShopeeEmFatias } from "./importacao-shopee";
-import { importarMLEmFatias } from "./importacao-ml";
+import { importarMLEmFatias, lojasParaEscolherML, type LojaParaEscolherML } from "./importacao-ml";
 import { agruparVariacoes, chaveDeGrupoAnuncio, idsDuplicadosAntigos } from "./agrupamento";
 
 export default function AnunciosPage() {
@@ -83,6 +83,11 @@ export default function AnunciosPage() {
   const [msgImportShopee,    setMsgImportShopee]    = useState<{ ok: boolean; texto: string } | null>(null);
   // MULTI-LOJA V1: lojas Shopee para escolher quando o dono tem mais de uma (a API responde 409)
   const [lojasShopeeEscolha, setLojasShopeeEscolha] = useState<{ id: string; rotulo: string }[] | null>(null);
+  // CDS V2 Fase 2F: com 2+ contas ML a API de catálogo responde 409 ML_STORE_SELECTION_REQUIRED;
+  // a tela pergunta qual conta e REPETE a MESMA ação levando o `loja_id` escolhido.
+  type AcaoCatalogoML = "importar" | "precos" | "skus";
+  const [escolhaLojaML, setEscolhaLojaML] = useState<{ acao: AcaoCatalogoML; lojas: LojaParaEscolherML[] } | null>(null);
+  const corpoLojaML = (lojaId?: string) => JSON.stringify(lojaId ? { loja_id: lojaId } : {});
 
   async function carregar(uid?: string | null) {
     setLoading(true);
@@ -228,11 +233,12 @@ export default function AnunciosPage() {
     setDeletandoSelecionados(false);
   }
 
-  async function importarDoML() {
+  async function importarDoML(lojaId?: string) {
     setImportando(true);
     setMsgImport(null);
+    setEscolhaLojaML(null);
     try {
-      // IMPORT ML V2: em fatias — enquanto `parcial`, continua com o cursor do servidor (preso à loja).
+      // IMPORT ML V2: em fatias — enquanto `parcial`, continua com a loja + cursor do servidor.
       const r = await importarMLEmFatias(async (corpo) => {
         const res = await fetch("/api/ml/importar-anuncios", {
           method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(corpo),
@@ -242,7 +248,8 @@ export default function AnunciosPage() {
         // e `json()` o transformaria em exceção antes de podermos vê-lo.
         return { status: res.status, texto: await res.text() };
       }, (status, texto) => classificarRespostaImportacao(status, texto, "Mercado Livre"),
-      (p) => setMsgImport({ ok: true, texto: `Importando anúncios do ML... ${p.itensProcessados} de ${p.total} processados` }));
+      (p) => setMsgImport({ ok: true, texto: `Importando anúncios do ML... ${p.itensProcessados} de ${p.total} processados` }), lojaId);
+      if (r.tipo === "escolher_loja") { setEscolhaLojaML({ acao: "importar", lojas: r.lojas }); setImportando(false); return; }
       if (r.tipo === "erro") {
         setMsgImport({ ok: false, texto: r.mensagem });
         if (r.progresso.importados + r.progresso.atualizados > 0) await carregar();
@@ -305,12 +312,16 @@ export default function AnunciosPage() {
     setImportandoShopee(false);
   }
 
-  async function sincronizarPrecos() {
+  async function sincronizarPrecos(lojaId?: string) {
     setSincronizando(true);
     setMsgSync(null);
+    setEscolhaLojaML(null);
     try {
-      const res  = await fetch("/api/ml/sync-precos", { method: "POST" });
-      const data = await res.json();
+      const res  = await fetch("/api/ml/sync-precos", { method: "POST", headers: { "Content-Type": "application/json" }, body: corpoLojaML(lojaId) });
+      const texto = await res.text();
+      const lojas = lojasParaEscolherML(res.status, texto);
+      if (lojas) { setEscolhaLojaML({ acao: "precos", lojas }); setSincronizando(false); return; }
+      const data = JSON.parse(texto);
       setMsgSync({ ok: !data.erro, texto: data.mensagem, detalhes: data.detalhes ?? [] });
       if (!data.erro && data.atualizados > 0) await carregar();
     } catch {
@@ -319,12 +330,16 @@ export default function AnunciosPage() {
     setSincronizando(false);
   }
 
-  async function atualizarSkus() {
+  async function atualizarSkus(lojaId?: string) {
     setAtualizandoSkus(true);
     setMsgSkus(null);
+    setEscolhaLojaML(null);
     try {
-      const res  = await fetch("/api/ml/sync-skus", { method: "POST" });
-      const data = await res.json();
+      const res  = await fetch("/api/ml/sync-skus", { method: "POST", headers: { "Content-Type": "application/json" }, body: corpoLojaML(lojaId) });
+      const texto = await res.text();
+      const lojas = lojasParaEscolherML(res.status, texto);
+      if (lojas) { setEscolhaLojaML({ acao: "skus", lojas }); setAtualizandoSkus(false); return; }
+      const data = JSON.parse(texto);
       setMsgSkus({ ok: !data.erro, texto: data.mensagem });
       if (!data.erro && data.atualizados > 0) await carregar();
     } catch {
@@ -469,7 +484,7 @@ export default function AnunciosPage() {
 
           {/* Botão Sincronizar */}
           <button
-            onClick={sincronizarPrecos}
+            onClick={() => sincronizarPrecos()}
             disabled={sincronizando || !mlConectado}
             title={bloqueioML ?? "Sincronizar preços e dados com o ML"}
             style={{
@@ -496,7 +511,7 @@ export default function AnunciosPage() {
           {/* Botão Importar do ML */}
           {mlConectado && (
             <button
-              onClick={importarDoML}
+              onClick={() => importarDoML()}
               disabled={importando}
               title="Importa todos os anúncios ativos do ML automaticamente"
               style={{
@@ -821,7 +836,7 @@ export default function AnunciosPage() {
               Ações de manutenção
             </span>
             <button
-              onClick={atualizarSkus}
+              onClick={() => atualizarSkus()}
               disabled={atualizandoSkus || !mlConectado}
               title={bloqueioML ?? "Buscar SKU automaticamente para anúncios sem SKU"}
               style={{
@@ -912,6 +927,34 @@ export default function AnunciosPage() {
             {msgImport.texto}
           </span>
           <button onClick={() => setMsgImport(null)} style={{ background: "none", border: "none", color: "#9099aa", cursor: "pointer", fontSize: "18px", opacity: 0.6 }}>×</button>
+        </div>
+      )}
+
+      {/* ── Escolha da conta ML (2+ contas): a MESMA ação é repetida com o loja_id escolhido ── */}
+      {escolhaLojaML && (
+        <div role="dialog" aria-label="Escolha a conta do Mercado Livre" style={{
+          background: "rgba(255,230,0,0.06)", border: "1px solid rgba(255,230,0,0.25)",
+          borderRadius: "14px", padding: "14px 18px", marginBottom: "16px",
+        }}>
+          <div style={{ color: "#FFE600", fontWeight: 800, fontSize: "14px", marginBottom: "10px" }}>
+            {escolhaLojaML.acao === "importar" ? "Escolha a conta do Mercado Livre para importar"
+              : escolhaLojaML.acao === "precos" ? "Escolha a conta do Mercado Livre para sincronizar preços"
+              : "Escolha a conta do Mercado Livre para atualizar SKUs"}
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+            {escolhaLojaML.lojas.map(l => (
+              <button key={l.id} type="button"
+                onClick={() => escolhaLojaML.acao === "importar" ? importarDoML(l.id)
+                  : escolhaLojaML.acao === "precos" ? sincronizarPrecos(l.id) : atualizarSkus(l.id)}
+                style={{ background: "rgba(255,230,0,0.12)", border: "1px solid rgba(255,230,0,0.3)", borderRadius: "8px", padding: "7px 14px", color: "#FFE600", fontWeight: 700, fontSize: "13px", cursor: "pointer" }}>
+                {l.rotulo}
+              </button>
+            ))}
+            <button type="button" onClick={() => setEscolhaLojaML(null)}
+              style={{ background: "transparent", border: "1px solid rgba(255,255,255,0.15)", borderRadius: "8px", padding: "7px 14px", color: "#9099aa", fontSize: "13px", cursor: "pointer" }}>
+              Cancelar
+            </button>
+          </div>
         </div>
       )}
 

@@ -256,9 +256,9 @@ export async function resolverContaML(
 }
 
 /**
- * Quantas lojas ML ATIVAS o dono tem (sem token na resposta). Usado pelas barreiras
- * da Fase 1B: catálogo (`anuncios` ML ainda sem `loja_id`) e vendas legadas (cache de
- * `pedidos` não escopado por loja) falham fechado com 2+ contas ML até a Fase 2.
+ * Quantas lojas ML ATIVAS o dono tem (sem token na resposta). Usado pela barreira de
+ * vendas legadas (cache de `pedidos` não escopado por loja): 2+ contas ML falham fechado.
+ * O catálogo multi-ML foi liberado na Fase 2F (estado 4): ver lib/ml-loja-catalogo.ts.
  */
 export async function contarLojasMLAtivasDoDono(userId: string): Promise<number> {
   if (!userId) return 0;
@@ -267,8 +267,7 @@ export async function contarLojasMLAtivasDoDono(userId: string): Promise<number>
   return linhas.length;
 }
 
-/** Código das barreiras multi-ML (Fase 1B → Fase 2). */
-export const MULTI_ML_CATALOG_NOT_READY = "MULTI_ML_CATALOG_NOT_READY";
+/** Código da barreira multi-ML de VENDAS (Fase 1B; continua até a fase de Vendas multi-ML). */
 export const MULTI_ML_VENDAS_NOT_READY = "MULTI_ML_VENDAS_NOT_READY";
 
 /** CASOS A–D da especificação, nesta ordem. */

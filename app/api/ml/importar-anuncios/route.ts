@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { autenticarRequisicao, lerCookie } from "@/lib/autenticacao";
-import { contarLojasMLAtivasDoDono, MULTI_ML_CATALOG_NOT_READY, resolverContaML } from "@/lib/ml-conexao";
+import { LOJA_ML_INVALIDA, ML_STORE_SELECTION_REQUIRED, referenciaDeLojaML, resolverLojaCatalogoML, respostaSelecaoLojaML } from "@/lib/ml-loja-catalogo";
 import { codificarCursorML, ErroImportacaoML, importarCatalogoML } from "@/lib/anuncios/importacao-ml";
 
 // SEC-3-B1: dados sensiveis (SEC-3) so por service_role, server-side.
@@ -14,9 +14,9 @@ function supabase(): SupabaseClient {
 }
 
 /**
- * POST /api/ml/importar-anuncios — IMPORT ML V2 (CDS V2 Fase 2D): UMA fatia por request, da loja ML
+ * POST /api/ml/importar-anuncios — IMPORT ML V2 (CDS V2 Fase 2D/2F): UMA fatia por request, da loja ML
  * resolvida AQUI (na borda); o motor recebe `lojaId` explicito, revalida dono + marketplace + loja e
- * resolve a credencial daquela loja. A tela repete com `cursor` ate `parcial: false`.
+ * resolve a credencial daquela loja. A tela repete com `loja_id` + `cursor` ate `parcial: false`.
  */
 export async function POST(request: Request) {
   const inicioMs = Date.now();   // o orcamento da fatia conta a request inteira
@@ -27,25 +27,19 @@ export async function POST(request: Request) {
   if (!userId) {
     return NextResponse.json({ erro: true, mensagem: "Sessão inválida." }, { status: 401 });
   }
-  // CDS V2 Fase 1B/2D: o catalogo ja e escopado por loja, mas 2+ contas ML do dono seguem barradas
-  // (Fase 2F, depois do estado 4) ANTES de provider/escrita — mesmo com loja_ativa_id apontando uma delas.
-  if (await contarLojasMLAtivasDoDono(userId) > 1) {
-    return NextResponse.json({ erro: true, codigo: MULTI_ML_CATALOG_NOT_READY,
-      mensagem: "Catálogo com mais de uma conta do Mercado Livre ainda não é suportado." }, { status: 409 });
+  // CDS V2 Fase 2F: loja na BORDA, ANTES de provider/escrita. `loja_id` da ação (ou o contexto
+  // loja_ativa_id) é só referência, validada por dono + ML + ativa; sem referência, só a loja ML
+  // ÚNICA; 2+ lojas sem referência → ML_STORE_SELECTION_REQUIRED. O motor nunca escolhe loja.
+  const corpo = await request.json().catch(() => ({})) as { cursor?: unknown; loja_id?: unknown };
+  const loja = await resolverLojaCatalogoML(userId, referenciaDeLojaML(corpo, lerCookie(request, "loja_ativa_id")));
+  if (!loja.ok) {
+    if (loja.motivo === ML_STORE_SELECTION_REQUIRED || loja.motivo === LOJA_ML_INVALIDA) {
+      const { status, corpo: recusa } = respostaSelecaoLojaML(loja);
+      return NextResponse.json(recusa, { status });
+    }
+    return NextResponse.json({ erro: true, mensagem: "Conta do ML não conectada." }, { status: 401 });
   }
-  // Loja na BORDA: contexto validado (loja_ativa_id, conferido por dono + ML) ou a loja ML única
-  // por opt-in explícito. O motor nunca escolhe loja.
-  const conta = await resolverContaML(userId, lerCookie(request, "loja_ativa_id"), { permitirUnica: true });
-  if (!conta.ok) {
-    return NextResponse.json({
-      erro: true,
-      mensagem: conta.motivo === "LOJA_NAO_DEFINIDA"
-        ? "Selecione a loja do Mercado Livre."
-        : "Conta do ML não conectada.",
-    }, { status: 401 });
-  }
-  const lojaId = conta.lojaId;
-  const corpo = await request.json().catch(() => ({})) as { cursor?: unknown };
+  const lojaId = loja.conta.lojaId;
 
   try {
     const r = await importarCatalogoML({ banco: supabase(), userId, lojaId, cursor: corpo?.cursor, inicioMs });

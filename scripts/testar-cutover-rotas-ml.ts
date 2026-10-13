@@ -102,6 +102,10 @@ function semear() {
   anuncios = [{
     id: "an-1", user_id: UID_A, marketplace: "ML", loja_id: LOJA_A, ativo: true, ml_item_id: "MLB111", nome: "Produto",   // estado 3: row ML tem loja
     preco_anuncio: 100, sku: null, custo_produto: 10, imposto: 0.1, custo_frete: 0,
+  }, {
+    // Fase 2F (multi-ML): o MESMO item na loja B do mesmo dono — as rotas de catálogo operando B chegam ao ML
+    id: "an-2", user_id: UID_A, marketplace: "ML", loja_id: LOJA_B, ativo: true, ml_item_id: "MLB111", nome: "Produto",
+    preco_anuncio: 100, sku: null, custo_produto: 10, imposto: 0.1, custo_frete: 0,
   }];
 }
 
@@ -340,29 +344,16 @@ async function principal() {
   // ══════════════════════════════════════════════════════════════════
   secao("\n[B. cross-store: cookie da loja A + loja_ativa_id = B]");
 
-  // CDS V2 Fase 1B: `anuncios` ML ainda não tem loja_id (Fase 2). Com 2+ contas ML do dono, as
-  // rotas de CATÁLOGO falham fechado MESMO com contexto válido: 409 + código estruturado, 0
-  // chamadas ao ML e 0 escritas. `/api/anuncio` só LÊ o item no ML (não persiste catálogo):
-  // segue provando o isolamento de credencial — opera B, nunca A.
+  // CDS V2 Fase 2F (estado 4): catálogo multi-ML liberado. Com 2+ contas ML e o contexto válido
+  // apontando B, TODAS as rotas operam B — nunca A, nem o cookie de token do navegador.
   for (const [nome, chamar] of AS_QUATRO) {
-    if (nome === "/api/anuncio") {
-      t(`B. ${nome} opera B, nunca A`, async () => {
-        reiniciar();
-        await chamar({ cds_session: tokenSessaoA, loja_ativa_id: LOJA_B, ml_access_token: TOKEN_A });
-        const usados = tokensDeUsuario();
-        assert(usados.length > 0, "não falou com o ML");
-        assert(!usados.includes(TOKEN_A), `🔴 operou a loja A: ${usados.join(", ")}`);
-        assert(usados.every(x => x === TOKEN_B), `não operou B: ${usados.join(", ")}`);
-      });
-      continue;
-    }
-    t(`B. ${nome}: 2 lojas ML + contexto válido (B) -> 409 MULTI_ML_CATALOG_NOT_READY, 0 ML, 0 escritas`, async () => {
+    t(`B. ${nome}: 2 lojas ML + contexto válido (B) -> opera B, nunca A`, async () => {
       reiniciar();
-      const res = await chamar({ cds_session: tokenSessaoA, loja_ativa_id: LOJA_B, ml_access_token: TOKEN_A });
-      const corpo = await res.json();
-      assert(res.status === 409 && corpo.erro === true && corpo.codigo === "MULTI_ML_CATALOG_NOT_READY", `${res.status} ${JSON.stringify(corpo)}`);
-      assert(tokensDeUsuario().length === 0 && chamadas.length === 0, `🔴 chamou o ML com catálogo bloqueado: ${chamadas.map(c => c.url).join(", ")}`);
-      assert(escritas === 0, `🔴 gravou ${escritas}x antes do bloqueio`);
+      await chamar({ cds_session: tokenSessaoA, loja_ativa_id: LOJA_B, ml_access_token: TOKEN_A });
+      const usados = tokensDeUsuario();
+      assert(usados.length > 0, "não falou com o ML");
+      assert(!usados.includes(TOKEN_A), `🔴 operou a loja A: ${usados.join(", ")}`);
+      assert(usados.every(x => x === TOKEN_B), `não operou B: ${usados.join(", ")}`);
     });
   }
 
@@ -394,11 +385,13 @@ async function principal() {
       const res = await chamar({ cds_session: tokenSessaoA });
       assert(tokensDeUsuario().length === 0, `🔴 escolheu uma loja arbitrariamente: ${tokensDeUsuario().join(", ")}`);
       if (nome !== "/api/anuncio") {
-        // CDS V2 Fase 1B: catálogo com 2+ contas ML = bloqueio estruturado (não escolhe loja).
+        // CDS V2 Fase 2F: catálogo com 2+ contas ML e sem seleção = escolha obrigatória (não escolhe loja).
         const corpo = await res.json();
-        assert(res.status === 409 && corpo.erro === true && corpo.codigo === "MULTI_ML_CATALOG_NOT_READY",
-          `esperado 409 MULTI_ML_CATALOG_NOT_READY: ${res.status} ${JSON.stringify(corpo)}`);
-        assert(chamadas.length === 0 && escritas === 0, `🔴 ML=${chamadas.length} escritas=${escritas} com catálogo bloqueado`);
+        assert(res.status === 409 && corpo.erro === true && corpo.codigo === "ML_STORE_SELECTION_REQUIRED"
+          && Array.isArray(corpo.lojas) && corpo.lojas.length === 2,
+          `esperado 409 ML_STORE_SELECTION_REQUIRED: ${res.status} ${JSON.stringify(corpo)}`);
+        assert(!JSON.stringify(corpo).includes("<"), "🔴 resposta de escolha carrega credencial");
+        assert(chamadas.length === 0 && escritas === 0, `🔴 ML=${chamadas.length} escritas=${escritas} sem loja escolhida`);
       }
     });
   }
@@ -573,7 +566,8 @@ async function principal() {
         .replace(/(^|[^:])\/\/.*$/gm, "$1");
       assert(!/ml_(access|refresh)_token/.test(fonte), `🔴 ${caminho} lê/grava cookie de credencial ML`);
       assert(!/getMLToken|applyMLCookies|getMLLojaAtiva|lerIdLojaMLAtivaMaisRecenteDoDono/.test(fonte), `🔴 ${caminho} usa helper legado de credencial/seleção`);
-      if (/api\.mercadolibre\.com/.test(fonte)) assert(/resolverContaML|getMLLojaById/.test(fonte), `${caminho} chama o ML sem resolver a conta no servidor`);
+      // Fase 2F: as rotas de catálogo resolvem a conta pelo helper de loja (lib/ml-loja-catalogo.ts → resolverContaML).
+      if (/api\.mercadolibre\.com/.test(fonte)) assert(/resolverContaML|getMLLojaById|resolverLojaCatalogoML/.test(fonte), `${caminho} chama o ML sem resolver a conta no servidor`);
     }
   });
 

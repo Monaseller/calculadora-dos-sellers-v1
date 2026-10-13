@@ -220,16 +220,20 @@ async function principal() {
     assert(!/ml_(access|refresh)_token=/.test(setCookie(res)), "refresh gravou cookie");
   });
 
-  secao("\n[5. barreiras multi-ML (até a Fase 2 / Vendas store-scoped)]");
-  t("10. catálogo (3 rotas) com 2 contas ML, COM e SEM contexto → 409 MULTI_ML_CATALOG_NOT_READY, 0 ML, 0 escritas", async () => {
-    for (const ctx of [{ loja_ativa_id: ML_A }, {}] as Record<string, string>[]) {
-      for (const [nome, rota] of catalogo) {
-        semear();
-        const res = await rota(req(`/api/ml/${nome}`, { cds_session: sessao.U, ...ctx }, "POST"));
-        const corpo = await res.json();
-        assert(res.status === 409 && corpo.codigo === "MULTI_ML_CATALOG_NOT_READY", `${nome}: ${res.status} ${JSON.stringify(corpo)}`);
-        assert(chamadas.length === 0 && escritas.length === 0, `${nome}: ML=${chamadas.length} escritas=${escritas.length}`);
-      }
+  secao("\n[5. multi-ML: catálogo liberado com loja escolhida (Fase 2F); Vendas segue barrada]");
+  t("10. catálogo (3 rotas) com 2 contas ML: COM contexto A → só TOKEN_A; SEM contexto → 409 ML_STORE_SELECTION_REQUIRED, 0 ML, 0 escritas", async () => {
+    for (const [nome, rota] of catalogo) {
+      semear();
+      // o MESMO item em A e em B (mesmo dono), para as rotas chegarem ao provider
+      for (const [id, loja] of [["an-a", ML_A], ["an-b", ML_B]] as const) BANCO.anuncios.push({ id, user_id: U, marketplace: "ML", loja_id: loja, ativo: true, ml_item_id: "MLB900", variation_id: null, sku: null, nome: "p" });
+      await rota(req(`/api/ml/${nome}`, { cds_session: sessao.U, loja_ativa_id: ML_A }, "POST"));
+      assert(tokensUsados().length > 0 && tokensUsados().every((x) => x === TOKEN_A), `${nome}: não operou A ou usou credencial de outra loja: ${tokensUsados()}`);
+      assert(!escritas.some((e) => e.tabela === "anuncios" && e.filtros.some(([c, v]) => c === "loja_id" && v !== ML_A)), `${nome}: 🔴 escreveu fora da loja A`);
+      semear();
+      const res = await rota(req(`/api/ml/${nome}`, { cds_session: sessao.U }, "POST"));
+      const corpo = await res.json();
+      assert(res.status === 409 && corpo.codigo === "ML_STORE_SELECTION_REQUIRED", `${nome}: ${res.status} ${JSON.stringify(corpo)}`);
+      assert(chamadas.length === 0 && escritas.length === 0, `${nome}: ML=${chamadas.length} escritas=${escritas.length}`);
     }
   });
   t("11. vendas e vendas-hoje com 2 contas ML → 409 MULTI_ML_VENDAS_NOT_READY, 0 ML, 0 escritas", async () => {

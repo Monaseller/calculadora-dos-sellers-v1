@@ -23,12 +23,13 @@
  *       shop_id/seller_id literal nem traz nome de loja embutido ("mais recente" segue em I3);
  *   I7  I7_ML_CREDENTIALS_ARE_STORE_SCOPED (Fase 1B): cookie de token ML não é fonte nem destino de
  *       credencial (só DELETE legado); nenhum seletor implícito tem chamador; toda rota ML resolve a conta
- *       por loja no servidor; loja única só por opt-in; sync ML exige loja; catálogo e vendas legadas
- *       multi-ML falham fechado antes de provider/escrita; item-thumbnails exige sessão;
+ *       por loja no servidor; loja única só por opt-in; sync ML exige loja; vendas legadas multi-ML
+ *       falham fechado antes de provider/escrita; catálogo multi-ML liberado (Fase 2F) com a loja da
+ *       ação validada no servidor antes de provider/banco; item-thumbnails exige sessão;
  *   I8  I8_ML_CATALOG_IS_STORE_SCOPED (Fase 2D): leitura/escrita ML com loja_id; todo INSERT com loja_id
  *       explícito (runtime não depende da ponte do trigger); Import ML V2 com loja obrigatória e cursor preso
  *       à loja; mapa de custo loja|item|variação; manual ML sem identidade do provider e com loja do
- *       servidor; identidade imutável no PATCH; Meus Produtos agrupa por marketplace|loja_id|item; barreira multi-ML;
+ *       servidor; identidade imutável no PATCH; Meus Produtos agrupa por marketplace|loja_id|item; a ação leva a loja;
  *   Z   ZONAS PROTEGIDAS sem suíte comportamental própria (telas legadas de Vendas/Dashboard,
  *       constantes financeiras, supabase/**, vercel.json, .env.example, sync-worker.mjs): mudar
  *       exige re-baseline EXPLÍCITO de scripts/zonas-protegidas.json (aparece no diff), nunca
@@ -309,16 +310,22 @@ export function mudancasDeBancoSemRevisao(raiz: string, base: string, opcoes: { 
   return erros;
 }
 
-// ── I7: credenciais ML escopadas por loja (Fase 1B) ──────────────────────
-/** Rotas de catálogo ML: com 2+ contas ML falham fechado (anuncios ML ainda sem loja_id — Fase 2). */
+// ── I7: credenciais ML escopadas por loja (Fase 1B; catálogo multi-ML liberado na Fase 2F) ─────
+/**
+ * Rotas de catálogo ML. Fase 2F (estado 4): multi-ML PERMITIDO (MULTI_ML_CATALOG_ALLOWED) — no lugar da
+ * barreira, a loja sai SÓ de lib/ml-loja-catalogo.ts, antes de provider/banco.
+ */
 export const ROTAS_CATALOGO_ML = ["app/api/ml/importar-anuncios/route.ts", "app/api/ml/sync-precos/route.ts", "app/api/ml/sync-skus/route.ts"];
-/** Rotas de vendas legadas ML (cache/dados não escopados por loja): 2+ contas ML falham fechado. */
+export const HELPER_LOJA_CATALOGO_ML = "lib/ml-loja-catalogo.ts";
+/** Rotas de vendas legadas ML (cache/dados não escopados por loja): 2+ contas ML falham fechado (MULTI_ML_VENDAS_BLOCKED). */
 export const ROTAS_VENDAS_LEGADAS_ML = ["app/api/ml/vendas/route.ts", "app/api/ml/vendas-hoje/route.ts"];
 /**
  * I7_ML_CREDENTIALS_ARE_STORE_SCOPED: o cookie de token ML não é fonte nem destino de credencial (só
  * DELETE legado em desconectar); nenhum seletor implícito ("mais recente"/primeira ativa) tem chamador;
  * toda rota que fala com o ML resolve a conta no servidor por loja; a loja única é opt-in; o sync ML
- * exige loja explícita; catálogo e vendas legadas multi-ML falham fechado antes de provider/escrita;
+ * exige loja explícita; vendas legadas multi-ML falham fechado antes de provider/escrita; catálogo
+ * multi-ML (Fase 2F): sem barreira, loja da ação/contexto validada no servidor pelo helper ANTES de
+ * provider/banco, seleção explícita nunca cai para a loja única, 2+ sem seleção → ML_STORE_SELECTION_REQUIRED;
  * item-thumbnails exige sessão; resposta HTTP nunca carrega accessToken/refreshToken.
  */
 export function credenciaisMLNaoEscopadasPorLoja(raiz = RAIZ_V2): string[] {
@@ -339,7 +346,7 @@ export function credenciaisMLNaoEscopadasPorLoja(raiz = RAIZ_V2): string[] {
   }
   for (const f of listar(raiz, "app/api/ml", "app/api/anuncio", "app/api/sync").filter((x) => /route\.ts$/.test(x))) {
     const src = semComentarios(ler(raiz, f));
-    if (/api\.mercadolibre\.com|syncMLForUser/.test(src) && !/resolverContaML\(|getMLLojaById\(/.test(src)) erros.push(`${f}: fala com o ML sem resolver a conta por loja no servidor`);
+    if (/api\.mercadolibre\.com|syncMLForUser/.test(src) && !/resolverContaML\(|getMLLojaById\(|resolverLojaCatalogoML\(/.test(src)) erros.push(`${f}: fala com o ML sem resolver a conta por loja no servidor`);
   }
   const conexao = semComentarios(ler(raiz, "lib/ml-conexao.ts"));
   if (!/opcoes\.permitirUnica !== true/.test(conexao)) erros.push("lib/ml-conexao.ts: loja única deixou de ser opt-in explícito");
@@ -358,8 +365,32 @@ export function credenciaisMLNaoEscopadasPorLoja(raiz = RAIZ_V2): string[] {
     const iPrimeiroEfeito = src.search(/resolverContaML\(|fetch\(|\.update\(|\.insert\(|\.upsert\(|syncMLForUser\(/);
     if (iPrimeiroEfeito >= 0 && iPrimeiroEfeito < iBarreira) erros.push(`${f}: provider/escrita antes da barreira ${codigo}`);
   };
-  for (const f of ROTAS_CATALOGO_ML) barreira(f, "MULTI_ML_CATALOG_NOT_READY");
   for (const f of ROTAS_VENDAS_LEGADAS_ML) barreira(f, "MULTI_ML_VENDAS_NOT_READY");
+  // Catálogo multi-ML (Fase 2F): a barreira não existe mais em runtime; a loja vem do helper, antes de tudo.
+  for (const f of runtime) if (/MULTI_ML_CATALOG_NOT_READY/.test(semComentarios(ler(raiz, f)))) erros.push(`${f}: barreira multi-ML do catálogo voltou (MULTI_ML_CATALOG_ALLOWED)`);
+  for (const f of ROTAS_CATALOGO_ML) {
+    const todo = semComentarios(ler(raiz, f));
+    const iHandler = todo.search(/export async function POST\(/);
+    if (iHandler < 0) { erros.push(`${f}: handler não encontrado`); continue; }
+    const src = todo.slice(iHandler);
+    if (/contarLojasMLAtivasDoDono|resolverContaML\(/.test(todo)) erros.push(`${f}: catálogo resolve/conta lojas fora de ${HELPER_LOJA_CATALOGO_ML}`);
+    const iAuth = src.search(/autenticarRequisicao\(/);
+    const iLoja = src.search(/resolverLojaCatalogoML\(userId, referenciaDeLojaML\(\w+, lerCookie\(request, "loja_ativa_id"\)\)\)/);
+    if (iLoja < 0) { erros.push(`${f}: loja do catálogo não resolvida pelo helper (ação/contexto validados no servidor)`); continue; }
+    if (iAuth < 0 || iAuth > iLoja) erros.push(`${f}: loja resolvida antes da sessão`);
+    const iEfeito = src.search(/fetch\(|\.from\(|\.update\(|\.insert\(|\.upsert\(|importarCatalogoML\(/);
+    if (iEfeito >= 0 && iEfeito < iLoja) erros.push(`${f}: provider/banco antes da validação da loja`);
+    if (!/const loja = await resolverLojaCatalogoML\([\s\S]{0,80}\n\s*if \(!loja\.ok\) \{[\s\S]{0,500}?\n\s*return NextResponse\.json\([^;]*;\s*\n\s*\}/.test(src)) erros.push(`${f}: recusa da loja não encerra a rota`);
+  }
+  const helper = existsSync(join(raiz, HELPER_LOJA_CATALOGO_ML)) ? semComentarios(ler(raiz, HELPER_LOJA_CATALOGO_ML)) : "";
+  if (!helper) erros.push(`${HELPER_LOJA_CATALOGO_ML} ausente`);
+  else {
+    if (!/referencia\s*\?\s*await resolverContaML\(userId, referencia\)\s*:\s*await resolverContaML\(userId, null, \{ permitirUnica: true \}\)/.test(helper)) erros.push(`${HELPER_LOJA_CATALOGO_ML}: seleção explícita com loja única implícita, ou sem seleção sem opt-in`);
+    if ((helper.match(/resolverContaML\(/g) ?? []).length !== 2) erros.push(`${HELPER_LOJA_CATALOGO_ML}: resolução de conta fora dos dois ramos`);
+    if (!/conta\.motivo === "LOJA_NAO_DEFINIDA"\) \{\s*return \{ ok: false, motivo: ML_STORE_SELECTION_REQUIRED/.test(helper)) erros.push(`${HELPER_LOJA_CATALOGO_ML}: 2+ lojas sem seleção não exige escolha`);
+    if (!/conta\.motivo === "LOJA_INVALIDA"\) return \{ ok: false, motivo: LOJA_ML_INVALIDA \}/.test(helper)) erros.push(`${HELPER_LOJA_CATALOGO_ML}: loja indicada inválida não é recusada`);
+    if (/\.lojas\[0\]|linhas\[0\]|contarLojas|order\(|limit\(|created_at/.test(helper)) erros.push(`${HELPER_LOJA_CATALOGO_ML}: seleção implícita de loja`);
+  }
   const thumbs = semComentarios(ler(raiz, "app/api/ml/item-thumbnails/route.ts"));
   const iAuth = thumbs.search(/autenticarRequisicao\(/), iConta = thumbs.search(/resolverContaML\(/), iFetch = thumbs.search(/fetch\(/);
   if (!(iAuth >= 0 && iConta > iAuth && iFetch > iConta)) erros.push("app/api/ml/item-thumbnails/route.ts: sessão → conta por loja → provider fora de ordem");
@@ -387,7 +418,8 @@ function corpoDe(src: string, assinatura: RegExp): string | null {
  * provider, credencial resolvida no motor SEM loja única implícita; (d) mapa de custo ML chaveado por
  * loja|item|variação; (e) criação manual só com loja resolvida no servidor, sem identidade do provider;
  * (f) PATCH: identidade técnica imutável e loja/dono não graváveis; (g) Meus Produtos agrupa por
- * marketplace|loja_id|item com a loja real (sem identidade paralela); (h) barreira multi-ML intacta.
+ * marketplace|loja_id|item com a loja real (sem identidade paralela); (h) Fase 2F: a ação da tela leva
+ * a loja (import 1ª fatia + continuação, sync-precos, sync-skus) e a escolha repete a ação com a loja.
  */
 export function catalogoMLNaoEscopadoPorLoja(raiz = RAIZ_V2): string[] {
   const erros: string[] = [];
@@ -452,8 +484,18 @@ export function catalogoMLNaoEscopadoPorLoja(raiz = RAIZ_V2): string[] {
   if (!agrup.includes("`${a.marketplace ?? \"\"}|${a.loja_id ?? \"\"}|${a.ml_item_id}`")) erros.push("Meus Produtos: chave de grupo sem marketplace|loja_id|item");
   if ((agrup.match(/const chave = chaveDeGrupoAnuncio\(a\);/g) ?? []).length < 2) erros.push("Meus Produtos: funções de agrupamento sem a chave por loja");
   for (const f of runtime) if (/loja_ref|lojaRef/.test(tiraComentarios(ler(raiz, f)))) erros.push(`${f}: identidade paralela de loja (loja_ref)`);
-  // (h) barreira multi-ML do catálogo
-  for (const f of ROTAS_CATALOGO_ML) if (!/contarLojasMLAtivasDoDono\(userId\) > 1\) \{\s*return NextResponse\.json\(\{ erro: true, codigo: MULTI_ML_CATALOG_NOT_READY/.test(ler(raiz, f))) erros.push(`${f}: barreira MULTI_ML_CATALOG_NOT_READY ausente`);
+  // (h) Fase 2F: a AÇÃO da tela leva a loja — import (1ª fatia e continuação) e syncs com `loja_id`;
+  // a escolha (409 ML_STORE_SELECTION_REQUIRED) repete a MESMA ação com a loja escolhida.
+  const uiImport = tiraComentarios(ler(raiz, "app/(app)/anuncios/importacao-ml.ts"));
+  if (!/let corpo: Record<string, unknown> = lojaId \? \{ loja_id: lojaId \} : \{\};/.test(uiImport)
+    || !/corpo = \{ loja_id: d\.loja_id, cursor: d\.cursor \};/.test(uiImport)) erros.push("importacao-ml (tela): fatia sem loja_id");
+  if (!/d\?\.codigo !== "ML_STORE_SELECTION_REQUIRED"/.test(uiImport)) erros.push("importacao-ml (tela): escolha de conta ML ignorada");
+  if (!/importarMLEmFatias\([\s\S]*?,\s*lojaId\);/.test(tela)) erros.push("Meus Produtos: import ML perde a loja escolhida");
+  for (const r of ["sync-precos", "sync-skus"]) {
+    if (!new RegExp(`fetch\\("/api/ml/${r}", \\{ method: "POST", headers: \\{ "Content-Type": "application/json" \\}, body: corpoLojaML\\(lojaId\\) \\}\\)`).test(tela)) erros.push(`Meus Produtos: ${r} sem loja_id da ação`);
+  }
+  if (!/const corpoLojaML = \(lojaId\?: string\) => JSON\.stringify\(lojaId \? \{ loja_id: lojaId \} : \{\}\);/.test(tela)) erros.push("Meus Produtos: corpo da ação sem loja_id");
+  if (!/escolhaLojaML\.acao === "importar" \? importarDoML\(l\.id\)\s*: escolhaLojaML\.acao === "precos" \? sincronizarPrecos\(l\.id\) : atualizarSkus\(l\.id\)/.test(tela)) erros.push("Meus Produtos: escolha da conta ML não repete a ação com a loja");
   return erros;
 }
 

@@ -12,7 +12,7 @@
  *   • sync-precos / sync-skus (só { sku }) / mapa de custo / vendas-hoje: presos à loja da credencial;
  *   • POST manual ML (D2 = identidade): sem ml_item_id/variation_id e com loja do servidor; PATCH:
  *     identidade técnica imutável; Meus Produtos agrupa por marketplace|loja_id|item;
- *   • barreira MULTI_ML_CATALOG_NOT_READY intacta; I8 limpo.
+ *   • Fase 2F: barreira multi-ML do catálogo removida (2+ lojas sem escolha → ML_STORE_SELECTION_REQUIRED); I8 limpo.
  *
  * Concorrência: SEM garantia forte (sem UNIQUE ML até a 20261108, sem lease durável) — esta suíte
  * prova idempotência em retry SEQUENCIAL, e nada além disso.
@@ -338,7 +338,7 @@ async function principal() {
 
   secao("\n[2. rotas com 1 conta ML ativa (barreira intacta) — ML-B inativa com rows históricas]");
 
-  t("R1. POST /api/ml/importar-anuncios → loja única A resolvida na borda; resposta com loja_id A; B intocada; 2 ativas → 409 MULTI_ML_CATALOG_NOT_READY sem provider", async () => {
+  t("R1. POST /api/ml/importar-anuncios → loja única A resolvida na borda; resposta com loja_id A; B intocada; 2 ativas SEM escolha → 409 ML_STORE_SELECTION_REQUIRED sem provider", async () => {
     semear(false);
     const antesB = foto((a) => a.loja_id === LOJA_B);
     const res = await rotaImport(req("/api/ml/importar-anuncios", "POST", {}));
@@ -348,7 +348,7 @@ async function principal() {
     semear(true); chamadas = [];
     const r2 = await rotaImport(req("/api/ml/importar-anuncios", "POST", {}));
     const c2: any = await r2.json();
-    assert(r2.status === 409 && c2.codigo === "MULTI_ML_CATALOG_NOT_READY" && chamadas.length === 0 && escritas.length === 0, `${r2.status} ${JSON.stringify(c2)}`);
+    assert(r2.status === 409 && c2.codigo === "ML_STORE_SELECTION_REQUIRED" && chamadas.length === 0 && escritas.length === 0, `${r2.status} ${JSON.stringify(c2)}`);
   });
 
   t("R2. sync-skus: lê/escreve SÓ a loja A (mesmo item/variação/SKU vazio em B fica intocado); payload { sku }", async () => {
@@ -477,7 +477,9 @@ async function principal() {
     const seqOk = [fatia({ parcial: true, cursor: "c1" }), fatia({ parcial: true, cursor: "c2" }), fatia({ parcial: false, cursor: null })];
     const corpos: any[] = [];
     const r = await UI.importarMLEmFatias(async (c) => { corpos.push(c); return seqOk.shift()!; }, classificar);
-    assert(r.tipo === "ok" && r.progresso.importados === 3 && r.progresso.fatias === 3 && JSON.stringify(corpos) === JSON.stringify([{}, { cursor: "c1" }, { cursor: "c2" }]), JSON.stringify(r));
+    // Fase 2F: a continuação leva a loja + cursor devolvidos pelo servidor
+    assert(r.tipo === "ok" && r.progresso.importados === 3 && r.progresso.fatias === 3
+      && JSON.stringify(corpos) === JSON.stringify([{}, { loja_id: LOJA_A, cursor: "c1" }, { loja_id: LOJA_A, cursor: "c2" }]), JSON.stringify(corpos));
     const repetido = [fatia({ parcial: true, cursor: "c1" }), fatia({ parcial: true, cursor: "c1" })];
     assert((await UI.importarMLEmFatias(async () => repetido.shift()!, classificar)).tipo === "erro", "cursor repetido não parou");
     const trocou = [fatia({ parcial: true, cursor: "c1" }), fatia({ parcial: true, cursor: "c2", loja_id: LOJA_B })];
