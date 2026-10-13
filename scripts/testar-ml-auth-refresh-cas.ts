@@ -3,7 +3,7 @@
  *
  * ── O defeito ───────────────────────────────────────────────────────
  *
- * `getMLLojaById` e `getMLLojaAtiva` renovam token vencido e gravam com
+ * `getMLLojaById` (e a antiga `getMLLojaAtiva`, removida na Fase 2G) renovam token vencido e gravavam com
  * `saveTokensToDB(lojaId, userId, result)` — TRES argumentos. O quarto,
  * `refreshTokenAnterior`, e o que liga o compare-and-swap que ja existe
  * em `gravarCredencialML`. Sem ele a escrita e CEGA.
@@ -338,20 +338,11 @@ async function principal(): Promise<void> {
   ok("H4  e nenhuma dessas tentou rede", chamadasOauth === 0, String(chamadasOauth));
 
   // ── CASE I ────────────────────────────────────────────────────────
-  secao("CASE I — getMLLojaAtiva: mesma classe de corrida");
-  semear();
-  paresDeRotacao = [{ access: "A1", refresh: "R1" }, { access: "A2", refresh: "R2" }];
-  armarBarreira(2);
-  const [i1, i2] = await Promise.all([
-    auth.getMLLojaAtiva(USER),
-    auth.getMLLojaAtiva(USER),
-  ]);
-  ok("I1  CAS_WINNERS = 1", escritasEfetivas === 1, String(escritasEfetivas));
-  ok("I2  DB_FINAL_REFRESH = R1", linha().refresh_token === "R1", String(linha().refresh_token));
-  ok("I3  os dois devolvem a credencial do banco",
-    i1?.accessToken === "A1" && i2?.accessToken === "A1",
-    JSON.stringify([i1?.accessToken, i2?.accessToken]));
-  ok("I4  nenhum segundo /oauth/token", chamadasOauth === 2, String(chamadasOauth));
+  // CDS V2 Fase 2G: `getMLLojaAtiva` ("loja ML ativa mais recente", sem chamador desde a Fase 1B)
+  // foi REMOVIDA. A corrida de renovação que os casos I/I2 cobriam por ela é a MESMA de
+  // `getMLLojaById` (mesmo helper renovarComCas), coberta pelos casos A–H e J–N.
+  secao("CASE I — o seletor implícito getMLLojaAtiva não existe mais");
+  ok("I1  ml-auth não exporta getMLLojaAtiva", !("getMLLojaAtiva" in auth));
 
   // ── MODEL 1: o desfecho que a DOCUMENTACAO sustenta ───────────────
   //
@@ -429,23 +420,6 @@ async function principal(): Promise<void> {
   paresDeRotacao = [];
   await auth.getMLLojaById(LOJA, USER);
   ok("N3  caminho de falha: ainda UM unico OAuth", chamadasOauth === 1, String(chamadasOauth));
-
-  secao("CASE I2 — getMLLojaAtiva no MODEL 1");
-  semear();
-  paresDeRotacao = [];
-  paresDeRotacao[1] = { access: "A1", refresh: "R1" };
-  portoes = { 1: () => leituras > 2 };
-  const [i2B, i2A] = await Promise.all([
-    auth.getMLLojaAtiva(USER),
-    auth.getMLLojaAtiva(USER),
-  ]);
-  ok("I5  GET_ML_LOJA_ATIVA_MODEL1: o banco ficou com R1", linha().refresh_token === "R1",
-    String(linha().refresh_token));
-  ok("I6  os dois devolvem a credencial do vencedor",
-    i2A?.accessToken === "A1" && i2B?.accessToken === "A1",
-    JSON.stringify([i2A?.accessToken, i2B?.accessToken]));
-  ok("I7  UMA escrita efetiva", escritasEfetivas === 1, String(escritasEfetivas));
-  ok("I8  nenhum terceiro OAuth", chamadasOauth === 2, String(chamadasOauth));
 
   console.log(`\n── placar ${"─".repeat(54)}`);
   console.log(`  PASS ${passou}   FAIL ${falhou}\n`);

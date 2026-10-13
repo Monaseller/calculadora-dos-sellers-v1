@@ -276,9 +276,10 @@ function lerSetCookie(res: Response): string {
   if (Array.isArray(varios) && varios.length) return varios.join("\n");
   return res.headers.get("set-cookie") ?? "";
 }
-function reqAnuncio(cookies: Record<string, string>) {
+function reqAnuncio(cookies: Record<string, string>, lojaDoAnuncio?: string) {
   const valor = Object.entries(cookies).map(([k, v]) => `${k}=${v}`).join("; ");
-  return new Request(`https://exemplo.test/api/anuncio?link=${encodeURIComponent(LINK_ML)}`,
+  const loja = lojaDoAnuncio === undefined ? "" : `&loja_id=${encodeURIComponent(lojaDoAnuncio)}`;
+  return new Request(`https://exemplo.test/api/anuncio?link=${encodeURIComponent(LINK_ML)}${loja}`,
     valor ? { headers: { cookie: valor } } : undefined);
 }
 
@@ -418,6 +419,44 @@ async function principal() {
       }
     });
   }
+
+  // ══════════════════════════════════════════════════════════════════
+  secao("\n[2G. /api/anuncio: credencial da loja DO anúncio (multi-ML)]");
+
+  t("AN1. ?loja_id=B (anúncio de B) com contexto A → só TOKEN_B; a loja do anúncio vence o contexto", async () => {
+    reiniciar();
+    const res = await rotas["anuncio"](reqAnuncio({ cds_session: tokenSessaoA, loja_ativa_id: LOJA_A }, LOJA_B));
+    assert(res.status === 200, `status ${res.status}`);
+    const usados = tokensDeUsuario();
+    assert(usados.length > 0 && usados.every(x => x === TOKEN_B), `🔴 não usou a loja do anúncio: ${usados.join(", ")}`);
+  });
+  for (const [caso, loja] of [["de outro dono", LOJA_ALHEIA], ["inexistente", LOJA_INEXISTENTE], ["malformada", "nao-e-uuid"], ["Shopee do mesmo dono", "44444444-4444-4444-8444-444444444444"]] as const) {
+    t(`AN2. ?loja_id ${caso} → 404 LOJA_ML_INVALIDA antes do provider; nunca cai para outra loja`, async () => {
+      reiniciar();
+      lojas.push({ id: "44444444-4444-4444-8444-444444444444", user_id: UID_A, marketplace: "Shopee", ativo: true, nickname: "SP", seller_id: "<seller-SP>",
+        access_token: "<TOKEN_SP>", refresh_token: null, token_expires_at: daquiA(HORA), created_at: "2026-03-01" } as any);
+      const res = await rotas["anuncio"](reqAnuncio({ cds_session: tokenSessaoA, loja_ativa_id: LOJA_A }, loja));
+      const corpo = await res.json();
+      assert(res.status === 404 && corpo.codigo === "LOJA_ML_INVALIDA", `${res.status} ${JSON.stringify(corpo)}`);
+      assert(chamadas.length === 0, `🔴 chamou o provider com loja inválida: ${chamadas.map(c => c.url).join(", ")}`);
+    });
+  }
+  t("AN3. 2 lojas, SEM loja do anúncio e SEM contexto → nenhuma credencial de loja (consulta pública), nunca a primeira/mais recente", async () => {
+    reiniciar();
+    const res = await rotas["anuncio"](reqAnuncio({ cds_session: tokenSessaoA }));
+    assert(res.status === 200 && tokensDeUsuario().length === 0, `${res.status} 🔴 escolheu loja: ${tokensDeUsuario().join(", ")}`);
+  });
+  t("AN4. 1 loja, sem referência → a loja única (compatibilidade)", async () => {
+    apenasLojaA();
+    await rotas["anuncio"](reqAnuncio({ cds_session: tokenSessaoA }));
+    assert(tokensDeUsuario().length > 0 && tokensDeUsuario().every(x => x === TOKEN_A), `tokens: ${tokensDeUsuario().join(", ")}`);
+  });
+  t("AN5. a edição em Meus Produtos envia a loja DO anúncio na re-busca", async () => {
+    const fs = await import("node:fs");
+    const form = fs.readFileSync("app/(app)/anuncios/FormAnuncio.tsx", "utf8");
+    assert(/const lojaDoAnuncio = \(inicial as \{ loja_id\?: string \| null \}\)\.loja_id;/.test(form)
+      && /fetch\(`\/api\/anuncio\?link=\$\{encodeURIComponent\(inicial\.ml_item_id\)\}\$\{varQuery\}\$\{lojaQuery\}`\)/.test(form), "re-busca sem a loja do anúncio");
+  });
 
   // ══════════════════════════════════════════════════════════════════
   secao("\n[G. refresh já rotacionado por /api/ml/conexao]");

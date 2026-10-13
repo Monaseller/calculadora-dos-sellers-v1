@@ -1,6 +1,5 @@
 import {
   lerCredencialMLPorLojaEDono,
-  lerCredencialMLAtivaDoDono,
   gravarCredencialML,
 } from "@/lib/marketplace/credenciais";
 import { tetoEfetivoMs, type LimiteExterno } from "@/lib/controle-tempo";
@@ -367,50 +366,12 @@ async function procurarCredencialVencedora(
   return null;
 }
 
-/** Busca loja ML ativa pelo userId (para sync server-side sem cookie) */
-export async function getMLLojaAtiva(userId: string): Promise<{
-  lojaId:      string;
-  accessToken: string;
-  sellerId:    string;
-  nickname:    string;
-} | null> {
-  const { linha: loja } = await lerCredencialMLAtivaDoDono(userId);
-
-  if (!loja || !loja.access_token) return null;
-
-  let accessToken = loja.access_token;
-  const expired = loja.token_expires_at &&
-    new Date(loja.token_expires_at).getTime() - 5 * 60 * 1000 < Date.now();
-
-  if (expired && loja.refresh_token) {
-    // A2-C2. Mesma corrida de `getMLLojaById`, mesma cura — e o MESMO
-    // helper, para que um conserto futuro nao precise ser feito duas
-    // vezes em dois lugares que ja provaram divergir.
-    const renovada = await renovarComCas(
-      loja.id,
-      userId,
-      loja.refresh_token,
-      async () => (await lerCredencialMLAtivaDoDono(userId)).linha
-    );
-    if (renovada === null) return null;
-    accessToken = renovada.accessToken;
-  }
-
-  return {
-    lojaId:      loja.id,
-    accessToken,
-    sellerId:    loja.seller_id ?? "",
-    nickname:    loja.nickname ?? "ML",
-  };
-}
-
 /**
  * Busca uma loja ML específica pelo id (não "a mais recente ativa").
  * Adicionado 2026-07-11 para o worker de sincronização (sync_jobs) poder
- * sincronizar exatamente a loja do job — getMLLojaAtiva sempre resolveria
- * para a mais recente, o que quebraria o contrato "job por loja_id
- * específico" quando o usuário tem mais de uma loja ML. Mesma lógica de
- * refresh de token de getMLLojaAtiva, sem o filtro "mais recente ativa".
+ * sincronizar exatamente a loja do job. CDS V2 Fase 2G: o seletor implícito
+ * "loja ML ativa mais recente" (getMLLojaAtiva), sem chamador desde a Fase 1B,
+ * foi removido — toda conta ML sai por loja explícita (aqui ou resolverContaML).
  *
  * ── PR #1: `userId` passou a ser OBRIGATÓRIO ────────────────────────
  * Esta função consultava `lojas` SÓ por `id` e devolvia token — o que a

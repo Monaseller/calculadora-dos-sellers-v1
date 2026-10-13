@@ -39,7 +39,6 @@ import {
   filtrosShopeeDoDono,
   filtrosGravacaoPorLojaEDono,
   lerCredencialMLPorLojaEDono,
-  lerCredencialMLAtivaDoDono,
   listarCredenciaisMLDoDono,
   gravarCredencialML,
   lerCredencialShopeeDoDono,
@@ -153,8 +152,9 @@ ok("16. lerCredencialMLPorLojaEDono sem lojaId devolve null sem tocar banco",
   (await lerCredencialMLPorLojaEDono("", USUARIO_A)).linha === null);
 ok("17. lerCredencialMLPorLojaEDono sem userId devolve null sem tocar banco",
   (await lerCredencialMLPorLojaEDono(LOJA_A, "")).linha === null);
-ok("18. lerCredencialMLAtivaDoDono sem userId devolve null",
-  (await lerCredencialMLAtivaDoDono("")).linha === null);
+// CDS V2 Fase 2G: o seletor "loja ML ativa mais recente" (sem chamador desde a Fase 1B) foi removido.
+ok("18. lerCredencialMLAtivaDoDono (loja ML 'mais recente') não existe mais",
+  !("lerCredencialMLAtivaDoDono" in (await import("../lib/marketplace/credenciais"))));
 ok("19. listarCredenciaisMLDoDono sem userId devolve lista vazia",
   (await listarCredenciaisMLDoDono("")).linhas.length === 0);
 ok("20. lerCredencialShopeeDoDono sem userId devolve null",

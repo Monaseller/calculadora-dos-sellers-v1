@@ -439,7 +439,21 @@ export async function GET(request: Request) {
   // fallback público/scraping segue existindo exatamente como antes — mas
   // agora isso só acontece quando realmente NÃO há credencial, nunca por
   // um cookie vencido.
-  const conta = await resolverContaML(userId, lerCookie(request, "loja_ativa_id"), { permitirUnica: true });
+  //
+  // CDS V2 Fase 2G (multi-ML): a credencial é da loja DO ANÚNCIO. `?loja_id` (edição de um anúncio
+  // existente) é referência EXPLÍCITA: validada por dono + ML + ativa, nunca cai para a loja única, e
+  // inválida → 404 antes do provider. Sem ela, o contexto loja_ativa_id validado; sem contexto, só a
+  // loja ML ÚNICA. Com 2+ lojas e nenhuma referência, NENHUMA loja é escolhida: a consulta segue pelo
+  // caminho público (sem token), como para quem não tem credencial — nunca "a primeira"/"a mais recente".
+  const lojaDoAnuncio = url.searchParams.get("loja_id");
+  const referencia = lojaDoAnuncio || lerCookie(request, "loja_ativa_id");
+  const conta = referencia
+    ? await resolverContaML(userId, referencia)
+    : await resolverContaML(userId, null, { permitirUnica: true });
+  if (lojaDoAnuncio && !conta.ok && conta.motivo === "LOJA_INVALIDA") {
+    return NextResponse.json({ erro: true, codigo: "LOJA_ML_INVALIDA",
+      mensagem: "Conta do Mercado Livre não encontrada entre as suas contas ativas." }, { status: 404 });
+  }
   const token = conta.ok ? conta.accessToken : null;
 
   let itemId = parsed.primaryId;

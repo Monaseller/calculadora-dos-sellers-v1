@@ -187,24 +187,6 @@ export async function lerCredencialMLPorLojaEDono(
   return { linha: (data as LinhaCredencialML | null) ?? null, erro: null };
 }
 
-/** A loja ML ativa mais recente do dono. */
-export async function lerCredencialMLAtivaDoDono(
-  userId: string
-): Promise<ResultadoLeitura<LinhaCredencialML>> {
-  if (!userId) return { linha: null, erro: null };
-
-  const { data, error } = await aplicarFiltros(
-    getSupabaseServidor().from("lojas").select(COLUNAS_ML),
-    filtrosMLAtivaDoDono(userId)
-  )
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  if (error) return { linha: null, erro: error.message };
-  return { linha: (data as LinhaCredencialML | null) ?? null, erro: null };
-}
-
 /**
  * Todas as lojas ML ativas do dono, opcionalmente restritas a uma.
  * `lojaId` SOMA-SE aos filtros de dono — nunca os substitui.
@@ -1266,35 +1248,6 @@ export async function listarLojasAtivasDoDono(
     return { linhas: [], erro: "erro_consulta_loja" };
   }
   return { linhas: (Array.isArray(data) ? data : []) as LinhaLojaDoDono[], erro: null };
-}
-
-/**
- * Só o `id` da loja ML ativa mais recente do dono.
- *
- * Existe separada de `lerCredencialMLAtivaDoDono` de proposito: aquela
- * projeta `access_token`/`refresh_token` porque quem a chama precisa
- * deles. Este chamador quer um id para devolver ao frontend, e trazer
- * token para a memoria de uma rota que nunca o usa e superficie a toa.
- */
-export async function lerIdLojaMLAtivaMaisRecenteDoDono(
-  userId: string
-): Promise<{ lojaId: string | null; erro: string | null }> {
-  if (!userId) return { lojaId: null, erro: null };
-
-  const { data, error } = await aplicarFiltros(
-    getSupabaseServidor().from("lojas").select("id"),
-    filtrosMLAtivaDoDono(userId)
-  )
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  if (error) {
-    console.error("[credenciais] falha ao ler loja ML ativa mais recente do dono");
-    return { lojaId: null, erro: "erro_consulta_loja" };
-  }
-  const linha = data as { id?: unknown } | null;
-  return { lojaId: linha?.id ? String(linha.id) : null, erro: null };
 }
 
 export interface LinhaLojaParaResumo {

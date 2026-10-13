@@ -165,7 +165,10 @@ export default function FormAnuncio({ inicial, onSalvar, onFechar }: Props) {
     if (!modoEdicao || !inicial?.ml_item_id || inicial.marketplace === "Shopee") return;
     const varId = inicial.variation_id ?? "";
     const varQuery = varId ? `&variationId=${encodeURIComponent(varId)}` : "";
-    fetch(`/api/anuncio?link=${encodeURIComponent(inicial.ml_item_id)}${varQuery}`)
+    // CDS V2 Fase 2G: a re-busca usa a credencial da loja DO anúncio (multi-ML), não a loja em uso.
+    const lojaDoAnuncio = (inicial as { loja_id?: string | null }).loja_id;
+    const lojaQuery = lojaDoAnuncio ? `&loja_id=${encodeURIComponent(lojaDoAnuncio)}` : "";
+    fetch(`/api/anuncio?link=${encodeURIComponent(inicial.ml_item_id)}${varQuery}${lojaQuery}`)
       .then(r => r.json())
       .then(data => {
         if (data.erro) return;

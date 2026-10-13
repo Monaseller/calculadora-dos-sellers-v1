@@ -35,9 +35,9 @@
  * `refreshMLToken`, `saveTokensToDB` e `credencialExpirada` vêm de
  * `lib/ml-auth.ts`. Uma segunda implementação de refresh seria uma
  * segunda chance de divergir do OAuth real do ML. O que NÃO é reusado é a
- * *seleção da loja*: `getMLLojaAtiva` pega "a mais recente ativa" e
- * `getMLLojaById` não verifica dono nenhum — as duas premissas que esta
- * arquitetura precisa abandonar.
+ * *seleção da loja*: `getMLLojaAtiva` pegava "a mais recente ativa" (removida
+ * na Fase 2G, sem chamador) e `getMLLojaById` não verificava dono — as duas
+ * premissas que esta arquitetura abandonou.
  *
  * ── O token nunca sai do servidor ───────────────────────────────────
  * `resolverContaML` devolve `accessToken` porque quem chama é código de

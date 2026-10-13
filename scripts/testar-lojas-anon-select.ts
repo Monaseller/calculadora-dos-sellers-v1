@@ -169,13 +169,14 @@ const RUNTIME = arquivosRuntime();
     "listarLojasAtivasParaCron",
     "lerLojaParaValidacaoDeJob",
     "listarLojasAtivasDoDono",
-    "lerIdLojaMLAtivaMaisRecenteDoDono",
     "listarLojasDoDonoPorIds",
     "listarLojasConectadasDoDono",
     "lerLojaParaPublicacaoML",
   ] as const;
 
-  ok("21. as 7 operacoes novas existem e sao exportadas", NOVAS.every((f) => corpo(f) !== ""));
+  // CDS V2 Fase 2G: lerIdLojaMLAtivaMaisRecenteDoDono ("loja ML mais recente", sem chamador) foi removida.
+  ok("21. as 6 operacoes novas existem e sao exportadas; o seletor 'mais recente' nao existe mais",
+    NOVAS.every((f) => corpo(f) !== "") && corpo("lerIdLojaMLAtivaMaisRecenteDoDono") === "");
 
   ok(
     "22. NENHUMA operacao nova projeta coluna de credencial",

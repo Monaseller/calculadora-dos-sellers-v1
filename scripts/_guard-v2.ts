@@ -127,12 +127,12 @@ export function legadoMexeEmJobCanonico(raiz = RAIZ_V2): string[] {
 
 // ── I3: seleção implícita de loja ──────────────────────────────────────
 export const SELETOR_IMPLICITO = /\b(getShopeeLojaAtiva|getMLLojaAtiva|lerCredencialMLAtivaDoDono|lerIdLojaMLAtivaMaisRecenteDoDono)\(|resolverCredencialShopee\([^,()]+,\s*null\b/g;
-/** Dívida ML conhecida (Fase 1 remove) — arquivo → nº de usos. Shopee implícito: nenhum. */
+/**
+ * Arquivo → nº de usos tolerados. CDS V2 Fase 2G: a dívida ML zerou (getMLLojaAtiva,
+ * lerCredencialMLAtivaDoDono e lerIdLojaMLAtivaMaisRecenteDoDono foram REMOVIDAS) — qualquer uso
+ * ML volta a falhar. Shopee: só a definição de getShopeeLojaAtiva (0 chamadores).
+ */
 export const SELETORES_IMPLICITOS_CONHECIDOS: Record<string, number> = {
-  "app/api/ml/vendas/route.ts": 1,      // lerIdLojaMLAtivaMaisRecenteDoDono
-  "app/api/sync/manual/route.ts": 1,    // getMLLojaAtiva
-  "lib/sync-ml.ts": 1,                  // getMLLojaAtiva
-  "lib/ml-auth.ts": 2,                  // dentro de getMLLojaAtiva (definição)
   "lib/shopee-auth.ts": 1,              // dentro de getShopeeLojaAtiva (definição, 0 chamadores)
 };
 export function seletoresImplicitos(raiz = RAIZ_V2): Record<string, number> {
@@ -341,7 +341,8 @@ export function credenciaisMLNaoEscopadasPorLoja(raiz = RAIZ_V2): string[] {
       const antes = src.slice(Math.max(0, m.index! - 30), m.index!);
       if (!/function\s+$/.test(antes)) erros.push(`${f}: chama seletor implícito ${m[1]}`);
     }
-    if (f !== "lib/ml-auth.ts" && f !== CAPABILITY_LOJAS && /\blerCredencialMLAtivaDoDono\(/.test(src)) erros.push(`${f}: usa lerCredencialMLAtivaDoDono (loja "mais recente")`);
+    // Fase 2G: os seletores "loja ML mais recente" foram removidos — nem definição volta (sem exceção por arquivo).
+    if (/\b(lerCredencialMLAtivaDoDono|lerIdLojaMLAtivaMaisRecenteDoDono|getMLLojaAtiva)\b/.test(src)) erros.push(`${f}: seletor implícito "loja ML mais recente" voltou`);
     if (f.startsWith("app/api/") && /NextResponse\.json\(\s*\{[^;]*\b(accessToken|refreshToken|access_token|refresh_token)\b\s*[:,}]/.test(src)) erros.push(`${f}: resposta HTTP carrega credencial`);
   }
   for (const f of listar(raiz, "app/api/ml", "app/api/anuncio", "app/api/sync").filter((x) => /route\.ts$/.test(x))) {
@@ -381,6 +382,19 @@ export function credenciaisMLNaoEscopadasPorLoja(raiz = RAIZ_V2): string[] {
     const iEfeito = src.search(/fetch\(|\.from\(|\.update\(|\.insert\(|\.upsert\(|importarCatalogoML\(/);
     if (iEfeito >= 0 && iEfeito < iLoja) erros.push(`${f}: provider/banco antes da validação da loja`);
     if (!/const loja = await resolverLojaCatalogoML\([\s\S]{0,80}\n\s*if \(!loja\.ok\) \{[\s\S]{0,500}?\n\s*return NextResponse\.json\([^;]*;\s*\n\s*\}/.test(src)) erros.push(`${f}: recusa da loja não encerra a rota`);
+  }
+  // Fase 2G: consulta de link (/api/anuncio, só leitura): `?loja_id` é referência EXPLÍCITA (sem loja
+  // única; inválida → 404 antes do provider); sem referência, só a loja única; 2+ → sem credencial.
+  {
+    const a = semComentarios(ler(raiz, "app/api/anuncio/route.ts"));
+    const iH = a.search(/export async function GET\(/);
+    const g = iH < 0 ? "" : a.slice(iH);
+    const iRef = g.search(/const conta = referencia\s*\?\s*await resolverContaML\(userId, referencia\)\s*:\s*await resolverContaML\(userId, null, \{ permitirUnica: true \}\);/);
+    const iRecusa = g.search(/if \(lojaDoAnuncio && !conta\.ok && conta\.motivo === "LOJA_INVALIDA"\) \{\s*return NextResponse\.json\(/);
+    const iProvider = g.search(/fetchItem\(|fetch\(/);
+    if (iRef < 0 || (g.match(/resolverContaML\(/g) ?? []).length !== 2) erros.push("app/api/anuncio/route.ts: referência explícita com loja única implícita, ou conta fora dos dois ramos");
+    if (!/const lojaDoAnuncio = url\.searchParams\.get\("loja_id"\);\s*const referencia = lojaDoAnuncio \|\| lerCookie\(request, "loja_ativa_id"\);/.test(g)) erros.push("app/api/anuncio/route.ts: referência de loja fora do contrato (loja do anúncio > contexto)");
+    if (iRecusa < 0 || iRecusa < iRef || (iProvider >= 0 && iProvider < iRecusa)) erros.push("app/api/anuncio/route.ts: loja do anúncio inválida não é recusada antes do provider");
   }
   const helper = existsSync(join(raiz, HELPER_LOJA_CATALOGO_ML)) ? semComentarios(ler(raiz, HELPER_LOJA_CATALOGO_ML)) : "";
   if (!helper) erros.push(`${HELPER_LOJA_CATALOGO_ML} ausente`);
