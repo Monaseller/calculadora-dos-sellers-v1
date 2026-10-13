@@ -23,6 +23,10 @@ export class ErroSQL extends Error {}
 
 /** Trigger instalado: função compilada + eventos. */
 export type Gatilho = { nome: string; tabela: string; funcao: string; colunasUpdate: string[] | null; insert: boolean };
+/** Índice UNIQUE (parcial) emulado: colunas/predicado executados do SQL; `def` = pg_indexes.indexdef. */
+export type IndiceUnico = { nome: string; tabela: string; colunas: Expr[]; onde: Expr | null; def: string; valido: boolean; pronto: boolean };
+/** CHECK emulado: expressão executada do SQL (NOT VALID também vale para escritas novas); `def` = pg_get_constraintdef. */
+export type CheckRestricao = { nome: string; tabela: string; expr: Expr; def: string; validado: boolean };
 export type Banco = {
   tabelas: Record<string, Linha[]>;
   temp: Record<string, Linha[]>;
@@ -30,6 +34,10 @@ export type Banco = {
   gatilhos: Gatilho[];
   config: Record<string, string>;
   locks: Array<{ tabela: string; modo: string }>;
+  /** Fonte (prosrc) de cada função instalada. */
+  fontes?: Record<string, string>;
+  indices?: IndiceUnico[];
+  checks?: CheckRestricao[];
 };
 /** Restrições do banco que a migration NÃO cria (CHECK/FK/UNIQUE já existentes) — emuladas pelo chamador. */
 export type Restricoes = (db: Banco, tabela: string, linha: Linha) => void;
@@ -102,6 +110,15 @@ function lerCmp(L: Leitor): Expr {
       switch (op.v) { case "=": return x === y; case "<>": return x !== y; case ">": return x > y; case "<": return x < y; case ">=": return x >= y; default: return x <= y; }
     };
   }
+  if (L.eh("like") || (L.eh("not") && L.eh("like", 1))) {
+    const neg = L.opc("not"); L.tomar("like"); const b = lerSoma(L);
+    return (c) => {
+      const x = a(c), p = b(c);
+      if (x === null || x === undefined || p === null || p === undefined) return null;
+      const re = new RegExp("^" + String(p).split("%").map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/_/g, ".")).join("[\\s\\S]*") + "$");
+      const m = re.test(String(x)); return neg ? !m : m;
+    };
+  }
   if (L.opc("is")) {
     const neg = L.opc("not");
     if (L.opc("null")) return (c) => { const v = a(c); const n = v === null || v === undefined; return neg ? !n : n; };
@@ -125,7 +142,7 @@ function lerCast(L: Leitor): Expr {
   while (L.opc("::")) {
     const tipo = L.tomar().v; const a = e;
     if (tipo === "text") e = (c) => { const v = a(c); return v === null || v === undefined ? null : textoCanonico(v); };
-    else if (tipo === "regclass") e = (c) => a(c);
+    else if (tipo === "regclass" || tipo === "regprocedure") e = (c) => a(c);
     else throw new ErroSQL(`cast não suportado: ${tipo}`);
   }
   return e;
@@ -153,6 +170,8 @@ function lerPrim(L: Leitor): Expr {
     if (f === "coalesce") return (c) => { for (const a of args) { const v = a(c); if (v !== null && v !== undefined) return v; } return null; };
     if (f === "md5") return (c) => { const v = args[0](c); return v === null ? null : createHash("md5").update(textoCanonico(v)).digest("hex"); };
     if (f === "to_jsonb") return (c) => { const v = args[0](c); if (!v || typeof v !== "object") throw new ErroSQL("to_jsonb de não-linha"); return { __jsonb: { ...v } }; };
+    if (f === "pg_get_triggerdef") return (c) => { const g = c.db.gatilhos.find((x) => `trg:${x.nome}` === args[0](c)); return g ? definicaoGatilho(g) : null; };
+    if (f === "pg_get_constraintdef") return (c) => (c.db.checks ?? []).find((x) => `con:${x.nome}` === args[0](c))?.def ?? null;
     throw new ErroSQL(`função não suportada: ${f}`);
   }
   if (x.t === "id") {
@@ -218,7 +237,13 @@ export function lerSelect(L: Leitor): Select {
 function linhasDaFonte(f: Fonte, c: Ctx): Linha[] {
   if (f.sub) return rodarSelect(f.sub, c);
   const t = f.tabela!;
-  if (t === "pg_trigger") return c.db.gatilhos.map((g) => ({ tgrelid: g.tabela, tgname: g.nome, tgisinternal: false }));
+  // catálogo virtual (o suficiente para prechecks/validações de migration)
+  if (t === "pg_trigger") return c.db.gatilhos.map((g) => ({ oid: `trg:${g.nome}`, tgrelid: g.tabela, tgname: g.nome, tgisinternal: false }));
+  if (t === "pg_indexes") return (c.db.indices ?? []).map((i) => ({ schemaname: i.tabela.split(".")[0], tablename: i.tabela.split(".")[1], indexname: i.nome, indexdef: i.def }));
+  if (t === "pg_class") return (c.db.indices ?? []).map((i) => ({ oid: `idx:${i.nome}`, relname: i.nome }));
+  if (t === "pg_index") return (c.db.indices ?? []).map((i) => ({ indexrelid: `idx:${i.nome}`, indrelid: i.tabela, indisunique: true, indisvalid: i.valido, indisready: i.pronto }));
+  if (t === "pg_constraint") return (c.db.checks ?? []).map((k) => ({ oid: `con:${k.nome}`, conname: k.nome, conrelid: k.tabela, contype: "c", convalidated: k.validado }));
+  if (t === "pg_proc") return Object.keys(c.db.funcoes).map((n) => ({ oid: `${n}()`, proname: n.split(".").pop(), prosrc: c.db.fontes?.[n] ?? "" }));
   if (t in c.db.temp) return c.db.temp[t];
   if (t in c.db.tabelas) return c.db.tabelas[t];
   throw new ErroSQL(`relation "${t}" does not exist`);
@@ -358,14 +383,39 @@ function dispararGatilhos(db: Banco, tabela: string, novo: Linha, evento: "inser
     for (const s of corpo) if (s(e) === "return") break;
   }
 }
+/** pg_get_triggerdef no formato do PostgreSQL. */
+export function definicaoGatilho(g: Gatilho): string {
+  const upd = g.colunasUpdate === null ? "" : `UPDATE${g.colunasUpdate[0] === "*" ? "" : ` OF ${g.colunasUpdate.join(", ")}`}`;
+  const eventos = [g.insert ? "INSERT" : "", upd].filter(Boolean).join(" OR ");
+  return `CREATE TRIGGER ${g.nome} BEFORE ${eventos} ON ${g.tabela} FOR EACH ROW EXECUTE FUNCTION ${g.funcao.split(".").pop()}()`;
+}
+const ctxLinha = (db: Banco, r: Linha): Ctx => ({ db, alias: {}, vars: {}, linha: r });
+/** Chave de um índice UNIQUE para a linha; null = fora do índice (predicado falso ou algum componente NULL). */
+function chaveIndice(db: Banco, i: IndiceUnico, r: Linha): string | null {
+  if (i.onde && tri(i.onde(ctxLinha(db, r))) !== true) return null;
+  const vals = i.colunas.map((e) => e(ctxLinha(db, r)));
+  if (vals.some((v) => v === null || v === undefined)) return null;       // NULL é distinto de NULL no UNIQUE
+  return JSON.stringify(vals.map(textoCanonico));
+}
+/** CHECKs (também NOT VALID: valem para escrita nova) e UNIQUEs declarados pelo SQL. */
+function aplicarRestricoesDeclaradas(db: Banco, tabela: string, novo: Linha) {
+  for (const k of (db.checks ?? []).filter((x) => x.tabela === tabela)) {
+    if (tri(k.expr(ctxLinha(db, novo))) === false) throw new ErroSQL(`new row violates check constraint "${k.nome}"`);
+  }
+  for (const i of (db.indices ?? []).filter((x) => x.tabela === tabela)) {
+    const k = chaveIndice(db, i, novo); if (k === null) continue;
+    if (db.tabelas[tabela].some((r) => r.id !== novo.id && chaveIndice(db, i, r) === k)) throw new ErroSQL(`duplicate key value violates unique constraint "${i.nome}"`);
+  }
+}
 export function inserirLinha(db: Banco, tabela: string, linha: Linha, restricoes: Restricoes): Linha {
-  const novo = { ...linha }; dispararGatilhos(db, tabela, novo, "insert", restricoes); restricoes(db, tabela, novo); db.tabelas[tabela].push(novo); return novo;
+  const novo = { ...linha }; dispararGatilhos(db, tabela, novo, "insert", restricoes); restricoes(db, tabela, novo); aplicarRestricoesDeclaradas(db, tabela, novo);
+  db.tabelas[tabela].push(novo); return novo;
 }
 export function atualizarLinha(db: Banco, tabela: string, id: string, patch: Linha, restricoes: Restricoes): Linha {
   const tab = db.tabelas[tabela]; const i = tab.findIndex((r) => r.id === id);
   const novo = { ...tab[i], ...patch };
   dispararGatilhos(db, tabela, novo, Object.keys(patch), restricoes);
-  restricoes(db, tabela, novo); tab[i] = novo; return novo;
+  restricoes(db, tabela, novo); aplicarRestricoesDeclaradas(db, tabela, novo); tab[i] = novo; return novo;
 }
 
 // ── Script ───────────────────────────────────────────────────────────
@@ -418,7 +468,35 @@ export function executarScript(sql: string, db0: Banco, restricoes: Restricoes):
         continue;
       }
       if ((m = /^create\s+or\s+replace\s+function\s+([\w.]+)\(\)\s+returns\s+trigger\s+language\s+plpgsql\b[\s\S]*?\bas\s+\$\$([\s\S]*)\$\$$/i.exec(cmd))) {
-        db.funcoes[m[1].toLowerCase()] = compilarCorpo(m[2]); continue;
+        db.funcoes[m[1].toLowerCase()] = compilarCorpo(m[2]); (db.fontes ??= {})[m[1].toLowerCase()] = m[2]; continue;
+      }
+      if ((m = /^create\s+unique\s+index\s+(\w+)\s+on\s+([\w.]+)\s*\(([\s\S]*)$/i.exec(cmd))) {
+        const nome = m[1].toLowerCase(), tabela = m[2].toLowerCase();
+        if ((db.indices ?? []).some((i) => i.nome === nome)) throw new ErroSQL(`relation "${nome}" already exists`);
+        const L = new Leitor(tokenizar(`(${m[3]}`)); L.tomar("(");
+        const colunas: Expr[] = []; do colunas.push(lerExpr(L)); while (L.opc(","));
+        L.tomar(")");
+        const onde = L.opc("where") ? lerExpr(L) : null;
+        if (!L.fim()) throw new ErroSQL(`sobra no CREATE UNIQUE INDEX: ${L.ver().v}`);
+        const idx: IndiceUnico = { nome, tabela, colunas, onde, def: cmd.replace(/\s+/g, " "), valido: true, pronto: true };
+        const vistos = new Set<string>();
+        for (const r of db.tabelas[tabela] ?? []) { const k = chaveIndice(db, idx, r); if (k === null) continue; if (vistos.has(k)) throw new ErroSQL(`could not create unique index "${nome}"`); vistos.add(k); }
+        (db.indices ??= []).push(idx); continue;
+      }
+      if ((m = /^alter\s+table\s+([\w.]+)\s+add\s+constraint\s+(\w+)\s+check\s*\(([\s\S]*)$/i.exec(cmd))) {
+        const tabela = m[1].toLowerCase(), nome = m[2].toLowerCase();
+        if ((db.checks ?? []).some((k) => k.nome === nome)) throw new ErroSQL(`constraint "${nome}" for relation "${tabela}" already exists`);
+        const L = new Leitor(tokenizar(`(${m[3]}`)); L.tomar("("); const expr = lerExpr(L); L.tomar(")");
+        const naoValida = L.opc("not") ? (L.tomar("valid"), true) : false;
+        if (!L.fim()) throw new ErroSQL(`sobra no ADD CONSTRAINT: ${L.ver().v}`);
+        const k: CheckRestricao = { nome, tabela, expr, def: `CHECK (${m[3].replace(/\)\s*not\s+valid\s*$/i, "").replace(/\)\s*$/, "").trim()})`, validado: false };
+        if (!naoValida) validarCheck(db, k);
+        (db.checks ??= []).push(k); continue;
+      }
+      if ((m = /^alter\s+table\s+([\w.]+)\s+validate\s+constraint\s+(\w+)$/i.exec(cmd))) {
+        const k = (db.checks ?? []).find((x) => x.nome === m![2].toLowerCase() && x.tabela === m![1].toLowerCase());
+        if (!k) throw new ErroSQL(`constraint "${m[2]}" of relation "${m[1]}" does not exist`);
+        validarCheck(db, k); continue;
       }
       if ((m = /^drop\s+trigger\s+(\w+)\s+on\s+([\w.]+)$/i.exec(cmd))) {
         const i = db.gatilhos.findIndex((g) => g.nome === m![1].toLowerCase() && g.tabela === m![2].toLowerCase());
@@ -440,9 +518,27 @@ export function executarScript(sql: string, db0: Banco, restricoes: Restricoes):
     return { ok: false, erro: String(err?.message ?? err), db: clonar(db0), traco, comandos };
   }
 }
+function validarCheck(db: Banco, k: CheckRestricao) {
+  if ((db.tabelas[k.tabela] ?? []).some((r) => tri(k.expr(ctxLinha(db, r))) === false)) {
+    throw new ErroSQL(`check constraint "${k.nome}" of relation "${k.tabela.split(".").pop()}" is violated by some row`);
+  }
+  k.validado = true;
+}
 export function clonar(db: Banco): Banco {
   return { tabelas: JSON.parse(JSON.stringify(db.tabelas)), temp: JSON.parse(JSON.stringify(db.temp)), funcoes: { ...db.funcoes },
-    gatilhos: db.gatilhos.map((g) => ({ ...g, colunasUpdate: g.colunasUpdate ? [...g.colunasUpdate] : null })), config: { ...db.config }, locks: [...db.locks] };
+    gatilhos: db.gatilhos.map((g) => ({ ...g, colunasUpdate: g.colunasUpdate ? [...g.colunasUpdate] : null })), config: { ...db.config }, locks: [...db.locks],
+    fontes: { ...(db.fontes ?? {}) }, indices: (db.indices ?? []).map((i) => ({ ...i })), checks: (db.checks ?? []).map((k) => ({ ...k })) };
+}
+/**
+ * Declara objetos JÁ existentes no banco (fora da migration sob teste): UNIQUE parcial e CHECK com a
+ * definição exata do catálogo de produção; as expressões são executáveis (parseadas do SQL dado).
+ */
+export function declararIndiceUnico(db: Banco, nome: string, tabela: string, colunas: string, onde: string | null, def: string) {
+  const L = new Leitor(tokenizar(`(${colunas})`)); L.tomar("("); const cols: Expr[] = []; do cols.push(lerExpr(L)); while (L.opc(",")); L.tomar(")");
+  (db.indices ??= []).push({ nome, tabela, colunas: cols, onde: onde ? lerExpr(new Leitor(tokenizar(onde))) : null, def, valido: true, pronto: true });
+}
+export function declararCheck(db: Banco, nome: string, tabela: string, expr: string, def: string) {
+  (db.checks ??= []).push({ nome, tabela, expr: lerExpr(new Leitor(tokenizar(expr))), def, validado: true });
 }
 /** Valor da variável `nome` no ÚLTIMO IF rotulado `rotulo` executado (ex.: contador n do PRECHECK G). */
 export function contadorNoTraco(traco: Traco, rotulo: string, nome = "n"): number | null {
