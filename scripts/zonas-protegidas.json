@@ -132,6 +132,7 @@
     "supabase/migrations/20261106_lojas_remove_unique_seller_global.sql": "a68205fa9c3f6acd491f5e8a6d2d57971ac682082dec2fbc490fe0987eb4b451",
     "supabase/migrations/20261107_anuncios_ml_loja_fase1.sql": "a79871846ed20258255cef33fca7fc40720c26b3a5f494e4701a22b10d310256",
     "supabase/migrations/20261108_anuncios_ml_loja_fase2.sql": "06e3ba013777e178611d68b70a9bd82204cb8fdbb02b07619c58a05b58af3aa1",
+    "supabase/migrations/20261109_anuncios_status_marketplace.sql": "8d692cd87c03f19be6591debaa6f0ebbf113e3745cefabe20da9b8ba4cd1e1fc",
     "vercel.json": "a6daecdcaed811dbdab068a0a91c4f44654fb257b7fe4afb0b51a7d882b0b4cd"
   }
 }

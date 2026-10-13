@@ -27,6 +27,8 @@ export type Gatilho = { nome: string; tabela: string; funcao: string; colunasUpd
 export type IndiceUnico = { nome: string; tabela: string; colunas: Expr[]; onde: Expr | null; def: string; valido: boolean; pronto: boolean };
 /** CHECK emulado: expressão executada do SQL (NOT VALID também vale para escritas novas); `def` = pg_get_constraintdef. */
 export type CheckRestricao = { nome: string; tabela: string; expr: Expr; def: string; validado: boolean };
+/** Coluna declarada (information_schema.columns): tipo no nome do PostgreSQL, nulabilidade e default (texto). */
+export type Coluna = { nome: string; tipo: string; nula: boolean; padrao: string | null; padraoExpr?: Expr | null };
 export type Banco = {
   tabelas: Record<string, Linha[]>;
   temp: Record<string, Linha[]>;
@@ -38,6 +40,8 @@ export type Banco = {
   fontes?: Record<string, string>;
   indices?: IndiceUnico[];
   checks?: CheckRestricao[];
+  /** Colunas por tabela (só tabelas declaradas; ADD COLUMN exige a tabela declarada). */
+  colunas?: Record<string, Coluna[]>;
 };
 /** Restrições do banco que a migration NÃO cria (CHECK/FK/UNIQUE já existentes) — emuladas pelo chamador. */
 export type Restricoes = (db: Banco, tabela: string, linha: Linha) => void;
@@ -244,6 +248,9 @@ function linhasDaFonte(f: Fonte, c: Ctx): Linha[] {
   if (t === "pg_index") return (c.db.indices ?? []).map((i) => ({ indexrelid: `idx:${i.nome}`, indrelid: i.tabela, indisunique: true, indisvalid: i.valido, indisready: i.pronto }));
   if (t === "pg_constraint") return (c.db.checks ?? []).map((k) => ({ oid: `con:${k.nome}`, conname: k.nome, conrelid: k.tabela, contype: "c", convalidated: k.validado }));
   if (t === "pg_proc") return Object.keys(c.db.funcoes).map((n) => ({ oid: `${n}()`, proname: n.split(".").pop(), prosrc: c.db.fontes?.[n] ?? "" }));
+  if (t === "information_schema.columns") return Object.entries(c.db.colunas ?? {}).flatMap(([tab, cols]) => cols.map((col) => ({
+    table_schema: tab.split(".")[0], table_name: tab.split(".")[1], column_name: col.nome, data_type: col.tipo,
+    is_nullable: col.nula ? "YES" : "NO", column_default: col.padrao })));
   if (t in c.db.temp) return c.db.temp[t];
   if (t in c.db.tabelas) return c.db.tabelas[t];
   throw new ErroSQL(`relation "${t}" does not exist`);
@@ -399,6 +406,9 @@ function chaveIndice(db: Banco, i: IndiceUnico, r: Linha): string | null {
 }
 /** CHECKs (também NOT VALID: valem para escrita nova) e UNIQUEs declarados pelo SQL. */
 function aplicarRestricoesDeclaradas(db: Banco, tabela: string, novo: Linha) {
+  for (const c of db.colunas?.[tabela] ?? []) {
+    if (!c.nula && (novo[c.nome] === null || novo[c.nome] === undefined)) throw new ErroSQL(`null value in column "${c.nome}" violates not-null constraint`);
+  }
   for (const k of (db.checks ?? []).filter((x) => x.tabela === tabela)) {
     if (tri(k.expr(ctxLinha(db, novo))) === false) throw new ErroSQL(`new row violates check constraint "${k.nome}"`);
   }
@@ -408,7 +418,9 @@ function aplicarRestricoesDeclaradas(db: Banco, tabela: string, novo: Linha) {
   }
 }
 export function inserirLinha(db: Banco, tabela: string, linha: Linha, restricoes: Restricoes): Linha {
-  const novo = { ...linha }; dispararGatilhos(db, tabela, novo, "insert", restricoes); restricoes(db, tabela, novo); aplicarRestricoesDeclaradas(db, tabela, novo);
+  const novo = { ...linha };
+  for (const c of db.colunas?.[tabela] ?? []) if (!(c.nome in novo)) novo[c.nome] = c.padraoExpr ? c.padraoExpr(ctxLinha(db, novo)) : null;
+  dispararGatilhos(db, tabela, novo, "insert", restricoes); restricoes(db, tabela, novo); aplicarRestricoesDeclaradas(db, tabela, novo);
   db.tabelas[tabela].push(novo); return novo;
 }
 export function atualizarLinha(db: Banco, tabela: string, id: string, patch: Linha, restricoes: Restricoes): Linha {
@@ -493,6 +505,9 @@ export function executarScript(sql: string, db0: Banco, restricoes: Restricoes):
         if (!naoValida) validarCheck(db, k);
         (db.checks ??= []).push(k); continue;
       }
+      if ((m = /^alter\s+table\s+([\w.]+)\s+(add\s+column\s+[\s\S]+)$/i.exec(cmd))) {
+        adicionarColunas(db, m[1].toLowerCase(), m[2]); continue;
+      }
       if ((m = /^alter\s+table\s+([\w.]+)\s+validate\s+constraint\s+(\w+)$/i.exec(cmd))) {
         const k = (db.checks ?? []).find((x) => x.nome === m![2].toLowerCase() && x.tabela === m![1].toLowerCase());
         if (!k) throw new ErroSQL(`constraint "${m[2]}" of relation "${m[1]}" does not exist`);
@@ -518,6 +533,45 @@ export function executarScript(sql: string, db0: Banco, restricoes: Restricoes):
     return { ok: false, erro: String(err?.message ?? err), db: clonar(db0), traco, comandos };
   }
 }
+/** Tipos aceitos em ADD COLUMN → nome em information_schema.columns.data_type. Outro tipo → erro. */
+const TIPOS_COLUNA: Record<string, string> = { text: "text", timestamptz: "timestamp with time zone", boolean: "boolean", uuid: "uuid", numeric: "numeric" };
+/**
+ * ALTER TABLE t ADD COLUMN c tipo [DEFAULT expr] [NOT NULL | NULL] [, ADD COLUMN ...] — atômico no
+ * comando. Coluna existente → erro (sem IF NOT EXISTS); NOT NULL sem default em tabela com linhas →
+ * erro; o default é avaliado e gravado em TODA linha existente. Qualquer outra sintaxe → erro.
+ */
+function adicionarColunas(db: Banco, tabela: string, clausulas: string) {
+  const cols = db.colunas?.[tabela];
+  if (!cols) throw new ErroSQL(`colunas de "${tabela}" não declaradas (ADD COLUMN exige o catálogo da tabela)`);
+  const L = new Leitor(tokenizar(clausulas));
+  const novas: Coluna[] = [];
+  do {
+    L.tomar("add"); L.tomar("column");
+    if (L.eh("if")) throw new ErroSQL("IF NOT EXISTS não suportado (fail-closed)");
+    const nome = L.tomar().v;
+    let tipo = L.tomar().v;
+    if (tipo === "timestamp" && L.opc("with")) { L.tomar("time"); L.tomar("zone"); tipo = "timestamptz"; }
+    if (!(tipo in TIPOS_COLUNA)) throw new ErroSQL(`tipo não suportado em ADD COLUMN: ${tipo}`);
+    const col: Coluna = { nome, tipo: TIPOS_COLUNA[tipo], nula: true, padrao: null, padraoExpr: null };
+    while (!L.fim() && !L.eh(",")) {
+      if (L.opc("default")) {
+        const ini = L.p; col.padraoExpr = lerExpr(L);
+        col.padrao = L.k.slice(ini, L.p).map((x) => (x.t === "str" ? `'${x.v}'` : x.v)).join(" ");
+      } else if (L.opc("not")) { L.tomar("null"); col.nula = false; }
+      else if (L.opc("null")) { col.nula = true; }
+      else throw new ErroSQL(`sobra no ADD COLUMN: ${L.ver().v}`);
+    }
+    if (cols.some((c) => c.nome === nome) || novas.some((c) => c.nome === nome)) throw new ErroSQL(`column "${nome}" of relation "${tabela.split(".").pop()}" already exists`);
+    novas.push(col);
+  } while (L.opc(","));
+  const linhas = db.tabelas[tabela] ?? [];
+  const valores = linhas.map((r) => novas.map((c) => (c.padraoExpr ? c.padraoExpr(ctxLinha(db, r)) : null)));
+  novas.forEach((c, j) => {
+    if (!c.nula && valores.some((v) => v[j] === null || v[j] === undefined)) throw new ErroSQL(`column "${c.nome}" of relation "${tabela.split(".").pop()}" contains null values`);
+  });
+  linhas.forEach((r, i) => novas.forEach((c, j) => { r[c.nome] = valores[i][j] ?? null; }));
+  cols.push(...novas);
+}
 function validarCheck(db: Banco, k: CheckRestricao) {
   if ((db.tabelas[k.tabela] ?? []).some((r) => tri(k.expr(ctxLinha(db, r))) === false)) {
     throw new ErroSQL(`check constraint "${k.nome}" of relation "${k.tabela.split(".").pop()}" is violated by some row`);
@@ -527,7 +581,17 @@ function validarCheck(db: Banco, k: CheckRestricao) {
 export function clonar(db: Banco): Banco {
   return { tabelas: JSON.parse(JSON.stringify(db.tabelas)), temp: JSON.parse(JSON.stringify(db.temp)), funcoes: { ...db.funcoes },
     gatilhos: db.gatilhos.map((g) => ({ ...g, colunasUpdate: g.colunasUpdate ? [...g.colunasUpdate] : null })), config: { ...db.config }, locks: [...db.locks],
-    fontes: { ...(db.fontes ?? {}) }, indices: (db.indices ?? []).map((i) => ({ ...i })), checks: (db.checks ?? []).map((k) => ({ ...k })) };
+    fontes: { ...(db.fontes ?? {}) }, indices: (db.indices ?? []).map((i) => ({ ...i })), checks: (db.checks ?? []).map((k) => ({ ...k })),
+    ...(db.colunas ? { colunas: Object.fromEntries(Object.entries(db.colunas).map(([t, cs]) => [t, cs.map((c) => ({ ...c }))])) } : {}) };
+}
+/** Declara as colunas JÁ existentes de uma tabela (catálogo de produção), para ADD COLUMN / information_schema. */
+export function declararColunas(db: Banco, tabela: string, colunas: Array<Omit<Coluna, "padraoExpr">>) {
+  // default executável quando é literal simples (0, true, 8...); função (now(), gen_random_uuid()) fica só como texto
+  const expr = (padrao: string | null) => {
+    if (padrao === null || /\(/.test(padrao)) return null;
+    const L = new Leitor(tokenizar(padrao)); const e = lerExpr(L); return L.fim() ? e : null;
+  };
+  (db.colunas ??= {})[tabela] = colunas.map((c) => ({ ...c, padraoExpr: expr(c.padrao) }));
 }
 /**
  * Declara objetos JÁ existentes no banco (fora da migration sob teste): UNIQUE parcial e CHECK com a
