@@ -39,6 +39,8 @@ const UID_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const UID_OUTRO = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const LOJA_ML_A = "11111111-1111-4111-8111-111111111111";
 const LOJA_SHOPEE_A = "44444444-4444-4444-8444-444444444444";
+// CDS V2 Fase 2D (estado 3): toda row ML tem loja — a do dono A é LOJA_ML_A; a de outro dono, outra loja.
+const LOJA_ML_OUTRO = "55555555-5555-4555-8555-555555555555";
 const TOKEN_A = "<access-da-loja-ML-A>";
 const PAGINA = 1000;   // max-rows do PostgREST
 
@@ -58,7 +60,7 @@ function reiniciar(linhas: any[]) {
 }
 /** Linha de anuncio. `id` ordena a paginação (ordem lexicográfica, como uuid em texto). */
 function an(id: string, user_id: string, marketplace: "ML" | "Shopee", ml_item_id: string | null, sku: string | null, ativo = true) {
-  return { id, user_id, marketplace, ml_item_id, sku, ativo, nome: `p-${id}`, loja_id: marketplace === "Shopee" ? LOJA_SHOPEE_A : null };
+  return { id, user_id, marketplace, ml_item_id, sku, ativo, nome: `p-${id}`, loja_id: marketplace === "Shopee" ? LOJA_SHOPEE_A : user_id === UID_A ? LOJA_ML_A : LOJA_ML_OUTRO };
 }
 
 // ── Duplo do banco (PostgREST) ───────────────────────────────────────

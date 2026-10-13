@@ -23,25 +23,36 @@ import { CATEGORIAS_ML } from "@/lib/comissoes-mercado-livre";
 import { LojaIdIntegrityError } from "@/lib/sync-errors";
 import { lerTodasAsPaginas } from "@/lib/anuncios/leitura-paginada";
 
+/** Chave do mapa de custo ML: LOJA | item | variacao ("" = item sem variacao). Nunca so dono + item. */
+export function chaveAnuncioML(lojaId: string, mlItemId: string, variationId: string | number | null | undefined): string {
+  return `${lojaId}|${mlItemId}|${variationId === null || variationId === undefined ? "" : String(variationId)}`;
+}
+/** Custo da linha EXATA (item + variacao) da loja; fallback controlado so para a linha SEM variacao do item. */
+export function buscarAnuncioML(mapa: Map<string, any>, lojaId: string, mlItemId: string, variationId: string | number | null | undefined): any {
+  return mapa.get(chaveAnuncioML(lojaId, mlItemId, variationId)) ?? mapa.get(chaveAnuncioML(lojaId, mlItemId, null));
+}
+
 /**
- * Mapa de custo por item ML (CDS V2 Fase 0): SO anuncios do Mercado Livre do
- * dono — nunca Shopee (antes nao havia filtro de marketplace) — e TODAS as
+ * Mapa de custo por item ML (CDS V2 Fase 0 → 2D): SO anuncios do Mercado Livre
+ * DAQUELA LOJA do dono — nunca Shopee, nunca outra loja ML (o mesmo item/variacao
+ * em ML-A e ML-B sao anuncios diferentes, com custos diferentes) — e TODAS as
  * paginas (o PostgREST corta em 1000 sem erro). Leitura falha → erro: um mapa
- * parcial gravaria custo 0 em silencio. Ainda sem loja: anuncios ML nao tem
- * loja_id (Fase 2); o item_id do ML e do vendedor, entao nao colide entre contas.
+ * parcial gravaria custo 0 em silencio.
  */
-export async function carregarMapaAnunciosML(userId: string): Promise<Map<string, any>> {
+export async function carregarMapaAnunciosML(userId: string, lojaId: string): Promise<Map<string, any>> {
+  if (!lojaId) throw new Error("carregarMapaAnunciosML: loja_obrigatoria");
   const leitura = await lerTodasAsPaginas<any>(() => supabase()
     .from("anuncios")
-    .select("id, ml_item_id, nome, sku, custo_produto, insumos, custo_frete, frete_gratis, imposto, tipo_anuncio, categoria")
+    .select("id, ml_item_id, variation_id, nome, sku, custo_produto, insumos, custo_frete, frete_gratis, imposto, tipo_anuncio, categoria, loja_id")
     .eq("marketplace", "ML")
     .eq("ativo", true)
     .not("ml_item_id", "is", null)
-    .eq("user_id", userId));
+    .eq("user_id", userId)
+    .eq("loja_id", lojaId));
   if (!leitura.ok) throw new Error(`carregarMapaAnunciosML: ${leitura.motivo}`);
   const mapaAnuncios = new Map<string, any>();
   for (const a of leitura.linhas) {
-    if (a.ml_item_id) mapaAnuncios.set(a.ml_item_id, a);
+    if (a.ml_item_id && a.loja_id === lojaId) mapaAnuncios.set(chaveAnuncioML(lojaId, a.ml_item_id, a.variation_id), a);
   }
   return mapaAnuncios;
 }
@@ -280,7 +291,7 @@ export async function syncMLForUserV2(
   const found = allOrders.length;
   if (found === 0) return { found: 0, inserted: 0 };
 
-  const mapaAnuncios = await carregarMapaAnunciosML(userId);
+  const mapaAnuncios = await carregarMapaAnunciosML(userId, lojaId);
 
   const rows: any[] = [];
   const now = new Date().toISOString();
@@ -339,7 +350,7 @@ export async function syncMLForUserV2(
       const qtd:       number = orderItem.quantity   ?? 1;
       const valorUnit: number = orderItem.unit_price ?? 0;
       const faturamento       = valorUnit * qtd;
-      const anuncio           = mapaAnuncios.get(mlItemId);
+      const anuncio           = buscarAnuncioML(mapaAnuncios, lojaId, mlItemId, orderItem.item?.variation_id ?? null);
 
       const saleFeeML = typeof orderItem.sale_fee === "number" ? orderItem.sale_fee : null;
       let tarifaVenda: number;

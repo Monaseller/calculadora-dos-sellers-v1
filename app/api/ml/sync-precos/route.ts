@@ -133,6 +133,7 @@ export async function POST(request: Request) {
     .eq("ativo", true)
     .eq("marketplace", "ML")
     .eq("user_id", userId)
+    .eq("loja_id", conta.lojaId)
     .not("ml_item_id", "is", null));
 
   if (!leitura.ok) {
@@ -261,7 +262,8 @@ export async function POST(request: Request) {
           .update(mudancas)
           .eq("id", anuncio.id)
           .eq("user_id", userId)
-          .eq("marketplace", "ML");
+          .eq("marketplace", "ML")
+          .eq("loja_id", conta.lojaId);
         if (erroGravacao) {
           // Fail-closed: para aqui. O que já foi gravado fica; nada mais é tentado.
           console.error("[POST /api/ml/sync-precos] falha ao gravar anúncio:", erroGravacao.message);

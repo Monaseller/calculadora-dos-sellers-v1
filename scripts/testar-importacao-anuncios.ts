@@ -70,6 +70,13 @@ const CODIGO_HELPER_SP = semComentarios(HELPER_TELA_SP);
 const CAMPOS_DA_SHOPEE = ["nome", "preco_anuncio", "thumbnail", "sku"];
 /** Bloco `novas.push({...})` do lote de INSERT do motor. */
 const linhaNovaSP = () => /novas\.push\(\{([\s\S]*?)\}\);/.exec(CODIGO_MOTOR_SP)?.[1] ?? "";
+// CDS V2 Fase 2D — IMPORT ML V2: a escrita do ML mora no MOTOR por loja (fatias retomaveis). Os
+// invariantes que viviam na rota antiga sao verificados ONDE a responsabilidade esta, com forca >=.
+const MOTOR_ML        = path.join(RAIZ, "lib", "anuncios", "importacao-ml.ts");
+const CODIGO_MOTOR_ML = semComentarios(MOTOR_ML);
+/** Os UNICOS campos que a importacao ML pode atualizar numa linha ja existente (peso/frete/SKU so se vazios). */
+const CAMPOS_DO_ML = ["nome", "preco_anuncio", "tipo_anuncio", "logistic_type", "frete_gratis", "thumbnail", "permalink", "peso_kg", "custo_frete", "sku"];
+const linhaNovaML = () => /novas\.push\(\{([\s\S]*?)\}\);/.exec(CODIGO_MOTOR_ML)?.[1] ?? "";
 
 /**
  * Blocos `.update({...})` de uma fonte, com o objeto literal que os
@@ -106,35 +113,47 @@ async function principal() {
   // ── A / B / C — a regra do soft delete no código de servidor ──────
   secao("\n[1. A/B/C — importação não reativa anúncio excluído]");
 
-  for (const [nome, codigo] of [["Mercado Livre", CODIGO_ML]] as const) {
-    t(`A/B. ${nome}: nenhum UPDATE de importação escreve 'ativo'`, () => {
-      const updates = payloadsDeUpdate(codigo);
-      assert(updates.length >= 2, `esperava ao menos 2 payloads de update, achei ${updates.length}`);
-      for (const p of updates) {
-        assert(!/\bativo\s*:/.test(p),
-          `🔴 payload de UPDATE voltou a escrever 'ativo' — import reativaria anúncio excluído`);
-      }
-    });
+  // Mercado Livre (IMPORT V2, Fase 2D): as mesmas regras, verificadas no MOTOR por loja.
+  t("A/B. Mercado Livre (motor): nenhum UPDATE de importação escreve 'ativo' — só campos do ML", () => {
+    const chaves = [...CODIGO_MOTOR_ML.matchAll(/\bupd\.(\w+)\s*=/g)].map((m) => m[1]);
+    assert(chaves.length >= 7, `esperava os campos do ML no update, achei ${chaves}`);
+    assert(!chaves.includes("ativo"), "🔴 payload de UPDATE voltou a escrever 'ativo' — import reativaria anúncio excluído");
+    assert(chaves.every((c) => CAMPOS_DO_ML.includes(c)),
+      `🔴 UPDATE toca campo que não é do ML (custo/imposto/insumos/margem/loja/dono): ${chaves}`);
+    const updates = CODIGO_MOTOR_ML.match(/\.update\(/g) ?? [];
+    assert(updates.length === 1 && /\.update\(m\.upd\)/.test(CODIGO_MOTOR_ML), "o motor ML deve ter UM update, com o payload montado campo a campo");
+    assert(!/\.(insert|update|upsert)\(/.test(CODIGO_ML), "🔴 a rota ML voltou a escrever em anuncios fora do motor");
+    for (const [campo, regra] of [["peso_kg", /if \(!existente\.peso_kg && l\.peso_kg\) upd\.peso_kg/], ["custo_frete", /if \(!existente\.custo_frete && l\.custo_frete\) upd\.custo_frete/], ["sku", /if \(!existente\.sku && l\.sku\) upd\.sku/]] as const) {
+      assert(regra.test(CODIGO_MOTOR_ML), `🔴 ${campo} do usuário pode ser sobrescrito pelo import`);
+    }
+  });
 
-    t(`C. ${nome}: todo INSERT nasce com ativo: true`, () => {
-      const inserts = payloadsDeInsert(codigo);
-      assert(inserts.length >= 2, `esperava ao menos 2 inserts, achei ${inserts.length}`);
-      for (const p of inserts) {
-        assert(/\bativo\s*:\s*true\b/.test(p), "anúncio novo deveria entrar ativo");
-      }
-    });
+  t("C/G. Mercado Livre (motor): todo INSERT do lote nasce ativo, ML, do dono e da LOJA, com identidade, preço e sem forçar imposto/margem", () => {
+    const l = linhaNovaML();
+    assert(/\bativo\s*:\s*true\b/.test(l), "anúncio novo deveria entrar ativo");
+    for (const campo of [/marketplace:\s*"ML"/, /user_id:\s*userId/, /loja_id:\s*lojaId/, /ml_item_id:\s*l\.ml_item_id/,
+      /variation_id:\s*l\.variation_id/, /preco_anuncio:\s*l\.preco_anuncio/]) {
+      assert(campo.test(l), `linha nova do lote sem ${campo}`);
+    }
+    assert(!/\b(imposto|margem_desejada)\s*:/.test(l), "🔴 linha nova força imposto/margem (o default do banco é outro)");
+    assert(/await banco\.from\("anuncios"\)\.insert\(novas\)/.test(CODIGO_MOTOR_ML), "o lote não é um INSERT único");
+    assert(/if \(error\) throw new ErroImportacaoML\("BANCO", "insercao em lote recusada pelo banco"\)/.test(CODIGO_MOTOR_ML),
+      "🔴 falha do lote não fecha a fatia");
+    assert(/if \(error\) throw new ErroImportacaoML\("BANCO", "atualizacao recusada pelo banco"\)/.test(CODIGO_MOTOR_ML),
+      "🔴 falha de update não fecha a fatia");
+  });
 
-    t(`G. ${nome}: a busca de existentes NÃO filtra por ativo`, () => {
-      // Se filtrasse `ativo=true`, uma linha soft-deleted não seria
-      // encontrada e o import a RE-INSERIRIA como nova e ativa — a mesma
-      // ressurreição, por outra porta, e ainda duplicando.
-      const i = codigo.indexOf('from("anuncios")');
-      assert(i >= 0, "não achei a consulta de existentes");
-      const trecho = codigo.slice(i, i + 400);
-      assert(!/\.eq\("ativo"/.test(trecho),
-        "🔴 a busca de existentes passou a filtrar ativo — soft-deleted seria reinserido");
-    });
-  }
+  t("G. Mercado Livre (motor): a busca de existentes NÃO filtra por ativo e prende dono + ML + loja", () => {
+    // Se filtrasse `ativo=true`, uma linha soft-deleted não seria encontrada e o import a
+    // RE-INSERIRIA como nova e ativa — a mesma ressurreição, por outra porta, e ainda duplicando.
+    const i = CODIGO_MOTOR_ML.indexOf('from("anuncios")');
+    assert(i >= 0, "não achei a consulta de existentes no motor ML");
+    const trecho = CODIGO_MOTOR_ML.slice(i, CODIGO_MOTOR_ML.indexOf(";", i));
+    assert(!/\.eq\("ativo"/.test(trecho), "🔴 a busca de existentes passou a filtrar ativo — soft-deleted seria reinserido");
+    assert(/\.eq\("loja_id",\s*lojaId\)/.test(trecho), "🔴 existentes sem escopo de loja — outra loja ML seria casada");
+    assert(!/\.(gt|gte|lt|lte|range|limit)\(/.test(trecho), "🔴 o cursor/paginação não pode restringir os existentes (identidade)");
+    assert(/lerTodasAsPaginas<any>\(\(\) => banco\s*\.from\("anuncios"\)/.test(CODIGO_MOTOR_ML), "existentes ML sem leitura paginada completa");
+  });
 
   // Shopee (IMPORT V2): as mesmas regras, verificadas no MOTOR.
   t("A/B. Shopee (motor): nenhum UPDATE de importação escreve 'ativo' — só campos da Shopee", () => {
@@ -170,7 +189,7 @@ async function principal() {
   secao("\n[2. D/E — identidade do anúncio]");
 
   t("D. a busca de existentes é escopada por marketplace E user_id", () => {
-    for (const [nome, codigo, mkt] of [["ML", CODIGO_ML, "ML"], ["Shopee", CODIGO_MOTOR_SP, "Shopee"]] as const) {
+    for (const [nome, codigo, mkt] of [["ML", CODIGO_MOTOR_ML, "ML"], ["Shopee", CODIGO_MOTOR_SP, "Shopee"]] as const) {
       const i = codigo.indexOf('from("anuncios")');
       const trecho = codigo.slice(i, i + 400);
       assert(new RegExp(`\\.eq\\("marketplace",\\s*"${mkt}"\\)`).test(trecho),
@@ -181,7 +200,7 @@ async function principal() {
   });
 
   t("E. a chave de identidade inclui a variação", () => {
-    for (const [nome, codigo] of [["ML", CODIGO_ML], ["Shopee", CODIGO_MOTOR_SP]] as const) {
+    for (const [nome, codigo] of [["ML", CODIGO_MOTOR_ML], ["Shopee", CODIGO_MOTOR_SP]] as const) {
       assert(/`\$\{row\.ml_item_id\}\|\$\{row\.variation_id\s*\?\?\s*""\}`/.test(codigo),
         `${nome}: chave do mapa de existentes não combina item + variação`);
     }
@@ -229,11 +248,10 @@ async function principal() {
 
   secao("\n[4. H/I — isolamento entre marketplaces]");
 
-  t("H. ML só insere marketplace 'ML'", () => {
-    for (const p of payloadsDeInsert(CODIGO_ML)) {
-      assert(/marketplace:\s*"ML"/.test(p), "insert do ML sem marketplace ML");
-      assert(!/marketplace:\s*"Shopee"/.test(p), "🔴 rota do ML inserindo Shopee");
-    }
+  t("H. ML só insere marketplace 'ML' (motor V2; a rota não insere)", () => {
+    assert(/marketplace:\s*"ML"/.test(linhaNovaML()), "insert do ML sem marketplace ML");
+    assert(!/marketplace:\s*"Shopee"/.test(CODIGO_MOTOR_ML), "🔴 motor do ML inserindo Shopee");
+    assert(payloadsDeInsert(CODIGO_ML).length === 0 && !/\.insert\(/.test(CODIGO_ML), "🔴 a rota ML voltou a inserir fora do motor");
   });
 
   t("I. Shopee só insere marketplace 'Shopee'", () => {
@@ -242,12 +260,21 @@ async function principal() {
     assert(!/marketplace:\s*"ML"/.test(CODIGO_MOTOR_SP), "🔴 motor da Shopee inserindo ML");
   });
 
-  t("H/I. os updates alcançam só a linha já casada, por id (Shopee: + dono + loja)", () => {
-    const n = (CODIGO_ML.match(/\.update\(upd\)\.eq\("id",\s*existente\.id\)/g) ?? []).length;
-    assert(n >= 2, `ML: updates deveriam mirar existente.id (achei ${n})`);
+  t("H/I. os updates alcançam só a linha já casada, por id + dono + loja (ML: + marketplace, exatamente 1 linha)", () => {
+    assert(/mudancas\.push\(\{ id: existente\.id, upd \}\)/.test(CODIGO_MOTOR_ML), "ML: update não nasce da linha casada (existente.id)");
+    assert(/\.update\(m\.upd\)\s*\.eq\("id", m\.id\)\.eq\("user_id", userId\)\.eq\("marketplace", "ML"\)\.eq\("loja_id", lojaId\)\.select\("id"\)/.test(CODIGO_MOTOR_ML),
+      "🔴 ML: update não está preso a id + dono + ML + loja");
+    assert(/if \(\(data \?\? \[\]\)\.length !== 1\) throw new ErroImportacaoML\("BANCO"/.test(CODIGO_MOTOR_ML), "🔴 ML: update de linha de outra loja passaria em silêncio");
     assert(/mudancas\.push\(\{ id: existente\.id, upd \}\)/.test(CODIGO_MOTOR_SP), "Shopee: update não nasce da linha casada (existente.id)");
     assert(/\.update\(m\.upd\)\.eq\("id", m\.id\)\.eq\("user_id", userId\)\.eq\("loja_id", lojaId\)/.test(CODIGO_MOTOR_SP),
       "🔴 Shopee: update não está preso a id + dono + loja");
+  });
+
+  t("H. ML: o cursor só escolhe QUAIS itens processar — a identidade (dono + loja + item|variação) não muda", () => {
+    assert(/const restantes = ultimoItem === null \? todos : todos\.filter\(\(id\) => cmpItemML\(id, ultimoItem\) > 0\);/.test(CODIGO_MOTOR_ML),
+      "o cursor ML deveria só filtrar a lista ordenada de ids");
+    assert((CODIGO_MOTOR_ML.match(/existMap\.(get|set)\(`\$\{\w+\.ml_item_id\}\|\$\{\w+\.variation_id \?\? ""\}`/g) ?? []).length >= 2,
+      "a chave ML usada na leitura e na comparação deveria ser item|variação");
   });
 
   t("H. o cursor só escolhe QUAIS itens processar — a identidade (dono + loja + item|variação) não muda", () => {

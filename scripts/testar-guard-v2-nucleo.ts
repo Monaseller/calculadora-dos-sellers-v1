@@ -123,6 +123,7 @@ async function principal() {
   const SML = await import("../lib/sync-ml");
   const MOT = await import("../lib/anuncios/importacao-shopee");
   const RUN = await import("./rodar-bateria-offline");
+  const G2 = await import("./_guard-v2");
 
   const consultaDe = (linhas: Linha[]) => () => {
     const st: any = { ordem: null, faixa: null };
@@ -162,13 +163,22 @@ async function principal() {
     const r = await PAG.lerTodasAsPaginas(consultaDe(gerar(PAG.MAX_PAGINAS_ANUNCIOS + 5)), 1);
     assert(!r.ok && r.motivo === "LIMITE_DE_PAGINAS", JSON.stringify(r).slice(0, 80));
   });
-  t("A5. todo leitor operacional de anuncios usa a leitura paginada (Shopee existentes/custo, ML custo/existentes/precos/skus)", () => {
-    for (const [arq, n] of [["lib/anuncios/importacao-shopee.ts", 1], ["lib/sync-shopee.ts", 1], ["lib/sync-ml.ts", 1],
-      ["app/api/ml/importar-anuncios/route.ts", 1], ["app/api/ml/sync-precos/route.ts", 1], ["app/api/ml/sync-skus/route.ts", 1]] as const) {
+  t("A5. todo leitor operacional de anuncios usa a leitura paginada (Shopee existentes/custo; ML: TODO runtime que fala com o ML, detectado)", () => {
+    // Shopee (lado inalterado): os dois leitores operacionais conhecidos
+    for (const [arq, n] of [["lib/anuncios/importacao-shopee.ts", 1], ["lib/sync-shopee.ts", 1]] as const) {
       const s = fonte(arq);
       const usos = (s.match(/lerTodasAsPaginas<\w+>\(\(\) => \w+\(?\)?\s*\.from\("anuncios"\)/g) ?? []).length;
       const cruas = (s.match(/=\s*await\s+\w+\(?\)?\s*\.from\("anuncios"\)\s*\.select\(/g) ?? []).length;
       assert(usos === n && cruas === 0, `${arq}: paginadas=${usos} cruas=${cruas}`);
+    }
+    // ML (Fase 2D, semântico): em todo arquivo de runtime que fala com o ML, TODA leitura de anuncios é
+    // paginada e presa a marketplace ML + loja (I5) — sem lista de arquivos; âncoras provam que o
+    // detector enxerga os leitores conhecidos.
+    const viol = G2.leitoresMLSemMarketplace();
+    assert(viol.length === 0, viol.join(" | "));
+    const leituras = G2.arquivosQueFalamComML().flatMap((f) => G2.cadeiasAnuncios(G2.RAIZ_V2, f)).filter((c) => c.tipo === "select");
+    for (const ancora of ["lib/anuncios/importacao-ml.ts", "lib/sync-ml.ts", "app/api/ml/sync-precos/route.ts", "app/api/ml/sync-skus/route.ts", "app/api/ml/vendas-hoje/route.ts"]) {
+      assert(leituras.some((c) => c.arquivo === ancora && c.paginada), `detector não viu a leitura paginada de ${ancora}`);
     }
   });
 
@@ -204,18 +214,23 @@ async function principal() {
     assert(chamadasShopee.every((s) => s === "419809235"), "chamou outra loja");
   });
 
-  console.log("\n[C. ML: mapa de custo nunca lê Shopee]");
-  t("C. mesmo dono com 1200 Shopee + 1100 ML ativos → mapa ML tem os 1100 ML e nenhum Shopee", async () => {
+  console.log("\n[C. ML: mapa de custo nunca lê Shopee nem outra loja ML]");
+  t("C. mesmo dono com 1200 Shopee + 1100 ML-A + 50 ML-B (mesmos item_ids) → mapa da loja A só com os 1100 da A", async () => {
     const linhas: Linha[] = [];
-    for (let i = 0; i < 1200; i++) linhas.push(anuncio(`s${pad(i)}`, DONO_X, "Shopee", LOJA_A, String(300000 + i)));
-    for (let i = 0; i < 1100; i++) linhas.push(anuncio(`m${pad(i)}`, DONO_X, "ML", null, `MLB${400000 + i}`));
-    for (let i = 0; i < 30; i++) linhas.push(anuncio(`y${pad(i)}`, DONO_Y, "ML", null, `MLB${500000 + i}`));
+    for (let i = 0; i < 1200; i++) linhas.push(anuncio(`s${pad(i)}`, DONO_X, "Shopee", LOJA_C, String(300000 + i)));
+    for (let i = 0; i < 1100; i++) linhas.push(anuncio(`m${pad(i)}`, DONO_X, "ML", LOJA_A, `MLB${400000 + i}`));
+    for (let i = 0; i < 50; i++) linhas.push(anuncio(`b${pad(i)}`, DONO_X, "ML", LOJA_B, `MLB${400000 + i}`));
+    for (let i = 0; i < 30; i++) linhas.push(anuncio(`y${pad(i)}`, DONO_Y, "ML", LOJA_A, `MLB${500000 + i}`));
     MAX_ROWS = 1000; db = { anuncios: linhas }; consultas = [];
-    const mapa = await SML.carregarMapaAnunciosML(DONO_X);
+    const mapa = await SML.carregarMapaAnunciosML(DONO_X, LOJA_A);
     const ids = [...mapa.values()].map((a: any) => a.id);
     assert(mapa.size === 1100 && ids.every((id) => String(id).startsWith("m")), `ml=${mapa.size} amostra=${ids.slice(0, 3)}`);
-    assert(consultas.filter((c) => c.tabela === "anuncios").every((c) => c.filtros.some(([k, col, v]: any) => k === "eq" && col === "marketplace" && v === "ML")), "consulta sem marketplace ML");
-    assert(/const mapaAnuncios = await carregarMapaAnunciosML\(userId\);/.test(fonte("lib/sync-ml.ts")), "sync ML nao usa o mapa filtrado");
+    const doAnuncios = consultas.filter((c) => c.tabela === "anuncios");
+    assert(doAnuncios.every((c) => c.filtros.some(([k, col, v]: any) => k === "eq" && col === "marketplace" && v === "ML")), "consulta sem marketplace ML");
+    assert(doAnuncios.every((c) => c.filtros.some(([k, col, v]: any) => k === "eq" && col === "loja_id" && v === LOJA_A)), "consulta sem loja");
+    // a chave carrega a loja: o mesmo item na loja B nunca devolve o custo da A
+    assert(SML.buscarAnuncioML(mapa, LOJA_B, "MLB400000", null) === undefined && String(SML.buscarAnuncioML(mapa, LOJA_A, "MLB400000", null)?.id).startsWith("m"), "chave sem loja");
+    assert(/const mapaAnuncios = await carregarMapaAnunciosML\(userId, lojaId\);/.test(fonte("lib/sync-ml.ts")), "sync ML nao usa o mapa da loja");
   });
 
   console.log("\n[D. cliente anon não ganha acesso novo]");

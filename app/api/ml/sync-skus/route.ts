@@ -74,13 +74,15 @@ export async function POST(request: Request) {
   // CDS V2 Fase 0: TODAS as páginas (o PostgREST corta em 1000 sem erro); falha de
   // leitura é 5xx — antes virava "nada para atualizar" em silêncio.
   // CDS V2 Fase 0C: SÓ anúncios ML — row Shopee (mesmo dono, ativa, sem SKU) nunca vira
-  // candidata nem tem o id enviado ao Mercado Livre. Sem loja_id: ML ainda não tem (Fase 2).
+  // candidata nem tem o id enviado ao Mercado Livre. CDS V2 Fase 2D: SÓ da loja cuja credencial
+  // vai ao provider — row de outra loja ML do dono nunca é lida nem escrita aqui.
   const leitura = await lerTodasAsPaginas<any>(() => supabase()
     .from("anuncios")
     .select("id, ml_item_id, variation_id, nome, sku")
     .eq("marketplace", "ML")
     .eq("ativo", true)
     .eq("user_id", userId)
+    .eq("loja_id", conta.lojaId)
     .not("ml_item_id", "is", null)
     .or("sku.is.null,sku.eq."));
 
@@ -207,6 +209,7 @@ export async function POST(request: Request) {
           .eq("id", anuncio.id)
           .eq("user_id", userId)
           .eq("marketplace", "ML")
+          .eq("loja_id", conta.lojaId)
           .eq("ml_item_id", anuncio.ml_item_id)
           .or("sku.is.null,sku.eq.")
           .select("id");

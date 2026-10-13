@@ -100,7 +100,7 @@ function semear() {
   // Um anúncio para `sync-precos` chegar ao fim da rota (e portanto à
   // emissão de cookie de compatibilidade).
   anuncios = [{
-    id: "an-1", user_id: UID_A, marketplace: "ML", ativo: true, ml_item_id: "MLB111", nome: "Produto",
+    id: "an-1", user_id: UID_A, marketplace: "ML", loja_id: LOJA_A, ativo: true, ml_item_id: "MLB111", nome: "Produto",   // estado 3: row ML tem loja
     preco_anuncio: 100, sku: null, custo_produto: 10, imposto: 0.1, custo_frete: 0,
   }];
 }

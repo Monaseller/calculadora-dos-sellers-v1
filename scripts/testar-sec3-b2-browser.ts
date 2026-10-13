@@ -234,10 +234,12 @@ const filtroDono = (c: Chamada) => c.filtros.find(([tipo, col]) => tipo === "eq"
 const escritas = () => chamadas.filter((c) => c.op !== "select");
 const anuncio = (id: string) => BANCO.anuncios.find((a) => a.id === id);
 
+// CDS V2 Fase 2D (D2 = identidade): o formulário válido é um anúncio ML MANUAL — sem identidade do
+// provider (ml_item_id / variation_id nascem só pela importação); a loja vem do servidor (LOJA_A).
 const FORM_VALIDO = {
   nome: "Produto X", marketplace: "ML", categoria: null, tipo_anuncio: "Clássico", tipo_conta_shopee: null,
   custo_produto: 10, insumos: 0, custo_frete: 0, frete_gratis: false, imposto: 6, margem_desejada: 20,
-  preco_ideal: null, preco_anuncio: 50, sku: "SKU1", peso_kg: null, ml_item_id: "MLB1", variation_id: null,
+  preco_ideal: null, preco_anuncio: 50, sku: "SKU1", peso_kg: null,
   thumbnail: null, permalink: null, ativo: true, logistic_type: "me2",
 };
 
@@ -361,12 +363,12 @@ async function principal() {
     const r = await rotaLista.POST(req("/api/anuncios", { method: "POST", body: FORM_VALIDO }));
     assert(r.status === 401 && chamadas.length === 0, `status ${r.status}`);
   });
-  t("D2. formulario valido -> 201 e o dono gravado e o da SESSAO", async () => {
+  t("D2. formulario valido -> 201; dono gravado = SESSAO e loja = a loja ML do dono resolvida NO SERVIDOR", async () => {
     reset();
     const r = await rotaLista.POST(req("/api/anuncios", { sessao: sessaoA, method: "POST", body: FORM_VALIDO }));
     assert(r.status === 201, `status ${r.status}`);
     const ins = escritas();
-    assert(ins.length === 1 && ins[0].op === "insert" && ins[0].payload.user_id === UID_A, JSON.stringify(ins));
+    assert(ins.length === 1 && ins[0].op === "insert" && ins[0].payload.user_id === UID_A && ins[0].payload.loja_id === LOJA_A, JSON.stringify(ins));
   });
   t("D3/K1. body com user_id de B -> 400, nenhuma escrita (dono nao e escolhido pelo browser)", async () => {
     reset();
@@ -377,6 +379,38 @@ async function principal() {
     reset();
     const r = await rotaLista.POST(req("/api/anuncios", { sessao: sessaoA, method: "POST", body: { ...FORM_VALIDO, loja_id: LOJA_B } }));
     assert(r.status === 400 && escritas().length === 0, `status ${r.status}`);
+  });
+  t("K3. ML manual + body tenta loja_id de uma loja ML de OUTRO dono -> recusado; nunca grava naquela loja", async () => {
+    reset();
+    const lojaML_B = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    BANCO.lojas.push({ id: lojaML_B, user_id: UID_B, marketplace: "ML", nickname: "conta-b-ml", ativo: true });
+    const r = await rotaLista.POST(req("/api/anuncios", { sessao: sessaoA, method: "POST", body: { ...FORM_VALIDO, loja_id: lojaML_B } }));
+    assert(r.status === 400 && escritas().length === 0, `status ${r.status}`);
+    assert(!BANCO.anuncios.some((a) => a.loja_id === lojaML_B), "gravou na loja de outro dono");
+  });
+  t("K4. POST ML com ml_item_id -> 400 ML_PROVIDER_IDENTITY_MANUAL_CREATE_NOT_ALLOWED, antes de qualquer escrita", async () => {
+    reset();
+    const r = await rotaLista.POST(req("/api/anuncios", { sessao: sessaoA, method: "POST", body: { ...FORM_VALIDO, ml_item_id: "MLB1" } }));
+    const corpo = await r.json() as any;
+    assert(r.status === 400 && corpo.codigo === "ML_PROVIDER_IDENTITY_MANUAL_CREATE_NOT_ALLOWED" && escritas().length === 0, `${r.status} ${JSON.stringify(corpo)}`);
+  });
+  t("K5. POST ML com variation_id -> 400 ML_PROVIDER_IDENTITY_MANUAL_CREATE_NOT_ALLOWED, antes de qualquer escrita", async () => {
+    reset();
+    const r = await rotaLista.POST(req("/api/anuncios", { sessao: sessaoA, method: "POST", body: { ...FORM_VALIDO, variation_id: "501" } }));
+    const corpo = await r.json() as any;
+    assert(r.status === 400 && corpo.codigo === "ML_PROVIDER_IDENTITY_MANUAL_CREATE_NOT_ALLOWED" && escritas().length === 0, `${r.status} ${JSON.stringify(corpo)}`);
+  });
+  t("K6. ML manual sem loja ML resolvível (0 lojas ML; ou 2+ sem contexto) -> 409 STORE_SELECTION_REQUIRED, nenhuma escrita", async () => {
+    reset();
+    BANCO.lojas = BANCO.lojas.filter((l) => l.id !== LOJA_A);
+    const r0 = await rotaLista.POST(req("/api/anuncios", { sessao: sessaoA, method: "POST", body: FORM_VALIDO }));
+    const c0 = await r0.json() as any;
+    assert(r0.status === 409 && c0.codigo === "STORE_SELECTION_REQUIRED" && escritas().length === 0, `0 lojas: ${r0.status} ${JSON.stringify(c0)}`);
+    reset();
+    BANCO.lojas.push({ id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", user_id: UID_A, marketplace: "ML", nickname: "conta-a2", ativo: true });
+    const r2 = await rotaLista.POST(req("/api/anuncios", { sessao: sessaoA, method: "POST", body: FORM_VALIDO }));
+    const c2 = await r2.json() as any;
+    assert(r2.status === 409 && c2.codigo === "STORE_SELECTION_REQUIRED" && escritas().length === 0, `2 lojas: ${r2.status} ${JSON.stringify(c2)}`);
   });
   t("I1. whitelist: id/created_at/campo desconhecido -> recusados", () => {
     for (const extra of [{ id: "x" }, { created_at: "2020-01-01" }, { coluna_nova: 1 }, { user_id: UID_A }]) {
@@ -393,11 +427,11 @@ async function principal() {
     assert(!servico.montarCamposGravaveis({}, true).ok, "edicao vazia");
     assert(!servico.montarCamposGravaveis([1], false).ok, "array como corpo");
   });
-  t("I3. o objeto gravado tem EXATAMENTE os campos da whitelist + user_id", async () => {
+  t("I3. o objeto gravado tem EXATAMENTE os campos da whitelist + user_id + loja_id (do servidor)", async () => {
     reset();
     await rotaLista.POST(req("/api/anuncios", { sessao: sessaoA, method: "POST", body: FORM_VALIDO }));
     const chaves = Object.keys(escritas()[0].payload).sort();
-    const esperado = [...Object.keys(FORM_VALIDO), "user_id"].sort();
+    const esperado = [...Object.keys(FORM_VALIDO), "user_id", "loja_id"].sort();
     assert(JSON.stringify(chaves) === JSON.stringify(esperado), chaves.join(","));
     assert(Object.keys(FORM_VALIDO).every((k) => k in servico.CAMPOS_GRAVAVEIS), "form fora da whitelist");
   });

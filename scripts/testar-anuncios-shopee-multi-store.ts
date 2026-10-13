@@ -247,9 +247,13 @@ async function principal() {
     const n = db.anuncios.length;
     const r1 = await rotaAnuncios.POST(post("/api/anuncios", { nome: "x", marketplace: "Shopee", custo_produto: 1, ml_item_id: "7001" }));
     assert(r1.status === 400 && db.anuncios.length === n, `POST Shopee manual ${r1.status}`);
+    // CDS V2 Fase 2D (D2 = identidade): POST manual ML COM identidade do provider → recusado, 0 escritas
     const ml = await rotaAnuncios.POST(post("/api/anuncios", { nome: "ml", marketplace: "ML", custo_produto: 1, ml_item_id: "MLB1" }));
-    assert(ml.status === 201, `POST ML ${ml.status} (fluxo ML nao pode quebrar)`);
-    const linhaMl = db.anuncios.find((a) => a.marketplace === "ML")!; const antesMl = JSON.stringify(linhaMl);
+    const corpoMl = await ml.json() as any;
+    assert(ml.status === 400 && corpoMl.codigo === "ML_PROVIDER_IDENTITY_MANUAL_CREATE_NOT_ALLOWED" && db.anuncios.length === n, `POST ML com ml_item_id ${ml.status} ${JSON.stringify(corpoMl)}`);
+    // a row ML dos cenários seguintes nasce como nasceria pela importação da loja ML: semeada no banco
+    db.anuncios.push({ id: "ml-semeado", user_id: DONO_X, marketplace: "ML", loja_id: LOJA_C, ml_item_id: "MLB1", variation_id: null, nome: "ml", custo_produto: 1, ativo: true });
+    const linhaMl = db.anuncios.find((a) => a.id === "ml-semeado")!; const antesMl = JSON.stringify(linhaMl);
     const r2 = await patch(String(linhaMl.id), { marketplace: "Shopee", ml_item_id: "7001" });
     assert(r2.status === 400 && JSON.stringify(db.anuncios.find((a) => a.id === linhaMl.id)) === antesMl, `ML virou Shopee pela edicao (${r2.status})`);
     assert(regraBanco({ user_id: DONO_X, loja_id: null, marketplace: "Shopee", ml_item_id: "1" }) === "23514 shopee_exige_loja", "regra shopee-exige-loja");

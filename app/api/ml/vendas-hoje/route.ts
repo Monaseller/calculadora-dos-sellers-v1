@@ -3,6 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { autenticarRequisicao, lerCookie } from "@/lib/autenticacao";
 import { contarLojasMLAtivasDoDono, MULTI_ML_VENDAS_NOT_READY, resolverContaML } from "@/lib/ml-conexao";
+import { lerTodasAsPaginas } from "@/lib/anuncios/leitura-paginada";
 
 // SEC-3-B1: dados sensiveis (SEC-3) so por service_role, server-side.
 // O cliente nasce sob demanda — nunca no import — a partir do helper
@@ -87,14 +88,22 @@ export async function GET(request: Request) {
   }
 
   // 4. Busca anúncios cadastrados no Supabase
-  let anunciosQuery = supabase()
+  // Filtro de dono INCONDICIONAL: `userId` vem da sessão (acima). CDS V2 Fase 2D: SÓ anúncios ML da
+  // LOJA cuja credencial buscou os pedidos (nunca Shopee, nunca outra loja ML), TODAS as páginas;
+  // leitura falha → 5xx (um mapa vazio gravaria vendas_dia sem anúncio, em silêncio).
+  const leitura = await lerTodasAsPaginas<any>(() => supabase()
     .from("anuncios")
     .select("id, ml_item_id, nome, preco_ideal, custo_produto, insumos, custo_frete, frete_gratis, imposto, margem_desejada")
+    .eq("marketplace", "ML")
+    .eq("loja_id", conta.lojaId)
     .eq("ativo", true)
-    .not("ml_item_id", "is", null);
-  // Filtro de dono INCONDICIONAL: `userId` vem da sessão (acima).
-  anunciosQuery = anunciosQuery.eq("user_id", userId);
-  const { data: anuncios } = await anunciosQuery;
+    .eq("user_id", userId)
+    .not("ml_item_id", "is", null));
+  if (!leitura.ok) {
+    console.error("[GET /api/ml/vendas-hoje] falha ao ler anúncios:", leitura.motivo);
+    return NextResponse.json({ erro: true, mensagem: "Não foi possível carregar os anúncios agora." }, { status: 503 });
+  }
+  const anuncios = leitura.linhas;
 
   const mapa = new Map<string, any>();
   for (const a of (anuncios ?? [])) {

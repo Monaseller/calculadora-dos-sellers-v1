@@ -13,8 +13,9 @@
  *   I3  nenhuma seleção implícita de loja nova: Shopee "mais recente" = 0 chamadores; os usos ML
  *       ainda existentes (dívida da Fase 1) são uma lista FECHADA — chamador novo = falha;
  *   I4  toda rota em app/api/internal/** exige segredo (CRON_SECRET ou x-worker-secret);
- *   I5  ML_SKU_SYNC_NEVER_READS_OR_WRITES_SHOPEE_ROWS (Fase 0C/0C.1): toda leitura paginada de anuncios dos
- *       caminhos ML e todo UPDATE do sync-skus filtram marketplace = "ML" — row Shopee nunca chega ao provider ML nem é escrita por ele;
+ *   I5  ML_SKU_SYNC_NEVER_READS_OR_WRITES_SHOPEE_ROWS (Fase 0C → 2D): em TODO runtime que fala com o ML (detectado),
+ *       toda leitura/escrita de anuncios filtra marketplace = "ML" E loja_id, e a leitura é paginada —
+ *       row Shopee nunca chega ao provider ML nem é escrita por ele, e lojas ML do dono não se misturam;
  *   I6  I6_STORE_IDENTITY_IS_EXPLICIT (Fase 1A): o fallback técnico "<Marketplace> <id>" só nasce em
  *       lib/lojas/identidade.ts; nome de loja só é gravado via camposDeNomeParaGravar na capability
  *       (nunca por rota/navegador, nunca dados.nome cru); callbacks extraem nome só pelos parsers
@@ -24,6 +25,10 @@
  *       credencial (só DELETE legado); nenhum seletor implícito tem chamador; toda rota ML resolve a conta
  *       por loja no servidor; loja única só por opt-in; sync ML exige loja; catálogo e vendas legadas
  *       multi-ML falham fechado antes de provider/escrita; item-thumbnails exige sessão;
+ *   I8  I8_ML_CATALOG_IS_STORE_SCOPED (Fase 2D): leitura/escrita ML com loja_id; todo INSERT com loja_id
+ *       explícito (runtime não depende da ponte do trigger); Import ML V2 com loja obrigatória e cursor preso
+ *       à loja; mapa de custo loja|item|variação; manual ML sem identidade do provider e com loja do
+ *       servidor; identidade imutável no PATCH; Meus Produtos agrupa por marketplace|loja_id|item; barreira multi-ML;
  *   Z   ZONAS PROTEGIDAS sem suíte comportamental própria (telas legadas de Vendas/Dashboard,
  *       constantes financeiras, supabase/**, vercel.json, .env.example, sync-worker.mjs): mudar
  *       exige re-baseline EXPLÍCITO de scripts/zonas-protegidas.json (aparece no diff), nunca
@@ -149,24 +154,40 @@ export function rotasInternasSemSegredo(raiz = RAIZ_V2): string[] {
     .filter((f) => !/CRON_SECRET|x-worker-secret|autenticarRotaInterna|validarSegredo/.test(ler(raiz, f)));
 }
 
-// ── I5: leitores ML (e escritor sync-skus) de anuncios filtram marketplace no banco ──
-export const LEITORES_ML_ANUNCIOS = ["app/api/ml/sync-skus/route.ts", "app/api/ml/sync-precos/route.ts",
-  "app/api/ml/importar-anuncios/route.ts", "lib/sync-ml.ts"];
-export const ESCRITORES_ML_ANUNCIOS = ["app/api/ml/sync-skus/route.ts"];
+// ── I5: ML nunca toca row Shopee; leitura/escrita operacional ML exige marketplace + LOJA (Fase 0C → 2D) ──
+const tiraComentarios = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+/** Runtime (app, lib) que fala com o Mercado Livre — DETECTADO pelo conteúdo, não por lista. */
+export function arquivosQueFalamComML(raiz = RAIZ_V2): string[] {
+  return listar(raiz, "app", "lib").filter((f) => /\.(ts|tsx)$/.test(f))
+    .filter((f) => /api\.mercadolibre\.com|\bresolverContaML\(|\bgetMLLojaById\(/.test(tiraComentarios(ler(raiz, f))));
+}
+export type CadeiaAnuncios = { arquivo: string; texto: string; tipo: "select" | "update" | "insert" | "upsert" | "delete" | "?"; paginada: boolean };
+/** Toda cadeia `.from("anuncios")...;` de um arquivo (até o fim do comando). */
+export function cadeiasAnuncios(raiz: string, arquivo: string): CadeiaAnuncios[] {
+  const src = tiraComentarios(ler(raiz, arquivo));
+  const out: CadeiaAnuncios[] = [];
+  for (const m of src.matchAll(/\.from\(\s*["']anuncios["']\s*\)/g)) {
+    const fim = src.indexOf(";", m.index!);
+    const texto = src.slice(m.index!, fim < 0 ? undefined : fim);
+    const tipo = (/^\.from\([^)]*\)\s*\.(select|update|insert|upsert|delete)\(/.exec(texto)?.[1] ?? "?") as CadeiaAnuncios["tipo"];
+    out.push({ arquivo, texto, tipo, paginada: /lerTodasAsPaginas<\w+>\(\(\)\s*=>\s*[\w.]+\(?\)?\s*$/.test(src.slice(Math.max(0, m.index! - 80), m.index!)) });
+  }
+  return out;
+}
 export function leitoresMLSemMarketplace(raiz = RAIZ_V2): string[] {
   const erros: string[] = [];
-  for (const f of LEITORES_ML_ANUNCIOS) {
-    const blocos = (ler(raiz, f).match(/lerTodasAsPaginas<\w+>\(\(\) => [\s\S]*?\)\);/g) ?? [])
-      .filter((b) => b.includes('.from("anuncios")'));
-    if (!blocos.length) erros.push(`${f}: nenhuma leitura paginada de anuncios encontrada`);
-    for (const b of blocos) if (!b.includes('.eq("marketplace", "ML")')) erros.push(`${f}: leitura de anuncios sem marketplace = "ML"`);
+  const arquivos = arquivosQueFalamComML(raiz);
+  let cadeias = 0;
+  for (const f of arquivos) {
+    for (const c of cadeiasAnuncios(raiz, f)) {
+      cadeias++;
+      if (c.tipo === "insert") continue;                                        // INSERT: ver I8 (loja_id explícito)
+      if (!c.texto.includes('.eq("marketplace", "ML")')) erros.push(`${f}: ${c.tipo} de anuncios sem marketplace = "ML" (row Shopee alcançável pelo ML)`);
+      if (!/\.eq\("loja_id",/.test(c.texto)) erros.push(`${f}: ${c.tipo} de anuncios sem loja_id (lojas ML do mesmo dono se misturam)`);
+      if (c.tipo === "select" && !c.paginada) erros.push(`${f}: leitura operacional de anuncios sem leitura paginada (PostgREST corta em 1000)`);
+    }
   }
-  // WRITE (Fase 0C.1): todo UPDATE de anuncios do sync-skus ML exige marketplace = "ML"
-  for (const f of ESCRITORES_ML_ANUNCIOS) {
-    const escritas = ler(raiz, f).match(/\.from\("anuncios"\)\s*\.update\([\s\S]*?;/g) ?? [];
-    if (!escritas.length) erros.push(`${f}: nenhum UPDATE de anuncios encontrado`);
-    for (const w of escritas) if (!w.includes('.eq("marketplace", "ML")')) erros.push(`${f}: UPDATE de anuncios sem marketplace = "ML"`);
-  }
+  if (!arquivos.length || cadeias === 0) erros.push("ANCORA: nenhum acesso operacional ML a anuncios encontrado (detector cego)");
   return erros;
 }
 
@@ -347,6 +368,95 @@ export function credenciaisMLNaoEscopadasPorLoja(raiz = RAIZ_V2): string[] {
 }
 
 /** Pacote usado pelos guards reescritos: [] = tudo íntegro. */
+// ── I8: catálogo ML escopado por LOJA (Fase 2D) ───────────────────────────
+export const MOTOR_IMPORT_ML = "lib/anuncios/importacao-ml.ts";
+/** Corpo de uma função nomeada (contagem de chaves a partir da 1ª `{` após a assinatura). */
+function corpoDe(src: string, assinatura: RegExp): string | null {
+  const m = assinatura.exec(src); if (!m) return null;
+  let profundidade = 0, k = m.index + m[0].length - 1;
+  for (; k < src.length; k++) { if (src[k] === "(") profundidade++; else if (src[k] === ")" && --profundidade === 0) break; }
+  const abre = src.indexOf("{", src.indexOf(")", k));
+  let n = 0;
+  for (let i = abre; i < src.length; i++) { if (src[i] === "{") n++; else if (src[i] === "}" && --n === 0) return src.slice(abre, i + 1); }
+  return null;
+}
+/**
+ * I8_ML_CATALOG_IS_STORE_SCOPED: (a) toda cadeia de anuncios do runtime que filtra marketplace ML
+ * filtra loja_id; (b) todo INSERT em anuncios grava loja_id explícito (runtime nunca depende da ponte
+ * transitória do trigger); (c) Import ML V2: loja obrigatória, cursor preso à loja validado antes do
+ * provider, credencial resolvida no motor SEM loja única implícita; (d) mapa de custo ML chaveado por
+ * loja|item|variação; (e) criação manual só com loja resolvida no servidor, sem identidade do provider;
+ * (f) PATCH: identidade técnica imutável e loja/dono não graváveis; (g) Meus Produtos agrupa por
+ * marketplace|loja_id|item com a loja real (sem identidade paralela); (h) barreira multi-ML intacta.
+ */
+export function catalogoMLNaoEscopadoPorLoja(raiz = RAIZ_V2): string[] {
+  const erros: string[] = [];
+  const runtime = listar(raiz, "app", "lib", "components").filter((f) => /\.(ts|tsx)$/.test(f));
+  let inserts = 0;
+  for (const f of runtime) {
+    const src = tiraComentarios(ler(raiz, f));
+    if (!/\.from\(\s*["']anuncios["']\s*\)/.test(src)) continue;
+    for (const c of cadeiasAnuncios(raiz, f)) {
+      if (/\.eq\("marketplace",\s*"ML"\)/.test(c.texto) && !/\.eq\("loja_id",/.test(c.texto)) erros.push(`${f}: ${c.tipo} ML de anuncios sem loja_id`);
+      if (c.tipo === "insert" || c.tipo === "upsert") {
+        inserts++;
+        const arg = /\.(?:insert|upsert)\(\s*([\s\S]*)$/.exec(c.texto)?.[1] ?? "";
+        if (arg.trimStart().startsWith("{")) { if (!/\bloja_id\s*[:,}]/.test(arg)) erros.push(`${f}: INSERT em anuncios sem loja_id explícito`); }
+        else {
+          const nome = /^\s*(\w+)/.exec(arg)?.[1] ?? "";
+          const pushes = nome ? [...src.matchAll(new RegExp(`\\b${nome}\\.push\\(\\{([\\s\\S]*?)\\}\\);`, "g"))] : [];
+          if (!pushes.length) erros.push(`${f}: INSERT em anuncios com payload não rastreável (${nome || "?"})`);
+          for (const p of pushes) if (!/\bloja_id\s*:/.test(p[1])) erros.push(`${f}: linha de INSERT em lote (${nome}.push) sem loja_id`);
+        }
+      }
+    }
+  }
+  if (inserts === 0) erros.push("ANCORA: nenhum INSERT em anuncios encontrado (detector cego)");
+
+  // (c) motor Import ML V2
+  if (!existsSync(join(raiz, MOTOR_IMPORT_ML))) erros.push(`${MOTOR_IMPORT_ML} ausente`);
+  else {
+    const m = tiraComentarios(ler(raiz, MOTOR_IMPORT_ML));
+    const corpo = corpoDe(m, /export\s+async\s+function\s+importarCatalogoML\s*\(/) ?? "";
+    if (!corpo) erros.push("motor: importarCatalogoML ausente");
+    const iCursor = corpo.indexOf("lerCursorML("), iConta = corpo.indexOf("resolverContaML("), iFetch = corpo.search(/getML\(|fetch\(/);
+    if (iCursor < 0 || iConta < 0 || iCursor > iConta || (iFetch >= 0 && iFetch < iConta)) erros.push("motor: cursor e loja precisam ser validados ANTES do provider");
+    if (/permitirUnica/.test(m)) erros.push("motor: loja única implícita (permitirUnica) dentro do motor");
+    if (!/resolverContaML\(userId,\s*lojaId\)/.test(corpo)) erros.push("motor: credencial não resolvida pela loja explícita");
+    if (!/c\.l\s*!==\s*lojaId[\s\S]{0,40}CURSOR_DE_OUTRA_LOJA/.test(m)) erros.push("motor: cursor não preso à loja");
+  }
+  // (d) mapa de custo ML
+  const sync = tiraComentarios(ler(raiz, "lib/sync-ml.ts"));
+  if (!/export function chaveAnuncioML\(lojaId: string, mlItemId: string, variationId/.test(sync)) erros.push("lib/sync-ml.ts: chave do mapa de custo ML sem loja|item|variação");
+  if (/mapaAnuncios\.(set|get)\((a\.ml_item_id|mlItemId)\b/.test(sync)) erros.push("lib/sync-ml.ts: mapa de custo ML chaveado só por item");
+  for (const f of runtime) for (const c of tiraComentarios(ler(raiz, f)).matchAll(/carregarMapaAnunciosML\(([^)]*)\)/g)) {
+    if (!/,/.test(c[1])) erros.push(`${f}: carregarMapaAnunciosML sem loja`);
+  }
+  // (e) criação manual / (f) PATCH
+  const serv = tiraComentarios(ler(raiz, "lib/anuncios/servico.ts"));
+  const grav = /export const CAMPOS_GRAVAVEIS[^{]*\{([\s\S]*?)\};/.exec(serv)?.[1] ?? "";
+  if (!grav || /\b(loja_id|user_id)\s*:/.test(grav)) erros.push("servico: loja_id/user_id graváveis pelo browser");
+  const montar = corpoDe(serv, /export function montarCamposGravaveis\(/) ?? "";
+  if (!/campos\.marketplace === "ML"[\s\S]{0,200}ml_item_id[\s\S]{0,120}variation_id[\s\S]{0,200}ML_PROVIDER_IDENTITY_MANUAL_CREATE_NOT_ALLOWED/.test(montar)) erros.push("servico: POST manual ML aceita identidade do provider");
+  for (const f of runtime) for (const c of tiraComentarios(ler(raiz, f)).matchAll(/\bawait\s+criarAnuncio\(([^;]*?)\);/g)) {
+    if (c[1].split(",").length < 4) erros.push(`${f}: criarAnuncio sem loja resolvida no servidor`);
+  }
+  const atualizar = corpoDe(serv, /export async function atualizarAnuncioDoDono\(/) ?? "";
+  if (!/"identidade_recusada"/.test(atualizar) || !/ml_item_id, variation_id/.test(atualizar)) erros.push("servico: PATCH não compara a identidade ML com a do banco");
+  // (g) apresentação
+  const tela = tiraComentarios(ler(raiz, "app/(app)/anuncios/page.tsx"));
+  // a tela agrupa SÓ pelas funções puras da chave por loja — nenhum Map próprio de anúncios
+  if (/\.(get|set)\(a\.ml_item_id\b/.test(tela) || /new Map<string,\s*Anuncio\[\]>/.test(tela)
+    || !/idsDuplicadosAntigos\(anuncios\)/.test(tela) || !/agruparVariacoes\(anunciosFiltrados\)/.test(tela)) erros.push("Meus Produtos: agrupamento fora da chave marketplace|loja_id|item");
+  const agrup = tiraComentarios(ler(raiz, "app/(app)/anuncios/agrupamento.ts"));
+  if (!agrup.includes("`${a.marketplace ?? \"\"}|${a.loja_id ?? \"\"}|${a.ml_item_id}`")) erros.push("Meus Produtos: chave de grupo sem marketplace|loja_id|item");
+  if ((agrup.match(/const chave = chaveDeGrupoAnuncio\(a\);/g) ?? []).length < 2) erros.push("Meus Produtos: funções de agrupamento sem a chave por loja");
+  for (const f of runtime) if (/loja_ref|lojaRef/.test(tiraComentarios(ler(raiz, f)))) erros.push(`${f}: identidade paralela de loja (loja_ref)`);
+  // (h) barreira multi-ML do catálogo
+  for (const f of ROTAS_CATALOGO_ML) if (!/contarLojasMLAtivasDoDono\(userId\) > 1\) \{\s*return NextResponse\.json\(\{ erro: true, codigo: MULTI_ML_CATALOG_NOT_READY/.test(ler(raiz, f))) erros.push(`${f}: barreira MULTI_ML_CATALOG_NOT_READY ausente`);
+  return erros;
+}
+
 export function invariantesV2(raiz = RAIZ_V2, opcoes: { zonas?: boolean } = {}): string[] {
   const erros: string[] = [];
   for (const v of canonicoAlcancaLegado(raiz)) erros.push(`I1 canônico→legado: ${v}`);
@@ -356,6 +466,7 @@ export function invariantesV2(raiz = RAIZ_V2, opcoes: { zonas?: boolean } = {}):
   for (const v of leitoresMLSemMarketplace(raiz)) erros.push(`I5 ML_SKU_SYNC_NEVER_READS_OR_WRITES_SHOPEE_ROWS: ${v}`);
   for (const v of identidadeDeLojaNaoExplicita(raiz)) erros.push(`I6 I6_STORE_IDENTITY_IS_EXPLICIT: ${v}`);
   for (const v of credenciaisMLNaoEscopadasPorLoja(raiz)) erros.push(`I7 I7_ML_CREDENTIALS_ARE_STORE_SCOPED: ${v}`);
+  for (const v of catalogoMLNaoEscopadoPorLoja(raiz)) erros.push(`I8 I8_ML_CATALOG_IS_STORE_SCOPED: ${v}`);
   if (opcoes.zonas !== false) for (const v of verificarZonas(raiz)) erros.push(`Z zona protegida sem re-baseline: ${v}`);
   return erros;
 }

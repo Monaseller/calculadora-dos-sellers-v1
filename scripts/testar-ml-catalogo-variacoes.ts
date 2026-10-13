@@ -67,7 +67,7 @@ function reiniciar(linhas: any[], itens: Record<string, any> = {}, completos: Re
   falharUpdate = new Set(); atualizacoes = []; chamadasRede = [];
 }
 function an(id: string, ml_item_id: string, variation_id: string | null, sku: string | null, extra: Record<string, unknown> = {}) {
-  return { id, user_id: UID, marketplace: "ML", ml_item_id, variation_id, sku, ativo: true, nome: `p-${id}`, loja_id: null,
+  return { id, user_id: UID, marketplace: "ML", ml_item_id, variation_id, sku, ativo: true, nome: `p-${id}`, loja_id: LOJA_A,   // estado 3: row ML tem loja
     preco_anuncio: 10, thumbnail: `thumb-${id}`, ...extra };
 }
 const foto = () => JSON.parse(JSON.stringify(anuncios));

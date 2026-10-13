@@ -25,6 +25,8 @@ import {
   type ResultadoDesativacao,
 } from "./paginacao";
 import { importarShopeeEmFatias } from "./importacao-shopee";
+import { importarMLEmFatias } from "./importacao-ml";
+import { agruparVariacoes, chaveDeGrupoAnuncio, idsDuplicadosAntigos } from "./agrupamento";
 
 export default function AnunciosPage() {
   const [anuncios,    setAnuncios]    = useState<Anuncio[]>([]);
@@ -230,18 +232,25 @@ export default function AnunciosPage() {
     setImportando(true);
     setMsgImport(null);
     try {
-      const res = await fetch("/api/ml/importar-anuncios", { method: "POST" });
-      // `text()` e não `json()`: é o corpo ilegível — função interrompida
-      // por timeout, página de erro do proxy — que precisamos reconhecer,
-      // e `json()` o transformaria em exceção antes de podermos vê-lo.
-      const r = classificarRespostaImportacao(res.status, await res.text(), "Mercado Livre");
-      if (r.classe !== "SUCESSO") {
+      // IMPORT ML V2: em fatias — enquanto `parcial`, continua com o cursor do servidor (preso à loja).
+      const r = await importarMLEmFatias(async (corpo) => {
+        const res = await fetch("/api/ml/importar-anuncios", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(corpo),
+        });
+        // `text()` e não `json()`: é o corpo ilegível — função interrompida
+        // por timeout, página de erro do proxy — que precisamos reconhecer,
+        // e `json()` o transformaria em exceção antes de podermos vê-lo.
+        return { status: res.status, texto: await res.text() };
+      }, (status, texto) => classificarRespostaImportacao(status, texto, "Mercado Livre"),
+      (p) => setMsgImport({ ok: true, texto: `Importando anúncios do ML... ${p.itensProcessados} de ${p.total} processados` }));
+      if (r.tipo === "erro") {
         setMsgImport({ ok: false, texto: r.mensagem });
+        if (r.progresso.importados + r.progresso.atualizados > 0) await carregar();
       } else {
-        const data = r.dados;
+        const p = r.progresso;
         setMsgImport({
           ok: true,
-          texto: `✅ ${data.importados} importados, ${data.atualizados} atualizados${data.erros > 0 ? `, ${data.erros} erros` : ""} — total ${data.total} anúncios no ML`,
+          texto: `✅ ${p.importados} importados, ${p.atualizados} atualizados, ${p.ignorados} sem mudança — total ${p.total} anúncios no ML`,
         });
         // Foca o marketplace que acabou de ser importado. A lista é
         // unificada e abre em "todos"; com 802 anúncios Shopee no meio, o
@@ -348,24 +357,8 @@ export default function AnunciosPage() {
   }
 
   // ── IDs dos duplicados antigos ───────────────────────────────────────────
-  const idsAntigosDuplicados = useMemo(() => {
-    const grupos = new Map<string, Anuncio[]>();
-    anuncios.forEach(a => {
-      if (a.ml_item_id) {
-        const g = grupos.get(a.ml_item_id) ?? [];
-        g.push(a);
-        grupos.set(a.ml_item_id, g);
-      }
-    });
-    const ids = new Set<string>();
-    grupos.forEach(grupo => {
-      if (grupo.length <= 1) return;
-      // Grupos onde todos têm variation_id são variações intencionais — não duplicados
-      if (grupo.every(a => a.variation_id)) return;
-      grupo.slice(1).forEach(a => ids.add(a.id));
-    });
-    return ids;
-  }, [anuncios]);
+  // marketplace|loja_id|ml_item_id: o mesmo item em outra loja (ou marketplace) não é duplicata
+  const idsAntigosDuplicados = useMemo(() => idsDuplicadosAntigos(anuncios), [anuncios]);
 
   // ── Lista filtrada ───────────────────────────────────────────────────────
   const anunciosFiltrados = useMemo(() => {
@@ -392,21 +385,8 @@ export default function AnunciosPage() {
 
   // ── Agrupar variações ────────────────────────────────────────────────────
   const { soloAnuncios, gruposVariacoes } = useMemo(() => {
-    const mlIdMap = new Map<string, Anuncio[]>();
-    const soloList: Anuncio[] = [];
-    for (const a of anunciosFiltrados) {
-      if (a.variation_id && a.ml_item_id) {
-        const g = mlIdMap.get(a.ml_item_id) ?? [];
-        g.push(a);
-        mlIdMap.set(a.ml_item_id, g);
-      } else {
-        soloList.push(a);
-      }
-    }
-    return {
-      soloAnuncios:   soloList,
-      gruposVariacoes: [...mlIdMap.values()],
-    };
+    const { solo, grupos } = agruparVariacoes(anunciosFiltrados);
+    return { soloAnuncios: solo, gruposVariacoes: grupos };
   }, [anunciosFiltrados]);
 
   // ── Indicador de filtros ativos ──────────────────────────────────────────
@@ -1127,7 +1107,7 @@ export default function AnunciosPage() {
             const grupoIds = grupo.map(v => v.id);
             const todosSelected = grupoIds.every(id => selectedIds.has(id));
             return (
-              <div key={grupo[0].ml_item_id} style={{ position: "relative" }}>
+              <div key={chaveDeGrupoAnuncio(grupo[0]) ?? grupo[0].id} style={{ position: "relative" }}>
                 {modoSelecao && (
                   <div
                     onClick={() => toggleSelectGrupo(grupoIds)}

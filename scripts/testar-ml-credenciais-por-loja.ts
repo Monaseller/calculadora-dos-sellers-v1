@@ -243,7 +243,7 @@ async function principal() {
   });
   t("12. catálogo com UMA conta ML segue funcionando pela loja única explícita (TOKEN_V)", async () => {
     semear();
-    BANCO.anuncios.push({ id: "an-v", user_id: V, marketplace: "ML", ativo: true, ml_item_id: "MLB777", sku: null, nome: "produto v" });
+    BANCO.anuncios.push({ id: "an-v", user_id: V, marketplace: "ML", loja_id: ML_V, ativo: true, ml_item_id: "MLB777", sku: null, nome: "produto v" });
     const [, rota] = catalogo.find(([n]) => n === "sync-skus")!;
     const res = await rota(req(`/api/ml/sync-skus`, { cds_session: sessao.V }, "POST"));
     assert(res.status === 200 && tokensUsados().length > 0 && tokensUsados().every((x) => x === TOKEN_V), `${res.status} tokens=${tokensUsados()}`);

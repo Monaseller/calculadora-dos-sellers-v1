@@ -221,11 +221,13 @@ const UID_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const UID_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const LOJA_A = "11111111-1111-4111-8111-111111111111";
 const LOJA_B = "22222222-2222-4222-8222-222222222222";
+/** Loja ML do dono B (estado 3: anúncio ML de B pertence a uma loja ML de B, nunca à Shopee). */
+const LOJA_ML_B = "77777777-7777-4777-8777-777777777777";
 const PROJ_B = "55555555-5555-4555-8555-555555555555";
 const JOB_B = "66666666-6666-4666-8666-666666666666";
 const DIA = "2026-09-01";
 
-interface Chamada { tabela: string; op: string; filtros: [string, string, unknown][]; payload?: unknown }
+interface Chamada { tabela: string; op: string; filtros: [string, string, unknown][]; payload?: unknown; faixa?: [number, number] }
 let chamadas: Chamada[] = [];
 let BANCO: Record<string, any[]> = {};
 function bancoPadrao(): Record<string, any[]> {
@@ -233,14 +235,16 @@ function bancoPadrao(): Record<string, any[]> {
     lojas: [
       { id: LOJA_A, user_id: UID_A, marketplace: "ML", nickname: "conta-a", ativo: true, partner_id: "p", partner_key: "<k-a>", access_token: "<t-a>", shop_id: 1 },
       { id: LOJA_B, user_id: UID_B, marketplace: "Shopee", nickname: "conta-b", ativo: true, partner_id: "p", partner_key: "<k-b>", access_token: "<t-b>", shop_id: 2 },
+      { id: LOJA_ML_B, user_id: UID_B, marketplace: "ML", nickname: "conta-b-ml", ativo: true, access_token: "<t-b-ml>" },
     ],
     pedidos: [
       { id: "pa", user_id: UID_A, loja_id: LOJA_A, data_pagamento: DIA, data_criacao: DIA },
       { id: "pb", user_id: UID_B, loja_id: LOJA_B, data_pagamento: DIA, data_criacao: DIA },
     ],
     anuncios: [
-      { id: "anuncio-a", user_id: UID_A, ativo: true, ml_item_id: "MLB1", nome: "A", margem_desejada: 10 },
-      { id: "anuncio-b", user_id: UID_B, ativo: true, ml_item_id: "MLB1", nome: "B", margem_desejada: 10 },
+      // CDS V2 Fase 2D: fixture no estado 3 (toda row ML tem marketplace + loja do proprio dono)
+      { id: "anuncio-a", user_id: UID_A, marketplace: "ML", loja_id: LOJA_A, ativo: true, ml_item_id: "MLB1", nome: "A", margem_desejada: 10 },
+      { id: "anuncio-b", user_id: UID_B, marketplace: "ML", loja_id: LOJA_ML_B, ativo: true, ml_item_id: "MLB1", nome: "B", margem_desejada: 10 },
     ],
     sync_jobs: [
       { id: JOB_B, user_id: UID_B, loja_id: LOJA_B, marketplace: "Shopee", tipo: "incremental", status: "rodando" },
@@ -256,10 +260,12 @@ function clienteFalso() {
       chamadas.push(reg);
       if (reg.op === "insert") return [{ id: "job-novo", ...(reg.payload as object) }];
       if (reg.op !== "select") return [];
-      return (BANCO[tabela] ?? []).filter((l) => reg.filtros.every(([tipo, col, v]) =>
+      const filtradas = (BANCO[tabela] ?? []).filter((l) => reg.filtros.every(([tipo, col, v]) =>
         tipo === "eq" ? String(l[col]) === String(v)
           : tipo === "in" ? (v as unknown[]).map(String).includes(String(l[col]))
           : true));
+      // PostgREST: .range(de, ate) recorta o resultado JÁ filtrado (página além do fim → []).
+      return reg.faixa ? filtradas.slice(reg.faixa[0], reg.faixa[1] + 1) : filtradas;
     };
     const c: any = new Proxy({}, {
       get(_alvo, prop: string) {
@@ -270,6 +276,7 @@ function clienteFalso() {
         return (...args: unknown[]) => {
           if (["insert", "update", "upsert", "delete"].includes(prop)) { reg.op = prop; reg.payload = args[0]; }
           if (prop === "eq" || prop === "in") reg.filtros.push([prop, String(args[0]), args[1]]);
+          if (prop === "range") reg.faixa = [Number(args[0]), Number(args[1])];
           return c;
         };
       },

@@ -35,11 +35,13 @@ export type ColunaAnuncio = (typeof DB_ANUNCIO_COLUMNS)[number];
 export const DERIVED_UI_FIELDS = ["lucro_liquido", "margem_contribuicao"] as const;
 
 /**
- * Meus Produtos (lista + edição): todas as colunas físicas, menos o dono e a
- * loja (`loja_id` não vai ao browser sem decisão própria — payload inalterado).
+ * Meus Produtos (lista + edição): todas as colunas físicas, menos o dono.
+ * CDS V2 Fase 2D: `loja_id` vai ao browser como identidade TÉCNICA da loja (sem hash paralelo):
+ * a tela agrupa ML por marketplace|loja_id|ml_item_id para nunca fundir lojas. Não é exibido e
+ * não é autoridade — toda escrita revalida loja no servidor.
  */
 export const COLUNAS_ANUNCIO_TELA: string = DB_ANUNCIO_COLUMNS
-  .filter((c) => c !== "user_id" && c !== "loja_id")
+  .filter((c) => c !== "user_id")
   .join(", ");
 
 /**
