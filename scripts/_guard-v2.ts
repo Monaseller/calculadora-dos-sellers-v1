@@ -35,6 +35,11 @@
  *       NULL; observação só de identidade presente na resposta; gravação em lote por ids + dono + marketplace
  *       + loja, confirmando todas as rows; existentes lidos sem filtro de ativo; escrita de observação antes
  *       do cursor e fail-closed; Shopee sem status (não infere NORMAL); provider nunca escreve ativo;
+ *   I10 I10_KNOWN_ID_REFRESH_IS_STORE_SCOPED (Fase 2H-D): refresh de identidades conhecidas — fonte por dono +
+ *       marketplace + loja + item não nulo (sem filtro de ativo/status/visto), dedup por item da loja, cursor
+ *       preso a marketplace + loja + tipo "refresh" antes do provider, credencial da loja, positivo só com id
+ *       pedido == id devolvido (ML code 200), sem inferência de 404/ausência, variação/model só se voltou,
+ *       escrita só pelo helper de observação, checkpoint depois da escrita;
  *   Z   ZONAS PROTEGIDAS sem suíte comportamental própria (telas legadas de Vendas/Dashboard,
  *       constantes financeiras, supabase/**, vercel.json, .env.example, sync-worker.mjs): mudar
  *       exige re-baseline EXPLÍCITO de scripts/zonas-protegidas.json (aparece no diff), nunca
@@ -320,7 +325,7 @@ export function mudancasDeBancoSemRevisao(raiz: string, base: string, opcoes: { 
  * Rotas de catálogo ML. Fase 2F (estado 4): multi-ML PERMITIDO (MULTI_ML_CATALOG_ALLOWED) — no lugar da
  * barreira, a loja sai SÓ de lib/ml-loja-catalogo.ts, antes de provider/banco.
  */
-export const ROTAS_CATALOGO_ML = ["app/api/ml/importar-anuncios/route.ts", "app/api/ml/sync-precos/route.ts", "app/api/ml/sync-skus/route.ts"];
+export const ROTAS_CATALOGO_ML = ["app/api/ml/importar-anuncios/route.ts", "app/api/ml/sync-precos/route.ts", "app/api/ml/sync-skus/route.ts", "app/api/ml/refresh-identidades/route.ts"];
 export const HELPER_LOJA_CATALOGO_ML = "lib/ml-loja-catalogo.ts";
 /** Rotas de vendas legadas ML (cache/dados não escopados por loja): 2+ contas ML falham fechado (MULTI_ML_VENDAS_BLOCKED). */
 export const ROTAS_VENDAS_LEGADAS_ML = ["app/api/ml/vendas/route.ts", "app/api/ml/vendas-hoje/route.ts"];
@@ -572,6 +577,59 @@ export function observacaoMisturadaComAtivo(raiz = RAIZ_V2): string[] {
   return erros;
 }
 
+// ── I10: refresh de identidades conhecidas, por loja (Fase 2H-D) ─────────
+export const REFRESH_COMUM = "lib/anuncios/refresh-identidades.ts";
+const REFRESH_MOTORES: Array<{ arquivo: string; m: "ML" | "Shopee" }> = [
+  { arquivo: "lib/anuncios/refresh-identidades-ml.ts", m: "ML" },
+  { arquivo: "lib/anuncios/refresh-identidades-shopee.ts", m: "Shopee" },
+];
+/**
+ * I10_KNOWN_ID_REFRESH_IS_STORE_SCOPED: o refresh lê a fonte por dono + marketplace + loja + item não nulo (sem
+ * filtro de ativo/status/visto), agrupa só linhas da loja, valida o cursor (marketplace + loja + "refresh")
+ * ANTES do provider, usa a credencial da loja, só observa resposta positiva com o MESMO id pedido, não infere
+ * nada de 404/ausência, só observa variação/model que voltou, escreve só pelo helper e avança o checkpoint
+ * depois da escrita (falha → erro).
+ */
+export function refreshDeIdentidadesForaDaLoja(raiz = RAIZ_V2): string[] {
+  const erros: string[] = [];
+  for (const f of [REFRESH_COMUM, ...REFRESH_MOTORES.map((x) => x.arquivo)]) if (!existsSync(join(raiz, f))) return [`${f} ausente`];
+  const c = tiraComentarios(ler(raiz, REFRESH_COMUM));
+  if (!/c\.k !== "refresh" \|\| c\.m !== m/.test(c) || !/if \(c\.l !== lojaId\) return \{ ok: false, motivo: "CURSOR_DE_OUTRA_LOJA" \};/.test(c)) erros.push("cursor do refresh sem tipo/marketplace/loja");
+  if (!/if \(row\.loja_id !== lojaId\) throw new ErroRefreshIdentidades/.test(c)) erros.push("fonte do refresh aceita linha de outra loja");
+  if (/\b(deleted|closed|inactive|paused|NORMAL|UNLIST|BANNED)\b/.test(c)) erros.push("refresh comum menciona status inferido");
+  for (const { arquivo, m } of REFRESH_MOTORES) {
+    const s = tiraComentarios(ler(raiz, arquivo));
+    const fonte = /const leitura = await lerTodasAsPaginas[\s\S]*?\)\);/.exec(s)?.[0] ?? "";
+    if (!new RegExp(`\\.eq\\("marketplace", "${m}"\\)\\s*\\.eq\\("user_id", userId\\)\\s*\\.eq\\("loja_id", lojaId\\)\\s*\\.not\\("ml_item_id", "is", null\\)`).test(fonte)) erros.push(`${arquivo}: fonte fora de dono + ${m} + loja + item`);
+    if (/\.eq\("(ativo|status_marketplace|visto_em)"|\.is\("(status_marketplace|visto_em)"/.test(fonte)) erros.push(`${arquivo}: fonte filtra ativo/status/visto (soft-deleted deixa de ser refrescável)`);
+    if (!new RegExp(`agruparFonte\\(leitura\\.linhas, lojaId, "${m}"\\)`).test(s)) erros.push(`${arquivo}: fonte não agrupada pela loja`);
+    const iCursor = s.indexOf(`lerCursorRefresh(args.cursor, "${m}", lojaId)`);
+    const iProvider = s.search(m === "ML" ? /resolverContaML\(|await getML\(/ : /await chamarShopee\(/);
+    if (iCursor < 0 || iProvider < 0 || iCursor > iProvider) erros.push(`${arquivo}: cursor validado depois do provider (ou ausente)`);
+    if (/\b(deleted|closed|inactive|paused|NORMAL|UNLIST|BANNED)\b|\b404\b/.test(s)) erros.push(`${arquivo}: inferência de status/404`);
+    if (/\b(status_marketplace|visto_em|ativo)\s*:/.test(s)) erros.push(`${arquivo}: escreve campo de observação/ativo fora do helper`);
+    const iGrava = s.search(new RegExp(`if \\(pares\\.length > 0 && !\\(await gravarObservacoes\\(banco, \\{ userId, lojaId, marketplace: "${m}" \\}, pares\\)\\)\\) \\{\\s*throw new ErroRefreshIdentidades`));
+    const iCk = s.search(m === "ML" ? /cursorItem = lote\[lote\.length - 1\];/ : /if \(k > 0\) cursorItem = lote\[k - 1\];/);
+    if (iGrava < 0 || iCk < 0 || iGrava > iCk) erros.push(`${arquivo}: checkpoint antes da escrita (ou escrita sem falhar fechado)`);
+    if (m === "ML") {
+      if (!/const conta = await resolverContaML\(userId, lojaId\);/.test(s) || /permitirUnica/.test(s) || !/if \(conta\.lojaId !== lojaId\) throw/.test(s)) erros.push(`${arquivo}: credencial não é a da loja`);
+      if (!/if \(id === null \|\| !lote\.includes\(id\)\) continue;/.test(s) || !/if \(x\.code === 200\) positivos\.set\(id, x\.body\);/.test(s)) erros.push(`${arquivo}: positivo sem code 200 + id pedido`);
+      if ((s.match(/observacaoPositiva\(/g) ?? []).length !== 1 || !/observacaoPositiva\(instante, body\.status\)/.test(s)) erros.push(`${arquivo}: status não é o RAW de body.status`);
+      if (!/voltaram\.has\(String\(r\.variation_id\)\)/.test(s)) erros.push(`${arquivo}: variação observada sem ter voltado`);
+    } else {
+      const obs = [...s.matchAll(/observacaoPositiva\(([^;]*?)\);/g)].map((x) => x[1]);
+      if (obs.length !== 1 || obs[0] !== "observadoEm()") erros.push(`${arquivo}: Shopee passa status (não provado)`);
+      if (!/lote\.includes\(String\(it\.item_id\)\)/.test(s)) erros.push(`${arquivo}: item fora do lote pedido aceito`);
+      if (!/voltaram\.has\(String\(x\.variation_id\)\)/.test(s)) erros.push(`${arquivo}: model observado sem ter voltado`);
+    }
+  }
+  const rotaSP = tiraComentarios(ler(raiz, "app/api/shopee/refresh-identidades/route.ts"));
+  const iSel = rotaSP.search(/selecionarLojaShopee\(userId, \{[\s\S]{0,200}usarCookie: false/), iCred = rotaSP.search(/getShopeeLojaById\(lojaId, userId\)/), iMot = rotaSP.search(/refrescarIdentidadesShopee\(/);
+  if (iSel < 0 || iCred < iSel || iMot < iCred) erros.push("rota Shopee do refresh: loja explícita → credencial da loja → motor fora de ordem");
+  if (!ROTAS_CATALOGO_ML.includes("app/api/ml/refresh-identidades/route.ts")) erros.push("rota ML do refresh fora das rotas de catálogo (I7)");
+  return erros;
+}
+
 export function invariantesV2(raiz = RAIZ_V2, opcoes: { zonas?: boolean } = {}): string[] {
   const erros: string[] = [];
   for (const v of canonicoAlcancaLegado(raiz)) erros.push(`I1 canônico→legado: ${v}`);
@@ -583,6 +641,7 @@ export function invariantesV2(raiz = RAIZ_V2, opcoes: { zonas?: boolean } = {}):
   for (const v of credenciaisMLNaoEscopadasPorLoja(raiz)) erros.push(`I7 I7_ML_CREDENTIALS_ARE_STORE_SCOPED: ${v}`);
   for (const v of catalogoMLNaoEscopadoPorLoja(raiz)) erros.push(`I8 I8_ML_CATALOG_IS_STORE_SCOPED: ${v}`);
   for (const v of observacaoMisturadaComAtivo(raiz)) erros.push(`I9 I9_MARKETPLACE_OBSERVATION_IS_SEPARATE_FROM_ATIVO: ${v}`);
+  for (const v of refreshDeIdentidadesForaDaLoja(raiz)) erros.push(`I10 I10_KNOWN_ID_REFRESH_IS_STORE_SCOPED: ${v}`);
   if (opcoes.zonas !== false) for (const v of verificarZonas(raiz)) erros.push(`Z zona protegida sem re-baseline: ${v}`);
   return erros;
 }
