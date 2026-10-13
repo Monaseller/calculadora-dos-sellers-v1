@@ -263,12 +263,28 @@ async function principal() {
     for (const id of ids) assert(completo(cat, LOJA_B, id), `item ${id} incompleto`);
     assert(r.progresso.ignorados > 0 && r.progresso.atualizados === 0, JSON.stringify(r.progresso));
   });
-  t("G. linha igual a da Shopee → NENHUM update", async () => {
+  // Fase 2H-C: a linha comercialmente igual nao tem UPDATE de NEGOCIO; o writer de observacao pode
+  // gravar SO { visto_em } (status Shopee nao provado), preso a ids da loja B + dono + Shopee + loja.
+  t("G. linha igual a da Shopee → NENHUM update de negocio; so observacao { visto_em } presa a loja", async () => {
+    const antes = daLoja(LOJA_B).map((a) => { const { visto_em, ...resto } = a; return JSON.stringify(resto); }).sort();
     ops = [];
     const r = await UI.importarShopeeEmFatias(postarCorpo, LOJA_B);
     assert(r.tipo === "ok" && r.progresso.importados === 0 && r.progresso.atualizados === 0, JSON.stringify(r));
-    assert(!ops.some((o) => o.op === "update"), `updates: ${ops.filter((o) => o.op === "update").length}`);
     assert(r.progresso.ignorados === daLoja(LOJA_B).length, JSON.stringify(r.progresso));
+    const ups = ops.filter((o) => o.op === "update");
+    assert(ups.length > 0 && ups.every((o) => JSON.stringify(Object.keys(o.payload)) === '["visto_em"]'), `update alem de { visto_em }: ${JSON.stringify(ups.map((o) => o.payload))}`);
+    const idsB = new Set(daLoja(LOJA_B).map((a) => a.id));
+    const alcancados: string[] = [];
+    for (const o of ups) {
+      const f = (k: string, c: string) => o.filtros.find(([kk, cc]: any) => kk === k && cc === c)?.[2];
+      const ids = f("in", "id") as string[] | undefined;
+      assert(Array.isArray(ids) && ids.length > 0 && ids.every((id) => idsB.has(id)), `observacao sem ids da loja B: ${JSON.stringify(o.filtros)}`);
+      assert(f("eq", "user_id") === DONO_X && f("eq", "marketplace") === "Shopee" && f("eq", "loja_id") === LOJA_B, `observacao fora de dono+Shopee+loja: ${JSON.stringify(o.filtros)}`);
+      alcancados.push(...ids);
+    }
+    assert(alcancados.length === idsB.size && new Set(alcancados).size === idsB.size, `observacao nao cobre exatamente as linhas da loja: ${alcancados.length}/${idsB.size}`);
+    const depois = daLoja(LOJA_B).map((a) => { const { visto_em, ...resto } = a; return JSON.stringify(resto); }).sort();
+    assert(JSON.stringify(depois) === JSON.stringify(antes), "campo de negocio/usuario mudou");
   });
   t("H/I. preco novo na Shopee → UPDATE so de campos da Shopee; custo/imposto/insumos/ativo do usuario preservados", async () => {
     const cat = CATALOGO[SHOP[LOJA_B]]; const alvo = ordenados(cat).find((id) => cat[id].modelos.length === 0)!;
@@ -277,9 +293,13 @@ async function principal() {
     Object.assign(linha, { custo_produto: 9.99, imposto: 6, insumos: 1.5, ativo: false });
     ops = [];
     const r = await UI.importarShopeeEmFatias(postarCorpo, LOJA_B);
-    const ups = ops.filter((o) => o.op === "update");
+    // Fase 2H-C: separa o UPDATE de NEGOCIO (exatamente 1, so preco) das observacoes (so { visto_em })
+    const todos = ops.filter((o) => o.op === "update");
+    const ehObs = (o: any) => JSON.stringify(Object.keys(o.payload)) === '["visto_em"]';
+    const ups = todos.filter((o) => !ehObs(o));
     assert(r.tipo === "ok" && r.progresso.atualizados === 1 && ups.length === 1, JSON.stringify(r));
     assert(JSON.stringify(Object.keys(ups[0].payload)) === JSON.stringify(["preco_anuncio"]), `payload: ${JSON.stringify(ups[0].payload)}`);
+    assert(todos.filter(ehObs).every((o) => !("ativo" in o.payload) && !("custo_produto" in o.payload)), "observacao com campo do usuario");
     const d = daLoja(LOJA_B).find((a) => a.ml_item_id === alvo)!;
     assert(d.preco_anuncio === 44.9 && d.custo_produto === 9.99 && d.imposto === 6 && d.insumos === 1.5 && d.ativo === false, JSON.stringify(d));
     assert(ups[0].filtros.some(([k, c, v]: any) => k === "eq" && c === "loja_id" && v === LOJA_B) && ups[0].filtros.some(([k, c, v]: any) => k === "eq" && c === "user_id" && v === DONO_X), "update sem prender loja/dono");

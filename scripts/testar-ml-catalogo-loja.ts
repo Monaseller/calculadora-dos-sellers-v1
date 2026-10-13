@@ -92,7 +92,7 @@ function clienteFalso() {
         else if (p === "eq") { st.filtros.push(["eq", String(args[0]), args[1]]); st.preds.push((l: Linha) => l[args[0]] === args[1]); }
         else if (p === "not") { if (args[1] === "is" && args[2] === null) st.preds.push((l: Linha) => l[args[0]] !== null && l[args[0]] !== undefined); }
         else if (p === "or") { if (args[0] === "sku.is.null,sku.eq.") { st.filtros.push(["or", "sku", "vazio"]); st.preds.push((l: Linha) => l.sku === null || l.sku === undefined || l.sku === ""); } }
-        else if (p === "in") st.preds.push((l: Linha) => (args[1] as any[]).includes(l[args[0]]));
+        else if (p === "in") { st.filtros.push(["in", String(args[0]), [...(args[1] as any[])]]); st.preds.push((l: Linha) => (args[1] as any[]).includes(l[args[0]])); }
         else if (p === "range") st.faixa = [Number(args[0]), Number(args[1])];
         else if (p === "order") st.ordem = String(args[0]);
         return b;
@@ -221,9 +221,20 @@ async function principal() {
     const novas = ins.flatMap((w) => w.payload as Linha[]);
     assert(novas.length === 2 && novas.every((n) => n.loja_id === LOJA_A && n.user_id === U && n.marketplace === "ML"), `inserts: ${JSON.stringify(novas)}`);
     assert(novas.some((n) => n.ml_item_id === "MLB2" && n.variation_id === "502") && novas.some((n) => n.ml_item_id === "MLB3"), "linhas novas erradas");
+    // Fase 2H-C: NEGOCIO por eq("id"); OBSERVACAO por in("id", [...]) — ambos com dono + ML + loja A; os ids
+    // do `in` precisam existir e ser da loja A do dono (nunca UPDATE sem ids, nunca `in` que alcance B).
+    const obs = escritasAnuncios().filter((x) => x.op === "update" && Object.keys(x.payload).every((k) => k === "visto_em" || k === "status_marketplace"));
+    assert(obs.length > 0, "import sem observação das linhas existentes");
     for (const w of escritasAnuncios().filter((x) => x.op === "update")) {
-      const f = Object.fromEntries(w.filtros.map(([, c, v]) => [c, v]));
-      assert(f.id && f.user_id === U && f.marketplace === "ML" && f.loja_id === LOJA_A, `update fora de id+dono+ML+loja: ${JSON.stringify(w.filtros)}`);
+      const eq = Object.fromEntries(w.filtros.filter(([k]) => k === "eq").map(([, c, v]) => [c, v]));
+      const inIds = w.filtros.find(([k, c]) => k === "in" && c === "id")?.[2] as string[] | undefined;
+      assert(eq.user_id === U && eq.marketplace === "ML" && eq.loja_id === LOJA_A, `update fora de dono+ML+loja: ${JSON.stringify(w.filtros)}`);
+      if (obs.includes(w)) {
+        assert(Array.isArray(inIds) && inIds.length > 0 && !eq.id, `observação sem lista de ids: ${JSON.stringify(w.filtros)}`);
+        assert(inIds.every((id) => BANCO.anuncios.some((a) => a.id === id && a.loja_id === LOJA_A && a.user_id === U && a.marketplace === "ML")), `observação alcança id fora da loja A: ${JSON.stringify(inIds)}`);
+      } else {
+        assert(eq.id && !inIds, `update de negócio sem eq(id): ${JSON.stringify(w.filtros)}`);
+      }
     }
     assert(BANCO.anuncios.find((a) => a.id === "a-1")!.preco_anuncio === 120 && BANCO.anuncios.find((a) => a.id === "b-1")!.preco_anuncio === 100, "preço foi para a loja errada");
     assert(chamadas.filter((c) => c.token).every((c) => c.token === TOKEN_A), `token de outra loja: ${chamadas.map((c) => c.token)}`);
@@ -258,7 +269,12 @@ async function principal() {
     const n = BANCO.anuncios.length;
     escritas = [];
     const r2 = await importar(LOJA_A);
-    assert(r2.importados === 0 && r2.atualizados === 0 && r2.ignorados === 4 && BANCO.anuncios.length === n && escritasAnuncios().length === 0, JSON.stringify(r2));
+    // Fase 2H-C: na 2ª passada NENHUMA escrita de negócio (0 insert, 0 update de campo do ML); só observação
+    // { status_marketplace?, visto_em } das 4 linhas da loja A — não conta como "atualizado".
+    const negocio = escritasAnuncios().filter((w) => w.op !== "update" || !Object.keys(w.payload).every((k) => k === "visto_em" || k === "status_marketplace"));
+    assert(r2.importados === 0 && r2.atualizados === 0 && r2.ignorados === 4 && BANCO.anuncios.length === n && negocio.length === 0, `${JSON.stringify(r2)} negócio=${JSON.stringify(negocio.map((w) => w.payload))}`);
+    const observadas = escritasAnuncios().flatMap((w) => (w.filtros.find(([k, c]) => k === "in" && c === "id")?.[2] as string[]) ?? []);
+    assert(observadas.length === 4 && observadas.every((id) => linhasDe(LOJA_A).some((a) => a.id === id)), `observação: ${JSON.stringify(observadas)}`);
     const k = linhasDe(LOJA_A).map((a) => `${a.ml_item_id}|${a.variation_id ?? ""}`);
     assert(new Set(k).size === k.length, `duplicata na loja A: ${k}`);
   });

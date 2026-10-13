@@ -30,6 +30,11 @@
  *       explícito (runtime não depende da ponte do trigger); Import ML V2 com loja obrigatória e cursor preso
  *       à loja; mapa de custo loja|item|variação; manual ML sem identidade do provider e com loja do
  *       servidor; identidade imutável no PATCH; Meus Produtos agrupa por marketplace|loja_id|item; a ação leva a loja;
+ *   I9  I9_MARKETPLACE_OBSERVATION_IS_SEPARATE_FROM_ATIVO (Fase 2H-C): só lib/anuncios/observacao-marketplace.ts
+ *       monta/grava { status_marketplace?, visto_em } — status RAW intocado, sem status → sem a chave, nunca
+ *       NULL; observação só de identidade presente na resposta; gravação em lote por ids + dono + marketplace
+ *       + loja, confirmando todas as rows; existentes lidos sem filtro de ativo; escrita de observação antes
+ *       do cursor e fail-closed; Shopee sem status (não infere NORMAL); provider nunca escreve ativo;
  *   Z   ZONAS PROTEGIDAS sem suíte comportamental própria (telas legadas de Vendas/Dashboard,
  *       constantes financeiras, supabase/**, vercel.json, .env.example, sync-worker.mjs): mudar
  *       exige re-baseline EXPLÍCITO de scripts/zonas-protegidas.json (aparece no diff), nunca
@@ -513,6 +518,60 @@ export function catalogoMLNaoEscopadoPorLoja(raiz = RAIZ_V2): string[] {
   return erros;
 }
 
+// ── I9: observação do marketplace separada de `ativo` (Fase 2H-C) ─────────
+export const HELPER_OBSERVACAO = "lib/anuncios/observacao-marketplace.ts";
+const MOTORES_OBSERVACAO: Array<{ arquivo: string; marketplace: "ML" | "Shopee" }> = [
+  { arquivo: "lib/anuncios/importacao-ml.ts", marketplace: "ML" },
+  { arquivo: "lib/anuncios/importacao-shopee.ts", marketplace: "Shopee" },
+];
+/**
+ * I9_MARKETPLACE_OBSERVATION_IS_SEPARATE_FROM_ATIVO: `status_marketplace`/`visto_em` só pelo helper de
+ * observação; status RAW (sem transformação) e só quando presente (sem status → sem a chave; nunca NULL);
+ * observação só de identidade que VOLTOU na resposta (ausência não escreve); gravação em lote por ids +
+ * dono + marketplace + loja que confirma TODAS as rows; existentes lidos sem filtro de `ativo` (row
+ * soft-deleted segue observável); escrita de observação depois do negócio e ANTES do cursor, falha →
+ * erro; Shopee nunca passa status (não infere NORMAL); nenhum writer do provider grava `ativo` em UPDATE.
+ */
+export function observacaoMisturadaComAtivo(raiz = RAIZ_V2): string[] {
+  const erros: string[] = [];
+  if (!existsSync(join(raiz, HELPER_OBSERVACAO))) return [`${HELPER_OBSERVACAO} ausente`];
+  const h = tiraComentarios(ler(raiz, HELPER_OBSERVACAO));
+  const pos = corpoDe(h, /export function observacaoPositiva\(/) ?? "";
+  if (!/const obs: ObservacaoMarketplace = \{ visto_em: observadoEm\.toISOString\(\) \};/.test(pos)) erros.push("helper: visto_em não é o instante da observação");
+  if (!/if \(typeof statusRaw === "string" && statusRaw\.trim\(\) !== ""\) obs\.status_marketplace = statusRaw;/.test(pos)) erros.push("helper: status não é RAW, ou entra sem estar presente");
+  if (/status_marketplace\s*[:=]\s*null|toLowerCase|toUpperCase|normaliz|canonic/i.test(pos)) erros.push("helper: status transformado ou anulado");
+  const grava = corpoDe(h, /export async function gravarObservacoes\(/) ?? "";
+  if (!/\.update\(obs\)\s*\.in\("id", lote\)\.eq\("user_id", alvo\.userId\)\.eq\("marketplace", alvo\.marketplace\)\.eq\("loja_id", alvo\.lojaId\)\.select\("id"\)/.test(grava)) erros.push("helper: gravação sem ids + dono + marketplace + loja");
+  if (!/if \(error \|\| \(data \?\? \[\]\)\.length !== lote\.length\) return false;/.test(grava)) erros.push("helper: gravação aceita confirmação parcial");
+  const runtime = listar(raiz, "app", "lib", "components").filter((f) => /\.(ts|tsx)$/.test(f) && f !== HELPER_OBSERVACAO);
+  for (const f of runtime) {
+    const src = tiraComentarios(ler(raiz, f));
+    if (/\b(status_marketplace|visto_em)\b/.test(src)) erros.push(`${f}: grava/monta status_marketplace/visto_em fora do helper de observação`);
+  }
+  for (const { arquivo, marketplace } of MOTORES_OBSERVACAO) {
+    const m = tiraComentarios(ler(raiz, arquivo));
+    if (/\bupd\.ativo\b|\.update\(\{[^)]*\bativo\b/.test(m)) erros.push(`${arquivo}: writer do provider grava ativo`);
+    const existentes = /const existentes = await lerTodasAsPaginas[\s\S]*?\);/.exec(m)?.[0] ?? "";
+    if (!existentes || /\.eq\("ativo"/.test(existentes)) erros.push(`${arquivo}: existentes filtrados por ativo (soft-deleted deixa de ser observável)`);
+    if (!/observacoes\.push\(\{ id: existente\.id, obs \}\);/.test(m)) erros.push(`${arquivo}: linha existente sem observação`);
+    const iGrava = m.search(/if \(observacoes\.length > 0 && !\(await gravarObservacoes\(banco, \{ userId, lojaId, marketplace: "(ML|Shopee)" \}, observacoes\)\)\) \{\s*throw new ErroImportacao/);
+    const iCursor = m.search(marketplace === "ML" ? /cursorItem = lote\[lote\.length - 1\];/ : /if \(k > 0\) cursorItem = lote\[k - 1\];/);
+    if (iGrava < 0) erros.push(`${arquivo}: escrita de observação ausente ou sem falhar fechado`);
+    else if (!/marketplace: "(ML|Shopee)"/.exec(m.slice(iGrava))?.[0].includes(marketplace)) erros.push(`${arquivo}: observação com marketplace errado`);
+    if (iCursor < 0 || iGrava < 0 || iGrava > iCursor) erros.push(`${arquivo}: cursor avança antes da escrita de observação`);
+    const iUltimaEscritaNegocio = Math.max(m.lastIndexOf(".insert(novas)"), m.lastIndexOf(".update(m.upd)"));
+    if (iGrava >= 0 && iUltimaEscritaNegocio > iGrava) erros.push(`${arquivo}: observação antes das escritas de negócio`);
+  }
+  const ml = tiraComentarios(ler(raiz, MOTORES_OBSERVACAO[0].arquivo));
+  const iPula = ml.search(/if \(!item\) continue;/), iObs = ml.search(/const obs = observacaoPositiva\(instante, item\.status\);/);
+  if (iObs < 0 || iPula < 0 || iPula > iObs) erros.push("ML: observação fora de item presente na resposta (ou status não é o RAW de item.status)");
+  const sp = tiraComentarios(ler(raiz, MOTORES_OBSERVACAO[1].arquivo));
+  const chamadasObs = [...sp.matchAll(/observacaoPositiva\(([^;]*?)\);/g)].map((x) => x[1]);
+  if (chamadasObs.length !== 1 || chamadasObs[0] !== "observadoEm()") erros.push(`Shopee: observação passa status (não provado) — ${chamadasObs.join(" | ")}`);
+  if ((sp.match(/"NORMAL"/g) ?? []).length !== 1 || !/item_status: "NORMAL" \}, "get_item_list"/.test(sp)) erros.push("Shopee: NORMAL fora do filtro da listagem");
+  return erros;
+}
+
 export function invariantesV2(raiz = RAIZ_V2, opcoes: { zonas?: boolean } = {}): string[] {
   const erros: string[] = [];
   for (const v of canonicoAlcancaLegado(raiz)) erros.push(`I1 canônico→legado: ${v}`);
@@ -523,6 +582,7 @@ export function invariantesV2(raiz = RAIZ_V2, opcoes: { zonas?: boolean } = {}):
   for (const v of identidadeDeLojaNaoExplicita(raiz)) erros.push(`I6 I6_STORE_IDENTITY_IS_EXPLICIT: ${v}`);
   for (const v of credenciaisMLNaoEscopadasPorLoja(raiz)) erros.push(`I7 I7_ML_CREDENTIALS_ARE_STORE_SCOPED: ${v}`);
   for (const v of catalogoMLNaoEscopadoPorLoja(raiz)) erros.push(`I8 I8_ML_CATALOG_IS_STORE_SCOPED: ${v}`);
+  for (const v of observacaoMisturadaComAtivo(raiz)) erros.push(`I9 I9_MARKETPLACE_OBSERVATION_IS_SEPARATE_FROM_ATIVO: ${v}`);
   if (opcoes.zonas !== false) for (const v of verificarZonas(raiz)) erros.push(`Z zona protegida sem re-baseline: ${v}`);
   return erros;
 }

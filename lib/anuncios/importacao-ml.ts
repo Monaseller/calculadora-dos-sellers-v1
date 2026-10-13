@@ -27,13 +27,22 @@
  *     SKU so se vazios). custo/insumos/imposto/margem/preco_ideal/ativo do usuario nunca. Linha nova
  *     NAO forca imposto/margem — vale o default do banco.
  *
+ *   - OBSERVACAO (Fase 2H-C): cada item que VOLTOU no multiget (code 200) e uma observacao positiva:
+ *     visto_em = instante da resposta do lote; status_marketplace = `item.status` RAW so se presente
+ *     (sem status → so visto_em; o status anterior fica). Linha nova nasce com a observacao no INSERT;
+ *     linha existente (inclusive soft-deleted, `ativo=false`) recebe um UPDATE SEPARADO so de
+ *     { status_marketplace?, visto_em } por id + dono + ML + loja, DEPOIS das escritas de negocio e
+ *     ANTES do cursor avancar; falha → a fatia falha (fail-closed). Nao conta como "atualizado".
+ *     Ausencia (item que nao voltou) nao escreve nada.
+ *
  * Paginacao do ML: o repositorio so comprova `/users/{seller}/items/search?status=active&limit&offset`
  * (sem modo scan/scroll comprovado) — ML_V2_SCAN_SUPPORTED = NO. Limitacao conhecida do provider: a
- * busca por offset pode nao alcancar catalogos muito grandes. Status importado: so `active` (2H trata
- * status/reconciliacao).
+ * busca por offset pode nao alcancar catalogos muito grandes. Listagem: so `active`; ausencia NUNCA
+ * vira status (reconciliacao por ausencia proibida).
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { lerTodasAsPaginas } from "@/lib/anuncios/leitura-paginada";
+import { gravarObservacoes, observacaoPositiva, type ObservacaoMarketplace } from "@/lib/anuncios/observacao-marketplace";
 import { resolverContaML } from "@/lib/ml-conexao";
 import { calcularFreteMl, calcularFreteFullMl, calcularFreteFlexMl } from "@/lib/tabela-frete-ml";
 import { CATEGORIAS_ML } from "@/lib/comissoes-mercado-livre";
@@ -204,8 +213,11 @@ async function listarItens(sellerId: string, token: string): Promise<string[]> {
 export async function importarCatalogoML(args: {
   banco: SupabaseClient; userId: string; lojaId: string; cursor?: unknown;
   inicioMs: number; orcamentoMs?: number; agora?: () => number;
+  /** Instante de cada observação (uma por resposta de lote). Seam determinístico para testes. */
+  observadoEm?: () => Date;
 }): Promise<ResultadoFatiaML> {
   const { banco, userId, lojaId } = args;
+  const observadoEm = args.observadoEm ?? (() => new Date());
   if (!userId || typeof lojaId !== "string" || !UUID.test(lojaId)) throw new ErroImportacaoML("LOJA", "loja ML explicita obrigatoria", "LOJA_INVALIDA");
   const orcamento = args.orcamentoMs ?? ORCAMENTO_FATIA_MS;
   const agora = args.agora ?? (() => Date.now());
@@ -267,6 +279,8 @@ export async function importarCatalogoML(args: {
       if (ini > 0 && estourou()) break;                       // toda fatia avança ao menos UM lote (sem laço parado)
       const lote = restantes.slice(ini, ini + LOTE_DETALHE);
       const raw: any[] = await getML(`/items?ids=${lote.join(",")}&include_attributes=all`, token, "items multiget");
+      const instante = observadoEm();                          // UM instante por resposta: todas as rows do item iguais
+      const observacoes: { id: string; obs: ObservacaoMarketplace }[] = [];
       const porId = new Map<string, any>();
       for (const x of Array.isArray(raw) ? raw : []) if (x?.code === 200 && x.body?.id) porId.set(String(x.body.id), x.body);
 
@@ -274,7 +288,9 @@ export async function importarCatalogoML(args: {
       const mudancas: { id: string; upd: Record<string, unknown> }[] = [];
       for (const itemId of lote) {
         const item = porId.get(itemId);
-        if (!item) continue;                                   // sumiu entre listagem e detalhe → nada a gravar
+        if (!item) continue;                                   // sumiu entre listagem e detalhe → nada a gravar (nem observacao)
+        // status do ITEM/anuncio (RAW, se a resposta trouxe): o mesmo para todas as rows/variacoes dele
+        const obs = observacaoPositiva(instante, item.status);
         for (const l of linhasDoItemML(item, await categoriaDe(item.category_id ?? ""))) {
           const existente = existMap.get(`${l.ml_item_id}|${l.variation_id ?? ""}`);
           if (!existente) {
@@ -285,9 +301,11 @@ export async function importarCatalogoML(args: {
               logistic_type: l.logistic_type, frete_gratis: l.frete_gratis, peso_kg: l.peso_kg,
               custo_frete: l.custo_frete ?? 0, sku: l.sku, thumbnail: l.thumbnail, permalink: l.permalink,
               custo_produto: 0, insumos: 0, ativo: true,
+              ...obs,
             });
             continue;
           }
+          observacoes.push({ id: existente.id, obs });         // existente (ativo ou nao): observacao em escrita SEPARADA
           // So campos do ML; `ativo` e campos do usuario fora (F0.c.18A). Peso/frete/SKU so se vazios.
           const upd: Record<string, unknown> = {};
           if (existente.nome !== l.nome) upd.nome = l.nome;
@@ -315,6 +333,10 @@ export async function importarCatalogoML(args: {
         if (error) throw new ErroImportacaoML("BANCO", "atualizacao recusada pelo banco");
         if ((data ?? []).length !== 1) throw new ErroImportacaoML("BANCO", "linha existente fora da loja ou removida");
         r.atualizados++;
+      }
+      // Observacao das linhas existentes: DEPOIS das escritas de negocio, ANTES do cursor; nao e "atualizado".
+      if (observacoes.length > 0 && !(await gravarObservacoes(banco, { userId, lojaId, marketplace: "ML" }, observacoes))) {
+        throw new ErroImportacaoML("BANCO", "observacao do marketplace recusada pelo banco");
       }
       cursorItem = lote[lote.length - 1];
       r.itensProcessados += lote.length;

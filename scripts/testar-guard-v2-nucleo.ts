@@ -52,13 +52,19 @@ function clienteFalso() {
     from(tabela: string) {
       const st: any = { op: "select", payload: null, filtros: [] as any[], faixa: null as [number, number] | null, ordem: null as string | null, unico: false };
       const casa = (r: Linha) => st.filtros.every(([k, c, v]: any) =>
-        k === "eq" ? String(r[c]) === String(v) : k === "notnull" ? r[c] != null : k === "is" ? (r[c] ?? null) === v : true);
+        k === "eq" ? String(r[c]) === String(v) : k === "in" ? (v as any[]).map(String).includes(String(r[c]))
+          : k === "notnull" ? r[c] != null : k === "is" ? (r[c] ?? null) === v : true);
       const exec = () => {
         const ls = (db[tabela] ??= []);
         if (st.op !== "select") {
           escritas.push({ op: st.op, tabela, payload: st.payload, filtros: [...st.filtros] });
           if (st.op === "insert") { for (const n of [].concat(st.payload)) ls.push({ id: `novo-${ls.length}`, ...(n as any) }); return { data: null, error: null }; }
-          if (st.op === "update") { for (const r of ls.filter(casa)) Object.assign(r, st.payload); return { data: null, error: null }; }
+          if (st.op === "update") {
+            // como o PostgREST: UPDATE afeta as rows que casam com TODOS os filtros; com .select(), devolve-as
+            const alvo = ls.filter(casa);
+            for (const r of alvo) Object.assign(r, st.payload);
+            return { data: st.retornar ? alvo.map((r) => ({ id: r.id })) : null, error: null };
+          }
         }
         consultas.push({ tabela, filtros: [...st.filtros], faixa: st.faixa });
         if (falharLeituraNaPagina !== null && st.faixa && st.faixa[0] >= falharLeituraNaPagina * 1000) return { data: null, error: { message: "falha simulada" } };
@@ -74,6 +80,8 @@ function clienteFalso() {
         return (...a: any[]) => {
           if (p === "insert" || p === "update" || p === "upsert") { st.op = p; st.payload = a[0]; }
           else if (p === "eq" || p === "is") st.filtros.push([p, a[0], a[1]]);
+          else if (p === "in") st.filtros.push(["in", a[0], [...a[1]]]);
+          else if (p === "select" && st.op !== "select") st.retornar = true;
           else if (p === "not" && a[1] === "is" && a[2] === null) st.filtros.push(["notnull", a[0]]);
           else if (p === "order") st.ordem = a[0];
           else if (p === "range") st.faixa = [a[0], a[1]];
@@ -198,7 +206,7 @@ async function principal() {
     const doAnuncios = consultas.filter((c) => c.tabela === "anuncios");
     assert(doAnuncios.length >= 3 && doAnuncios.every((c) => c.filtros.some(([k, col, v]: any) => k === "eq" && col === "loja_id" && v === LOJA_A)), "consulta sem loja");
   });
-  t("A/B. Import V2 com 1001 existentes na loja (>1000) → 0 inserções, 1001 ignorados, nada na loja B", async () => {
+  t("A/B. Import V2 com 1001 existentes na loja (>1000) → 0 inserções, 0 updates de negócio, 1001 ignorados, observação { visto_em } das 1001, nada na loja B", async () => {
     const linhas: Linha[] = [];
     const ids: string[] = [];
     for (let i = 0; i < 1001; i++) { ids.push(String(200000 + i)); linhas.push({ ...anuncio(`a${pad(i)}`, DONO_X, "Shopee", LOJA_A, String(200000 + i)), nome: `Item ${200000 + i}`, preco_anuncio: 10, sku: `S${200000 + i}` }); }
@@ -210,7 +218,21 @@ async function principal() {
       cred: { partnerId: "1", partnerKey: "k", accessToken: "t", shopId: "419809235" },
     });
     assert(r.parcial === false && r.importados === 0 && r.ignorados === 1001 && r.atualizados === 0, JSON.stringify(r));
-    assert(escritas.length === 0, `escritas: ${escritas.length}`);
+    // Fase 2H-C: nenhuma escrita de NEGÓCIO; só observação Shopee { visto_em } (status não provado), presa a
+    // dono + Shopee + loja A, cobrindo EXATAMENTE as 1001 linhas da A; loja B intocada.
+    const negocio = escritas.filter((w) => w.op !== "update" || JSON.stringify(Object.keys(w.payload)) !== '["visto_em"]');
+    assert(negocio.length === 0, `escritas de negócio: ${JSON.stringify(negocio.map((w) => [w.op, w.payload]))}`);
+    const observadas: string[] = [];
+    for (const w of escritas) {
+      const f = (k: string, c: string) => w.filtros.find(([kk, cc]: any) => kk === k && cc === c)?.[2];
+      assert(f("eq", "user_id") === DONO_X && f("eq", "marketplace") === "Shopee" && f("eq", "loja_id") === LOJA_A, `observação fora de dono+Shopee+loja A: ${JSON.stringify(w.filtros)}`);
+      const lista = f("in", "id") as string[] | undefined;
+      assert(Array.isArray(lista) && lista.length > 0, "observação sem lista de ids");
+      observadas.push(...lista);
+    }
+    const daA = linhas.filter((l) => l.loja_id === LOJA_A).map((l) => l.id).sort();
+    assert(JSON.stringify([...observadas].sort()) === JSON.stringify(daA), `observação ≠ as 1001 linhas da loja A (${observadas.length})`);
+    assert(linhas.filter((l) => l.loja_id === LOJA_B).every((l) => !("visto_em" in l)), "🔴 observação alcançou a loja B");
     assert(chamadasShopee.every((s) => s === "419809235"), "chamou outra loja");
   });
 

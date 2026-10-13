@@ -21,10 +21,18 @@
  *     (dono+loja+marketplace+item+model) e a ultima barreira. Falha → para,
  *     sem avancar o cursor alem do que foi gravado (fail-closed).
  *   - PRECO: price_info.current_price ja vem em REAIS (Open API v2) — direto.
+ *   - OBSERVACAO (Fase 2H-C): cada linha (item/model) de item CONCLUIDO que voltou no
+ *     get_item_base_info (+ get_model_list) e uma observacao positiva: SO visto_em (instante da
+ *     resposta do lote). status_marketplace NAO e gravado: nenhuma resposta gravada no repo prova
+ *     `item_status` no get_item_base_info, e o filtro NORMAL da listagem NAO autoriza inferir status
+ *     (SHOPEE_STATUS_WRITER = DEFERRED). Linha nova nasce com visto_em no INSERT; existente (inclusive
+ *     `ativo=false`) recebe UPDATE SEPARADO so de visto_em por id + dono + Shopee + loja, depois das
+ *     escritas de negocio e antes do cursor; falha → fatia falha. Ausencia nao escreve nada.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { shopeeGet } from "@/lib/shopee-api";
 import { lerTodasAsPaginas } from "@/lib/anuncios/leitura-paginada";
+import { gravarObservacoes, observacaoPositiva, type ObservacaoMarketplace } from "@/lib/anuncios/observacao-marketplace";
 
 export const ORCAMENTO_FATIA_MS = 35_000;
 export const CONCORRENCIA_MODELOS = 3;
@@ -121,8 +129,11 @@ async function linhasDoItem(cred: CredencialLoja, item: any): Promise<LinhaShope
 export async function importarFatiaShopee(args: {
   banco: SupabaseClient; userId: string; lojaId: string; cred: CredencialLoja;
   ultimoItem: string | null; inicioMs: number; orcamentoMs?: number; agora?: () => number;
+  /** Instante de cada observação (uma por resposta de get_item_base_info). Seam determinístico para testes. */
+  observadoEm?: () => Date;
 }): Promise<ResultadoFatia> {
   const { banco, userId, lojaId, cred, ultimoItem } = args;
+  const observadoEm = args.observadoEm ?? (() => new Date());
   const orcamento = args.orcamentoMs ?? ORCAMENTO_FATIA_MS;
   const agora = args.agora ?? (() => Date.now());
   const estourou = () => agora() - args.inicioMs >= orcamento;
@@ -151,6 +162,9 @@ export async function importarFatiaShopee(args: {
     const lote = restantes.slice(ini, ini + LOTE_BASE_INFO);
     const base = await chamar(cred, "/api/v2/product/get_item_base_info",
       { item_id_list: lote.join(","), need_tax_info: "false", need_complaint_policy: "false" }, "get_item_base_info");
+    // UM instante por resposta; SO visto_em (status Shopee nao provado → nunca passado ao helper)
+    const obs = observacaoPositiva(observadoEm());
+    const observacoes: { id: string; obs: ObservacaoMarketplace }[] = [];
     const porId = new Map<string, any>();
     for (const it of (base?.response?.item_list ?? []) as any[]) porId.set(String(it.item_id), it);
 
@@ -184,9 +198,11 @@ export async function importarFatiaShopee(args: {
             custo_produto: 0, insumos: 0, custo_frete: 0, imposto: 0,
             margem_desejada: 0, frete_gratis: false, ativo: true,
             user_id: userId, loja_id: lojaId,
+            ...obs,
           });
           continue;
         }
+        observacoes.push({ id: existente.id, obs });   // existente (ativo ou nao): observacao em escrita SEPARADA
         // So campos da Shopee; `ativo` e campos do usuario fora (F0.c.18A).
         const upd: Record<string, unknown> = {};
         if (existente.nome !== l.nome) upd.nome = l.nome;
@@ -206,6 +222,10 @@ export async function importarFatiaShopee(args: {
       const { error } = await banco.from("anuncios").update(m.upd).eq("id", m.id).eq("user_id", userId).eq("loja_id", lojaId);
       if (error) throw new ErroImportacaoShopee("BANCO", "atualizacao recusada pelo banco");
       r.atualizados++;
+    }
+    // Observacao das linhas existentes: DEPOIS das escritas de negocio, ANTES do cursor; nao e "atualizado".
+    if (observacoes.length > 0 && !(await gravarObservacoes(banco, { userId, lojaId, marketplace: "Shopee" }, observacoes))) {
+      throw new ErroImportacaoShopee("BANCO", "observacao do marketplace recusada pelo banco");
     }
     if (k > 0) cursorItem = lote[k - 1];
     r.itensProcessados += k;
