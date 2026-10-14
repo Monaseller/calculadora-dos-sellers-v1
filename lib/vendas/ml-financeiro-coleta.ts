@@ -15,11 +15,14 @@
  * Erros do provider: TRANSIENT_ERROR (429, 502/503/504, timeout, rede) → retry com backoff e, se persistir,
  * PENDENTE; INTEGRATION_ERROR (404 inesperado, 4xx, 500, estrutura inválida) → sem retry cego, LOGADO com
  * contexto sanitizado (loja, pedido, pack, envio, etapa, HTTP) — nunca token nem dado do comprador.
+ * A3.2-C.3 CARÊNCIA: venda com < 5 min (relógio do provider: date_closed/date_created) cujo subrecurso
+ * financeiro ainda não existe (404/200 incompleto em descontos, pack, custos do envio ou billing) é
+ * PROVIDER_DATA_NOT_READY — PENDENTE e elegível ao refresh, não bug. A 1ª tentativa é sempre imediata.
  */
 import "server-only";
 import {
-  classificarHttpML, conferirBillingML, extrairEnvioFinanceiroML, extrairPedidoFinanceiroML, financeiroPendenteElegivel,
-  FONTE_VERSAO_ML_FINANCEIRO, liquidoPedidoML, type ClasseErroML, type EnvioFinanceiroML, type PedidoFinanceiroML,
+  classeComCarenciaML, classificarHttpML, conferirBillingML, extrairEnvioFinanceiroML, extrairPedidoFinanceiroML, financeiroPendenteElegivel,
+  FONTE_VERSAO_ML_FINANCEIRO, idadePedidoMLms, liquidoPedidoML, type ClasseErroML, type ClasseFinanceiraML, type EnvioFinanceiroML, type PedidoFinanceiroML,
 } from "./ml-financeiro";
 
 const API_ML = "https://api.mercadolibre.com";
@@ -53,10 +56,10 @@ export interface DepsColetaML {
   relogio?: () => number;
   log?: (linha: string) => void;
 }
-export interface FalhaFinanceiraML { order_id: string; pack_id: string | null; shipment_id: string | null; etapa: string; classe: ClasseErroML; http: number }
+export interface FalhaFinanceiraML { order_id: string; pack_id: string | null; shipment_id: string | null; etapa: string; classe: ClasseFinanceiraML; http: number }
 export interface ResultadoColetaML {
   pedidos: number; envios: number; billingPendente: number;
-  actual: number; pendentes: number; integracao: number; transitorios: number; adiados: number; jaCompletos: number;
+  actual: number; pendentes: number; integracao: number; transitorios: number; naoProntos: number; adiados: number; jaCompletos: number;
   falhas: FalhaFinanceiraML[];
 }
 export type EntradaColetaML = readonly string[] | { pedidos: readonly any[] };
@@ -73,10 +76,12 @@ export async function coletarFinanceiroML(
   deps: DepsColetaML,
   prazo: { ate?: number } = {},
 ): Promise<ResultadoColetaML> {
-  const r: ResultadoColetaML = { pedidos: 0, envios: 0, billingPendente: 0, actual: 0, pendentes: 0, integracao: 0, transitorios: 0, adiados: 0, jaCompletos: 0, falhas: [] };
+  const r: ResultadoColetaML = { pedidos: 0, envios: 0, billingPendente: 0, actual: 0, pendentes: 0, integracao: 0, transitorios: 0, naoProntos: 0, adiados: 0, jaCompletos: 0, falhas: [] };
   const log = deps.log ?? ((l: string) => console.error(l));
   const agoraMs = deps.relogio ?? (() => Date.now());
   const ate = prazo.ate ?? agoraMs() + JANELA_PROVIDER_MS;
+  const agoraReal = () => deps.agora?.() ?? new Date();   // idade da venda: relógio de parede vs horário do provider
+  const idades = new Map<string, number | null>();
   const modoSync = !Array.isArray(entrada);
   const payloads = new Map<string, any>();
   if (modoSync) for (const o of (entrada as { pedidos: readonly any[] }).pedidos) if (o?.id != null) payloads.set(String(o.id), o);
@@ -104,14 +109,17 @@ export async function coletarFinanceiroML(
   }
 
   const adiados = new Set<string>();
-  const registrar = (f: FalhaFinanceiraML | { order_id: string; pack_id: string | null; shipment_id: string | null; etapa: string; classe: typeof DEFERIDO }) => {
+  const registrar = (f: (Omit<FalhaFinanceiraML, "classe"> & { classe: ClasseErroML }) | { order_id: string; pack_id: string | null; shipment_id: string | null; etapa: string; classe: typeof DEFERIDO }) => {
     if (f.classe === DEFERIDO) {
       if (!adiados.has(f.order_id)) { adiados.add(f.order_id); log(`[ml-financeiro] ${DEFERIDO} loja=${conta.lojaId} order=${f.order_id} pack=${f.pack_id ?? "-"} shipment=${f.shipment_id ?? "-"} etapa=${f.etapa}`); }
       return;
     }
-    r.falhas.push(f);
-    if (f.classe === "INTEGRATION_ERROR") r.integracao++; else r.transitorios++;
-    log(`[ml-financeiro] ${f.classe} loja=${conta.lojaId} order=${f.order_id} pack=${f.pack_id ?? "-"} shipment=${f.shipment_id ?? "-"} etapa=${f.etapa} http=${f.http}`);
+    const idade = idades.get(f.order_id) ?? null;
+    const g: FalhaFinanceiraML = { ...f, classe: f.classe === "INTEGRATION_ERROR" ? classeComCarenciaML(f.classe, f.etapa, f.http, idade) : f.classe };
+    r.falhas.push(g);
+    if (g.classe === "INTEGRATION_ERROR") r.integracao++; else if (g.classe === "TRANSIENT_ERROR") r.transitorios++; else r.naoProntos++;
+    const idadeLog = idade !== null ? ` order_age_s=${Math.round(idade / 1000)}` : "";
+    log(`[ml-financeiro] ${g.classe} loja=${conta.lojaId} order=${g.order_id} pack=${g.pack_id ?? "-"} shipment=${g.shipment_id ?? "-"} etapa=${g.etapa} http=${g.http}${idadeLog}`);
   };
 
   // pedido já COMPLETO no banco → não consulta de novo
@@ -139,6 +147,7 @@ export async function coletarFinanceiroML(
       registrar({ order_id: id, pack_id: order?.pack_id != null ? String(order.pack_id) : null, shipment_id: null, etapa: "order_estrutura", classe: "INTEGRATION_ERROR", http: 200 });
       return;
     }
+    idades.set(id, idadePedidoMLms(order, agoraReal()));
     const d = await getML(`/orders/${encodeURIComponent(id)}/discounts`);
     const p = extrairPedidoFinanceiroML(order, d.classe === "OK" ? d.corpo : null);
     extraidos.set(id, p);
@@ -179,11 +188,15 @@ export async function coletarFinanceiroML(
     const b = await getML(`/billing/integration/group/ML/order/details?order_ids=${lote.map(encodeURIComponent).join(",")}`);
     for (const id of lote) {
       const p = extraidos.get(id)!;
-      const conf = b.classe === DEFERIDO ? { billing_status: "PENDENTE" as const, billing_tarifa: null } : conferirBillingML(id, p.tarifa_venda, b.status, b.corpo);
+      const conf0 = b.classe === DEFERIDO ? { billing_status: "PENDENTE" as const, billing_tarifa: null } : conferirBillingML(id, p.tarifa_venda, b.status, b.corpo);
+      // A3.2-C.3: billing parcial de venda na carência não é divergência — fica PENDENTE (elegível ao refresh)
+      const parcialNaCarencia = conf0.billing_status === "DIVERGENTE" && classeComCarenciaML("INTEGRATION_ERROR", "billing_divergente", 200, idades.get(id) ?? null) === "PROVIDER_DATA_NOT_READY";
+      const conf = parcialNaCarencia ? { billing_status: "PENDENTE" as const, billing_tarifa: conf0.billing_tarifa } : conf0;
       if (conf.billing_status === "PENDENTE") r.billingPendente++;
       if (b.classe === DEFERIDO) registrar({ order_id: id, pack_id: p.pack_id, shipment_id: p.shipment_id, etapa: "billing", classe: DEFERIDO });
       else if (b.classe !== "OK") registrar({ order_id: id, pack_id: p.pack_id, shipment_id: p.shipment_id, etapa: "billing", classe: b.classe, http: b.status });
-      else if (conf.billing_status === "DIVERGENTE") registrar({ order_id: id, pack_id: p.pack_id, shipment_id: p.shipment_id, etapa: "billing_divergente", classe: "INTEGRATION_ERROR", http: 200 });
+      else if (conf0.billing_status === "DIVERGENTE") registrar({ order_id: id, pack_id: p.pack_id, shipment_id: p.shipment_id, etapa: "billing_divergente", classe: "INTEGRATION_ERROR", http: 200 });
+      else if (conf0.billing_status === "PENDENTE") registrar({ order_id: id, pack_id: p.pack_id, shipment_id: p.shipment_id, etapa: "billing", classe: "INTEGRATION_ERROR", http: 200 });   // 200 sem cobrança do pedido
       finais.push({ ...p, ...conf });
     }
   }
@@ -200,6 +213,6 @@ export async function coletarFinanceiroML(
     const envio = p.shipment_id ? enviosProntos.get(p.shipment_id) ?? existentes.get(p.order_id)?.envio ?? null : null;
     if (liquidoPedidoML(p, envio).qualidade === "ACTUAL") r.actual++; else r.pendentes++;
   }
-  log(`[ml-financeiro] resumo loja=${conta.lojaId} modo=${modoSync ? "sync" : "retry"} pedidos=${ids.length} ja_completos=${r.jaCompletos} gravados=${r.pedidos} actual=${r.actual} pendentes=${r.pendentes} transient=${r.transitorios} integracao=${r.integracao} deferred_by_runtime_budget=${r.adiados}`);
+  log(`[ml-financeiro] resumo loja=${conta.lojaId} modo=${modoSync ? "sync" : "retry"} pedidos=${ids.length} ja_completos=${r.jaCompletos} gravados=${r.pedidos} actual=${r.actual} pendentes=${r.pendentes} transient=${r.transitorios} integracao=${r.integracao} provider_data_not_ready=${r.naoProntos} deferred_by_runtime_budget=${r.adiados}`);
   return r;
 }

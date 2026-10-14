@@ -1152,7 +1152,7 @@ export function financeiroMLNaoReal(raiz = RAIZ_V2): string[] {
   if (!/if \(classe === "TRANSIENT_ERROR"\) continue;/.test(c) || !/if \(t > 0\) await deps\.esperar\(BACKOFF_BASE_MS \* 2 \*\* \(t - 1\)\);/.test(c) || !/signal: ctrl\.signal/.test(c)) erros.push("coletor: retry/backoff/timeout fora do contrato (só transitório repete)");
   // logs do motor: com contexto (loja, pedido, pack, envio, etapa, HTTP) e SEM token/comprador — só as linhas log(`...`)
   const linhasLog = c.match(/log\(`[^`]*`\)/g) ?? [];
-  if (!/log\(`\[ml-financeiro\] \$\{f\.classe\} loja=\$\{conta\.lojaId\} order=\$\{f\.order_id\} pack=/.test(c) || linhasLog.length < 3 || linhasLog.some((l) => /token|buyer|receiver|nickname|email/i.test(l))) erros.push("coletor: falha sem log sanitizado (ou log com token/comprador)");
+  if (!/log\(`\[ml-financeiro\] \$\{g\.classe\} loja=\$\{conta\.lojaId\} order=\$\{g\.order_id\} pack=/.test(c) || linhasLog.length < 3 || linhasLog.some((l) => /token|buyer|receiver|nickname|email/i.test(l))) erros.push("coletor: falha sem log sanitizado (ou log com token/comprador)");
   if (!/if \(e && financeiroPendenteElegivel\(e\.pedido, e\.envio\) === null\) \{ r\.jaCompletos\+\+; return false; \}/.test(c)) erros.push("coletor: pedido completo (ACTUAL) consultado de novo");
   // A3.2-C.1: SEM teto por quantidade — TODA venda do lote é tentada; a única proteção de tempo é o PRAZO, checado
   // antes de CADA chamada ao provider (inclusive retry); o que não coube é DEFERRED_BY_RUNTIME_BUDGET (não é erro da API)
@@ -1164,6 +1164,12 @@ export function financeiroMLNaoReal(raiz = RAIZ_V2): string[] {
   if (!/financeiroPendente: candidatosRecuperacaoFinanceiraML\(\(pedidos \?\? \[\]\)\.map\(/.test(rg) || !/\{ de: dateFrom, ate: dateTo, campo: dateField \}\)\.length,/.test(rg) || /coletarFinanceiroML|ml-financeiro-coleta/.test(rg)) erros.push("GET de Vendas: sem contagem de recuperação da janela ou com trabalho de provider na leitura");
   const rr = existsSync(join(raiz, ROTA_RETRY_FIN_ML)) ? tiraComentarios(ler(raiz, ROTA_RETRY_FIN_ML)) : "";
   if (!/\? await resolverContaML\(userId, lojaPedida\)\s*: await resolverContaML\(userId, null, \{ permitirUnica: true \}\);/.test(rr) || /lerCookie|loja_ativa_id/.test(rr)) erros.push(`${ROTA_RETRY_FIN_ML}: loja fora do contrato explícito (ou cookie)`);
+  // A3.2-C.3 CARÊNCIA: só subrecurso financeiro (nunca "order"), só 404/200 incompleto, só venda < 5 min pelo relógio
+  // do PROVIDER; transitório intocado; nenhuma espera artificial; resumo distingue PROVIDER_DATA_NOT_READY
+  const car = corpoDaFuncao(m, "classeComCarenciaML") ?? "";
+  if (!/if \(classe !== "INTEGRATION_ERROR"\) return classe;/.test(car) || !/if \(http !== 404 && http !== 200\) return classe;/.test(car) || !/if \(idadeMs === null \|\| idadeMs < -60_000 \|\| idadeMs >= CARENCIA_PROVIDER_ML_MS\) return classe;/.test(car)
+    || !/export const CARENCIA_PROVIDER_ML_MS = 5 \* 60_000;/.test(m) || /ETAPAS_COM_CARENCIA_ML = \[[^\]]*"order"/.test(m) || !/const ref = order\?\.date_closed \?\? order\?\.date_created;/.test(m)) erros.push("carência: escopo fora do contrato (etapa order, HTTP além de 404/200, venda antiga ou relógio local)");
+  if (/CARENCIA_PROVIDER_ML_MS|esperar\(\s*5\s*\*\s*60/.test(c) || !/classe: f\.classe === "INTEGRATION_ERROR" \? classeComCarenciaML\(f\.classe, f\.etapa, f\.http, idade\) : f\.classe/.test(c) || !/provider_data_not_ready=\$\{r\.naoProntos\}/.test(c)) erros.push("coletor: espera artificial pela carência, carência fora do registro único ou resumo sem PROVIDER_DATA_NOT_READY");
   // A3.2-C.2 HISTÓRICO: o SERVIDOR escolhe os candidatos (dono + loja + ML + pagas + janela; sem linha financeira OU
   // pendente) — o cliente nunca manda a lista de pedidos; mais recentes primeiro; só o prazo limita o trabalho
   if (/order_ids/.test(rr) || !/\.from\("pedidos"\)\s*\.select\("order_id, status, data, data_pagamento, data_criacao"\)\s*\.eq\("user_id", userId\)\.eq\("marketplace", "ML"\)\.eq\("loja_id", lojaId\)\.eq\("status", "paid"\)/.test(rr)

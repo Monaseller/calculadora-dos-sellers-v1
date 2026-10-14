@@ -17,10 +17,31 @@ import { join } from "node:path";
 let ok = 0, falhou = 0;
 let fila: Promise<void> = Promise.resolve();
 const imprimir = console.log.bind(console);
+/**
+ * Diagnóstico de travamento: cada teste tem 30 s (o sync usa espera REAL de backoff — 1 s/2 s — e um mutante pode
+ * introduzir espera longa); estourou → FALHA explícita com TIMEOUT e a suíte ABORTA (o teste pendurado deixaria o
+ * estado em memória inconsistente para os seguintes). A suíte inteira tem 10 min de vigia: nada fica
+ * aberto indefinidamente (timers/promises pendurados terminam no process.exit).
+ */
+const TIMEOUT_TESTE_MS = 30_000;
+const VIGIA_SUITE_MS = 10 * 60_000;
+setTimeout(() => { imprimir(`ERRO FATAL: suíte excedeu ${VIGIA_SUITE_MS / 60_000} min (handle/promise pendurado)`); process.exit(1); }, VIGIA_SUITE_MS).unref();
 function t(nome: string, fn: () => void | Promise<void>) {
   fila = fila.then(async () => {
-    try { await fn(); ok++; imprimir(`  PASS  ${nome}`); }
-    catch (e: any) { falhou++; imprimir(`  FALHA ${nome} -> ${e?.message ?? e}`); }
+    let tid: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.resolve().then(fn),
+        new Promise<never>((_, rej) => { tid = setTimeout(() => rej(new Error(`TIMEOUT ${TIMEOUT_TESTE_MS / 1000}s — teste pendurado`)), TIMEOUT_TESTE_MS); }),
+      ]);
+      ok++; imprimir(`  PASS  ${nome}`);
+    }
+    catch (e: any) {
+      console.log = imprimir; falhou++; imprimir(`  FALHA ${nome} -> ${e?.message ?? e}`);
+      if (String(e?.message ?? "").startsWith("TIMEOUT ")) { imprimir(`
+✗ ABORTADO: teste pendurado — ${ok} passaram, ${falhou} falharam (restante não executado)`); process.exit(1); }
+    }
+    finally { clearTimeout(tid); }
   });
 }
 function secao(s: string) { fila = fila.then(() => { imprimir(s); }); }
@@ -480,7 +501,7 @@ async function principal() {
     const r = await K.coletarFinanceiroML({ userId: U, lojaId: ML_A, accessToken: TOKEN_A }, { pedidos: [orderGolden()] }, depsFalsos(), { ate: 0 });
     assert(r.adiados === 1 && r.transitorios === 0 && r.integracao === 0 && r.falhas.length === 0 && chamadas.length === 0, JSON.stringify(r));
     assert(logs.some((l) => /DEFERRED_BY_RUNTIME_BUDGET loja=.* order=2000018971279352 /.test(l)) && !logs.some((l) => /TRANSIENT_ERROR|INTEGRATION_ERROR/.test(l)), logs.join(" | "));
-    assert(logs.some((l) => /resumo .* transient=0 integracao=0 deferred_by_runtime_budget=1/.test(l)), "resumo não distingue");
+    assert(logs.some((l) => /resumo .* transient=0 integracao=0 provider_data_not_ready=0 deferred_by_runtime_budget=1/.test(l)), "resumo não distingue");
   });
   t("BUDGET-6. ACTUAL não é reconsultado (sync e recuperação)", async () => {
     semear(); await sync(); chamadas = [];
@@ -505,6 +526,84 @@ async function principal() {
     chamadas = [];
     const r = await postRetry(janela());
     assert(r.corpo.candidatos === 70 && r.corpo.tentados === 70 && r.corpo.actual === 70 && r.corpo.adiados === 0, JSON.stringify(r.corpo));
+  });
+
+  secao("\n[6. carência do provider — venda recém-fechada (A3.2-C.3)]");
+  // golden: date_closed 2026-10-14T07:07:10-03:00 = 10:07:10Z
+  const RECENTE = () => new Date("2026-10-14T10:08:10.000Z");   // 1 min
+  const ANTIGA = () => new Date("2026-10-14T10:20:10.000Z");    // 13 min
+  const coletar = (entrada: any, agora: () => Date) => K.coletarFinanceiroML({ userId: U, lojaId: ML_A, accessToken: TOKEN_A }, entrada, { ...depsFalsos(), agora });
+  const SEM_COBRANCA = { status: 200, corpo: { results: [] } };
+  t("GRACE-1/10. venda de 1 min com financeiro completo → ACTUAL na 1ª tentativa, sem espera nenhuma", async () => {
+    semear(); esperas = []; logs.length = 0;
+    const r = await coletar({ pedidos: [orderGolden()] }, RECENTE);
+    assert(r.actual === 1 && r.naoProntos === 0 && esperas.length === 0 && finDe(ORDER)?.billing_status === "CONFERIDO", JSON.stringify(r));
+    assert(F.idadePedidoMLms(orderGolden(), RECENTE()) === 60_000, "idade pelo relógio do provider");
+  });
+  t("GRACE-2. 1 min + billing ainda sem cobrança → PENDENTE, PROVIDER_DATA_NOT_READY (não erro), elegível", async () => {
+    semear(); logs.length = 0; roteiro["/billing/"] = [SEM_COBRANCA];
+    const r = await coletar({ pedidos: [orderGolden()] }, RECENTE);
+    assert(r.naoProntos === 1 && r.integracao === 0 && finDe(ORDER)?.billing_status === "PENDENTE", JSON.stringify(r));
+    assert(logs.some((l) => /PROVIDER_DATA_NOT_READY .*order=2000018971279352 .*etapa=billing http=200 order_age_s=60/.test(l)), logs.join(" | "));
+    assert(F.financeiroPendenteElegivel(finDe(ORDER) as any, envioDe(SHIP)[0] as any) === "billing", "não elegível ao refresh");
+  });
+  t("GRACE-3. 1 min + descontos 404 → PROVIDER_DATA_NOT_READY; 1 min + billing parcial (só 4,16) → PENDENTE, não DIVERGENTE", async () => {
+    semear(); logs.length = 0; roteiro[`/orders/${ORDER}/discounts`] = [{ status: 404, corpo: {} }];
+    let r = await coletar({ pedidos: [orderGolden()] }, RECENTE);
+    assert(r.naoProntos === 1 && r.integracao === 0 && finDe(ORDER)?.descontos_status === "INDISPONIVEL" && logs.some((l) => /PROVIDER_DATA_NOT_READY .*etapa=discounts http=404/.test(l)), JSON.stringify(r));
+    semear(); logs.length = 0;
+    roteiro["/billing/"] = [{ status: 200, corpo: { results: [{ details: [{ charge_info: { detail_type: "CHARGE", detail_amount: 4.16 }, sales_info: [{ order_id: Number(ORDER) }] }] }] } }];
+    r = await coletar({ pedidos: [orderGolden()] }, RECENTE);
+    assert(finDe(ORDER)?.billing_status === "PENDENTE" && r.naoProntos === 1 && r.integracao === 0, `${finDe(ORDER)?.billing_status} ${JSON.stringify(r)}`);
+  });
+  t("GRACE-4. venda recente + 429 → TRANSIENT_ERROR (retry com backoff), nunca PROVIDER_DATA_NOT_READY", async () => {
+    semear(); esperas = []; logs.length = 0;
+    roteiro[`/shipments/${SHIP}/costs`] = [{ status: 429 }, { status: 429 }, { status: 429 }];
+    const r = await coletar({ pedidos: [orderGolden()] }, RECENTE);
+    assert(r.transitorios === 1 && r.naoProntos === 0 && JSON.stringify(esperas) === "[1000,2000]", JSON.stringify(r));
+    assert(F.classeComCarenciaML("TRANSIENT_ERROR", "billing", 429, 60_000) === "TRANSIENT_ERROR", "carência tocou transitório");
+  });
+  t("GRACE-5. venda recente + pack usado como order (/orders/{pack} 404) → INTEGRATION_ERROR", async () => {
+    semear(); logs.length = 0;
+    const r = await coletar([PACK], RECENTE);
+    assert(r.integracao === 1 && r.naoProntos === 0 && logs.some((l) => /INTEGRATION_ERROR .*order=2000015516685373 .*etapa=order http=404/.test(l)), JSON.stringify(r));
+    assert(F.classeComCarenciaML("INTEGRATION_ERROR", "order", 404, 10_000) === "INTEGRATION_ERROR", "carência na etapa order");
+  });
+  t("GRACE-6. venda recente + credencial/loja errada (403/401) → INTEGRATION_ERROR (carência não esconde)", async () => {
+    semear(); logs.length = 0; roteiro[`/shipments/${SHIP}/costs`] = [{ status: 403, corpo: {} }];
+    const r = await coletar({ pedidos: [orderGolden()] }, RECENTE);
+    assert(r.integracao === 1 && r.naoProntos === 0 && logs.some((l) => /INTEGRATION_ERROR .*etapa=shipment_costs http=403/.test(l)), JSON.stringify(r));
+    for (const h of [401, 403, 400, 500]) assert(F.classeComCarenciaML("INTEGRATION_ERROR", "billing", h, 10_000) === "INTEGRATION_ERROR", `http ${h} escondido`);
+  });
+  t("GRACE-7. refresh alguns minutos depois, dados agora disponíveis → ACTUAL", async () => {
+    semear(); roteiro["/billing/"] = [SEM_COBRANCA];
+    await coletar({ pedidos: [orderGolden()] }, RECENTE);
+    assert(finDe(ORDER)?.billing_status === "PENDENTE", "1ª tentativa não ficou pendente");
+    db.pedidos.push({ id: `${U}_ML_${ML_A}_${ORDER}_${ITEM}_nv`, user_id: U, marketplace: "ML", loja_id: ML_A, order_id: ORDER, ml_item_id: ITEM, variation_id: null, data: DIA, data_pagamento: DIA, data_criacao: DIA, synced_at: new Date().toISOString(), status: "paid", qtd: 1, faturamento: 41.24, tarifa_venda: 4.19, conta: "MONAMOR" });
+    const r = await postRetry({ loja_id: ML_A, date_from: DIA, date_to: DIA });
+    assert(r.corpo.actual === 1 && finDe(ORDER)?.billing_status === "CONFERIDO", JSON.stringify(r.corpo));
+  });
+  t("GRACE-8. venda com 13 min e billing/descontos ausentes → INTEGRATION_ERROR (sem PROVIDER_DATA_NOT_READY)", async () => {
+    semear(); logs.length = 0; roteiro["/billing/"] = [SEM_COBRANCA]; roteiro[`/orders/${ORDER}/discounts`] = [{ status: 404, corpo: {} }];
+    const r = await coletar({ pedidos: [orderGolden()] }, ANTIGA);
+    assert(r.naoProntos === 0 && r.integracao === 2 && !logs.some((l) => /PROVIDER_DATA_NOT_READY/.test(l)), JSON.stringify(r));
+    assert(F.classeComCarenciaML("INTEGRATION_ERROR", "billing", 404, F.CARENCIA_PROVIDER_ML_MS) === "INTEGRATION_ERROR" && F.classeComCarenciaML("INTEGRATION_ERROR", "billing", 404, null) === "INTEGRATION_ERROR", "venda antiga/sem data na carência");
+  });
+  t("GRACE-9. golden histórica continua 30,10 ACTUAL (fora da carência, fórmula intacta)", async () => {
+    semear(); logs.length = 0;
+    const r = await coletar({ pedidos: [orderGolden()] }, () => new Date());
+    const l = F.liquidoPedidoML(finDe(ORDER) as any, envioDe(SHIP)[0] as any);
+    assert(r.naoProntos === 0 && c(l.liquido) === 3010 && l.qualidade === "ACTUAL", JSON.stringify(l));
+  });
+  t("GRACE-11/12. GET de Vendas segue sem chamada ao provider; uma rodada automática por carga", async () => {
+    semear(); roteiro["/billing/"] = [SEM_COBRANCA];
+    await coletar({ pedidos: [orderGolden()] }, RECENTE);
+    db.pedidos.push({ id: `${U}_ML_${ML_A}_${ORDER}_${ITEM}_nv`, user_id: U, marketplace: "ML", loja_id: ML_A, order_id: ORDER, ml_item_id: ITEM, variation_id: null, data: DIA, data_pagamento: DIA, data_criacao: DIA, synced_at: new Date().toISOString(), status: "paid", qtd: 1, faturamento: 41.24, tarifa_venda: 4.19, conta: "MONAMOR" });
+    chamadas = [];
+    const g = await getVendas(`date_from=${DIA}&date_to=${DIA}&loja_id=${ML_A}`);
+    assert(chamadas.length === 0 && g.corpo.financeiroPendente === 1, `chamadas=${chamadas.length} pendente=${g.corpo.financeiroPendente}`);
+    const pg = fonte("app/(app)/vendas/page.tsx");
+    assert(/retryFinanceiroRef\.current = true;/.test(pg) && !/retryFinanceiroRef\.current = false/.test(pg) && (pg.match(/\/api\/ml\/vendas\/financeiro/g) ?? []).length === 1, "loop possível");
   });
 
   secao("\n[4. guard]");

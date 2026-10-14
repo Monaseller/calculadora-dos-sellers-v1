@@ -132,6 +132,38 @@ export function classificarHttpML(status: number): ClasseErroML | "OK" {
 }
 
 /**
+ * A3.2-C.3 — CARÊNCIA do provider: numa venda recém-fechada o Mercado Livre leva ~5 min para expor todo o
+ * financeiro (billing, descontos, custos do envio). A 1ª tentativa é IMEDIATA (sem espera artificial); só a
+ * AUSÊNCIA de um subrecurso financeiro dentro da carência deixa de ser erro de integração.
+ */
+export const CARENCIA_PROVIDER_ML_MS = 5 * 60_000;
+/** Etapas com consistência eventual no provider — nunca "order" (o pedido já existe: 404 aqui é identidade errada). */
+export const ETAPAS_COM_CARENCIA_ML = ["discounts", "pack", "shipment_costs", "shipment_costs_estrutura", "billing", "billing_divergente"] as const;
+export type ClasseFinanceiraML = ClasseErroML | "PROVIDER_DATA_NOT_READY";
+
+/** Idade da venda pelo horário do PROVIDER (date_closed, senão date_created); null se ausente/ilegível. */
+export function idadePedidoMLms(order: any, agora: Date): number | null {
+  const ref = order?.date_closed ?? order?.date_created;
+  const t = ref ? Date.parse(String(ref)) : NaN;
+  return Number.isFinite(t) ? agora.getTime() - t : null;
+}
+
+/**
+ * Reclassifica uma falha à luz da carência: INTEGRATION_ERROR vira PROVIDER_DATA_NOT_READY SÓ se (1) a etapa é de
+ * subrecurso financeiro com consistência eventual, (2) a resposta foi 404 (ainda não existe) ou 200 incompleto, e
+ * (3) a venda tem menos de 5 min pelo relógio do provider (tolerância de 60 s para relógios adiantados).
+ * 401/403/400/500, a etapa "order" (pack usado como order, credencial/loja errada) e venda antiga continuam ERRO.
+ * TRANSIENT_ERROR nunca é tocado (segue o retry com backoff).
+ */
+export function classeComCarenciaML(classe: ClasseErroML, etapa: string, http: number, idadeMs: number | null): ClasseFinanceiraML {
+  if (classe !== "INTEGRATION_ERROR") return classe;
+  if (!(ETAPAS_COM_CARENCIA_ML as readonly string[]).includes(etapa)) return classe;
+  if (http !== 404 && http !== 200) return classe;
+  if (idadeMs === null || idadeMs < -60_000 || idadeMs >= CARENCIA_PROVIDER_ML_MS) return classe;
+  return "PROVIDER_DATA_NOT_READY";
+}
+
+/**
  * A3.2-C — o pedido tem financeiro INCOMPLETO que uma nova tentativa pode completar? Devolve o motivo ou null.
  * Elegível: billing PENDENTE, descontos indisponíveis, tarifa ausente no pedido, ou envio que existe mas cujo
  * custo/pedidos do pack não vieram. NÃO elegível (null): completo; sem envio (nada a buscar); envio
