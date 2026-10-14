@@ -274,7 +274,7 @@ async function principal() {
     const gravado = RUN.lerManifestoGravado();
     assert(gravado !== null, "manifesto ausente");
     assert(RUN.verificarManifesto(gravado, atual).length === 0, `manifesto divergente: ${RUN.verificarManifesto(gravado, atual).join(" | ")}`);
-    for (const f of ["scripts/testar-guard-v2-nucleo.ts", "scripts/rodar-bateria-offline.ts", "scripts/testar-vendas-sync-cron.ts", "scripts/_excecao-shopee-import-v2.ts"]) assert(f in atual, `${f} fora do manifesto`);
+    for (const f of ["scripts/testar-guard-v2-nucleo.ts", "scripts/rodar-bateria-offline.ts", "scripts/testar-vendas-sync-cron.ts", "scripts/_excecao-shopee-multi-app.ts"]) assert(f in atual, `${f} fora do manifesto`);
     const alterado = { ...atual, "scripts/testar-vendas-sync-cron.ts": "0".repeat(64) };
     const semUm = { ...atual }; delete (semUm as any)["scripts/testar-middleware.ts"];
     const comExtra = { ...atual, "scripts/testar-intruso.ts": "f".repeat(64) };

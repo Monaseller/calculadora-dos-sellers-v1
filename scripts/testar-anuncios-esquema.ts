@@ -41,6 +41,7 @@ const SNAPSHOT = JSON.parse(readFileSync(join(RAIZ, "docs/schema/anuncios.coluna
 const COLUNAS = new Set<string>(SNAPSHOT.colunas.map((c: { nome: string }) => c.nome));
 // CDS V2 Fase 2D: o snapshot é o de PRODUÇÃO no estado 3 (loja_id já é coluna real). Não há mais
 // coluna "pendente" aceita por exceção exata: código e projeções valem contra o snapshot, e só ele.
+// Fase 2H-E: snapshot atualizado com as colunas da 2H-B (já em produção) — a tela passa a lê-las.
 
 // ── Scanner: cadeias `.from("anuncios")` ─────────────────────────────
 
@@ -156,10 +157,14 @@ async function principal() {
     const achados = varrer(arquivos, COLUNAS);
     assert(achados.length === 0, achados.map((a) => `${a.arquivo}:${a.linha} ${a.onde}(${a.coluna})`).join(" | "));
   });
-  t("5c. snapshot = PRODUCAO com a fase 1 aplicada: loja_id uuid, nulo, sem default, ultima coluna; nada pendente fora do snapshot", () => {
+  t("5c. snapshot = PRODUCAO (estado 4 + 2H-B): loja_id uuid na 25; status_marketplace text e visto_em timestamptz nas 26-27, nulos, sem default; nada pendente fora do snapshot", () => {
     const loja = SNAPSHOT.colunas.find((c: { nome: string }) => c.nome === "loja_id");
     assert(loja && loja.tipo === "uuid" && loja.nulo === true && loja.default === false, JSON.stringify(loja));
-    assert(SNAPSHOT.colunas[SNAPSHOT.colunas.length - 1].nome === "loja_id", "loja_id fora da posicao do banco (25, ultima)");
+    // CDS V2 Fase 2H-E: ordem conferida em information_schema de produção (read-only, 2026-10-14)
+    const cauda = SNAPSHOT.colunas.slice(-3).map((c: { nome: string; tipo: string; nulo: boolean; default: boolean }) => `${c.nome}:${c.tipo}:${c.nulo}:${c.default}`);
+    assert(SNAPSHOT.colunas.length === 27 && JSON.stringify(cauda) === JSON.stringify([
+      "loja_id:uuid:true:false", "status_marketplace:text:true:false", "visto_em:timestamp with time zone:true:false",
+    ]), `cauda do snapshot fora da posicao do banco: ${cauda.join(" | ")}`);
   });
   t("5b. o scanner de fato encontrou as cadeias conhecidas (não está cego)", () => {
     const comCadeia = [...arquivos].filter(([, s]) => /\.from\(\s*["'`]anuncios["'`]\s*\)/.test(s)).map(([f]) => f);

@@ -40,6 +40,11 @@
  *       preso a marketplace + loja + tipo "refresh" antes do provider, credencial da loja, positivo só com id
  *       pedido == id devolvido (ML code 200), sem inferência de 404/ausência, variação/model só se voltou,
  *       escrita só pelo helper de observação, checkpoint depois da escrita;
+ *   I11 I11_MARKETPLACE_STATUS_UI_IS_READ_ONLY (Fase 2H-E): fora do helper (I9), status_marketplace/visto_em
+ *       só em leitores NOMINAIS (projeção da tela; módulo puro de apresentação, com o tipo readonly); a apresentação
+ *       não grava, não faz I/O, não lê/deriva `ativo`, não usa relógio nem infere estado (NULL ≠ inativo,
+ *       Shopee NULL ≠ NORMAL); só os cards a usam (fora de filtro/agrupamento/ordem); card nunca some e
+ *       não dispara escrita nova; o browser não grava os campos (CAMPOS_GRAVAVEIS);
  *   Z   ZONAS PROTEGIDAS sem suíte comportamental própria (telas legadas de Vendas/Dashboard,
  *       constantes financeiras, supabase/**, vercel.json, .env.example, sync-worker.mjs): mudar
  *       exige re-baseline EXPLÍCITO de scripts/zonas-protegidas.json (aparece no diff), nunca
@@ -525,6 +530,9 @@ export function catalogoMLNaoEscopadoPorLoja(raiz = RAIZ_V2): string[] {
 
 // ── I9: observação do marketplace separada de `ativo` (Fase 2H-C) ─────────
 export const HELPER_OBSERVACAO = "lib/anuncios/observacao-marketplace.ts";
+/** Fase 2H-E: os ÚNICOS leitores de status_marketplace/visto_em fora do helper — somente leitura (I11). */
+export const UI_OBSERVACAO = "app/(app)/anuncios/observacao.ts";
+export const LEITORES_OBSERVACAO = ["lib/anuncios/colunas.ts", UI_OBSERVACAO];
 const MOTORES_OBSERVACAO: Array<{ arquivo: string; marketplace: "ML" | "Shopee" }> = [
   { arquivo: "lib/anuncios/importacao-ml.ts", marketplace: "ML" },
   { arquivo: "lib/anuncios/importacao-shopee.ts", marketplace: "Shopee" },
@@ -548,7 +556,9 @@ export function observacaoMisturadaComAtivo(raiz = RAIZ_V2): string[] {
   const grava = corpoDe(h, /export async function gravarObservacoes\(/) ?? "";
   if (!/\.update\(obs\)\s*\.in\("id", lote\)\.eq\("user_id", alvo\.userId\)\.eq\("marketplace", alvo\.marketplace\)\.eq\("loja_id", alvo\.lojaId\)\.select\("id"\)/.test(grava)) erros.push("helper: gravação sem ids + dono + marketplace + loja");
   if (!/if \(error \|\| \(data \?\? \[\]\)\.length !== lote\.length\) return false;/.test(grava)) erros.push("helper: gravação aceita confirmação parcial");
-  const runtime = listar(raiz, "app", "lib", "components").filter((f) => /\.(ts|tsx)$/.test(f) && f !== HELPER_OBSERVACAO);
+  // Fase 2H-E: os LEITORES nominais (projeção, tipo, apresentação) podem citar os campos — e só eles;
+  // que eles só LEEM é provado por I11 (observacaoNaUiNaoSoLeitura).
+  const runtime = listar(raiz, "app", "lib", "components").filter((f) => /\.(ts|tsx)$/.test(f) && f !== HELPER_OBSERVACAO && !LEITORES_OBSERVACAO.includes(f));
   for (const f of runtime) {
     const src = tiraComentarios(ler(raiz, f));
     if (/\b(status_marketplace|visto_em)\b/.test(src)) erros.push(`${f}: grava/monta status_marketplace/visto_em fora do helper de observação`);
@@ -630,6 +640,62 @@ export function refreshDeIdentidadesForaDaLoja(raiz = RAIZ_V2): string[] {
   return erros;
 }
 
+// ── I11: observação do marketplace na UI é SOMENTE LEITURA (Fase 2H-E) ─────
+export const CARDS_OBSERVACAO = ["app/(app)/anuncios/CardAnuncio.tsx", "app/(app)/anuncios/CardAnuncioVariacoes.tsx"];
+/** Única escrita que um card dispara (anterior à 2H-E): vendas do dia do anúncio. */
+const FETCH_DOS_CARDS: Record<string, RegExp[]> = {
+  "app/(app)/anuncios/CardAnuncio.tsx": [/^fetch\(`\/api\/anuncios\/\$\{encodeURIComponent\(a\.id\)\}\/vendas-dia`/],
+  "app/(app)/anuncios/CardAnuncioVariacoes.tsx": [],
+};
+const CAMPO_OBS = /\b(status_marketplace|visto_em)\b/g;
+/**
+ * I11_MARKETPLACE_STATUS_UI_IS_READ_ONLY: (a) a projeção da tela cita os campos só dentro de
+ * DB_ANUNCIO_COLUMNS; (b) o tipo de leitura vive só na apresentação, opcional e readonly; (c) a apresentação é pura — sem import, I/O,
+ * escrita, atribuição/montagem dos campos, `ativo`, relógio ou palavra de estado inferido (NULL ≠
+ * inativo/offline/removido; Shopee NULL ≠ NORMAL; visto_em antigo ≠ stale); (d) só os cards a usam
+ * (página/filtro/agrupamento/ordem nunca); (e) card nunca some, não toca `ativo` e não dispara escrita
+ * além da que já existia; (f) o browser não grava os campos (CAMPOS_GRAVAVEIS).
+ */
+export function observacaoNaUiNaoSoLeitura(raiz = RAIZ_V2): string[] {
+  const erros: string[] = [];
+  for (const f of [UI_OBSERVACAO, ...CARDS_OBSERVACAO]) if (!existsSync(join(raiz, f))) return [`${f} ausente`];
+  // (a) projeção
+  const col = tiraComentarios(ler(raiz, "lib/anuncios/colunas.ts"));
+  const lista = /export const DB_ANUNCIO_COLUMNS = \[([\s\S]*?)\] as const;/.exec(col)?.[1] ?? "";
+  if (!/"status_marketplace", "visto_em"/.test(lista)) erros.push("colunas: projeção da tela sem os campos de observação (leitura cega)");
+  if ((col.match(CAMPO_OBS) ?? []).length !== (lista.match(CAMPO_OBS) ?? []).length) erros.push("colunas: campo de observação fora de DB_ANUNCIO_COLUMNS");
+  // (b) tipo de leitura: só no módulo de apresentação, só opcional e readonly
+  const ui0 = tiraComentarios(ler(raiz, UI_OBSERVACAO));
+  const decl = /export interface ObservacaoLida \{([\s\S]*?)\}/.exec(ui0)?.[1].split(/\r?\n/).map((l) => l.trim()).filter(Boolean) ?? [];
+  if (JSON.stringify(decl) !== JSON.stringify(["readonly status_marketplace?: string | null;", "readonly visto_em?: string | null;"])) erros.push(`${UI_OBSERVACAO}: tipo de leitura da observação não é opcional/readonly (${decl.join(" | ")})`);
+  // (c) apresentação pura
+  const ui = tiraComentarios(ler(raiz, UI_OBSERVACAO));
+  if (/^\s*import\b|\brequire\(|\bimport\(/m.test(ui)) erros.push(`${UI_OBSERVACAO}: importa módulo (a apresentação é pura)`);
+  if (/\bfetch\(|\.from\(|\.(update|insert|upsert|delete|rpc)\(|supabase|localStorage|sessionStorage|XMLHttpRequest|sendBeacon/.test(ui)) erros.push(`${UI_OBSERVACAO}: I/O ou escrita`);
+  if (/\b(status_marketplace|visto_em)\s*(:|=(?!=))/.test(ui)) erros.push(`${UI_OBSERVACAO}: atribui/monta campo de observação`);
+  if (/\bativo\b/.test(ui)) erros.push(`${UI_OBSERVACAO}: observação lê/deriva ativo`);
+  if (/Date\.now\(|new Date\(\s*\)|performance\.now\(/.test(ui)) erros.push(`${UI_OBSERVACAO}: relógio na apresentação (visto_em vira decisão de idade)`);
+  if (/\b(inactive|inativ\w*|offline|online|deleted|removid\w*|exclu\w*|stale|antig\w*|vencid\w*|NORMAL|UNLIST\w*|BANNED|paused|pausad\w*|closed|encerrad\w*)\b/i.test(ui)) erros.push(`${UI_OBSERVACAO}: estado inferido da observação`);
+  // (d) só os cards usam a apresentação
+  const runtime = listar(raiz, "app", "lib", "components").filter((f) => /\.(ts|tsx)$/.test(f));
+  const importadores = runtime.filter((f) => arestas(raiz, f).some((a) => a.para === UI_OBSERVACAO)).sort();
+  if (JSON.stringify(importadores) !== JSON.stringify([...CARDS_OBSERVACAO].sort())) erros.push(`apresentação da observação usada fora dos cards: ${importadores.join(", ") || "(nenhum)"}`);
+  // (e) cards
+  for (const f of CARDS_OBSERVACAO) {
+    const s = tiraComentarios(ler(raiz, f));
+    if (/\bif\s*\([^\n]*\bobs\w*\b[^\n]*\)\s*\{?\s*return\b|\bobs\w*\b[^\n]*\?\s*null\s*:/.test(s)) erros.push(`${f}: card some conforme a observação (observação não decide visibilidade)`);
+    if (/\bativo\b/.test(s)) erros.push(`${f}: card toca ativo`);
+    const fetches = [...s.matchAll(/\bfetch\([^\n]*/g)].map((m) => m[0]);
+    const permitidos = FETCH_DOS_CARDS[f];
+    if (fetches.length !== permitidos.length || !fetches.every((x, i) => permitidos[i].test(x))) erros.push(`${f}: escrita/fetch fora da lista fechada (${fetches.length})`);
+  }
+  // (f) o browser não grava os campos
+  const serv = tiraComentarios(ler(raiz, "lib/anuncios/servico.ts"));
+  const grav = /export const CAMPOS_GRAVAVEIS[^{]*\{([\s\S]*?)\};/.exec(serv)?.[1] ?? "";
+  if (!grav || /\b(status_marketplace|visto_em)\b/.test(grav)) erros.push("servico: campos de observação graváveis pelo browser");
+  return erros;
+}
+
 export function invariantesV2(raiz = RAIZ_V2, opcoes: { zonas?: boolean } = {}): string[] {
   const erros: string[] = [];
   for (const v of canonicoAlcancaLegado(raiz)) erros.push(`I1 canônico→legado: ${v}`);
@@ -642,6 +708,7 @@ export function invariantesV2(raiz = RAIZ_V2, opcoes: { zonas?: boolean } = {}):
   for (const v of catalogoMLNaoEscopadoPorLoja(raiz)) erros.push(`I8 I8_ML_CATALOG_IS_STORE_SCOPED: ${v}`);
   for (const v of observacaoMisturadaComAtivo(raiz)) erros.push(`I9 I9_MARKETPLACE_OBSERVATION_IS_SEPARATE_FROM_ATIVO: ${v}`);
   for (const v of refreshDeIdentidadesForaDaLoja(raiz)) erros.push(`I10 I10_KNOWN_ID_REFRESH_IS_STORE_SCOPED: ${v}`);
+  for (const v of observacaoNaUiNaoSoLeitura(raiz)) erros.push(`I11 I11_MARKETPLACE_STATUS_UI_IS_READ_ONLY: ${v}`);
   if (opcoes.zonas !== false) for (const v of verificarZonas(raiz)) erros.push(`Z zona protegida sem re-baseline: ${v}`);
   return erros;
 }

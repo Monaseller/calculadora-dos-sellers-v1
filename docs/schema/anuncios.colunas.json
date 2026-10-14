@@ -1,6 +1,6 @@
 {
   "tabela": "public.anuncios",
-  "capturado_em": "2026-10-05",
+  "capturado_em": "2026-10-14",
   "fonte": "information_schema.columns do banco de Production (somente leitura), ordenado por ordinal_position",
   "observacao": "A tabela foi criada fora das migrations deste repo; este snapshot e a fonte versionada do schema para os guards offline. Atualize-o junto com qualquer migration que altere public.anuncios.",
   "colunas": [
@@ -28,6 +28,8 @@
     { "nome": "variation_id", "tipo": "text", "nulo": true, "default": false },
     { "nome": "logistic_type", "tipo": "text", "nulo": true, "default": false },
     { "nome": "user_id", "tipo": "text", "nulo": true, "default": false },
-    { "nome": "loja_id", "tipo": "uuid", "nulo": true, "default": false }
+    { "nome": "loja_id", "tipo": "uuid", "nulo": true, "default": false },
+    { "nome": "status_marketplace", "tipo": "text", "nulo": true, "default": false },
+    { "nome": "visto_em", "tipo": "timestamp with time zone", "nulo": true, "default": false }
   ]
 }

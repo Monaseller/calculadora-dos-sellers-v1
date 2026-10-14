@@ -2,6 +2,7 @@
 import { useState } from "react";
 import { type Anuncio } from "@/lib/supabase";
 import { CATEGORIAS_ML } from "@/lib/comissoes-mercado-livre";
+import { apresentarObservacao } from "./observacao";
 
 interface Props {
   anuncio: Anuncio;
@@ -29,6 +30,8 @@ export default function CardAnuncio({ anuncio: a, onEditar, onExcluir }: Props) 
   const CORBG = a.marketplace === "ML" ? "rgba(255,230,0,0.12)" : "rgba(238,77,45,0.12)";
 
   const precoAtual = a.preco_anuncio;
+  // Observação do marketplace: só exibição (status RAW + última observação); null = não mostra nada
+  const obs = apresentarObservacao(a);
 
   // Calcula lucro e margem dinamicamente — não depende de colunas extras no DB
   function calcLucroMargem() {
@@ -120,6 +123,11 @@ export default function CardAnuncio({ anuncio: a, onEditar, onExcluir }: Props) 
                 SKU: {a.sku}
               </span>
             )}
+            {obs?.status && (
+              <span title={`Status no marketplace (valor original): ${obs.status}`} style={{ background: "rgba(255,255,255,0.06)", color: "#9099aa", fontSize: "10px", fontWeight: 700, borderRadius: "6px", padding: "2px 8px" }}>
+                ● {obs.status}
+              </span>
+            )}
           </div>
 
           {/* Nome */}
@@ -128,6 +136,9 @@ export default function CardAnuncio({ anuncio: a, onEditar, onExcluir }: Props) 
           </div>
           {a.categoria && (
             <div style={{ color: "#9099aa", fontSize: "11px" }}>{a.categoria}</div>
+          )}
+          {obs?.vistoEm && (
+            <div style={{ color: "#9099aa", fontSize: "10px", marginTop: "2px" }}>Última observação: {obs.vistoEm}</div>
           )}
         </div>
 

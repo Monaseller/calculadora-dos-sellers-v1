@@ -1,6 +1,7 @@
 "use client";
 import { type Anuncio } from "@/lib/supabase";
 import { CATEGORIAS_ML } from "@/lib/comissoes-mercado-livre";
+import { apresentarObservacao, observacaoDoGrupo } from "./observacao";
 
 interface Props {
   variacoes: Anuncio[];
@@ -32,6 +33,8 @@ export default function CardAnuncioVariacoes({ variacoes, onEditar, onExcluir }:
     : primeiro.nome ?? "Produto";
   // Thumbnail: primeiro que tiver
   const thumbnail = variacoes.find(v => v.thumbnail)?.thumbnail ?? null;
+  // Observação do marketplace (só exibição): uma vez no cabeçalho; por variação só se divergirem
+  const obsGrupo = observacaoDoGrupo(variacoes);
 
   return (
     <div style={{
@@ -84,6 +87,14 @@ export default function CardAnuncioVariacoes({ variacoes, onEditar, onExcluir }:
                 {primeiro.ml_item_id}
               </span>
             )}
+            {obsGrupo.comum?.status && (
+              <span title={`Status no marketplace (valor original): ${obsGrupo.comum.status}`} style={{
+                background: "rgba(255,255,255,0.06)", color: "#9099aa",
+                fontSize: "10px", fontWeight: 700, borderRadius: "6px", padding: "2px 8px",
+              }}>
+                ● {obsGrupo.comum.status}
+              </span>
+            )}
           </div>
           {/* Nome */}
           <div style={{
@@ -95,6 +106,11 @@ export default function CardAnuncioVariacoes({ variacoes, onEditar, onExcluir }:
           {primeiro.categoria && (
             <div style={{ color: "#9099aa", fontSize: "11px", marginTop: "2px" }}>
               {primeiro.categoria}
+            </div>
+          )}
+          {obsGrupo.comum?.vistoEm && (
+            <div style={{ color: "#9099aa", fontSize: "10px", marginTop: "2px" }}>
+              Última observação: {obsGrupo.comum.vistoEm}
             </div>
           )}
         </div>
@@ -119,6 +135,7 @@ export default function CardAnuncioVariacoes({ variacoes, onEditar, onExcluir }:
             : v.nome ?? "";
           const calc = calcVariacao(v);
           const cor  = CORES_VAR[idx % CORES_VAR.length];
+          const obs  = obsGrupo.porLinha ? apresentarObservacao(v) : null;
 
           return (
             <div
@@ -163,6 +180,11 @@ export default function CardAnuncioVariacoes({ variacoes, onEditar, onExcluir }:
                 {v.sku && (
                   <div style={{ fontSize: "10px", color: "#9099aa", fontFamily: "monospace", marginTop: "1px" }}>
                     SKU: {v.sku}
+                  </div>
+                )}
+                {obs && (
+                  <div style={{ fontSize: "10px", color: "#9099aa", marginTop: "1px" }}>
+                    {[obs.status ? `● ${obs.status}` : null, obs.vistoEm ? `Última observação: ${obs.vistoEm}` : null].filter(Boolean).join(" · ")}
                   </div>
                 )}
               </div>

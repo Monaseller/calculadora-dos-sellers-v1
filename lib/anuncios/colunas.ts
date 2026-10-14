@@ -24,6 +24,9 @@ export const DB_ANUNCIO_COLUMNS = [
   "peso_kg", "variation_id", "logistic_type", "user_id",
   // ANUNCIOS MULTI-LOJA (fase 1 aplicada em producao): loja Shopee do anuncio
   "loja_id",
+  // CDS V2 Fase 2H-B (aplicada em producao): observacao do marketplace. Gravada SO pelo helper de
+  // observacao (I9); aqui so entra na leitura da tela (I11) — nunca em CAMPOS_GRAVAVEIS.
+  "status_marketplace", "visto_em",
 ] as const;
 
 export type ColunaAnuncio = (typeof DB_ANUNCIO_COLUMNS)[number];
@@ -39,6 +42,7 @@ export const DERIVED_UI_FIELDS = ["lucro_liquido", "margem_contribuicao"] as con
  * CDS V2 Fase 2D: `loja_id` vai ao browser como identidade TÉCNICA da loja (sem hash paralelo):
  * a tela agrupa ML por marketplace|loja_id|ml_item_id para nunca fundir lojas. Não é exibido e
  * não é autoridade — toda escrita revalida loja no servidor.
+ * CDS V2 Fase 2H-E: a observação do marketplace também vai, SÓ para exibição (somente leitura).
  */
 export const COLUNAS_ANUNCIO_TELA: string = DB_ANUNCIO_COLUMNS
   .filter((c) => c !== "user_id")
