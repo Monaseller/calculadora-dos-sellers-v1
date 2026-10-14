@@ -6,6 +6,7 @@ import { calcularUltimos7Dias, DATE_PRESETS } from "@/lib/date-range-utils";
 import { ASYNC_SYNC_JOBS_ENABLED } from "@/lib/feature-flags";
 import type { FinanceiroVendaLive } from "@/lib/vendas/custo-produto-tipos";
 import { avisoCustoLive, custoCadastradoLive, seloLucroLive, textoFreteLive, totaisLive } from "./financeiro-live";
+import { codigoAnuncio, codigoVenda, copiarCodigo } from "./codigos-venda";
 import { AVISO_SELECIONE_LOJA_ML_SYNC, CHAVE_LOJA_ML_VENDAS, type CorpoSyncManual, type LojaMLVendas, escolherLojaMLInicial, lojasMLDaLista, lojasMLDaRecusa, planoSyncManual } from "./loja-ml";
 
 // ── Tipos ──────────────────────────────────────────────────────────────────
@@ -81,6 +82,7 @@ export default function VendasPage() {
   const prontoMLRef = useRef(false);
   const listaMLFalhouRef = useRef(false);   // lista de lojas indisponível → sync com ML bloqueado (A5-B.1)
   const [avisoSyncML, setAvisoSyncML] = useState<string | null>(null);
+  const [codigoCopiado, setCodigoCopiado] = useState<string | null>(null);   // Vendas A3.2: feedback do copiar
   const [shopeeLojaId, setShopeeLojaId] = useState<string | null>(null);
   const [loading,   setLoading]   = useState(false);
   const [erro,      setErro]      = useState<string | null>(null);
@@ -636,6 +638,22 @@ export default function VendasPage() {
     });
     return () => { vivo = false; };
   }, []); // eslint-disable-line
+
+  // Vendas A3.2: código original do marketplace, com copiar (o valor exato, sem rótulo).
+  function celulaCodigo(codigo: string | null, chave: string) {
+    if (!codigo) return <span style={{ color: "#9099aa", fontSize: "11px" }}>—</span>;
+    const copiado = codigoCopiado === chave;
+    return (
+      <button
+        type="button"
+        title={copiado ? "Copiado" : "Copiar"}
+        onClick={async () => { if (await copiarCodigo(codigo, typeof navigator !== "undefined" ? navigator.clipboard : null)) { setCodigoCopiado(chave); setTimeout(() => setCodigoCopiado((c) => (c === chave ? null : c)), 1500); } }}
+        style={{ display: "inline-flex", alignItems: "center", gap: "5px", fontFamily: "monospace", fontSize: "11px", color: "#d7dbe5", background: "rgba(255,255,255,0.06)", border: "none", padding: "2px 7px", borderRadius: "6px", cursor: "pointer", whiteSpace: "nowrap" }}
+      >
+        {codigo}<span style={{ fontSize: "10px", color: copiado ? "#00D97E" : "#9099aa" }}>{copiado ? "✓" : "⧉"}</span>
+      </button>
+    );
+  }
 
   function trocarLojaML(id: string) {
     if (!id || id === lojaMLRef.current) return;
@@ -1446,7 +1464,7 @@ export default function VendasPage() {
           overflow: "hidden",
         }}>
           <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: "1100px" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: "1340px" }}>
               <thead>
                 <tr>
                   {[
@@ -1454,6 +1472,8 @@ export default function VendasPage() {
                     { label: "CONTA",             right: false },
                     { label: "SKU",               right: false },
                     { label: "DATA",              right: false },
+                    { label: "CÓD. VENDA",        right: false },
+                    { label: "CÓD. ANÚNCIO",      right: false },
                     { label: "FRETE",             right: false },
                     { label: "ENVIO",             right: false },
                     { label: "VALOR UNIT.",       right: true  },
@@ -1518,6 +1538,9 @@ export default function VendasPage() {
                         {new Date(r.data + "T12:00:00").toLocaleDateString("pt-BR")}
                       </span>
                     </td>
+                    {/* Cód. venda / Cód. anúncio (originais do marketplace) */}
+                    <td style={tdStyle()}>{celulaCodigo(codigoVenda(r), `v:${r.marketplace}:${r.orderId}`)}</td>
+                    <td style={tdStyle()}>{celulaCodigo(codigoAnuncio(r), `a:${r.marketplace}:${r.orderId}:${r.mlItemId}`)}</td>
                     {/* Frete */}
                     <td style={tdStyle()}>
                       {r.frete === "gratis"
@@ -1570,7 +1593,7 @@ export default function VendasPage() {
               {/* Linha de totais */}
               <tfoot>
                 <tr style={{ background: "rgba(255,106,0,0.06)", borderTop: "2px solid rgba(255,106,0,0.2)" }}>
-                  <td colSpan={6} style={{ ...tdStyle(), fontWeight: 800, color: "#ff6b00", fontSize: "11px", letterSpacing: "0.3px" }}>
+                  <td colSpan={8} style={{ ...tdStyle(), fontWeight: 800, color: "#ff6b00", fontSize: "11px", letterSpacing: "0.3px" }}>
                     TOTAL — {filteredRows.length} linha{filteredRows.length !== 1 ? "s" : ""}
                   </td>
                   <td style={tdStyle(true)}></td>
