@@ -45,6 +45,10 @@
  *       não grava, não faz I/O, não lê/deriva `ativo`, não usa relógio nem infere estado (NULL ≠ inativo,
  *       Shopee NULL ≠ NORMAL); só os cards a usam (fora de filtro/agrupamento/ordem); card nunca some e
  *       não dispara escrita nova; o browser não grava os campos (CAMPOS_GRAVAVEIS);
+ *   I12 I12_SALES_STORE_SCOPE_IS_EXPLICIT (Vendas A2): toda cadeia de `pedidos` filtra dono + loja, ou é uma
+ *       forma de uma lista FECHADA (escrita/detecção por id, update de seleção escopada, enumeração admin,
+ *       agregado do dono); /api/ml/vendas lê só a loja resolvida no servidor (sem loja → falha fechado) com a
+ *       barreira multi-ML preservada; sync Shopee de B nunca lê/atualiza/sobrescreve A;
  *   Z   ZONAS PROTEGIDAS sem suíte comportamental própria (telas legadas de Vendas/Dashboard,
  *       constantes financeiras, supabase/**, vercel.json, .env.example, sync-worker.mjs): mudar
  *       exige re-baseline EXPLÍCITO de scripts/zonas-protegidas.json (aparece no diff), nunca
@@ -696,6 +700,100 @@ export function observacaoNaUiNaoSoLeitura(raiz = RAIZ_V2): string[] {
   return erros;
 }
 
+// ── I12: escopo de loja EXPLÍCITO nas leituras/escritas de vendas (Vendas A2) ─────
+/** Toda cadeia `.from("<tabela>")...;` (até o fim do comando), sem comentários. */
+function cadeiasDe(raiz: string, arquivo: string, tabela: string): string[] {
+  const src = tiraComentarios(ler(raiz, arquivo));
+  return [...src.matchAll(new RegExp(`\\.from\\(\\s*["']${tabela}["']\\s*\\)`, "g"))].map((m) => {
+    const fim = src.indexOf(";", m.index!);
+    return src.slice(m.index!, fim < 0 ? undefined : fim);
+  });
+}
+/**
+ * Cadeias de `pedidos` SEM filtro de loja — lista FECHADA, por arquivo e por forma. Nenhuma representa
+ * "uma loja" por leitura: é escrita por id (a linha já carrega loja_id; id sem loja = dívida A4),
+ * detecção por id do dono (precisa VER as outras lojas para não sobrescrevê-las), update por ids vindos
+ * de seleção escopada, enumeração admin de lojas, ou o AGREGADO do dono (agente).
+ */
+export const PEDIDOS_SEM_LOJA_PERMITIDOS: Record<string, RegExp[]> = {
+  "lib/sync-ml.ts": [/^\.from\("pedidos"\)\s*\.upsert\(rows\.slice\(i, i \+ UPSERT_BATCH\), \{ onConflict: "id" \}\)$/],
+  "lib/sync-shopee.ts": [
+    /^\.from\("pedidos"\)\s*\.select\("id, loja_id, financial_reconciled_at"\)\s*\.eq\("user_id", userId\)\s*\.in\("id", lote\)$/,
+    /^\.from\("pedidos"\)\s*\.upsert\(rows\.slice\(i, i \+ UPSERT_BATCH\), \{ onConflict: "id" \}\)$/,
+  ],
+  "lib/shopee/ingestao/persistencia.ts": [
+    /^\.from\("pedidos"\)\.select\("id"\)\.eq\("user_id", userId\)\.in\("id", legados\.slice\(i, i \+ LOTE\)\)$/,
+    /^\.from\("pedidos"\)\.upsert\(itens\.slice\(i, i \+ LOTE\), \{ onConflict: "id" \}\)$/,
+  ],
+  "app/api/admin/shopee/backfill-pedidos-0707/route.ts": [/^\.from\("pedidos"\)\.upsert\(lote, \{ onConflict: "id" \}\)$/],
+  "app/api/admin/shopee/reconciliar-financeiro/route.ts": [/^\.from\("pedidos"\)\.update\(campos\)\.eq\("id", id\)$/],
+  "app/api/admin/backfill-resumos-diarios/route.ts": [
+    /^\.from\("pedidos"\)\s*\.select\("loja_id"\)\s*\.gte\("data_pagamento", data\)\s*\.lt\("data_pagamento", proximoDia\)\s*\.not\("loja_id", "is", null\)$/,
+    /^\.from\("pedidos"\)\s*\.select\("loja_id"\)\s*\.gte\("data_criacao", data\)\s*\.lt\("data_criacao", proximoDia\)\s*\.not\("loja_id", "is", null\)$/,
+  ],
+  // AGREGADO do dono (agente): intencionalmente sem filtro de loja — nunca vira "uma loja" implícita.
+  "lib/agentes/dados/vendas.ts": [/^\.from\("pedidos"\)\.select\(COLUNAS_LEITURA_INTERNA\), filtros\)\s*\.gte\("data_pagamento", filtro\.dataInicio\)\s*\.lte\("data_pagamento", filtro\.dataFim\)$/],
+};
+/**
+ * I12_SALES_STORE_SCOPE_IS_EXPLICIT: (a) toda cadeia de `pedidos` no runtime filtra dono + loja
+ * (`.eq("user_id", …)` e `.eq("loja_id", …)`), ou é uma das formas FECHADAS acima (cada arquivo com
+ * exatamente essas); (b) /api/ml/vendas: a loja da leitura sai do resolvedor do servidor (conta
+ * resolvida, ou a loja da credencial vencida); sem loja → falha fechado ANTES de qualquer `pedidos`;
+ * cache, frescor de hoje e páginas com `loja_id = lojaLeitura`; a barreira multi-ML continua antes da
+ * resolução; (c) sync Shopee: "já existe" exige loja; leitura/UPDATE de status com loja; row existente de
+ * OUTRA loja do dono nunca entra no upsert; (d) o agregado do dono (agente) é por dono (closure) e não
+ * filtra loja — continua agregado, nunca single-store implícito.
+ */
+export function vendasSemEscopoDeLoja(raiz = RAIZ_V2): string[] {
+  const erros: string[] = [];
+  // (a)
+  const runtime = listar(raiz, "app", "lib", "components").filter((f) => /\.(ts|tsx)$/.test(f));
+  let escopadas = 0;
+  for (const f of runtime) {
+    const semLoja: string[] = [];
+    for (const c of cadeiasDe(raiz, f, "pedidos")) {
+      if (/\.eq\(\s*"loja_id",/.test(c) && /\.eq\(\s*"user_id",/.test(c)) { escopadas++; continue; }
+      semLoja.push(c.trim());
+    }
+    const sobra = [...(PEDIDOS_SEM_LOJA_PERMITIDOS[f] ?? [])];
+    for (const c of semLoja) {
+      const i = sobra.findIndex((r) => r.test(c));
+      if (i < 0) erros.push(`${f}: pedidos sem dono+loja fora da lista fechada — ${c.replace(/\s+/g, " ").slice(0, 120)}`);
+      else sobra.splice(i, 1);
+    }
+    if (sobra.length) erros.push(`${f}: forma permitida ausente (lista fechada desatualizada): ${sobra.length}`);
+  }
+  for (const f of Object.keys(PEDIDOS_SEM_LOJA_PERMITIDOS)) if (!runtime.includes(f)) erros.push(`${f}: arquivo da lista fechada ausente`);
+  if (escopadas < 10) erros.push(`ANCORA: só ${escopadas} cadeias de pedidos com dono+loja (detector cego?)`);
+  // (b) /api/ml/vendas
+  const rota = "app/api/ml/vendas/route.ts";
+  const todo = tiraComentarios(ler(raiz, rota));
+  const src = todo.slice(Math.max(0, todo.search(/export async function GET\(/)));
+  const iBarreira = src.search(/contarLojasMLAtivasDoDono\(userId\) > 1\) \{\s*return NextResponse\.json\(\{ erro: true, codigo: MULTI_ML_VENDAS_NOT_READY/);
+  const iConta = src.search(/const contaML = await resolverContaML\(/);
+  const iLoja = src.search(/const lojaLeitura: string \| null = contaML\.ok\s*\?\s*contaML\.lojaId\s*:\s*contaML\.motivo === "PRECISA_RECONECTAR" \? contaML\.loja\.id : null;/);
+  const iFalha = src.search(/if \(!lojaLeitura\) \{\s*return NextResponse\.json\(/);
+  const iPedidos = src.search(/\.from\("pedidos"\)/);
+  if (iBarreira < 0 || iConta < 0 || iBarreira > iConta) erros.push(`${rota}: barreira multi-ML ausente ou depois da resolução da conta`);
+  if (iLoja < 0 || iLoja < iConta) erros.push(`${rota}: loja da leitura não sai do resolvedor do servidor`);
+  if (iFalha < 0 || iFalha < iLoja || iPedidos < 0 || iFalha > iPedidos) erros.push(`${rota}: sem loja resolvida não falha fechado antes de ler pedidos`);
+  const cadeiasRota = cadeiasDe(raiz, rota, "pedidos");
+  if (cadeiasRota.length !== 3 || !cadeiasRota.every((c) => /\.eq\("user_id", userId\)\s*\.eq\("marketplace", "ML"\)\s*\.eq\("loja_id", lojaLeitura\)/.test(c))) erros.push(`${rota}: cache/frescor/página sem user_id + ML + loja_id = lojaLeitura`);
+  // (c) sync Shopee
+  const sp = tiraComentarios(ler(raiz, "lib/sync-shopee.ts"));
+  if (!/export async function filtrarOrderSnsAusentes\(\s*userId: string,\s*lojaId: string,/.test(sp) || !/filtrarOrderSnsAusentes\(userId, lojaId, /.test(sp)) erros.push("sync-shopee: \"já existe\" sem a loja da execução");
+  if (!/\.select\("order_id, status_shopee_raw"\)\s*\.eq\("user_id", userId\)\s*\.eq\("marketplace", "Shopee"\)\s*\.eq\("loja_id", lojaId\)/.test(sp)) erros.push("sync-shopee: leitura de status sem a loja");
+  if (!/\.update\(\{ status: g\.statusComercial, status_shopee_raw: g\.statusRaw \}\)\s*\.eq\("user_id", userId\)\s*\.eq\("marketplace", "Shopee"\)\s*\.eq\("loja_id", lojaId\)/.test(sp)) erros.push("sync-shopee: UPDATE de status sem a loja (sync de B alcança A)");
+  if (!/export function classificarExistentesShopee\([\s\S]{0,400}?if \(e\.loja_id !== null && e\.loja_id !== lojaId\) \{ deOutraLoja\.add\(e\.id\); continue; \}/.test(sp)) erros.push("sync-shopee: row de outra loja não é separada");
+  const iClass = sp.search(/classificarExistentesShopee\(existentes, lojaId\)/), iSplice = sp.search(/if \(deOutraLoja\.has\(rows\[i\]\.id\)\) \{ rows\.splice\(i, 1\);/), iUpsert = sp.search(/\.upsert\(rows\.slice\(i, i \+ UPSERT_BATCH\), \{ onConflict: "id" \}\)/);
+  if (iClass < 0 || iSplice < iClass || iUpsert < iSplice) erros.push("sync-shopee: row de outra loja pode entrar no upsert");
+  // (d) agregado do dono
+  const ag = tiraComentarios(ler(raiz, "lib/agentes/dados/vendas.ts"));
+  const filtros = corpoDe(ag, /export function filtrosVendas\(/) ?? "";
+  if (!/user_id: String\(userId\)/.test(filtros) || /loja/.test(filtros) || !/export function criarLeiturasDeVendas\(userId: string\)/.test(ag)) erros.push("agente: agregado do dono deixou de ser por dono, ou virou single-store implícito");
+  return erros;
+}
+
 export function invariantesV2(raiz = RAIZ_V2, opcoes: { zonas?: boolean } = {}): string[] {
   const erros: string[] = [];
   for (const v of canonicoAlcancaLegado(raiz)) erros.push(`I1 canônico→legado: ${v}`);
@@ -709,6 +807,7 @@ export function invariantesV2(raiz = RAIZ_V2, opcoes: { zonas?: boolean } = {}):
   for (const v of observacaoMisturadaComAtivo(raiz)) erros.push(`I9 I9_MARKETPLACE_OBSERVATION_IS_SEPARATE_FROM_ATIVO: ${v}`);
   for (const v of refreshDeIdentidadesForaDaLoja(raiz)) erros.push(`I10 I10_KNOWN_ID_REFRESH_IS_STORE_SCOPED: ${v}`);
   for (const v of observacaoNaUiNaoSoLeitura(raiz)) erros.push(`I11 I11_MARKETPLACE_STATUS_UI_IS_READ_ONLY: ${v}`);
+  for (const v of vendasSemEscopoDeLoja(raiz)) erros.push(`I12 I12_SALES_STORE_SCOPE_IS_EXPLICIT: ${v}`);
   if (opcoes.zonas !== false) for (const v of verificarZonas(raiz)) erros.push(`Z zona protegida sem re-baseline: ${v}`);
   return erros;
 }

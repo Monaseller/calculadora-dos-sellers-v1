@@ -295,21 +295,21 @@ async function secaoAssincrona() {
     return lote.filter(sn => existentesNoBanco.has(sn));
   };
   eq("61. devolve apenas os que nao existem no banco",
-     await filtrarOrderSnsAusentes("u1", ["A1", "A2", "A3", "A4"], consultor), ["A2", "A4"]);
+     await filtrarOrderSnsAusentes("u1", "loja-1", ["A1", "A2", "A3", "A4"], consultor), ["A2", "A4"]);
   eq("62. uma unica consulta para lote pequeno", chamadas.length, 1);
 
   eq("63. lista vazia nao consulta o banco",
-     await filtrarOrderSnsAusentes("u1", [], async () => { throw new Error("nao deveria consultar"); }), []);
+     await filtrarOrderSnsAusentes("u1", "loja-1", [], async () => { throw new Error("nao deveria consultar"); }), []);
 
   const chamadas2: string[][] = [];
   const muitos = Array.from({ length: 500 }, (_, i) => `S${i}`);
-  const todosAusentes = await filtrarOrderSnsAusentes("u1", muitos, async (l) => { chamadas2.push(l); return []; });
+  const todosAusentes = await filtrarOrderSnsAusentes("u1", "loja-1", muitos, async (l) => { chamadas2.push(l); return []; });
   eq("64. 500 order_sn geram 3 consultas em lote", chamadas2.length, 3);
   eq("65. todos ausentes quando o banco nao tem nenhum", todosAusentes.length, 500);
 
   let propagou = false;
   try {
-    await filtrarOrderSnsAusentes("u1", ["A1"], async () => { throw new Error("banco fora"); });
+    await filtrarOrderSnsAusentes("u1", "loja-1", ["A1"], async () => { throw new Error("banco fora"); });
   } catch { propagou = true; }
   ok("66. erro de consulta LANCA (nunca vira 'esta ausente')", propagou);
 }

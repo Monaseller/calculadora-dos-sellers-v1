@@ -93,6 +93,17 @@ export async function GET(request: Request) {
     ? { lojaId: contaML.lojaId, accessToken: contaML.accessToken, sellerId: contaML.sellerId, nickname: contaML.nickname }
     : null;
   const lojaId = lojaML?.lojaId ?? null;
+  // CDS V2 Vendas A2: a loja que ESTA leitura representa — toda consulta de `pedidos` abaixo
+  // (cache, frescor, página) leva user_id + ML + loja_id. Credencial vencida (PRECISA_RECONECTAR)
+  // ainda identifica a loja: o cache dela é servido, sem sync, como antes. Sem loja resolvida
+  // (sem conta ML ativa, ou contexto inválido) não existe leitura escopada: falha fechado —
+  // nunca o cache do dono inteiro, nunca "a primeira/mais recente".
+  const lojaLeitura: string | null = contaML.ok
+    ? contaML.lojaId
+    : contaML.motivo === "PRECISA_RECONECTAR" ? contaML.loja.id : null;
+  if (!lojaLeitura) {
+    return NextResponse.json({ erro: true, semConexao: true, mensagem: "Conta do Mercado Livre não conectada." });
+  }
 
   // Fase C (2026-07-06): date_field decide se o relatório é filtrado por
   // data_pagamento (visão financeira, padrão) ou data_criacao (visão operacional).
@@ -117,6 +128,7 @@ export async function GET(request: Request) {
     .select("synced_at")
     .eq("user_id", userId)
     .eq("marketplace", "ML")
+    .eq("loja_id", lojaLeitura)
     .gte("data", dateFrom)
     .lte("data", dateTo)
     .order("synced_at", { ascending: false })
@@ -163,7 +175,7 @@ export async function GET(request: Request) {
       if (rangeIncludeHoje) {
         const { data: probeHoje } = await supabase()
           .from("pedidos").select("synced_at")
-          .eq("user_id", userId).eq("marketplace", "ML")
+          .eq("user_id", userId).eq("marketplace", "ML").eq("loja_id", lojaLeitura)
           .eq("data", hoje)
           .order("synced_at", { ascending: false }).limit(1);
         const lastSyncHoje = probeHoje?.[0]?.synced_at
@@ -210,7 +222,8 @@ export async function GET(request: Request) {
       .from("pedidos")
       .select(selectArg, opts as any)
       .eq("user_id", userId)
-      .eq("marketplace", "ML");
+      .eq("marketplace", "ML")
+      .eq("loja_id", lojaLeitura);
 
     if (dateField === "pagamento") {
       q = q.or(

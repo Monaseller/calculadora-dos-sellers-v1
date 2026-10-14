@@ -283,18 +283,40 @@ export function lotesDeOrderSn(sns: string[], tamanho = LOTE_CONSULTA_ORDER_SN):
  *
  * `buscarExistentes` e injetavel para permitir teste sem banco.
  */
+/** Row de `pedidos` que ja existe com um dos ids que o sync vai gravar (lida por dono + ids). */
+export interface ExistentePedidoShopee { id: string; loja_id: string | null; reconciliada: boolean }
+
+/**
+ * CDS V2 Vendas A2 — o que a loja `lojaId` pode gravar. `deOutraLoja`: ids cuja row existente e de
+ * OUTRA loja do dono (o id legado nao tem loja) — nunca sobrescritos por este sync. Row existente
+ * sem loja (legado pre-multi-loja) segue adotavel. `reconciliadas`: so as da PROPRIA loja (as de
+ * outra loja ja ficam fora do upsert).
+ */
+export function classificarExistentesShopee(existentes: readonly ExistentePedidoShopee[], lojaId: string): { deOutraLoja: Set<string>; reconciliadas: Set<string> } {
+  const deOutraLoja = new Set<string>(), reconciliadas = new Set<string>();
+  for (const e of existentes) {
+    if (e.loja_id !== null && e.loja_id !== lojaId) { deOutraLoja.add(e.id); continue; }
+    if (e.reconciliada) reconciliadas.add(e.id);
+  }
+  return { deOutraLoja, reconciliadas };
+}
+
 export async function filtrarOrderSnsAusentes(
   userId: string,
+  // CDS V2 Vendas A2: "ja existe" e DESTA loja — pedido de outra loja do mesmo dono nao conta.
+  lojaId: string,
   sns: string[],
   buscarExistentes?: (lote: string[]) => Promise<string[]>,
 ): Promise<string[]> {
   if (sns.length === 0) return [];
+  if (!lojaId) throw new Error("[sync-shopee] filtrarOrderSnsAusentes: loja_obrigatoria");
   const consultar = buscarExistentes ?? (async (lote: string[]) => {
     const { data, error } = await supabase()
       .from("pedidos")
       .select("order_id")
       .eq("user_id", userId)
       .eq("marketplace", "Shopee")
+      .eq("loja_id", lojaId)
       .in("order_id", lote);
     // Erro de consulta NUNCA vira "esta ausente" — isso reprocessaria o dia
     // inteiro. Falha explicita, o sync trata como qualquer outro erro.
@@ -1188,7 +1210,7 @@ async function executarSyncShopee(
   const orderSnsRecuperados = new Set<string>();
   if (completedSegregados.length > 0) {
     const _recInicioMs = Date.now();
-    const ausentes = await filtrarOrderSnsAusentes(userId, Array.from(new Set(completedSegregados)));
+    const ausentes = await filtrarOrderSnsAusentes(userId, lojaId, Array.from(new Set(completedSegregados)));
     for (const sn of ausentes) orderSnsRecuperados.add(sn);
     allOrderSns.push(...ausentes);
     console.log("[DIAG-SYNC-SHOPEE] etapa1_5_recuperacao", {
@@ -1241,6 +1263,7 @@ async function executarSyncShopee(
           .select("order_id, status_shopee_raw")
           .eq("user_id", userId)
           .eq("marketplace", "Shopee")
+          .eq("loja_id", lojaId)          // Vendas A2: so os pedidos DESTA loja
           .in("order_id", lote);
         // Erro aqui NUNCA vira "nao existe": isso reescreveria status a esmo.
         if (error) throw new Error(`consulta de status existentes falhou: ${error.message}`);
@@ -1264,6 +1287,7 @@ async function executarSyncShopee(
           .update({ status: g.statusComercial, status_shopee_raw: g.statusRaw })
           .eq("user_id", userId)          // isolamento entre usuarios
           .eq("marketplace", "Shopee")    // isolamento entre marketplaces
+          .eq("loja_id", lojaId)          // isolamento entre lojas (Vendas A2): sync de B nunca muda A
           .in("order_id", g.orderSns);
         chunksExecutados++;
         if (error) {
@@ -1385,21 +1409,32 @@ async function executarSyncShopee(
   // Nao bloqueia a linha inteira: campos comerciais e operacionais continuam
   // sendo atualizados. So os campos de CAMPOS_SNAPSHOT_FINANCEIRO sao removidos
   // do payload, e apenas nas linhas que ja tem financial_reconciled_at.
+  //
+  // CDS V2 Vendas A2: a mesma leitura (dono + ids) traz a LOJA da row existente. O `id` legado
+  // nao tem loja: se ja existe uma row com o mesmo id em OUTRA loja do dono, esta loja NAO a
+  // sobrescreve (a linha sai do upsert) — sync da loja B nunca toca a loja A.
   let linhasProtegidas = 0;
+  let linhasDeOutraLoja = 0;
   if (rows.length > 0) {
     const _protInicioMs = Date.now();
     try {
-      const idsReconciliados = new Set<string>();
+      const existentes: ExistentePedidoShopee[] = [];
       const todosIds = rows.map(r => r.id).filter(Boolean);
       for (const lote of lotesDeOrderSn(todosIds)) {
         const { data, error } = await supabase()
           .from("pedidos")
-          .select("id")
-          .in("id", lote)
-          .not("financial_reconciled_at", "is", null);
-        // Erro NUNCA vira "nao reconciliado" — isso apagaria dado financeiro.
+          .select("id, loja_id, financial_reconciled_at")
+          .eq("user_id", userId)
+          .in("id", lote);
+        // Erro NUNCA vira "nao reconciliado" nem "nao existe" — isso apagaria dado financeiro
+        // ou sobrescreveria a row de outra loja.
         if (error) throw new Error(`consulta de linhas reconciliadas falhou: ${error.message}`);
-        for (const r of data ?? []) idsReconciliados.add((r as any).id);
+        for (const r of data ?? []) existentes.push({ id: (r as any).id, loja_id: (r as any).loja_id ?? null, reconciliada: (r as any).financial_reconciled_at != null });
+      }
+      const { deOutraLoja, reconciliadas: idsReconciliados } = classificarExistentesShopee(existentes, lojaId);
+      if (deOutraLoja.size > 0) {
+        for (let i = rows.length - 1; i >= 0; i--) if (deOutraLoja.has(rows[i].id)) { rows.splice(i, 1); linhasDeOutraLoja++; }
+        console.error(`[sync-shopee] ${linhasDeOutraLoja} linha(s) com id ja pertencente a OUTRA loja do dono — fora do upsert (loja ${lojaId})`);
       }
       if (idsReconciliados.size > 0) {
         for (let i = 0; i < rows.length; i++) {
@@ -1412,6 +1447,7 @@ async function executarSyncShopee(
         linhasNoLote: rows.length,
         jaReconciliadas: idsReconciliados.size,
         linhasProtegidas,
+        linhasDeOutraLoja,
         tempoMs: Date.now() - _protInicioMs,
       });
     } catch (err: any) {
