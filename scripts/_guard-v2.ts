@@ -58,6 +58,9 @@
  *       novo com loja + variação; legada reaproveitada/adotada só pela loja, mesma identidade, e adoção de
  *       variação só com UMA variação do item no pedido; 2+ → ambígua preservada (sem chute, sem dupla
  *       contagem); SKU/nome/preço fora da identidade; erro de gravação falha o sync; histórico não é preenchido;
+ *   I15 I15_ML_SALE_IDENTITY_IS_DB_UNIQUE (Vendas A4-C): existe migration com UNIQUE parcial ML em pedidos sobre
+ *       (loja_id, order_id, ml_item_id, coalesce(variation_id, '')), sem SKU/pedidos.id na identidade, com
+ *       prechecks fail-closed e sem escrita de dados (UPDATE/DELETE/INSERT), NOT NULL, DROP ou CONCURRENTLY;
  *   Z   ZONAS PROTEGIDAS sem suíte comportamental própria (telas legadas de Vendas/Dashboard,
  *       constantes financeiras, supabase/**, vercel.json, .env.example, sync-worker.mjs): mudar
  *       exige re-baseline EXPLÍCITO de scripts/zonas-protegidas.json (aparece no diff), nunca
@@ -919,6 +922,36 @@ export function identidadeVendaMLNaoExata(raiz = RAIZ_V2): string[] {
   return erros;
 }
 
+// ── I15: identidade da linha de venda ML garantida pelo BANCO (Vendas A4-C) ──────
+/**
+ * I15_ML_SALE_IDENTITY_IS_DB_UNIQUE: localizada pelo CONTEÚDO (não pelo nome do arquivo), existe UMA migration
+ * em supabase/migrations que cria o UNIQUE parcial ML de pedidos sobre (loja_id, order_id, ml_item_id,
+ * coalesce(variation_id, '')) WHERE marketplace = 'ML' (+ loja e item não nulos), sem SKU e sem pedidos.id na
+ * identidade; o arquivo tem prechecks fail-closed (índice já existente, duplicata, sentinel '') e não escreve
+ * dados (UPDATE/DELETE/INSERT), não muda nulabilidade, não derruba nada e não usa CONCURRENTLY (aplicação
+ * transacional). Fórmula financeira e barreira multi-ML seguem sob I13 e I7.
+ */
+export function identidadeVendaMLNaoNoBanco(raiz = RAIZ_V2): string[] {
+  const erros: string[] = [];
+  const semComentario = (s: string) => s.replace(/--[^\n]*/g, "");
+  const migracoes = listar(raiz, "supabase/migrations").filter((f) => f.endsWith(".sql"))
+    .map((f) => ({ f, sql: semComentario(ler(raiz, f)).toLowerCase().replace(/\s+/g, " ") }))
+    .filter((m) => /create unique index \w+ on public\.pedidos \(/.test(m.sql) && /marketplace = 'ml'/.test(m.sql));
+  if (migracoes.length !== 1) return [`${migracoes.length} migration(s) com UNIQUE ML em pedidos (esperado 1)`];
+  const { f, sql } = migracoes[0];
+  const idx = /create unique index (\w+) on public\.pedidos \(([^;]*?)\) where ([^;]*);/.exec(sql);
+  if (!idx) return [`${f}: UNIQUE ML de pedidos fora da forma (colunas + where)`];
+  if (idx[2].trim() !== "loja_id, order_id, ml_item_id, coalesce(variation_id, '')") erros.push(`${f}: identidade do índice ≠ (loja_id, order_id, ml_item_id, coalesce(variation_id, '')) — ${idx[2]}`);
+  if (idx[3].trim() !== "marketplace = 'ml' and loja_id is not null and ml_item_id is not null") erros.push(`${f}: predicado do índice fora do contrato — ${idx[3]}`);
+  if (/\bsku\b|\bid\b(?!_)/.test(idx[2])) erros.push(`${f}: SKU ou pedidos.id na identidade`);
+  const semStrings = sql.replace(/'[^']*'/g, "''");
+  if (/\b(update|delete|insert|truncate)\s/.test(semStrings) || /set not null|\bdrop\b|concurrently/.test(semStrings)) erros.push(`${f}: escrita de dados, NOT NULL, DROP ou CONCURRENTLY na migration`);
+  const iIdx = sql.indexOf(`create unique index ${idx[1]}`);
+  const pre = sql.slice(0, iIdx);
+  if (!/indexname = '\w+'.*if n <> 0 then raise exception/.test(pre) || !/having count\(\*\) > 1\) d; if n <> 0 then raise exception/.test(pre) || !/variation_id = ''; if n <> 0 then raise exception/.test(pre)) erros.push(`${f}: prechecks fail-closed ausentes antes do índice (existente / duplicata / sentinel)`);
+  return erros;
+}
+
 export function invariantesV2(raiz = RAIZ_V2, opcoes: { zonas?: boolean } = {}): string[] {
   const erros: string[] = [];
   for (const v of canonicoAlcancaLegado(raiz)) erros.push(`I1 canônico→legado: ${v}`);
@@ -935,6 +968,7 @@ export function invariantesV2(raiz = RAIZ_V2, opcoes: { zonas?: boolean } = {}):
   for (const v of vendasSemEscopoDeLoja(raiz)) erros.push(`I12 I12_SALES_STORE_SCOPE_IS_EXPLICIT: ${v}`);
   for (const v of custoDeVendaForaDeMeusProdutos(raiz)) erros.push(`I13 I13_SALES_COST_COMES_FROM_MEUS_PRODUTOS: ${v}`);
   for (const v of identidadeVendaMLNaoExata(raiz)) erros.push(`I14 I14_ML_SALE_ITEM_IDENTITY_IS_EXACT: ${v}`);
+  for (const v of identidadeVendaMLNaoNoBanco(raiz)) erros.push(`I15 I15_ML_SALE_IDENTITY_IS_DB_UNIQUE: ${v}`);
   if (opcoes.zonas !== false) for (const v of verificarZonas(raiz)) erros.push(`Z zona protegida sem re-baseline: ${v}`);
   return erros;
 }
