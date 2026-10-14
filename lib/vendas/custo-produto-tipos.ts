@@ -21,7 +21,7 @@ export interface RefProdutoMeusProdutos {
 }
 
 export type OrigemTarifa = "real" | "estimada" | "legada";
-export type StatusFrete = "incluso_no_repasse" | "nao_incluido" | "pendente";
+export type StatusFrete = "incluso_no_repasse" | "nao_incluido" | "pendente" | "no_liquido_ml";
 
 /**
  * Vendas A3.1 — qualidade do dado FINANCEIRO da venda (separada do status de custo do produto):
@@ -32,7 +32,17 @@ export type StatusFrete = "incluso_no_repasse" | "nao_incluido" | "pendente";
  *             desconta ~47% — estimar inflaria o lucro).
  */
 export type QualidadeFinanceira = "ACTUAL" | "ESTIMATED" | "PENDING";
-export type BaseFinanceira = "REPASSE_REAL" | "REPASSE_LEGADO" | "COMPONENTES_ESTIMADOS" | "SEM_BASE";
+export type BaseFinanceira = "REPASSE_REAL" | "REPASSE_LEGADO" | "COMPONENTES_ESTIMADOS" | "SEM_BASE" | "ML_RECONCILIADO";
+
+/** Vendas A3.2-B — detalhe do financeiro REAL do ML (pedido + envio), só informativo na tela. */
+export interface DetalheFinanceiroML {
+  packId: string | null;
+  freteComprador: number | null;   // receiver.cost — pago pelo comprador (NÃO é custo do vendedor)
+  descontoVendedor: number | null; // já refletido no preço
+  descontoMeli: number | null;     // rebate de campanha — já refletido na tarifa líquida
+  billing: "CONFERIDO" | "DIVERGENTE" | "PENDENTE" | "SEM_PERMISSAO";
+  motivo: "ok" | "tarifa" | "frete" | "frete_compartilhado" | "billing";
+}
 
 export interface FinanceiroVendaLive {
   origem: "LIVE_CALCULATED";
@@ -45,6 +55,9 @@ export interface FinanceiroVendaLive {
   tarifa: number;                    // tarifa da LINHA (ML: por unidade × qtd); com base repasse é só informativa
   tarifaOrigem: OrigemTarifa;
   freteStatus: StatusFrete;
+  freteVendedor?: number | null;     // ML reconciliado: Σ senders[].cost (custo LÍQUIDO do vendedor)
+  liquidoMarketplace?: number | null; // ML reconciliado: receita − tarifa líquida − frete do vendedor
+  detalheML?: DetalheFinanceiroML | null;
   lucro: number | null;              // null = PENDENTE (custo do produto e/ou base financeira)
   margemPct: number | null;
   roi: number | null;

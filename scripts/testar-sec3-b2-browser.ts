@@ -243,6 +243,32 @@ const FORM_VALIDO = {
   thumbnail: null, permalink: null, ativo: true, logistic_type: "me2",
 };
 
+// Vendas A3.2-B: financeiro ML (NAO aplicada). Aprovada PELO NOME EXATO e mantida NA varredura: o arquivo
+// inteiro e lido e so estas 4 linhas de seguranca, cada uma exatamente uma vez, sao aceitas — todas
+// FECHAM acesso (REVOKE de PUBLIC/anon/authenticated + RLS sem policy). Qualquer GRANT, POLICY, DISABLE/
+// FORCE RLS ou outra linha de banco no arquivo reprova; a falta de uma delas tambem.
+const MIGRACAO_ML_FINANCEIRO = "supabase/migrations/20261115_ml_financeiro.sql";
+const LINHAS_SEGURANCA_ML_FINANCEIRO = [
+  "REVOKE ALL PRIVILEGES ON TABLE public.ml_financeiro_pedidos FROM PUBLIC, anon, authenticated;",
+  "REVOKE ALL PRIVILEGES ON TABLE public.ml_financeiro_envios FROM PUBLIC, anon, authenticated;",
+  "ALTER TABLE public.ml_financeiro_pedidos ENABLE ROW LEVEL SECURITY;",
+  "ALTER TABLE public.ml_financeiro_envios ENABLE ROW LEVEL SECURITY;",
+];
+/** Teste que cita literalmente as linhas acima — fora da varredura textual pelo caminho EXATO. */
+const TESTE_ML_FINANCEIRO = "scripts/testar-vendas-ml-financeiro.ts";
+/** Violacoes de banco no texto da migration financeira ML (linhas aprovadas consumidas uma vez cada). */
+function bancoNaMigracaoMlFinanceiro(texto: string, detecta: (l: string) => boolean): string[] {
+  const sobra = [...LINHAS_SEGURANCA_ML_FINANCEIRO];
+  const erros: string[] = [];
+  for (const l of texto.split(/\r?\n/)) {
+    if (!detecta(l)) continue;
+    const i = sobra.indexOf(l.trim());
+    if (i >= 0) sobra.splice(i, 1); else erros.push(`${MIGRACAO_ML_FINANCEIRO}: ${l.trim()}`);
+  }
+  for (const f of sobra) erros.push(`${MIGRACAO_ML_FINANCEIRO}: linha de seguranca ausente: ${f}`);
+  return erros;
+}
+
 async function principal() {
   const { emitirTokenSessao } = await import("../lib/autenticacao");
   sessaoA = (await emitirTokenSessao(UID_A)).token;
@@ -591,8 +617,12 @@ async function principal() {
     "supabase/migrations/20261030_sales_sync_c4_shopee_refresh_lease.sql",
     // SALES-SYNC-C8: SELECT do service_role no lease (guard proprio: testar-shopee-refresh-lease M6)
     "supabase/migrations/20261031_sales_sync_c8_shopee_refresh_lease_select.sql",
+    // VENDAS A3.2-B: financeiro ML (NAO aplicada) — NA varredura M2, so com as linhas exatas; guard: testar-vendas-ml-financeiro
+    MIGRACAO_ML_FINANCEIRO,
   ];
-  const FORA_DA_VARREDURA = [...APROVADAS, "scripts/testar-s2d1-migracao.ts", "scripts/testar-ml-corpus-migracao.ts"];
+  // A3.2-B: a migration financeira ML sai da varredura generica so para ser varrida INTEIRA no M2
+  // (bancoNaMigracaoMlFinanceiro); o teste que cita as linhas sai pelo caminho exato.
+  const FORA_DA_VARREDURA = [...APROVADAS, "scripts/testar-s2d1-migracao.ts", "scripts/testar-ml-corpus-migracao.ts", TESTE_ML_FINANCEIRO];
   t("M1. V2: mudanca de banco nunca e silenciosa — supabase/ inteiro em zona protegida (re-baseline explicito no diff) e toda migration nova desde a base tem contrato/teste proprio", () => {
     // CDS V2 Fase 1A-SCHEMA: a cerca "nada em supabase/ desde c075653, salvo lista fixa (+ excecao exata)"
     // virou contrato: (1) cada arquivo de supabase/ esta no baseline de zonas — arquivo novo/alterado so
@@ -618,8 +648,21 @@ async function principal() {
       ...d.split(/\r?\n/).filter((l) => l.startsWith("+") && !l.startsWith("+++")),
       ...novos.flatMap((f) => readFileSync(join(RAIZ, f), "utf8").split(/\r?\n/)),
     ];
-    const sql = linhas.filter((l) => /\b(GRANT|REVOKE)\s+\w+|ROW LEVEL SECURITY|CREATE POLICY/i.test(l));
+    const detecta = (l: string) => /\b(GRANT|REVOKE)\s+\w+|ROW LEVEL SECURITY|CREATE POLICY/i.test(l);
+    const sql = [...linhas.filter(detecta), ...bancoNaMigracaoMlFinanceiro(readFileSync(join(RAIZ, MIGRACAO_ML_FINANCEIRO), "utf8"), detecta)];
     assert(sql.length === 0, sql.join(" | "));
+  });
+  t("M3. financeiro ML fechado ao browser/anon: so REVOKE + RLS exatos; GRANT/POLICY/RLS desligada ou falta reprovam", () => {
+    const real = readFileSync(join(RAIZ, MIGRACAO_ML_FINANCEIRO), "utf8");
+    const detecta = (l: string) => /\b(GRANT|REVOKE)\s+\w+|ROW LEVEL SECURITY|CREATE POLICY/i.test(l);
+    assert(bancoNaMigracaoMlFinanceiro(real, detecta).length === 0, "migration real reprovou");
+    for (const intrusa of [
+      "GRANT SELECT ON public.ml_financeiro_pedidos TO anon;",
+      "GRANT SELECT ON public.ml_financeiro_envios TO authenticated;",
+      "CREATE POLICY publica ON public.ml_financeiro_envios FOR SELECT USING (true);",
+      "ALTER TABLE public.ml_financeiro_pedidos DISABLE ROW LEVEL SECURITY;",
+    ]) assert(bancoNaMigracaoMlFinanceiro(`${real}\n${intrusa}`, detecta).length > 0, `nao pegou: ${intrusa}`);
+    for (const l of LINHAS_SEGURANCA_ML_FINANCEIRO) assert(bancoNaMigracaoMlFinanceiro(real.replace(l, ""), detecta).some((e) => e.includes("ausente")), `falta nao pega: ${l}`);
   });
 
   await fila;

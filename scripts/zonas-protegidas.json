@@ -15,7 +15,7 @@
   "arquivos": {
     ".env.example": "c4b82f1f45595370fe6763493db862602a861a64a9d58f0fd237954fe574637d",
     "app/(app)/dashboard/page.tsx": "7a6fdadbd2b588c4e3f7580512615fab91464608b10fa6933324f3ab78ae9028",
-    "app/(app)/vendas/page.tsx": "15d01ace0c0f9e201a9809b3def1888ef30db17ab8e090a7c5e3a50d8e9ebb3f",
+    "app/(app)/vendas/page.tsx": "17dabae5beecf29c7000712dda9d1b8003d2b657c1312300ff76c9f99668e974",
     "lib/comissoes-mercado-livre.ts": "3f7f976661e8f4dc57d35902834e77228cc1941f809b2aa2a5e0bd2a18d5c557",
     "lib/comissoes-shopee.ts": "1ca7224be8e6e09f855171c457a58210562dd4a0584a6196e612081cda4b9a40",
     "lib/shopee-financeiro.ts": "6bba23a2ce2a52cc9385162f9d5b426a59814136512ac876f42564d2ade6235a",
@@ -134,6 +134,7 @@
     "supabase/migrations/20261108_anuncios_ml_loja_fase2.sql": "06e3ba013777e178611d68b70a9bd82204cb8fdbb02b07619c58a05b58af3aa1",
     "supabase/migrations/20261109_anuncios_status_marketplace.sql": "8d692cd87c03f19be6591debaa6f0ebbf113e3745cefabe20da9b8ba4cd1e1fc",
     "supabase/migrations/20261110_pedidos_ml_identidade.sql": "4088a5247f72f1224c6482b0e6462cda78f55e8cdf50a9337e47a12cb526d38d",
+    "supabase/migrations/20261115_ml_financeiro.sql": "0677700915bbb8feec84281acaec08c408a2b47ee0184cc21b0fd45d904f86dc",
     "vercel.json": "a6daecdcaed811dbdab068a0a91c4f44654fb257b7fe4afb0b51a7d882b0b4cd"
   }
 }

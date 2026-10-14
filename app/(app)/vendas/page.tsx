@@ -5,7 +5,7 @@ import { useDateField } from "@/lib/date-field-context";
 import { calcularUltimos7Dias, DATE_PRESETS } from "@/lib/date-range-utils";
 import { ASYNC_SYNC_JOBS_ENABLED } from "@/lib/feature-flags";
 import type { FinanceiroVendaLive } from "@/lib/vendas/custo-produto-tipos";
-import { avisoCustoLive, custoCadastradoLive, seloLucroLive, textoFreteLive, totaisLive } from "./financeiro-live";
+import { avisoCustoLive, custoCadastradoLive, detalheLiquidoML, seloLucroLive, textoFreteLive, totaisLive } from "./financeiro-live";
 import { codigoAnuncio, codigoVenda, copiarCodigo } from "./codigos-venda";
 import { AVISO_SELECIONE_LOJA_ML_SYNC, CHAVE_LOJA_ML_VENDAS, type CorpoSyncManual, type LojaMLVendas, escolherLojaMLInicial, lojasMLDaLista, lojasMLDaRecusa, planoSyncManual } from "./loja-ml";
 
@@ -34,6 +34,7 @@ interface VendaRow {
   cadastrado:     boolean;   // LEGADO (persistido) — a tela usa `financeiro`
   // Vendas A3: custo/imposto/lucro AO VIVO de Meus Produtos (LIVE_CALCULATED). null = custo indisponível.
   financeiro?:    FinanceiroVendaLive | null;
+  packId?:        string | null;   // ML (A3.2-B): código exibido = pack_id ?? order_id
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -1464,7 +1465,7 @@ export default function VendasPage() {
           overflow: "hidden",
         }}>
           <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: "1340px" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: "1440px" }}>
               <thead>
                 <tr>
                   {[
@@ -1484,6 +1485,7 @@ export default function VendasPage() {
                     { label: "TARIFA VENDA (-)",  right: true  },
                     { label: "FRETE COMPRADOR (-)", right: true },
                     { label: "FRETE VENDEDOR (-)", right: true  },
+                    { label: "LÍQUIDO ML",        right: true  },
                     { label: "MARGEM CONTRIB.",   right: true  },
                     { label: "MC %",              right: true  },
                   ].map(({ label, right }) => (
@@ -1577,7 +1579,11 @@ export default function VendasPage() {
                     {/* Frete Comprador */}
                     <td style={{ ...tdStyle(true), color: "#9099aa" }}>—</td>
                     {/* Frete Vendedor */}
-                    <td style={{ ...tdStyle(true), color: "#9099aa" }}>{textoFreteLive(r.financeiro)}</td>
+                    <td style={{ ...tdStyle(true), color: r.financeiro?.freteVendedor != null ? "#ff6b6b" : "#9099aa" }}>{r.financeiro?.freteVendedor != null ? `-${moeda(r.financeiro.freteVendedor)}` : textoFreteLive(r.financeiro)}</td>
+                    {/* Líquido ML (financeiro real: receita − tarifa líquida − frete do vendedor) */}
+                    <td style={{ ...tdStyle(true), fontWeight: 700, color: r.financeiro?.liquidoMarketplace != null ? "#d7dbe5" : "#9099aa" }} title={detalheLiquidoML(r.financeiro) ?? undefined}>
+                      {r.financeiro?.liquidoMarketplace != null ? moeda(r.financeiro.liquidoMarketplace) : r.financeiro?.detalheML ? "pendente" : "—"}
+                    </td>
                     {/* Margem Contrib. */}
                     <td style={{ ...tdStyle(true), fontWeight: 800, color: r.financeiro?.lucro == null ? "#9099aa" : r.financeiro.lucro >= 0 ? "#00D97E" : "#ff4d4d" }}>
                       {r.financeiro?.lucro == null ? "pendente" : moeda(r.financeiro.lucro)}
@@ -1604,6 +1610,7 @@ export default function VendasPage() {
                   <td style={{ ...tdStyle(true), fontWeight: 700, color: "#ff6b6b" }}>-{moeda(live.tarifa)}</td>
                   <td style={{ ...tdStyle(true), fontWeight: 700, color: "#9099aa" }}>—</td>
                   <td style={{ ...tdStyle(true), fontWeight: 700, color: "#9099aa" }}>{live.pendentes ? `${live.pendentes} pend.` : "—"}</td>
+                  <td style={{ ...tdStyle(true), fontWeight: 700, color: "#9099aa" }}>—</td>
                   <td style={{ ...tdStyle(true), fontWeight: 900, color: live.lucro >= 0 ? "#00D97E" : "#ff4d4d" }}>
                     {moeda(live.lucro)}{live.estimados ? " (estimado)" : ""}{live.pendentes ? ` · ${live.pendentes} pend.` : ""}
                   </td>

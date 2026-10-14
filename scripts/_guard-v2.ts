@@ -67,6 +67,10 @@
  *       descarta resposta de outra loja, não escolhe por ordem e o sync (job e manual) leva a loja escolhida;
  *       sync manual com ML e 2+ lojas sem escolha é BLOQUEADO na tela antes de qualquer request (A5-B.1);
  *       vendas-hoje mantém a barreira e o helper/constante seguem em lib/ml-conexao.ts;
+ *   I17 I17_ML_FINANCIAL_RECONCILIATION_IS_REAL (Vendas A3.2-B): líquido ML = receita − tarifa LÍQUIDA − frete do
+ *       vendedor (senders.cost), sem rebate/desconto de novo, sem receiver.cost nem gross_amount; ACTUAL só com
+ *       billing conferido; envio compartilhado → PENDING (frete 1× por envio); tarifa com proveniência; coletor só
+ *       GET e fora das rotas; código da venda ML = pack_id ?? order_id; migration aditiva (fechamento: SEC-3);
  *   Z   ZONAS PROTEGIDAS sem suíte comportamental própria (telas legadas de Vendas/Dashboard,
  *       constantes financeiras, supabase/**, vercel.json, .env.example, sync-worker.mjs): mudar
  *       exige re-baseline EXPLÍCITO de scripts/zonas-protegidas.json (aparece no diff), nunca
@@ -868,7 +872,8 @@ export function custoDeVendaForaDeMeusProdutos(raiz = RAIZ_V2): string[] {
     || (fin.match(/- tarifa\b/g) ?? []).length !== 1) erros.push("serviço: dupla contagem (repasse − tarifa/frete) ou base de lucro fora do contrato");
   if (!/const tarifa = shopee \? \(numero\(venda\.tarifa_venda\) \?\? 0\) : \(numero\(venda\.tarifa_venda\) \?\? 0\) \* qtd;/.test(fin)) erros.push("serviço: tarifa ML (sale_fee por unidade) sem × qtd");
   if (/pendencias\.push\("frete"\)/.test(fin)) erros.push("serviço: regra global frete ausente → lucro pendente voltou");
-  if (/custo_frete|frete_vendedor|frete_comprador/.test(s)) erros.push("serviço: frete do anúncio/legado no cálculo");
+  // A3.2-B: frete REAL do ML só pelo envio reconciliado (ml-financeiro.ts, I17); nunca o do anúncio nem o legado da venda.
+  if (/custo_frete|\bvenda\.frete_|\bp!?\.frete_/.test(s)) erros.push("serviço: frete do anúncio/legado no cálculo");
   // (d) sem escrita, sem custo persistido
   if (/\.(update|insert|upsert|delete|rpc)\(/.test(s)) erros.push("serviço: grava (snapshot/backfill proibido)");
   if (/venda\.(custo|imposto|lucro|lucro_liquido|margem_contrib|insumos|cadastrado)\b/.test(s)) erros.push("serviço: usa custo/lucro persistido da venda como autoridade");
@@ -877,7 +882,10 @@ export function custoDeVendaForaDeMeusProdutos(raiz = RAIZ_V2): string[] {
     const r = tiraComentarios(ler(raiz, arquivo));
     const cargas = r.match(/carregarMapaCustoProduto\(/g) ?? [];
     const iCarga = r.search(new RegExp(`const mapaCusto = await carregarMapaCustoProduto\\(supabase\\(\\), userId, "${marketplace}", ${loja}\\);`));
-    const iRows = r.search(/let rows = \(pedidos \?\? \[\]\)\.map\(\(p: any\) => \(\{\s*\.\.\.pedidoToRow\(p\),\s*financeiro: mapaCusto\.ok \? financeiroDaVenda\(p, resolverCustoProduto\(mapaCusto\.mapa, identidadeDaVenda\(p\)\)\) : null,\s*\}\)\);/);
+    // A3.2-B: a rota ML passa o financeiro REAL do pedido (lido do banco, mesma loja) como 3º argumento.
+    const iRows = marketplace === "ML"
+      ? r.search(/let rows = \(pedidos \?\? \[\]\)\.map\(\(p: any\) => \(\{\s*\.\.\.pedidoToRow\(p\),\s*packId: financeiroML\.get\(String\(p\.order_id\)\)\?\.pedido\.pack_id \?\? null,\s*financeiro: mapaCusto\.ok \? financeiroDaVenda\(p, resolverCustoProduto\(mapaCusto\.mapa, identidadeDaVenda\(p\)\), financeiroML\.get\(String\(p\.order_id\)\) \?\? null\) : null,\s*\}\)\);/)
+      : r.search(/let rows = \(pedidos \?\? \[\]\)\.map\(\(p: any\) => \(\{\s*\.\.\.pedidoToRow\(p\),\s*financeiro: mapaCusto\.ok \? financeiroDaVenda\(p, resolverCustoProduto\(mapaCusto\.mapa, identidadeDaVenda\(p\)\)\) : null,\s*\}\)\);/);
     if (cargas.length !== 1 || iCarga < 0 || iRows < 0 || iCarga > iRows) erros.push(`${arquivo}: lookup de custo fora do contrato (uma carga por requisição, pela loja da leitura, antes das linhas)`);
     if (/\.filter\([^)]*(financeiro|custoStatus)/.test(r)) erros.push(`${arquivo}: venda escondida por estado de custo`);
     if (/from\(\s*["']anuncios["']\s*\)/.test(r)) erros.push(`${arquivo}: rota lê anuncios por fora do serviço de custo`);
@@ -1083,6 +1091,66 @@ export function lojaMLVendasNaoExplicita(raiz = RAIZ_V2): string[] {
   return erros;
 }
 
+// ── I17: financeiro REAL do Mercado Livre (Vendas A3.2-B) ───────────────────────────
+export const MODULO_FIN_ML = "lib/vendas/ml-financeiro.ts";
+export const COLETOR_FIN_ML = "lib/vendas/ml-financeiro-coleta.ts";
+export const LEITOR_FIN_ML = "lib/vendas/ml-financeiro-leitura.ts";
+export const MIGRACAO_FIN_ML = "supabase/migrations/20261115_ml_financeiro.sql";
+/**
+ * I17_ML_FINANCIAL_RECONCILIATION_IS_REAL: líquido ML = receita − tarifa LÍQUIDA (Σ sale_fee × qtd) − frete do
+ * vendedor (Σ senders[].cost), nada somado de volta (rebate já na tarifa, desconto do vendedor já no preço),
+ * sem receiver.cost (comprador) nem gross_amount; ACTUAL só com billing CONFERIDO; envio compartilhado (sem
+ * rateio do provider) → PENDING; frete gravado UMA vez por envio; tarifa com proveniência (sync: PROVIDER |
+ * ESTIMATE, estimativa POR UNIDADE); legado segue ESTIMATED; coletor só GET e fora das rotas; a rota só lê o
+ * banco (dono + loja); código da venda ML = pack_id ?? order_id; migration aditiva (fechamento provado nas SEC-3).
+ */
+export function financeiroMLNaoReal(raiz = RAIZ_V2): string[] {
+  const erros: string[] = [];
+  for (const f of [MODULO_FIN_ML, COLETOR_FIN_ML, LEITOR_FIN_ML, MIGRACAO_FIN_ML]) if (!existsSync(join(raiz, f))) return [`${f} ausente`];
+  const m = tiraComentarios(ler(raiz, MODULO_FIN_ML));
+  // líquido
+  const liq = corpoDaFuncao(m, "liquidoPedidoML") ?? "";
+  if (!/const liquido = cent\(p\.receita_produto - p\.tarifa_venda - envio\.frete_vendedor\);/.test(liq) || (liq.match(/[-+] /g) ?? []).length !== 2) erros.push("líquido ML fora de receita − tarifa líquida − frete do vendedor");
+  if (/desconto|rebate|frete_comprador|frete_bruto|gross/.test(liq)) erros.push("líquido ML soma/subtrai desconto, rebate, frete do comprador ou bruto (dupla contagem)");
+  if (!/qualidade: p\.billing_status === "CONFERIDO" \? "ACTUAL" : "ESTIMATED"/.test(liq) || (liq.match(/"ACTUAL"/g) ?? []).length !== 1) erros.push("ACTUAL sem billing CONFERIDO");
+  if (!/if \(!envio\.pedidos \|\| envio\.pedidos\.length !== 1 \|\| envio\.pedidos\[0\] !== p\.order_id\) return \{ liquido: null, freteVendedor: null, qualidade: "PENDING", motivo: "frete_compartilhado" \};/.test(liq)) erros.push("envio compartilhado sem rateio vira número (frete duplicado/inventado)");
+  if (!/if \(p\.tarifa_origem !== "PROVIDER" \|\| p\.tarifa_venda === null\) return \{ liquido: null, freteVendedor: null, qualidade: "PENDING", motivo: "tarifa" \};/.test(liq)) erros.push("tarifa ausente/não-provider vira líquido");
+  // extração
+  const env = corpoDaFuncao(m, "extrairEnvioFinanceiroML") ?? "";
+  if (!/senders\.reduce\(\(a, s\) => a \+ \(s\.cost as number\), 0\)/.test(env) || !/frete_comprador: custos \? num\(custos\?\.receiver\?\.cost\) : null/.test(env) || !/frete_bruto_referencia: custos \? num\(custos\?\.gross_amount\) : null/.test(env) || (env.match(/gross_amount/g) ?? []).length !== 1) erros.push("frete do vendedor fora de senders[].cost (ou bruto/receiver usados como custo)");
+  const ped = corpoDaFuncao(m, "extrairPedidoFinanceiroML") ?? "";
+  if (!/if \(fee === null\) tarifaCompleta = false; else tarifa \+= fee \* qtd;/.test(ped) || !/tarifa_origem: tarifaCompleta \? "PROVIDER" : "AUSENTE"/.test(ped) || !/receita \+= \(num\(i\?\.unit_price\) \?\? 0\) \* qtd;/.test(ped)) erros.push("tarifa/receita do pedido fora de Σ sale_fee × qtd / Σ unit_price × qtd (com proveniência)");
+  // sync: proveniência + estimativa por unidade
+  const sy = tiraComentarios(ler(raiz, "lib/sync-ml.ts"));
+  if (!/const tarifaOrigem: "PROVIDER" \| "ESTIMATE" = saleFeeML !== null \? "PROVIDER" : "ESTIMATE";/.test(sy) || !/tarifaVenda = valorUnit \* comissaoRate;/.test(sy) || !/tarifa_origem:\s*tarifaOrigem,/.test(sy) || /faturamento \* comissaoRate/.test(sy)) erros.push("sync-ml: tarifa sem proveniência ou estimativa da LINHA (× qtd de novo)");
+  // serviço: real só pelo pedido reconciliado; legado continua ESTIMATED (I13)
+  const s = tiraComentarios(ler(raiz, SERVICO_CUSTO_VENDA));
+  const real = corpoDaFuncao(s, "financeiroRealML") ?? "";
+  if (!/const liq = liquidoPedidoML\(ml\.pedido, ml\.envio\);/.test(real) || !/qualidadeFinanceira: liq\.qualidade,/.test(real) || /"ACTUAL"/.test(real)) erros.push("serviço: qualidade ML real fora do líquido reconciliado");
+  if (!/const real = !shopee && ml && ml\.pedido\.itens === 1 && Math\.abs\(ml\.pedido\.receita_produto - faturamento\) <= 0\.01 \? ml : null;/.test(s)) erros.push("serviço: financeiro real aplicado a linha de pedido com várias linhas (rateio inventado)");
+  // coletor: só GET, envio 1×, fora das rotas
+  const c = tiraComentarios(ler(raiz, COLETOR_FIN_ML));
+  if (!/method: "GET"/.test(c) || /method:\s*"(POST|PUT|PATCH|DELETE)"|\.(post|put|patch|delete)\(/i.test(c)) erros.push("coletor: chamada ao provider que não é GET");
+  if (!/if \(p\.shipment_id && !envios\.has\(p\.shipment_id\)\)/.test(c)) erros.push("coletor: custo do envio buscado/gravado por pedido (frete duplicado)");
+  for (const f of listar(raiz, "app").filter((x) => /\.(ts|tsx)$/.test(x))) if (/ml-financeiro-coleta/.test(ler(raiz, f))) erros.push(`${f}: provider financeiro chamado em rota/tela (só no job)`);
+  // leitor: dono + loja
+  const l = tiraComentarios(ler(raiz, LEITOR_FIN_ML));
+  if ((l.match(/\.eq\("user_id", userId\)\.eq\("loja_id", lojaId\)\.in\(/g) ?? []).length !== 2 || /fetch\(|mercadoli/.test(l)) erros.push("leitor: financeiro sem dono + loja, ou chama provider");
+  // código da venda
+  const cv = tiraComentarios(ler(raiz, "app/(app)/vendas/codigos-venda.ts"));
+  if (!/return \(r\.marketplace === "ML" \? limpo\(r\.packId\) : null\) \?\? limpo\(r\.orderId\);/.test(cv)) erros.push("código da venda ML fora de pack_id ?? order_id");
+  // migration
+  const sql = ler(raiz, MIGRACAO_FIN_ML).replace(/--[^\n]*/g, "").toLowerCase().replace(/\s+/g, " ");
+  if (!/primary key \(loja_id, order_id\)/.test(sql) || !/primary key \(loja_id, shipment_id\)/.test(sql)) erros.push("migration: grão pedido/envio fora de (loja, order) / (loja, shipment)");
+  if ((sql.match(/foreign key \(loja_id, user_id\) references public\.lojas \(id, user_id\)/g) ?? []).length !== 2) erros.push("migration: tabela sem FK de dono da loja");
+  // fechamento das tabelas (privilégios revogados + RLS sem policy): provado linha a linha pelas suítes SEC-3
+  // (sec3-b1 K2 / sec3-b2 M2, linhas exatas) e por testar-vendas-ml-financeiro FIN2-16 — fora deste guard,
+  // que é varrido pelo scan de mudança de banco.
+  if (/\b(update|delete|insert|truncate)\s/.test(sql.replace(/'[^']*'/g, "''")) || /\bdrop\b|set not null|concurrently/.test(sql)) erros.push("migration: escrita de dados, DROP, NOT NULL ou CONCURRENTLY");
+  if (!/alter table public\.pedidos add column tarifa_origem text null;/.test(sql)) erros.push("migration: proveniência da tarifa ausente/obrigatória");
+  return erros;
+}
+
 export function invariantesV2(raiz = RAIZ_V2, opcoes: { zonas?: boolean } = {}): string[] {
   const erros: string[] = [];
   for (const v of canonicoAlcancaLegado(raiz)) erros.push(`I1 canônico→legado: ${v}`);
@@ -1101,6 +1169,7 @@ export function invariantesV2(raiz = RAIZ_V2, opcoes: { zonas?: boolean } = {}):
   for (const v of identidadeVendaMLNaoExata(raiz)) erros.push(`I14 I14_ML_SALE_ITEM_IDENTITY_IS_EXACT: ${v}`);
   for (const v of identidadeVendaMLNaoNoBanco(raiz)) erros.push(`I15 I15_ML_SALE_IDENTITY_IS_DB_UNIQUE: ${v}`);
   for (const v of lojaMLVendasNaoExplicita(raiz)) erros.push(`I16 I16_ML_VENDAS_STORE_IS_EXPLICIT: ${v}`);
+  for (const v of financeiroMLNaoReal(raiz)) erros.push(`I17 I17_ML_FINANCIAL_RECONCILIATION_IS_REAL: ${v}`);
   if (opcoes.zonas !== false) for (const v of verificarZonas(raiz)) erros.push(`Z zona protegida sem re-baseline: ${v}`);
   return erros;
 }

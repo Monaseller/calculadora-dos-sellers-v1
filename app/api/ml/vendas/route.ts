@@ -11,6 +11,7 @@ import { syncMLForUser, type LojaMLResolvida } from "@/lib/sync-ml";
 import { resolverContaML } from "@/lib/ml-conexao";
 import { LOJA_ML_INVALIDA, ML_STORE_SELECTION_REQUIRED, respostaSelecaoLojaML } from "@/lib/ml-loja-catalogo";
 import { carregarMapaCustoProduto, financeiroDaVenda, identidadeDaVenda, resolverCustoProduto } from "@/lib/vendas/custo-produto";
+import { lerFinanceiroRealML } from "@/lib/vendas/ml-financeiro-leitura";
 
 // SEC-3-B1: dados sensiveis (SEC-3) so por service_role, server-side.
 // O cliente nasce sob demanda — nunca no import — a partir do helper
@@ -368,9 +369,13 @@ export async function GET(request: Request) {
   // `financeiro` é LIVE_CALCULATED; `custo`/`imposto`/`margemContrib`/`cadastrado` da linha seguem
   // LEGADOS (persistidos na sync) para quem ainda os lê — a tela de Vendas usa `financeiro`.
   const mapaCusto = await carregarMapaCustoProduto(supabase(), userId, "ML", lojaLeitura);
+  // Vendas A3.2-B: financeiro REAL do ML (pedido + envio) — só LEITURA do banco, da mesma loja; o provider é
+  // chamado pelo coletor (job), nunca aqui. `packId` vira o código da venda exibido (pack_id ?? order_id).
+  const financeiroML = await lerFinanceiroRealML(supabase(), userId, lojaLeitura, (pedidos ?? []).map((p: any) => String(p.order_id)));
   let rows = (pedidos ?? []).map((p: any) => ({
     ...pedidoToRow(p),
-    financeiro: mapaCusto.ok ? financeiroDaVenda(p, resolverCustoProduto(mapaCusto.mapa, identidadeDaVenda(p))) : null,
+    packId: financeiroML.get(String(p.order_id))?.pedido.pack_id ?? null,
+    financeiro: mapaCusto.ok ? financeiroDaVenda(p, resolverCustoProduto(mapaCusto.mapa, identidadeDaVenda(p)), financeiroML.get(String(p.order_id)) ?? null) : null,
   }));
 
   if (skuFilters.length > 0) {

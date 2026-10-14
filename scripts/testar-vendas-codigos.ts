@@ -1,7 +1,7 @@
 /**
  * CDS V2 — Vendas A3.2: códigos ORIGINAIS do marketplace na tela de Vendas + contrato da venda golden ML.
  *
- *   SALE-ID   CÓD. VENDA = order_id (ML order.id; Shopee order_sn), CÓD. ANÚNCIO = ml_item_id (ML
+ *   SALE-ID   CÓD. VENDA = ML pack_id ?? order_id (o código do painel); Shopee order_sn; CÓD. ANÚNCIO = ml_item_id (ML
  *             order_items[].item.id; Shopee item_id); pedidos.id interno nunca exposto; copiar = valor exato.
  *   GOLDEN    venda real 2000015516685373 (sem dados do comprador): o painel do ML fecha em 30,10; o modelo
  *             ATUAL do CDS não tem frete do vendedor nem rebate da tarifa — continua ESTIMATED, com frete
@@ -52,10 +52,11 @@ async function principal() {
   const rotaSP = corpoFn(fonte("app/api/shopee/vendas/route.ts"), "pedidoToRow");
 
   secao("\n[1. códigos da venda e do anúncio]");
-  t("SALE-ID1. ML: CÓD. VENDA = order_id (order.id do provider), ex. golden 2000015516685373", () => {
+  t("SALE-ID1. ML: CÓD. VENDA = pack_id ?? order_id (o do painel); golden pack 2000015516685373 → order 2000018971279352", () => {
     assert(/orderId:\s*p\.order_id,/.test(rotaML), "rota ML não expõe order_id como orderId");
     assert(/order_id:\s*String\(order\.id\),/.test(fonte("lib/sync-ml.ts")), "sync ML não grava order.id em order_id");
-    assert(C.codigoVenda({ orderId: GOLDEN.orderId, mlItemId: "MLB1" }) === GOLDEN.orderId, "código da venda ≠ order_id");
+    assert(C.codigoVenda({ marketplace: "ML", orderId: "2000018971279352", packId: GOLDEN.orderId, mlItemId: "MLB1" }) === GOLDEN.orderId, "venda em pack não exibe o pack");
+    assert(C.codigoVenda({ marketplace: "ML", orderId: "2000018971279352", packId: null }) === "2000018971279352", "sem pack não exibe o order_id");
   });
   t("SALE-ID2. Shopee: CÓD. VENDA = order_sn", () => {
     assert(/orderId:\s*p\.order_id,/.test(rotaSP), "rota Shopee não expõe order_id como orderId");
@@ -77,7 +78,7 @@ async function principal() {
     assert(C.codigoAnuncio({ orderId: "1", mlItemId: " MLB4567890123 " }) === "MLB4567890123", "código do anúncio alterado");
     assert(C.codigoAnuncio({ orderId: "1", mlItemId: "" }) === null, "linha sem item inventou código");
     const h = fonte("app/(app)/vendas/codigos-venda.ts");
-    assert(!/\.(sku|anuncio|titulo|title|nome|id)\b/.test(h) && /return limpo\(r\.mlItemId\)/.test(h) && /return limpo\(r\.orderId\)/.test(h), "helper usa SKU/título/id interno");
+    assert(!/\.(sku|anuncio|titulo|title|nome|id)\b/.test(h) && /return limpo\(r\.mlItemId\)/.test(h) && /\?\? limpo\(r\.orderId\)/.test(h), "helper usa SKU/título/id interno");
   });
   t("SALE-ID5. copiar copia o código EXATO; sem área de transferência / falha → false (sem exceção)", async () => {
     const copiados: string[] = [];

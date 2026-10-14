@@ -437,7 +437,11 @@ export async function syncMLForUserV2(
       const variationId       = variacaoDoItemML(orderItem);   // Vendas A4-B: variação EXATA do provider
       const anuncio           = buscarAnuncioML(mapaAnuncios, lojaId, mlItemId, variationId);
 
+      // Vendas A3.2-B: `tarifa_venda` é SEMPRE POR UNIDADE (a sale_fee do provider é por unidade e líquida);
+      // a estimativa por categoria também passa a ser por unidade (antes era da LINHA e o leitor × qtd
+      // contava de novo) e a origem fica marcada: 'PROVIDER' | 'ESTIMATE'. Histórico não é reescrito.
       const saleFeeML = typeof orderItem.sale_fee === "number" ? orderItem.sale_fee : null;
+      const tarifaOrigem: "PROVIDER" | "ESTIMATE" = saleFeeML !== null ? "PROVIDER" : "ESTIMATE";
       let tarifaVenda: number;
       if (saleFeeML !== null) {
         tarifaVenda = saleFeeML;
@@ -448,7 +452,7 @@ export async function syncMLForUserV2(
         const comissaoRate = cat
           ? (anuncio.tipo_anuncio === "Premium" ? cat.premium : cat.classico)
           : 0.13;
-        tarifaVenda = faturamento * comissaoRate;
+        tarifaVenda = valorUnit * comissaoRate;
       }
 
       const impostoVal     = anuncio ? faturamento * ((anuncio.imposto   || 0) / 100) : 0;
@@ -486,6 +490,7 @@ export async function syncMLForUserV2(
         custo,
         imposto:         impostoVal,
         tarifa_venda:    tarifaVenda,
+        tarifa_origem:   tarifaOrigem,
         frete_comprador: freteComprador,
         frete_vendedor:  freteVendedor,
         margem_contrib:  margemContrib,

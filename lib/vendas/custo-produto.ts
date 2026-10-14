@@ -24,6 +24,7 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { lerTodasAsPaginas } from "@/lib/anuncios/leitura-paginada";
+import { liquidoPedidoML, type EnvioFinanceiroML, type PedidoFinanceiroML } from "./ml-financeiro";
 import type { BaseFinanceira, FinanceiroVendaLive, MarketplaceVenda, OrigemTarifa, QualidadeFinanceira, RefProdutoMeusProdutos, StatusCustoVenda, StatusFrete } from "./custo-produto-tipos";
 
 export type { BaseFinanceira, FinanceiroVendaLive, MarketplaceVenda, OrigemTarifa, QualidadeFinanceira, RefProdutoMeusProdutos, StatusCustoVenda, StatusFrete } from "./custo-produto-tipos";
@@ -139,7 +140,12 @@ export interface VendaPersistidaParaCusto {
   has_income_data?: boolean | null;
   escrow_amount?: number | string | null;
   financial_reconciled_at?: string | null;
+  /** Vendas A3.2-B: proveniência da tarifa das linhas ML NOVAS ('PROVIDER' | 'ESTIMATE'); NULL = legado. */
+  tarifa_origem?: string | null;
 }
+
+/** Vendas A3.2-B: financeiro REAL do pedido ML (ml_financeiro_pedidos) + o envio dele (ml_financeiro_envios). */
+export interface FinanceiroRealML { pedido: PedidoFinanceiroML; envio: EnvioFinanceiroML | null }
 
 /**
  * Base financeira da venda, em ordem de preferência (Vendas A3.1 — decisão do dono do produto):
@@ -153,7 +159,7 @@ export interface VendaPersistidaParaCusto {
  * repasse e NÃO são subtraídos de novo (sem dupla contagem). Custo e insumos são POR UNIDADE (× qtd);
  * imposto é PERCENTUAL da receita (semântica já aprovada no CDS). Sem custo cadastrado → lucro pendente.
  */
-export function financeiroDaVenda(venda: VendaPersistidaParaCusto, resultado: ResultadoCustoProduto): FinanceiroVendaLive {
+export function financeiroDaVenda(venda: VendaPersistidaParaCusto, resultado: ResultadoCustoProduto, ml: FinanceiroRealML | null = null): FinanceiroVendaLive {
   const qtd = numero(venda.qtd) ?? 1;
   const faturamento = numero(venda.faturamento) ?? 0;
   const p = resultado.produto;
@@ -168,12 +174,18 @@ export function financeiroDaVenda(venda: VendaPersistidaParaCusto, resultado: Re
   const qualidadeFinanceira: QualidadeFinanceira = base === "REPASSE_REAL" ? "ACTUAL" : base === "SEM_BASE" ? "PENDING" : "ESTIMATED";
   const porRepasse = base === "REPASSE_REAL" || base === "REPASSE_LEGADO";
   const tarifa = shopee ? (numero(venda.tarifa_venda) ?? 0) : (numero(venda.tarifa_venda) ?? 0) * qtd;
-  const tarifaOrigem: OrigemTarifa = shopee ? (porRepasse ? "real" : "estimada") : "legada";
+  const tarifaOrigem: OrigemTarifa = shopee ? (porRepasse ? "real" : "estimada")
+    : venda.tarifa_origem === "PROVIDER" ? "real" : venda.tarifa_origem === "ESTIMATE" ? "estimada" : "legada";
   const freteStatus: StatusFrete = porRepasse ? "incluso_no_repasse" : shopee ? "pendente" : "nao_incluido";
 
   const pendencias: Array<"custo" | "financeiro"> = [];
   if (!comCusto) pendencias.push("custo");
   if (qualidadeFinanceira === "PENDING") pendencias.push("financeiro");
+
+  // Vendas A3.2-B: ML com financeiro REAL do pedido — só pedido de UMA linha cuja receita bate (o envio e a
+  // tarifa são do pedido; sem rateio entre linhas). Sem registro → segue o modelo legado ESTIMATED acima.
+  const real = !shopee && ml && ml.pedido.itens === 1 && Math.abs(ml.pedido.receita_produto - faturamento) <= 0.01 ? ml : null;
+  if (real) return financeiroRealML(real, resultado, faturamento, custoProduto, imposto, comCusto);
 
   let lucro: number | null = null;
   if (pendencias.length === 0 && custoProduto !== null && imposto !== null) {
@@ -192,6 +204,45 @@ export function financeiroDaVenda(venda: VendaPersistidaParaCusto, resultado: Re
     tarifa,
     tarifaOrigem,
     freteStatus,
+    lucro,
+    margemPct: lucro !== null && faturamento > 0 ? (lucro / faturamento) * 100 : null,
+    roi: lucro !== null && custoProduto !== null && custoProduto > 0 ? (lucro / custoProduto) * 100 : null,
+    pendencias,
+  };
+}
+
+/**
+ * Linha ML com financeiro REAL: líquido = receita − tarifa LÍQUIDA − frete do vendedor (ml-financeiro.ts);
+ * lucro = líquido − custo − imposto. ACTUAL só com o pedido reconciliado; billing não conferido → ESTIMATED;
+ * tarifa/frete ausente ou envio compartilhado → PENDING (sem número inventado).
+ */
+function financeiroRealML(ml: FinanceiroRealML, resultado: ResultadoCustoProduto, faturamento: number, custoProduto: number | null, imposto: number | null, comCusto: boolean): FinanceiroVendaLive {
+  const liq = liquidoPedidoML(ml.pedido, ml.envio);
+  const pendencias: Array<"custo" | "financeiro"> = [];
+  if (!comCusto) pendencias.push("custo");
+  if (liq.qualidade === "PENDING") pendencias.push("financeiro");
+  const lucro = pendencias.length === 0 && liq.liquido !== null && custoProduto !== null && imposto !== null ? liq.liquido - custoProduto - imposto : null;
+  return {
+    origem: "LIVE_CALCULATED",
+    custoStatus: resultado.status,
+    produto: resultado.ref,
+    custoProduto,
+    imposto,
+    qualidadeFinanceira: liq.qualidade,
+    baseFinanceira: "ML_RECONCILIADO",
+    tarifa: ml.pedido.tarifa_venda ?? 0,
+    tarifaOrigem: ml.pedido.tarifa_origem === "PROVIDER" ? "real" : "legada",
+    freteStatus: liq.freteVendedor !== null ? "no_liquido_ml" : "pendente",
+    freteVendedor: liq.freteVendedor,
+    liquidoMarketplace: liq.liquido,
+    detalheML: {
+      packId: ml.pedido.pack_id,
+      freteComprador: ml.envio?.frete_comprador ?? null,
+      descontoVendedor: ml.pedido.desconto_vendedor,
+      descontoMeli: ml.pedido.desconto_meli,
+      billing: ml.pedido.billing_status,
+      motivo: liq.motivo,
+    },
     lucro,
     margemPct: lucro !== null && faturamento > 0 ? (lucro / faturamento) * 100 : null,
     roi: lucro !== null && custoProduto !== null && custoProduto > 0 ? (lucro / custoProduto) * 100 : null,

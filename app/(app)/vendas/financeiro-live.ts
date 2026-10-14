@@ -56,7 +56,24 @@ export function totaisLive(linhas: ReadonlyArray<{ faturamento: number; financei
 }
 
 export const textoFreteLive = (f: FinanceiroVendaLive | null | undefined): string =>
-  !f ? "—" : f.freteStatus === "incluso_no_repasse" ? "no repasse" : f.freteStatus === "nao_incluido" ? "não incluído" : "pendente";
+  !f ? "—" : f.freteStatus === "incluso_no_repasse" ? "no repasse" : f.freteStatus === "nao_incluido" ? "não incluído" : f.freteStatus === "no_liquido_ml" ? "no líquido" : "pendente";
+
+/** Vendas A3.2-B: de onde saiu o Líquido ML (tooltip) — informativo; nada aqui entra de novo na conta. */
+export function detalheLiquidoML(f: FinanceiroVendaLive | null | undefined): string | null {
+  const d = f?.detalheML;
+  if (!f || !d) return null;
+  const m = (v: number | null | undefined) => (v == null ? "—" : v.toFixed(2).replace(".", ","));
+  const linhas = [
+    `Tarifa ML (líquida): ${m(f.tarifa)}`,
+    `Frete vendedor: ${m(f.freteVendedor)}`,
+    `Frete pago pelo comprador: ${m(d.freteComprador)} (não é custo do vendedor)`,
+    `Desconto do vendedor: ${m(d.descontoVendedor)} (já no preço)`,
+    `Desconto ML / rebate campanha: ${m(d.descontoMeli)} (já na tarifa)`,
+    `Billing: ${d.billing === "CONFERIDO" ? "conferido" : d.billing === "PENDENTE" ? "pendente" : d.billing === "SEM_PERMISSAO" ? "sem permissão" : "divergente"}`,
+  ];
+  if (d.motivo === "frete_compartilhado") linhas.push("Envio compartilhado por vários pedidos: sem rateio do Mercado Livre");
+  return linhas.join("\n");
+}
 
 /** Selo do lucro: "real" (repasse reconciliado) ou "estimado"; `null` quando o lucro está pendente. */
 export const seloLucroLive = (f: FinanceiroVendaLive | null | undefined): "real" | "estimado" | null =>
