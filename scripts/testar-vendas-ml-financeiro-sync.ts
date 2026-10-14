@@ -713,6 +713,247 @@ async function principal() {
     assert((await getVendas(`date_from=${DIA}&date_to=${DIA}&loja_id=${ML_A}`)).corpo.financeiroPendente === 1, "sem linha não elegível");
   });
 
+  secao("\n[8. A3.2-E — recuperação por etapa + persistência monotônica (fix forward 182af4e)]");
+  const L = await import("../lib/vendas/ml-financeiro-leitura");
+  const shipDe = (o: string) => (o === ORDER ? SHIP : String(Number(o.slice(-7))));
+  const finLinha = (o: string, extra: Record<string, unknown> = {}) => ({ user_id: U, loja_id: ML_A, order_id: o, pack_id: o === ORDER ? PACK : null, shipment_id: shipDe(o), itens: 1, receita_produto: 41.24, tarifa_venda: 4.19, tarifa_origem: "PROVIDER", desconto_vendedor: 0.52, desconto_meli: 0.76, descontos_status: "OK", billing_status: "CONFERIDO", billing_tarifa: 4.19, fonte_versao: 2, buscado_em: "2026-10-14T20:02:46.000Z", ...extra });
+  const envioLinha = (o: string, extra: Record<string, unknown> = {}) => ({ user_id: U, loja_id: ML_A, shipment_id: shipDe(o), pack_id: o === ORDER ? PACK : null, pedidos: [o], frete_comprador: 6.99, frete_vendedor: 6.95, frete_bruto_referencia: 16.92, fonte_versao: 2, buscado_em: "2026-10-14T20:02:46.000Z", ...extra });
+  const comLinha = (o: string, fin: Record<string, unknown> = {}, envio: Record<string, unknown> | null = {}) => { db.ml_financeiro_pedidos.push(finLinha(o, fin)); if (envio) db.ml_financeiro_envios.push(envioLinha(o, envio)); };
+  // estado REAL de produção depois de 182af4e: v2 PENDENTE com billing_tarifa NULL, descontos OK, envio completo
+  const REBAIXADA = { billing_status: "PENDENTE", billing_tarifa: null };
+  const SEM_DESC = { descontos_status: "INDISPONIVEL", desconto_vendedor: null, desconto_meli: null };
+  const PENDENTE_NULO = { billing: { billing_status: "PENDENTE" as const, billing_tarifa: null } };
+  let gravacoesPedidos = 0;
+  const depsBanco = (extra: Record<string, unknown> = {}) => {
+    const d = depsFalsos();
+    return { ...d, gravarPedidos: async (l: any[]) => { gravacoesPedidos++; await d.gravarPedidos(l); }, lerExistentes: (ids: string[]) => L.lerFinanceiroRealML(clienteFalso() as any, U, ML_A, ids, { estrito: true }), ...extra };
+  };
+  const coletarRetry = (ids: string[], extra: Record<string, unknown> = {}, prazo: { ate?: number } = {}) => K.coletarFinanceiroML({ userId: U, lojaId: ML_A, accessToken: TOKEN_A }, ids, depsBanco(extra) as any, prazo);
+  const coletarSync = (pedidos: any[], extra: Record<string, unknown> = {}, prazo: { ate?: number } = {}) => K.coletarFinanceiroML({ userId: U, lojaId: ML_A, accessToken: TOKEN_A }, { pedidos }, depsBanco(extra) as any, prazo);
+  const planoDe = async (o: string) => F.planoRecuperacaoML((await L.lerFinanceiroRealML(clienteFalso() as any, U, ML_A, [o], { estrito: true })).get(o));
+  const billings = () => chamadas.filter((x) => x.caminho.startsWith("/billing/")).map((x) => decodeURIComponent(x.caminho.split("order_ids=")[1] ?? "").split(","));
+  const caminhos = () => chamadas.map((x) => x.caminho.split("?")[0]).join(" ");
+  /** relógio que anda 1 por chamada ao provider: prazo em nº de chamadas */
+  const porChamada = () => { let agora = 0; return { relogio: () => agora, fetch: (async (...a: any[]) => { agora += 1; return (globalThis.fetch as any)(...a); }) as any }; };
+
+  t("MONO-1. CONFERIDO 4,19 + execução que não chega ao billing (prazo) → CONFERIDO 4,19 intacto, nada regravado", async () => {
+    historico([[ORDER]]); comLinha(ORDER, SEM_DESC); chamadas = []; gravacoesPedidos = 0;
+    const r = await coletarRetry([ORDER], {}, { ate: 0 });
+    const f = finDe(ORDER)!;
+    assert(f.billing_status === "CONFERIDO" && c(f.billing_tarifa) === 419 && gravacoesPedidos === 0 && chamadas.length === 0 && r.adiados === 1, `${JSON.stringify(f)} gravações=${gravacoesPedidos}`);
+    const m = F.mesclarPedidoFinanceiroML(finLinha(ORDER) as any, PENDENTE_NULO);
+    assert(m?.billing_status === "CONFERIDO" && c(m.billing_tarifa) === 419, `PENDENTE rebaixou CONFERIDO: ${JSON.stringify(m)}`);
+  });
+  t("MONO-2. billing_tarifa nunca vira NULL: PENDENTE 4,16 parcial + billing 429 → 4,16 mantido", async () => {
+    historico([[ORDER]]); comLinha(ORDER, { billing_status: "PENDENTE", billing_tarifa: 4.16 });
+    roteiro["/billing/"] = [{ status: 429 }, { status: 429 }, { status: 429 }];
+    await coletarRetry([ORDER]);
+    const f = finDe(ORDER)!;
+    assert(f.billing_status === "PENDENTE" && c(f.billing_tarifa) === 416, JSON.stringify(f));
+    const m = F.mesclarPedidoFinanceiroML(finLinha(ORDER, { billing_status: "PENDENTE", billing_tarifa: 4.16 }) as any, PENDENTE_NULO);
+    assert(c(m?.billing_tarifa) === 416, `NULL anulou billing_tarifa: ${JSON.stringify(m)}`);
+  });
+  t("MONO-3. CONFERIDO, DIVERGENTE e SEM_PERMISSAO nunca voltam a PENDENTE por falta de evidência (nem pelo coletor)", async () => {
+    for (const st of ["CONFERIDO", "DIVERGENTE", "SEM_PERMISSAO"]) {
+      const t0 = st === "SEM_PERMISSAO" ? null : st === "DIVERGENTE" ? 4.6 : 4.19;
+      const m = F.mesclarPedidoFinanceiroML(finLinha(ORDER, { billing_status: st, billing_tarifa: t0 }) as any, { billing: { billing_status: "PENDENTE", billing_tarifa: 4.16 } });
+      assert(m?.billing_status === st && m.billing_tarifa === t0, `${st} rebaixado: ${JSON.stringify(m)}`);
+    }
+    historico([[ORDER]]); comLinha(ORDER, { billing_status: "SEM_PERMISSAO", billing_tarifa: null, ...SEM_DESC });
+    roteiro[`/orders/${ORDER}/discounts`] = [{ status: 429 }, { status: 429 }, { status: 429 }];
+    chamadas = [];
+    await coletarRetry([ORDER]);
+    assert(finDe(ORDER)?.billing_status === "SEM_PERMISSAO" && !chamadas.some((x) => x.caminho.startsWith("/billing/")), `${finDe(ORDER)?.billing_status} ${caminhos()}`);
+  });
+  t("MONO-4. descontos OK (0,52/0,76) nunca voltam a INDISPONIVEL/zeros — nem quando o pedido é refeito", async () => {
+    assert(F.mesclarPedidoFinanceiroML(finLinha(ORDER) as any, {})?.descontos_status === "OK", "não obtido rebaixou descontos");
+    const m = F.mesclarPedidoFinanceiroML(finLinha(ORDER) as any, { pedido: F.extrairPedidoFinanceiroML(orderGolden(), null) });
+    assert(m?.descontos_status === "OK" && c(m.desconto_meli) === 76 && c(m.desconto_vendedor) === 52, `pedido refeito zerou descontos: ${JSON.stringify(m)}`);
+    const semFee = F.mesclarPedidoFinanceiroML(finLinha(ORDER) as any, { pedido: F.extrairPedidoFinanceiroML(orderGolden({ order_items: [{ item: { id: ITEM }, quantity: 1, unit_price: 41.24 }] }), null) });
+    assert(semFee?.tarifa_origem === "PROVIDER" && c(semFee.tarifa_venda) === 419, `tarifa PROVIDER rebaixada para AUSENTE: ${JSON.stringify(semFee)}`);
+    historico([[ORDER]]); comLinha(ORDER, { tarifa_venda: null, tarifa_origem: "AUSENTE", ...REBAIXADA });   // MULTI: pedido + billing
+    chamadas = [];
+    await coletarRetry([ORDER]);
+    const f = finDe(ORDER)!;
+    assert(f.descontos_status === "OK" && c(f.desconto_meli) === 76 && c(f.tarifa_venda) === 419 && f.billing_status === "CONFERIDO" && !chamadas.some((x) => /discounts/.test(x.caminho)), `${JSON.stringify(f)} ${caminhos()}`);
+  });
+  t("MONO-5. valores do envio nunca viram NULL: pack 429 mantém o frete; custo sem senders mantém receiver/bruto", async () => {
+    historico([[ORDER]]); comLinha(ORDER, {}, { pedidos: null });
+    roteiro[`/packs/${PACK}`] = [{ status: 429 }, { status: 429 }, { status: 429 }];
+    chamadas = [];
+    await coletarRetry([ORDER]);
+    assert(c(envioDe(SHIP)[0]?.frete_vendedor) === 695 && !chamadas.some((x) => /\/shipments\//.test(x.caminho)), `${JSON.stringify(envioDe(SHIP))} ${caminhos()}`);
+    historico([[ORDER]]); comLinha(ORDER, {}, { frete_vendedor: null });
+    roteiro[`/shipments/${SHIP}/costs`] = [{ status: 200, corpo: { gross_amount: 16.92 } }];
+    await coletarRetry([ORDER]);
+    const e = envioDe(SHIP)[0];
+    assert(e && c(e.frete_comprador) === 699 && c(e.frete_bruto_referencia) === 1692 && JSON.stringify(e.pedidos) === JSON.stringify([ORDER]), `envio anulado: ${JSON.stringify(e)}`);
+    const me = F.mesclarEnvioFinanceiroML(envioLinha(ORDER) as any, { shipment_id: SHIP, pack_id: null, pedidos: null, frete_comprador: null, frete_vendedor: null, frete_bruto_referencia: null });
+    assert(c(me.frete_vendedor) === 695 && c(me.frete_comprador) === 699 && me.pack_id === PACK && JSON.stringify(me.pedidos) === JSON.stringify([ORDER]), JSON.stringify(me));
+  });
+  t("MONO-6. golden rebaixada (v2 PENDENTE, billing NULL, descontos OK) → BILLING_ONLY → CONFERIDO 4,19, ACTUAL 30,10", async () => {
+    historico([[ORDER]]); comLinha(ORDER, REBAIXADA);
+    assert((await planoDe(ORDER)).tipo === "BILLING_ONLY", "golden fora de BILLING_ONLY");
+    chamadas = [];
+    const r = await postRetry(janela());
+    const f = finDe(ORDER)!;
+    assert(r.corpo.actual === 1 && f.billing_status === "CONFERIDO" && c(f.billing_tarifa) === 419 && f.descontos_status === "OK" && c(f.desconto_meli) === 76 && f.fonte_versao === 2, `${JSON.stringify(r.corpo)} ${JSON.stringify(f)}`);
+    assert(chamadas.length === 1 && chamadas[0].caminho.startsWith("/billing/"), `golden refez o pipeline: ${caminhos()}`);
+    const g = await getVendas(`date_from=${DIA}&date_to=${DIA}&loja_id=${ML_A}`);
+    const row = (g.corpo.rows ?? []).find((x: any) => x.orderId === ORDER);
+    assert(row?.financeiro?.qualidadeFinanceira === "ACTUAL" && c(row.financeiro.liquidoMarketplace) === 3010 && g.corpo.financeiroPendente === 0, JSON.stringify(row?.financeiro));
+  });
+  t("MONO-7. prazo esgotado na golden rebaixada → linha idêntica, zero gravações (nada sobrescrito)", async () => {
+    historico([[ORDER]]); comLinha(ORDER, REBAIXADA);
+    const antes = JSON.stringify(finDe(ORDER)), antesEnvio = JSON.stringify(envioDe(SHIP)); gravacoesPedidos = 0; escritas = [];
+    const r = await coletarRetry([ORDER], {}, { ate: 0 });
+    assert(JSON.stringify(finDe(ORDER)) === antes && JSON.stringify(envioDe(SHIP)) === antesEnvio && gravacoesPedidos === 0 && r.adiados === 1 && r.planos.BILLING_ONLY === 1, `${JSON.stringify(finDe(ORDER))} gravações=${gravacoesPedidos}`);
+  });
+  t("MONO-8. qualidade pelo estado FINAL mesclado: CONFERIDO existente + frete obtido agora → ACTUAL", async () => {
+    historico([[ORDER]]); comLinha(ORDER, {}, { frete_vendedor: null });
+    const r = await coletarRetry([ORDER]);
+    assert(r.planos.SHIPPING_ONLY === 1 && r.actual === 1 && r.pendentes === 0 && finDe(ORDER)?.billing_status === "CONFERIDO" && c(envioDe(SHIP)[0]?.frete_vendedor) === 695, JSON.stringify({ ...r, falhas: r.falhas.length }));
+  });
+
+  t("STAGE-1. sem linha → FULL_PIPELINE (pedido, descontos, envio, billing)", async () => {
+    const p = F.planoRecuperacaoML(null);
+    assert(p.tipo === "FULL_PIPELINE" && JSON.stringify(p.etapas) === JSON.stringify(["pedido", "descontos", "envio", "billing"]), JSON.stringify(p));
+    historico([[ORDER]]); chamadas = [];
+    const r = await coletarRetry([ORDER]);
+    for (const re of [/^\/orders\/\d+$/, /\/discounts$/, /^\/packs\//, /\/costs$/, /^\/billing\//]) assert(chamadas.some((x) => re.test(x.caminho.split("?")[0])), `${re} ausente: ${caminhos()}`);
+    assert(r.actual === 1 && r.planos.FULL_PIPELINE === 1, JSON.stringify(r.planos));
+  });
+  t("STAGE-2. só billing pendente → BILLING_ONLY: só o billing é chamado (nada de pedido/descontos/pack/envio)", async () => {
+    historico([[ORDER], ["2000017000100001"], ["2000017000100002"]]);
+    for (const o of [ORDER, "2000017000100001", "2000017000100002"]) comLinha(o, REBAIXADA);
+    chamadas = [];
+    const r = await coletarRetry([ORDER, "2000017000100001", "2000017000100002"]);
+    assert(r.planos.BILLING_ONLY === 3 && chamadas.length === 1 && chamadas[0].caminho.startsWith("/billing/") && r.actual === 3, `${JSON.stringify(r.planos)} ${caminhos()}`);
+  });
+  t("STAGE-3. só descontos → DISCOUNTS_ONLY: só /discounts; billing CONFERIDO 4,19 intocado", async () => {
+    historico([[ORDER]]); comLinha(ORDER, SEM_DESC);
+    assert((await planoDe(ORDER)).tipo === "DISCOUNTS_ONLY", "plano");
+    chamadas = [];
+    await coletarRetry([ORDER]);
+    const f = finDe(ORDER)!;
+    assert(chamadas.length === 1 && /\/orders\/\d+\/discounts$/.test(chamadas[0].caminho) && f.descontos_status === "OK" && c(f.desconto_meli) === 76 && f.billing_status === "CONFERIDO" && c(f.billing_tarifa) === 419, `${JSON.stringify(f)} ${caminhos()}`);
+  });
+  t("STAGE-4. só frete → SHIPPING_ONLY: só /shipments/{id}/costs (pedidos do pack já conhecidos)", async () => {
+    historico([[ORDER]]); comLinha(ORDER, {}, { frete_vendedor: null });
+    assert((await planoDe(ORDER)).tipo === "SHIPPING_ONLY", "plano");
+    chamadas = [];
+    await coletarRetry([ORDER]);
+    assert(chamadas.length === 1 && /\/shipments\/\d+\/costs$/.test(chamadas[0].caminho) && c(envioDe(SHIP)[0]?.frete_vendedor) === 695, caminhos());
+  });
+  t("STAGE-5. completo → SKIP: zero chamadas, zero gravações", async () => {
+    historico([[ORDER]]); comLinha(ORDER);
+    chamadas = []; gravacoesPedidos = 0;
+    const r = await coletarRetry([ORDER]);
+    assert((await planoDe(ORDER)).tipo === "SKIP" && r.jaCompletos === 1 && chamadas.length === 0 && gravacoesPedidos === 0, JSON.stringify(r.planos));
+  });
+  t("STAGE-6. descontos + billing faltando → MULTI_STAGE: só essas duas etapas", async () => {
+    historico([[ORDER]]); comLinha(ORDER, { ...SEM_DESC, ...REBAIXADA });
+    assert((await planoDe(ORDER)).tipo === "MULTI_STAGE", "plano");
+    chamadas = [];
+    await coletarRetry([ORDER]);
+    const f = finDe(ORDER)!;
+    assert(chamadas.length === 2 && chamadas.some((x) => /discounts$/.test(x.caminho)) && chamadas.some((x) => x.caminho.startsWith("/billing/")) && f.descontos_status === "OK" && f.billing_status === "CONFERIDO", `${caminhos()} ${JSON.stringify(f)}`);
+  });
+  t("STAGE-7. DIVERGENTE legado (v1) → BILLING_ONLY 1×: só o billing → CONFERIDO 4,19 v2; depois SKIP", async () => {
+    legadoDivergente();
+    assert((await planoDe(ORDER)).tipo === "BILLING_ONLY", "legado fora de BILLING_ONLY");
+    chamadas = [];
+    await coletarRetry([ORDER]);
+    const f = finDe(ORDER)!;
+    assert(chamadas.length === 1 && chamadas[0].caminho.startsWith("/billing/") && f.billing_status === "CONFERIDO" && c(f.billing_tarifa) === 419 && f.fonte_versao === 2, `${caminhos()} ${JSON.stringify(f)}`);
+    assert((await planoDe(ORDER)).tipo === "SKIP", "legado reconsultado em loop");
+    legadoDivergente(); roteiro["/billing/"] = [{ status: 429 }, { status: 429 }, { status: 429 }];
+    await coletarRetry([ORDER]);
+    assert(finDe(ORDER)?.billing_status === "DIVERGENTE" && finDe(ORDER)?.fonte_versao === 1 && (await planoDe(ORDER)).tipo === "BILLING_ONLY", `legado sem veredito perdeu a reavaliação: ${JSON.stringify(finDe(ORDER))}`);
+  });
+  t("STAGE-8. BILLING_ONLY sem o pedido: billing parcial → lê a idade 1×; recente → PENDENTE (carência), antiga → DIVERGENTE", async () => {
+    const parcial = { status: 200, corpo: { results: [{ order_id: Number(ORDER), details: [{ charge_info: { detail_type: "CHARGE", detail_sub_type: "CVVML", detail_amount: 4.16 }, sales_info: [{ order_id: Number(ORDER) }] }] }] } };
+    historico([[ORDER]]); comLinha(ORDER, REBAIXADA); roteiro["/billing/"] = [parcial]; chamadas = []; logs.length = 0;
+    let r = await coletarRetry([ORDER], { agora: () => new Date("2026-10-14T10:08:10.000Z") });
+    let f = finDe(ORDER)!;
+    assert(f.billing_status === "PENDENTE" && c(f.billing_tarifa) === 416 && r.naoProntos === 1 && r.integracao === 0 && chamadas.filter((x) => /^\/orders\/\d+$/.test(x.caminho)).length === 1, `${JSON.stringify(f)} ${caminhos()}`);
+    historico([[ORDER]]); comLinha(ORDER, REBAIXADA); roteiro["/billing/"] = [parcial];
+    r = await coletarRetry([ORDER], { agora: () => new Date("2026-10-14T10:20:10.000Z") });
+    f = finDe(ORDER)!;
+    assert(f.billing_status === "DIVERGENTE" && f.fonte_versao === 2 && r.integracao === 1, JSON.stringify(f));
+  });
+
+  const lote2 = (n: number, base: number) => Array.from({ length: n }, (_, i) => orderGolden({ id: base + i, pack_id: null, shipping: { id: 9100000 + base % 1000 + i } }));
+  t("BATCH-1. micro-lote = lote do billing (20); o billing do 1º lote acontece ANTES do 2º lote começar (sem cauda global)", async () => {
+    assert(K.MICRO_LOTE_ML === 20 && K.LOTE_BILLING_ML === 20, "micro-lote ≠ 20");
+    semear(); const ps = lote2(45, 2000019100000000); pedidosML = Object.fromEntries(ps.map((o) => [String(o.id), o])); chamadas = [];
+    const r = await coletarSync(ps);
+    const iB1 = chamadas.findIndex((x) => x.caminho.startsWith("/billing/"));
+    const iD21 = chamadas.findIndex((x) => x.caminho === `/orders/${2000019100000000 + 20}/discounts`);
+    const bs = billings();
+    assert(iB1 >= 0 && iD21 > iB1 && bs.length === 3 && bs.every((b) => b.length <= 20) && r.lotes === 3 && r.actual === 45, `billing1=${iB1} disc21=${iD21} lotes=${bs.map((b) => b.length)}`);
+  });
+  t("BATCH-2. prazo no 2º lote: o 1º lote já saiu CONFERIDO e gravado; o resto PENDENTE pelo payload; nenhuma venda perdida", async () => {
+    semear(); const ps = lote2(45, 2000019200000000); pedidosML = Object.fromEntries(ps.map((o) => [String(o.id), o])); chamadas = [];
+    const r = await coletarSync(ps, porChamada(), { ate: 45 });   // lote 1 = 20 descontos + 20 custos + 1 billing = 41 chamadas
+    const conf = db.ml_financeiro_pedidos.filter((p) => p.billing_status === "CONFERIDO").map((p) => Number(p.order_id) - 2000019200000000);
+    assert(db.ml_financeiro_pedidos.length === 45 && conf.length === 20 && conf.every((i) => i < 20) && r.adiados > 0 && chamadas.length <= 45, `conferidos=${conf.length} linhas=${db.ml_financeiro_pedidos.length} chamadas=${chamadas.length}`);
+  });
+  t("BATCH-3. 30 BILLING_ONLY = 2 chamadas de billing e nada mais (nunca o pipeline completo)", async () => {
+    const ids = Array.from({ length: 30 }, (_, i) => String(2000017000300000 + i));
+    historico(ids.map((o) => [o] as [string])); for (const o of ids) comLinha(o, REBAIXADA);
+    chamadas = [];
+    const r = await coletarRetry(ids);
+    assert(chamadas.length === 2 && chamadas.every((x) => x.caminho.startsWith("/billing/")) && r.actual === 30 && db.ml_financeiro_pedidos.every((p) => p.billing_status === "CONFERIDO"), `${caminhos().slice(0, 300)} actual=${r.actual}`);
+  });
+  t("BATCH-4. gravação por lote dentro do prazo; depois do prazo, UMA gravação final com o restante", async () => {
+    semear(); const ps = lote2(60, 2000019400000000); pedidosML = Object.fromEntries(ps.map((o) => [String(o.id), o])); gravacoesPedidos = 0;
+    await coletarSync(ps, porChamada(), { ate: 45 });
+    assert(gravacoesPedidos === 2 && db.ml_financeiro_pedidos.length === 60, `gravações=${gravacoesPedidos} linhas=${db.ml_financeiro_pedidos.length}`);
+    semear(); pedidosML = Object.fromEntries(ps.map((o) => [String(o.id), o])); gravacoesPedidos = 0;
+    await coletarSync(ps);
+    assert(gravacoesPedidos === 3, `sem prazo: ${gravacoesPedidos} gravações (esperado 1 por lote)`);
+  });
+  t("BATCH-5. prazo no meio de 40 DISCOUNTS_ONLY: nenhum CONFERIDO rebaixado; os que receberam descontos ficam OK", async () => {
+    const ids = Array.from({ length: 40 }, (_, i) => String(2000017000500000 + i));
+    historico(ids.map((o) => [o] as [string])); for (const o of ids) comLinha(o, SEM_DESC);
+    const r = await coletarRetry(ids, porChamada(), { ate: 5 });
+    const fs = db.ml_financeiro_pedidos;
+    assert(fs.length === 40 && fs.every((p) => p.billing_status === "CONFERIDO" && c(p.billing_tarifa) === 419) && fs.filter((p) => p.descontos_status === "OK").length === 5 && r.adiados === 35, `${fs.filter((p) => p.billing_status !== "CONFERIDO").length} rebaixados, ok=${fs.filter((p) => p.descontos_status === "OK").length}`);
+  });
+
+  t("QUEUE-1. prioridade: BILLING_ONLY (P0) < uma etapa (P1) < várias (P2) < sem linha (P3); billing-only entra no 1º lote", async () => {
+    assert(F.prioridadeRecuperacaoML("BILLING_ONLY") === 0 && F.prioridadeRecuperacaoML("DISCOUNTS_ONLY") === 1 && F.prioridadeRecuperacaoML("SHIPPING_ONLY") === 1 && F.prioridadeRecuperacaoML("MULTI_STAGE") === 2 && F.prioridadeRecuperacaoML("FULL_PIPELINE") === 3 && F.prioridadeRecuperacaoML("SKIP") === null, "ordem das classes");
+    const novos = Array.from({ length: 25 }, (_, i) => String(2000022000100000 + i)), velhos = Array.from({ length: 5 }, (_, i) => String(2000017000600000 + i));
+    historico([...novos, ...velhos].map((o) => [o] as [string])); for (const o of velhos) comLinha(o, REBAIXADA);
+    chamadas = [];
+    await coletarRetry([...novos, ...velhos]);
+    const b1 = billings()[0] ?? [];
+    assert(velhos.every((o) => b1.includes(o)), `billing-only fora do 1º lote: ${b1.join(",")}`);
+  });
+  t("QUEUE-2. dentro da classe, mais recente primeiro (ordem do servidor preservada)", async () => {
+    const ids = Array.from({ length: 25 }, (_, i) => String(2000017000700024 - i));
+    historico(ids.map((o) => [o] as [string])); for (const o of ids) comLinha(o, REBAIXADA);
+    chamadas = [];
+    await coletarRetry(ids);
+    assert(JSON.stringify(billings()[0]) === JSON.stringify(ids.slice(0, 20)), `1º lote: ${billings()[0]}`);
+  });
+  t("QUEUE-3. produção: golden + 44 rebaixadas + 100 históricas sem linha MAIS NOVAS → os 3 primeiros billings são das 45 BILLING_ONLY, antes de qualquer pipeline", async () => {
+    const rebaixadas = Array.from({ length: 44 }, (_, i) => String(2000017000800000 + i)), semLinha = Array.from({ length: 100 }, (_, i) => String(2000022000200000 + i));
+    historico([[ORDER], ...rebaixadas.map((o) => [o] as [string]), ...semLinha.map((o) => [o] as [string])]);
+    for (const o of [ORDER, ...rebaixadas]) comLinha(o, REBAIXADA);
+    chamadas = [];
+    const r = await postRetry(janela());
+    const bs = billings(), alvo = new Set([ORDER, ...rebaixadas]);
+    const idxB = chamadas.map((x, i) => (x.caminho.startsWith("/billing/") ? i : -1)).filter((i) => i >= 0);
+    const iDesc = chamadas.findIndex((x) => /discounts$/.test(x.caminho));
+    assert(bs.length >= 3 && bs[0][0] === ORDER && [...bs[0], ...bs[1]].every((o) => alvo.has(o)) && new Set(bs.slice(0, 3).flat().filter((o) => alvo.has(o))).size === 45, `1ºs billings: ${bs.slice(0, 3).map((b) => b.filter((o) => alvo.has(o)).length + "/" + b.length)} golden=${bs[0]?.[0]}`);
+    assert(iDesc > idxB[1], `pipeline sem linha começou antes do billing-only: descontos@${iDesc} billing2@${idxB[1]}`);
+    assert([ORDER, ...rebaixadas].every((o) => finDe(o)?.billing_status === "CONFERIDO" && c(finDe(o)?.billing_tarifa) === 419) && r.corpo.candidatos === 145, JSON.stringify(r.corpo));
+    const f = finDe(ORDER)!, l = F.liquidoPedidoML(f as any, envioDe(SHIP)[0] as any);
+    assert(l.qualidade === "ACTUAL" && c(l.liquido) === 3010, JSON.stringify(l));
+  });
+
   secao("\n[4. guard]");
   t("I17 (A3.2-C) limpo e invariantes V2 limpos", () => {
     const v = [...G2.financeiroMLNaoReal(), ...G2.invariantesV2(undefined, { zonas: false })];

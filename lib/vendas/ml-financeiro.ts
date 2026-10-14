@@ -70,20 +70,7 @@ export function extrairPedidoFinanceiroML(order: any, descontos: any | null): Om
     const fee = num(i?.sale_fee);
     if (fee === null) tarifaCompleta = false; else tarifa += fee * qtd;
   }
-  let vendedor: number | null = null, meli: number | null = null;
-  const detalhes: any[] | null = descontos && Array.isArray(descontos.details) ? descontos.details : null;
-  if (detalhes) {
-    vendedor = 0; meli = 0;
-    // A3.2-D (auditado): desconto do VENDEDOR = parte do vendedor (já no preço); desconto_meli = SÓ o rebate da tarifa —
-    // parte do ML num "discount" com supplier.funding_mode "sale_fee" (bate com billing sale_fee.rebate). Cupom
-    // (funding null) é benefício do ML ao comprador, NÃO rebate da tarifa: fica fora de desconto_meli.
-    for (const d of detalhes) for (const it of (Array.isArray(d?.items) ? d.items : [])) {
-      const total = num(it?.amounts?.total) ?? 0, seller = num(it?.amounts?.seller) ?? 0;
-      vendedor += seller;
-      if (d?.supplier?.funding_mode === "sale_fee") meli += total - seller;
-    }
-    vendedor = cent(vendedor); meli = cent(meli);
-  }
+  const desc = extrairDescontosML(descontos);
   return {
     order_id: String(order?.id),
     pack_id: str(order?.pack_id),
@@ -92,10 +79,26 @@ export function extrairPedidoFinanceiroML(order: any, descontos: any | null): Om
     receita_produto: cent(receita),
     tarifa_venda: tarifaCompleta ? cent(tarifa) : null,
     tarifa_origem: tarifaCompleta ? "PROVIDER" : "AUSENTE",
-    desconto_vendedor: vendedor,
-    desconto_meli: meli,
-    descontos_status: detalhes ? "OK" : "INDISPONIVEL",
+    desconto_vendedor: desc?.desconto_vendedor ?? null,
+    desconto_meli: desc?.desconto_meli ?? null,
+    descontos_status: desc ? "OK" : "INDISPONIVEL",
   };
+}
+
+/** Descontos (GET /orders/{id}/discounts) → valores; null = indisponível (resposta sem `details`). */
+export function extrairDescontosML(descontos: any | null): { desconto_vendedor: number; desconto_meli: number } | null {
+  const detalhes: any[] | null = descontos && Array.isArray(descontos.details) ? descontos.details : null;
+  if (!detalhes) return null;
+  let vendedor = 0, meli = 0;
+  // A3.2-D (auditado): desconto do VENDEDOR = parte do vendedor (já no preço); desconto_meli = SÓ o rebate da tarifa —
+  // parte do ML num "discount" com supplier.funding_mode "sale_fee" (bate com billing sale_fee.rebate). Cupom
+  // (funding null) é benefício do ML ao comprador, NÃO rebate da tarifa: fica fora de desconto_meli.
+  for (const d of detalhes) for (const it of (Array.isArray(d?.items) ? d.items : [])) {
+    const total = num(it?.amounts?.total) ?? 0, seller = num(it?.amounts?.seller) ?? 0;
+    vendedor += seller;
+    if (d?.supplier?.funding_mode === "sale_fee") meli += total - seller;
+  }
+  return { desconto_vendedor: cent(vendedor), desconto_meli: cent(meli) };
 }
 
 /** Envio: GET /shipments/{id}/costs (x-format-new) + os pedidos que o compartilham (pack.orders, ou o próprio). */
@@ -203,6 +206,96 @@ export function financeiroPendenteElegivel(p: PedidoFinanceiroML, envio: EnvioFi
   if (p.billing_status === "DIVERGENTE" && (p.fonte_versao ?? FONTE_VERSAO_ML_FINANCEIRO) < FONTE_VERSAO_ML_FINANCEIRO) return "versao";
   if (p.descontos_status === "INDISPONIVEL") return "descontos";
   return null;
+}
+
+/**
+ * A3.2-E — PLANO DE RECUPERAÇÃO por pedido: só as etapas que faltam (nunca o pipeline inteiro para completar um
+ * campo). Sem linha → FULL_PIPELINE; só billing pendente (inclui DIVERGENTE de versão antiga, 1×) → BILLING_ONLY;
+ * só descontos → DISCOUNTS_ONLY; só frete/pedidos do envio → SHIPPING_ONLY; mais de uma → MULTI_STAGE; completo → SKIP.
+ * SKIP ⇔ financeiroPendenteElegivel === null (a MESMA regra da contagem do GET e dos candidatos).
+ */
+export type EtapaRecuperacaoML = "pedido" | "descontos" | "envio" | "billing";
+export type TipoPlanoML = "FULL_PIPELINE" | "BILLING_ONLY" | "DISCOUNTS_ONLY" | "SHIPPING_ONLY" | "MULTI_STAGE" | "SKIP";
+export interface PlanoRecuperacaoML { tipo: TipoPlanoML; etapas: EtapaRecuperacaoML[] }
+export function planoRecuperacaoML(existente: { pedido: PedidoFinanceiroML; envio: EnvioFinanceiroML | null } | null | undefined): PlanoRecuperacaoML {
+  if (!existente) return { tipo: "FULL_PIPELINE", etapas: ["pedido", "descontos", "envio", "billing"] };
+  const { pedido: p, envio } = existente;
+  if (financeiroPendenteElegivel(p, envio) === null) return { tipo: "SKIP", etapas: [] };
+  const etapas: EtapaRecuperacaoML[] = [];
+  const semTarifa = p.tarifa_origem !== "PROVIDER" || p.tarifa_venda === null;
+  if (semTarifa) etapas.push("pedido");
+  if (p.descontos_status === "INDISPONIVEL") etapas.push("descontos");
+  if (p.shipment_id && (!envio || envio.frete_vendedor === null || (p.pack_id && envio.pedidos === null))) etapas.push("envio");
+  const billingLegado = p.billing_status === "DIVERGENTE" && (p.fonte_versao ?? FONTE_VERSAO_ML_FINANCEIRO) < FONTE_VERSAO_ML_FINANCEIRO;
+  if (p.billing_status === "PENDENTE" || billingLegado || (semTarifa && p.billing_status !== "SEM_PERMISSAO")) etapas.push("billing");
+  const tipo: TipoPlanoML = etapas.length !== 1 ? "MULTI_STAGE" : etapas[0] === "billing" ? "BILLING_ONLY" : etapas[0] === "descontos" ? "DISCOUNTS_ONLY" : etapas[0] === "envio" ? "SHIPPING_ONLY" : "MULTI_STAGE";
+  return { tipo, etapas };
+}
+
+/**
+ * A3.2-E — prioridade da fila de recuperação (menor primeiro; dentro da classe, mais recente primeiro — ordem de
+ * entrada): P0 BILLING_ONLY (1 chamada em lote completa o ACTUAL), P1 uma etapa, P2 várias, P3 sem linha.
+ */
+export function prioridadeRecuperacaoML(tipo: TipoPlanoML): 0 | 1 | 2 | 3 | null {
+  if (tipo === "BILLING_ONLY") return 0;
+  if (tipo === "DISCOUNTS_ONLY" || tipo === "SHIPPING_ONLY") return 1;
+  if (tipo === "MULTI_STAGE") return 2;
+  if (tipo === "FULL_PIPELINE") return 3;
+  return null;
+}
+
+/** O que uma execução OBTEVE para um pedido — etapa ausente = não obtida (nunca "zero"/"nulo"). */
+export interface ObtidoPedidoML {
+  pedido?: Omit<PedidoFinanceiroML, "billing_status" | "billing_tarifa" | "desconto_vendedor" | "desconto_meli" | "descontos_status">;
+  descontos?: { desconto_vendedor: number; desconto_meli: number };
+  billing?: { billing_status: StatusBillingML; billing_tarifa: number | null };
+}
+
+/**
+ * A3.2-E — MERGE MONOTÔNICO da linha do pedido: execução parcial/adiada/transitória NUNCA rebaixa o que já existe.
+ *   pedido   : só a etapa "pedido" troca receita/itens; tarifa só é trocada por tarifa PROVIDER; ids só por não-nulos;
+ *   descontos: só OK obtido troca; INDISPONIVEL/não obtido mantém (OK nunca volta a INDISPONIVEL com zeros);
+ *   billing  : veredito (CONFERIDO/DIVERGENTE/SEM_PERMISSAO) troca; PENDENTE (sem evidência nova) NUNCA substitui um
+ *              veredito — só evolui um PENDENTE (e nunca anula billing_tarifa já obtido);
+ *   versão   : avança para a atual só quando o billing recebeu veredito NESTA lógica (o DIVERGENTE antigo é 1×).
+ * Sem linha e sem pedido obtido → null (nada a gravar).
+ */
+export function mesclarPedidoFinanceiroML(existente: PedidoFinanceiroML | null, obtido: ObtidoPedidoML): PedidoFinanceiroML | null {
+  const base: PedidoFinanceiroML | null = existente
+    ? { ...existente }
+    : obtido.pedido
+      ? { ...obtido.pedido, desconto_vendedor: null, desconto_meli: null, descontos_status: "INDISPONIVEL", billing_status: "PENDENTE", billing_tarifa: null, fonte_versao: FONTE_VERSAO_ML_FINANCEIRO }
+      : null;
+  if (!base) return null;
+  const o = obtido.pedido;
+  if (o) {
+    base.itens = o.itens;
+    base.receita_produto = o.receita_produto;
+    base.pack_id = o.pack_id ?? base.pack_id;
+    base.shipment_id = o.shipment_id ?? base.shipment_id;
+    if (o.tarifa_origem === "PROVIDER" && o.tarifa_venda !== null) { base.tarifa_venda = o.tarifa_venda; base.tarifa_origem = "PROVIDER"; }
+  }
+  if (obtido.descontos) { base.desconto_vendedor = obtido.descontos.desconto_vendedor; base.desconto_meli = obtido.descontos.desconto_meli; base.descontos_status = "OK"; }
+  const b = obtido.billing;
+  if (b && b.billing_status !== "PENDENTE") {
+    base.billing_status = b.billing_status; base.billing_tarifa = b.billing_tarifa; base.fonte_versao = FONTE_VERSAO_ML_FINANCEIRO;
+  } else if (b && base.billing_status === "PENDENTE") {
+    base.billing_tarifa = b.billing_tarifa ?? base.billing_tarifa;
+  }
+  return base;
+}
+
+/** A3.2-E — MERGE MONOTÔNICO do envio: valor obtido troca; nulo (não obtido/falhou) nunca anula o que existe. */
+export function mesclarEnvioFinanceiroML(existente: EnvioFinanceiroML | null, obtido: EnvioFinanceiroML): EnvioFinanceiroML {
+  if (!existente) return obtido;
+  return {
+    shipment_id: obtido.shipment_id,
+    pack_id: obtido.pack_id ?? existente.pack_id,
+    pedidos: obtido.pedidos ?? existente.pedidos,
+    frete_comprador: obtido.frete_comprador ?? existente.frete_comprador,
+    frete_vendedor: obtido.frete_vendedor ?? existente.frete_vendedor,
+    frete_bruto_referencia: obtido.frete_bruto_referencia ?? existente.frete_bruto_referencia,
+  };
 }
 
 /**

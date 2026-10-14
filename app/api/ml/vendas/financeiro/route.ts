@@ -8,7 +8,8 @@
  *     SEM linha financeira ou com linha pendente elegível — mais recentes primeiro; completo (ACTUAL) fica fora;
  *   - tenta todas até o prazo de execução (concorrência 2 + prazo; sem teto por quantidade) — o que não couber
  *     continua elegível no próximo refresh. Não é backfill geral: só a janela/loja que o dono está vendo;
- *   - só GET no provider; resultado gravado; resposta = resumo (a tela relê GET /api/ml/vendas).
+ *   - só GET no provider; resultado gravado por MERGE monotônico (A3.2-E: só as etapas que faltam, billing por
+ *     micro-lote, nada confirmado é rebaixado); resposta = resumo (a tela relê GET /api/ml/vendas).
  * Body: { loja_id?: string, date_from: "AAAA-MM-DD", date_to: "AAAA-MM-DD", date_field?: "pagamento" | "criacao" }
  */
 import { NextResponse } from "next/server";
@@ -78,7 +79,9 @@ export async function POST(request: Request) {
     vendas.push(...((data ?? []) as any[]).map((v) => ({ ...v, order_id: String(v.order_id) })));
     if ((data ?? []).length < PAGINA_CANDIDATOS) break;
   }
-  const existentes = await lerFinanceiroRealML(supabase(), userId, lojaId, [...new Set(vendas.map((v) => v.order_id))]);
+  // A3.2-E: estado existente é a base do merge monotônico — leitura falhou → nada é consultado nem gravado
+  const existentes = await lerFinanceiroRealML(supabase(), userId, lojaId, [...new Set(vendas.map((v) => v.order_id))], { estrito: true }).catch(() => null);
+  if (!existentes) return NextResponse.json({ ok: false, tentados: 0 });
   const alvo = candidatosRecuperacaoFinanceiraML(vendas, existentes, { de, ate, campo });
   if (alvo.length === 0) return NextResponse.json({ ok: true, tentados: 0 });
 

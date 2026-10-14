@@ -212,7 +212,7 @@ function depsFinanceiroML(userId: string, lojaId: string): DepsColetaML {
       const { error } = await supabase().from("ml_financeiro_pedidos").upsert(linhas, { onConflict: "loja_id,order_id" });
       if (error) throw new Error(`gravação de ml_financeiro_pedidos falhou: ${error.message}`);
     },
-    lerExistentes: (ids) => lerFinanceiroRealML(supabase(), userId, lojaId, ids),
+    lerExistentes: (ids) => lerFinanceiroRealML(supabase(), userId, lojaId, ids, { estrito: true }),
   };
 }
 

@@ -1135,7 +1135,7 @@ export function financeiroMLNaoReal(raiz = RAIZ_V2): string[] {
   // coletor: só GET, envio 1×, fora das rotas
   const c = tiraComentarios(ler(raiz, COLETOR_FIN_ML));
   if (!/method: "GET"/.test(c) || /method:\s*"(POST|PUT|PATCH|DELETE)"|\.(post|put|patch|delete)\(/i.test(c)) erros.push("coletor: chamada ao provider que não é GET");
-  if (!/if \(p\.shipment_id && !envios\.has\(p\.shipment_id\)\) \{\s*const pedidos = pedidosDoEnvio;\s*envios\.set\(p\.shipment_id, getML\(`\/shipments\//.test(c)) erros.push("coletor: custo do envio buscado/gravado por pedido (frete duplicado)");
+  if (!/if \(!envios\.has\(shipment_id\)\) envios\.set\(shipment_id, \(async \(\) => \{/.test(c) || (c.match(/getML\(`\/shipments\//g) ?? []).length !== 1 || !/await envios\.get\(shipment_id\);/.test(c) || !/if \(!s \|\| enviosVistos\.has\(s\) \|\| !envios\.has\(s\)\) continue;/.test(c)) erros.push("coletor: custo do envio buscado/gravado por pedido (frete duplicado)");
   // A3.2-C: SÓ a rota de retry importa o motor (o GET de Vendas e a tela nunca chamam o provider)
   const ROTA_RETRY_FIN_ML = "app/api/ml/vendas/financeiro/route.ts";
   for (const f of listar(raiz, "app").filter((x) => /\.(ts|tsx)$/.test(x))) if (f !== ROTA_RETRY_FIN_ML && /ml-financeiro-coleta/.test(ler(raiz, f))) erros.push(`${f}: provider financeiro chamado em rota/tela (só no sync e no retry)`);
@@ -1153,11 +1153,13 @@ export function financeiroMLNaoReal(raiz = RAIZ_V2): string[] {
   // logs do motor: com contexto (loja, pedido, pack, envio, etapa, HTTP) e SEM token/comprador — só as linhas log(`...`)
   const linhasLog = c.match(/log\(`[^`]*`\)/g) ?? [];
   if (!/log\(`\[ml-financeiro\] \$\{g\.classe\} loja=\$\{conta\.lojaId\} order=\$\{g\.order_id\} pack=/.test(c) || linhasLog.length < 3 || linhasLog.some((l) => /token|buyer|receiver|nickname|email/i.test(l))) erros.push("coletor: falha sem log sanitizado (ou log com token/comprador)");
-  if (!/if \(e && financeiroPendenteElegivel\(e\.pedido, e\.envio\) === null\) \{ r\.jaCompletos\+\+; return false; \}/.test(c)) erros.push("coletor: pedido completo (ACTUAL) consultado de novo");
+  const plano = corpoDaFuncao(m, "planoRecuperacaoML") ?? "";
+  if (!/const fila = ids\.filter\(\(id\) => planos\.get\(id\)!\.tipo !== "SKIP"\)/.test(c) || !/if \(financeiroPendenteElegivel\(p, envio\) === null\) return \{ tipo: "SKIP", etapas: \[\] \};/.test(plano)) erros.push("coletor: pedido completo (ACTUAL) consultado de novo");
   // A3.2-C.1: SEM teto por quantidade — TODA venda do lote é tentada; a única proteção de tempo é o PRAZO, checado
   // antes de CADA chamada ao provider (inclusive retry); o que não coube é DEFERRED_BY_RUNTIME_BUDGET (não é erro da API)
   if (/orcamento\.pedidos|alvo\.slice\(0,|\bLIMITE_|ORCAMENTO_/.test(c) || !/if \(agoraMs\(\) >= ate\) return \{ status, corpo: null, classe: t === 0 \? DEFERIDO : "TRANSIENT_ERROR" \};/.test(c) || /Promise\.all\((?!Array\.from\(\{ length: Math\.min\(limite)/.test(c)) erros.push("coletor: teto por quantidade, prazo fora de cada chamada ou concorrência ilimitada");
-  if (!/if \(f\.classe === DEFERIDO\) \{/.test(c) || !/deferred_by_runtime_budget=\$\{r\.adiados\}/.test(c) || !/if \(o && Array\.isArray\(o\.order_items\)\) extraidos\.set\(id, extrairPedidoFinanceiroML\(o, null\)\);/.test(c)) erros.push("coletor: adiamento por prazo não distinguido de erro do provider, ou venda adiada sem registro pendente");
+  const iPayload = c.search(/if \(order && precisa\(id, "pedido"\)\) ob\.pedido = extrairPedidoFinanceiroML\(order, null\);/), iDesc = c.search(/const d = await getML\(`\/orders\/\$\{encodeURIComponent\(id\)\}\/discounts`\);/);
+  if (!/if \(f\.classe === DEFERIDO\) \{/.test(c) || !/deferred_by_runtime_budget=\$\{r\.adiados\}/.test(c) || iPayload < 0 || iDesc < iPayload) erros.push("coletor: adiamento por prazo não distinguido de erro do provider, ou venda adiada sem registro pendente");
   if (!/const inicioSync = Date\.now\(\);/.test(sy) || !/\{ ate: inicioSync \+ JANELA_PROVIDER_MS \},/.test(sy)) erros.push("sync-ml: prazo do financeiro fora do início do sync");
   // TARGETED_RETRY_ON_REFRESH: GET só marca pendentes (banco); retry por rota própria, mesma loja, só pendentes
   const rg = tiraComentarios(ler(raiz, "app/api/ml/vendas/route.ts"));
@@ -1186,7 +1188,24 @@ export function financeiroMLNaoReal(raiz = RAIZ_V2): string[] {
   if (!/let total: number \| null = num\(doPedido\?\.sale_fee\?\.net\);/.test(cb) || !/if \(total === null\) \{/.test(cb) || !/sub\.startsWith\("CVV"\)/.test(cb) || /CFFE|CVVML|CVVPRC|CVVFNU/.test(cb.replace(/\/\/.*$/gm, "")) || !/Math\.abs\(total - tarifa\) <= 0\.01/.test(cb)) erros.push("billing: fonte fora de sale_fee.net, fallback fora de CVV*, allowlist fechada ou tolerância alterada");
   // A3.2-D DESCONTOS: discount_not_found = sem desconto (exato); desconto_meli = só rebate da tarifa (funding sale_fee)
   if (!/const semDesconto = d\.status === 404 && d\.corpo\?\.error === "discount_not_found";/.test(c) || !/if \(d\.classe !== "OK" && !semDesconto\) registrar\(/.test(c)) erros.push("descontos: 404 sem o código discount_not_found tratado como sem desconto (ou o código virou erro)");
-  if (!/if \(d\?\.supplier\?\.funding_mode === "sale_fee"\) meli \+= total - seller;/.test(ped)) erros.push("descontos: desconto_meli soma cupom/benefício além do rebate da tarifa");
+  const dsc = corpoDaFuncao(m, "extrairDescontosML") ?? "";
+  if (!/if \(d\?\.supplier\?\.funding_mode === "sale_fee"\) meli \+= total - seller;/.test(dsc) || !/const desc = extrairDescontosML\(descontos\);/.test(ped)) erros.push("descontos: desconto_meli soma cupom/benefício além do rebate da tarifa");
+  // A3.2-E STAGE-AWARE + MONOTÔNICO (fix forward 182af4e): plano por pedido, fila P0..P3, micro-lote com o billing DO
+  // lote (sem cauda global), gravação só por merge com a linha existente, qualidade do estado final, leitura estrita
+  const loop = /for \(let i = 0; i < fila\.length; i \+= MICRO_LOTE_ML\) \{\s*const lote = fila\.slice\(i, i \+ MICRO_LOTE_ML\);\s*r\.lotes\+\+;\s*await emParalelo\(lote, CONCORRENCIA_ML, etapasDoPedido\);\s*await billingDoLote\(lote\);\s*await mesclarLote\(lote\);\s*if \(agoraMs\(\) < ate\) await gravar\(\);\s*\}/;
+  const bl = corpoDaFuncao(c, "billingDoLote") ?? "";
+  if (!loop.test(c) || (c.match(/\/billing\/integration\//g) ?? []).length !== 1 || !/\/billing\/integration\//.test(bl) || !/export const MICRO_LOTE_ML = LOTE_BILLING_ML;/.test(c) || !/export const LOTE_BILLING_ML = 20;/.test(c)
+    || !/const alvoB = lote\.filter\(\(id\) => precisa\(id, "billing"\)/.test(bl)) erros.push("coletor: billing fora do micro-lote (cauda global), micro-lote ≠ lote do billing ou billing de pedido sem a etapa no plano");
+  if ((c.match(/deps\.gravarPedidos\(/g) ?? []).length !== 1 || (c.match(/deps\.gravarEnvios\(/g) ?? []).length !== 1 || !/const m = mesclarPedidoFinanceiroML\(ex, obtidos\.get\(id\) \?\? \{\}\);/.test(c)
+    || !/if \(!ex \|\| !iguais\(ex, m, CAMPOS_PEDIDO\)\) paraGravar\.pedidos\.push\(\{ \.\.\.m, \.\.\.base, /.test(c) || !/return mesclarEnvioFinanceiroML\(noBanco, envio\);/.test(c)) erros.push("coletor: gravação de linha inteira sem merge com a existente (NULL/PENDENTE sobrescreve valor confirmado)");
+  const mp = corpoDaFuncao(m, "mesclarPedidoFinanceiroML") ?? "", me = corpoDaFuncao(m, "mesclarEnvioFinanceiroML") ?? "";
+  if (!/if \(b && b\.billing_status !== "PENDENTE"\) \{/.test(mp) || !/\} else if \(b && base\.billing_status === "PENDENTE"\) \{\s*base\.billing_tarifa = b\.billing_tarifa \?\? base\.billing_tarifa;/.test(mp)
+    || !/if \(obtido\.descontos\) \{/.test(mp) || /descontos_status = "INDISPONIVEL"/.test(mp) || !/if \(o\.tarifa_origem === "PROVIDER" && o\.tarifa_venda !== null\)/.test(mp)
+    || !/frete_vendedor: obtido\.frete_vendedor \?\? existente\.frete_vendedor,/.test(me) || !/pedidos: obtido\.pedidos \?\? existente\.pedidos,/.test(me)) erros.push("merge: estado confirmado pode ser rebaixado (billing → PENDENTE, descontos → INDISPONIVEL, frete/tarifa → NULL)");
+  const pr = corpoDaFuncao(m, "prioridadeRecuperacaoML") ?? "";
+  if (!/if \(tipo === "BILLING_ONLY"\) return 0;/.test(pr) || !/if \(tipo === "FULL_PIPELINE"\) return 3;/.test(pr) || !/\.sort\(\(a, b\) => a\.p - b\.p \|\| a\.i - b\.i\)/.test(c)) erros.push("fila: billing-only sem prioridade sobre o histórico sem linha, ou ordem de recência perdida");
+  if (!/for \(const \[id, p\] of finais\) \{\s*const envio = p\.shipment_id \? enviosBanco\.get\(p\.shipment_id\) \?\? existentes\.get\(id\)\?\.envio \?\? null : null;\s*if \(liquidoPedidoML\(p, envio\)\.qualidade === "ACTUAL"\)/.test(c)) erros.push("coletor: qualidade calculada só pelo resultado desta execução (não pelo estado final mesclado)");
+  if (!/catch \{\s*log\(`\[ml-financeiro\] ERRO leitura do financeiro existente loja=\$\{conta\.lojaId\}[^`]*`\);\s*return r;\s*\}/.test(c) || !/lerFinanceiroRealML\(supabase\(\), userId, lojaId, ids, \{ estrito: true \}\)/.test(sy) || !/\{ estrito: true \}\)\.catch\(\(\) => null\);\s*if \(!existentes\) return NextResponse\.json\(\{ ok: false, tentados: 0 \}\);/.test(rr)) erros.push("coletor: leitura do estado existente falha em silêncio (mapa vazio → regravação por cima)");
   if (!/export const FONTE_VERSAO_ML_FINANCEIRO = 2;/.test(m)) erros.push("versão da lógica financeira não avançou com a correção de billing/descontos");
   // uma rodada automática por carga da página (sem loop)
   const pgr = tiraComentarios(ler(raiz, PAGINA_VENDAS));

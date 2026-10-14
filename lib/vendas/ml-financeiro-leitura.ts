@@ -1,7 +1,8 @@
 /**
  * Leitura do financeiro REAL do ML para a tela de Vendas (CDS V2 Vendas A3.2-B). SÓ banco — o provider é
  * chamado pelo coletor (job), nunca aqui. Dono + loja em toda consulta; lotes por `in` (sem N+1).
- * Falha de leitura → mapa vazio: as linhas seguem no modelo legado ESTIMATED (nunca ACTUAL por engano).
+ * Falha de leitura → mapa vazio: as linhas seguem no modelo legado ESTIMATED (nunca ACTUAL por engano). No coletor
+ * (`estrito`), falha de leitura PROPAGA: sem o estado existente não há merge monotônico — nada é gravado.
  */
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -11,7 +12,7 @@ import type { EnvioFinanceiroML, PedidoFinanceiroML } from "./ml-financeiro";
 const LOTE = 200;
 const num = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
 
-export async function lerFinanceiroRealML(cliente: SupabaseClient, userId: string, lojaId: string, orderIds: readonly string[]): Promise<Map<string, FinanceiroRealML>> {
+export async function lerFinanceiroRealML(cliente: SupabaseClient, userId: string, lojaId: string, orderIds: readonly string[], opcoes: { estrito?: boolean } = {}): Promise<Map<string, FinanceiroRealML>> {
   const mapa = new Map<string, FinanceiroRealML>();
   const ids = [...new Set(orderIds.filter(Boolean).map(String))];
   if (!userId || !lojaId || ids.length === 0) return mapa;
@@ -43,6 +44,8 @@ export async function lerFinanceiroRealML(cliente: SupabaseClient, userId: strin
     for (const p of pedidos) mapa.set(p.order_id, { pedido: p, envio: p.shipment_id ? envios.get(p.shipment_id) ?? null : null });
   } catch (e: any) {
     console.error(`[ml-financeiro] leitura falhou (loja ${lojaId}): ${e?.message ?? e} — linhas seguem no modelo legado`);
+    // A3.2-E: base do MERGE da gravação — "vazio" faria tudo parecer sem linha e regravar por cima; o coletor aborta
+    if (opcoes.estrito) throw e;
     mapa.clear();
   }
   return mapa;
