@@ -49,6 +49,11 @@
  *       forma de uma lista FECHADA (escrita/detecção por id, update de seleção escopada, enumeração admin,
  *       agregado do dono); /api/ml/vendas lê só a loja resolvida no servidor (sem loja → falha fechado) com a
  *       barreira multi-ML preservada; sync Shopee de B nunca lê/atualiza/sobrescreve A;
+ *   I13 I13_SALES_COST_COMES_FROM_MEUS_PRODUTOS (Vendas A3): custo da venda vem AO VIVO de Meus Produtos por um
+ *       único serviço — leitura paginada por dono + marketplace + loja, sem `ativo`, chave exata
+ *       marketplace|loja|item|variação (sem SKU, sem fallback entre variações); sem custo / sem produto /
+ *       identidade incompleta → pendente, nunca 0; nada grava (sem snapshot/backfill); um lookup por
+ *       requisição (sem N+1); a venda segue visível; a tela de Vendas exibe só o cálculo ao vivo;
  *   Z   ZONAS PROTEGIDAS sem suíte comportamental própria (telas legadas de Vendas/Dashboard,
  *       constantes financeiras, supabase/**, vercel.json, .env.example, sync-worker.mjs): mudar
  *       exige re-baseline EXPLÍCITO de scripts/zonas-protegidas.json (aparece no diff), nunca
@@ -794,6 +799,70 @@ export function vendasSemEscopoDeLoja(raiz = RAIZ_V2): string[] {
   return erros;
 }
 
+// ── I13: custo da venda vem AO VIVO de Meus Produtos (Vendas A3) ─────────
+export const SERVICO_CUSTO_VENDA = "lib/vendas/custo-produto.ts";
+export const ROTAS_VENDAS_CUSTO_LIVE: Array<{ arquivo: string; marketplace: "ML" | "Shopee"; loja: string }> = [
+  { arquivo: "app/api/ml/vendas/route.ts", marketplace: "ML", loja: "lojaLeitura" },
+  { arquivo: "app/api/shopee/vendas/route.ts", marketplace: "Shopee", loja: "lojaId" },
+];
+export const TELA_VENDAS = "app/(app)/vendas/page.tsx";
+/**
+ * I13_SALES_COST_COMES_FROM_MEUS_PRODUTOS: (a) um único serviço lê `anuncios` para custo de venda — por
+ * dono + marketplace + loja, paginado (todas as páginas), SEM `ativo`, só identidade + campos do usuário
+ * (nunca SKU); (b) chave exata marketplace|loja|item|variação; venda com variação → só a linha exata; ML sem
+ * variação → só item de UMA linha sem variação, senão identidade incompleta (sem primeira/ativa/irmã);
+ * (c) custo cadastrado = custo_produto > 0; sem custo / sem produto / incompleto → custo e lucro null
+ * (pendente), nunca 0; frete do anúncio fora; (d) o serviço não grava (sem snapshot/backfill) e não lê o
+ * custo persistido da venda; (e) cada rota carrega o mapa UMA vez, fora do laço, pela loja da leitura, e
+ * não esconde venda por custo; (f) a tela de Vendas exibe custo/imposto/lucro/margem só de `financeiro`.
+ */
+export function custoDeVendaForaDeMeusProdutos(raiz = RAIZ_V2): string[] {
+  const erros: string[] = [];
+  if (!existsSync(join(raiz, SERVICO_CUSTO_VENDA))) return [`${SERVICO_CUSTO_VENDA} ausente`];
+  const s = tiraComentarios(ler(raiz, SERVICO_CUSTO_VENDA));
+  // (a) leitura
+  const cadeias = cadeiasDe(raiz, SERVICO_CUSTO_VENDA, "anuncios");
+  if (cadeias.length !== 1) erros.push(`serviço: ${cadeias.length} leituras de anuncios (esperado 1)`);
+  const c = cadeias[0] ?? "";
+  if (!/\.select\(COLUNAS_CUSTO_PRODUTO\)\s*\.eq\("user_id", userId\)\s*\.eq\("marketplace", marketplace\)\s*\.eq\("loja_id", lojaId\)/.test(c)) erros.push("serviço: leitura de custo sem dono + marketplace + loja");
+  if (/ativo/.test(c) || /\.limit\(|\.range\(/.test(c)) erros.push("serviço: leitura de custo filtra ativo ou corta páginas");
+  if (!/lerTodasAsPaginas<ProdutoDeCusto>\(\(\) => cliente\s*\.from\("anuncios"\)/.test(s)) erros.push("serviço: leitura de custo não paginada (PostgREST corta em 1000)");
+  if (/\bativo\b/.test(s)) erros.push("serviço: custo acoplado a ativo");
+  if (/\bsku\b/i.test(s)) erros.push("serviço: SKU no lookup de custo");
+  if (!/export const COLUNAS_CUSTO_PRODUTO = "id, marketplace, loja_id, ml_item_id, variation_id, custo_produto, imposto, insumos";/.test(s)) erros.push("serviço: colunas do lookup fora do contrato");
+  // (b) chave e resolução
+  if (!/return `\$\{marketplace\}\|\$\{lojaId\}\|\$\{itemId\}\|\$\{variacaoId \?\? ""\}`;/.test(s)) erros.push("serviço: chave sem marketplace|loja|item|variação");
+  const resolver = corpoDe(s, /export function resolverCustoProduto\(/) ?? "";
+  if (!/if \(id\.variacaoInformada\) \{\s*const p = mapa\.exatos\.get\(chaveCustoProduto\(/.test(resolver)) erros.push("serviço: venda com variação não usa só a chave exata");
+  if (!/if \(doItem\.length === 1 && !doItem\[0\]\.variation_id\) return encontrado\(mapa, doItem\[0\]\);/.test(resolver)
+    || (resolver.match(/doItem\[/g) ?? []).length !== 2 || /\.find\(|\.sort\(|\.filter\(|\[doItem\.length/.test(resolver)
+    || !/status: "PRODUCT_IDENTITY_INCOMPLETE"/.test(resolver)) erros.push("serviço: variação desconhecida escolhe uma linha (fallback)");
+  // (c) presença e pendência
+  if (!/export const custoCadastrado = \(p: ProdutoDeCusto\): boolean => \(numero\(p\.custo_produto\) \?\? 0\) > 0;/.test(s)) erros.push("serviço: presença de custo fora de custo_produto > 0");
+  const fin = corpoDe(s, /export function financeiroDaVenda\(/) ?? "";
+  if (!/const custoProduto = comCusto \? [^;]+ : null;/.test(fin) || !/const comCusto = resultado\.status === "PRODUCT_FOUND_WITH_COST" && p !== null;/.test(fin)) erros.push("serviço: custo sem cadastro vira número");
+  if (!/const lucro = pendencias\.length === 0 && custoProduto !== null && imposto !== null\s*\?/.test(fin) || !/: null;/.test(fin)) erros.push("serviço: lucro calculado com pendência");
+  if (/custo_frete|frete_vendedor|frete_comprador/.test(s)) erros.push("serviço: frete do anúncio/legado no cálculo");
+  // (d) sem escrita, sem custo persistido
+  if (/\.(update|insert|upsert|delete|rpc)\(/.test(s)) erros.push("serviço: grava (snapshot/backfill proibido)");
+  if (/venda\.(custo|imposto|lucro|lucro_liquido|margem_contrib|insumos|cadastrado)\b/.test(s)) erros.push("serviço: usa custo/lucro persistido da venda como autoridade");
+  // (e) rotas
+  for (const { arquivo, marketplace, loja } of ROTAS_VENDAS_CUSTO_LIVE) {
+    const r = tiraComentarios(ler(raiz, arquivo));
+    const cargas = r.match(/carregarMapaCustoProduto\(/g) ?? [];
+    const iCarga = r.search(new RegExp(`const mapaCusto = await carregarMapaCustoProduto\\(supabase\\(\\), userId, "${marketplace}", ${loja}\\);`));
+    const iRows = r.search(/let rows = \(pedidos \?\? \[\]\)\.map\(\(p: any\) => \(\{\s*\.\.\.pedidoToRow\(p\),\s*financeiro: mapaCusto\.ok \? financeiroDaVenda\(p, resolverCustoProduto\(mapaCusto\.mapa, identidadeDaVenda\(p\)\)\) : null,\s*\}\)\);/);
+    if (cargas.length !== 1 || iCarga < 0 || iRows < 0 || iCarga > iRows) erros.push(`${arquivo}: lookup de custo fora do contrato (uma carga por requisição, pela loja da leitura, antes das linhas)`);
+    if (/\.filter\([^)]*(financeiro|custoStatus)/.test(r)) erros.push(`${arquivo}: venda escondida por estado de custo`);
+    if (/from\(\s*["']anuncios["']\s*\)/.test(r)) erros.push(`${arquivo}: rota lê anuncios por fora do serviço de custo`);
+  }
+  // (f) tela
+  const tela = tiraComentarios(ler(raiz, TELA_VENDAS)).replace(/interface VendaRow \{[\s\S]*?\n\}/, "");
+  if (/\br\.(custo|imposto|margemContrib|mcPercent|cadastrado|freteComprador|freteVendedor)\b|totais\.(custo|imposto|margemContrib)\b/.test(tela)) erros.push("Vendas (tela): exibe custo/lucro LEGADO persistido");
+  if (!/const live = totaisLive\(/.test(tela) || !/avisoCustoLive\(r\.financeiro\)/.test(tela)) erros.push("Vendas (tela): sem o cálculo ao vivo / sem aviso de custo pendente");
+  return erros;
+}
+
 export function invariantesV2(raiz = RAIZ_V2, opcoes: { zonas?: boolean } = {}): string[] {
   const erros: string[] = [];
   for (const v of canonicoAlcancaLegado(raiz)) erros.push(`I1 canônico→legado: ${v}`);
@@ -808,6 +877,7 @@ export function invariantesV2(raiz = RAIZ_V2, opcoes: { zonas?: boolean } = {}):
   for (const v of refreshDeIdentidadesForaDaLoja(raiz)) erros.push(`I10 I10_KNOWN_ID_REFRESH_IS_STORE_SCOPED: ${v}`);
   for (const v of observacaoNaUiNaoSoLeitura(raiz)) erros.push(`I11 I11_MARKETPLACE_STATUS_UI_IS_READ_ONLY: ${v}`);
   for (const v of vendasSemEscopoDeLoja(raiz)) erros.push(`I12 I12_SALES_STORE_SCOPE_IS_EXPLICIT: ${v}`);
+  for (const v of custoDeVendaForaDeMeusProdutos(raiz)) erros.push(`I13 I13_SALES_COST_COMES_FROM_MEUS_PRODUTOS: ${v}`);
   if (opcoes.zonas !== false) for (const v of verificarZonas(raiz)) erros.push(`Z zona protegida sem re-baseline: ${v}`);
   return erros;
 }

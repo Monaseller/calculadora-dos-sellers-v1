@@ -4,6 +4,8 @@ import DateRangePicker from "./DateRangePicker";
 import { useDateField } from "@/lib/date-field-context";
 import { calcularUltimos7Dias, DATE_PRESETS } from "@/lib/date-range-utils";
 import { ASYNC_SYNC_JOBS_ENABLED } from "@/lib/feature-flags";
+import type { FinanceiroVendaLive } from "@/lib/vendas/custo-produto-tipos";
+import { avisoCustoLive, custoCadastradoLive, textoFreteLive, totaisLive } from "./financeiro-live";
 
 // ── Tipos ──────────────────────────────────────────────────────────────────
 interface VendaRow {
@@ -27,7 +29,9 @@ interface VendaRow {
   freteVendedor:  number;
   margemContrib:  number;
   mcPercent:      number;
-  cadastrado:     boolean;
+  cadastrado:     boolean;   // LEGADO (persistido) — a tela usa `financeiro`
+  // Vendas A3: custo/imposto/lucro AO VIVO de Meus Produtos (LIVE_CALCULATED). null = custo indisponível.
+  financeiro?:    FinanceiroVendaLive | null;
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -622,8 +626,8 @@ export default function VendasPage() {
     if (!temFiltro) return r.status === "paid" || r.status === "devolucao"; // padrão: pagas + devoluções (igual ao ML que conta ambas em "quantidade de vendas")
 
     const passCadastro = filtrosCadastro.some(f => {
-      if (f === "cadastrados")     return r.status === "paid" && r.cadastrado;
-      if (f === "nao_cadastrados") return r.status === "paid" && !r.cadastrado;
+      if (f === "cadastrados")     return r.status === "paid" && custoCadastradoLive(r.financeiro);
+      if (f === "nao_cadastrados") return r.status === "paid" && !custoCadastradoLive(r.financeiro);
       return false;
     });
     const passStatus = filtrosStatus.some(f => {
@@ -648,8 +652,8 @@ export default function VendasPage() {
   // Contagens para os dropdowns
   const paidRows = rowsLoja.filter(r => r.status === "paid");
   const countMap: Record<string, number> = {
-    cadastrados:     paidRows.filter(r =>  r.cadastrado).length,
-    nao_cadastrados: new Set(paidRows.filter(r => !r.cadastrado).map(r => r.mlItemId)).size,
+    cadastrados:     paidRows.filter(r =>  custoCadastradoLive(r.financeiro)).length,
+    nao_cadastrados: new Set(paidRows.filter(r => !custoCadastradoLive(r.financeiro)).map(r => r.mlItemId)).size,
   };
   const statusCountMap: Record<string, number> = {
     validas:    rowsLoja.filter(r => r.status === "paid").length,
@@ -671,17 +675,13 @@ export default function VendasPage() {
     .reduce(
       (acc, r) => ({
         faturamento:    acc.faturamento    + r.faturamento,
-        custo:          acc.custo          + r.custo,
-        imposto:        acc.imposto        + r.imposto,
         tarifaVenda:    acc.tarifaVenda    + r.tarifaVenda,
-        freteComprador: acc.freteComprador + r.freteComprador,
-        freteVendedor:  acc.freteVendedor  + r.freteVendedor,
-        margemContrib:  acc.margemContrib  + r.margemContrib,
         qtd:            acc.qtd            + r.qtd,
       }),
-      { faturamento: 0, custo: 0, imposto: 0, tarifaVenda: 0, freteComprador: 0, freteVendedor: 0, margemContrib: 0, qtd: 0 }
+      { faturamento: 0, tarifaVenda: 0, qtd: 0 }
     );
-  const mcTotalPct = totais.faturamento > 0 ? (totais.margemContrib / totais.faturamento) * 100 : 0;
+  // Vendas A3: custo/imposto/lucro só AO VIVO; linha pendente fica fora do lucro (nunca soma como 0).
+  const live = totaisLive(filteredRows.filter(r => r.status === "paid"));
   // Conta ordens únicas PAGAS (igual ao critério de totais.faturamento)
   // BUG 3 FIX: antes contava todos os status incluindo cancelados, divergindo da Shopee
   const pedidosUnicos = new Set(filteredRows.filter(r => r.status === "paid").map(r => r.orderId)).size;
@@ -1236,8 +1236,8 @@ export default function VendasPage() {
             { label: "Pedidos",       val: pedidosUnicos.toString(),         cor: "#fff" },
             { label: "Unidades",      val: totais.qtd.toString(),            cor: "#fff" },
             { label: "Faturamento",   val: moeda(totais.faturamento),        cor: "#fff" },
-            { label: "Margem Contrib.", val: moeda(totais.margemContrib),    cor: totais.margemContrib >= 0 ? "#00D97E" : "#ff4d4d" },
-            { label: "MC %",          val: pct(mcTotalPct),                  cor: mcTotalPct >= 0 ? "#00D97E" : "#ff4d4d" },
+            { label: "Margem Contrib.", val: `${moeda(live.lucro)}${live.pendentes ? ` · ${live.pendentes} pend.` : ""}`, cor: live.lucro >= 0 ? "#00D97E" : "#ff4d4d" },
+            { label: "MC %",          val: live.margemPct === null ? "pendente" : pct(live.margemPct), cor: (live.margemPct ?? 0) >= 0 ? "#00D97E" : "#ff4d4d" },
           ].map(({ label, val, cor }) => (
             <div key={label} style={{
               background: "#111318", border: "1px solid rgba(255,255,255,0.07)",
@@ -1400,9 +1400,11 @@ export default function VendasPage() {
                       {r.status === "pending" && (
                         <div style={{ fontSize: "10px", color: "#ffb800", marginTop: "2px", fontWeight: 700 }}>⏳ Aguardando pagamento</div>
                       )}
-                      {!r.cadastrado && r.status !== "devolucao" && (
-                        <div style={{ fontSize: "10px", color: "#ff6b00", marginTop: "2px" }}>⚠ não cadastrado</div>
-                      )}
+                      {(() => { const aviso = r.status !== "devolucao" ? avisoCustoLive(r.financeiro) : null; return aviso && (
+                        <div style={{ fontSize: "10px", color: "#ff6b00", marginTop: "2px" }}>
+                          ⚠ {aviso.href ? <a href={aviso.href} style={{ color: "#ff6b00" }}>{aviso.texto}</a> : aviso.texto}
+                        </div>
+                      ); })()}
                     </td>
                     {/* Conta + Marketplace */}
                     <td style={tdStyle()}>
@@ -1455,30 +1457,26 @@ export default function VendasPage() {
                     {/* Faturamento */}
                     <td style={{ ...tdStyle(true), fontWeight: 800 }}>{moeda(r.faturamento)}</td>
                     {/* Custo */}
-                    <td style={{ ...tdStyle(true), color: r.custo > 0 ? "#ff6b6b" : "#9099aa" }}>
-                      {r.custo > 0 ? `-${moeda(r.custo)}` : "—"}
+                    <td style={{ ...tdStyle(true), color: r.financeiro?.custoProduto != null ? "#ff6b6b" : "#9099aa" }}>
+                      {r.financeiro?.custoProduto != null ? `-${moeda(r.financeiro.custoProduto)}` : r.financeiro ? "pendente" : "—"}
                     </td>
                     {/* Imposto */}
-                    <td style={{ ...tdStyle(true), color: r.imposto > 0 ? "#ff6b6b" : "#9099aa" }}>
-                      {r.imposto > 0 ? `-${moeda(r.imposto)}` : "—"}
+                    <td style={{ ...tdStyle(true), color: (r.financeiro?.imposto ?? 0) > 0 ? "#ff6b6b" : "#9099aa" }}>
+                      {(r.financeiro?.imposto ?? 0) > 0 ? `-${moeda(r.financeiro!.imposto!)}` : "—"}
                     </td>
                     {/* Tarifa */}
-                    <td style={{ ...tdStyle(true), color: "#ff6b6b" }}>-{moeda(r.tarifaVenda)}</td>
+                    <td style={{ ...tdStyle(true), color: "#ff6b6b" }} title={r.financeiro?.tarifaOrigem === "estimada" ? "Tarifa estimada (sem dado financeiro da Shopee)" : undefined}>{r.financeiro?.tarifaOrigem === "estimada" ? "≈" : ""}-{moeda(r.tarifaVenda)}</td>
                     {/* Frete Comprador */}
-                    <td style={{ ...tdStyle(true), color: r.freteComprador > 0 ? "#ff6b6b" : "#9099aa" }}>
-                      {r.freteComprador > 0 ? `-${moeda(r.freteComprador)}` : "—"}
-                    </td>
+                    <td style={{ ...tdStyle(true), color: "#9099aa" }}>—</td>
                     {/* Frete Vendedor */}
-                    <td style={{ ...tdStyle(true), color: r.freteVendedor > 0 ? "#ff6b6b" : "#9099aa" }}>
-                      {r.freteVendedor > 0 ? `-${moeda(r.freteVendedor)}` : "—"}
-                    </td>
+                    <td style={{ ...tdStyle(true), color: "#9099aa" }}>{textoFreteLive(r.financeiro)}</td>
                     {/* Margem Contrib. */}
-                    <td style={{ ...tdStyle(true), fontWeight: 800, color: r.margemContrib >= 0 ? "#00D97E" : "#ff4d4d" }}>
-                      {moeda(r.margemContrib)}
+                    <td style={{ ...tdStyle(true), fontWeight: 800, color: r.financeiro?.lucro == null ? "#9099aa" : r.financeiro.lucro >= 0 ? "#00D97E" : "#ff4d4d" }}>
+                      {r.financeiro?.lucro == null ? "pendente" : moeda(r.financeiro.lucro)}
                     </td>
                     {/* MC % */}
-                    <td style={{ ...tdStyle(true), fontWeight: 800, color: r.mcPercent >= 0 ? "#00D97E" : "#ff4d4d" }}>
-                      {pct(r.mcPercent)}
+                    <td style={{ ...tdStyle(true), fontWeight: 800, color: r.financeiro?.margemPct == null ? "#9099aa" : r.financeiro.margemPct >= 0 ? "#00D97E" : "#ff4d4d" }}>
+                      {r.financeiro?.margemPct == null ? "—" : pct(r.financeiro.margemPct)}
                     </td>
                   </tr>
                 ))}
@@ -1492,20 +1490,16 @@ export default function VendasPage() {
                   <td style={tdStyle(true)}></td>
                   <td style={{ ...tdStyle(true), fontWeight: 800 }}>{totais.qtd}</td>
                   <td style={{ ...tdStyle(true), fontWeight: 900 }}>{moeda(totais.faturamento)}</td>
-                  <td style={{ ...tdStyle(true), fontWeight: 700, color: "#ff6b6b" }}>{totais.custo > 0 ? `-${moeda(totais.custo)}` : "—"}</td>
-                  <td style={{ ...tdStyle(true), fontWeight: 700, color: "#ff6b6b" }}>{totais.imposto > 0 ? `-${moeda(totais.imposto)}` : "—"}</td>
+                  <td style={{ ...tdStyle(true), fontWeight: 700, color: "#ff6b6b" }}>{live.custo > 0 ? `-${moeda(live.custo)}` : "—"}</td>
+                  <td style={{ ...tdStyle(true), fontWeight: 700, color: "#ff6b6b" }}>{live.imposto > 0 ? `-${moeda(live.imposto)}` : "—"}</td>
                   <td style={{ ...tdStyle(true), fontWeight: 700, color: "#ff6b6b" }}>-{moeda(totais.tarifaVenda)}</td>
-                  <td style={{ ...tdStyle(true), fontWeight: 700, color: totais.freteComprador > 0 ? "#ff6b6b" : "#9099aa" }}>
-                    {totais.freteComprador > 0 ? `-${moeda(totais.freteComprador)}` : "—"}
+                  <td style={{ ...tdStyle(true), fontWeight: 700, color: "#9099aa" }}>—</td>
+                  <td style={{ ...tdStyle(true), fontWeight: 700, color: "#9099aa" }}>{live.pendentes ? `${live.pendentes} pend.` : "—"}</td>
+                  <td style={{ ...tdStyle(true), fontWeight: 900, color: live.lucro >= 0 ? "#00D97E" : "#ff4d4d" }}>
+                    {moeda(live.lucro)}{live.pendentes ? ` · ${live.pendentes} pend.` : ""}
                   </td>
-                  <td style={{ ...tdStyle(true), fontWeight: 700, color: totais.freteVendedor > 0 ? "#ff6b6b" : "#9099aa" }}>
-                    {totais.freteVendedor > 0 ? `-${moeda(totais.freteVendedor)}` : "—"}
-                  </td>
-                  <td style={{ ...tdStyle(true), fontWeight: 900, color: totais.margemContrib >= 0 ? "#00D97E" : "#ff4d4d" }}>
-                    {moeda(totais.margemContrib)}
-                  </td>
-                  <td style={{ ...tdStyle(true), fontWeight: 900, color: mcTotalPct >= 0 ? "#00D97E" : "#ff4d4d" }}>
-                    {pct(mcTotalPct)}
+                  <td style={{ ...tdStyle(true), fontWeight: 900, color: (live.margemPct ?? 0) >= 0 ? "#00D97E" : "#ff4d4d" }}>
+                    {live.margemPct === null ? "pendente" : pct(live.margemPct)}
                   </td>
                 </tr>
               </tfoot>

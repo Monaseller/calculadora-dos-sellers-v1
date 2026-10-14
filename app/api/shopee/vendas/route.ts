@@ -11,6 +11,7 @@ import { autenticarRequisicao, lerCookie } from "@/lib/autenticacao";
 import { getShopeeLojaById } from "@/lib/shopee-auth";
 import { corpoSelecaoRecusada, NOME_COOKIE_LOJA_SHOPEE, selecionarLojaShopee } from "@/lib/shopee-loja-selecao";
 import { syncShopeeForUserV2 } from "@/lib/sync-shopee";
+import { carregarMapaCustoProduto, financeiroDaVenda, identidadeDaVenda, resolverCustoProduto } from "@/lib/vendas/custo-produto";
 
 // SEC-3-B1: dados sensiveis (SEC-3) so por service_role, server-side.
 // O cliente nasce sob demanda — nunca no import — a partir do helper
@@ -384,7 +385,14 @@ export async function GET(request: Request) {
     });
   }
 
-  let rows = (pedidos ?? []).map(pedidoToRow);
+  // Vendas A3: custo do produto AO VIVO de Meus Produtos (UMA leitura paginada da loja, sem `ativo`).
+  // `financeiro` é LIVE_CALCULATED; `custo`/`imposto`/`margemContrib`/`cadastrado` da linha seguem
+  // LEGADOS (persistidos na sync) para quem ainda os lê — a tela de Vendas usa `financeiro`.
+  const mapaCusto = await carregarMapaCustoProduto(supabase(), userId, "Shopee", lojaId);
+  let rows = (pedidos ?? []).map((p: any) => ({
+    ...pedidoToRow(p),
+    financeiro: mapaCusto.ok ? financeiroDaVenda(p, resolverCustoProduto(mapaCusto.mapa, identidadeDaVenda(p))) : null,
+  }));
 
   if (skuFilters.length > 0) {
     rows = rows.filter(r => {
@@ -412,6 +420,7 @@ export async function GET(request: Request) {
     lojaId: loja.lojaId,
     totalPedidos: totalOrders,
     rows,
+    custoLiveDisponivel: mapaCusto.ok,
     ...(resumoSyncInfo ?? {}),
   });
 }

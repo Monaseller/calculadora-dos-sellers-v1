@@ -37,7 +37,7 @@ export const SUITES_OFFLINE = [
   "agentes-analise-vendas", "ia-ui", "ia-ui-1c", "ia-ui-1cb", "ia-ui-1d", "validacao-oficial", "s2d1-migracao",
   "shopee-ingestao", "vendas-canonico-shopee", "shopee-intraday", "shopee-token-cas", "shopee-auth-transient", "shopee-refresh-lease", "dashboard-canonico",
   "vendas-canonico-service", "vendas-canonico-parcial", "vendas-sync-cron", "vendas-sync-auth-interna", "vendas-sync-feature-flag", "vendas-sync-elegibilidade",
-  "vendas-escopo-loja", "vendas-sync-worker-fairness", "vendas-sync-coordenador-tick", "vendas-sync-coordenador", "vendas-sync-worker", "vendas-sync-intraday", "sync-legacy-fence",
+  "vendas-escopo-loja", "vendas-custo-ao-vivo", "vendas-sync-worker-fairness", "vendas-sync-coordenador-tick", "vendas-sync-coordenador", "vendas-sync-worker", "vendas-sync-intraday", "sync-legacy-fence",
   "credenciais-marketplace", "lojas-anon-select", "sec3-b1-service-role", "sec3-b2-browser", "sec3-c-lockdown", "middleware",
 ].filter((s, i, a) => a.indexOf(s) === i);
 
