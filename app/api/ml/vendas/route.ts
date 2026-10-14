@@ -12,7 +12,7 @@ import { resolverContaML } from "@/lib/ml-conexao";
 import { LOJA_ML_INVALIDA, ML_STORE_SELECTION_REQUIRED, respostaSelecaoLojaML } from "@/lib/ml-loja-catalogo";
 import { carregarMapaCustoProduto, financeiroDaVenda, identidadeDaVenda, resolverCustoProduto } from "@/lib/vendas/custo-produto";
 import { lerFinanceiroRealML } from "@/lib/vendas/ml-financeiro-leitura";
-import { pedidosComFinanceiroPendente } from "@/lib/vendas/ml-financeiro";
+import { candidatosRecuperacaoFinanceiraML } from "@/lib/vendas/ml-financeiro";
 
 // SEC-3-B1: dados sensiveis (SEC-3) so por service_role, server-side.
 // O cliente nasce sob demanda — nunca no import — a partir do helper
@@ -406,8 +406,9 @@ export async function GET(request: Request) {
     totalPedidos: totalOrders,
     rows,
     custoLiveDisponivel: mapaCusto.ok,
-    // Vendas A3.2-C: pedidos desta página com financeiro INCOMPLETO que uma nova tentativa pode completar
-    // (só leitura do banco; a tela pede o retry em POST /api/ml/vendas/financeiro — nunca aqui).
-    financeiroPendente: pedidosComFinanceiroPendente([...rows].sort((a, b) => String(b.data).localeCompare(String(a.data))).map((r) => String(r.orderId)), financeiroML),
+    // Vendas A3.2-C.2: QUANTAS vendas pagas desta janela/loja precisam de recuperação financeira (sem linha
+    // financeira ou com linha pendente) — só leitura do banco, só a contagem. A tela pede a recuperação em
+    // POST /api/ml/vendas/financeiro com o CONTEXTO da janela; o servidor seleciona os pedidos (nunca aqui).
+    financeiroPendente: candidatosRecuperacaoFinanceiraML((pedidos ?? []).map((p: any) => ({ order_id: String(p.order_id), status: p.status, data: p.data, data_pagamento: p.data_pagamento, data_criacao: p.data_criacao })), financeiroML, { de: dateFrom, ate: dateTo, campo: dateField }).length,
   });
 }

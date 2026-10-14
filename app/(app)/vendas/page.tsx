@@ -86,7 +86,7 @@ export default function VendasPage() {
   const [codigoCopiado, setCodigoCopiado] = useState<string | null>(null);
   // Vendas A3.2-C: financeiro ML pendente → UMA nova tentativa server-side por carga da página (sem loop).
   const retryFinanceiroRef = useRef(false);
-  const [finPendente, setFinPendente] = useState<{ lojaId: string | null; ids: string[] } | null>(null);
+  const [finPendente, setFinPendente] = useState<{ lojaId: string | null; de: string; ate: string; campo: string } | null>(null);
   const [statusFinanceiro, setStatusFinanceiro] = useState<"atualizando" | "pendente" | null>(null);   // Vendas A3.2: feedback do copiar
   const [shopeeLojaId, setShopeeLojaId] = useState<string | null>(null);
   const [loading,   setLoading]   = useState(false);
@@ -431,10 +431,11 @@ export default function VendasPage() {
       }
       if (data?.lojaId) setMlLojaId(data.lojaId);
       if (!falhou) setMlRows((data.rows ?? []) as VendaRow[]);
-      // A3.2-C: pendentes elegíveis → dispara a ÚNICA rodada automática desta carga (a releitura não dispara outra)
-      if (!falhou && !retryFinanceiroRef.current && Array.isArray(data.financeiroPendente) && data.financeiroPendente.length > 0) {
+      // A3.2-C.2: há vendas da janela sem financeiro (ou pendente) → dispara a ÚNICA rodada automática desta carga,
+      // mandando só o CONTEXTO (loja + janela); o servidor escolhe os pedidos. A releitura não dispara outra.
+      if (!falhou && !retryFinanceiroRef.current && typeof data.financeiroPendente === "number" && data.financeiroPendente > 0) {
         retryFinanceiroRef.current = true;
-        setFinPendente({ lojaId: lojaDaChamada, ids: data.financeiroPendente.map(String) });
+        setFinPendente({ lojaId: lojaDaChamada, de: from, ate: to, campo: dateField });
       }
       // falha no ML: mlRows permanece como estava — nunca zera.
     } else {
@@ -639,10 +640,10 @@ export default function VendasPage() {
     setStatusFinanceiro("atualizando");
     fetch("/api/ml/vendas/financeiro", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...(finPendente.lojaId ? { loja_id: finPendente.lojaId } : {}), order_ids: finPendente.ids }),
+      body: JSON.stringify({ ...(finPendente.lojaId ? { loja_id: finPendente.lojaId } : {}), date_from: finPendente.de, date_to: finPendente.ate, date_field: finPendente.campo }),
     }).catch(() => null)
       .then(() => lerMarketplace("ML", dateFrom, dateTo, skuTags, [...filtrosCadastro, ...filtrosStatus]))
-      .then((res) => { if (vivo) setStatusFinanceiro(((res as any)?.data?.financeiroPendente ?? []).length > 0 ? "pendente" : null); })
+      .then((res) => { if (vivo) setStatusFinanceiro(Number((res as any)?.data?.financeiroPendente ?? 0) > 0 ? "pendente" : null); })
       .catch(() => { if (vivo) setStatusFinanceiro("pendente"); });
     return () => { vivo = false; };
   }, [finPendente]); // eslint-disable-line

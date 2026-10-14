@@ -218,7 +218,7 @@ async function principal() {
     const r = await getVendas(`date_from=${DIA}&date_to=${DIA}&loja_id=${ML_A}`);
     const row = (r.corpo.rows ?? []).find((x: any) => x.orderId === ORDER);
     assert(row && row.packId === PACK && row.financeiro?.qualidadeFinanceira === "ACTUAL" && c(row.financeiro?.liquidoMarketplace) === 3010, JSON.stringify(row?.financeiro ?? r.corpo).slice(0, 300));
-    assert((r.corpo.financeiroPendente ?? []).length === 0, `pendentes: ${r.corpo.financeiroPendente}`);
+    assert(r.corpo.financeiroPendente === 0, `pendentes: ${r.corpo.financeiroPendente}`);
   });
   t("SYNCFIN-6. sale_fee real → pedidos.tarifa_origem = PROVIDER", async () => {
     semear(); await sync();
@@ -302,57 +302,149 @@ async function principal() {
     assert(!logs.some((l) => l.includes(TOKEN_A) || /buyer|nickname|receiver/i.test(l)), "log com segredo/comprador");
   });
 
-  secao("\n[3. refresh de Vendas — retry só dos pendentes, mesma loja, uma rodada]");
+  secao("\n[3. refresh de Vendas — recuperação escolhida no SERVIDOR (janela + loja), uma rodada]");
+  const janela = (extra: Record<string, unknown> = {}) => ({ loja_id: ML_A, date_from: DIA, date_to: DIA, date_field: "pagamento", ...extra });
+  const linhaPedido = (order: string, extra: Record<string, unknown> = {}) => ({
+    id: `${U}_ML_${ML_A}_${order}_${ITEM}_nv`, user_id: U, marketplace: "ML", loja_id: ML_A, order_id: order, ml_item_id: ITEM, variation_id: null,
+    data: DIA, data_pagamento: DIA, data_criacao: DIA, synced_at: new Date().toISOString(), status: "paid", qtd: 1, faturamento: 41.24, tarifa_venda: 4.19, conta: "MONAMOR", ...extra,
+  });
   const comBillingPendente = async () => { semear(); roteiro["/billing/"] = [{ status: 429 }, { status: 429 }, { status: 429 }]; await sync(); };
-  t("RETRYFIN-5. pendente aparece na leitura (financeiroPendente) e a venda continua visível", async () => {
+  t("RETRYFIN-5. pendente conta na leitura (financeiroPendente = número) e a venda continua visível", async () => {
     await comBillingPendente();
     assert(finDe(ORDER)?.billing_status === "PENDENTE", "billing não ficou pendente");
     const r = await getVendas(`date_from=${DIA}&date_to=${DIA}&loja_id=${ML_A}`);
-    assert(JSON.stringify(r.corpo.financeiroPendente) === JSON.stringify([ORDER]) && (r.corpo.rows ?? []).some((x: any) => x.orderId === ORDER), JSON.stringify(r.corpo.financeiroPendente));
+    assert(r.corpo.financeiroPendente === 1 && (r.corpo.rows ?? []).some((x: any) => x.orderId === ORDER), JSON.stringify(r.corpo.financeiroPendente));
   });
-  t("RETRYFIN-6. a tela dispara o retry ao carregar (POST único, com a loja escolhida) e relê", async () => {
+  t("RETRYFIN-6. a tela dispara a recuperação ao carregar (POST único com loja + janela, sem lista) e relê", async () => {
     const pg = fonte("app/(app)/vendas/page.tsx");
-    assert((pg.match(/\/api\/ml\/vendas\/financeiro/g) ?? []).length === 1 && /loja_id: finPendente\.lojaId/.test(pg) && /\.then\(\(\) => lerMarketplace\("ML", /.test(pg), "tela sem retry/releitura");
+    assert((pg.match(/\/api\/ml\/vendas\/financeiro/g) ?? []).length === 1 && /loja_id: finPendente\.lojaId/.test(pg) && /date_from: finPendente\.de, date_to: finPendente\.ate, date_field: finPendente\.campo/.test(pg) && !/order_ids/.test(pg) && /\.then\(\(\) => lerMarketplace\("ML", /.test(pg), "tela sem recuperação/releitura");
   });
-  t("RETRYFIN-7/8. retry tenta SÓ o pendente: ACTUAL e pedido desconhecido não são consultados", async () => {
+  t("RETRYFIN-7/8. recuperação tenta SÓ o que precisa: ACTUAL da janela não é consultado", async () => {
     await comBillingPendente();
-    db.ml_financeiro_pedidos.push({ ...finDe(ORDER)!, order_id: "2000000000000777", billing_status: "CONFERIDO", billing_tarifa: 4.19 });
+    const ACT = "2000000000000777";
+    db.pedidos.push(linhaPedido(ACT));
+    db.ml_financeiro_pedidos.push({ ...finDe(ORDER)!, order_id: ACT, billing_status: "CONFERIDO", billing_tarifa: 4.19, shipment_id: SHIP, pack_id: null });
+    db.ml_financeiro_envios[0] = { ...db.ml_financeiro_envios[0], pedidos: [ACT] };
     chamadas = [];
-    const r = await postRetry({ loja_id: ML_A, order_ids: [ORDER, "2000000000000777", "2000000000000888"] });
-    assert(r.corpo.tentados === 1, JSON.stringify(r.corpo));
-    assert(!chamadas.some((x) => /2000000000000777|2000000000000888/.test(x.caminho)), "ACTUAL/desconhecido consultado");
-    chamadas = [];
-    const so = await postRetry({ loja_id: ML_A, order_ids: ["2000000000000777"] });
-    assert(so.corpo.tentados === 0 && chamadas.length === 0, "ACTUAL reconsultado");
+    const r = await postRetry(janela());
+    assert(r.corpo.candidatos === 1, JSON.stringify(r.corpo));
+    assert(!chamadas.some((x) => x.caminho.includes(ACT)), "ACTUAL consultado");
   });
-  t("RETRYFIN-9. retry respeita a loja: pendente da loja A pedido com loja_id=B → nada; com A → só TOKEN_A", async () => {
+  t("RETRYFIN-9. recuperação respeita a loja: janela pedida com loja_id=B → nada da loja A; com A → só TOKEN_A", async () => {
     await comBillingPendente(); chamadas = [];
-    const b = await postRetry({ loja_id: ML_B, order_ids: [ORDER] });
+    const b = await postRetry(janela({ loja_id: ML_B }));
     assert(b.corpo.tentados === 0 && chamadas.length === 0, JSON.stringify(b.corpo));
-    await postRetry({ loja_id: ML_A, order_ids: [ORDER] });
+    await postRetry(janela());
     assert(chamadas.length > 0 && chamadas.every((x) => x.token === TOKEN_A && x.metodo === "GET"), `tokens ${[...new Set(chamadas.map((x) => x.token))]}`);
   });
   t("RETRYFIN-10. sem loop: uma rodada por carga (trava nunca é rearmada; a releitura não dispara outra)", async () => {
     const pg = fonte("app/(app)/vendas/page.tsx");
-    assert(/if \(!falhou && !retryFinanceiroRef\.current && Array\.isArray\(data\.financeiroPendente\)/.test(pg) && /retryFinanceiroRef\.current = true;/.test(pg) && !/retryFinanceiroRef\.current = false/.test(pg), "trava ausente");
-    assert(/useEffect\(\(\) => \{\s*if \(!finPendente\) return;[\s\S]{0,900}?\}, \[finPendente\]\);/.test(pg), "retry fora de efeito único");
+    assert(/if \(!falhou && !retryFinanceiroRef\.current && typeof data\.financeiroPendente === "number" && data\.financeiroPendente > 0\)/.test(pg) && /retryFinanceiroRef\.current = true;/.test(pg) && !/retryFinanceiroRef\.current = false/.test(pg), "trava ausente");
+    assert(/useEffect\(\(\) => \{\s*if \(!finPendente\) return;[\s\S]{0,900}?\}, \[finPendente\]\);/.test(pg), "recuperação fora de efeito único");
   });
-  t("RETRYFIN-11. retry com sucesso → a releitura mostra ACTUAL 30,10 e nenhum pendente", async () => {
+  t("RETRYFIN-11. recuperação com sucesso → a releitura mostra ACTUAL 30,10 e nenhum pendente", async () => {
     await comBillingPendente();
-    const r = await postRetry({ loja_id: ML_A, order_ids: [ORDER] });
+    const r = await postRetry(janela());
     assert(r.corpo.ok && r.corpo.actual === 1, JSON.stringify(r.corpo));
     const g = await getVendas(`date_from=${DIA}&date_to=${DIA}&loja_id=${ML_A}`);
     const row = (g.corpo.rows ?? []).find((x: any) => x.orderId === ORDER);
-    assert(row?.financeiro?.qualidadeFinanceira === "ACTUAL" && c(row.financeiro.liquidoMarketplace) === 3010 && (g.corpo.financeiroPendente ?? []).length === 0, JSON.stringify(row?.financeiro));
+    assert(row?.financeiro?.qualidadeFinanceira === "ACTUAL" && c(row.financeiro.liquidoMarketplace) === 3010 && g.corpo.financeiroPendente === 0, JSON.stringify(row?.financeiro));
   });
-  t("RETRYFIN-12. retry falha de novo (429) → venda visível, ESTIMATED (nunca ACTUAL), ainda pendente para o próximo refresh", async () => {
+  t("RETRYFIN-12. falha de novo (429) → venda visível, ESTIMATED (nunca ACTUAL), ainda pendente para o próximo refresh", async () => {
     await comBillingPendente();
     roteiro["/billing/"] = [{ status: 429 }, { status: 429 }, { status: 429 }];
-    silenciar(); const r = await retry.POST(new Request("https://x.test/api/ml/vendas/financeiro", { method: "POST", headers: { ...cab, "content-type": "application/json" }, body: JSON.stringify({ loja_id: ML_A, order_ids: [ORDER] }) })).then((x) => x.json() as any).finally(restaurar);
-    assert(r.pendentes === 1 && r.actual === 0, JSON.stringify(r));
+    const r = await postRetry(janela());
+    assert(r.corpo.pendentes === 1 && r.corpo.actual === 0, JSON.stringify(r.corpo));
     const g = await getVendas(`date_from=${DIA}&date_to=${DIA}&loja_id=${ML_A}`);
     const row = (g.corpo.rows ?? []).find((x: any) => x.orderId === ORDER);
-    assert(row && row.financeiro?.qualidadeFinanceira === "ESTIMATED" && JSON.stringify(g.corpo.financeiroPendente) === JSON.stringify([ORDER]), JSON.stringify(row?.financeiro));
+    assert(row && row.financeiro?.qualidadeFinanceira === "ESTIMATED" && g.corpo.financeiroPendente === 1, JSON.stringify(row?.financeiro));
+  });
+
+  secao("\n[4. histórico SEM linha financeira — recuperação sob demanda (A3.2-C.2)]");
+  const historico = (pedidos: Array<[string, Record<string, unknown>?]>) => {
+    semear(); pedidosML = {};
+    for (const [o, extra] of pedidos) {
+      db.pedidos.push(linhaPedido(o, extra ?? {}));
+      pedidosML[o] = orderGolden({ id: Number(o), pack_id: o === ORDER ? Number(PACK) : null, shipping: { id: o === ORDER ? Number(SHIP) : Number(o.slice(-7)) } });
+    }
+  };
+  t("HISTFIN-1/2. venda PAGA sem linha financeira é elegível — inclusive a golden (GET conta, sem precisar de sync)", async () => {
+    historico([[ORDER]]);
+    assert(db.ml_financeiro_pedidos.length === 0, "fixture com linha financeira");
+    const g = await getVendas(`date_from=${DIA}&date_to=${DIA}&loja_id=${ML_A}`);
+    assert(g.corpo.financeiroPendente === 1, `contagem ${g.corpo.financeiroPendente}`);
+    assert(JSON.stringify(F.candidatosRecuperacaoFinanceiraML([{ order_id: ORDER, status: "paid", data: DIA, data_pagamento: DIA, data_criacao: DIA }], new Map(), { de: DIA, ate: DIA, campo: "pagamento" })) === JSON.stringify([ORDER]), "golden não elegível");
+  });
+  t("HISTFIN-3. ACTUAL não é elegível", async () => {
+    semear(); await sync();
+    const g = await getVendas(`date_from=${DIA}&date_to=${DIA}&loja_id=${ML_A}`);
+    assert(g.corpo.financeiroPendente === 0, `contagem ${g.corpo.financeiroPendente}`);
+  });
+  t("HISTFIN-4/5/6. outra loja, outro dono e Shopee NÃO são selecionados pelo servidor", async () => {
+    historico([[ORDER]]);
+    db.pedidos.push(linhaPedido("2000000000000101", { loja_id: ML_B }));
+    db.pedidos.push(linhaPedido("2000000000000102", { user_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" }));
+    db.pedidos.push(linhaPedido("2000000000000103", { marketplace: "Shopee" }));
+    db.pedidos.push(linhaPedido("2000000000000104", { status: "cancelled" }));
+    chamadas = [];
+    const r = await postRetry(janela());
+    assert(r.corpo.candidatos === 1, JSON.stringify(r.corpo));
+    assert(!chamadas.some((x) => /200000000000010[1-4]/.test(x.caminho)), "fora do escopo consultado");
+  });
+  t("HISTFIN-7. venda fora da janela não é selecionada", async () => {
+    historico([[ORDER], ["2000000000000201", { data: "2026-09-01", data_pagamento: "2026-09-01", data_criacao: "2026-09-01" }]]);
+    chamadas = [];
+    const r = await postRetry(janela());
+    assert(r.corpo.candidatos === 1 && !chamadas.some((x) => x.caminho.includes("2000000000000201")), JSON.stringify(r.corpo));
+  });
+  t("HISTFIN-8/9. servidor seleciona sozinho; 2.500 candidatos históricos não exigem corpo grande nem quebram", async () => {
+    historico(Array.from({ length: 2500 }, (_, i) => [String(2000020000000000 + i)] as [string]));
+    let r: any;
+    silenciar(); try { const x = await retry.POST(new Request("https://x.test/api/ml/vendas/financeiro", { method: "POST", headers: { ...cab, "content-type": "application/json" }, body: JSON.stringify(janela()) })); r = { status: x.status, corpo: await x.json() }; } finally { restaurar(); }
+    assert(r.status === 200 && r.corpo.candidatos === 2500, JSON.stringify(r.corpo));
+    assert(JSON.stringify(janela()).length < 200, "corpo grande");
+    const rr = fonte("app/api/ml/vendas/financeiro/route.ts");
+    assert(!/order_ids/.test(rr) && !/MAX_IDS|LIMITE_/.test(rr), "rota aceita lista do cliente ou tem teto");
+  });
+  t("HISTFIN-10. mais recentes primeiro (data efetiva da janela, depois order_id)", () => {
+    const vendas = [
+      { order_id: "1", status: "paid", data: "2026-10-01", data_pagamento: "2026-10-01", data_criacao: "2026-10-01" },
+      { order_id: "3", status: "paid", data: "2026-10-14", data_pagamento: "2026-10-14", data_criacao: "2026-10-14" },
+      { order_id: "2", status: "paid", data: "2026-10-07", data_pagamento: "2026-10-07", data_criacao: "2026-10-07" },
+    ];
+    assert(JSON.stringify(F.candidatosRecuperacaoFinanceiraML(vendas, new Map(), { de: "2026-10-01", ate: "2026-10-31", campo: "pagamento" })) === JSON.stringify(["3", "2", "1"]), "ordem");
+  });
+  t("HISTFIN-11. prazo esgotado: os restantes continuam elegíveis no próximo refresh (sem linha = elegível)", async () => {
+    historico([[ORDER], ["2000000000000301"]]);
+    const r = await K.coletarFinanceiroML({ userId: U, lojaId: ML_A, accessToken: TOKEN_A }, [ORDER, "2000000000000301"], depsFalsos(), { ate: 0 });
+    assert(r.adiados === 2 && db.ml_financeiro_pedidos.length === 0, JSON.stringify(r));
+    const g = await getVendas(`date_from=${DIA}&date_to=${DIA}&loja_id=${ML_A}`);
+    assert(g.corpo.financeiroPendente === 2, `contagem ${g.corpo.financeiroPendente}`);
+  });
+  t("HISTFIN-12. uma carga da página → no máximo UMA rodada automática", async () => {
+    const pg = fonte("app/(app)/vendas/page.tsx");
+    assert(/retryFinanceiroRef\.current = true;/.test(pg) && !/retryFinanceiroRef\.current = false/.test(pg) && (pg.match(/\/api\/ml\/vendas\/financeiro/g) ?? []).length === 1, "loop possível");
+  });
+  t("HISTFIN-13. GET de Vendas: ZERO chamadas ao provider (com histórico sem financeiro)", async () => {
+    historico([[ORDER]]); chamadas = [];
+    await getVendas(`date_from=${DIA}&date_to=${DIA}&loja_id=${ML_A}`);
+    assert(chamadas.length === 0, `chamadas no GET: ${chamadas.map((x) => x.caminho)}`);
+  });
+  t("HISTFIN-14. golden histórica recuperada pelo refresh: 41,24 − 4,19 − 6,95 = 30,10 ACTUAL; código = pack", async () => {
+    historico([[ORDER]]);
+    const r = await postRetry(janela());
+    assert(r.corpo.actual === 1, JSON.stringify(r.corpo));
+    const f = finDe(ORDER)!, e = envioDe(SHIP)[0];
+    assert(f.pack_id === PACK && f.shipment_id === SHIP && c(f.receita_produto) === 4124 && c(f.tarifa_venda) === 419 && f.tarifa_origem === "PROVIDER" && f.billing_status === "CONFERIDO", JSON.stringify(f));
+    assert(c(e.frete_comprador) === 699 && c(e.frete_vendedor) === 695, JSON.stringify(e));
+    const g = await getVendas(`date_from=${DIA}&date_to=${DIA}&loja_id=${ML_A}`);
+    const row = (g.corpo.rows ?? []).find((x: any) => x.orderId === ORDER);
+    assert(row?.packId === PACK && row?.financeiro?.qualidadeFinanceira === "ACTUAL" && c(row.financeiro.liquidoMarketplace) === 3010 && g.corpo.financeiroPendente === 0, JSON.stringify(row?.financeiro));
+  });
+  t("HISTFIN-15. sem linha financeira NÃO é INTEGRATION_ERROR (nenhum log/contagem de erro só por não ter linha)", async () => {
+    historico([[ORDER]]); logs.length = 0;
+    const r = await K.coletarFinanceiroML({ userId: U, lojaId: ML_A, accessToken: TOKEN_A }, [ORDER], depsFalsos());
+    assert(r.integracao === 0 && r.transitorios === 0 && !logs.some((l) => /INTEGRATION_ERROR|TRANSIENT_ERROR/.test(l)) && r.actual === 1, `${JSON.stringify(r)} ${logs.join(" | ")}`);
   });
 
   secao("\n[5. prazo de execução — sem teto por quantidade (A3.2-C.1)]");
@@ -375,13 +467,13 @@ async function principal() {
     const adiados = db.ml_financeiro_pedidos.filter((p) => p.billing_status === "PENDENTE");
     assert(adiados.length >= r.adiados && adiados.every((p) => c(p.tarifa_venda) === 419 && p.tarifa_origem === "PROVIDER"), "venda adiada sem dados do payload");
   });
-  t("BUDGET-3. venda adiada pelo prazo é ELEGÍVEL ao retry do refresh (aparece em financeiroPendente)", async () => {
+  t("BUDGET-3. venda adiada pelo prazo é ELEGÍVEL ao retry do refresh (conta em financeiroPendente)", async () => {
     semear(); logs.length = 0;
     await K.coletarFinanceiroML({ userId: U, lojaId: ML_A, accessToken: TOKEN_A }, { pedidos: [orderGolden()] }, depsFalsos(), { ate: 0 });
-    db.pedidos.push({ id: `${U}_ML_${ML_A}_${ORDER}_${ITEM}_nv`, user_id: U, marketplace: "ML", loja_id: ML_A, order_id: ORDER, ml_item_id: ITEM, variation_id: null, data: DIA, data_pagamento: DIA, data_criacao: DIA, synced_at: new Date().toISOString(), status: "paid", qtd: 1, faturamento: 41.24, tarifa_venda: 4.19, conta: "MONAMOR" });
+    db.pedidos.push(linhaPedido(ORDER));
     assert(F.financeiroPendenteElegivel(finDe(ORDER) as any, null) !== null, "adiado não elegível");
     const g = await getVendas(`date_from=${DIA}&date_to=${DIA}&loja_id=${ML_A}`);
-    assert(JSON.stringify(g.corpo.financeiroPendente) === JSON.stringify([ORDER]), JSON.stringify(g.corpo.financeiroPendente));
+    assert(g.corpo.financeiroPendente === 1, JSON.stringify(g.corpo.financeiroPendente));
   });
   t("BUDGET-4/5. adiado NÃO é TRANSIENT_ERROR nem INTEGRATION_ERROR (log próprio DEFERRED_BY_RUNTIME_BUDGET)", async () => {
     semear(); logs.length = 0;
@@ -390,12 +482,12 @@ async function principal() {
     assert(logs.some((l) => /DEFERRED_BY_RUNTIME_BUDGET loja=.* order=2000018971279352 /.test(l)) && !logs.some((l) => /TRANSIENT_ERROR|INTEGRATION_ERROR/.test(l)), logs.join(" | "));
     assert(logs.some((l) => /resumo .* transient=0 integracao=0 deferred_by_runtime_budget=1/.test(l)), "resumo não distingue");
   });
-  t("BUDGET-6. ACTUAL não é reconsultado (sync e retry)", async () => {
+  t("BUDGET-6. ACTUAL não é reconsultado (sync e recuperação)", async () => {
     semear(); await sync(); chamadas = [];
     await sync();
     assert(!chamadas.some((x) => /discounts|shipments|packs|billing/.test(x.caminho)), "ACTUAL reconsultado no sync");
-    const r = await postRetry({ loja_id: ML_A, order_ids: [ORDER] });
-    assert(r.corpo.tentados === 0, "ACTUAL reconsultado no retry");
+    const r = await postRetry(janela());
+    assert(r.corpo.tentados === 0, "ACTUAL reconsultado na recuperação");
   });
   t("BUDGET-7. nenhuma Promise.all sem limite no caminho financeiro (só o pool de concorrência 2)", async () => {
     const k = fonte("lib/vendas/ml-financeiro-coleta.ts").replace(/\/\*[\s\S]*?\*\//g, "");
@@ -408,13 +500,11 @@ async function principal() {
     const pg = fonte("app/(app)/vendas/page.tsx");
     assert(/retryFinanceiroRef\.current = true;/.test(pg) && !/retryFinanceiroRef\.current = false/.test(pg) && (pg.match(/\/api\/ml\/vendas\/financeiro/g) ?? []).length === 1, "loop possível");
   });
-  t("BUDGET-9. retry sem teto 40: 70 pendentes com API saudável → os 70 tentados na mesma requisição", async () => {
-    semearLote(70);
-    await K.coletarFinanceiroML({ userId: U, lojaId: ML_A, accessToken: TOKEN_A }, { pedidos: Object.values(pedidosML) }, depsFalsos(), { ate: 0 });
-    assert(db.ml_financeiro_pedidos.filter((p) => p.billing_status === "PENDENTE").length === 70, "pendentes não criados");
+  t("BUDGET-9. sem teto 40: 70 vendas históricas sem financeiro com API saudável → as 70 na mesma requisição", async () => {
+    historico(Array.from({ length: 70 }, (_, i) => [String(2000021000000000 + i)] as [string]));
     chamadas = [];
-    const r = await postRetry({ loja_id: ML_A, order_ids: Object.keys(pedidosML) });
-    assert(r.corpo.tentados === 70 && r.corpo.actual === 70 && r.corpo.adiados === 0, JSON.stringify(r.corpo));
+    const r = await postRetry(janela());
+    assert(r.corpo.candidatos === 70 && r.corpo.tentados === 70 && r.corpo.actual === 70 && r.corpo.adiados === 0, JSON.stringify(r.corpo));
   });
 
   secao("\n[4. guard]");

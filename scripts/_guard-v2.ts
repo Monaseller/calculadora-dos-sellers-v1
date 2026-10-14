@@ -1161,15 +1161,21 @@ export function financeiroMLNaoReal(raiz = RAIZ_V2): string[] {
   if (!/const inicioSync = Date\.now\(\);/.test(sy) || !/\{ ate: inicioSync \+ JANELA_PROVIDER_MS \},/.test(sy)) erros.push("sync-ml: prazo do financeiro fora do início do sync");
   // TARGETED_RETRY_ON_REFRESH: GET só marca pendentes (banco); retry por rota própria, mesma loja, só pendentes
   const rg = tiraComentarios(ler(raiz, "app/api/ml/vendas/route.ts"));
-  if (!/financeiroPendente: pedidosComFinanceiroPendente\(/.test(rg) || /coletarFinanceiroML|ml-financeiro-coleta/.test(rg)) erros.push("GET de Vendas: sem lista de pendentes ou com trabalho de provider na leitura");
+  if (!/financeiroPendente: candidatosRecuperacaoFinanceiraML\(\(pedidos \?\? \[\]\)\.map\(/.test(rg) || !/\{ de: dateFrom, ate: dateTo, campo: dateField \}\)\.length,/.test(rg) || /coletarFinanceiroML|ml-financeiro-coleta/.test(rg)) erros.push("GET de Vendas: sem contagem de recuperação da janela ou com trabalho de provider na leitura");
   const rr = existsSync(join(raiz, ROTA_RETRY_FIN_ML)) ? tiraComentarios(ler(raiz, ROTA_RETRY_FIN_ML)) : "";
   if (!/\? await resolverContaML\(userId, lojaPedida\)\s*: await resolverContaML\(userId, null, \{ permitirUnica: true \}\);/.test(rr) || /lerCookie|loja_ativa_id/.test(rr)) erros.push(`${ROTA_RETRY_FIN_ML}: loja fora do contrato explícito (ou cookie)`);
-  if (!/const existentes = await lerFinanceiroRealML\(supabase\(\), userId, contaML\.lojaId,/.test(rr) || !/const alvo = pedidosComFinanceiroPendente\(pedidos, existentes\);/.test(rr) || !/\}, \{ ate: inicio \+ JANELA_PROVIDER_MS \}\)/.test(rr) || /LIMITE_RETRY/.test(rr) || !/coletarFinanceiroML\(\{ userId, lojaId, accessToken: contaML\.accessToken \}, alvo,/.test(rr)) erros.push(`${ROTA_RETRY_FIN_ML}: retry sem revalidar pendentes no banco (dono + loja) ou sem prazo de execução`);
+  // A3.2-C.2 HISTÓRICO: o SERVIDOR escolhe os candidatos (dono + loja + ML + pagas + janela; sem linha financeira OU
+  // pendente) — o cliente nunca manda a lista de pedidos; mais recentes primeiro; só o prazo limita o trabalho
+  if (/order_ids/.test(rr) || !/\.from\("pedidos"\)\s*\.select\("order_id, status, data, data_pagamento, data_criacao"\)\s*\.eq\("user_id", userId\)\.eq\("marketplace", "ML"\)\.eq\("loja_id", lojaId\)\.eq\("status", "paid"\)/.test(rr)
+    || !/const existentes = await lerFinanceiroRealML\(supabase\(\), userId, lojaId,/.test(rr) || !/const alvo = candidatosRecuperacaoFinanceiraML\(vendas, existentes, \{ de, ate, campo \}\);/.test(rr)
+    || !/\}, \{ ate: inicio \+ JANELA_PROVIDER_MS \}\)/.test(rr) || /LIMITE_|MAX_IDS|\.slice\(0,/.test(rr) || !/coletarFinanceiroML\(\{ userId, lojaId, accessToken: contaML\.accessToken \}, alvo,/.test(rr)) erros.push(`${ROTA_RETRY_FIN_ML}: recuperação sem seleção no servidor (dono + loja + janela), com lista do cliente, teto ou sem prazo`);
+  const cand = corpoDaFuncao(m, "candidatosRecuperacaoFinanceiraML") ?? "";
+  if (!/if \(v\.status !== "paid"\) continue;/.test(cand) || !/return !f \|\| financeiroPendenteElegivel\(f\.pedido, f\.envio\) !== null;/.test(cand) || !/\.sort\(\(a, b\) => \(a\[1\] < b\[1\] \? 1 :/.test(cand)) erros.push("recuperação: venda sem linha financeira não elegível, não-paga elegível ou ordem não é mais-recentes-primeiro");
   const elg = corpoDaFuncao(m, "financeiroPendenteElegivel") ?? "";
   if (/"CONFERIDO"|SEM_PERMISSAO|DIVERGENTE/.test(elg) || !/if \(p\.billing_status === "PENDENTE"\) return "billing";/.test(elg)) erros.push("elegibilidade do retry inclui pedido completo ou erro de integração (loop de consulta)");
   // uma rodada automática por carga da página (sem loop)
   const pgr = tiraComentarios(ler(raiz, PAGINA_VENDAS));
-  if (!/if \(!falhou && !retryFinanceiroRef\.current && Array\.isArray\(data\.financeiroPendente\) && data\.financeiroPendente\.length > 0\) \{\s*retryFinanceiroRef\.current = true;/.test(pgr) || /retryFinanceiroRef\.current = false/.test(pgr) || (pgr.match(/\/api\/ml\/vendas\/financeiro/g) ?? []).length !== 1) erros.push("tela: retry do financeiro sem trava de uma rodada por carga (loop) ou chamado fora do ponto único");
+  if (!/if \(!falhou && !retryFinanceiroRef\.current && typeof data\.financeiroPendente === "number" && data\.financeiroPendente > 0\) \{\s*retryFinanceiroRef\.current = true;/.test(pgr) || /retryFinanceiroRef\.current = false/.test(pgr) || /order_ids/.test(pgr) || (pgr.match(/\/api\/ml\/vendas\/financeiro/g) ?? []).length !== 1) erros.push("tela: recuperação sem trava de uma rodada por carga (loop), com lista de pedidos ou fora do ponto único");
   // leitor: dono + loja
   const l = tiraComentarios(ler(raiz, LEITOR_FIN_ML));
   if ((l.match(/\.eq\("user_id", userId\)\.eq\("loja_id", lojaId\)\.in\(/g) ?? []).length !== 2 || /fetch\(|mercadoli/.test(l)) erros.push("leitor: financeiro sem dono + loja, ou chama provider");

@@ -150,19 +150,37 @@ export function financeiroPendenteElegivel(p: PedidoFinanceiroML, envio: EnvioFi
 }
 
 /**
- * A3.2-C.1 — validação de ENTRADA do retry (tamanho do corpo/consulta), não teto de negócio: o retry tenta
- * todos os pendentes recebidos até o PRAZO de execução do coletor.
+ * A3.2-C.2 — data que coloca a venda na janela da tela (a MESMA regra do GET /api/ml/vendas, `date_field`):
+ * pagamento → data_pagamento; sem ela e sem data_criacao → `data` legada; criacao → data_criacao ?? `data`.
+ * null = fora de qualquer janela por esse critério.
  */
-export const MAX_IDS_RETRY_FINANCEIRO_ML = 2000;
+export function dataDaJanelaML(r: { data?: string | null; data_pagamento?: string | null; data_criacao?: string | null }, campo: "pagamento" | "criacao"): string | null {
+  if (campo === "pagamento") return r.data_pagamento ?? (r.data_criacao == null ? r.data ?? null : null);
+  return r.data_criacao ?? r.data ?? null;
+}
 
-/** Order_ids com financeiro pendente ELEGÍVEL, na ordem recebida (a tela manda os mais recentes primeiro). */
-export function pedidosComFinanceiroPendente(ordem: readonly string[], fin: ReadonlyMap<string, { pedido: PedidoFinanceiroML; envio: EnvioFinanceiroML | null }>): string[] {
-  const out: string[] = [];
-  for (const id of new Set(ordem)) {
-    const f = fin.get(id);
-    if (f && financeiroPendenteElegivel(f.pedido, f.envio) !== null) out.push(id);
+/**
+ * A3.2-C.2 — candidatos à RECUPERAÇÃO financeira de uma janela da tela: vendas ML PAGAS (já filtradas por dono +
+ * loja) SEM linha financeira, ou com linha financeira pendente elegível. Mais recentes primeiro. Sem linha =
+ * nunca reconciliada (não é erro de integração). Completo (ACTUAL), SEM_PERMISSAO e DIVERGENTE ficam fora.
+ */
+export function candidatosRecuperacaoFinanceiraML(
+  vendas: ReadonlyArray<{ order_id: string; status?: string | null; data?: string | null; data_pagamento?: string | null; data_criacao?: string | null }>,
+  fin: ReadonlyMap<string, { pedido: PedidoFinanceiroML; envio: EnvioFinanceiroML | null }>,
+  janela: { de: string; ate: string; campo: "pagamento" | "criacao" },
+): string[] {
+  const porPedido = new Map<string, string>();
+  for (const v of vendas) {
+    if (v.status !== "paid") continue;
+    const d = dataDaJanelaML(v, janela.campo);
+    if (!d || d < janela.de || d > janela.ate) continue;
+    const id = String(v.order_id);
+    if ((porPedido.get(id) ?? "") < d) porPedido.set(id, d);
   }
-  return out;
+  return [...porPedido.entries()]
+    .filter(([id]) => { const f = fin.get(id); return !f || financeiroPendenteElegivel(f.pedido, f.envio) !== null; })
+    .sort((a, b) => (a[1] < b[1] ? 1 : a[1] > b[1] ? -1 : a[0] < b[0] ? 1 : -1))
+    .map(([id]) => id);
 }
 
 export type QualidadeLiquidoML = "ACTUAL" | "ESTIMATED" | "PENDING";
