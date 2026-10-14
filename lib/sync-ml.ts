@@ -22,6 +22,8 @@ import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { CATEGORIAS_ML } from "@/lib/comissoes-mercado-livre";
 import { LojaIdIntegrityError } from "@/lib/sync-errors";
 import { lerTodasAsPaginas } from "@/lib/anuncios/leitura-paginada";
+import { coletarFinanceiroML, type DepsColetaML, type ResultadoColetaML } from "@/lib/vendas/ml-financeiro-coleta";
+import { lerFinanceiroRealML } from "@/lib/vendas/ml-financeiro-leitura";
 
 /** Chave do mapa de custo ML: LOJA | item | variacao ("" = item sem variacao). Nunca so dono + item. */
 export function chaveAnuncioML(lojaId: string, mlItemId: string, variationId: string | number | null | undefined): string {
@@ -193,6 +195,25 @@ export interface SyncMLResult {
   inserted: number;
   /** Vendas A4-B: itens com linha legada sem variação + 2+ variações na resposta — preservados, não corrigidos. */
   legadoVariacaoAmbigua?: number;
+  /** Vendas A3.2-C: resumo do financeiro REAL coletado no próprio sync (null = enriquecimento falhou, logado). */
+  financeiro?: ResultadoColetaML | null;
+}
+
+/** Vendas A3.2-C: dependências do motor financeiro — mesmo cliente servidor do sync, mesma loja. */
+function depsFinanceiroML(userId: string, lojaId: string): DepsColetaML {
+  return {
+    fetch: (...a) => fetch(...a),
+    esperar: (ms) => new Promise((ok) => setTimeout(ok, ms)),
+    gravarEnvios: async (linhas) => {
+      const { error } = await supabase().from("ml_financeiro_envios").upsert(linhas, { onConflict: "loja_id,shipment_id" });
+      if (error) throw new Error(`gravação de ml_financeiro_envios falhou: ${error.message}`);
+    },
+    gravarPedidos: async (linhas) => {
+      const { error } = await supabase().from("ml_financeiro_pedidos").upsert(linhas, { onConflict: "loja_id,order_id" });
+      if (error) throw new Error(`gravação de ml_financeiro_pedidos falhou: ${error.message}`);
+    },
+    lerExistentes: (ids) => lerFinanceiroRealML(supabase(), userId, lojaId, ids),
+  };
 }
 
 // ── Vendas A4-B: identidade EXATA da linha de venda ML ──────────────────────
@@ -530,5 +551,21 @@ export async function syncMLForUserV2(
   // executada — reativar então (reintroduzir o bloco de coleta por conta +
   // a chamada a atualizarResumosDosDias, removidos nesta edição).
 
-  return { found, inserted: resolvidas.length, legadoVariacaoAmbigua: ambiguas.length };
+  // Vendas A3.2-C: o financeiro REAL das vendas gravadas entra NO PRÓPRIO sync — todo caminho (auto-sync de
+  // Vendas, sync manual, cron, executor interno) passa por aqui. Mesma loja/credencial do pedido; só vendas
+  // PAGAS; o payload já trazido é reaproveitado (sem GET de pedido); pedido já completo não é consultado.
+  // Erro financeiro NÃO falha o sync (os pedidos já foram gravados): é logado e fica pendente para retry.
+  const gravados = new Set(resolvidas.map((r) => String(r.order_id)));
+  let financeiro: ResultadoColetaML | null = null;
+  try {
+    financeiro = await coletarFinanceiroML(
+      { userId, lojaId, accessToken: token },
+      { pedidos: allOrders.filter((o) => o._status === "paid" && gravados.has(String(o.id))) },
+      depsFinanceiroML(userId, lojaId),
+    );
+  } catch (e: any) {
+    console.error(`[ml-financeiro] ERRO enriquecimento loja=${lojaId}: ${e?.message ?? e}`);
+  }
+
+  return { found, inserted: resolvidas.length, legadoVariacaoAmbigua: ambiguas.length, financeiro };
 }

@@ -83,7 +83,11 @@ export default function VendasPage() {
   const prontoMLRef = useRef(false);
   const listaMLFalhouRef = useRef(false);   // lista de lojas indisponível → sync com ML bloqueado (A5-B.1)
   const [avisoSyncML, setAvisoSyncML] = useState<string | null>(null);
-  const [codigoCopiado, setCodigoCopiado] = useState<string | null>(null);   // Vendas A3.2: feedback do copiar
+  const [codigoCopiado, setCodigoCopiado] = useState<string | null>(null);
+  // Vendas A3.2-C: financeiro ML pendente → UMA nova tentativa server-side por carga da página (sem loop).
+  const retryFinanceiroRef = useRef(false);
+  const [finPendente, setFinPendente] = useState<{ lojaId: string | null; ids: string[] } | null>(null);
+  const [statusFinanceiro, setStatusFinanceiro] = useState<"atualizando" | "pendente" | null>(null);   // Vendas A3.2: feedback do copiar
   const [shopeeLojaId, setShopeeLojaId] = useState<string | null>(null);
   const [loading,   setLoading]   = useState(false);
   const [erro,      setErro]      = useState<string | null>(null);
@@ -427,6 +431,11 @@ export default function VendasPage() {
       }
       if (data?.lojaId) setMlLojaId(data.lojaId);
       if (!falhou) setMlRows((data.rows ?? []) as VendaRow[]);
+      // A3.2-C: pendentes elegíveis → dispara a ÚNICA rodada automática desta carga (a releitura não dispara outra)
+      if (!falhou && !retryFinanceiroRef.current && Array.isArray(data.financeiroPendente) && data.financeiroPendente.length > 0) {
+        retryFinanceiroRef.current = true;
+        setFinPendente({ lojaId: lojaDaChamada, ids: data.financeiroPendente.map(String) });
+      }
       // falha no ML: mlRows permanece como estava — nunca zera.
     } else {
       if (data?.lojaId) setShopeeLojaId(data.lojaId);
@@ -621,6 +630,22 @@ export default function VendasPage() {
       pararPolling("Shopee");
     };
   }, []);
+
+  // Vendas A3.2-C: nova tentativa do financeiro pendente (server-side, só os pendentes desta loja/página) e
+  // UMA releitura. Ainda pendente → aviso discreto; novo refresh do navegador tenta de novo.
+  useEffect(() => {
+    if (!finPendente) return;
+    let vivo = true;
+    setStatusFinanceiro("atualizando");
+    fetch("/api/ml/vendas/financeiro", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...(finPendente.lojaId ? { loja_id: finPendente.lojaId } : {}), order_ids: finPendente.ids }),
+    }).catch(() => null)
+      .then(() => lerMarketplace("ML", dateFrom, dateTo, skuTags, [...filtrosCadastro, ...filtrosStatus]))
+      .then((res) => { if (vivo) setStatusFinanceiro(((res as any)?.data?.financeiroPendente ?? []).length > 0 ? "pendente" : null); })
+      .catch(() => { if (vivo) setStatusFinanceiro("pendente"); });
+    return () => { vivo = false; };
+  }, [finPendente]); // eslint-disable-line
 
   // Vendas A5: lojas ML do dono (GET /api/lojas — só ativas). 1 → ela; 2+ → a salva neste navegador se
   // ainda está na lista, senão o dono escolhe. Falha da lista → a rota decide (loja única ou 409 seleção).
@@ -1405,6 +1430,12 @@ export default function VendasPage() {
           <div style={{ fontSize: "40px", marginBottom: "12px" }}>🔗</div>
           <div style={{ fontWeight: 800, fontSize: "18px", marginBottom: "6px" }}>Nenhuma conta conectada</div>
           <div style={{ color: "#9099aa", fontSize: "14px" }}>Vá em Configurações e conecte sua conta do Mercado Livre ou Shopee.</div>
+        </div>
+      )}
+
+      {statusFinanceiro && (
+        <div style={{ margin: "0 0 12px", fontSize: "12px", fontWeight: 700, color: statusFinanceiro === "atualizando" ? "#9099aa" : "#ffb380" }}>
+          {statusFinanceiro === "atualizando" ? "Atualizando financeiro..." : "Financeiro ainda não atualizado"}
         </div>
       )}
 

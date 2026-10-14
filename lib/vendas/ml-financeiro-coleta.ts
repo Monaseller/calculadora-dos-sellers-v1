@@ -1,43 +1,81 @@
 /**
- * Coletor do financeiro REAL do Mercado Livre (CDS V2 Vendas A3.2-B). Roda em JOB/sync — NUNCA no GET de
- * Vendas (a tela só lê o banco). Só GET no provider; credencial da LOJA recebida pronta (nada de refresh aqui).
+ * Motor do financeiro REAL do Mercado Livre (CDS V2 Vendas A3.2-B/C). Só GET no provider; credencial da
+ * LOJA recebida pronta (nada de refresh aqui). Duas entradas:
+ *   SYNC   (syncMLForUserV2, após gravar `pedidos`): recebe os PAYLOADS dos pedidos que o próprio sync já
+ *          trouxe (order_items[].sale_fee, pack_id, shipping.id) — nenhum GET de pedido a mais;
+ *   RETRY  (POST /api/ml/vendas/financeiro, ao recarregar Vendas): recebe order_ids PENDENTES e busca
+ *          GET /orders/{order_id} — sempre ORDER id (o pack é outra entidade: GET /packs/{pack_id}).
+ * Por pedido: /orders/{id}/discounts; por pack (1×): /packs/{id}; por envio (1×, mesmo com 2+ pedidos):
+ * /shipments/{id}/costs; billing em lote. Pedido já COMPLETO no banco não é consultado de novo.
  *
- * Por pedido: GET /orders/{id} e /orders/{id}/discounts; por pack (1×): GET /packs/{id} (pedidos do envio);
- * por envio (1×, mesmo com 2+ pedidos): GET /shipments/{id}/costs; billing em lote (order_ids). 429/5xx →
- * retry com backoff; billing que segue sem resposta vira PENDENTE (o pedido é gravado, sem ACTUAL).
- * Gravação idempotente: upsert por (loja_id, order_id) e (loja_id, shipment_id) — reprocessar é seguro.
+ * Erros: TRANSIENT_ERROR (429, 502/503/504, timeout, rede) → retry com backoff e, se persistir, o pedido
+ * fica PENDENTE (nova tentativa no próximo sync ou ao recarregar Vendas); INTEGRATION_ERROR (404 inesperado,
+ * 4xx, 500, estrutura inválida) → sem retry cego, LOGADO com contexto sanitizado (loja, pedido, pack, envio,
+ * etapa, HTTP) — nunca token nem dado do comprador. Um pedido com erro não impede os outros.
+ * Orçamento por execução (tempo + quantidade): o que não couber é gravado a partir do payload (tarifa,
+ * pack, envio) como PENDENTE, sem chamadas, para a próxima tentativa.
  */
 import "server-only";
-import { conferirBillingML, extrairEnvioFinanceiroML, extrairPedidoFinanceiroML, FONTE_VERSAO_ML_FINANCEIRO, type EnvioFinanceiroML, type PedidoFinanceiroML } from "./ml-financeiro";
+import {
+  classificarHttpML, conferirBillingML, extrairEnvioFinanceiroML, extrairPedidoFinanceiroML, financeiroPendenteElegivel,
+  FONTE_VERSAO_ML_FINANCEIRO, LIMITE_RETRY_FINANCEIRO_ML, liquidoPedidoML, type ClasseErroML, type EnvioFinanceiroML, type PedidoFinanceiroML,
+} from "./ml-financeiro";
 
 const API_ML = "https://api.mercadolibre.com";
 export const LOTE_BILLING_ML = 20;
+/** Mesma concorrência do coletor original (2): o ML já respondeu 429 no billing com chamadas avulsas. */
 export const CONCORRENCIA_ML = 2;
 export const TENTATIVAS_ML = 3;
+/** Backoff entre tentativas transitórias: 1 s, 2 s. */
+export const BACKOFF_BASE_MS = 1000;
+/** Timeout por requisição — estourou → TRANSIENT_ERROR (retry). */
+export const TIMEOUT_REQUISICAO_MS = 10_000;
+/**
+ * Orçamento por execução. Funções da Vercel têm 60 s e o sync ainda precisa buscar/gravar pedidos antes:
+ * 20 s de enriquecimento deixam folga. 100 pedidos é teto de segurança (p95 medido: ~395 pedidos/dia/loja,
+ * ~8/30 min — o auto-sync de "hoje" cabe folgado; um primeiro sync de dia cheio converge em poucas rodadas).
+ */
+export const ORCAMENTO_SYNC = { pedidos: 100, prazoMs: 20_000 } as const;
+/** Retry ao recarregar Vendas: no máximo 40 pedidos pendentes por carga de página, no mesmo prazo. */
+export const ORCAMENTO_RETRY = { pedidos: LIMITE_RETRY_FINANCEIRO_ML, prazoMs: 20_000 } as const;
 
+type LinhaBase = { user_id: string; loja_id: string; fonte_versao: number; buscado_em: string };
 export interface DepsColetaML {
   fetch: typeof fetch;
   esperar: (ms: number) => Promise<void>;
-  gravarEnvios: (linhas: Array<EnvioFinanceiroML & { user_id: string; loja_id: string; fonte_versao: number; buscado_em: string }>) => Promise<void>;
-  gravarPedidos: (linhas: Array<PedidoFinanceiroML & { user_id: string; loja_id: string; fonte_versao: number; buscado_em: string }>) => Promise<void>;
+  gravarEnvios: (linhas: Array<EnvioFinanceiroML & LinhaBase>) => Promise<void>;
+  gravarPedidos: (linhas: Array<PedidoFinanceiroML & LinhaBase>) => Promise<void>;
+  /** Registros já gravados (pedido + envio) — pedido COMPLETO não é consultado de novo. */
+  lerExistentes?: (orderIds: string[]) => Promise<Map<string, { pedido: PedidoFinanceiroML; envio: EnvioFinanceiroML | null }>>;
   agora?: () => Date;
+  log?: (linha: string) => void;
 }
-export interface ResultadoColetaML { pedidos: number; envios: number; billingPendente: number; falhas: Array<{ order_id: string; motivo: string }> }
+export interface FalhaFinanceiraML { order_id: string; pack_id: string | null; shipment_id: string | null; etapa: string; classe: ClasseErroML; http: number }
+export interface ResultadoColetaML {
+  pedidos: number; envios: number; billingPendente: number;
+  actual: number; pendentes: number; integracao: number; adiados: number; jaCompletos: number;
+  falhas: FalhaFinanceiraML[];
+}
+export type EntradaColetaML = readonly string[] | { pedidos: readonly any[] };
 
-/** GET com retry/backoff em 429 e 5xx. Nunca outro método. */
-async function getML(deps: DepsColetaML, token: string, caminho: string, extra: Record<string, string> = {}): Promise<{ status: number; corpo: any | null }> {
+/** GET com timeout; retry com backoff SÓ em erro transitório. Nunca outro método. */
+async function getML(deps: DepsColetaML, token: string, caminho: string, extra: Record<string, string> = {}): Promise<{ status: number; corpo: any | null; classe: ClasseErroML | "OK" }> {
   let status = 0;
   for (let t = 0; t < TENTATIVAS_ML; t++) {
-    if (t > 0) await deps.esperar(1000 * 2 ** (t - 1));
+    if (t > 0) await deps.esperar(BACKOFF_BASE_MS * 2 ** (t - 1));
+    const ctrl = new AbortController();
+    const tid = setTimeout(() => ctrl.abort(), TIMEOUT_REQUISICAO_MS);
     try {
-      const res = await deps.fetch(API_ML + caminho, { method: "GET", headers: { Authorization: `Bearer ${token}`, ...extra } });
+      const res = await deps.fetch(API_ML + caminho, { method: "GET", headers: { Authorization: `Bearer ${token}`, ...extra }, signal: ctrl.signal });
       status = res.status;
-      if (status === 429 || status >= 500) continue;
+      const classe = classificarHttpML(status);
+      if (classe === "TRANSIENT_ERROR") continue;
       let corpo: any = null; try { corpo = await res.json(); } catch {}
-      return { status, corpo };
-    } catch { status = 0; }
+      return { status, corpo, classe };
+    } catch { status = 0; } // timeout/rede → transitório
+    finally { clearTimeout(tid); }
   }
-  return { status, corpo: null };
+  return { status, corpo: null, classe: "TRANSIENT_ERROR" };
 }
 
 async function emParalelo<T>(itens: readonly T[], limite: number, fn: (x: T) => Promise<void>): Promise<void> {
@@ -47,46 +85,98 @@ async function emParalelo<T>(itens: readonly T[], limite: number, fn: (x: T) => 
 
 export async function coletarFinanceiroML(
   conta: { userId: string; lojaId: string; accessToken: string },
-  orderIds: readonly string[],
+  entrada: EntradaColetaML,
   deps: DepsColetaML,
+  orcamento: { pedidos: number; prazoMs: number } = ORCAMENTO_SYNC,
 ): Promise<ResultadoColetaML> {
-  const r: ResultadoColetaML = { pedidos: 0, envios: 0, billingPendente: 0, falhas: [] };
-  const extraidos = new Map<string, Omit<PedidoFinanceiroML, "billing_status" | "billing_tarifa">>();
-  const pedidosDoPack = new Map<string, string[] | null>();
-  const envios = new Map<string, EnvioFinanceiroML>();
+  const r: ResultadoColetaML = { pedidos: 0, envios: 0, billingPendente: 0, actual: 0, pendentes: 0, integracao: 0, adiados: 0, jaCompletos: 0, falhas: [] };
+  const log = deps.log ?? ((l: string) => console.error(l));
+  const inicio = Date.now();
+  const modoSync = !Array.isArray(entrada);
+  const payloads = new Map<string, any>();
+  if (modoSync) for (const o of (entrada as { pedidos: readonly any[] }).pedidos) if (o?.id != null) payloads.set(String(o.id), o);
+  const ids = modoSync ? [...payloads.keys()] : [...new Set((entrada as readonly string[]).map(String))];
 
-  await emParalelo([...new Set(orderIds.map(String))], CONCORRENCIA_ML, async (id) => {
-    const o = await getML(deps, conta.accessToken, `/orders/${encodeURIComponent(id)}`);
-    if (o.status !== 200 || !o.corpo) { r.falhas.push({ order_id: id, motivo: `order_${o.status}` }); return; }
-    const d = await getML(deps, conta.accessToken, `/orders/${encodeURIComponent(id)}/discounts`);
-    extraidos.set(id, extrairPedidoFinanceiroML(o.corpo, d.status === 200 ? d.corpo : null));
+  const falhar = (f: FalhaFinanceiraML) => {
+    r.falhas.push(f);
+    if (f.classe === "INTEGRATION_ERROR") r.integracao++;
+    log(`[ml-financeiro] ${f.classe} loja=${conta.lojaId} order=${f.order_id} pack=${f.pack_id ?? "-"} shipment=${f.shipment_id ?? "-"} etapa=${f.etapa} http=${f.http}`);
+  };
+
+  // pedido já COMPLETO no banco → não consulta de novo
+  const existentes = deps.lerExistentes ? await deps.lerExistentes(ids).catch(() => new Map()) : new Map();
+  const alvo = ids.filter((id) => {
+    const e = existentes.get(id);
+    if (e && financeiroPendenteElegivel(e.pedido, e.envio) === null) { r.jaCompletos++; return false; }
+    return true;
   });
 
+  const extraidos = new Map<string, Omit<PedidoFinanceiroML, "billing_status" | "billing_tarifa">>();
+  const adiados: string[] = [];
+  const dentro = alvo.slice(0, orcamento.pedidos);
+  adiados.push(...alvo.slice(orcamento.pedidos));
+
+  await emParalelo(dentro, CONCORRENCIA_ML, async (id) => {
+    if (Date.now() - inicio > orcamento.prazoMs) { adiados.push(id); return; }
+    let order = payloads.get(id);
+    if (!order) {
+      const o = await getML(deps, conta.accessToken, `/orders/${encodeURIComponent(id)}`);
+      if (o.classe !== "OK" || !o.corpo) { falhar({ order_id: id, pack_id: null, shipment_id: null, etapa: "order", classe: o.classe === "OK" ? "INTEGRATION_ERROR" : o.classe, http: o.status }); return; }
+      order = o.corpo;
+    }
+    if (String(order?.id) !== id || !Array.isArray(order?.order_items)) {
+      falhar({ order_id: id, pack_id: order?.pack_id != null ? String(order.pack_id) : null, shipment_id: null, etapa: "order_estrutura", classe: "INTEGRATION_ERROR", http: 200 });
+      return;
+    }
+    const d = await getML(deps, conta.accessToken, `/orders/${encodeURIComponent(id)}/discounts`);
+    const p = extrairPedidoFinanceiroML(order, d.classe === "OK" ? d.corpo : null);
+    if (d.classe !== "OK") falhar({ order_id: id, pack_id: p.pack_id, shipment_id: p.shipment_id, etapa: "discounts", classe: d.classe, http: d.status });
+    extraidos.set(id, p);
+  });
+
+  // adiados (orçamento): no SYNC grava a partir do payload, PENDENTE, sem chamadas — o retry pega depois
+  for (const id of adiados) {
+    r.adiados++;
+    const o = payloads.get(id);
+    if (o && Array.isArray(o.order_items)) extraidos.set(id, extrairPedidoFinanceiroML(o, null));
+  }
+  const adiadosSet = new Set(adiados);
+
   // pedidos que compartilham o envio: os do pack (1 GET por pack) ou só o próprio pedido
-  for (const p of extraidos.values()) if (p.pack_id && !pedidosDoPack.has(p.pack_id)) {
+  const pedidosDoPack = new Map<string, string[] | null>();
+  const envios = new Map<string, EnvioFinanceiroML>();
+  for (const p of extraidos.values()) if (!adiadosSet.has(p.order_id) && p.pack_id && !pedidosDoPack.has(p.pack_id)) {
     const pk = await getML(deps, conta.accessToken, `/packs/${encodeURIComponent(p.pack_id)}`);
-    pedidosDoPack.set(p.pack_id, pk.status === 200 && Array.isArray(pk.corpo?.orders) ? pk.corpo.orders.map((x: any) => String(x?.id)) : null);
+    const lista = pk.classe === "OK" && Array.isArray(pk.corpo?.orders) ? pk.corpo.orders.map((x: any) => String(x?.id)) : null;
+    if (!lista) falhar({ order_id: p.order_id, pack_id: p.pack_id, shipment_id: p.shipment_id, etapa: "pack", classe: pk.classe === "OK" ? "INTEGRATION_ERROR" : pk.classe, http: pk.status });
+    pedidosDoPack.set(p.pack_id, lista);
   }
   // custo do envio: UMA vez por shipment, mesmo com 2+ pedidos
-  for (const p of extraidos.values()) if (p.shipment_id && !envios.has(p.shipment_id)) {
+  for (const p of extraidos.values()) if (!adiadosSet.has(p.order_id) && p.shipment_id && !envios.has(p.shipment_id)) {
     const c = await getML(deps, conta.accessToken, `/shipments/${encodeURIComponent(p.shipment_id)}/costs`, { "x-format-new": "true" });
     const pedidos = p.pack_id ? (pedidosDoPack.get(p.pack_id) ?? null) : [p.order_id];
-    envios.set(p.shipment_id, extrairEnvioFinanceiroML(p.shipment_id, p.pack_id, c.status === 200 ? c.corpo : null, pedidos));
+    const envio = extrairEnvioFinanceiroML(p.shipment_id, p.pack_id, c.classe === "OK" ? c.corpo : null, pedidos);
+    if (c.classe !== "OK") falhar({ order_id: p.order_id, pack_id: p.pack_id, shipment_id: p.shipment_id, etapa: "shipment_costs", classe: c.classe, http: c.status });
+    else if (envio.frete_vendedor === null) falhar({ order_id: p.order_id, pack_id: p.pack_id, shipment_id: p.shipment_id, etapa: "shipment_costs_estrutura", classe: "INTEGRATION_ERROR", http: 200 });
+    envios.set(p.shipment_id, envio);
   }
 
-  // billing em lote; resposta ausente → PENDENTE por pedido (sem ACTUAL)
-  const ids = [...extraidos.keys()];
+  // billing em lote (só dos consultados); sem resposta → PENDENTE (nunca ACTUAL); 403 → SEM_PERMISSAO, logado
   const finais: PedidoFinanceiroML[] = [];
-  for (let i = 0; i < ids.length; i += LOTE_BILLING_ML) {
-    const lote = ids.slice(i, i + LOTE_BILLING_ML);
+  const consultados = [...extraidos.keys()].filter((id) => !adiadosSet.has(id));
+  for (let i = 0; i < consultados.length; i += LOTE_BILLING_ML) {
+    const lote = consultados.slice(i, i + LOTE_BILLING_ML);
     const b = await getML(deps, conta.accessToken, `/billing/integration/group/ML/order/details?order_ids=${lote.map(encodeURIComponent).join(",")}`);
     for (const id of lote) {
       const p = extraidos.get(id)!;
       const conf = conferirBillingML(id, p.tarifa_venda, b.status, b.corpo);
       if (conf.billing_status === "PENDENTE") r.billingPendente++;
+      if (b.classe !== "OK") falhar({ order_id: id, pack_id: p.pack_id, shipment_id: p.shipment_id, etapa: "billing", classe: b.classe, http: b.status });
+      else if (conf.billing_status === "DIVERGENTE") falhar({ order_id: id, pack_id: p.pack_id, shipment_id: p.shipment_id, etapa: "billing_divergente", classe: "INTEGRATION_ERROR", http: 200 });
       finais.push({ ...p, ...conf });
     }
   }
+  for (const id of adiados) { const p = extraidos.get(id); if (p) finais.push({ ...p, billing_status: "PENDENTE", billing_tarifa: null }); }
 
   const buscado_em = (deps.agora?.() ?? new Date()).toISOString();
   const base = { user_id: conta.userId, loja_id: conta.lojaId, fonte_versao: FONTE_VERSAO_ML_FINANCEIRO, buscado_em };
@@ -94,5 +184,10 @@ export async function coletarFinanceiroML(
   if (linhasEnvio.length) await deps.gravarEnvios(linhasEnvio);
   if (finais.length) await deps.gravarPedidos(finais.map((p) => ({ ...p, ...base })));
   r.envios = linhasEnvio.length; r.pedidos = finais.length;
+  for (const p of finais) {
+    const envio = p.shipment_id ? envios.get(p.shipment_id) ?? existentes.get(p.order_id)?.envio ?? null : null;
+    if (liquidoPedidoML(p, envio).qualidade === "ACTUAL") r.actual++; else r.pendentes++;
+  }
+  log(`[ml-financeiro] resumo loja=${conta.lojaId} modo=${modoSync ? "sync" : "retry"} pedidos=${ids.length} ja_completos=${r.jaCompletos} gravados=${r.pedidos} actual=${r.actual} pendentes=${r.pendentes} integracao=${r.integracao} adiados=${r.adiados}`);
   return r;
 }

@@ -119,6 +119,50 @@ export function conferirBillingML(orderId: string, tarifa: number | null, httpSt
   return { billing_status: tarifa !== null && Math.abs(total - tarifa) <= 0.01 ? "CONFERIDO" : "DIVERGENTE", billing_tarifa: total };
 }
 
+/**
+ * A3.2-C — classe do erro do provider. TRANSIENT_ERROR: 429, 502/503/504 e timeout/rede (status 0) — retry e
+ * nova tentativa depois. INTEGRATION_ERROR: qualquer outro não-200 (404 inesperado, 4xx, 500) — bug de
+ * integração a investigar, nunca escondido como "pendente" comum.
+ */
+export type ClasseErroML = "TRANSIENT_ERROR" | "INTEGRATION_ERROR";
+export function classificarHttpML(status: number): ClasseErroML | "OK" {
+  if (status === 200) return "OK";
+  if (status === 0 || status === 429 || status === 502 || status === 503 || status === 504) return "TRANSIENT_ERROR";
+  return "INTEGRATION_ERROR";
+}
+
+/**
+ * A3.2-C — o pedido tem financeiro INCOMPLETO que uma nova tentativa pode completar? Devolve o motivo ou null.
+ * Elegível: billing PENDENTE, descontos indisponíveis, tarifa ausente no pedido, ou envio que existe mas cujo
+ * custo/pedidos do pack não vieram. NÃO elegível (null): completo; sem envio (nada a buscar); envio
+ * COMPARTILHADO por vários pedidos (sem rateio do provider — não é falha técnica); billing SEM_PERMISSAO ou
+ * DIVERGENTE (erro de integração: investigar, não repetir a cada carga de página).
+ */
+export function financeiroPendenteElegivel(p: PedidoFinanceiroML, envio: EnvioFinanceiroML | null): "billing" | "descontos" | "tarifa" | "frete" | "pack" | null {
+  if (p.tarifa_origem !== "PROVIDER" || p.tarifa_venda === null) return "tarifa";
+  if (p.shipment_id) {
+    if (!envio || envio.frete_vendedor === null) return "frete";
+    if (p.pack_id && envio.pedidos === null) return "pack";
+  }
+  if (p.billing_status === "PENDENTE") return "billing";
+  if (p.descontos_status === "INDISPONIVEL") return "descontos";
+  return null;
+}
+
+/** A3.2-C — no máximo 40 pedidos pendentes por carga da tela de Vendas (orçamento do retry, ver o coletor). */
+export const LIMITE_RETRY_FINANCEIRO_ML = 40;
+
+/** Order_ids com financeiro pendente ELEGÍVEL, na ordem recebida (a tela manda os mais recentes primeiro), até o limite. */
+export function pedidosComFinanceiroPendente(ordem: readonly string[], fin: ReadonlyMap<string, { pedido: PedidoFinanceiroML; envio: EnvioFinanceiroML | null }>, limite = LIMITE_RETRY_FINANCEIRO_ML): string[] {
+  const out: string[] = [];
+  for (const id of new Set(ordem)) {
+    const f = fin.get(id);
+    if (f && financeiroPendenteElegivel(f.pedido, f.envio) !== null) out.push(id);
+    if (out.length >= limite) break;
+  }
+  return out;
+}
+
 export type QualidadeLiquidoML = "ACTUAL" | "ESTIMATED" | "PENDING";
 export interface LiquidoML {
   liquido: number | null;
