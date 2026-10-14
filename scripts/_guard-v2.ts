@@ -841,7 +841,15 @@ export function custoDeVendaForaDeMeusProdutos(raiz = RAIZ_V2): string[] {
   if (!/export const custoCadastrado = \(p: ProdutoDeCusto\): boolean => \(numero\(p\.custo_produto\) \?\? 0\) > 0;/.test(s)) erros.push("serviço: presença de custo fora de custo_produto > 0");
   const fin = corpoDe(s, /export function financeiroDaVenda\(/) ?? "";
   if (!/const custoProduto = comCusto \? [^;]+ : null;/.test(fin) || !/const comCusto = resultado\.status === "PRODUCT_FOUND_WITH_COST" && p !== null;/.test(fin)) erros.push("serviço: custo sem cadastro vira número");
-  if (!/const lucro = pendencias\.length === 0 && custoProduto !== null && imposto !== null\s*\?/.test(fin) || !/: null;/.test(fin)) erros.push("serviço: lucro calculado com pendência");
+  if (!/let lucro: number \| null = null;\s*if \(pendencias\.length === 0 && custoProduto !== null && imposto !== null\) \{/.test(fin)) erros.push("serviço: lucro calculado com pendência");
+  // A3.1: base financeira em ordem (repasse real → repasse legado → componentes ML → sem base) e SEM dupla
+  // contagem: com repasse, só custo do produto e imposto saem; tarifa/frete/descontos já estão no repasse.
+  if (!/\? \(venda\.has_income_data === true \? \(venda\.financial_reconciled_at \? "REPASSE_REAL" : "REPASSE_LEGADO"\) : "SEM_BASE"\)\s*: "COMPONENTES_ESTIMADOS";/.test(fin)
+    || !/const qualidadeFinanceira: QualidadeFinanceira = base === "REPASSE_REAL" \? "ACTUAL" : base === "SEM_BASE" \? "PENDING" : "ESTIMATED";/.test(fin)) erros.push("serviço: base/qualidade financeira fora da ordem aprovada (ACTUAL só com repasse reconciliado)");
+  if (!/const liquidoDaVenda = porRepasse \? \(numero\(venda\.escrow_amount\) \?\? 0\) : faturamento - tarifa;\s*lucro = liquidoDaVenda - custoProduto - imposto;/.test(fin)
+    || (fin.match(/- tarifa\b/g) ?? []).length !== 1) erros.push("serviço: dupla contagem (repasse − tarifa/frete) ou base de lucro fora do contrato");
+  if (!/const tarifa = shopee \? \(numero\(venda\.tarifa_venda\) \?\? 0\) : \(numero\(venda\.tarifa_venda\) \?\? 0\) \* qtd;/.test(fin)) erros.push("serviço: tarifa ML (sale_fee por unidade) sem × qtd");
+  if (/pendencias\.push\("frete"\)/.test(fin)) erros.push("serviço: regra global frete ausente → lucro pendente voltou");
   if (/custo_frete|frete_vendedor|frete_comprador/.test(s)) erros.push("serviço: frete do anúncio/legado no cálculo");
   // (d) sem escrita, sem custo persistido
   if (/\.(update|insert|upsert|delete|rpc)\(/.test(s)) erros.push("serviço: grava (snapshot/backfill proibido)");

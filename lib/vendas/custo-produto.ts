@@ -24,9 +24,9 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { lerTodasAsPaginas } from "@/lib/anuncios/leitura-paginada";
-import type { FinanceiroVendaLive, MarketplaceVenda, OrigemTarifa, RefProdutoMeusProdutos, StatusCustoVenda, StatusFrete } from "./custo-produto-tipos";
+import type { BaseFinanceira, FinanceiroVendaLive, MarketplaceVenda, OrigemTarifa, QualidadeFinanceira, RefProdutoMeusProdutos, StatusCustoVenda, StatusFrete } from "./custo-produto-tipos";
 
-export type { FinanceiroVendaLive, MarketplaceVenda, OrigemTarifa, RefProdutoMeusProdutos, StatusCustoVenda, StatusFrete } from "./custo-produto-tipos";
+export type { BaseFinanceira, FinanceiroVendaLive, MarketplaceVenda, OrigemTarifa, QualidadeFinanceira, RefProdutoMeusProdutos, StatusCustoVenda, StatusFrete } from "./custo-produto-tipos";
 
 /** O que o lookup lê de Meus Produtos — só identidade e os campos do usuário. */
 export const COLUNAS_CUSTO_PRODUTO = "id, marketplace, loja_id, ml_item_id, variation_id, custo_produto, imposto, insumos";
@@ -138,42 +138,57 @@ export interface VendaPersistidaParaCusto {
   tarifa_venda: number | string | null;
   has_income_data?: boolean | null;
   escrow_amount?: number | string | null;
+  financial_reconciled_at?: string | null;
 }
 
 /**
- * Fórmula já aprovada no CDS (sync ML/Shopee, CardAnuncio): custo e insumos são POR UNIDADE (× qtd);
- * imposto é PERCENTUAL sobre a receita da venda. Frete vem SÓ da venda: Shopee com dado financeiro já o
- * traz no repasse (`escrow_amount`); sem ele (e no ML, que não traz frete real) o frete é PENDENTE —
- * o frete do anúncio não entra. Tarifa: a persistida, com a origem explícita (Shopee: real com repasse,
- * estimada sem; ML: legada — sale_fee ou estimativa, a origem não foi gravada).
+ * Base financeira da venda, em ordem de preferência (Vendas A3.1 — decisão do dono do produto):
+ *   1. REPASSE_REAL    Shopee reconciliada (`financial_reconciled_at`): `escrow_amount` é o repasse FINAL
+ *                      (contrato da coluna) → ACTUAL;
+ *   2. REPASSE_LEGADO  Shopee com repasse do sync legado (`has_income_data`, sem reconciliação) → ESTIMATED;
+ *   3. COMPONENTES_ESTIMADOS  ML: receita − `tarifa_venda` × qtd (o `sale_fee` do ML é POR UNIDADE e o
+ *                      legado o gravou sem × qtd); frete do vendedor NÃO incluído → ESTIMATED;
+ *   4. SEM_BASE        Shopee sem repasse → PENDING (a tarifa estimada cobre só comissão+campanha).
+ * Com base repasse o lucro é `repasse − custo − imposto`: tarifa, comissão, frete e descontos JÁ estão no
+ * repasse e NÃO são subtraídos de novo (sem dupla contagem). Custo e insumos são POR UNIDADE (× qtd);
+ * imposto é PERCENTUAL da receita (semântica já aprovada no CDS). Sem custo cadastrado → lucro pendente.
  */
 export function financeiroDaVenda(venda: VendaPersistidaParaCusto, resultado: ResultadoCustoProduto): FinanceiroVendaLive {
   const qtd = numero(venda.qtd) ?? 1;
   const faturamento = numero(venda.faturamento) ?? 0;
-  const tarifa = numero(venda.tarifa_venda) ?? 0;
   const p = resultado.produto;
   const comCusto = resultado.status === "PRODUCT_FOUND_WITH_COST" && p !== null;
   const custoProduto = comCusto ? ((numero(p!.custo_produto) ?? 0) + (numero(p!.insumos) ?? 0)) * qtd : null;
   const imposto = p ? faturamento * ((numero(p.imposto) ?? 0) / 100) : null;
 
   const shopee = venda.marketplace === "Shopee";
-  const comRepasse = shopee && venda.has_income_data === true;
-  const tarifaOrigem: OrigemTarifa = shopee ? (comRepasse ? "real" : "estimada") : "legada";
-  const freteStatus: StatusFrete = comRepasse ? "incluso_no_repasse" : "pendente";
+  const base: BaseFinanceira = shopee
+    ? (venda.has_income_data === true ? (venda.financial_reconciled_at ? "REPASSE_REAL" : "REPASSE_LEGADO") : "SEM_BASE")
+    : "COMPONENTES_ESTIMADOS";
+  const qualidadeFinanceira: QualidadeFinanceira = base === "REPASSE_REAL" ? "ACTUAL" : base === "SEM_BASE" ? "PENDING" : "ESTIMATED";
+  const porRepasse = base === "REPASSE_REAL" || base === "REPASSE_LEGADO";
+  const tarifa = shopee ? (numero(venda.tarifa_venda) ?? 0) : (numero(venda.tarifa_venda) ?? 0) * qtd;
+  const tarifaOrigem: OrigemTarifa = shopee ? (porRepasse ? "real" : "estimada") : "legada";
+  const freteStatus: StatusFrete = porRepasse ? "incluso_no_repasse" : shopee ? "pendente" : "nao_incluido";
 
-  const pendencias: Array<"custo" | "frete"> = [];
+  const pendencias: Array<"custo" | "financeiro"> = [];
   if (!comCusto) pendencias.push("custo");
-  if (freteStatus === "pendente") pendencias.push("frete");
+  if (qualidadeFinanceira === "PENDING") pendencias.push("financeiro");
 
-  const lucro = pendencias.length === 0 && custoProduto !== null && imposto !== null
-    ? (numero(venda.escrow_amount) ?? 0) - custoProduto - imposto
-    : null;
+  let lucro: number | null = null;
+  if (pendencias.length === 0 && custoProduto !== null && imposto !== null) {
+    // Base repasse: só os custos INTERNOS saem (o resto já está no repasse). Componentes: receita − tarifa.
+    const liquidoDaVenda = porRepasse ? (numero(venda.escrow_amount) ?? 0) : faturamento - tarifa;
+    lucro = liquidoDaVenda - custoProduto - imposto;
+  }
   return {
     origem: "LIVE_CALCULATED",
     custoStatus: resultado.status,
     produto: resultado.ref,
     custoProduto,
     imposto,
+    qualidadeFinanceira,
+    baseFinanceira: base,
     tarifa,
     tarifaOrigem,
     freteStatus,

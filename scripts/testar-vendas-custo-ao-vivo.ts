@@ -115,9 +115,9 @@ async function principal() {
   secao("\n[1. estados do lookup]");
   t("A3-C1. produto exato + custo cadastrado → WITH_COST; custo = (custo + insumos) × qtd, imposto % da receita", () => {
     const m = mapa("Shopee", SP_A, [anuncio("a1", "Shopee", SP_A, "10", null, 20)]);
-    const f = fin(m, venda("Shopee", "10", null, { has_income_data: true, escrow_amount: 80 }));
+    const f = fin(m, venda("Shopee", "10", null, { has_income_data: true, escrow_amount: 80, financial_reconciled_at: "2026-07-05T00:00:00Z" }));
     assert(f.custoStatus === "PRODUCT_FOUND_WITH_COST" && perto(f.custoProduto, 21) && perto(f.imposto, 10), JSON.stringify(f));
-    assert(perto(f.lucro, 80 - 21 - 10) && f.freteStatus === "incluso_no_repasse" && f.tarifaOrigem === "real" && f.produto?.anuncioId === "a1" && f.produto.exata, JSON.stringify(f));
+    assert(perto(f.lucro, 80 - 21 - 10) && f.qualidadeFinanceira === "ACTUAL" && f.baseFinanceira === "REPASSE_REAL" && f.freteStatus === "incluso_no_repasse" && f.produto?.anuncioId === "a1" && f.produto.exata, JSON.stringify(f));
   });
   t("A3-C2. produto exato com custo 0 (não cadastrado) → WITHOUT_COST; custo e lucro null (nunca 0)", () => {
     const m = mapa("Shopee", SP_A, [anuncio("a1", "Shopee", SP_A, "10", null, 0)]);
@@ -169,13 +169,32 @@ async function principal() {
     const f = fin(m, venda("Shopee", "10", null, { qtd: 3, faturamento: 300, has_income_data: true, escrow_amount: 240 }));
     assert(perto(f.custoProduto, 63) && perto(f.imposto, 30) && perto(f.lucro, 240 - 63 - 30) && perto(f.roi, (147 / 63) * 100), JSON.stringify(f));
   });
-  t("A3-F. frete só da venda: ML (sem frete real) e Shopee sem repasse → pendente; frete do anúncio nunca entra; tarifa marcada", () => {
-    const mML = mapa("ML", ML_A, [anuncio("a", "ML", ML_A, "MLB1", null, 10)]);
-    const ml = fin(mML, venda("ML", "MLB1", null));
-    assert(ml.custoStatus === "PRODUCT_FOUND_WITH_COST" && ml.freteStatus === "pendente" && ml.lucro === null && ml.pendencias.join() === "frete" && ml.tarifaOrigem === "legada", JSON.stringify(ml));
-    const mSP = mapa("Shopee", SP_A, [anuncio("a", "Shopee", SP_A, "10", null, 10)]);
-    const sp = fin(mSP, venda("Shopee", "10", null, { has_income_data: false }));
-    assert(sp.freteStatus === "pendente" && sp.lucro === null && sp.tarifaOrigem === "estimada", JSON.stringify(sp));
+  secao("\n[1b. base financeira (A3.1) — real / estimado / pendente, sem dupla contagem]");
+  const mSP = mapa("Shopee", SP_A, [anuncio("a", "Shopee", SP_A, "10", null, 10)]);
+  const mML = mapa("ML", ML_A, [anuncio("a", "ML", ML_A, "MLB1", null, 10)]);
+  t("A31-1. Shopee reconciliada → ACTUAL: lucro = repasse − custo − imposto (tarifa e frete NÃO subtraídos de novo)", () => {
+    const f = fin(mSP, venda("Shopee", "10", null, { has_income_data: true, escrow_amount: 60, tarifa_venda: 25, financial_reconciled_at: "2026-07-05T00:00:00Z" }));
+    assert(f.qualidadeFinanceira === "ACTUAL" && perto(f.lucro, 60 - 11 - 10) && f.freteStatus === "incluso_no_repasse" && f.pendencias.length === 0, JSON.stringify(f));
+  });
+  t("A31-2. Shopee com repasse do sync legado (sem reconciliação) → ESTIMATED, mesma base, sem dupla contagem", () => {
+    const f = fin(mSP, venda("Shopee", "10", null, { has_income_data: true, escrow_amount: 64, tarifa_venda: 22, financial_reconciled_at: null }));
+    assert(f.qualidadeFinanceira === "ESTIMATED" && f.baseFinanceira === "REPASSE_LEGADO" && perto(f.lucro, 64 - 11 - 10), JSON.stringify(f));
+  });
+  t("A31-3. Shopee SEM repasse → PENDING (tarifa estimada não vira lucro); venda segue com status de custo próprio", () => {
+    const f = fin(mSP, venda("Shopee", "10", null, { has_income_data: false, tarifa_venda: 15 }));
+    assert(f.qualidadeFinanceira === "PENDING" && f.baseFinanceira === "SEM_BASE" && f.lucro === null && f.pendencias.join() === "financeiro" && f.custoStatus === "PRODUCT_FOUND_WITH_COST" && f.tarifaOrigem === "estimada", JSON.stringify(f));
+  });
+  t("A31-4. ML → ESTIMATED: lucro = receita − tarifa × qtd − custo − imposto; frete \"não incluído\" (nunca bloqueia)", () => {
+    const f = fin(mML, venda("ML", "MLB1", null, { qtd: 2, faturamento: 200, tarifa_venda: 23 }));
+    assert(f.qualidadeFinanceira === "ESTIMATED" && f.baseFinanceira === "COMPONENTES_ESTIMADOS" && perto(f.tarifa, 46) && perto(f.lucro, 200 - 46 - 22 - 20), JSON.stringify(f));
+    assert(f.freteStatus === "nao_incluido" && f.pendencias.length === 0 && f.tarifaOrigem === "legada", JSON.stringify(f));
+  });
+  t("A31-5. qualidade financeira é SEPARADA do custo: sem custo → lucro pendente mesmo com repasse real; ML sem custo também", () => {
+    const sem = mapa("Shopee", SP_A, [anuncio("z", "Shopee", SP_A, "10", null, 0)]);
+    const f = fin(sem, venda("Shopee", "10", null, { has_income_data: true, escrow_amount: 80, financial_reconciled_at: "2026-07-05T00:00:00Z" }));
+    assert(f.qualidadeFinanceira === "ACTUAL" && f.custoStatus === "PRODUCT_FOUND_WITHOUT_COST" && f.lucro === null && f.pendencias.join() === "custo", JSON.stringify(f));
+    const ml = fin(mapa("ML", ML_A, []), venda("ML", "MLB1", null));
+    assert(ml.qualidadeFinanceira === "ESTIMATED" && ml.lucro === null && ml.pendencias.join() === "custo", JSON.stringify(ml));
   });
 
   secao("\n[2. carga em lote (paginação, sem ativo, sem N+1)]");
@@ -208,6 +227,7 @@ async function principal() {
     assert(porOrder.o1.custoStatus === "PRODUCT_FOUND_WITH_COST" && perto(porOrder.o1.custoProduto, 11), JSON.stringify(porOrder.o1));
     assert(porOrder.o2.custoStatus === "PRODUCT_FOUND_WITHOUT_COST" && porOrder.o3.custoStatus === "PRODUCT_NOT_FOUND" && porOrder.o4.custoStatus === "PRODUCT_IDENTITY_INCOMPLETE", JSON.stringify(porOrder));
     for (const o of ["o2", "o3", "o4"]) assert(porOrder[o].custoProduto === null && porOrder[o].lucro === null, `${o}: virou número`);
+    assert(porOrder.o1.qualidadeFinanceira === "ESTIMATED" && perto(porOrder.o1.lucro, 100 - 12 - 11 - 10), `ML com custo ficou pendente pelo frete: ${JSON.stringify(porOrder.o1)}`);
   });
   t("A3-C10. custo editado em Meus Produtos (10 → 12) → a PRÓXIMA leitura de Vendas usa 12; nada gravado em pedidos", async () => {
     db = { lojas: [lojaSP], anuncios: [anuncio("c", "Shopee", SP_A, "10", null, 10)], pedidos: [pedido("Shopee", SP_A, "s1", "10", null)] };
@@ -239,6 +259,10 @@ async function principal() {
     const semCad = fin(mapa("Shopee", SP_A, [anuncio("z", "Shopee", SP_A, "10", null, 0)]), venda("Shopee", "10", null));
     assert(FL.avisoCustoLive(semCad)?.texto === "Custo não cadastrado" && FL.avisoCustoLive(semCad)?.href === FL.ROTA_MEUS_PRODUTOS, "custo não cadastrado sem link");
     assert(FL.textoFreteLive(comLucro) === "no repasse" && FL.textoFreteLive(semCad) === "pendente" && FL.avisoCustoLive(null)?.texto === "Custo indisponível", "frete/indisponível");
+    assert(tot.estimados === 1 && FL.seloLucroLive(comLucro) === "estimado" && FL.seloLucroLive(semCusto) === null, "selo/estimados");
+    const real = fin(m, venda("Shopee", "10", null, { has_income_data: true, escrow_amount: 80, financial_reconciled_at: "2026-07-05T00:00:00Z" }));
+    const ml = fin(mapa("ML", ML_A, [anuncio("a", "ML", ML_A, "MLB1", null, 10)]), venda("ML", "MLB1", null));
+    assert(FL.seloLucroLive(real) === "real" && FL.seloLucroLive(ml) === "estimado" && FL.textoFreteLive(ml) === "não incluído" && FL.totaisLive([{ faturamento: 100, financeiro: real }]).estimados === 0, "selo real / ML");
   });
 
   secao("\n[5. guard]");

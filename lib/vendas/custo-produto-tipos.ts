@@ -21,7 +21,18 @@ export interface RefProdutoMeusProdutos {
 }
 
 export type OrigemTarifa = "real" | "estimada" | "legada";
-export type StatusFrete = "incluso_no_repasse" | "pendente";
+export type StatusFrete = "incluso_no_repasse" | "nao_incluido" | "pendente";
+
+/**
+ * Vendas A3.1 — qualidade do dado FINANCEIRO da venda (separada do status de custo do produto):
+ *   ACTUAL    repasse REAL reconciliado (get_escrow_detail: "repasse FINAL ao vendedor");
+ *   ESTIMATED repasse do sync legado (income_distribution, equivalência não provada) ou componentes
+ *             estimados (ML: receita − tarifa por unidade × qtd; frete NÃO incluído);
+ *   PENDING   sem base confiável (Shopee sem repasse: a tarifa estimada cobre ~15% e o repasse real
+ *             desconta ~47% — estimar inflaria o lucro).
+ */
+export type QualidadeFinanceira = "ACTUAL" | "ESTIMATED" | "PENDING";
+export type BaseFinanceira = "REPASSE_REAL" | "REPASSE_LEGADO" | "COMPONENTES_ESTIMADOS" | "SEM_BASE";
 
 export interface FinanceiroVendaLive {
   origem: "LIVE_CALCULATED";
@@ -29,11 +40,13 @@ export interface FinanceiroVendaLive {
   produto: RefProdutoMeusProdutos | null;
   custoProduto: number | null;       // (custo_produto + insumos) × qtd — só com custo cadastrado
   imposto: number | null;            // faturamento × imposto% — produto encontrado
-  tarifa: number;
+  qualidadeFinanceira: QualidadeFinanceira;
+  baseFinanceira: BaseFinanceira;
+  tarifa: number;                    // tarifa da LINHA (ML: por unidade × qtd); com base repasse é só informativa
   tarifaOrigem: OrigemTarifa;
   freteStatus: StatusFrete;
-  lucro: number | null;              // null = PENDENTE (custo e/ou frete)
+  lucro: number | null;              // null = PENDENTE (custo do produto e/ou base financeira)
   margemPct: number | null;
   roi: number | null;
-  pendencias: Array<"custo" | "frete">;
+  pendencias: Array<"custo" | "financeiro">;
 }

@@ -36,16 +36,19 @@ export interface TotaisLive {
   lucro: number;              // soma só das linhas com lucro calculável
   faturamentoCalculado: number;
   margemPct: number | null;   // lucro / faturamento das linhas calculáveis
-  pendentes: number;          // linhas cujo lucro está pendente (custo e/ou frete)
+  pendentes: number;          // linhas cujo lucro está pendente (custo do produto e/ou base financeira)
+  estimados: number;          // linhas com lucro ESTIMADO (não real) dentro do total
+  tarifa: number;             // tarifa da linha (ML: por unidade × qtd)
 }
 
 export function totaisLive(linhas: ReadonlyArray<{ faturamento: number; financeiro?: FinanceiroVendaLive | null }>): TotaisLive {
-  const t: TotaisLive = { custo: 0, imposto: 0, lucro: 0, faturamentoCalculado: 0, margemPct: null, pendentes: 0 };
+  const t: TotaisLive = { custo: 0, imposto: 0, lucro: 0, faturamentoCalculado: 0, margemPct: null, pendentes: 0, estimados: 0, tarifa: 0 };
   for (const r of linhas) {
     const f = r.financeiro;
     if (f?.custoProduto != null) t.custo += f.custoProduto;
     if (f?.imposto != null) t.imposto += f.imposto;
-    if (f?.lucro != null) { t.lucro += f.lucro; t.faturamentoCalculado += r.faturamento; }
+    if (f) t.tarifa += f.tarifa;
+    if (f?.lucro != null) { t.lucro += f.lucro; t.faturamentoCalculado += r.faturamento; if (f.qualidadeFinanceira !== "ACTUAL") t.estimados++; }
     else t.pendentes++;
   }
   t.margemPct = t.faturamentoCalculado > 0 ? (t.lucro / t.faturamentoCalculado) * 100 : null;
@@ -53,4 +56,8 @@ export function totaisLive(linhas: ReadonlyArray<{ faturamento: number; financei
 }
 
 export const textoFreteLive = (f: FinanceiroVendaLive | null | undefined): string =>
-  !f ? "—" : f.freteStatus === "incluso_no_repasse" ? "no repasse" : "pendente";
+  !f ? "—" : f.freteStatus === "incluso_no_repasse" ? "no repasse" : f.freteStatus === "nao_incluido" ? "não incluído" : "pendente";
+
+/** Selo do lucro: "real" (repasse reconciliado) ou "estimado"; `null` quando o lucro está pendente. */
+export const seloLucroLive = (f: FinanceiroVendaLive | null | undefined): "real" | "estimado" | null =>
+  f?.lucro == null ? null : f.qualidadeFinanceira === "ACTUAL" ? "real" : "estimado";
