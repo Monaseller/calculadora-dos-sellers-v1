@@ -6,9 +6,10 @@
 import { NextResponse } from "next/server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
-import { autenticarRequisicao, lerCookie } from "@/lib/autenticacao";
+import { autenticarRequisicao } from "@/lib/autenticacao";
 import { syncMLForUser, type LojaMLResolvida } from "@/lib/sync-ml";
-import { contarLojasMLAtivasDoDono, MULTI_ML_VENDAS_NOT_READY, resolverContaML } from "@/lib/ml-conexao";
+import { resolverContaML } from "@/lib/ml-conexao";
+import { LOJA_ML_INVALIDA, ML_STORE_SELECTION_REQUIRED, respostaSelecaoLojaML } from "@/lib/ml-loja-catalogo";
 import { carregarMapaCustoProduto, financeiroDaVenda, identidadeDaVenda, resolverCustoProduto } from "@/lib/vendas/custo-produto";
 
 // SEC-3-B1: dados sensiveis (SEC-3) so por service_role, server-side.
@@ -81,15 +82,24 @@ export async function GET(request: Request) {
   // docs/DECISIONS.md, redesenho do botão Sincronizar, 2026-07-11).
   // LOJAS-ANON-SELECT: era leitura com o cliente ANON. So o `id` sai do
   // banco — a rota nunca usou token aqui.
-  // CDS V2 Fase 1B: a loja e a credencial saem do resolvedor do servidor — contexto
-  // `loja_ativa_id` revalidado por dono + marketplace, ou a loja ML ÚNICA por opt-in
-  // explícito. Nunca o cookie de token, nunca "a mais recente". O cache de `pedidos`
-  // desta rota não é escopado por loja: com 2+ contas ML, falha fechado (não mistura).
-  if (await contarLojasMLAtivasDoDono(userId) > 1) {
-    return NextResponse.json({ erro: true, codigo: MULTI_ML_VENDAS_NOT_READY,
-      mensagem: "Vendas com mais de uma conta do Mercado Livre ainda não são suportadas." }, { status: 409 });
+  // CDS V2 Vendas A5: a loja vem do PEDIDO (`?loja_id`), validada no servidor (dono + ML + ativa) — sem
+  // cookie, sem "a única" e sem outra loja como fallback. Sem `loja_id`: SÓ a loja ML única (opt-in);
+  // 2+ lojas → 409 ML_STORE_SELECTION_REQUIRED com as lojas do próprio dono, antes de qualquer leitura
+  // de `pedidos` ou chamada ao provider. Loja pedida inválida (de outro dono, Shopee, inativa,
+  // malformada) → 404 LOJA_ML_INVALIDA. O cookie `loja_ativa_id` não é identidade desta rota.
+  const lojaPedida = url.searchParams.get("loja_id");
+  const contaML = lojaPedida
+    ? await resolverContaML(userId, lojaPedida)
+    : await resolverContaML(userId, null, { permitirUnica: true });
+  if (!contaML.ok && contaML.motivo === "LOJA_NAO_DEFINIDA") {
+    const { status, corpo } = respostaSelecaoLojaML({ ok: false, motivo: ML_STORE_SELECTION_REQUIRED,
+      lojas: contaML.lojas.map((l) => ({ id: l.id, rotulo: l.nickname || "Conta do Mercado Livre" })) });
+    return NextResponse.json(corpo, { status });
   }
-  const contaML = await resolverContaML(userId, lerCookie(request, "loja_ativa_id"), { permitirUnica: true });
+  if (!contaML.ok && contaML.motivo === "LOJA_INVALIDA") {
+    const { status, corpo } = respostaSelecaoLojaML({ ok: false, motivo: LOJA_ML_INVALIDA });
+    return NextResponse.json(corpo, { status });
+  }
   const lojaML: LojaMLResolvida | null = contaML.ok
     ? { lojaId: contaML.lojaId, accessToken: contaML.accessToken, sellerId: contaML.sellerId, nickname: contaML.nickname }
     : null;

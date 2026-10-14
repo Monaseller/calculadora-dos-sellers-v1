@@ -220,7 +220,7 @@ async function principal() {
     assert(!/ml_(access|refresh)_token=/.test(setCookie(res)), "refresh gravou cookie");
   });
 
-  secao("\n[5. multi-ML: catálogo liberado com loja escolhida (Fase 2F); Vendas segue barrada]");
+  secao("\n[5. multi-ML: catálogo liberado com loja escolhida (Fase 2F); Vendas por loja explícita (A5); vendas-hoje segue barrada]");
   t("10. catálogo (3 rotas) com 2 contas ML: COM contexto A → só TOKEN_A; SEM contexto → 409 ML_STORE_SELECTION_REQUIRED, 0 ML, 0 escritas", async () => {
     for (const [nome, rota] of catalogo) {
       semear();
@@ -236,14 +236,22 @@ async function principal() {
       assert(chamadas.length === 0 && escritas.length === 0, `${nome}: ML=${chamadas.length} escritas=${escritas.length}`);
     }
   });
-  t("11. vendas e vendas-hoje com 2 contas ML → 409 MULTI_ML_VENDAS_NOT_READY, 0 ML, 0 escritas", async () => {
-    for (const [nome, rota] of [["vendas", vendas.GET], ["vendas-hoje", vendasHoje.GET]] as const) {
-      semear();
-      const res = await (rota as any)(req(`/api/ml/${nome}?date_from=2026-10-01&date_to=2026-10-01`, { cds_session: sessao.U, loja_ativa_id: ML_A }));
-      const corpo = await res.json();
-      assert(res.status === 409 && corpo.codigo === "MULTI_ML_VENDAS_NOT_READY", `${nome}: ${res.status} ${JSON.stringify(corpo)}`);
-      assert(chamadas.length === 0 && escritas.length === 0, `${nome}: ML=${chamadas.length} escritas=${escritas.length}`);
-    }
+  t("11. vendas-hoje com 2 contas ML → 409 MULTI_ML_VENDAS_NOT_READY; vendas SEM loja_id (cookie A ignorado) → 409 ML_STORE_SELECTION_REQUIRED; COM loja_id=A → só TOKEN_A", async () => {
+    semear();
+    let res = await (vendasHoje.GET as any)(req(`/api/ml/vendas-hoje?date_from=2026-10-01&date_to=2026-10-01`, { cds_session: sessao.U, loja_ativa_id: ML_A }));
+    let corpo = await res.json();
+    assert(res.status === 409 && corpo.codigo === "MULTI_ML_VENDAS_NOT_READY", `vendas-hoje: ${res.status} ${JSON.stringify(corpo)}`);
+    assert(chamadas.length === 0 && escritas.length === 0, `vendas-hoje: ML=${chamadas.length} escritas=${escritas.length}`);
+    semear();
+    res = await (vendas.GET as any)(req(`/api/ml/vendas?date_from=2026-10-01&date_to=2026-10-01`, { cds_session: sessao.U, loja_ativa_id: ML_A }));
+    corpo = await res.json();
+    assert(res.status === 409 && corpo.codigo === "ML_STORE_SELECTION_REQUIRED", `vendas sem loja_id: ${res.status} ${JSON.stringify(corpo)}`);
+    assert(chamadas.length === 0 && escritas.length === 0, `vendas sem loja_id: ML=${chamadas.length} escritas=${escritas.length}`);
+    semear();
+    res = await (vendas.GET as any)(req(`/api/ml/vendas?date_from=2026-10-01&date_to=2026-10-01&loja_id=${ML_A}`, { cds_session: sessao.U, loja_ativa_id: ML_B }));
+    assert(res.status !== 409 && res.status !== 404, `vendas loja_id=A: ${res.status}`);
+    assert(tokensUsados().every((x) => x === TOKEN_A), `vendas loja_id=A usou ${tokensUsados()}`);
+    assert(!escritas.some((e) => e.filtros.some(([c, v]) => c === "loja_id" && v !== ML_A)), "🔴 vendas loja_id=A escreveu fora de A");
   });
   t("12. catálogo com UMA conta ML segue funcionando pela loja única explícita (TOKEN_V)", async () => {
     semear();

@@ -47,8 +47,12 @@ export async function POST(request: Request) {
       // CDS V2 Fase 1B: loja ML EXPLICITA (body.loja_id) ou o contexto loja_ativa_id — ambos
       // revalidados por dono + marketplace no servidor — ou a UNICA por opt-in explicito.
       // Nunca "a mais recente" (getMLLojaAtiva); com 2+ e sem escolha valida, nao sincroniza.
+      // CDS V2 Vendas A5: `loja_id_ml` (Vendas, loja ML escolhida) e a loja EXPLICITA do ML — so ela, sem
+      // cookie e sem "a unica" (o `loja_id` do corpo tambem e lido pela Shopee: nao serve para o ML).
       (marketplace === "todos" || marketplace === "ML")
-        ? resolverContaML(userId, (body as { loja_id?: string }).loja_id || lerCookie(request, "loja_ativa_id"), { permitirUnica: true })
+        ? ((body as { loja_id_ml?: string }).loja_id_ml
+            ? resolverContaML(userId, (body as { loja_id_ml?: string }).loja_id_ml)
+            : resolverContaML(userId, (body as { loja_id?: string }).loja_id || lerCookie(request, "loja_ativa_id"), { permitirUnica: true }))
             .then(conta => conta.ok
               ? syncMLForUser(userId, dateFrom, dateTo, undefined, noBuffer,
                   { lojaId: conta.lojaId, accessToken: conta.accessToken, sellerId: conta.sellerId, nickname: conta.nickname })

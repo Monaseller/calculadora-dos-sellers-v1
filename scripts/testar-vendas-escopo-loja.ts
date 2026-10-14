@@ -206,20 +206,31 @@ async function principal() {
     assert(r.status === 200 && (r.corpo.rows ?? []).length === 0, JSON.stringify(r.corpo.rows));
     assert(chamadasML.some((c) => c.url.includes("/orders/search") && c.token === TOKEN_A), "A sem cache próprio não sincronizou (cache de B contou como de A)");
   });
-  t("A2-M5. barreira intacta: 2 lojas ML ATIVAS → 409 MULTI_ML_VENDAS_NOT_READY, 0 leitura de pedidos, 0 ML", async () => {
-    db = { lojas: [lojaML(ML_A, true, TOKEN_A), lojaML(ML_B, true, TOKEN_B)], pedidos: [pedidoML(ML_A, "a1", DIA, PASSADO())] };
+  t("A2-M5. (A5) 2 lojas ML ATIVAS: sem loja_id (cookie A ignorado) → 409 ML_STORE_SELECTION_REQUIRED, 0 pedidos, 0 ML; loja_id=B → SÓ B", async () => {
+    db = { lojas: [lojaML(ML_A, true, TOKEN_A), lojaML(ML_B, true, TOKEN_B)], pedidos: [pedidoML(ML_A, "a1", DIA, PASSADO()), pedidoML(ML_B, "b1", DIA, PASSADO())] };
     zera(); silenciar();
     const r = await getVendas(`date_from=${DIA}&date_to=${DIA}`, { loja_ativa_id: ML_A });
     restaurar();
-    assert(r.status === 409 && r.corpo.codigo === "MULTI_ML_VENDAS_NOT_READY", `${r.status} ${JSON.stringify(r.corpo)}`);
+    assert(r.status === 409 && r.corpo.codigo === "ML_STORE_SELECTION_REQUIRED", `${r.status} ${JSON.stringify(r.corpo)}`);
     assert(pedidosLidos().length === 0 && chamadasML.length === 0, `pedidos lidos=${pedidosLidos().length} ML=${chamadasML.length}`);
+    zera(); silenciar();
+    const b = await getVendas(`date_from=${DIA}&date_to=${DIA}&loja_id=${ML_B}`, { loja_ativa_id: ML_A });
+    restaurar();
+    const orders = (b.corpo.rows ?? []).map((x: any) => x.orderId).join(",");
+    assert(b.status === 200 && orders === "b1", `loja_id=B: ${b.status} ${orders}`);
+    assert(chamadasML.every((c) => c.token === TOKEN_B), `loja_id=B usou ${chamadasML.map((c) => c.token)}`);
   });
-  t("A2-M6. sem loja resolvida (contexto inválido / sem conta ativa) → falha fechado, 0 leitura; credencial vencida → cache SÓ dela, sem ML", async () => {
+  t("A2-M6. sem loja resolvida (loja pedida inativa / sem conta ativa) → falha fechado, 0 leitura; cookie inativo ignorado; credencial vencida → cache SÓ dela, sem ML", async () => {
     db = { lojas: [lojaML(ML_A, true, TOKEN_A), lojaML(ML_B, false, TOKEN_B)], pedidos: [pedidoML(ML_A, "a1", DIA, PASSADO()), pedidoML(ML_B, "b1", DIA, PASSADO())] };
     zera(); silenciar();
-    const inval = await getVendas(`date_from=${DIA}&date_to=${DIA}`, { loja_ativa_id: ML_B });
+    const inval = await getVendas(`date_from=${DIA}&date_to=${DIA}&loja_id=${ML_B}`);
     restaurar();
-    assert(inval.corpo.semConexao === true && pedidosLidos().length === 0, `contexto inválido leu ${pedidosLidos().length} / ${JSON.stringify(inval.corpo)}`);
+    assert(inval.status === 404 && inval.corpo.codigo === "LOJA_ML_INVALIDA" && pedidosLidos().length === 0 && chamadasML.length === 0, `loja pedida inativa: ${inval.status} leu ${pedidosLidos().length} / ${JSON.stringify(inval.corpo)}`);
+    zera(); silenciar();
+    const cookie = await getVendas(`date_from=${DIA}&date_to=${DIA}`, { loja_ativa_id: ML_B });
+    restaurar();
+    const ordCookie = (cookie.corpo.rows ?? []).map((x: any) => x.orderId).join(",");
+    assert(ordCookie === "a1", `cookie de B inativa virou identidade (ou A não resolveu): ${ordCookie}`);
     db = { lojas: [lojaML(ML_B, false, TOKEN_B)], pedidos: [pedidoML(ML_B, "b1", DIA, PASSADO())] };
     zera(); silenciar();
     const sem = await getVendas(`date_from=${DIA}&date_to=${DIA}`);

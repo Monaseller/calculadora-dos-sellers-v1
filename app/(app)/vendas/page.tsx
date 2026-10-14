@@ -6,6 +6,7 @@ import { calcularUltimos7Dias, DATE_PRESETS } from "@/lib/date-range-utils";
 import { ASYNC_SYNC_JOBS_ENABLED } from "@/lib/feature-flags";
 import type { FinanceiroVendaLive } from "@/lib/vendas/custo-produto-tipos";
 import { avisoCustoLive, custoCadastradoLive, seloLucroLive, textoFreteLive, totaisLive } from "./financeiro-live";
+import { CHAVE_LOJA_ML_VENDAS, type LojaMLVendas, corpoMarketplaceSyncManual, escolherLojaMLInicial, lojasMLDaLista, lojasMLDaRecusa } from "./loja-ml";
 
 // ── Tipos ──────────────────────────────────────────────────────────────────
 interface VendaRow {
@@ -72,6 +73,12 @@ export default function VendasPage() {
   const [shopeeRows, setShopeeRows] = useState<VendaRow[]>([]);
   const rows = [...mlRows, ...shopeeRows].sort((a, b) => b.data.localeCompare(a.data));
   const [mlLojaId,     setMlLojaId]     = useState<string | null>(null);
+  // CDS V2 Vendas A5: loja ML EXPLÍCITA (uma por vez). `lojasML` null = lista ainda não carregada.
+  const [lojasML,        setLojasML]        = useState<LojaMLVendas[] | null>(null);
+  const [lojaMLSel,      setLojaMLSel]      = useState<string | null>(null);
+  const [exigeEscolhaML, setExigeEscolhaML] = useState(false);
+  const lojaMLRef = useRef<string | null>(null);
+  const prontoMLRef = useRef(false);
   const [shopeeLojaId, setShopeeLojaId] = useState<string | null>(null);
   const [loading,   setLoading]   = useState(false);
   const [erro,      setErro]      = useState<string | null>(null);
@@ -172,7 +179,7 @@ export default function VendasPage() {
       const res = await fetch("/api/sync/manual", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ dateFrom: from, dateTo: to, marketplace: "todos", noBuffer: true }),
+        body: JSON.stringify({ dateFrom: from, dateTo: to, ...corpoMarketplaceSyncManual(lojaMLRef.current, lojasML), noBuffer: true }),
         signal: ctrl.signal,
       });
       clearTimeout(tid);
@@ -359,6 +366,11 @@ export default function VendasPage() {
     // beneficiando da separação mlRows/shopeeRows abaixo — uma falha aqui
     // não zera o outro marketplace nem os dados já exibidos deste.
     if (force) params.set("sync", "1");
+    // Vendas A5: o ML só é lido com a loja decidida (lista carregada; com 2+ lojas, escolhida) e SEMPRE
+    // com `loja_id` quando há loja — a resposta de uma loja anterior é descartada.
+    const lojaDaChamada = mkt === "ML" ? lojaMLRef.current : null;
+    if (mkt === "ML" && !prontoMLRef.current) return { falhou: false, data: null };
+    if (mkt === "ML" && lojaDaChamada) params.set("loja_id", lojaDaChamada);
 
     const url  = mkt === "ML" ? `/api/ml/vendas?${params}` : `/api/shopee/vendas?${params}`;
     const ctrl = new AbortController();
@@ -378,6 +390,19 @@ export default function VendasPage() {
     const falhou = !data || data.erro;
 
     if (mkt === "ML") {
+      if (lojaMLRef.current !== lojaDaChamada) return { falhou: true, data: null };   // loja trocada no meio
+      if (data?.codigo === "ML_STORE_SELECTION_REQUIRED") {
+        const lojas = lojasMLDaRecusa(data.lojas);
+        setLojasML(lojas); setExigeEscolhaML(true); prontoMLRef.current = false; setMlRows([]);
+        return { falhou: true, data };
+      }
+      if (data?.codigo === "LOJA_ML_INVALIDA") {   // loja escolhida deixou de valer: sem fallback, nova escolha
+        try { localStorage.removeItem(CHAVE_LOJA_ML_VENDAS); } catch {}
+        lojaMLRef.current = null; prontoMLRef.current = false;
+        setLojasML((ls) => (ls ?? []).filter((l) => l.id !== lojaDaChamada));
+        setLojaMLSel(null); setExigeEscolhaML(true); setMlRows([]); setMlLojaId(null);
+        return { falhou: true, data };
+      }
       if (data?.lojaId) setMlLojaId(data.lojaId);
       if (!falhou) setMlRows((data.rows ?? []) as VendaRow[]);
       // falha no ML: mlRows permanece como estava — nunca zera.
@@ -493,7 +518,7 @@ export default function VendasPage() {
 
   async function dispararUm(mkt: "ML" | "Shopee") {
     const chave  = chaveMkt(mkt);
-    const lojaId = mkt === "ML" ? mlLojaId : shopeeLojaId;
+    const lojaId = mkt === "ML" ? lojaMLRef.current : shopeeLojaId;   // Vendas A5: a loja ML ESCOLHIDA
 
     if (!lojaId) {
       setSyncMsg(prev => ({ ...prev, [chave]: "Loja não identificada ainda — aguarde o carregamento ou recarregue a página." }));
@@ -575,11 +600,38 @@ export default function VendasPage() {
     };
   }, []);
 
-  // Leitura ao montar E toda vez que o período, marketplace ou date_field mudar
-  // (NÃO dispara sync — só lê o cache atual; ver dispararSincronizar para o botão).
+  // Vendas A5: lojas ML do dono (GET /api/lojas — só ativas). 1 → ela; 2+ → a salva neste navegador se
+  // ainda está na lista, senão o dono escolhe. Falha da lista → a rota decide (loja única ou 409 seleção).
   useEffect(() => {
+    let vivo = true;
+    fetch("/api/lojas").then((r) => (r.ok ? r.json() : null)).catch(() => null).then((lista) => {
+      if (!vivo) return;
+      let salva: string | null = null;
+      try { salva = localStorage.getItem(CHAVE_LOJA_ML_VENDAS); } catch {}
+      const lojas = lista === null ? [] : lojasMLDaLista(lista);
+      const inicial = escolherLojaMLInicial(lojas, salva);
+      if (inicial.descartarSalva) { try { localStorage.removeItem(CHAVE_LOJA_ML_VENDAS); } catch {} }
+      setLojasML(lojas); setLojaMLSel(inicial.lojaId); setExigeEscolhaML(inicial.exigeEscolha);
+      lojaMLRef.current = inicial.lojaId; prontoMLRef.current = !inicial.exigeEscolha;
+    });
+    return () => { vivo = false; };
+  }, []); // eslint-disable-line
+
+  function trocarLojaML(id: string) {
+    if (!id || id === lojaMLRef.current) return;
+    lojaMLRef.current = id; prontoMLRef.current = true;
+    try { localStorage.setItem(CHAVE_LOJA_ML_VENDAS, id); } catch {}
+    setLojaMLSel(id); setExigeEscolhaML(false); setMlRows([]); setMlLojaId(null);   // a leitura vem do efeito abaixo
+  }
+
+  // Leitura ao montar E toda vez que o período, marketplace, date_field ou a loja ML escolhida mudar
+  // (NÃO dispara sync — só lê o cache atual; ver dispararSincronizar para o botão).
+  // Vendas A5: espera a lista de lojas ML (lojasML === null) para nunca ler o ML sem a loja decidida.
+  const lojasMLCarregadas = lojasML !== null;
+  useEffect(() => {
+    if (!lojasMLCarregadas) return;
     refetchTudo(dateFrom, dateTo, skuTags, [...filtrosCadastro, ...filtrosStatus], lojaAtiva);
-  }, [dateFrom, dateTo, lojaAtiva, dateField]); // eslint-disable-line
+  }, [dateFrom, dateTo, lojaAtiva, dateField, lojasMLCarregadas, lojaMLSel]); // eslint-disable-line
 
   const OPCOES_CADASTRO = [
     { key: "cadastrados",     label: "Cadastrados",     icone: "✅", cor: "#00D97E", bg: "rgba(0,217,126,0.12)" },
@@ -862,6 +914,20 @@ export default function VendasPage() {
         </div>
 
         {/* Cadastro — multi-select */}
+        {lojasML && lojasML.length >= 2 && lojaAtiva !== "Shopee" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: "5px" }}>
+            <label style={{ fontSize: "10px", fontWeight: 700, color: "#9099aa", letterSpacing: "0.4px" }}>LOJA ML</label>
+            <select
+              value={lojaMLSel ?? ""}
+              onChange={(e) => trocarLojaML(e.target.value)}
+              style={{ padding: "9px 12px", borderRadius: "10px", border: `1px solid ${exigeEscolhaML ? "rgba(255,107,0,0.6)" : "rgba(255,255,255,0.1)"}`, background: "#111318", color: "#d7dbe5", fontWeight: 700, fontSize: "13px" }}
+            >
+              {!lojaMLSel && <option value="">Escolha a loja do Mercado Livre</option>}
+              {lojasML.map((l) => <option key={l.id} value={l.id}>{l.nome}</option>)}
+            </select>
+          </div>
+        )}
+
         <div style={{ display: "flex", flexDirection: "column", gap: "5px", position: "relative" }}>
           <label style={{ fontSize: "10px", fontWeight: 700, color: "#9099aa", letterSpacing: "0.4px" }}>CADASTRO</label>
           <button

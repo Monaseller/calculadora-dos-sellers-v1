@@ -47,8 +47,8 @@
  *       não dispara escrita nova; o browser não grava os campos (CAMPOS_GRAVAVEIS);
  *   I12 I12_SALES_STORE_SCOPE_IS_EXPLICIT (Vendas A2): toda cadeia de `pedidos` filtra dono + loja, ou é uma
  *       forma de uma lista FECHADA (escrita/detecção por id, update de seleção escopada, enumeração admin,
- *       agregado do dono); /api/ml/vendas lê só a loja resolvida no servidor (sem loja → falha fechado) com a
- *       barreira multi-ML preservada; sync Shopee de B nunca lê/atualiza/sobrescreve A;
+ *       agregado do dono); /api/ml/vendas lê só a loja EXPLÍCITA validada no servidor (sem loja → falha fechado;
+ *       2+ sem escolha → 409 seleção, Vendas A5); sync Shopee de B nunca lê/atualiza/sobrescreve A;
  *   I13 I13_SALES_COST_COMES_FROM_MEUS_PRODUTOS (Vendas A3): custo da venda vem AO VIVO de Meus Produtos por um
  *       único serviço — leitura paginada por dono + marketplace + loja, sem `ativo`, chave exata
  *       marketplace|loja|item|variação (sem SKU, sem fallback entre variações); sem custo / sem produto /
@@ -61,6 +61,11 @@
  *   I15 I15_ML_SALE_IDENTITY_IS_DB_UNIQUE (Vendas A4-C): existe migration com UNIQUE parcial ML em pedidos sobre
  *       (loja_id, order_id, ml_item_id, coalesce(variation_id, '')), sem SKU/pedidos.id na identidade, com
  *       prechecks fail-closed e sem escrita de dados (UPDATE/DELETE/INSERT), NOT NULL, DROP ou CONCURRENTLY;
+ *   I16 I16_ML_VENDAS_STORE_IS_EXPLICIT (Vendas A5): Vendas ML mostra UMA loja escolhida (seleção, não agregação):
+ *       a rota usa só `?loja_id` (validada: dono + ML + ativa) ou a única; sem cookie, sem "primeira/mais recente",
+ *       sem fallback para outra loja, sem `.in("loja_id")`; inválida → 404 LOJA_ML_INVALIDA; a tela envia a loja,
+ *       descarta resposta de outra loja, não escolhe por ordem e o sync (job e manual) leva a loja escolhida;
+ *       vendas-hoje mantém a barreira e o helper/constante seguem em lib/ml-conexao.ts;
  *   Z   ZONAS PROTEGIDAS sem suíte comportamental própria (telas legadas de Vendas/Dashboard,
  *       constantes financeiras, supabase/**, vercel.json, .env.example, sync-worker.mjs): mudar
  *       exige re-baseline EXPLÍCITO de scripts/zonas-protegidas.json (aparece no diff), nunca
@@ -348,8 +353,11 @@ export function mudancasDeBancoSemRevisao(raiz: string, base: string, opcoes: { 
  */
 export const ROTAS_CATALOGO_ML = ["app/api/ml/importar-anuncios/route.ts", "app/api/ml/sync-precos/route.ts", "app/api/ml/sync-skus/route.ts", "app/api/ml/refresh-identidades/route.ts"];
 export const HELPER_LOJA_CATALOGO_ML = "lib/ml-loja-catalogo.ts";
-/** Rotas de vendas legadas ML (cache/dados não escopados por loja): 2+ contas ML falham fechado (MULTI_ML_VENDAS_BLOCKED). */
-export const ROTAS_VENDAS_LEGADAS_ML = ["app/api/ml/vendas/route.ts", "app/api/ml/vendas-hoje/route.ts"];
+/**
+ * Rotas de vendas ML que AINDA falham fechado com 2+ contas ML (MULTI_ML_VENDAS_BLOCKED). Vendas A5: a rota
+ * principal (/api/ml/vendas) saiu daqui — a loja é explícita e validada (I16); vendas-hoje continua barrada (A6).
+ */
+export const ROTAS_VENDAS_LEGADAS_ML = ["app/api/ml/vendas-hoje/route.ts"];
 /**
  * I7_ML_CREDENTIALS_ARE_STORE_SCOPED: o cookie de token ML não é fonte nem destino de credencial (só
  * DELETE legado em desconectar); nenhum seletor implícito ("mais recente"/primeira ativa) tem chamador;
@@ -752,7 +760,7 @@ export const PEDIDOS_SEM_LOJA_PERMITIDOS: Record<string, RegExp[]> = {
  * exatamente essas); (b) /api/ml/vendas: a loja da leitura sai do resolvedor do servidor (conta
  * resolvida, ou a loja da credencial vencida); sem loja → falha fechado ANTES de qualquer `pedidos`;
  * cache, frescor de hoje e páginas com `loja_id = lojaLeitura`; a barreira multi-ML continua antes da
- * resolução; (c) sync Shopee: "já existe" exige loja; leitura/UPDATE de status com loja; row existente de
+ * resolução (Vendas A5: no lugar da barreira, loja explícita ou 409 seleção — ver I16); (c) sync Shopee: "já existe" exige loja; leitura/UPDATE de status com loja; row existente de
  * OUTRA loja do dono nunca entra no upsert; (d) o agregado do dono (agente) é por dono (closure) e não
  * filtra loja — continua agregado, nunca single-store implícito.
  */
@@ -781,12 +789,14 @@ export function vendasSemEscopoDeLoja(raiz = RAIZ_V2): string[] {
   const rota = "app/api/ml/vendas/route.ts";
   const todo = tiraComentarios(ler(raiz, rota));
   const src = todo.slice(Math.max(0, todo.search(/export async function GET\(/)));
-  const iBarreira = src.search(/contarLojasMLAtivasDoDono\(userId\) > 1\) \{\s*return NextResponse\.json\(\{ erro: true, codigo: MULTI_ML_VENDAS_NOT_READY/);
-  const iConta = src.search(/const contaML = await resolverContaML\(/);
+  // Vendas A5: no lugar da barreira multi-ML, a loja é EXPLÍCITA e validada antes de qualquer `pedidos`
+  // (pedido `?loja_id` → resolverContaML sem fallback; sem pedido → só a loja única; 2+ → 409 seleção).
+  const iConta = src.search(/const contaML = lojaPedida\s*\?\s*await resolverContaML\(userId, lojaPedida\)\s*:\s*await resolverContaML\(userId, null, \{ permitirUnica: true \}\);/);
+  const iSelecao = src.search(/if \(!contaML\.ok && contaML\.motivo === "LOJA_NAO_DEFINIDA"\) \{[\s\S]{0,300}?return NextResponse\.json\(corpo, \{ status \}\);/);
   const iLoja = src.search(/const lojaLeitura: string \| null = contaML\.ok\s*\?\s*contaML\.lojaId\s*:\s*contaML\.motivo === "PRECISA_RECONECTAR" \? contaML\.loja\.id : null;/);
   const iFalha = src.search(/if \(!lojaLeitura\) \{\s*return NextResponse\.json\(/);
   const iPedidos = src.search(/\.from\("pedidos"\)/);
-  if (iBarreira < 0 || iConta < 0 || iBarreira > iConta) erros.push(`${rota}: barreira multi-ML ausente ou depois da resolução da conta`);
+  if (iConta < 0 || iSelecao < iConta || iPedidos < iSelecao) erros.push(`${rota}: loja explícita/validada (ou seleção 409) não precede a leitura de pedidos`);
   if (iLoja < 0 || iLoja < iConta) erros.push(`${rota}: loja da leitura não sai do resolvedor do servidor`);
   if (iFalha < 0 || iFalha < iLoja || iPedidos < 0 || iFalha > iPedidos) erros.push(`${rota}: sem loja resolvida não falha fechado antes de ler pedidos`);
   const cadeiasRota = cadeiasDe(raiz, rota, "pedidos");
@@ -929,7 +939,7 @@ export function identidadeVendaMLNaoExata(raiz = RAIZ_V2): string[] {
  * coalesce(variation_id, '')) WHERE marketplace = 'ML' (+ loja e item não nulos), sem SKU e sem pedidos.id na
  * identidade; o arquivo tem prechecks fail-closed (índice já existente, duplicata, sentinel '') e não escreve
  * dados (UPDATE/DELETE/INSERT), não muda nulabilidade, não derruba nada e não usa CONCURRENTLY (aplicação
- * transacional). Fórmula financeira e barreira multi-ML seguem sob I13 e I7.
+ * transacional). Fórmula financeira segue sob I13; a barreira multi-ML de vendas-hoje, sob I7.
  */
 export function identidadeVendaMLNaoNoBanco(raiz = RAIZ_V2): string[] {
   const erros: string[] = [];
@@ -952,6 +962,71 @@ export function identidadeVendaMLNaoNoBanco(raiz = RAIZ_V2): string[] {
   return erros;
 }
 
+// ── I16: loja ML EXPLÍCITA na tela/rota de Vendas (Vendas A5) ─────────────────────
+export const PAGINA_VENDAS = "app/(app)/vendas/page.tsx";
+export const HELPER_LOJA_ML_VENDAS = "app/(app)/vendas/loja-ml.ts";
+/**
+ * I16_ML_VENDAS_STORE_IS_EXPLICIT: (rota) a loja vem de `?loja_id` (resolverContaML SEM opt-in de única —
+ * inválida/inativa/de outro dono nunca cai para outra) ou, sem pedido, só da ÚNICA; 2+ → 409 com as lojas do
+ * PRÓPRIO dono; inválida → 404 LOJA_ML_INVALIDA antes de qualquer `pedidos`; sem cookie, sem getMLLojaAtiva,
+ * sem contagem/barreira, sem `.in("loja_id")` (agregação); sync e custo com a loja resolvida. (sync manual)
+ * `loja_id_ml` resolve SÓ essa loja (sem cookie, sem única). (tela) helper puro de seleção; `loja_id` em toda
+ * leitura ML; leitura ML só com a loja decidida; resposta de outra loja descartada; 409/404 tratados sem
+ * fallback; job de sync e sync manual com a loja escolhida; nada de `lojas[0]`/ordem para 2+. (helper) a salva
+ * só vale se estiver na lista; `[0]` só com UMA loja. vendas-hoje mantém a barreira; helper e constante em
+ * lib/ml-conexao.ts permanecem.
+ */
+export function lojaMLVendasNaoExplicita(raiz = RAIZ_V2): string[] {
+  const erros: string[] = [];
+  const rota = "app/api/ml/vendas/route.ts";
+  const todo = tiraComentarios(ler(raiz, rota));
+  const r = todo.slice(Math.max(0, todo.search(/export async function GET\(/)));
+  const iPedidos = r.search(/\.from\("pedidos"\)/);
+  // 1. loja pedida pela query; a pedida nunca tem opt-in de única (sem fallback)
+  if (!/const lojaPedida = url\.searchParams\.get\("loja_id"\);/.test(r)) erros.push(`${rota}: loja não vem de ?loja_id`);
+  const chamadas = [...r.matchAll(/resolverContaML\(([^;]*?)\)(?=\s*[:;])/g)].map((m) => m[1].replace(/\s+/g, " ").trim());
+  if (chamadas.length !== 2 || chamadas[0] !== "userId, lojaPedida" || chamadas[1] !== "userId, null, { permitirUnica: true }") erros.push(`${rota}: resolverContaML fora do contrato (pedida sem fallback | única sem pedido): ${JSON.stringify(chamadas)}`);
+  // 2. sem cookie / "mais recente" / barreira / agregação / ordem
+  if (/lerCookie|loja_ativa_id|cookies\(\)/.test(r)) erros.push(`${rota}: cookie usado como identidade da loja`);
+  if (/getMLLojaAtiva\(|contarLojasMLAtivasDoDono|MULTI_ML_VENDAS_NOT_READY/.test(todo)) erros.push(`${rota}: "mais recente"/contagem/barreira multi-ML de volta na rota principal`);
+  if (/\.in\(\s*"loja_id"/.test(todo) || /lojas\[\d\]/.test(r)) erros.push(`${rota}: agregação ou escolha de loja por ordem`);
+  // 3. 409 com as lojas do próprio dono; 404 inválida — ambos antes de pedidos
+  const i409 = r.search(/motivo: ML_STORE_SELECTION_REQUIRED,\s*lojas: contaML\.lojas\.map\(/);
+  const i404 = r.search(/if \(!contaML\.ok && contaML\.motivo === "LOJA_INVALIDA"\) \{\s*const \{ status, corpo \} = respostaSelecaoLojaML\(\{ ok: false, motivo: LOJA_ML_INVALIDA \}\);\s*return NextResponse\.json\(corpo, \{ status \}\);/);
+  if (i409 < 0 || iPedidos < 0 || i409 > iPedidos) erros.push(`${rota}: 409 de seleção não usa as lojas do dono antes de pedidos`);
+  if (i404 < 0 || iPedidos < 0 || i404 > iPedidos) erros.push(`${rota}: loja inválida/inativa não vira 404 LOJA_ML_INVALIDA antes de pedidos`);
+  // 4. sync e custo com a loja resolvida
+  const syncs = [...r.matchAll(/syncMLForUser\(([^)]*)\)/g)].map((m) => m[1].trim());
+  if (syncs.length < 1 || !syncs.every((a) => /, lojaML$/.test(a))) erros.push(`${rota}: sync ML sem a loja resolvida`);
+  if (!/carregarMapaCustoProduto\(supabase\(\), userId, "ML", lojaLeitura\)/.test(r)) erros.push(`${rota}: custo ao vivo fora da loja da leitura`);
+  // 5. sync manual: loja_id_ml resolve SÓ ela
+  const sm = tiraComentarios(ler(raiz, "app/api/sync/manual/route.ts"));
+  if (!/\.loja_id_ml\s*\?\s*resolverContaML\(userId, \(body as \{ loja_id_ml\?: string \}\)\.loja_id_ml\)\s*:/.test(sm)) erros.push("app/api/sync/manual/route.ts: loja_id_ml não resolve SÓ a loja escolhida (sem cookie/única)");
+  // 6. tela
+  const pg = tiraComentarios(ler(raiz, PAGINA_VENDAS));
+  if (!/from "\.\/loja-ml";/.test(pg)) erros.push(`${PAGINA_VENDAS}: não usa o helper puro de loja ML`);
+  if (!/if \(mkt === "ML" && !prontoMLRef\.current\) return/.test(pg)) erros.push(`${PAGINA_VENDAS}: lê ML antes de a loja estar decidida`);
+  const iSet = pg.search(/if \(mkt === "ML" && lojaDaChamada\) params\.set\("loja_id", lojaDaChamada\);/);
+  const iUrl = pg.search(/`\/api\/ml\/vendas\?\$\{params\}`/);
+  if (iSet < 0 || iUrl < 0 || iSet > iUrl) erros.push(`${PAGINA_VENDAS}: leitura ML sem loja_id antes da URL`);
+  if ((pg.match(/\/api\/ml\/vendas[?`"]/g) ?? []).length !== 1) erros.push(`${PAGINA_VENDAS}: chamada a /api/ml/vendas fora de lerMarketplace`);
+  if (!/if \(lojaMLRef\.current !== lojaDaChamada\) return \{ falhou: true, data: null \};/.test(pg)) erros.push(`${PAGINA_VENDAS}: resposta de outra loja não é descartada`);
+  if (!/data\?\.codigo === "ML_STORE_SELECTION_REQUIRED"/.test(pg) || !/data\?\.codigo === "LOJA_ML_INVALIDA"[\s\S]{0,200}?lojaMLRef\.current = null;/.test(pg)) erros.push(`${PAGINA_VENDAS}: 409/404 de loja sem tratamento (ou com fallback)`);
+  if (!/const lojaId = mkt === "ML" \? lojaMLRef\.current : shopeeLojaId;/.test(pg)) erros.push(`${PAGINA_VENDAS}: job de sync ML sem a loja escolhida`);
+  if (!/\.\.\.corpoMarketplaceSyncManual\(lojaMLRef\.current, lojasML\)/.test(pg) || /marketplace: "todos", noBuffer/.test(pg)) erros.push(`${PAGINA_VENDAS}: sync manual sem a loja ML escolhida`);
+  if (/lojasML\[\d\]|lojas\[\d\]/.test(pg)) erros.push(`${PAGINA_VENDAS}: loja ML escolhida por ordem`);
+  // 7. helper puro
+  const h = tiraComentarios(ler(raiz, HELPER_LOJA_ML_VENDAS));
+  if (/^import /m.test(h) || /fetch\(|localStorage\./.test(h)) erros.push(`${HELPER_LOJA_ML_VENDAS}: helper não é puro`);
+  if (!/if \(lojas\.length === 1\) return \{ lojaId: lojas\[0\]\.id/.test(h) || (h.match(/\[\d\]/g) ?? []).length !== 2 || !/const valida = salva !== null && lojas\.some\(\(l\) => l\.id === salva\);/.test(h)) erros.push(`${HELPER_LOJA_ML_VENDAS}: escolha inicial fora do contrato (única | salva na lista | escolha)`);
+  if (!/if \(lojasML && lojasML\.length >= 2\) return \{ marketplace: "Shopee" \};/.test(h)) erros.push(`${HELPER_LOJA_ML_VENDAS}: sync manual com 2+ lojas e nenhuma escolhida inclui o ML`);
+  // 8. vendas-hoje e helper legado preservados
+  const mc = tiraComentarios(ler(raiz, "lib/ml-conexao.ts"));
+  if (!/export const MULTI_ML_VENDAS_NOT_READY = "MULTI_ML_VENDAS_NOT_READY";/.test(mc) || !/export async function contarLojasMLAtivasDoDono\(/.test(mc)) erros.push("lib/ml-conexao.ts: helper/constante da barreira removidos");
+  if (!/MULTI_ML_VENDAS_NOT_READY/.test(tiraComentarios(ler(raiz, "app/api/ml/vendas-hoje/route.ts")))) erros.push("app/api/ml/vendas-hoje/route.ts: barreira multi-ML removida");
+  return erros;
+}
+
 export function invariantesV2(raiz = RAIZ_V2, opcoes: { zonas?: boolean } = {}): string[] {
   const erros: string[] = [];
   for (const v of canonicoAlcancaLegado(raiz)) erros.push(`I1 canônico→legado: ${v}`);
@@ -969,6 +1044,7 @@ export function invariantesV2(raiz = RAIZ_V2, opcoes: { zonas?: boolean } = {}):
   for (const v of custoDeVendaForaDeMeusProdutos(raiz)) erros.push(`I13 I13_SALES_COST_COMES_FROM_MEUS_PRODUTOS: ${v}`);
   for (const v of identidadeVendaMLNaoExata(raiz)) erros.push(`I14 I14_ML_SALE_ITEM_IDENTITY_IS_EXACT: ${v}`);
   for (const v of identidadeVendaMLNaoNoBanco(raiz)) erros.push(`I15 I15_ML_SALE_IDENTITY_IS_DB_UNIQUE: ${v}`);
+  for (const v of lojaMLVendasNaoExplicita(raiz)) erros.push(`I16 I16_ML_VENDAS_STORE_IS_EXPLICIT: ${v}`);
   if (opcoes.zonas !== false) for (const v of verificarZonas(raiz)) erros.push(`Z zona protegida sem re-baseline: ${v}`);
   return erros;
 }
