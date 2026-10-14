@@ -1178,7 +1178,16 @@ export function financeiroMLNaoReal(raiz = RAIZ_V2): string[] {
   const cand = corpoDaFuncao(m, "candidatosRecuperacaoFinanceiraML") ?? "";
   if (!/if \(v\.status !== "paid"\) continue;/.test(cand) || !/return !f \|\| financeiroPendenteElegivel\(f\.pedido, f\.envio\) !== null;/.test(cand) || !/\.sort\(\(a, b\) => \(a\[1\] < b\[1\] \? 1 :/.test(cand)) erros.push("recuperação: venda sem linha financeira não elegível, não-paga elegível ou ordem não é mais-recentes-primeiro");
   const elg = corpoDaFuncao(m, "financeiroPendenteElegivel") ?? "";
-  if (/"CONFERIDO"|SEM_PERMISSAO|DIVERGENTE/.test(elg) || !/if \(p\.billing_status === "PENDENTE"\) return "billing";/.test(elg)) erros.push("elegibilidade do retry inclui pedido completo ou erro de integração (loop de consulta)");
+  // A3.2-D: DIVERGENTE só entra pela reavaliação ÚNICA de versão antiga (a versão atual nunca é reconsultada em loop)
+  const elgSemVersao = elg.replace(/if \(p\.billing_status === "DIVERGENTE" && \(p\.fonte_versao \?\? FONTE_VERSAO_ML_FINANCEIRO\) < FONTE_VERSAO_ML_FINANCEIRO\) return "versao";/, "");
+  if (/"CONFERIDO"|SEM_PERMISSAO|DIVERGENTE/.test(elgSemVersao) || !/if \(p\.billing_status === "PENDENTE"\) return "billing";/.test(elg) || elgSemVersao === elg) erros.push("elegibilidade do retry inclui pedido completo, erro de integração ou DIVERGENTE da versão atual (loop de consulta)");
+  // A3.2-D BILLING: sale_fee.net do provider é a fonte; fallback só CVV* (nunca CFFE/frete); ±1 centavo
+  const cb = corpoDaFuncao(m, "conferirBillingML") ?? "";
+  if (!/let total: number \| null = num\(doPedido\?\.sale_fee\?\.net\);/.test(cb) || !/if \(total === null\) \{/.test(cb) || !/sub\.startsWith\("CVV"\)/.test(cb) || /CFFE|CVVML|CVVPRC|CVVFNU/.test(cb.replace(/\/\/.*$/gm, "")) || !/Math\.abs\(total - tarifa\) <= 0\.01/.test(cb)) erros.push("billing: fonte fora de sale_fee.net, fallback fora de CVV*, allowlist fechada ou tolerância alterada");
+  // A3.2-D DESCONTOS: discount_not_found = sem desconto (exato); desconto_meli = só rebate da tarifa (funding sale_fee)
+  if (!/const semDesconto = d\.status === 404 && d\.corpo\?\.error === "discount_not_found";/.test(c) || !/if \(d\.classe !== "OK" && !semDesconto\) registrar\(/.test(c)) erros.push("descontos: 404 sem o código discount_not_found tratado como sem desconto (ou o código virou erro)");
+  if (!/if \(d\?\.supplier\?\.funding_mode === "sale_fee"\) meli \+= total - seller;/.test(ped)) erros.push("descontos: desconto_meli soma cupom/benefício além do rebate da tarifa");
+  if (!/export const FONTE_VERSAO_ML_FINANCEIRO = 2;/.test(m)) erros.push("versão da lógica financeira não avançou com a correção de billing/descontos");
   // uma rodada automática por carga da página (sem loop)
   const pgr = tiraComentarios(ler(raiz, PAGINA_VENDAS));
   if (!/if \(!falhou && !retryFinanceiroRef\.current && typeof data\.financeiroPendente === "number" && data\.financeiroPendente > 0\) \{\s*retryFinanceiroRef\.current = true;/.test(pgr) || /retryFinanceiroRef\.current = false/.test(pgr) || /order_ids/.test(pgr) || (pgr.match(/\/api\/ml\/vendas\/financeiro/g) ?? []).length !== 1) erros.push("tela: recuperação sem trava de uma rodada por carga (loop), com lista de pedidos ou fora do ponto único");

@@ -19,12 +19,13 @@ export async function lerFinanceiroRealML(cliente: SupabaseClient, userId: strin
     const pedidos: PedidoFinanceiroML[] = [];
     for (let i = 0; i < ids.length; i += LOTE) {
       const { data, error } = await cliente.from("ml_financeiro_pedidos")
-        .select("order_id, pack_id, shipment_id, itens, receita_produto, tarifa_venda, tarifa_origem, desconto_vendedor, desconto_meli, descontos_status, billing_status, billing_tarifa")
+        .select("order_id, pack_id, shipment_id, itens, receita_produto, tarifa_venda, tarifa_origem, desconto_vendedor, desconto_meli, descontos_status, billing_status, billing_tarifa, fonte_versao")
         .eq("user_id", userId).eq("loja_id", lojaId).in("order_id", ids.slice(i, i + LOTE));
       if (error) throw new Error(error.message);
       for (const r of (data ?? []) as any[]) pedidos.push({
         ...r, order_id: String(r.order_id), itens: Number(r.itens), receita_produto: Number(r.receita_produto),
         tarifa_venda: num(r.tarifa_venda), desconto_vendedor: num(r.desconto_vendedor), desconto_meli: num(r.desconto_meli), billing_tarifa: num(r.billing_tarifa),
+        fonte_versao: r.fonte_versao == null ? undefined : Number(r.fonte_versao),
       });
     }
     const envios = new Map<string, EnvioFinanceiroML>();

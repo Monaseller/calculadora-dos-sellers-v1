@@ -132,13 +132,16 @@ const orderGolden = (extra: Record<string, unknown> = {}) => ({
 });
 const DESCONTOS = { details: [{ type: "discount", items: [{ id: ITEM, amounts: { seller: 0.52, total: 1.28 } }], supplier: { funding_mode: "sale_fee" } }] };
 const CUSTOS = { gross_amount: 16.92, receiver: { cost: 6.99, compensation: 0 }, senders: [{ cost: 6.95, compensation: 0, discounts: [{ type: "mandatory", promoted_amount: 2.98 }] }] };
-const billingDe = (ids: string[]) => ({ results: [{ details: ids.flatMap((o) => {
-  const fee = pedidosML[o]?.order_items?.reduce((a: number, i: any) => a + (i.sale_fee ?? 0) * i.quantity, 0) ?? 0;
-  return [
+// formato REAL auditado (A3.2-D): um resultado por pedido com order_id + sale_fee {gross, net, rebate} + linhas, inclusive o
+// FRETE (CFFE) — que nunca pode entrar na tarifa conferida
+const billingDe = (ids: string[]) => ({ results: ids.map((o) => {
+  const fee = Math.round((pedidosML[o]?.order_items?.reduce((a: number, i: any) => a + (i.sale_fee ?? 0) * i.quantity, 0) ?? 0) * 100) / 100;
+  return { order_id: Number(o), sale_fee: { gross: fee, net: fee, rebate: 0, discount: 0, discount_reason: null }, details: [
     { charge_info: { detail_type: "CHARGE", detail_sub_type: "CVVML", detail_amount: Math.round((fee - 0.03) * 100) / 100 }, sales_info: [{ order_id: Number(o) }] },
     { charge_info: { detail_type: "CHARGE", detail_sub_type: "CVVPRC", detail_amount: 0.03 }, sales_info: [{ order_id: Number(o) }] },
-  ];
-}) }] });
+    { charge_info: { detail_type: "CHARGE", detail_sub_type: "CFFE", detail_amount: 13.94 }, sales_info: [{ order_id: Number(o) }] },
+  ] };
+}) });
 function respostaPadrao(u: URL): Resp {
   const p = u.pathname;
   if (p === "/orders/search") {
@@ -552,7 +555,8 @@ async function principal() {
     let r = await coletar({ pedidos: [orderGolden()] }, RECENTE);
     assert(r.naoProntos === 1 && r.integracao === 0 && finDe(ORDER)?.descontos_status === "INDISPONIVEL" && logs.some((l) => /PROVIDER_DATA_NOT_READY .*etapa=discounts http=404/.test(l)), JSON.stringify(r));
     semear(); logs.length = 0;
-    roteiro["/billing/"] = [{ status: 200, corpo: { results: [{ details: [{ charge_info: { detail_type: "CHARGE", detail_amount: 4.16 }, sales_info: [{ order_id: Number(ORDER) }] }] }] } }];
+    // billing ainda sendo lançado (A3.2-D): só a linha CVVML 4,16 e sem sale_fee.net → fallback 4,16 ≠ 4,19
+    roteiro["/billing/"] = [{ status: 200, corpo: { results: [{ order_id: Number(ORDER), details: [{ charge_info: { detail_type: "CHARGE", detail_sub_type: "CVVML", detail_amount: 4.16 }, sales_info: [{ order_id: Number(ORDER) }] }] }] } }];
     r = await coletar({ pedidos: [orderGolden()] }, RECENTE);
     assert(finDe(ORDER)?.billing_status === "PENDENTE" && r.naoProntos === 1 && r.integracao === 0, `${finDe(ORDER)?.billing_status} ${JSON.stringify(r)}`);
   });
@@ -604,6 +608,109 @@ async function principal() {
     assert(chamadas.length === 0 && g.corpo.financeiroPendente === 1, `chamadas=${chamadas.length} pendente=${g.corpo.financeiroPendente}`);
     const pg = fonte("app/(app)/vendas/page.tsx");
     assert(/retryFinanceiroRef\.current = true;/.test(pg) && !/retryFinanceiroRef\.current = false/.test(pg) && (pg.match(/\/api\/ml\/vendas\/financeiro/g) ?? []).length === 1, "loop possível");
+  });
+
+  secao("\n[7. billing + descontos auditados em pedidos reais (A3.2-D)]");
+  const ln = (sub: string, valor: number, order = ORDER) => ({ charge_info: { detail_type: "CHARGE", detail_sub_type: sub, detail_amount: valor }, sales_info: [{ order_id: Number(order) }] });
+  const billingReal = (order: string, linhas: any[], saleFee?: { gross: number; net: number; rebate: number }) => ({ results: [{ order_id: Number(order), ...(saleFee ? { sale_fee: { ...saleFee, discount: 0, discount_reason: null } } : {}), details: linhas }] });
+  t("BILLFIX-1/2. golden: sale_fee.net 4,19 + CFFE 13,94 no billing → billing_tarifa 4,19 CONFERIDO (frete nunca entra)", () => {
+    const b = billingReal(ORDER, [ln("CVVML", 4.16), ln("CVVPRC", 0.03), ln("CFFE", 13.94)], { gross: 4.95, net: 4.19, rebate: 0.76 });
+    assert(JSON.stringify(F.conferirBillingML(ORDER, 4.19, 200, b)) === JSON.stringify({ billing_status: "CONFERIDO", billing_tarifa: 4.19 }), JSON.stringify(F.conferirBillingML(ORDER, 4.19, 200, b)));
+    const semNet = billingReal(ORDER, [ln("CVVML", 4.16), ln("CVVPRC", 0.03), ln("CFFE", 13.94)]);
+    assert(c(F.conferirBillingML(ORDER, 4.19, 200, semNet).billing_tarifa) === 419, "CFFE entrou no fallback");
+  });
+  t("BILLFIX-3. CVVFNU (taxa de recebimento) entra no fallback CVV* — pedido A real: 0,02 + 0,52 + 1,93 = 2,47", () => {
+    const A = "2000018969272464";
+    const b = billingReal(A, [ln("CVVFNU", 0.02, A), ln("CVVPRC", 0.52, A), ln("CVVML", 1.93, A), ln("CFFE", 6.85, A)]);
+    assert(JSON.stringify(F.conferirBillingML(A, 2.47, 200, b)) === JSON.stringify({ billing_status: "CONFERIDO", billing_tarifa: 2.47 }), JSON.stringify(F.conferirBillingML(A, 2.47, 200, b)));
+  });
+  t("BILLFIX-4/5. sale_fee.net tem prioridade sobre as linhas — pedido C real: linhas 0,09 (ainda sendo lançadas), net 11,61 → CONFERIDO", () => {
+    const C = "2000018977975502";
+    const b = billingReal(C, [ln("CVVPRC", 0.09, C)], { gross: 12.45, net: 11.61, rebate: 0.84 });
+    assert(JSON.stringify(F.conferirBillingML(C, 11.61, 200, b)) === JSON.stringify({ billing_status: "CONFERIDO", billing_tarifa: 11.61 }), JSON.stringify(F.conferirBillingML(C, 11.61, 200, b)));
+  });
+  t("BILLFIX-6. sem sale_fee.net → fallback CVV*; sem linha de tarifa → PENDENTE (nunca soma frete)", () => {
+    assert(c(F.conferirBillingML(ORDER, 4.19, 200, billingReal(ORDER, [ln("CVVML", 4.16), ln("CVVPRC", 0.03)])).billing_tarifa) === 419, "fallback");
+    assert(F.conferirBillingML(ORDER, 4.19, 200, billingReal(ORDER, [ln("CFFE", 13.94)])).billing_status === "PENDENTE", "só frete virou tarifa");
+  });
+  t("BILLFIX-7. sale_fee.net realmente diferente (> 1 centavo) → DIVERGENTE; 1 centavo → CONFERIDO", () => {
+    assert(F.conferirBillingML(ORDER, 4.19, 200, billingReal(ORDER, [], { gross: 4.5, net: 4.5, rebate: 0 })).billing_status === "DIVERGENTE", "divergência aceita");
+    assert(F.conferirBillingML(ORDER, 4.19, 200, billingReal(ORDER, [], { gross: 4.2, net: 4.2, rebate: 0 })).billing_status === "CONFERIDO", "tolerância de 1 centavo");
+  });
+  t("BILLFIX-8. billing 429 continua TRANSIENT (PENDENTE, nunca DIVERGENTE)", async () => {
+    semear(); logs.length = 0; roteiro["/billing/"] = [{ status: 429 }, { status: 429 }, { status: 429 }];
+    const r = await K.coletarFinanceiroML({ userId: U, lojaId: ML_A, accessToken: TOKEN_A }, { pedidos: [orderGolden()] }, depsFalsos());
+    assert(r.transitorios === 1 && finDe(ORDER)?.billing_status === "PENDENTE" && F.conferirBillingML(ORDER, 4.19, 429, null).billing_status === "PENDENTE", JSON.stringify(r));
+  });
+  t("DISCFIX-1/2. 404 discount_not_found → OK com zeros, sem INTEGRATION_ERROR (também numa venda de 1 min)", async () => {
+    for (const agora of [() => new Date(), () => new Date("2026-10-14T10:08:10.000Z")]) {
+      semear(); logs.length = 0; roteiro[`/orders/${ORDER}/discounts`] = [{ status: 404, corpo: { error: "discount_not_found", message: "Discount not found", status: 404, cause: "" } }];
+      const r = await K.coletarFinanceiroML({ userId: U, lojaId: ML_A, accessToken: TOKEN_A }, { pedidos: [orderGolden()] }, { ...depsFalsos(), agora });
+      const f = finDe(ORDER)!;
+      assert(f.descontos_status === "OK" && c(f.desconto_vendedor) === 0 && c(f.desconto_meli) === 0, JSON.stringify(f));
+      assert(r.integracao === 0 && r.naoProntos === 0 && !logs.some((l) => /etapa=discounts/.test(l)), logs.join(" | "));
+      assert(F.financeiroPendenteElegivel(f as any, envioDe(SHIP)[0] as any) === null, "sem desconto ficou elegível ao retry");
+    }
+  });
+  t("DISCFIX-3. outro 404 em descontos NÃO vira zero: segue INTEGRATION_ERROR (fora da carência), INDISPONIVEL", async () => {
+    semear(); logs.length = 0; roteiro[`/orders/${ORDER}/discounts`] = [{ status: 404, corpo: { error: "not_found", message: "resource not found" } }];
+    const r = await K.coletarFinanceiroML({ userId: U, lojaId: ML_A, accessToken: TOKEN_A }, { pedidos: [orderGolden()] }, depsFalsos());
+    assert(r.integracao === 1 && finDe(ORDER)?.descontos_status === "INDISPONIVEL" && finDe(ORDER)?.desconto_meli === null, JSON.stringify(r));
+  });
+  t("DISCFIX-4/5/6. desconto_meli = SÓ o rebate da tarifa (discount + funding sale_fee); cupom fica fora — pedido E real e golden", () => {
+    const E = { id: 2000018959301854, order_items: [{ item: { id: "MLB5007770012" }, quantity: 1, unit_price: 30, sale_fee: 3.37 }] };
+    const descE = { details: [
+      { type: "coupon", items: [{ id: "MLB5007770012", amounts: { seller: 0, total: 2.54 } }], supplier: { funding_mode: null } },
+      { type: "discount", items: [{ id: "MLB5007770012", amounts: { seller: 10.34, total: 11.1 } }], supplier: { funding_mode: "sale_fee" } },
+    ] };
+    const pe = F.extrairPedidoFinanceiroML(E, descE);
+    assert(c(pe.desconto_meli) === 76 && c(pe.desconto_vendedor) === 1034, `meli ${pe.desconto_meli} vendedor ${pe.desconto_vendedor} (cupom 2,54 entrou?)`);
+    const pg = F.extrairPedidoFinanceiroML(orderGolden(), DESCONTOS);
+    assert(c(pg.desconto_meli) === 76 && c(pg.desconto_vendedor) === 52, JSON.stringify(pg));
+  });
+  t("DISCFIX-7. desconto do vendedor não entra de novo no líquido (golden segue 30,10)", async () => {
+    semear(); await sync();
+    const l = F.liquidoPedidoML(finDe(ORDER) as any, envioDe(SHIP)[0] as any);
+    assert(c(l.liquido) === 3010 && l.qualidade === "ACTUAL" && c(finDe(ORDER)?.billing_tarifa) === 419, `${JSON.stringify(l)} billing ${finDe(ORDER)?.billing_tarifa}`);
+  });
+  t("VERFIX-1. DIVERGENTE da versão antiga (1) é elegível UMA vez ('versao'); da versão atual não", () => {
+    const base = { order_id: ORDER, pack_id: PACK, shipment_id: SHIP, itens: 1, receita_produto: 41.24, tarifa_venda: 4.19, tarifa_origem: "PROVIDER" as const, desconto_vendedor: 0.52, desconto_meli: 0.76, descontos_status: "OK" as const, billing_status: "DIVERGENTE" as const, billing_tarifa: 18.13 };
+    const envio = { shipment_id: SHIP, pack_id: PACK, pedidos: [ORDER], frete_comprador: 6.99, frete_vendedor: 6.95, frete_bruto_referencia: 16.92 };
+    assert(F.financeiroPendenteElegivel({ ...base, fonte_versao: 1 }, envio) === "versao", "legado não elegível");
+    assert(F.financeiroPendenteElegivel({ ...base, fonte_versao: F.FONTE_VERSAO_ML_FINANCEIRO }, envio) === null, "DIVERGENTE atual elegível (loop)");
+    assert(F.FONTE_VERSAO_ML_FINANCEIRO === 2, "versão não avançou");
+  });
+  const legadoDivergente = () => {
+    historico([[ORDER]]);
+    db.ml_financeiro_pedidos.push({ user_id: U, loja_id: ML_A, order_id: ORDER, pack_id: PACK, shipment_id: SHIP, itens: 1, receita_produto: 41.24, tarifa_venda: 4.19, tarifa_origem: "PROVIDER", desconto_vendedor: 0.52, desconto_meli: 0.76, descontos_status: "OK", billing_status: "DIVERGENTE", billing_tarifa: 18.13, fonte_versao: 1, buscado_em: "2026-10-14T18:55:27.449Z" });
+    db.ml_financeiro_envios.push({ user_id: U, loja_id: ML_A, shipment_id: SHIP, pack_id: PACK, pedidos: [ORDER], frete_comprador: 6.99, frete_vendedor: 6.95, frete_bruto_referencia: 16.92, fonte_versao: 1, buscado_em: "2026-10-14T18:55:27.449Z" });
+  };
+  t("VERFIX-2. recuperação do legado (golden DIVERGENTE 18,13 v1) → CONFERIDO 4,19, fonte_versao 2, ACTUAL 30,10", async () => {
+    legadoDivergente();
+    const g0 = await getVendas(`date_from=${DIA}&date_to=${DIA}&loja_id=${ML_A}`);
+    assert(g0.corpo.financeiroPendente === 1, `legado não contado: ${g0.corpo.financeiroPendente}`);
+    const r = await postRetry({ loja_id: ML_A, date_from: DIA, date_to: DIA });
+    const f = finDe(ORDER)!;
+    assert(r.corpo.actual === 1 && f.billing_status === "CONFERIDO" && c(f.billing_tarifa) === 419 && f.fonte_versao === 2, `${JSON.stringify(r.corpo)} ${JSON.stringify(f)}`);
+    const g = await getVendas(`date_from=${DIA}&date_to=${DIA}&loja_id=${ML_A}`);
+    const row = (g.corpo.rows ?? []).find((x: any) => x.orderId === ORDER);
+    assert(row?.financeiro?.qualidadeFinanceira === "ACTUAL" && c(row.financeiro.liquidoMarketplace) === 3010 && row.packId === PACK && g.corpo.financeiroPendente === 0, JSON.stringify(row?.financeiro));
+  });
+  t("VERFIX-3/4. DIVERGENTE real na versão nova NÃO é reconsultado (sem loop de refresh)", async () => {
+    legadoDivergente();
+    roteiro["/billing/"] = [{ status: 200, corpo: billingReal(ORDER, [ln("CVVML", 4.6)], { gross: 4.6, net: 4.6, rebate: 0 }) }];
+    await postRetry({ loja_id: ML_A, date_from: DIA, date_to: DIA });
+    assert(finDe(ORDER)?.billing_status === "DIVERGENTE" && finDe(ORDER)?.fonte_versao === 2, JSON.stringify(finDe(ORDER)));
+    chamadas = [];
+    const r2 = await postRetry({ loja_id: ML_A, date_from: DIA, date_to: DIA });
+    const g = await getVendas(`date_from=${DIA}&date_to=${DIA}&loja_id=${ML_A}`);
+    assert(r2.corpo.tentados === 0 && chamadas.length === 0 && g.corpo.financeiroPendente === 0, `${JSON.stringify(r2.corpo)} chamadas=${chamadas.length}`);
+  });
+  t("VERFIX-5/6. ACTUAL segue não elegível; venda SEM linha financeira segue elegível", async () => {
+    semear(); await sync();
+    assert((await getVendas(`date_from=${DIA}&date_to=${DIA}&loja_id=${ML_A}`)).corpo.financeiroPendente === 0, "ACTUAL elegível");
+    historico([[ORDER]]);
+    assert((await getVendas(`date_from=${DIA}&date_to=${DIA}&loja_id=${ML_A}`)).corpo.financeiroPendente === 1, "sem linha não elegível");
   });
 
   secao("\n[4. guard]");

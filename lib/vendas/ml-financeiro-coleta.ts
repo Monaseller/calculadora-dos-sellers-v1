@@ -149,10 +149,13 @@ export async function coletarFinanceiroML(
     }
     idades.set(id, idadePedidoMLms(order, agoraReal()));
     const d = await getML(`/orders/${encodeURIComponent(id)}/discounts`);
-    const p = extrairPedidoFinanceiroML(order, d.classe === "OK" ? d.corpo : null);
+    // A3.2-D (auditado): 404 com error "discount_not_found" = pedido SEM desconto (não é erro) — tem precedência sobre a
+    // carência genérica; qualquer outro 404 segue a classificação normal (carência/integração).
+    const semDesconto = d.status === 404 && d.corpo?.error === "discount_not_found";
+    const p = extrairPedidoFinanceiroML(order, d.classe === "OK" ? d.corpo : semDesconto ? { details: [] } : null);
     extraidos.set(id, p);
     if (d.classe === DEFERIDO) { registrar({ order_id: id, pack_id: p.pack_id, shipment_id: p.shipment_id, etapa: "discounts", classe: DEFERIDO }); return; }
-    if (d.classe !== "OK") registrar({ order_id: id, pack_id: p.pack_id, shipment_id: p.shipment_id, etapa: "discounts", classe: d.classe, http: d.status });
+    if (d.classe !== "OK" && !semDesconto) registrar({ order_id: id, pack_id: p.pack_id, shipment_id: p.shipment_id, etapa: "discounts", classe: d.classe, http: d.status });
 
     let pedidosDoEnvio: string[] | null = [p.order_id];
     if (p.pack_id) {

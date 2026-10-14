@@ -15,7 +15,12 @@
  * inventado: o líquido de um pedido só existe quando o envio tem EXATAMENTE aquele pedido.
  */
 
-export const FONTE_VERSAO_ML_FINANCEIRO = 1;
+/**
+ * Versão da lógica que gravou a linha financeira. 1 = A3.2-B/C (billing somava TODAS as cobranças — inclusive o
+ * frete CFFE — e desconto_meli somava cupom); 2 = A3.2-D (billing = sale_fee.net do provider; desconto_meli = só o
+ * rebate da tarifa). DIVERGENTE de versão anterior é reavaliado UMA vez (ver financeiroPendenteElegivel).
+ */
+export const FONTE_VERSAO_ML_FINANCEIRO = 2;
 
 export type OrigemTarifaML = "PROVIDER" | "AUSENTE";
 export type StatusDescontosML = "OK" | "INDISPONIVEL";
@@ -35,6 +40,8 @@ export interface PedidoFinanceiroML {
   descontos_status: StatusDescontosML;
   billing_status: StatusBillingML;
   billing_tarifa: number | null;
+  /** Versão da lógica que gravou a linha (ausente = registro ainda não lido do banco). */
+  fonte_versao?: number;
 }
 
 /** Linha de public.ml_financeiro_envios (sem user_id/loja_id). */
@@ -67,9 +74,13 @@ export function extrairPedidoFinanceiroML(order: any, descontos: any | null): Om
   const detalhes: any[] | null = descontos && Array.isArray(descontos.details) ? descontos.details : null;
   if (detalhes) {
     vendedor = 0; meli = 0;
+    // A3.2-D (auditado): desconto do VENDEDOR = parte do vendedor (já no preço); desconto_meli = SÓ o rebate da tarifa —
+    // parte do ML num "discount" com supplier.funding_mode "sale_fee" (bate com billing sale_fee.rebate). Cupom
+    // (funding null) é benefício do ML ao comprador, NÃO rebate da tarifa: fica fora de desconto_meli.
     for (const d of detalhes) for (const it of (Array.isArray(d?.items) ? d.items : [])) {
       const total = num(it?.amounts?.total) ?? 0, seller = num(it?.amounts?.seller) ?? 0;
-      vendedor += seller; meli += total - seller;
+      vendedor += seller;
+      if (d?.supplier?.funding_mode === "sale_fee") meli += total - seller;
     }
     vendedor = cent(vendedor); meli = cent(meli);
   }
@@ -103,19 +114,30 @@ export function extrairEnvioFinanceiroML(shipmentId: string, packId: string | nu
 }
 
 /**
- * Conferência da tarifa pelo billing (GET billing order details): Σ `detail_amount` das cobranças (CHARGE)
- * do pedido = tarifa (±1 centavo) → CONFERIDO. 403 → SEM_PERMISSAO; sem resposta (429/erro) → PENDENTE.
+ * Conferência da tarifa pelo billing (GET billing order details) — A3.2-D, auditado em pedidos reais:
+ *   FONTE PRINCIPAL: `results[pedido].sale_fee.net` — agregado do provider (bate com Σ sale_fee × qtd mesmo enquanto as
+ *   linhas de cobrança ainda estão sendo lançadas);
+ *   FALLBACK (sem sale_fee.net): Σ das linhas CHARGE do pedido cujo `detail_sub_type` começa com "CVV" (família de
+ *   tarifa: CVVML, CVVPRC, CVVFNU…). Frete (CFFE) e qualquer outra cobrança NUNCA entram.
+ * ±1 centavo → CONFERIDO; diferente → DIVERGENTE; 403 → SEM_PERMISSAO; sem resposta (429/erro) ou sem dado → PENDENTE.
  */
 export function conferirBillingML(orderId: string, tarifa: number | null, httpStatus: number, corpo: any | null): { billing_status: StatusBillingML; billing_tarifa: number | null } {
   if (httpStatus === 401 || httpStatus === 403) return { billing_status: "SEM_PERMISSAO", billing_tarifa: null };
   if (httpStatus !== 200 || !corpo) return { billing_status: "PENDENTE", billing_tarifa: null };
-  let soma = 0, achou = false;
-  for (const r of (Array.isArray(corpo.results) ? corpo.results : [])) for (const d of (Array.isArray(r?.details) ? r.details : [])) {
-    const doPedido = (Array.isArray(d?.sales_info) ? d.sales_info : []).some((s: any) => String(s?.order_id) === orderId);
-    if (doPedido && d?.charge_info?.detail_type === "CHARGE" && num(d.charge_info.detail_amount) !== null) { soma += d.charge_info.detail_amount; achou = true; }
+  const resultados: any[] = Array.isArray(corpo.results) ? corpo.results : [];
+  const doPedido = resultados.find((r) => String(r?.order_id) === orderId);
+  let total: number | null = num(doPedido?.sale_fee?.net);
+  if (total === null) {
+    let soma = 0, achou = false;
+    for (const r of resultados) for (const d of (Array.isArray(r?.details) ? r.details : [])) {
+      const ehDoPedido = (Array.isArray(d?.sales_info) ? d.sales_info : []).some((s: any) => String(s?.order_id) === orderId);
+      const sub = String(d?.charge_info?.detail_sub_type ?? "");
+      if (ehDoPedido && d?.charge_info?.detail_type === "CHARGE" && sub.startsWith("CVV") && num(d.charge_info.detail_amount) !== null) { soma += d.charge_info.detail_amount; achou = true; }
+    }
+    if (!achou) return { billing_status: "PENDENTE", billing_tarifa: null };
+    total = soma;
   }
-  if (!achou) return { billing_status: "PENDENTE", billing_tarifa: null };
-  const total = cent(soma);
+  total = cent(total);
   return { billing_status: tarifa !== null && Math.abs(total - tarifa) <= 0.01 ? "CONFERIDO" : "DIVERGENTE", billing_tarifa: total };
 }
 
@@ -170,13 +192,15 @@ export function classeComCarenciaML(classe: ClasseErroML, etapa: string, http: n
  * COMPARTILHADO por vários pedidos (sem rateio do provider — não é falha técnica); billing SEM_PERMISSAO ou
  * DIVERGENTE (erro de integração: investigar, não repetir a cada carga de página).
  */
-export function financeiroPendenteElegivel(p: PedidoFinanceiroML, envio: EnvioFinanceiroML | null): "billing" | "descontos" | "tarifa" | "frete" | "pack" | null {
+export function financeiroPendenteElegivel(p: PedidoFinanceiroML, envio: EnvioFinanceiroML | null): "billing" | "descontos" | "tarifa" | "frete" | "pack" | "versao" | null {
   if (p.tarifa_origem !== "PROVIDER" || p.tarifa_venda === null) return "tarifa";
   if (p.shipment_id) {
     if (!envio || envio.frete_vendedor === null) return "frete";
     if (p.pack_id && envio.pedidos === null) return "pack";
   }
   if (p.billing_status === "PENDENTE") return "billing";
+  // A3.2-D: DIVERGENTE gravado pela lógica antiga (somava frete CFFE) é reavaliado UMA vez; DIVERGENTE da versão atual não
+  if (p.billing_status === "DIVERGENTE" && (p.fonte_versao ?? FONTE_VERSAO_ML_FINANCEIRO) < FONTE_VERSAO_ML_FINANCEIRO) return "versao";
   if (p.descontos_status === "INDISPONIVEL") return "descontos";
   return null;
 }

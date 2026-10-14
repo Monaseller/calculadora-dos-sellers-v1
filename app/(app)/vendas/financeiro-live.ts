@@ -68,7 +68,7 @@ export function detalheLiquidoML(f: FinanceiroVendaLive | null | undefined): str
     `Frete vendedor: ${m(f.freteVendedor)}`,
     `Frete pago pelo comprador: ${m(d.freteComprador)} (não é custo do vendedor)`,
     `Desconto do vendedor: ${m(d.descontoVendedor)} (já no preço)`,
-    `Desconto ML / rebate campanha: ${m(d.descontoMeli)} (já na tarifa)`,
+    `Rebate ML na tarifa: ${m(d.descontoMeli)} (já na tarifa)`,
     `Billing: ${d.billing === "CONFERIDO" ? "conferido" : d.billing === "PENDENTE" ? "pendente" : d.billing === "SEM_PERMISSAO" ? "sem permissão" : "divergente"}`,
   ];
   if (d.motivo === "frete_compartilhado") linhas.push("Envio compartilhado por vários pedidos: sem rateio do Mercado Livre");
