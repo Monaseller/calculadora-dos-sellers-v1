@@ -123,6 +123,20 @@ function lerCmp(L: Leitor): Expr {
       const m = re.test(String(x)); return neg ? !m : m;
     };
   }
+  if (L.eh("in") || (L.eh("not") && L.eh("in", 1))) {
+    // x [NOT] IN (a, b, ...) com a semântica de três valores do SQL: x nulo → nulo; achou → verdadeiro;
+    // não achou com algum elemento nulo → nulo; senão falso (NOT inverte, nulo continua nulo).
+    const neg = L.opc("not"); L.tomar("in"); L.tomar("(");
+    const lista: Expr[] = []; do lista.push(lerSoma(L)); while (L.opc(","));
+    L.tomar(")");
+    return (c) => {
+      const x = a(c);
+      if (x === null || x === undefined) return null;
+      const vs = lista.map((f) => f(c));
+      const r = vs.some((v) => v !== null && v !== undefined && textoCanonico(v) === textoCanonico(x)) ? true : vs.some((v) => v === null || v === undefined) ? null : false;
+      return r === null ? null : neg ? !r : r;
+    };
+  }
   if (L.opc("is")) {
     const neg = L.opc("not");
     if (L.opc("null")) return (c) => { const v = a(c); const n = v === null || v === undefined; return neg ? !n : n; };

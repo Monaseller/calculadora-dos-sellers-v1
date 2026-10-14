@@ -50,6 +50,7 @@ async function principal() {
   const S = await import("../lib/vendas/custo-produto");
   const V = await import("../app/(app)/vendas/codigos-venda");
   const G2 = await import("./_guard-v2");
+  const SQL = await import("./_guard-v2-sql");
 
   const golden = () => {
     const p = F.extrairPedidoFinanceiroML(ORDER_GOLDEN, DESCONTOS_GOLDEN);
@@ -199,6 +200,56 @@ async function principal() {
     const pedidos = codigo.match(/ALTER TABLE public\.pedidos [^;]+;/g) ?? [];
     assert(pedidos.length === 2 && pedidos[0] === "ALTER TABLE public.pedidos ADD COLUMN tarifa_origem text NULL;" && /^ALTER TABLE public\.pedidos ADD CONSTRAINT pedidos_tarifa_origem_check CHECK \(tarifa_origem IS NULL OR /.test(pedidos[1]), `pedidos alterado além da coluna aditiva: ${pedidos.join(" | ")}`);
     assert(!/\b(UPDATE|DELETE|INSERT|TRUNCATE)\s|\bDROP\b|SET NOT NULL/i.test(codigo), "migration escreve/remove/restringe dados");
+  });
+
+  secao("\n[7. CHECK de pedidos.tarifa_origem NOT VALID — sem varredura histórica]");
+  // Executa as instruções REAIS de `pedidos` da migration no interpretador offline (_guard-v2-sql).
+  const sqlMig = readFileSync(join(process.cwd(), "supabase/migrations/20261115_ml_financeiro.sql"), "utf8").replace(/\r\n/g, "\n");
+  const cmds = SQL.comandosDoScript(sqlMig);
+  const doPedidos = cmds.filter((x) => /^ALTER TABLE public\.pedidos /i.test(x));
+  const check = doPedidos.find((x) => /ADD CONSTRAINT pedidos_tarifa_origem_check/i.test(x)) ?? "";
+  const bancoPedidos = (linhas: Record<string, unknown>[], comColuna: boolean) => {
+    const db: any = { tabelas: { "public.pedidos": linhas.map((l) => ({ ...l })) }, temp: {}, funcoes: {}, gatilhos: [], config: {}, locks: [] };
+    SQL.declararColunas(db, "public.pedidos", [{ nome: "id", tipo: "text", nula: false, padrao: null }, ...(comColuna ? [{ nome: "tarifa_origem", tipo: "text", nula: true, padrao: null }] : [])]);
+    return db;
+  };
+  const rodar = (db: any, comandos: string[]) => SQL.executarScript(`BEGIN;\n${comandos.map((x) => x + ";").join("\n")}\nCOMMIT;`, db, () => {});
+  t("FIN2-NV1. migration: pedidos_tarifa_origem_check é NOT VALID", () => {
+    assert(doPedidos.length === 2 && /\)\s*NOT VALID$/i.test(check), `CHECK: ${check}`);
+  });
+  t("FIN2-NV2. migration NÃO contém VALIDATE CONSTRAINT (validação é operação futura separada)", () => {
+    assert(!cmds.some((x) => /VALIDATE\s+CONSTRAINT/i.test(x)), "VALIDATE CONSTRAINT na migration");
+  });
+  t("FIN2-NV3. sem UPDATE/backfill: linhas históricas não são reescritas nem VARRIDAS no ADD CONSTRAINT", () => {
+    assert(!cmds.some((x) => /^(UPDATE|DELETE|INSERT)\b/i.test(x)), "escrita de dados na migration");
+    const hist = [{ id: "h1", tarifa_origem: null }, { id: "h2", tarifa_origem: null }];
+    const r = rodar(bancoPedidos(hist, false), doPedidos);
+    assert(r.ok && JSON.stringify(r.db.tabelas["public.pedidos"]) === JSON.stringify(hist), `histórico alterado: ${r.ok ? JSON.stringify(r.db.tabelas["public.pedidos"]) : r.erro}`);
+    // linha histórica fora do domínio: com NOT VALID o ADD não a examina; sem NOT VALID o mesmo ADD varre e falha
+    const sentinela = [{ id: "h1", tarifa_origem: "FORA_DO_DOMINIO" }];
+    assert(rodar(bancoPedidos(sentinela, true), [check]).ok, "ADD CONSTRAINT varreu o histórico");
+    const semNotValid = rodar(bancoPedidos(sentinela, true), [check.replace(/\s*NOT VALID$/i, "")]);
+    assert(!semNotValid.ok && /violated by some row/.test(semNotValid.erro), "controle: CHECK validado não varreu (emulação cega)");
+    assert(rodar(bancoPedidos([], true), [check]).ok && (rodar(bancoPedidos([], true), [check]) as any).db.checks[0].validado === false, "constraint marcada como validada");
+  });
+  t("FIN2-NV4. CHECK aceita só NULL / PROVIDER / ESTIMATE em INSERT e UPDATE novos", () => {
+    const r = rodar(bancoPedidos([{ id: "h1", tarifa_origem: null }], false), doPedidos);
+    assert(r.ok, r.ok ? "" : r.erro);
+    const db = r.db;
+    for (const v of [null, "PROVIDER", "ESTIMATE"]) SQL.inserirLinha(db, "public.pedidos", { id: `n-${v}`, tarifa_origem: v }, () => {});
+    for (const v of ["AUSENTE", "provider", "", "LEGADO"]) {
+      let erro = ""; try { SQL.inserirLinha(db, "public.pedidos", { id: `x-${v}`, tarifa_origem: v }, () => {}); } catch (e: any) { erro = String(e?.message ?? e); }
+      assert(/violates check constraint "pedidos_tarifa_origem_check"/.test(erro), `INSERT ${JSON.stringify(v)} aceito`);
+    }
+    let erroUpd = ""; try { SQL.atualizarLinha(db, "public.pedidos", "h1", { tarifa_origem: "X" }, () => {}); } catch (e: any) { erroUpd = String(e?.message ?? e); }
+    assert(/violates check constraint/.test(erroUpd), "UPDATE inválido aceito");
+    SQL.atualizarLinha(db, "public.pedidos", "h1", { tarifa_origem: "PROVIDER" }, () => {});
+  });
+  t("FIN2-NV5. runtime compatível: o sync grava só PROVIDER | ESTIMATE (dentro do CHECK); a rota lê pedidos com *", () => {
+    const sy = readFileSync(join(process.cwd(), "lib/sync-ml.ts"), "utf8");
+    const valores = /const tarifaOrigem: "PROVIDER" \| "ESTIMATE" = saleFeeML !== null \? "PROVIDER" : "ESTIMATE";/.test(sy) ? ["PROVIDER", "ESTIMATE"] : [];
+    assert(valores.length === 2 && valores.every((v) => check.includes(`'${v}'`)) && /tarifa_origem:\s*tarifaOrigem,/.test(sy), "sync grava valor fora do CHECK");
+    assert(/buildPedidosQuery\("\*"\)/.test(readFileSync(join(process.cwd(), "app/api/ml/vendas/route.ts"), "utf8")), "rota passou a nomear colunas de pedidos");
   });
 
   await fila;

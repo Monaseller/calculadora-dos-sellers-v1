@@ -31,6 +31,12 @@
 -- ORDEM DE RELEASE: esta migration ANTES do codigo que grava
 -- `tarifa_origem` (o upsert do sync falharia sem a coluna).
 --
+-- LOCK: ADD COLUMN nula sem default = so catalogo (sem rewrite). O CHECK
+-- e NOT VALID: nao varre as ~585 mil linhas historicas sob ACCESS
+-- EXCLUSIVE (todas NULL de qualquer forma); linhas NOVAS e UPDATEs ja sao
+-- verificados. VALIDATE CONSTRAINT fica para operacao SEPARADA, depois do
+-- deploy estabilizado (divida registrada) — nao faz parte deste arquivo.
+--
 -- ROLLBACK (MANUAL — NAO EXECUTADO AQUI)
 -- ---------------------------------------------------------------------
 --     BEGIN;
@@ -89,6 +95,6 @@ ALTER TABLE public.ml_financeiro_pedidos ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.ml_financeiro_envios ENABLE ROW LEVEL SECURITY;
 
 ALTER TABLE public.pedidos ADD COLUMN tarifa_origem text NULL;
-ALTER TABLE public.pedidos ADD CONSTRAINT pedidos_tarifa_origem_check CHECK (tarifa_origem IS NULL OR tarifa_origem IN ('PROVIDER', 'ESTIMATE'));
+ALTER TABLE public.pedidos ADD CONSTRAINT pedidos_tarifa_origem_check CHECK (tarifa_origem IS NULL OR tarifa_origem IN ('PROVIDER', 'ESTIMATE')) NOT VALID;
 
 COMMIT;
