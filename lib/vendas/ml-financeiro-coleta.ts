@@ -26,6 +26,11 @@
  * Erros do provider: TRANSIENT_ERROR (429, 502/503/504, timeout, rede) → retry com backoff e, se persistir,
  * PENDENTE; INTEGRATION_ERROR (404 inesperado, 4xx, 500, estrutura inválida) → sem retry cego, LOGADO com
  * contexto sanitizado (loja, pedido, pack, envio, etapa, HTTP) — nunca token nem dado do comprador.
+ * A3.2-F RATE LIMIT + LOGS: o billing que esgota as tentativas com 429 abre um DISJUNTOR pelo resto da execução — nenhuma
+ * chamada de billing nova; os pedidos restantes ficam como estão (elegíveis, nada rebaixado) e contam como rate_limited.
+ * Billing 200 VÁLIDO sem cobrança do pedido = PROVIDER_DATA_NOT_READY em qualquer idade (o ML lança o billing depois
+ * de 5 min — visto com 312/478/606 s). Logs por pedido são AMOSTRA (AMOSTRAS_LOG_ML por classe); o resumo é SEMPRE
+ * emitido, uma vez, no fim — o volume de log não cresce com o número de pedidos.
  * A3.2-C.3 CARÊNCIA: venda com < 5 min (relógio do provider: date_closed/date_created) cujo subrecurso
  * financeiro ainda não existe (404/200 incompleto em descontos, pack, custos do envio ou billing) é
  * PROVIDER_DATA_NOT_READY — PENDENTE e elegível ao refresh, não bug. A 1ª tentativa é sempre imediata.
@@ -62,6 +67,13 @@ export const TIMEOUT_REQUISICAO_MS = 10_000;
  */
 export const JANELA_PROVIDER_MS = 40_000;
 export const DEFERIDO = "DEFERRED_BY_RUNTIME_BUDGET" as const;
+/**
+ * A3.2-F — linhas de log por pedido são AMOSTRA: no máximo 5 por classe (INTEGRATION_ERROR, TRANSIENT_ERROR,
+ * PROVIDER_DATA_NOT_READY, DEFERRED). Uma execução normal em produção registrou 4 linhas de falha (sync 4654084);
+ * 5 por classe mantém tudo de uma execução saudável e corta a tempestade (o retry real passou de 250 linhas e perdeu o
+ * resumo no teto de log da Vercel). As contagens completas ficam no resumo.
+ */
+export const AMOSTRAS_LOG_ML = 5;
 
 type LinhaBase = { user_id: string; loja_id: string; fonte_versao: number; buscado_em: string };
 export interface DepsColetaML {
@@ -81,10 +93,14 @@ export interface ResultadoColetaML {
   pedidos: number; envios: number; billingPendente: number;
   actual: number; pendentes: number; integracao: number; transitorios: number; naoProntos: number; adiados: number; jaCompletos: number;
   planos: Record<TipoPlanoML, number>; lotes: number;
+  /** A3.2-F: pedidos cujo billing ficou sem resposta por 429 (lote que esgotou as tentativas + os que o disjuntor pulou). */
+  limitados: number;
+  /** Linhas de log por pedido suprimidas (além da amostra) — as contagens acima seguem completas. */
+  logsOmitidos: number;
   falhas: FalhaFinanceiraML[];
 }
 export type EntradaColetaML = readonly string[] | { pedidos: readonly any[] };
-type RespML = { status: number; corpo: any | null; classe: ClasseErroML | "OK" | typeof DEFERIDO };
+type RespML = { status: number; corpo: any | null; classe: ClasseErroML | "OK" | typeof DEFERIDO; retryAfter?: string | null };
 type Billing = { billing_status: StatusBillingML; billing_tarifa: number | null };
 
 const CAMPOS_PEDIDO = ["pack_id", "shipment_id", "itens", "receita_produto", "tarifa_venda", "tarifa_origem", "desconto_vendedor", "desconto_meli", "descontos_status", "billing_status", "billing_tarifa", "fonte_versao"] as const;
@@ -104,14 +120,35 @@ export async function coletarFinanceiroML(
 ): Promise<ResultadoColetaML> {
   const r: ResultadoColetaML = {
     pedidos: 0, envios: 0, billingPendente: 0, actual: 0, pendentes: 0, integracao: 0, transitorios: 0, naoProntos: 0, adiados: 0, jaCompletos: 0,
-    planos: { FULL_PIPELINE: 0, BILLING_ONLY: 0, DISCOUNTS_ONLY: 0, SHIPPING_ONLY: 0, MULTI_STAGE: 0, SKIP: 0 }, lotes: 0, falhas: [],
+    planos: { FULL_PIPELINE: 0, BILLING_ONLY: 0, DISCOUNTS_ONLY: 0, SHIPPING_ONLY: 0, MULTI_STAGE: 0, SKIP: 0 }, lotes: 0, limitados: 0, logsOmitidos: 0, falhas: [],
   };
   const log = deps.log ?? ((l: string) => console.error(l));
+  const ctx = { modoSync: !Array.isArray(entrada), pedidos: 0, adiados: new Set<string>() };
+  try {
+    await coletar(conta, entrada, deps, prazo, r, ctx, log);
+    return r;
+  } finally {
+    // A3.2-F: o resumo sai SEMPRE (inclusive em falha de leitura/gravação), uma vez, e não depende das linhas anteriores
+    r.adiados = ctx.adiados.size;
+    const pl = r.planos;
+    log(`[ml-financeiro] resumo loja=${conta.lojaId} modo=${ctx.modoSync ? "sync" : "retry"} pedidos=${ctx.pedidos} ja_completos=${r.jaCompletos} gravados=${r.pedidos} actual=${r.actual} pendentes=${r.pendentes} transient=${r.transitorios} integracao=${r.integracao} provider_data_not_ready=${r.naoProntos} deferred_by_runtime_budget=${r.adiados} rate_limited=${r.limitados} lotes=${r.lotes} full=${pl.FULL_PIPELINE} billing_only=${pl.BILLING_ONLY} discounts_only=${pl.DISCOUNTS_ONLY} shipping_only=${pl.SHIPPING_ONLY} multi=${pl.MULTI_STAGE} logs_omitidos=${r.logsOmitidos}`);
+  }
+}
+
+async function coletar(
+  conta: { userId: string; lojaId: string; accessToken: string },
+  entrada: EntradaColetaML,
+  deps: DepsColetaML,
+  prazo: { ate?: number },
+  r: ResultadoColetaML,
+  ctx: { modoSync: boolean; pedidos: number; adiados: Set<string> },
+  log: (linha: string) => void,
+): Promise<void> {
   const agoraMs = deps.relogio ?? (() => Date.now());
   const ate = prazo.ate ?? agoraMs() + JANELA_PROVIDER_MS;
   const agoraReal = () => deps.agora?.() ?? new Date();   // idade da venda: relógio de parede vs horário do provider
   const idades = new Map<string, number | null>();
-  const modoSync = !Array.isArray(entrada);
+  const modoSync = ctx.modoSync;
   const payloads = new Map<string, any>();
   if (modoSync) for (const o of (entrada as { pedidos: readonly any[] }).pedidos) if (o?.id != null) payloads.set(String(o.id), o);
   // mais recente primeiro: o retry já chega ordenado pelo servidor; o sync é ordenado pelo relógio do provider
@@ -119,10 +156,11 @@ export async function coletarFinanceiroML(
   const ids = modoSync
     ? [...payloads.keys()].sort((a, b) => (recencia(a) < recencia(b) ? 1 : recencia(a) > recencia(b) ? -1 : 0))
     : [...new Set((entrada as readonly string[]).map(String))];
+  ctx.pedidos = ids.length;
 
   /** GET com timeout; retry com backoff SÓ em erro transitório; nenhuma chamada (nem retry) depois do prazo. */
   async function getML(caminho: string, extra: Record<string, string> = {}): Promise<RespML> {
-    let status = 0;
+    let status = 0, retryAfter: string | null = null;
     for (let t = 0; t < TENTATIVAS_ML; t++) {
       if (t > 0) await deps.esperar(BACKOFF_BASE_MS * 2 ** (t - 1));
       if (agoraMs() >= ate) return { status, corpo: null, classe: t === 0 ? DEFERIDO : "TRANSIENT_ERROR" };
@@ -132,19 +170,22 @@ export async function coletarFinanceiroML(
         const res = await deps.fetch(API_ML + caminho, { method: "GET", headers: { Authorization: `Bearer ${conta.accessToken}`, ...extra }, signal: ctrl.signal });
         status = res.status;
         const classe = classificarHttpML(status);
-        if (classe === "TRANSIENT_ERROR") continue;
+        if (classe === "TRANSIENT_ERROR") { if (status === 429) retryAfter = (res.headers?.get?.("retry-after") ?? "").replace(/[^0-9]/g, "").slice(0, 6) || null; continue; }
         let corpo: any = null; try { corpo = await res.json(); } catch {}
         return { status, corpo, classe };
       } catch { status = 0; } // timeout/rede → transitório
       finally { clearTimeout(tid); }
     }
-    return { status, corpo: null, classe: "TRANSIENT_ERROR" };
+    return { status, corpo: null, classe: "TRANSIENT_ERROR", retryAfter };
   }
 
-  const adiados = new Set<string>();
-  const registrar = (f: (Omit<FalhaFinanceiraML, "classe"> & { classe: ClasseErroML }) | { order_id: string; pack_id: string | null; shipment_id: string | null; etapa: string; classe: typeof DEFERIDO }) => {
+  const adiados = ctx.adiados;
+  const amostras = new Map<string, number>();
+  /** A3.2-F: a linha por pedido só sai enquanto a classe não esgotou a amostra; o resto só conta. */
+  const amostra = (classe: string) => { const n = amostras.get(classe) ?? 0; amostras.set(classe, n + 1); if (n >= AMOSTRAS_LOG_ML) r.logsOmitidos++; return n < AMOSTRAS_LOG_ML; };
+  const registrar = (f: (Omit<FalhaFinanceiraML, "classe"> & { classe: ClasseFinanceiraML }) | { order_id: string; pack_id: string | null; shipment_id: string | null; etapa: string; classe: typeof DEFERIDO }) => {
     if (f.classe === DEFERIDO) {
-      if (!adiados.has(f.order_id)) { adiados.add(f.order_id); log(`[ml-financeiro] ${DEFERIDO} loja=${conta.lojaId} order=${f.order_id} pack=${f.pack_id ?? "-"} shipment=${f.shipment_id ?? "-"} etapa=${f.etapa}`); }
+      if (!adiados.has(f.order_id)) { adiados.add(f.order_id); if (amostra(DEFERIDO)) log(`[ml-financeiro] ${DEFERIDO} loja=${conta.lojaId} order=${f.order_id} pack=${f.pack_id ?? "-"} shipment=${f.shipment_id ?? "-"} etapa=${f.etapa}`); }
       return;
     }
     const idade = idades.get(f.order_id) ?? null;
@@ -152,7 +193,7 @@ export async function coletarFinanceiroML(
     r.falhas.push(g);
     if (g.classe === "INTEGRATION_ERROR") r.integracao++; else if (g.classe === "TRANSIENT_ERROR") r.transitorios++; else r.naoProntos++;
     const idadeLog = idade !== null ? ` order_age_s=${Math.round(idade / 1000)}` : "";
-    log(`[ml-financeiro] ${g.classe} loja=${conta.lojaId} order=${g.order_id} pack=${g.pack_id ?? "-"} shipment=${g.shipment_id ?? "-"} etapa=${g.etapa} http=${g.http}${idadeLog}`);
+    if (amostra(g.classe)) log(`[ml-financeiro] ${g.classe} loja=${conta.lojaId} order=${g.order_id} pack=${g.pack_id ?? "-"} shipment=${g.shipment_id ?? "-"} etapa=${g.etapa} http=${g.http}${idadeLog}`);
   };
 
   // A3.2-E: o merge monotônico PRECISA do estado existente — leitura falhou → nada é consultado nem gravado
@@ -160,7 +201,7 @@ export async function coletarFinanceiroML(
   try { existentes = deps.lerExistentes ? await deps.lerExistentes(ids) : new Map(); }
   catch {
     log(`[ml-financeiro] ERRO leitura do financeiro existente loja=${conta.lojaId} — nada consultado nem gravado (merge sem base)`);
-    return r;
+    return;
   }
   const enviosBanco = new Map<string, EnvioFinanceiroML>();
   for (const e of existentes.values()) if (e.envio) enviosBanco.set(e.envio.shipment_id, e.envio);
@@ -238,11 +279,24 @@ export async function coletarFinanceiroML(
     }
   }
 
+  /**
+   * A3.2-F DISJUNTOR: um lote de billing que esgotou as tentativas com 429 abre o disjuntor — nenhum billing novo nesta
+   * execução (o próximo lote não é "testado"). Os pedidos pulados não ganham `billing` obtido: a linha fica como está.
+   */
+  let billingLimitado = false;
   /** Billing do MICRO-LOTE (1 chamada ≤ 20 ids) — só dos pedidos cujo plano inclui billing e que têm base. */
   async function billingDoLote(lote: readonly string[]): Promise<void> {
     const alvoB = lote.filter((id) => precisa(id, "billing") && (existentes.has(id) || !!obtidos.get(id)?.pedido));
     if (!alvoB.length) return;
+    if (billingLimitado) { r.limitados += alvoB.length; return; }
     const b = await getML(`/billing/integration/group/ML/order/details?order_ids=${alvoB.map(encodeURIComponent).join(",")}`);
+    if (b.classe === "TRANSIENT_ERROR" && b.status === 429) {
+      billingLimitado = true;
+      r.limitados += alvoB.length;
+      log(`[ml-financeiro] billing_rate_limited loja=${conta.lojaId} lote=${r.lotes} pedidos=${alvoB.length} tentativas=${TENTATIVAS_ML} retry_after=${b.retryAfter ?? "-"} — disjuntor aberto: sem billing até o fim da execução`);
+    }
+    // 200 sem a lista de resultados = resposta impossível (erro de integração); 200 válido sem cobrança = ainda não lançado
+    const estruturaInvalida = b.classe === "OK" && !Array.isArray(b.corpo?.results);
     const aplicar = (id: string, conf0: Billing, base: PedidoFinanceiroML | null) => {
       const ob = obtidos.get(id)!;
       // A3.2-C.3: billing parcial de venda na carência não é divergência — fica PENDENTE (elegível ao refresh)
@@ -252,7 +306,9 @@ export async function coletarFinanceiroML(
       if (b.classe === DEFERIDO) registrar({ ...ctx, etapa: "billing", classe: DEFERIDO });
       else if (b.classe !== "OK") registrar({ ...ctx, etapa: "billing", classe: b.classe, http: b.status });
       else if (conf0.billing_status === "DIVERGENTE") registrar({ ...ctx, etapa: "billing_divergente", classe: "INTEGRATION_ERROR", http: 200 });
-      else if (conf0.billing_status === "PENDENTE") registrar({ ...ctx, etapa: "billing", classe: "INTEGRATION_ERROR", http: 200 });   // 200 sem cobrança do pedido
+      else if (estruturaInvalida) registrar({ ...ctx, etapa: "billing_estrutura", classe: "INTEGRATION_ERROR", http: 200 });
+      // A3.2-F (produção: 312/478/606 s): 200 válido sem cobrança do pedido = o ML ainda não lançou — em QUALQUER idade
+      else if (conf0.billing_status === "PENDENTE") registrar({ ...ctx, etapa: "billing", classe: "PROVIDER_DATA_NOT_READY", http: 200 });
       ob.billing = conf;   // PENDENTE nunca rebaixa um veredito existente (mesclarPedidoFinanceiroML)
     };
     const semIdade: Array<{ id: string; conf0: Billing; base: PedidoFinanceiroML | null }> = [];
@@ -311,13 +367,9 @@ export async function coletarFinanceiroML(
   await gravar();
 
   // qualidade pelo estado FINAL mesclado (linha + envio do banco/desta execução)
-  r.adiados = adiados.size;
   for (const [id, p] of finais) {
     const envio = p.shipment_id ? enviosBanco.get(p.shipment_id) ?? existentes.get(id)?.envio ?? null : null;
     if (liquidoPedidoML(p, envio).qualidade === "ACTUAL") r.actual++; else r.pendentes++;
     if (p.billing_status === "PENDENTE") r.billingPendente++;
   }
-  const pl = r.planos;
-  log(`[ml-financeiro] resumo loja=${conta.lojaId} modo=${modoSync ? "sync" : "retry"} pedidos=${ids.length} ja_completos=${r.jaCompletos} gravados=${r.pedidos} actual=${r.actual} pendentes=${r.pendentes} transient=${r.transitorios} integracao=${r.integracao} provider_data_not_ready=${r.naoProntos} deferred_by_runtime_budget=${r.adiados} lotes=${r.lotes} full=${pl.FULL_PIPELINE} billing_only=${pl.BILLING_ONLY} discounts_only=${pl.DISCOUNTS_ONLY} shipping_only=${pl.SHIPPING_ONLY} multi=${pl.MULTI_STAGE}`);
-  return r;
 }

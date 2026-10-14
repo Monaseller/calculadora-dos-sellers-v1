@@ -102,5 +102,5 @@ export async function POST(request: Request) {
     return null;
   });
   if (!r) return NextResponse.json({ ok: false, tentados: alvo.length });
-  return NextResponse.json({ ok: true, candidatos: alvo.length, tentados: alvo.length - r.adiados, actual: r.actual, pendentes: r.pendentes, integracao: r.integracao, adiados: r.adiados });
+  return NextResponse.json({ ok: true, candidatos: alvo.length, tentados: alvo.length - r.adiados, actual: r.actual, pendentes: r.pendentes, integracao: r.integracao, adiados: r.adiados, limitados: r.limitados });
 }

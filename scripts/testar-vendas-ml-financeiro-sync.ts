@@ -119,7 +119,7 @@ const requireOriginal = (Module as any).prototype.require;
 };
 
 // ── Mercado Livre FALSO ─────────────────────────────────────────────────────
-type Resp = { status: number; corpo?: unknown; erro?: "timeout" };
+type Resp = { status: number; corpo?: unknown; erro?: "timeout"; headers?: Record<string, string> };
 let chamadas: { caminho: string; token: string | null; metodo: string }[] = [];
 let pedidosML: Record<string, any> = {};           // order_id → payload
 let roteiro: Record<string, Resp[]> = {};          // prefixo do caminho → respostas em sequência (depois 200 normal)
@@ -169,7 +169,7 @@ globalThis.fetch = (async (url: any, init?: any) => {
   const chave = Object.keys(roteiro).find((k) => caminho.startsWith(k) && roteiro[k].length > 0);
   const r = chave ? roteiro[chave].shift()! : respostaPadrao(u);
   if (r.erro === "timeout") throw Object.assign(new Error("aborted"), { name: "AbortError" });
-  return { ok: r.status === 200, status: r.status, json: async () => r.corpo ?? {}, text: async () => JSON.stringify(r.corpo ?? {}) } as any;
+  return { ok: r.status === 200, status: r.status, headers: { get: (k: string) => r.headers?.[k.toLowerCase()] ?? null }, json: async () => r.corpo ?? {}, text: async () => JSON.stringify(r.corpo ?? {}) } as any;
 }) as any;
 
 const lojaML = (id: string, token: string) => ({ id, user_id: U, marketplace: "ML", ativo: true, nickname: "MONAMOR", nome: "MONAMOR", seller_id: "744240004", access_token: token, refresh_token: "<R>", token_expires_at: FUTURO(), created_at: "2026-01-01" });
@@ -363,7 +363,7 @@ async function principal() {
   });
   t("RETRYFIN-10. sem loop: uma rodada por carga (trava nunca é rearmada; a releitura não dispara outra)", async () => {
     const pg = fonte("app/(app)/vendas/page.tsx");
-    assert(/if \(!falhou && !retryFinanceiroRef\.current && typeof data\.financeiroPendente === "number" && data\.financeiroPendente > 0\)/.test(pg) && /retryFinanceiroRef\.current = true;/.test(pg) && !/retryFinanceiroRef\.current = false/.test(pg), "trava ausente");
+    assert(/if \(deveRecuperarFinanceiroML\(\{ falhou, rodadaUsada: retryFinanceiroRef\.current, /.test(pg) && /retryFinanceiroRef\.current = true;/.test(pg) && !/retryFinanceiroRef\.current = false/.test(pg), "trava ausente");
     assert(/useEffect\(\(\) => \{\s*if \(!finPendente\) return;[\s\S]{0,900}?\}, \[finPendente\]\);/.test(pg), "recuperação fora de efeito único");
   });
   t("RETRYFIN-11. recuperação com sucesso → a releitura mostra ACTUAL 30,10 e nenhum pendente", async () => {
@@ -587,10 +587,10 @@ async function principal() {
     const r = await postRetry({ loja_id: ML_A, date_from: DIA, date_to: DIA });
     assert(r.corpo.actual === 1 && finDe(ORDER)?.billing_status === "CONFERIDO", JSON.stringify(r.corpo));
   });
-  t("GRACE-8. venda com 13 min e billing/descontos ausentes → INTEGRATION_ERROR (sem PROVIDER_DATA_NOT_READY)", async () => {
+  t("GRACE-8. venda com 13 min: descontos 404 → INTEGRATION_ERROR; billing 200 sem cobrança → PROVIDER_DATA_NOT_READY (A3.2-F, sem idade)", async () => {
     semear(); logs.length = 0; roteiro["/billing/"] = [SEM_COBRANCA]; roteiro[`/orders/${ORDER}/discounts`] = [{ status: 404, corpo: {} }];
     const r = await coletar({ pedidos: [orderGolden()] }, ANTIGA);
-    assert(r.naoProntos === 0 && r.integracao === 2 && !logs.some((l) => /PROVIDER_DATA_NOT_READY/.test(l)), JSON.stringify(r));
+    assert(r.naoProntos === 1 && r.integracao === 1 && logs.some((l) => /INTEGRATION_ERROR .*etapa=discounts http=404/.test(l)) && logs.some((l) => /PROVIDER_DATA_NOT_READY .*etapa=billing http=200 order_age_s=780/.test(l)), `${JSON.stringify({ ...r, falhas: r.falhas.length })} ${logs.join(" | ")}`);
     assert(F.classeComCarenciaML("INTEGRATION_ERROR", "billing", 404, F.CARENCIA_PROVIDER_ML_MS) === "INTEGRATION_ERROR" && F.classeComCarenciaML("INTEGRATION_ERROR", "billing", 404, null) === "INTEGRATION_ERROR", "venda antiga/sem data na carência");
   });
   t("GRACE-9. golden histórica continua 30,10 ACTUAL (fora da carência, fórmula intacta)", async () => {
@@ -952,6 +952,169 @@ async function principal() {
     assert([ORDER, ...rebaixadas].every((o) => finDe(o)?.billing_status === "CONFERIDO" && c(finDe(o)?.billing_tarifa) === 419) && r.corpo.candidatos === 145, JSON.stringify(r.corpo));
     const f = finDe(ORDER)!, l = F.liquidoPedidoML(f as any, envioDe(SHIP)[0] as any);
     assert(l.qualidade === "ACTUAL" && c(l.liquido) === 3010, JSON.stringify(l));
+  });
+
+  secao("\n[9. A3.2-F — rate limit do billing, billing ainda não lançado, logs compactos]");
+  const FL = await import("../app/(app)/vendas/financeiro-live");
+  const R429 = { status: 429 };
+  const tresx429 = () => [R429, R429, R429];
+  const resumos = () => logs.filter((l) => /\[ml-financeiro\] resumo /.test(l));
+  /** fetch que responde 429 às chamadas de billing a partir da (de+1)-ésima — conta quantas chegaram ao "provider" */
+  const billing429Depois = (de: number) => {
+    const st = { billing: 0 };
+    const fetch = (async (url: any, init?: any) => {
+      if (String(url).includes("/billing/") && ++st.billing > de) return { ok: false, status: 429, headers: { get: () => null }, json: async () => ({}), text: async () => "{}" };
+      return (globalThis.fetch as any)(url, init);
+    }) as any;
+    return { st, fetch };
+  };
+  const rebaixadas = (n: number, base: number) => {
+    const ids = Array.from({ length: n }, (_, i) => String(base + i));
+    historico(ids.map((o) => [o] as [string])); for (const o of ids) comLinha(o, REBAIXADA);
+    return ids;
+  };
+
+  t("RATE-1. carga com auto-sync (sync=1 e sem cache) → o sync já tentou o financeiro → a tela NÃO dispara o POST", async () => {
+    semear(); roteiro["/billing/"] = tresx429();
+    const g = await getVendas(`date_from=${DIA}&date_to=${DIA}&loja_id=${ML_A}&sync=1`);
+    assert(g.corpo.financeiroTentadoNoSync === true && g.corpo.financeiroPendente === 1, JSON.stringify({ t: g.corpo.financeiroTentadoNoSync, p: g.corpo.financeiroPendente }));
+    assert(FL.deveRecuperarFinanceiroML({ falhou: false, rodadaUsada: false, financeiroPendente: g.corpo.financeiroPendente, financeiroTentadoNoSync: g.corpo.financeiroTentadoNoSync }) === false, "sync + retry na mesma carga");
+    semear(); roteiro["/billing/"] = tresx429();
+    const g2 = await getVendas(`date_from=${DIA}&date_to=${DIA}&loja_id=${ML_A}`);   // sem cache → sync automático
+    assert(g2.corpo.financeiroTentadoNoSync === true && FL.deveRecuperarFinanceiroML({ falhou: false, rodadaUsada: false, financeiroPendente: g2.corpo.financeiroPendente, financeiroTentadoNoSync: g2.corpo.financeiroTentadoNoSync }) === false, JSON.stringify(g2.corpo.financeiroTentadoNoSync));
+    const pg = fonte("app/(app)/vendas/page.tsx");
+    assert(/if \(!falhou && data\.financeiroTentadoNoSync === true\) retryFinanceiroRef\.current = true;/.test(pg), "carga sincronizada não gasta a rodada");
+  });
+  t("RATE-2. carga SEM sync e com pendentes → UMA rodada de POST", async () => {
+    await comBillingPendente();
+    db.pedidos = db.pedidos.map((p) => ({ ...p, synced_at: new Date().toISOString() }));   // cache fresco: sem auto-sync
+    chamadas = [];
+    const g = await getVendas(`date_from=${DIA}&date_to=${DIA}&loja_id=${ML_A}`);
+    assert(chamadas.length === 0 && g.corpo.financeiroTentadoNoSync === false && g.corpo.financeiroPendente === 1, JSON.stringify({ c: chamadas.length, t: g.corpo.financeiroTentadoNoSync, p: g.corpo.financeiroPendente }));
+    assert(FL.deveRecuperarFinanceiroML({ falhou: false, rodadaUsada: false, financeiroPendente: 1, financeiroTentadoNoSync: false }) === true, "sem retry");
+    assert(FL.deveRecuperarFinanceiroML({ falhou: false, rodadaUsada: true, financeiroPendente: 1, financeiroTentadoNoSync: false }) === false, "segunda rodada na mesma carga");
+  });
+  t("RATE-3. sem pendentes (ou leitura com falha) → zero POST", () => {
+    assert(FL.deveRecuperarFinanceiroML({ falhou: false, rodadaUsada: false, financeiroPendente: 0, financeiroTentadoNoSync: false }) === false, "POST sem pendente");
+    assert(FL.deveRecuperarFinanceiroML({ falhou: true, rodadaUsada: false, financeiroPendente: 5, financeiroTentadoNoSync: false }) === false, "POST com leitura falha");
+    assert(FL.deveRecuperarFinanceiroML({ falhou: false, rodadaUsada: false, financeiroPendente: "3", financeiroTentadoNoSync: false }) === false, "contagem não numérica");
+  });
+  t("RATE-4. novo refresh do navegador (carga nova, trava zerada) pode tentar de novo", () => {
+    const pg = fonte("app/(app)/vendas/page.tsx");
+    assert(/const retryFinanceiroRef = useRef\(false\);/.test(pg) && !/retryFinanceiroRef\.current = false/.test(pg), "trava fora do ciclo da carga");
+    assert(FL.deveRecuperarFinanceiroML({ falhou: false, rodadaUsada: false, financeiroPendente: 3, financeiroTentadoNoSync: false }) === true, "carga nova não tenta");
+  });
+  t("RATE-5/10. lote de billing com 429 nas 3 tentativas → disjuntor aberto (1 linha agregada); 429 é TRANSIENT, nunca INTEGRATION", async () => {
+    const ids = rebaixadas(20, 2000017001000000); roteiro["/billing/"] = [{ status: 429, headers: { "retry-after": "7" } }, R429, { status: 429, headers: { "retry-after": "7" } }];
+    logs.length = 0; esperas = [];
+    const r = await coletarRetry(ids);
+    const agg = logs.filter((l) => /billing_rate_limited/.test(l));
+    assert(r.limitados === 20 && r.transitorios === 20 && r.integracao === 0 && agg.length === 1 && /pedidos=20 tentativas=3 retry_after=7/.test(agg[0]) && JSON.stringify(esperas) === "[1000,2000]", `${JSON.stringify({ ...r, falhas: r.falhas.length })} ${agg.join(" | ")}`);
+    assert(!logs.some((l) => /INTEGRATION_ERROR/.test(l)), logs.join(" | "));
+  });
+  t("RATE-6. disjuntor aberto → o próximo lote de billing NÃO chama o provider (45 billing-only: 1 chamada, não 3)", async () => {
+    const ids = rebaixadas(45, 2000017001100000); roteiro["/billing/"] = tresx429(); chamadas = [];
+    const r = await coletarRetry(ids);
+    assert(chamadas.filter((x) => x.caminho.startsWith("/billing/")).length === 3 && r.limitados === 45 && r.lotes === 3, `billing=${chamadas.filter((x) => x.caminho.startsWith("/billing/")).length} limitados=${r.limitados}`);
+  });
+  t("RATE-7/8. os billing-only pulados seguem BILLING_ONLY e elegíveis; nenhuma linha alterada, nenhuma gravação", async () => {
+    const ids = rebaixadas(45, 2000017001200000); roteiro["/billing/"] = tresx429();
+    const antes = JSON.stringify(db.ml_financeiro_pedidos); gravacoesPedidos = 0;
+    await coletarRetry(ids);
+    assert(JSON.stringify(db.ml_financeiro_pedidos) === antes && gravacoesPedidos === 0, `gravações=${gravacoesPedidos}`);
+    for (const o of [ids[0], ids[44]]) assert((await planoDe(o)).tipo === "BILLING_ONLY", `${o} saiu da fila`);
+  });
+  t("RATE-9. CONFERIDO preservado sob disjuntor (DISCOUNTS_ONLY recebe descontos; billing 4,19 intacto)", async () => {
+    const pend = rebaixadas(20, 2000017001300000);
+    const conf = Array.from({ length: 5 }, (_, i) => String(2000017001400000 + i));
+    for (const o of conf) { db.pedidos.push(linhaPedido(o)); pedidosML[o] = orderGolden({ id: Number(o), pack_id: null, shipping: { id: Number(o.slice(-7)) } }); comLinha(o, SEM_DESC); }
+    roteiro["/billing/"] = tresx429();
+    await coletarRetry([...pend, ...conf]);
+    assert(conf.every((o) => finDe(o)?.billing_status === "CONFERIDO" && c(finDe(o)?.billing_tarifa) === 419 && finDe(o)?.descontos_status === "OK"), JSON.stringify(conf.map((o) => finDe(o))));
+    assert(pend.every((o) => finDe(o)?.billing_status === "PENDENTE" && finDe(o)?.billing_tarifa === null), "pendente alterado");
+  });
+
+  const RECENTE_1 = () => new Date("2026-10-14T10:08:10.000Z"), MIN_6 = () => new Date("2026-10-14T10:13:10.000Z"), MIN_11 = () => new Date("2026-10-14T10:18:10.000Z");
+  for (const [n, agora, idade] of [["1", RECENTE_1, 60], ["2", MIN_6, 360], ["3", MIN_11, 660]] as const) {
+    t(`READY-${n}. billing 200 válido sem cobrança, venda com ${idade} s → PROVIDER_DATA_NOT_READY (sem depender da carência), PENDENTE`, async () => {
+      semear(); logs.length = 0; roteiro["/billing/"] = [SEM_COBRANCA];
+      const r = await coletar({ pedidos: [orderGolden()] }, agora);
+      const f = finDe(ORDER)!;
+      assert(r.naoProntos === 1 && r.integracao === 0 && f.billing_status === "PENDENTE" && logs.some((l) => new RegExp(`PROVIDER_DATA_NOT_READY .*etapa=billing http=200 order_age_s=${idade}`).test(l)), `${JSON.stringify({ ...r, falhas: r.falhas })}`);
+      assert(F.financeiroPendenteElegivel(f as any, envioDe(SHIP)[0] as any) === "billing", "não ficou elegível");
+    });
+  }
+  t("READY-4. billing 200 com sale_fee.net → conciliação normal (CONFERIDO 4,19)", async () => {
+    semear(); const r = await coletar({ pedidos: [orderGolden()] }, MIN_11);
+    assert(finDe(ORDER)?.billing_status === "CONFERIDO" && c(finDe(ORDER)?.billing_tarifa) === 419 && r.naoProntos === 0 && r.actual === 1, JSON.stringify(finDe(ORDER)));
+  });
+  t("READY-5. billing 200 malformado (sem results) → INTEGRATION_ERROR billing_estrutura, PENDENTE", async () => {
+    semear(); logs.length = 0; roteiro["/billing/"] = [{ status: 200, corpo: { paging: {} } }];
+    const r = await coletar({ pedidos: [orderGolden()] }, MIN_11);
+    assert(r.integracao === 1 && r.naoProntos === 0 && finDe(ORDER)?.billing_status === "PENDENTE" && logs.some((l) => /INTEGRATION_ERROR .*etapa=billing_estrutura http=200/.test(l)), `${JSON.stringify({ ...r, falhas: r.falhas })}`);
+  });
+  t("READY-6. billing vazio nunca dá ACTUAL", async () => {
+    semear(); roteiro["/billing/"] = [SEM_COBRANCA];
+    const r = await coletar({ pedidos: [orderGolden()] }, MIN_11);
+    const l = F.liquidoPedidoML(finDe(ORDER) as any, envioDe(SHIP)[0] as any);
+    assert(r.actual === 0 && l.qualidade !== "ACTUAL", JSON.stringify(l));
+  });
+
+  const TETO_LOG = 4 * K.AMOSTRAS_LOG_ML + 3;   // amostras por classe + disjuntor + erro de leitura + resumo
+  t("LOG-1/3. 500 billing-only adiados → linhas de log limitadas (não O(n)); resumo exatamente 1", async () => {
+    const ids = rebaixadas(500, 2000017002000000); logs.length = 0;
+    const r = await coletarRetry(ids, {}, { ate: 0 });
+    assert(r.adiados === 500 && logs.length <= TETO_LOG && resumos().length === 1 && r.logsOmitidos === 500 - K.AMOSTRAS_LOG_ML, `logs=${logs.length} adiados=${r.adiados} omitidos=${r.logsOmitidos}`);
+  });
+  t("LOG-2. 100 pedidos com 429 repetido (descontos) → contagem agregada 100, só amostra no log", async () => {
+    const ids = Array.from({ length: 100 }, (_, i) => String(2000017003000000 + i));
+    historico(ids.map((o) => [o] as [string])); for (const o of ids) comLinha(o, SEM_DESC);
+    roteiro["/orders/"] = Array.from({ length: 300 }, () => R429); logs.length = 0;
+    const r = await coletarRetry(ids);
+    const tr = logs.filter((l) => /TRANSIENT_ERROR/.test(l));
+    assert(r.transitorios === 100 && tr.length === K.AMOSTRAS_LOG_ML && logs.length <= TETO_LOG && resumos().length === 1 && /transient=100 /.test(resumos()[0]), `transient=${r.transitorios} linhas=${tr.length} total=${logs.length}`);
+  });
+  t("LOG-3b. resumo sai 1× mesmo com falha de leitura e com falha de gravação", async () => {
+    historico([[ORDER]]); logs.length = 0;
+    await coletarRetry([ORDER], { lerExistentes: async () => { throw new Error("leitura caiu"); } });
+    assert(resumos().length === 1 && logs.some((l) => /ERRO leitura do financeiro existente/.test(l)), logs.join(" | "));
+    semear(); logs.length = 0;
+    const err = await K.coletarFinanceiroML({ userId: U, lojaId: ML_A, accessToken: TOKEN_A }, { pedidos: [orderGolden()] }, { ...depsFalsos(), gravarPedidos: async () => { throw new Error("gravação caiu"); } }).then(() => null, (e) => e);
+    assert(err && resumos().length === 1, `erro=${err?.message} resumos=${resumos().length}`);
+  });
+  t("LOG-4. resumo traz rate_limited e deferred", async () => {
+    const ids = rebaixadas(45, 2000017004000000); roteiro["/billing/"] = tresx429(); logs.length = 0;
+    await coletarRetry(ids);
+    assert(resumos().length === 1 && /deferred_by_runtime_budget=0 rate_limited=45 /.test(resumos()[0]) && /logs_omitidos=\d+/.test(resumos()[0]), resumos().join(" | "));
+  });
+  t("LOG-5. amostras sanitizadas: sem token nem dado de comprador", async () => {
+    const ids = rebaixadas(30, 2000017005000000); roteiro["/billing/"] = tresx429(); logs.length = 0;
+    await coletarRetry(ids);
+    semear(); roteiro[`/shipments/${SHIP}/costs`] = [{ status: 403, corpo: { receiver: { name: "Fulano" } } }];
+    await K.coletarFinanceiroML({ userId: U, lojaId: ML_A, accessToken: TOKEN_A }, { pedidos: [orderGolden({ buyer: { nickname: "COMPRADOR", email: "x@y.z" } })] }, depsFalsos());
+    assert(logs.length > 0 && !logs.some((l) => l.includes(TOKEN_A) || /buyer|nickname|receiver|email|Fulano|COMPRADOR/i.test(l)), logs.join(" | "));
+  });
+
+  t("BACKLOG. 440 BILLING_ONLY: run 1 confirma 3 lotes e o disjuntor para o resto (sem rebaixar, sem refazer etapas); run 2 saudável drena", async () => {
+    const ids = rebaixadas(440, 2000017006000000); chamadas = []; gravacoesPedidos = 0;
+    const p429 = billing429Depois(3);
+    const r1 = await coletarRetry(ids, { fetch: p429.fetch });
+    const conf1 = db.ml_financeiro_pedidos.filter((p) => p.billing_status === "CONFERIDO").length;
+    const pend1 = db.ml_financeiro_pedidos.filter((p) => p.billing_status === "PENDENTE" && p.billing_tarifa === null).length;
+    assert(conf1 === 60 && pend1 === 380 && r1.limitados === 380 && p429.st.billing === 6, `conf=${conf1} pend=${pend1} limitados=${r1.limitados} billing=${p429.st.billing}`);
+    assert(chamadas.every((x) => x.caminho.startsWith("/billing/")), `etapa refeita: ${caminhos().slice(0, 200)}`);
+    chamadas = [];
+    const r2 = await coletarRetry(ids);
+    assert(db.ml_financeiro_pedidos.every((p) => p.billing_status === "CONFERIDO" && c(p.billing_tarifa) === 419) && r2.planos.SKIP === 60 && r2.planos.BILLING_ONLY === 380 && chamadas.length === 19 && chamadas.every((x) => x.caminho.startsWith("/billing/")), `skip=${r2.planos.SKIP} billing=${chamadas.length}`);
+  });
+  t("GOLDEN_REQUERIED = NO: golden CONFERIDO/ACTUAL não é reconsultada pela recuperação (nem com pendentes na janela)", async () => {
+    semear(); await sync();
+    pedidosML["2000017007000001"] = orderGolden({ id: 2000017007000001, pack_id: null, shipping: { id: 7000001 } });
+    db.pedidos.push(linhaPedido(ORDER), linhaPedido("2000017007000001"));
+    comLinha("2000017007000001", REBAIXADA);
+    chamadas = [];
+    const r = await postRetry(janela());
+    assert(r.corpo.candidatos === 1 && !chamadas.some((x) => x.caminho.includes(ORDER) || x.caminho.includes(SHIP) || x.caminho.includes(PACK)) && finDe(ORDER)?.billing_status === "CONFERIDO", `${JSON.stringify(r.corpo)} ${caminhos()}`);
   });
 
   secao("\n[4. guard]");

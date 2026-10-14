@@ -76,5 +76,14 @@ export function detalheLiquidoML(f: FinanceiroVendaLive | null | undefined): str
 }
 
 /** Selo do lucro: "real" (repasse reconciliado) ou "estimado"; `null` quando o lucro está pendente. */
+/**
+ * A3.2-F — a carga da página dispara a recuperação financeira (POST /api/ml/vendas/financeiro)? Só se: a leitura deu
+ * certo, há pendentes, esta carga ainda não usou sua rodada E a resposta NÃO veio de um sync que já tentou o financeiro
+ * (sync + retry em seguida dobrava as chamadas de billing e o ML respondia 429). Uma fonte por carga: SYNC ou RETRY.
+ */
+export function deveRecuperarFinanceiroML(r: { falhou: boolean; rodadaUsada: boolean; financeiroPendente: unknown; financeiroTentadoNoSync?: unknown }): boolean {
+  return !r.falhou && !r.rodadaUsada && r.financeiroTentadoNoSync !== true && typeof r.financeiroPendente === "number" && r.financeiroPendente > 0;
+}
+
 export const seloLucroLive = (f: FinanceiroVendaLive | null | undefined): "real" | "estimado" | null =>
   f?.lucro == null ? null : f.qualidadeFinanceira === "ACTUAL" ? "real" : "estimado";

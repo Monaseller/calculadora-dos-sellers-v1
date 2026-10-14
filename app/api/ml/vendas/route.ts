@@ -175,13 +175,18 @@ export async function GET(request: Request) {
   // de exatamente 1 — sem este try/catch, isso derrubaria a rota inteira
   // com 500 em vez de servir o cache já existente. Nada disto depende da
   // flag ENABLE_ASYNC_SYNC_JOBS; é uma correção de segurança independente.
+  // A3.2-F: esta requisição executou um sync ML (que já tentou o financeiro das vendas gravadas)? A tela então NÃO
+  // dispara a recuperação financeira em seguida na mesma carga — uma única fonte de trabalho financeiro no provider.
+  let financeiroTentadoNoSync = false;
   try {
     if (forceSync) {
       // Botão Sincronizar (fluxo antigo): re-sincroniza o range inteiro
       await (lojaML && syncMLForUser(userId, dateFrom, dateTo, undefined, false, lojaML));
+      financeiroTentadoNoSync = !!lojaML;
     } else if (!hasData) {
       // Sem cache: sync completo (primeira vez)
       await (lojaML && syncMLForUser(userId, dateFrom, dateTo, undefined, false, lojaML));
+      financeiroTentadoNoSync = !!lojaML;
     } else {
       // Tem cache: só atualiza hoje se o range inclui hoje (barato, 1 dia)
       const rangeIncludeHoje = dateFrom <= hoje && hoje <= dateTo;
@@ -201,6 +206,7 @@ export async function GET(request: Request) {
         if (Date.now() - lastSyncHoje > 30 * 60 * 1000) { // stale > 30 min
           console.log(`[DIAG-DATAS][ml/vendas] req #${_reqid} disparando auto-sync de hoje (stale)`);
           await (lojaML && syncMLForUser(userId, hoje, hoje, undefined, false, lojaML));
+          financeiroTentadoNoSync = !!lojaML;
           console.log(`[DIAG-DATAS][ml/vendas] req #${_reqid} auto-sync de hoje concluido`);
         }
       }
@@ -409,6 +415,7 @@ export async function GET(request: Request) {
     // Vendas A3.2-C.2: QUANTAS vendas pagas desta janela/loja precisam de recuperação financeira (sem linha
     // financeira ou com linha pendente) — só leitura do banco, só a contagem. A tela pede a recuperação em
     // POST /api/ml/vendas/financeiro com o CONTEXTO da janela; o servidor seleciona os pedidos (nunca aqui).
+    financeiroTentadoNoSync,
     financeiroPendente: candidatosRecuperacaoFinanceiraML((pedidos ?? []).map((p: any) => ({ order_id: String(p.order_id), status: p.status, data: p.data, data_pagamento: p.data_pagamento, data_criacao: p.data_criacao })), financeiroML, { de: dateFrom, ate: dateTo, campo: dateField }).length,
   });
 }

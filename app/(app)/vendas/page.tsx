@@ -5,7 +5,7 @@ import { useDateField } from "@/lib/date-field-context";
 import { calcularUltimos7Dias, DATE_PRESETS } from "@/lib/date-range-utils";
 import { ASYNC_SYNC_JOBS_ENABLED } from "@/lib/feature-flags";
 import type { FinanceiroVendaLive } from "@/lib/vendas/custo-produto-tipos";
-import { avisoCustoLive, custoCadastradoLive, detalheLiquidoML, seloLucroLive, textoFreteLive, totaisLive } from "./financeiro-live";
+import { avisoCustoLive, custoCadastradoLive, detalheLiquidoML, deveRecuperarFinanceiroML, seloLucroLive, textoFreteLive, totaisLive } from "./financeiro-live";
 import { codigoAnuncio, codigoVenda, copiarCodigo } from "./codigos-venda";
 import { AVISO_SELECIONE_LOJA_ML_SYNC, CHAVE_LOJA_ML_VENDAS, type CorpoSyncManual, type LojaMLVendas, escolherLojaMLInicial, lojasMLDaLista, lojasMLDaRecusa, planoSyncManual } from "./loja-ml";
 
@@ -433,7 +433,9 @@ export default function VendasPage() {
       if (!falhou) setMlRows((data.rows ?? []) as VendaRow[]);
       // A3.2-C.2: há vendas da janela sem financeiro (ou pendente) → dispara a ÚNICA rodada automática desta carga,
       // mandando só o CONTEXTO (loja + janela); o servidor escolhe os pedidos. A releitura não dispara outra.
-      if (!falhou && !retryFinanceiroRef.current && typeof data.financeiroPendente === "number" && data.financeiroPendente > 0) {
+      // A3.2-F: se ESTA leitura sincronizou (o sync já tentou o financeiro), a carga gasta a rodada sem POST.
+      if (!falhou && data.financeiroTentadoNoSync === true) retryFinanceiroRef.current = true;
+      if (deveRecuperarFinanceiroML({ falhou, rodadaUsada: retryFinanceiroRef.current, financeiroPendente: data?.financeiroPendente, financeiroTentadoNoSync: data?.financeiroTentadoNoSync })) {
         retryFinanceiroRef.current = true;
         setFinPendente({ lojaId: lojaDaChamada, de: from, ate: to, campo: dateField });
       }

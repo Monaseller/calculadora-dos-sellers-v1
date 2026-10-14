@@ -1149,7 +1149,7 @@ export function financeiroMLNaoReal(raiz = RAIZ_V2): string[] {
   // INTEGRATION_ERROR não é silencioso nem transitório; ACTUAL não é reconsultado; orçamento explícito
   const cls = corpoDaFuncao(m, "classificarHttpML") ?? "";
   if (!/if \(status === 0 \|\| status === 429 \|\| status === 502 \|\| status === 503 \|\| status === 504\) return "TRANSIENT_ERROR";/.test(cls) || !/return "INTEGRATION_ERROR";/.test(cls)) erros.push("classificação TRANSIENT/INTEGRATION fora do contrato (404/4xx viraria retry)");
-  if (!/if \(classe === "TRANSIENT_ERROR"\) continue;/.test(c) || !/if \(t > 0\) await deps\.esperar\(BACKOFF_BASE_MS \* 2 \*\* \(t - 1\)\);/.test(c) || !/signal: ctrl\.signal/.test(c)) erros.push("coletor: retry/backoff/timeout fora do contrato (só transitório repete)");
+  if (!/if \(classe === "TRANSIENT_ERROR"\) \{[^\n]*continue; \}/.test(c) || !/if \(t > 0\) await deps\.esperar\(BACKOFF_BASE_MS \* 2 \*\* \(t - 1\)\);/.test(c) || !/signal: ctrl\.signal/.test(c)) erros.push("coletor: retry/backoff/timeout fora do contrato (só transitório repete)");
   // logs do motor: com contexto (loja, pedido, pack, envio, etapa, HTTP) e SEM token/comprador — só as linhas log(`...`)
   const linhasLog = c.match(/log\(`[^`]*`\)/g) ?? [];
   if (!/log\(`\[ml-financeiro\] \$\{g\.classe\} loja=\$\{conta\.lojaId\} order=\$\{g\.order_id\} pack=/.test(c) || linhasLog.length < 3 || linhasLog.some((l) => /token|buyer|receiver|nickname|email/i.test(l))) erros.push("coletor: falha sem log sanitizado (ou log com token/comprador)");
@@ -1198,6 +1198,18 @@ export function financeiroMLNaoReal(raiz = RAIZ_V2): string[] {
     || !/const alvoB = lote\.filter\(\(id\) => precisa\(id, "billing"\)/.test(bl)) erros.push("coletor: billing fora do micro-lote (cauda global), micro-lote ≠ lote do billing ou billing de pedido sem a etapa no plano");
   if ((c.match(/deps\.gravarPedidos\(/g) ?? []).length !== 1 || (c.match(/deps\.gravarEnvios\(/g) ?? []).length !== 1 || !/const m = mesclarPedidoFinanceiroML\(ex, obtidos\.get\(id\) \?\? \{\}\);/.test(c)
     || !/if \(!ex \|\| !iguais\(ex, m, CAMPOS_PEDIDO\)\) paraGravar\.pedidos\.push\(\{ \.\.\.m, \.\.\.base, /.test(c) || !/return mesclarEnvioFinanceiroML\(noBanco, envio\);/.test(c)) erros.push("coletor: gravação de linha inteira sem merge com a existente (NULL/PENDENTE sobrescreve valor confirmado)");
+  // A3.2-F DISJUNTOR: lote de billing que esgotou as tentativas com 429 abre o disjuntor; com ele aberto nenhum billing
+  // novo é chamado (o próximo lote não é "testado"); 429 nunca vira erro de integração
+  const iPula = bl.search(/if \(billingLimitado\) \{ r\.limitados \+= alvoB\.length; return; \}/), iCall = bl.search(/const b = await getML\(`\/billing\/integration\//);
+  if (iPula < 0 || iCall < iPula || !/if \(b\.classe === "TRANSIENT_ERROR" && b\.status === 429\) \{\s*billingLimitado = true;/.test(bl)) erros.push("billing: sem disjuntor de 429 por execução (lotes seguidos batendo 429 até o prazo)");
+  // A3.2-F BILLING 200 VAZIO: resposta válida sem cobrança do pedido = PROVIDER_DATA_NOT_READY em QUALQUER idade;
+  // resposta sem `results` = erro de integração
+  if (!/else if \(conf0\.billing_status === "PENDENTE"\) registrar\(\{ \.\.\.ctx, etapa: "billing", classe: "PROVIDER_DATA_NOT_READY", http: 200 \}\);/.test(bl) || !/const estruturaInvalida = b\.classe === "OK" && !Array\.isArray\(b\.corpo\?\.results\);/.test(bl)) erros.push("billing: 200 sem cobrança tratado como erro de integração (o ML lança o billing depois de 5 min) ou estrutura inválida aceita");
+  // A3.2-F LOGS: linha por pedido só como AMOSTRA (constante pequena); resumo SEMPRE, uma vez, no finally do wrapper
+  const wrap = corpoDaFuncao(c, "coletarFinanceiroML") ?? "";
+  const logsPorPedido = c.match(/log\(`\[ml-financeiro\] \$\{(g\.classe|DEFERIDO)\}/g) ?? [];
+  if (!/export const AMOSTRAS_LOG_ML = 5;/.test(c) || logsPorPedido.length !== 2 || (c.match(/if \(amostra\((g\.classe|DEFERIDO)\)\) log\(`\[ml-financeiro\] \$\{(g\.classe|DEFERIDO)\}/g) ?? []).length !== 2
+    || !/\} finally \{[\s\S]*log\(`\[ml-financeiro\] resumo /.test(wrap) || (c.match(/\[ml-financeiro\] resumo /g) ?? []).length !== 1) erros.push("coletor: log por pedido sem amostragem (O(n) linhas) ou resumo que pode não sair");
   const mp = corpoDaFuncao(m, "mesclarPedidoFinanceiroML") ?? "", me = corpoDaFuncao(m, "mesclarEnvioFinanceiroML") ?? "";
   if (!/if \(b && b\.billing_status !== "PENDENTE"\) \{/.test(mp) || !/\} else if \(b && base\.billing_status === "PENDENTE"\) \{\s*base\.billing_tarifa = b\.billing_tarifa \?\? base\.billing_tarifa;/.test(mp)
     || !/if \(obtido\.descontos\) \{/.test(mp) || /descontos_status = "INDISPONIVEL"/.test(mp) || !/if \(o\.tarifa_origem === "PROVIDER" && o\.tarifa_venda !== null\)/.test(mp)
@@ -1205,11 +1217,17 @@ export function financeiroMLNaoReal(raiz = RAIZ_V2): string[] {
   const pr = corpoDaFuncao(m, "prioridadeRecuperacaoML") ?? "";
   if (!/if \(tipo === "BILLING_ONLY"\) return 0;/.test(pr) || !/if \(tipo === "FULL_PIPELINE"\) return 3;/.test(pr) || !/\.sort\(\(a, b\) => a\.p - b\.p \|\| a\.i - b\.i\)/.test(c)) erros.push("fila: billing-only sem prioridade sobre o histórico sem linha, ou ordem de recência perdida");
   if (!/for \(const \[id, p\] of finais\) \{\s*const envio = p\.shipment_id \? enviosBanco\.get\(p\.shipment_id\) \?\? existentes\.get\(id\)\?\.envio \?\? null : null;\s*if \(liquidoPedidoML\(p, envio\)\.qualidade === "ACTUAL"\)/.test(c)) erros.push("coletor: qualidade calculada só pelo resultado desta execução (não pelo estado final mesclado)");
-  if (!/catch \{\s*log\(`\[ml-financeiro\] ERRO leitura do financeiro existente loja=\$\{conta\.lojaId\}[^`]*`\);\s*return r;\s*\}/.test(c) || !/lerFinanceiroRealML\(supabase\(\), userId, lojaId, ids, \{ estrito: true \}\)/.test(sy) || !/\{ estrito: true \}\)\.catch\(\(\) => null\);\s*if \(!existentes\) return NextResponse\.json\(\{ ok: false, tentados: 0 \}\);/.test(rr)) erros.push("coletor: leitura do estado existente falha em silêncio (mapa vazio → regravação por cima)");
+  if (!/catch \{\s*log\(`\[ml-financeiro\] ERRO leitura do financeiro existente loja=\$\{conta\.lojaId\}[^`]*`\);\s*return;\s*\}/.test(c) || !/lerFinanceiroRealML\(supabase\(\), userId, lojaId, ids, \{ estrito: true \}\)/.test(sy) || !/\{ estrito: true \}\)\.catch\(\(\) => null\);\s*if \(!existentes\) return NextResponse\.json\(\{ ok: false, tentados: 0 \}\);/.test(rr)) erros.push("coletor: leitura do estado existente falha em silêncio (mapa vazio → regravação por cima)");
   if (!/export const FONTE_VERSAO_ML_FINANCEIRO = 2;/.test(m)) erros.push("versão da lógica financeira não avançou com a correção de billing/descontos");
   // uma rodada automática por carga da página (sem loop)
   const pgr = tiraComentarios(ler(raiz, PAGINA_VENDAS));
-  if (!/if \(!falhou && !retryFinanceiroRef\.current && typeof data\.financeiroPendente === "number" && data\.financeiroPendente > 0\) \{\s*retryFinanceiroRef\.current = true;/.test(pgr) || /retryFinanceiroRef\.current = false/.test(pgr) || /order_ids/.test(pgr) || (pgr.match(/\/api\/ml\/vendas\/financeiro/g) ?? []).length !== 1) erros.push("tela: recuperação sem trava de uma rodada por carga (loop), com lista de pedidos ou fora do ponto único");
+  const fl = tiraComentarios(ler(raiz, "app/(app)/vendas/financeiro-live.ts"));
+  const decide = corpoDaFuncao(fl, "deveRecuperarFinanceiroML") ?? "";
+  // A3.2-F: carga que já sincronizou (o sync tentou o financeiro) NÃO dispara a recuperação — uma fonte por carga
+  if (!/return !r\.falhou && !r\.rodadaUsada && r\.financeiroTentadoNoSync !== true && typeof r\.financeiroPendente === "number" && r\.financeiroPendente > 0;/.test(decide)
+    || !/if \(!falhou && data\.financeiroTentadoNoSync === true\) retryFinanceiroRef\.current = true;/.test(pgr)
+    || !/financeiroTentadoNoSync = !!lojaML;/.test(rg) || (rg.match(/financeiroTentadoNoSync = !!lojaML;/g) ?? []).length !== (rg.match(/await \(lojaML && syncMLForUser\(/g) ?? []).length) erros.push("tela: recuperação financeira disparada na mesma carga de um sync que já tentou o financeiro (rajada de billing)");
+  if (!/if \(deveRecuperarFinanceiroML\(\{ falhou, rodadaUsada: retryFinanceiroRef\.current, financeiroPendente: data\?\.financeiroPendente, financeiroTentadoNoSync: data\?\.financeiroTentadoNoSync \}\)\) \{\s*retryFinanceiroRef\.current = true;/.test(pgr) || /retryFinanceiroRef\.current = false/.test(pgr) || /order_ids/.test(pgr) || (pgr.match(/\/api\/ml\/vendas\/financeiro/g) ?? []).length !== 1) erros.push("tela: recuperação sem trava de uma rodada por carga (loop), com lista de pedidos ou fora do ponto único");
   // leitor: dono + loja
   const l = tiraComentarios(ler(raiz, LEITOR_FIN_ML));
   if ((l.match(/\.eq\("user_id", userId\)\.eq\("loja_id", lojaId\)\.in\(/g) ?? []).length !== 2 || /fetch\(|mercadoli/.test(l)) erros.push("leitor: financeiro sem dono + loja, ou chama provider");
