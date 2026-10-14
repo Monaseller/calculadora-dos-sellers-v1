@@ -6,7 +6,7 @@ import { calcularUltimos7Dias, DATE_PRESETS } from "@/lib/date-range-utils";
 import { ASYNC_SYNC_JOBS_ENABLED } from "@/lib/feature-flags";
 import type { FinanceiroVendaLive } from "@/lib/vendas/custo-produto-tipos";
 import { avisoCustoLive, custoCadastradoLive, seloLucroLive, textoFreteLive, totaisLive } from "./financeiro-live";
-import { CHAVE_LOJA_ML_VENDAS, type LojaMLVendas, corpoMarketplaceSyncManual, escolherLojaMLInicial, lojasMLDaLista, lojasMLDaRecusa } from "./loja-ml";
+import { AVISO_SELECIONE_LOJA_ML_SYNC, CHAVE_LOJA_ML_VENDAS, type CorpoSyncManual, type LojaMLVendas, escolherLojaMLInicial, lojasMLDaLista, lojasMLDaRecusa, planoSyncManual } from "./loja-ml";
 
 // ── Tipos ──────────────────────────────────────────────────────────────────
 interface VendaRow {
@@ -79,6 +79,8 @@ export default function VendasPage() {
   const [exigeEscolhaML, setExigeEscolhaML] = useState(false);
   const lojaMLRef = useRef<string | null>(null);
   const prontoMLRef = useRef(false);
+  const listaMLFalhouRef = useRef(false);   // lista de lojas indisponível → sync com ML bloqueado (A5-B.1)
+  const [avisoSyncML, setAvisoSyncML] = useState<string | null>(null);
   const [shopeeLojaId, setShopeeLojaId] = useState<string | null>(null);
   const [loading,   setLoading]   = useState(false);
   const [erro,      setErro]      = useState<string | null>(null);
@@ -172,14 +174,23 @@ export default function VendasPage() {
   }
 
   // Faz uma chamada ao sync com timeout seguro
-  async function syncJanela(from: string, to: string): Promise<{ ml: number; shopee: number; erro?: string }> {
+  // Vendas A5-B.1: o plano do sync manual é decidido ANTES de qualquer janela/mês/request. Com ML na intenção
+  // e loja ML obrigatória mas não escolhida → aviso e NADA é chamado (nunca degrada para Shopee-only).
+  function planoSyncOuAviso(): CorpoSyncManual | null {
+    const plano = planoSyncManual(lojaAtiva, lojaMLRef.current, listaMLFalhouRef.current ? null : lojasML);
+    if (!plano.ok) { setAvisoSyncML(AVISO_SELECIONE_LOJA_ML_SYNC); return null; }
+    setAvisoSyncML(null);
+    return plano.corpo;
+  }
+
+  async function syncJanela(corpo: CorpoSyncManual, from: string, to: string): Promise<{ ml: number; shopee: number; erro?: string }> {
     const ctrl = new AbortController();
     const tid  = setTimeout(() => ctrl.abort(), 58000); // 58s — alinhado ao maxDuration=60 do Vercel
     try {
       const res = await fetch("/api/sync/manual", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ dateFrom: from, dateTo: to, ...corpoMarketplaceSyncManual(lojaMLRef.current, lojasML), noBuffer: true }),
+        body: JSON.stringify({ dateFrom: from, dateTo: to, ...corpo, noBuffer: true }),
         signal: ctrl.signal,
       });
       clearTimeout(tid);
@@ -194,6 +205,8 @@ export default function VendasPage() {
   }
 
   async function iniciarSyncRapido(from: string, to: string, preset: string) {
+    const corpo = planoSyncOuAviso();
+    if (!corpo) return;
     const janelas = gerarJanelas(from, to);
     const dias = janelas.map(j => {
       const [yy, mm, dd] = j.from.split("-");
@@ -209,7 +222,7 @@ export default function VendasPage() {
     for (let i = 0; i < janelas.length; i++) {
       if (cancelRef.current) break;
       setQuickSyncDias(prev => prev.map((d, idx) => idx === i ? { ...d, status: "sincronizando" } : d));
-      const result = await syncJanela(janelas[i].from, janelas[i].to);
+      const result = await syncJanela(corpo, janelas[i].from, janelas[i].to);
       setQuickSyncDias(prev => prev.map((d, idx) =>
         idx === i ? { ...d, status: result.erro ? "erro" : "ok", count: (result.ml ?? 0) + (result.shopee ?? 0), erro: result.erro } : d
       ));
@@ -218,6 +231,8 @@ export default function VendasPage() {
   }
 
   async function iniciarHistorico() {
+    const corpo = planoSyncOuAviso();
+    if (!corpo) return;
     const meses = gerarMeses(historicoDesde);
     setHistoricoMeses(meses);
     setHistoricoRodando(true);
@@ -238,7 +253,7 @@ export default function VendasPage() {
       for (const janela of janelas) {
         if (cancelRef.current) break;
         const t0 = Date.now();
-        const result = await syncJanela(janela.from, janela.to);
+        const result = await syncJanela(corpo, janela.from, janela.to);
         const elapsed = ((Date.now() - t0) / 1000).toFixed(0);
         totalMl     += result.ml;
         totalShopee += result.shopee;
@@ -270,6 +285,8 @@ export default function VendasPage() {
   async function reprocessarErros() {
     const comErro = historicoMeses.filter(m => m.status === "erro");
     if (comErro.length === 0 || historicoRodando) return;
+    const corpo = planoSyncOuAviso();
+    if (!corpo) return;
     setHistoricoRodando(true);
     cancelRef.current = false;
     let algumaOk = false;
@@ -285,7 +302,7 @@ export default function VendasPage() {
       for (const janela of janelas) {
         if (cancelRef.current) break;
         const t0 = Date.now();
-        const result = await syncJanela(janela.from, janela.to);
+        const result = await syncJanela(corpo, janela.from, janela.to);
         const elapsed = ((Date.now() - t0) / 1000).toFixed(0);
         totalMl += result.ml; totalShopee += result.shopee;
         if (result.erro && !erroMes) {
@@ -312,13 +329,15 @@ export default function VendasPage() {
 
   // ── Teste rápido: sincroniza ontem (1 dia) para validar configuração ─────────
   async function testarSync() {
+    const corpo = planoSyncOuAviso();
+    if (!corpo) { setTesteResult({ ok: false, msg: `❌ ${AVISO_SELECIONE_LOJA_ML_SYNC}` }); return; }
     setTesteRodando(true);
     setTesteResult(null);
     const ontemDate = new Date(Date.now() - 3 * 60 * 60 * 1000);
     ontemDate.setDate(ontemDate.getDate() - 1);
     const ontem = ontemDate.toISOString().split("T")[0];
     const t0 = Date.now();
-    const result = await syncJanela(ontem, ontem);
+    const result = await syncJanela(corpo, ontem, ontem);
     const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
     if (result.erro) {
       setTesteResult({ ok: false, msg: `❌ ${result.erro} (${elapsed}s)` });
@@ -608,6 +627,7 @@ export default function VendasPage() {
       if (!vivo) return;
       let salva: string | null = null;
       try { salva = localStorage.getItem(CHAVE_LOJA_ML_VENDAS); } catch {}
+      listaMLFalhouRef.current = lista === null;
       const lojas = lista === null ? [] : lojasMLDaLista(lista);
       const inicial = escolherLojaMLInicial(lojas, salva);
       if (inicial.descartarSalva) { try { localStorage.removeItem(CHAVE_LOJA_ML_VENDAS); } catch {} }
@@ -621,7 +641,7 @@ export default function VendasPage() {
     if (!id || id === lojaMLRef.current) return;
     lojaMLRef.current = id; prontoMLRef.current = true;
     try { localStorage.setItem(CHAVE_LOJA_ML_VENDAS, id); } catch {}
-    setLojaMLSel(id); setExigeEscolhaML(false); setMlRows([]); setMlLojaId(null);   // a leitura vem do efeito abaixo
+    setLojaMLSel(id); setExigeEscolhaML(false); setMlRows([]); setMlLojaId(null); setAvisoSyncML(null);   // a leitura vem do efeito abaixo
   }
 
   // Leitura ao montar E toda vez que o período, marketplace, date_field ou a loja ML escolhida mudar
@@ -1613,6 +1633,12 @@ export default function VendasPage() {
                 >✕</button>
               )}
             </div>
+
+            {avisoSyncML && (
+              <div style={{ marginBottom: "16px", padding: "12px 14px", borderRadius: "12px", background: "rgba(255,107,0,0.1)", border: "1px solid rgba(255,107,0,0.4)", color: "#ffb380", fontSize: "13px", fontWeight: 700 }}>
+                ⚠️ {avisoSyncML}
+              </div>
+            )}
 
             {quickSyncDias.length > 0 ? (
               /* ── Progresso dia-a-dia ── */

@@ -65,6 +65,7 @@
  *       a rota usa só `?loja_id` (validada: dono + ML + ativa) ou a única; sem cookie, sem "primeira/mais recente",
  *       sem fallback para outra loja, sem `.in("loja_id")`; inválida → 404 LOJA_ML_INVALIDA; a tela envia a loja,
  *       descarta resposta de outra loja, não escolhe por ordem e o sync (job e manual) leva a loja escolhida;
+ *       sync manual com ML e 2+ lojas sem escolha é BLOQUEADO na tela antes de qualquer request (A5-B.1);
  *       vendas-hoje mantém a barreira e o helper/constante seguem em lib/ml-conexao.ts;
  *   Z   ZONAS PROTEGIDAS sem suíte comportamental própria (telas legadas de Vendas/Dashboard,
  *       constantes financeiras, supabase/**, vercel.json, .env.example, sync-worker.mjs): mudar
@@ -962,6 +963,60 @@ export function identidadeVendaMLNaoNoBanco(raiz = RAIZ_V2): string[] {
   return erros;
 }
 
+/** Corpo de `function nome(...) { ... }` por balanceamento de chaves (sem comentários). */
+function corpoDaFuncao(src: string, nome: string): string | null {
+  const m = new RegExp(`function ${nome}\\([^)]*\\)[^\\n]*\\{\\n`).exec(src);   // a { que fecha a assinatura, não a do tipo de retorno
+  if (!m) return null;
+  let n = 1, i = m.index + m[0].length;
+  for (; i < src.length && n > 0; i++) { if (src[i] === "{") n++; else if (src[i] === "}") n--; }
+  return src.slice(m.index + m[0].length, i - 1);
+}
+/**
+ * A5-B.1 (tela): o sync manual tem UM ponto de request (syncJanela, corpo recebido + datas, sem marketplace
+ * próprio); o plano sai de planoSyncManual com a INTENÇÃO da tela e a loja ML escolhida, e o bloqueio devolve
+ * null com aviso; TODA função que chama syncJanela planeja primeiro e retorna se bloqueado — antes de qualquer
+ * setX (janela/mês/progresso) e de qualquer request.
+ */
+export function syncManualSemPlano(pg: string): string[] {
+  const erros: string[] = [];
+  if ((pg.match(/\/api\/sync\/manual/g) ?? []).length !== 1) erros.push("/api/sync/manual chamado fora de syncJanela");
+  const sj = corpoDaFuncao(pg, "syncJanela");
+  if (!sj || !/fetch\("\/api\/sync\/manual"/.test(sj) || !/JSON\.stringify\(\{ dateFrom: from, dateTo: to, \.\.\.corpo, noBuffer: true \}\)/.test(sj) || /marketplace|loja_id/.test(sj)) erros.push("syncJanela: corpo do request não é exatamente o plano (+ datas)");
+  if (!/async function syncJanela\(corpo: CorpoSyncManual,/.test(pg)) erros.push("syncJanela sem o corpo planejado");
+  const po = corpoDaFuncao(pg, "planoSyncOuAviso");
+  if (!po || !/planoSyncManual\(lojaAtiva, lojaMLRef\.current, listaMLFalhouRef\.current \? null : lojasML\)/.test(po) || !/if \(!plano\.ok\) \{ setAvisoSyncML\([^)]*\); return null; \}/.test(po)) erros.push("planoSyncOuAviso: plano fora da intenção/loja escolhida, ou bloqueio sem aviso");
+  const chamadores = [...pg.matchAll(/async function (\w+)\(/g)].map((m) => m[1]).filter((f) => f !== "syncJanela" && /syncJanela\(/.test(corpoDaFuncao(pg, f) ?? ""));
+  if (chamadores.length < 4) erros.push(`ANCORA: só ${chamadores.length} pontos de sync manual (detector cego?)`);
+  for (const f of chamadores) {
+    const c = corpoDaFuncao(pg, f)!;
+    const iPlano = c.indexOf("const corpo = planoSyncOuAviso();");
+    const bloqueio = /const corpo = planoSyncOuAviso\(\);\s*if \(!corpo\) (\{[^\n]*?return; \}|return;)/.exec(c);
+    const antes = iPlano < 0 ? c : c.slice(0, iPlano);
+    if (iPlano < 0 || !bloqueio || bloqueio.index !== iPlano) erros.push(`${f}: sync manual sem plano/bloqueio antes de tudo`);
+    else if (/\bset[A-Z]\w*\(|syncJanela\(|fetch\(/.test(antes)) erros.push(`${f}: estado/request ANTES do plano (sync bloqueado marcaria janela/mês)`);
+    const chamadas = [...c.matchAll(/syncJanela\(([^,]+),/g)].map((m) => m[1].trim());
+    if (!chamadas.length || chamadas.some((a) => a !== "corpo")) erros.push(`${f}: syncJanela sem o corpo planejado`);
+  }
+  return erros;
+}
+/**
+ * A5-B.1 (helper): Shopee-only independe de loja ML; com ML na intenção o marketplace enviado é a intenção
+ * (nunca vira "Shopee"); loja escolhida → loja_id_ml; 2+ sem escolha (ou lista desconhecida) → BLOQUEADO.
+ */
+export function planoSyncManualForaDoContrato(h: string): string[] {
+  const erros: string[] = [];
+  const f = corpoDaFuncao(h, "planoSyncManual");
+  if (!f) return ["planoSyncManual ausente"];
+  const linhas = f.split("\n").map((l) => l.trim()).filter(Boolean);
+  if (linhas[0] !== 'if (intencao === "Shopee") return { ok: true, corpo: { marketplace: "Shopee" } };') erros.push("Shopee-only não é independente da loja ML");
+  if ((f.match(/marketplace: "Shopee"/g) ?? []).length !== 1 || (f.match(/marketplace: intencao/g) ?? []).length !== 2 || /marketplace: "(todos|ML)"/.test(f)) erros.push("intenção com ML degradada para outro marketplace");
+  if (!/if \(lojaMLSelecionada\) return \{ ok: true, corpo: \{ marketplace: intencao, loja_id_ml: lojaMLSelecionada \} \};/.test(f)) erros.push("loja ML escolhida não vai em loja_id_ml");
+  const iBloq = f.search(/if \(lojasML === null \|\| lojasML\.length >= 2\) return \{ ok: false, motivo: "ML_STORE_SELECTION_REQUIRED" \};/);
+  const iLivre = f.search(/return \{ ok: true, corpo: \{ marketplace: intencao \} \};/);
+  if (iBloq < 0 || iLivre < 0 || iBloq > iLivre) erros.push("2+ lojas ML sem escolha não bloqueia o sync com ML");
+  return erros;
+}
+
 // ── I16: loja ML EXPLÍCITA na tela/rota de Vendas (Vendas A5) ─────────────────────
 export const PAGINA_VENDAS = "app/(app)/vendas/page.tsx";
 export const HELPER_LOJA_ML_VENDAS = "app/(app)/vendas/loja-ml.ts";
@@ -1013,13 +1068,14 @@ export function lojaMLVendasNaoExplicita(raiz = RAIZ_V2): string[] {
   if (!/if \(lojaMLRef\.current !== lojaDaChamada\) return \{ falhou: true, data: null \};/.test(pg)) erros.push(`${PAGINA_VENDAS}: resposta de outra loja não é descartada`);
   if (!/data\?\.codigo === "ML_STORE_SELECTION_REQUIRED"/.test(pg) || !/data\?\.codigo === "LOJA_ML_INVALIDA"[\s\S]{0,200}?lojaMLRef\.current = null;/.test(pg)) erros.push(`${PAGINA_VENDAS}: 409/404 de loja sem tratamento (ou com fallback)`);
   if (!/const lojaId = mkt === "ML" \? lojaMLRef\.current : shopeeLojaId;/.test(pg)) erros.push(`${PAGINA_VENDAS}: job de sync ML sem a loja escolhida`);
-  if (!/\.\.\.corpoMarketplaceSyncManual\(lojaMLRef\.current, lojasML\)/.test(pg) || /marketplace: "todos", noBuffer/.test(pg)) erros.push(`${PAGINA_VENDAS}: sync manual sem a loja ML escolhida`);
+  // A5-B.1: sync manual — UM request (syncJanela), corpo SÓ do plano; plano decidido ANTES de qualquer estado/request
+  for (const v of syncManualSemPlano(pg)) erros.push(`${PAGINA_VENDAS}: ${v}`);
   if (/lojasML\[\d\]|lojas\[\d\]/.test(pg)) erros.push(`${PAGINA_VENDAS}: loja ML escolhida por ordem`);
   // 7. helper puro
   const h = tiraComentarios(ler(raiz, HELPER_LOJA_ML_VENDAS));
   if (/^import /m.test(h) || /fetch\(|localStorage\./.test(h)) erros.push(`${HELPER_LOJA_ML_VENDAS}: helper não é puro`);
   if (!/if \(lojas\.length === 1\) return \{ lojaId: lojas\[0\]\.id/.test(h) || (h.match(/\[\d\]/g) ?? []).length !== 2 || !/const valida = salva !== null && lojas\.some\(\(l\) => l\.id === salva\);/.test(h)) erros.push(`${HELPER_LOJA_ML_VENDAS}: escolha inicial fora do contrato (única | salva na lista | escolha)`);
-  if (!/if \(lojasML && lojasML\.length >= 2\) return \{ marketplace: "Shopee" \};/.test(h)) erros.push(`${HELPER_LOJA_ML_VENDAS}: sync manual com 2+ lojas e nenhuma escolhida inclui o ML`);
+  for (const v of planoSyncManualForaDoContrato(h)) erros.push(`${HELPER_LOJA_ML_VENDAS}: ${v}`);
   // 8. vendas-hoje e helper legado preservados
   const mc = tiraComentarios(ler(raiz, "lib/ml-conexao.ts"));
   if (!/export const MULTI_ML_VENDAS_NOT_READY = "MULTI_ML_VENDAS_NOT_READY";/.test(mc) || !/export async function contarLojasMLAtivasDoDono\(/.test(mc)) erros.push("lib/ml-conexao.ts: helper/constante da barreira removidos");

@@ -6,13 +6,16 @@
  *          única, 2+ → 409 ML_STORE_SELECTION_REQUIRED; inválida → 404 LOJA_ML_INVALIDA; cookie ignorado;
  *          cache, custo e sync só da loja escolhida; vendas-hoje mantém a barreira.
  *   Sync   POST /api/sync/manual — `loja_id_ml` resolve SÓ a loja escolhida (sem única, sem cookie).
- *   Tela   app/(app)/vendas/loja-ml.ts — escolha inicial, lista, recusa e corpo do sync manual.
+ *   Tela   app/(app)/vendas/loja-ml.ts — escolha inicial, lista, recusa e PLANO do sync manual; a tela
+ *          bloqueia o sync com ML (2+ lojas, nenhuma escolhida) antes de qualquer request (A5-B.1).
  *   Guard  I16_ML_VENDAS_STORE_IS_EXPLICIT.
  *
  * Uso: npx tsx scripts/testar-vendas-ml-multi-loja.ts
  */
 import "./_server-only-inerte";
 import Module from "node:module";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 let ok = 0, falhou = 0;
 let fila: Promise<void> = Promise.resolve();
@@ -302,16 +305,79 @@ async function principal() {
     const r = H.lojasMLDaRecusa([{ id: ML_A, rotulo: "a" }, { rotulo: "sem id" }]);
     assert(JSON.stringify(r) === JSON.stringify([{ id: ML_A, nome: "a" }]), JSON.stringify(r));
   });
-  t("A5-B18. corpo do sync manual: escolhida → loja_id_ml; 2+ sem escolha → só Shopee; 0/1 → todos", () => {
-    const A = { id: ML_A, nome: "A" }, B = { id: ML_B, nome: "B" };
-    const j = (x: unknown) => JSON.stringify(x);
-    assert(j(H.corpoMarketplaceSyncManual(ML_B, [A, B])) === j({ marketplace: "todos", loja_id_ml: ML_B }), "escolhida");
-    assert(j(H.corpoMarketplaceSyncManual(null, [A, B])) === j({ marketplace: "Shopee" }), "2+ sem escolha");
-    assert(j(H.corpoMarketplaceSyncManual(null, [A])) === j({ marketplace: "todos" }), "1");
-    assert(j(H.corpoMarketplaceSyncManual(null, null)) === j({ marketplace: "todos" }), "lista indisponível");
+  secao("\n[4. sync manual da tela — ML nunca é omitido em silêncio (A5-B.1)]");
+  const A = { id: ML_A, nome: "A" }, B = { id: ML_B, nome: "B" };
+  const j = (x: unknown) => JSON.stringify(x);
+  const BLOQ = j({ ok: false, motivo: "ML_STORE_SELECTION_REQUIRED" });
+  const fonte = (rel: string) => readFileSync(join(process.cwd(), rel), "utf8").replace(/\r\n/g, "\n")
+    .replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+  const pagina = fonte("app/(app)/vendas/page.tsx");
+  const corpoFn = (src: string, nome: string) => {
+    const m = new RegExp(`function ${nome}\\([^)]*\\)[^\\n]*\\{\\n`).exec(src)!;
+    let n = 1, i = m.index + m[0].length;
+    for (; n > 0; i++) { if (src[i] === "{") n++; else if (src[i] === "}") n--; }
+    return src.slice(m.index + m[0].length, i - 1);
+  };
+  const ENTRADAS = ["iniciarSyncRapido", "iniciarHistorico", "reprocessarErros", "testarSync"];
+  t("A5-B1.1. Todos + 2 lojas ML + nenhuma escolhida → BLOQUEADO (nenhum request)", () => {
+    assert(j(H.planoSyncManual("todos", null, [A, B])) === BLOQ, j(H.planoSyncManual("todos", null, [A, B])));
+    // toda entrada de sync manual retorna no bloqueio ANTES de syncJanela (o único ponto de request)
+    for (const f of ENTRADAS) {
+      const c = corpoFn(pagina, f);
+      assert(/^\s*(const comErro = historicoMeses\.filter\(m => m\.status === "erro"\);\s*if \(comErro\.length === 0 \|\| historicoRodando\) return;\s*)?const corpo = planoSyncOuAviso\(\);\s*if \(!corpo\) (\{[^\n]*?return; \}|return;)/.test(c), `${f}: não bloqueia antes de tudo`);
+    }
+    assert((pagina.match(/\/api\/sync\/manual/g) ?? []).length === 1 && /fetch\("\/api\/sync\/manual"/.test(corpoFn(pagina, "syncJanela")), "request fora de syncJanela");
+  });
+  t("A5-B1.2. Todos + 2 lojas sem escolha → aviso de seleção (no modal; no teste rápido, resultado de erro)", () => {
+    assert(H.AVISO_SELECIONE_LOJA_ML_SYNC === "Selecione uma loja do Mercado Livre para sincronizar.", H.AVISO_SELECIONE_LOJA_ML_SYNC);
+    assert(/if \(!plano\.ok\) \{ setAvisoSyncML\(AVISO_SELECIONE_LOJA_ML_SYNC\); return null; \}/.test(corpoFn(pagina, "planoSyncOuAviso")), "bloqueio sem aviso");
+    assert(/\{avisoSyncML && \(/.test(pagina) && /⚠️ \{avisoSyncML\}/.test(pagina), "aviso não é exibido");
+    assert(/if \(!corpo\) \{ setTesteResult\(\{ ok: false, msg: `❌ \$\{AVISO_SELECIONE_LOJA_ML_SYNC\}` \}\); return; \}/.test(corpoFn(pagina, "testarSync")), "teste rápido bloqueado sem aviso");
+  });
+  t("A5-B1.3. Mercado Livre + 2 lojas sem escolha → BLOQUEADO", () => {
+    assert(j(H.planoSyncManual("ML", null, [A, B])) === BLOQ, "ML sem escolha passou");
+  });
+  t("A5-B1.4. Shopee-only + 2 lojas ML sem escolha → Shopee PERMITIDO (sem loja ML)", () => {
+    for (const lojas of [[A, B], [A], [], null]) assert(j(H.planoSyncManual("Shopee", null, lojas)) === j({ ok: true, corpo: { marketplace: "Shopee" } }), `Shopee bloqueado/alterado com ${j(lojas)}`);
+    assert(j(H.planoSyncManual("Shopee", ML_A, [A, B])) === j({ ok: true, corpo: { marketplace: "Shopee" } }), "Shopee-only levou loja ML");
+  });
+  t("A5-B1.5. Todos + loja A escolhida → todos com loja_id_ml = A", () => {
+    assert(j(H.planoSyncManual("todos", ML_A, [A, B])) === j({ ok: true, corpo: { marketplace: "todos", loja_id_ml: ML_A } }), j(H.planoSyncManual("todos", ML_A, [A, B])));
+  });
+  t("A5-B1.6. Mercado Livre + loja A escolhida → ML com loja_id_ml = A", () => {
+    assert(j(H.planoSyncManual("ML", ML_A, [A, B])) === j({ ok: true, corpo: { marketplace: "ML", loja_id_ml: ML_A } }), j(H.planoSyncManual("ML", ML_A, [A, B])));
+  });
+  t("A5-B1.7. UMA loja ML → auto-seleção permite o sync (sem clique)", () => {
+    const ini = H.escolherLojaMLInicial([A], null);
+    assert(ini.lojaId === ML_A && !ini.exigeEscolha, j(ini));
+    assert(j(H.planoSyncManual("todos", ini.lojaId, [A])) === j({ ok: true, corpo: { marketplace: "todos", loja_id_ml: ML_A } }), "1 loja bloqueada");
+  });
+  t("A5-B1.8. preferência salva obsoleta (2+) → descartada e o sync com ML fica bloqueado; salva válida → permitido", () => {
+    const obsoleta = H.escolherLojaMLInicial([A, B], ML_X);
+    assert(obsoleta.lojaId === null && obsoleta.descartarSalva, j(obsoleta));
+    assert(j(H.planoSyncManual("todos", obsoleta.lojaId, [A, B])) === BLOQ && j(H.planoSyncManual("ML", obsoleta.lojaId, [A, B])) === BLOQ, "obsoleta permitiu sync com ML");
+    const valida = H.escolherLojaMLInicial([A, B], ML_B);
+    assert(j(H.planoSyncManual("todos", valida.lojaId, [A, B])) === j({ ok: true, corpo: { marketplace: "todos", loja_id_ml: ML_B } }), "salva válida não foi usada");
+    assert(j(H.planoSyncManual("todos", null, null)) === BLOQ, "lista de lojas indisponível permitiu sync com ML");
+  });
+  t("A5-B1.9. sync bloqueado não marca janela/mês: nenhum setX nem request antes do plano (detector prova com contraexemplo)", () => {
+    const v = G2.syncManualSemPlano(pagina);
+    assert(v.length === 0, v.join(" | "));
+    const ruim = pagina.replace("const corpo = planoSyncOuAviso();\n    if (!corpo) return;\n    const janelas", "setQuickSyncRodando(true);\n    const corpo = planoSyncOuAviso();\n    if (!corpo) return;\n    const janelas");
+    assert(ruim !== pagina && G2.syncManualSemPlano(ruim).some((e) => /iniciarSyncRapido: estado\/request ANTES do plano/.test(e)), "detector cego para estado antes do plano");
+  });
+  t("A5-B1.10. intenção com ML nunca vira Shopee-only (sem contagem Shopee como sucesso do período)", () => {
+    for (const intencao of ["todos", "ML"] as const) for (const sel of [null, ML_A]) for (const lojas of [null, [], [A], [A, B]]) {
+      const p = H.planoSyncManual(intencao, sel, lojas);
+      assert(!p.ok || p.corpo.marketplace === intencao, `${intencao}/${sel}/${j(lojas)} → ${j(p)}`);
+    }
+    const h = fonte("app/(app)/vendas/loja-ml.ts");
+    assert(G2.planoSyncManualForaDoContrato(h).length === 0, G2.planoSyncManualForaDoContrato(h).join(" | "));
+    const ruim = h.replace('if (lojasML === null || lojasML.length >= 2) return { ok: false, motivo: "ML_STORE_SELECTION_REQUIRED" };', 'if (lojasML === null || lojasML.length >= 2) return { ok: true, corpo: { marketplace: "Shopee" } };');
+    assert(ruim !== h && G2.planoSyncManualForaDoContrato(ruim).length > 0, "detector cego para degradação a Shopee");
   });
 
-  secao("\n[4. guard]");
+  secao("\n[5. guard]");
   t("A5-B19. I16 I16_ML_VENDAS_STORE_IS_EXPLICIT limpo", () => {
     const v = G2.lojaMLVendasNaoExplicita();
     assert(v.length === 0, v.join(" | "));

@@ -39,13 +39,20 @@ export function escolherLojaMLInicial(lojas: readonly LojaMLVendas[], salva: str
   return { lojaId: valida ? salva : null, exigeEscolha: !valida, descartarSalva: salva !== null && !valida };
 }
 
+export type IntencaoSyncManual = "todos" | "ML" | "Shopee";
+export interface CorpoSyncManual { marketplace: IntencaoSyncManual; loja_id_ml?: string }
+export type PlanoSyncManual = { ok: true; corpo: CorpoSyncManual } | { ok: false; motivo: "ML_STORE_SELECTION_REQUIRED" };
+export const AVISO_SELECIONE_LOJA_ML_SYNC = "Selecione uma loja do Mercado Livre para sincronizar.";
+
 /**
- * Corpo de marketplace do "Sincronizar histórico" (/api/sync/manual): com loja ML escolhida ela vai em
- * `loja_id_ml` (o `loja_id` do corpo é lido pela Shopee); com 2+ lojas ML e nenhuma escolhida o ML NÃO
- * entra (o servidor nunca escolhe entre lojas); com 0/1 o servidor resolve a única.
+ * Plano do sync manual (/api/sync/manual) para a intenção do dono (o marketplace da tela). O marketplace
+ * enviado é SEMPRE a intenção — nunca degrada para outro. Shopee não depende de loja ML. Com ML na
+ * intenção: loja escolhida → `loja_id_ml` (o `loja_id` do corpo é lido pela Shopee); 2+ lojas sem escolha,
+ * ou lista de lojas desconhecida (`null`), → BLOQUEADO (nada é chamado); 0/1 → o servidor resolve a única.
  */
-export function corpoMarketplaceSyncManual(lojaMLSelecionada: string | null, lojasML: readonly LojaMLVendas[] | null): { marketplace: "todos" | "Shopee"; loja_id_ml?: string } {
-  if (lojaMLSelecionada) return { marketplace: "todos", loja_id_ml: lojaMLSelecionada };
-  if (lojasML && lojasML.length >= 2) return { marketplace: "Shopee" };
-  return { marketplace: "todos" };
+export function planoSyncManual(intencao: IntencaoSyncManual, lojaMLSelecionada: string | null, lojasML: readonly LojaMLVendas[] | null): PlanoSyncManual {
+  if (intencao === "Shopee") return { ok: true, corpo: { marketplace: "Shopee" } };
+  if (lojaMLSelecionada) return { ok: true, corpo: { marketplace: intencao, loja_id_ml: lojaMLSelecionada } };
+  if (lojasML === null || lojasML.length >= 2) return { ok: false, motivo: "ML_STORE_SELECTION_REQUIRED" };
+  return { ok: true, corpo: { marketplace: intencao } };
 }
