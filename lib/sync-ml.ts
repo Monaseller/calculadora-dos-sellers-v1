@@ -22,7 +22,7 @@ import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { CATEGORIAS_ML } from "@/lib/comissoes-mercado-livre";
 import { LojaIdIntegrityError } from "@/lib/sync-errors";
 import { lerTodasAsPaginas } from "@/lib/anuncios/leitura-paginada";
-import { coletarFinanceiroML, type DepsColetaML, type ResultadoColetaML } from "@/lib/vendas/ml-financeiro-coleta";
+import { coletarFinanceiroML, JANELA_PROVIDER_MS, type DepsColetaML, type ResultadoColetaML } from "@/lib/vendas/ml-financeiro-coleta";
 import { lerFinanceiroRealML } from "@/lib/vendas/ml-financeiro-leitura";
 
 /** Chave do mapa de custo ML: LOJA | item | variacao ("" = item sem variacao). Nunca so dono + item. */
@@ -338,6 +338,7 @@ export async function syncMLForUserV2(
   if (!lojaOverride?.lojaId || !lojaOverride.accessToken) {
     throw new LojaIdIntegrityError(`[sync-ml] loja ML explicita obrigatoria (userId=${userId}) — sync interrompido, nenhum pedido gravado.`);
   }
+  const inicioSync = Date.now();   // A3.2-C.1: prazo do financeiro conta do início do sync (função de 60 s)
   const token    = lojaOverride.accessToken;
   const sellerId = lojaOverride.sellerId;
   const conta    = lojaOverride.nickname;
@@ -554,6 +555,7 @@ export async function syncMLForUserV2(
   // Vendas A3.2-C: o financeiro REAL das vendas gravadas entra NO PRÓPRIO sync — todo caminho (auto-sync de
   // Vendas, sync manual, cron, executor interno) passa por aqui. Mesma loja/credencial do pedido; só vendas
   // PAGAS; o payload já trazido é reaproveitado (sem GET de pedido); pedido já completo não é consultado.
+  // A3.2-C.1: TODA venda do lote é tentada; só o prazo de execução adia (DEFERRED_BY_RUNTIME_BUDGET).
   // Erro financeiro NÃO falha o sync (os pedidos já foram gravados): é logado e fica pendente para retry.
   const gravados = new Set(resolvidas.map((r) => String(r.order_id)));
   let financeiro: ResultadoColetaML | null = null;
@@ -562,6 +564,7 @@ export async function syncMLForUserV2(
       { userId, lojaId, accessToken: token },
       { pedidos: allOrders.filter((o) => o._status === "paid" && gravados.has(String(o.id))) },
       depsFinanceiroML(userId, lojaId),
+      { ate: inicioSync + JANELA_PROVIDER_MS },
     );
   } catch (e: any) {
     console.error(`[ml-financeiro] ERRO enriquecimento loja=${lojaId}: ${e?.message ?? e}`);

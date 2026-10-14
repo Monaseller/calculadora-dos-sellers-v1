@@ -1135,14 +1135,14 @@ export function financeiroMLNaoReal(raiz = RAIZ_V2): string[] {
   // coletor: só GET, envio 1×, fora das rotas
   const c = tiraComentarios(ler(raiz, COLETOR_FIN_ML));
   if (!/method: "GET"/.test(c) || /method:\s*"(POST|PUT|PATCH|DELETE)"|\.(post|put|patch|delete)\(/i.test(c)) erros.push("coletor: chamada ao provider que não é GET");
-  if (!/if \(!adiadosSet\.has\(p\.order_id\) && p\.shipment_id && !envios\.has\(p\.shipment_id\)\)/.test(c)) erros.push("coletor: custo do envio buscado/gravado por pedido (frete duplicado)");
+  if (!/if \(p\.shipment_id && !envios\.has\(p\.shipment_id\)\) \{\s*const pedidos = pedidosDoEnvio;\s*envios\.set\(p\.shipment_id, getML\(`\/shipments\//.test(c)) erros.push("coletor: custo do envio buscado/gravado por pedido (frete duplicado)");
   // A3.2-C: SÓ a rota de retry importa o motor (o GET de Vendas e a tela nunca chamam o provider)
   const ROTA_RETRY_FIN_ML = "app/api/ml/vendas/financeiro/route.ts";
   for (const f of listar(raiz, "app").filter((x) => /\.(ts|tsx)$/.test(x))) if (f !== ROTA_RETRY_FIN_ML && /ml-financeiro-coleta/.test(ler(raiz, f))) erros.push(`${f}: provider financeiro chamado em rota/tela (só no sync e no retry)`);
   // A3.2-C FINANCIAL_ON_SYNC: o core do sync (todo caminho passa por syncMLForUserV2) coleta o financeiro DEPOIS
   // de gravar os pedidos, com a MESMA loja/credencial e o payload já trazido; erro financeiro é logado, não some.
   const iUpsert = sy.search(/\.from\("pedidos"\)\s*\.upsert\(resolvidas/);
-  const iFin = sy.search(/financeiro = await coletarFinanceiroML\(\s*\{ userId, lojaId, accessToken: token \},\s*\{ pedidos: allOrders\.filter\(\(o\) => o\._status === "paid" && gravados\.has\(String\(o\.id\)\)\) \},\s*depsFinanceiroML\(userId, lojaId\),\s*\);/);
+  const iFin = sy.search(/financeiro = await coletarFinanceiroML\(\s*\{ userId, lojaId, accessToken: token \},\s*\{ pedidos: allOrders\.filter\(\(o\) => o\._status === "paid" && gravados\.has\(String\(o\.id\)\)\) \},\s*depsFinanceiroML\(userId, lojaId\),\s*\{ ate: inicioSync \+ JANELA_PROVIDER_MS \},\s*\);/);
   if (iUpsert < 0 || iFin < iUpsert) erros.push("sync-ml: financeiro não coletado no core do sync depois de gravar os pedidos (mesma loja/credencial/payload)");
   if (!/console\.error\(`\[ml-financeiro\] ERRO enriquecimento loja=\$\{lojaId\}/.test(sy)) erros.push("sync-ml: falha do enriquecimento financeiro silenciosa");
   if ((sy.match(/coletarFinanceiroML\(/g) ?? []).length !== 1) erros.push("sync-ml: motor financeiro chamado fora do ponto único do core");
@@ -1150,15 +1150,21 @@ export function financeiroMLNaoReal(raiz = RAIZ_V2): string[] {
   const cls = corpoDaFuncao(m, "classificarHttpML") ?? "";
   if (!/if \(status === 0 \|\| status === 429 \|\| status === 502 \|\| status === 503 \|\| status === 504\) return "TRANSIENT_ERROR";/.test(cls) || !/return "INTEGRATION_ERROR";/.test(cls)) erros.push("classificação TRANSIENT/INTEGRATION fora do contrato (404/4xx viraria retry)");
   if (!/if \(classe === "TRANSIENT_ERROR"\) continue;/.test(c) || !/if \(t > 0\) await deps\.esperar\(BACKOFF_BASE_MS \* 2 \*\* \(t - 1\)\);/.test(c) || !/signal: ctrl\.signal/.test(c)) erros.push("coletor: retry/backoff/timeout fora do contrato (só transitório repete)");
-  if (!/log\(`\[ml-financeiro\] \$\{f\.classe\} loja=\$\{conta\.lojaId\} order=\$\{f\.order_id\} pack=/.test(c) || /access_?token\}|buyer|receiver\./i.test(c.replace(/accessToken: string/g, ""))) erros.push("coletor: falha sem log sanitizado (ou log com token/comprador)");
+  // logs do motor: com contexto (loja, pedido, pack, envio, etapa, HTTP) e SEM token/comprador — só as linhas log(`...`)
+  const linhasLog = c.match(/log\(`[^`]*`\)/g) ?? [];
+  if (!/log\(`\[ml-financeiro\] \$\{f\.classe\} loja=\$\{conta\.lojaId\} order=\$\{f\.order_id\} pack=/.test(c) || linhasLog.length < 3 || linhasLog.some((l) => /token|buyer|receiver|nickname|email/i.test(l))) erros.push("coletor: falha sem log sanitizado (ou log com token/comprador)");
   if (!/if \(e && financeiroPendenteElegivel\(e\.pedido, e\.envio\) === null\) \{ r\.jaCompletos\+\+; return false; \}/.test(c)) erros.push("coletor: pedido completo (ACTUAL) consultado de novo");
-  if (!/const dentro = alvo\.slice\(0, orcamento\.pedidos\);/.test(c) || !/if \(Date\.now\(\) - inicio > orcamento\.prazoMs\) \{ adiados\.push\(id\); return; \}/.test(c) || /Promise\.all\((?!Array\.from\(\{ length: Math\.min\(limite)/.test(c)) erros.push("coletor: sem orçamento (quantidade/prazo) ou concorrência ilimitada");
+  // A3.2-C.1: SEM teto por quantidade — TODA venda do lote é tentada; a única proteção de tempo é o PRAZO, checado
+  // antes de CADA chamada ao provider (inclusive retry); o que não coube é DEFERRED_BY_RUNTIME_BUDGET (não é erro da API)
+  if (/orcamento\.pedidos|alvo\.slice\(0,|\bLIMITE_|ORCAMENTO_/.test(c) || !/if \(agoraMs\(\) >= ate\) return \{ status, corpo: null, classe: t === 0 \? DEFERIDO : "TRANSIENT_ERROR" \};/.test(c) || /Promise\.all\((?!Array\.from\(\{ length: Math\.min\(limite)/.test(c)) erros.push("coletor: teto por quantidade, prazo fora de cada chamada ou concorrência ilimitada");
+  if (!/if \(f\.classe === DEFERIDO\) \{/.test(c) || !/deferred_by_runtime_budget=\$\{r\.adiados\}/.test(c) || !/if \(o && Array\.isArray\(o\.order_items\)\) extraidos\.set\(id, extrairPedidoFinanceiroML\(o, null\)\);/.test(c)) erros.push("coletor: adiamento por prazo não distinguido de erro do provider, ou venda adiada sem registro pendente");
+  if (!/const inicioSync = Date\.now\(\);/.test(sy) || !/\{ ate: inicioSync \+ JANELA_PROVIDER_MS \},/.test(sy)) erros.push("sync-ml: prazo do financeiro fora do início do sync");
   // TARGETED_RETRY_ON_REFRESH: GET só marca pendentes (banco); retry por rota própria, mesma loja, só pendentes
   const rg = tiraComentarios(ler(raiz, "app/api/ml/vendas/route.ts"));
   if (!/financeiroPendente: pedidosComFinanceiroPendente\(/.test(rg) || /coletarFinanceiroML|ml-financeiro-coleta/.test(rg)) erros.push("GET de Vendas: sem lista de pendentes ou com trabalho de provider na leitura");
   const rr = existsSync(join(raiz, ROTA_RETRY_FIN_ML)) ? tiraComentarios(ler(raiz, ROTA_RETRY_FIN_ML)) : "";
   if (!/\? await resolverContaML\(userId, lojaPedida\)\s*: await resolverContaML\(userId, null, \{ permitirUnica: true \}\);/.test(rr) || /lerCookie|loja_ativa_id/.test(rr)) erros.push(`${ROTA_RETRY_FIN_ML}: loja fora do contrato explícito (ou cookie)`);
-  if (!/const existentes = await lerFinanceiroRealML\(supabase\(\), userId, contaML\.lojaId,/.test(rr) || !/const alvo = pedidosComFinanceiroPendente\(pedidos, existentes, LIMITE_RETRY_FINANCEIRO_ML\);/.test(rr) || !/coletarFinanceiroML\(\{ userId, lojaId, accessToken: contaML\.accessToken \}, alvo,/.test(rr)) erros.push(`${ROTA_RETRY_FIN_ML}: retry sem revalidar pendentes no banco (dono + loja) ou sem limite`);
+  if (!/const existentes = await lerFinanceiroRealML\(supabase\(\), userId, contaML\.lojaId,/.test(rr) || !/const alvo = pedidosComFinanceiroPendente\(pedidos, existentes\);/.test(rr) || !/\}, \{ ate: inicio \+ JANELA_PROVIDER_MS \}\)/.test(rr) || /LIMITE_RETRY/.test(rr) || !/coletarFinanceiroML\(\{ userId, lojaId, accessToken: contaML\.accessToken \}, alvo,/.test(rr)) erros.push(`${ROTA_RETRY_FIN_ML}: retry sem revalidar pendentes no banco (dono + loja) ou sem prazo de execução`);
   const elg = corpoDaFuncao(m, "financeiroPendenteElegivel") ?? "";
   if (/"CONFERIDO"|SEM_PERMISSAO|DIVERGENTE/.test(elg) || !/if \(p\.billing_status === "PENDENTE"\) return "billing";/.test(elg)) erros.push("elegibilidade do retry inclui pedido completo ou erro de integração (loop de consulta)");
   // uma rodada automática por carga da página (sem loop)

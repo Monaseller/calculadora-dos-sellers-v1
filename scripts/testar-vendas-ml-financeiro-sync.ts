@@ -262,9 +262,9 @@ async function principal() {
     assert(r.inserted === 1 && db.pedidos.some((x) => x.order_id === ORDER), "sync derrubado");
     assert(erros.some((x) => /\[ml-financeiro\] ERRO enriquecimento loja=/.test(x)), "falha silenciosa");
   });
-  t("SYNCFIN-16. orçamento: além do limite do sync, o pedido é gravado PENDENTE pelo payload, sem chamadas", async () => {
+  t("SYNCFIN-16. prazo já esgotado: o pedido é gravado PENDENTE pelo payload, sem chamadas", async () => {
     semear(); esperas = []; logs.length = 0;
-    const r = await K.coletarFinanceiroML({ userId: U, lojaId: ML_A, accessToken: TOKEN_A }, { pedidos: [orderGolden()] }, depsFalsos(), { pedidos: 0, prazoMs: 20_000 });
+    const r = await K.coletarFinanceiroML({ userId: U, lojaId: ML_A, accessToken: TOKEN_A }, { pedidos: [orderGolden()] }, depsFalsos(), { ate: 0 });
     const f = finDe(ORDER)!;
     assert(r.adiados === 1 && f.billing_status === "PENDENTE" && f.pack_id === PACK && c(f.tarifa_venda) === 419 && chamadas.length === 0, `${JSON.stringify(r)} chamadas=${chamadas.length}`);
     assert(F.financeiroPendenteElegivel(f as any, null) !== null, "adiado não ficou elegível ao retry");
@@ -353,6 +353,68 @@ async function principal() {
     const g = await getVendas(`date_from=${DIA}&date_to=${DIA}&loja_id=${ML_A}`);
     const row = (g.corpo.rows ?? []).find((x: any) => x.orderId === ORDER);
     assert(row && row.financeiro?.qualidadeFinanceira === "ESTIMATED" && JSON.stringify(g.corpo.financeiroPendente) === JSON.stringify([ORDER]), JSON.stringify(row?.financeiro));
+  });
+
+  secao("\n[5. prazo de execução — sem teto por quantidade (A3.2-C.1)]");
+  const lote = (n: number, base = 2000019000000000) => Array.from({ length: n }, (_, i) => orderGolden({ id: base + i, pack_id: null, shipping: { id: 9000000 + i } }));
+  const semearLote = (n: number) => { semear(); pedidosML = Object.fromEntries(lote(n).map((o) => [String(o.id), o])); };
+  t("BUDGET-1. lote de 130 pedidos com API saudável: TODOS tentados na mesma execução (nenhum adiado, sem teto 100)", async () => {
+    semearLote(130); esperas = []; logs.length = 0;
+    const r = await K.coletarFinanceiroML({ userId: U, lojaId: ML_A, accessToken: TOKEN_A }, { pedidos: Object.values(pedidosML) }, depsFalsos());
+    const descontos = chamadas.filter((x) => /\/orders\/\d+\/discounts$/.test(x.caminho)).length;
+    assert(descontos === 130 && r.adiados === 0 && r.actual === 130 && db.ml_financeiro_pedidos.length === 130, `descontos=${descontos} ${JSON.stringify({ ...r, falhas: r.falhas.length })}`);
+    assert(chamadas.filter((x) => /\/shipments\/\d+\/costs$/.test(x.caminho)).length === 130, "envio fora de 1×/shipment");
+  });
+  t("BUDGET-2. prazo atingido (relógio): o restante fica DEFERRED, gravado pelo payload; nenhuma venda perdida; nada chamado após o prazo", async () => {
+    semearLote(30); esperas = []; logs.length = 0;
+    let agora = 0; const prazo = 20;
+    const deps = { ...depsFalsos(), relogio: () => agora, fetch: (async (...a: any[]) => { agora += 1; return (globalThis.fetch as any)(...a); }) as any };
+    const r = await K.coletarFinanceiroML({ userId: U, lojaId: ML_A, accessToken: TOKEN_A }, { pedidos: Object.values(pedidosML) }, deps, { ate: prazo });
+    assert(r.adiados > 0 && db.ml_financeiro_pedidos.length === 30, `adiados=${r.adiados} gravados=${db.ml_financeiro_pedidos.length}`);
+    assert(chamadas.length <= prazo, `chamadas depois do prazo: ${chamadas.length}`);
+    const adiados = db.ml_financeiro_pedidos.filter((p) => p.billing_status === "PENDENTE");
+    assert(adiados.length >= r.adiados && adiados.every((p) => c(p.tarifa_venda) === 419 && p.tarifa_origem === "PROVIDER"), "venda adiada sem dados do payload");
+  });
+  t("BUDGET-3. venda adiada pelo prazo é ELEGÍVEL ao retry do refresh (aparece em financeiroPendente)", async () => {
+    semear(); logs.length = 0;
+    await K.coletarFinanceiroML({ userId: U, lojaId: ML_A, accessToken: TOKEN_A }, { pedidos: [orderGolden()] }, depsFalsos(), { ate: 0 });
+    db.pedidos.push({ id: `${U}_ML_${ML_A}_${ORDER}_${ITEM}_nv`, user_id: U, marketplace: "ML", loja_id: ML_A, order_id: ORDER, ml_item_id: ITEM, variation_id: null, data: DIA, data_pagamento: DIA, data_criacao: DIA, synced_at: new Date().toISOString(), status: "paid", qtd: 1, faturamento: 41.24, tarifa_venda: 4.19, conta: "MONAMOR" });
+    assert(F.financeiroPendenteElegivel(finDe(ORDER) as any, null) !== null, "adiado não elegível");
+    const g = await getVendas(`date_from=${DIA}&date_to=${DIA}&loja_id=${ML_A}`);
+    assert(JSON.stringify(g.corpo.financeiroPendente) === JSON.stringify([ORDER]), JSON.stringify(g.corpo.financeiroPendente));
+  });
+  t("BUDGET-4/5. adiado NÃO é TRANSIENT_ERROR nem INTEGRATION_ERROR (log próprio DEFERRED_BY_RUNTIME_BUDGET)", async () => {
+    semear(); logs.length = 0;
+    const r = await K.coletarFinanceiroML({ userId: U, lojaId: ML_A, accessToken: TOKEN_A }, { pedidos: [orderGolden()] }, depsFalsos(), { ate: 0 });
+    assert(r.adiados === 1 && r.transitorios === 0 && r.integracao === 0 && r.falhas.length === 0 && chamadas.length === 0, JSON.stringify(r));
+    assert(logs.some((l) => /DEFERRED_BY_RUNTIME_BUDGET loja=.* order=2000018971279352 /.test(l)) && !logs.some((l) => /TRANSIENT_ERROR|INTEGRATION_ERROR/.test(l)), logs.join(" | "));
+    assert(logs.some((l) => /resumo .* transient=0 integracao=0 deferred_by_runtime_budget=1/.test(l)), "resumo não distingue");
+  });
+  t("BUDGET-6. ACTUAL não é reconsultado (sync e retry)", async () => {
+    semear(); await sync(); chamadas = [];
+    await sync();
+    assert(!chamadas.some((x) => /discounts|shipments|packs|billing/.test(x.caminho)), "ACTUAL reconsultado no sync");
+    const r = await postRetry({ loja_id: ML_A, order_ids: [ORDER] });
+    assert(r.corpo.tentados === 0, "ACTUAL reconsultado no retry");
+  });
+  t("BUDGET-7. nenhuma Promise.all sem limite no caminho financeiro (só o pool de concorrência 2)", async () => {
+    const k = fonte("lib/vendas/ml-financeiro-coleta.ts").replace(/\/\*[\s\S]*?\*\//g, "");
+    const usos = k.match(/Promise\.all\(/g) ?? [];
+    assert(usos.length === 1 && /Promise\.all\(Array\.from\(\{ length: Math\.min\(limite, itens\.length\) \}/.test(k) && K.CONCORRENCIA_ML === 2, `Promise.all: ${usos.length}`);
+    assert(!/Promise\.all/.test(fonte("app/api/ml/vendas/financeiro/route.ts")) && !/LIMITE_RETRY|ORCAMENTO_/.test(k), "Promise.all/teto no retry");
+    assert(K.TENTATIVAS_ML === 3 && K.BACKOFF_BASE_MS === 1000 && K.TIMEOUT_REQUISICAO_MS === 10_000 && K.JANELA_PROVIDER_MS === 40_000, "parâmetros alterados");
+  });
+  t("BUDGET-8. página: no máximo UMA rodada automática por carga (sem loop)", async () => {
+    const pg = fonte("app/(app)/vendas/page.tsx");
+    assert(/retryFinanceiroRef\.current = true;/.test(pg) && !/retryFinanceiroRef\.current = false/.test(pg) && (pg.match(/\/api\/ml\/vendas\/financeiro/g) ?? []).length === 1, "loop possível");
+  });
+  t("BUDGET-9. retry sem teto 40: 70 pendentes com API saudável → os 70 tentados na mesma requisição", async () => {
+    semearLote(70);
+    await K.coletarFinanceiroML({ userId: U, lojaId: ML_A, accessToken: TOKEN_A }, { pedidos: Object.values(pedidosML) }, depsFalsos(), { ate: 0 });
+    assert(db.ml_financeiro_pedidos.filter((p) => p.billing_status === "PENDENTE").length === 70, "pendentes não criados");
+    chamadas = [];
+    const r = await postRetry({ loja_id: ML_A, order_ids: Object.keys(pedidosML) });
+    assert(r.corpo.tentados === 70 && r.corpo.actual === 70 && r.corpo.adiados === 0, JSON.stringify(r.corpo));
   });
 
   secao("\n[4. guard]");

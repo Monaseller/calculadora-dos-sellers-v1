@@ -5,7 +5,8 @@
  *   - loja do MESMO contrato do GET: `loja_id` explícita validada no servidor (dono + ML + ativa) ou a única;
  *     credencial dessa loja (vencida → nada é feito; o refresh é de outro fluxo);
  *   - só ORDER ids; o servidor revalida no banco (dono + loja) e tenta SÓ os pendentes elegíveis — pedido
- *     completo (ACTUAL) não é consultado; no máximo LIMITE_RETRY_FINANCEIRO_ML por chamada;
+ *     completo (ACTUAL) não é consultado; TODOS os pendentes até o prazo de execução (concorrência 2 + prazo;
+ *     sem teto por quantidade — o que não couber fica DEFERRED_BY_RUNTIME_BUDGET para o próximo refresh);
  *   - só GET no provider; resultado gravado; resposta = resumo (a tela relê GET /api/ml/vendas).
  * Body: { loja_id?: string, order_ids: string[] }
  */
@@ -15,8 +16,8 @@ import { autenticarRequisicao } from "@/lib/autenticacao";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { resolverContaML } from "@/lib/ml-conexao";
 import { LOJA_ML_INVALIDA, ML_STORE_SELECTION_REQUIRED, respostaSelecaoLojaML } from "@/lib/ml-loja-catalogo";
-import { LIMITE_RETRY_FINANCEIRO_ML, pedidosComFinanceiroPendente } from "@/lib/vendas/ml-financeiro";
-import { coletarFinanceiroML, ORCAMENTO_RETRY } from "@/lib/vendas/ml-financeiro-coleta";
+import { MAX_IDS_RETRY_FINANCEIRO_ML, pedidosComFinanceiroPendente } from "@/lib/vendas/ml-financeiro";
+import { coletarFinanceiroML, JANELA_PROVIDER_MS } from "@/lib/vendas/ml-financeiro-coleta";
 import { lerFinanceiroRealML } from "@/lib/vendas/ml-financeiro-leitura";
 
 export const maxDuration = 60;
@@ -27,13 +28,14 @@ function supabase(): SupabaseClient {
 }
 
 export async function POST(request: Request) {
+  const inicio = Date.now();   // prazo do provider conta do início da requisição (função de 60 s)
   const auth = await autenticarRequisicao(request);
   const userId = auth.autenticado ? auth.uid : null;
   if (!userId) return NextResponse.json({ erro: true, mensagem: "Sessão inválida." }, { status: 401 });
 
   const body = (await request.json().catch(() => ({}))) as { loja_id?: unknown; order_ids?: unknown };
   const lojaPedida = typeof body.loja_id === "string" && body.loja_id ? body.loja_id : null;
-  const pedidos = Array.isArray(body.order_ids) ? body.order_ids.filter((x): x is string => typeof x === "string" && /^\d{6,20}$/.test(x)) : [];
+  const pedidos = Array.isArray(body.order_ids) ? body.order_ids.filter((x): x is string => typeof x === "string" && /^\d{6,20}$/.test(x)).slice(0, MAX_IDS_RETRY_FINANCEIRO_ML) : [];
   if (pedidos.length === 0) return NextResponse.json({ ok: true, tentados: 0 });
 
   const contaML = lojaPedida
@@ -50,9 +52,9 @@ export async function POST(request: Request) {
   }
   if (!contaML.ok) return NextResponse.json({ ok: false, tentados: 0, motivo: contaML.motivo });
 
-  // revalida no banco: só pedidos DESTE dono + loja, só os pendentes elegíveis, até o limite
-  const existentes = await lerFinanceiroRealML(supabase(), userId, contaML.lojaId, pedidos.slice(0, LIMITE_RETRY_FINANCEIRO_ML * 2));
-  const alvo = pedidosComFinanceiroPendente(pedidos, existentes, LIMITE_RETRY_FINANCEIRO_ML);
+  // revalida no banco: só pedidos DESTE dono + loja, só os pendentes elegíveis
+  const existentes = await lerFinanceiroRealML(supabase(), userId, contaML.lojaId, pedidos);
+  const alvo = pedidosComFinanceiroPendente(pedidos, existentes);
   if (alvo.length === 0) return NextResponse.json({ ok: true, tentados: 0 });
 
   const lojaId = contaML.lojaId;
@@ -68,10 +70,10 @@ export async function POST(request: Request) {
       if (error) throw new Error(`gravação de ml_financeiro_pedidos falhou: ${error.message}`);
     },
     lerExistentes: async () => existentes,
-  }, ORCAMENTO_RETRY).catch((e: any) => {
+  }, { ate: inicio + JANELA_PROVIDER_MS }).catch((e: any) => {
     console.error(`[ml-financeiro] ERRO retry loja=${lojaId}: ${e?.message ?? e}`);
     return null;
   });
   if (!r) return NextResponse.json({ ok: false, tentados: alvo.length });
-  return NextResponse.json({ ok: true, tentados: alvo.length, actual: r.actual, pendentes: r.pendentes, integracao: r.integracao });
+  return NextResponse.json({ ok: true, tentados: alvo.length, actual: r.actual, pendentes: r.pendentes, integracao: r.integracao, adiados: r.adiados });
 }

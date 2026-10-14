@@ -149,16 +149,18 @@ export function financeiroPendenteElegivel(p: PedidoFinanceiroML, envio: EnvioFi
   return null;
 }
 
-/** A3.2-C — no máximo 40 pedidos pendentes por carga da tela de Vendas (orçamento do retry, ver o coletor). */
-export const LIMITE_RETRY_FINANCEIRO_ML = 40;
+/**
+ * A3.2-C.1 — validação de ENTRADA do retry (tamanho do corpo/consulta), não teto de negócio: o retry tenta
+ * todos os pendentes recebidos até o PRAZO de execução do coletor.
+ */
+export const MAX_IDS_RETRY_FINANCEIRO_ML = 2000;
 
-/** Order_ids com financeiro pendente ELEGÍVEL, na ordem recebida (a tela manda os mais recentes primeiro), até o limite. */
-export function pedidosComFinanceiroPendente(ordem: readonly string[], fin: ReadonlyMap<string, { pedido: PedidoFinanceiroML; envio: EnvioFinanceiroML | null }>, limite = LIMITE_RETRY_FINANCEIRO_ML): string[] {
+/** Order_ids com financeiro pendente ELEGÍVEL, na ordem recebida (a tela manda os mais recentes primeiro). */
+export function pedidosComFinanceiroPendente(ordem: readonly string[], fin: ReadonlyMap<string, { pedido: PedidoFinanceiroML; envio: EnvioFinanceiroML | null }>): string[] {
   const out: string[] = [];
   for (const id of new Set(ordem)) {
     const f = fin.get(id);
     if (f && financeiroPendenteElegivel(f.pedido, f.envio) !== null) out.push(id);
-    if (out.length >= limite) break;
   }
   return out;
 }
