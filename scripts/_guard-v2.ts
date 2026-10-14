@@ -54,6 +54,10 @@
  *       marketplace|loja|item|variação (sem SKU, sem fallback entre variações); sem custo / sem produto /
  *       identidade incompleta → pendente, nunca 0; nada grava (sem snapshot/backfill); um lookup por
  *       requisição (sem N+1); a venda segue visível; a tela de Vendas exibe só o cálculo ao vivo;
+ *   I14 I14_ML_SALE_ITEM_IDENTITY_IS_EXACT (Vendas A4-B): o writer ML grava a variação EXATA do provider; id
+ *       novo com loja + variação; legada reaproveitada/adotada só pela loja, mesma identidade, e adoção de
+ *       variação só com UMA variação do item no pedido; 2+ → ambígua preservada (sem chute, sem dupla
+ *       contagem); SKU/nome/preço fora da identidade; erro de gravação falha o sync; histórico não é preenchido;
  *   Z   ZONAS PROTEGIDAS sem suíte comportamental própria (telas legadas de Vendas/Dashboard,
  *       constantes financeiras, supabase/**, vercel.json, .env.example, sync-worker.mjs): mudar
  *       exige re-baseline EXPLÍCITO de scripts/zonas-protegidas.json (aparece no diff), nunca
@@ -721,7 +725,7 @@ function cadeiasDe(raiz: string, arquivo: string, tabela: string): string[] {
  * de seleção escopada, enumeração admin de lojas, ou o AGREGADO do dono (agente).
  */
 export const PEDIDOS_SEM_LOJA_PERMITIDOS: Record<string, RegExp[]> = {
-  "lib/sync-ml.ts": [/^\.from\("pedidos"\)\s*\.upsert\(rows\.slice\(i, i \+ UPSERT_BATCH\), \{ onConflict: "id" \}\)$/],
+  "lib/sync-ml.ts": [/^\.from\("pedidos"\)\s*\.upsert\(resolvidas\.slice\(i, i \+ UPSERT_BATCH\), \{ onConflict: "id" \}\)$/],
   "lib/sync-shopee.ts": [
     /^\.from\("pedidos"\)\s*\.select\("id, loja_id, financial_reconciled_at"\)\s*\.eq\("user_id", userId\)\s*\.in\("id", lote\)$/,
     /^\.from\("pedidos"\)\s*\.upsert\(rows\.slice\(i, i \+ UPSERT_BATCH\), \{ onConflict: "id" \}\)$/,
@@ -871,6 +875,50 @@ export function custoDeVendaForaDeMeusProdutos(raiz = RAIZ_V2): string[] {
   return erros;
 }
 
+// ── I14: identidade EXATA da linha de venda ML (Vendas A4-B) ─────────────
+/**
+ * I14_ML_SALE_ITEM_IDENTITY_IS_EXACT: (a) o laço de order_items lê a variação do PROVIDER
+ * (`variacaoDoItemML(orderItem)` ← `orderItem.item.variation_id`) e a grava na linha — nunca `variation_id:
+ * null` forçado nem variação vinda do anúncio; uma linha por item (quantidade não vira linhas) e receita =
+ * valorUnit × qtd; (b) id NOVO com loja e variação; (c) resolução: só existentes da MESMA loja; legada
+ * reaproveitada pela identidade exata; adoção de variação só com UMA variação do item e UMA legada; 2+ →
+ * ambígua, não gravada; nada de SKU/nome/preço/posição; (d) existentes lidos por dono + ML + loja; erro de
+ * leitura/gravação lança e o sync não devolve sucesso; (e) A3 usa o caminho exato quando há variação.
+ */
+export function identidadeVendaMLNaoExata(raiz = RAIZ_V2): string[] {
+  const erros: string[] = [];
+  const s = tiraComentarios(ler(raiz, "lib/sync-ml.ts"));
+  // (a) laço de itens
+  const iLaco = s.search(/for \(const orderItem of \(order\.order_items \?\? \[\]\)\) \{/);
+  const laco = iLaco < 0 ? "" : s.slice(iLaco, s.indexOf("rows.push({", iLaco) + 2400);
+  if (!laco) erros.push("sync-ml: laço de order_items não encontrado (detector cego)");
+  if (!/const variationId\s+= variacaoDoItemML\(orderItem\);/.test(laco) || !/variation_id:\s+variationId,/.test(laco)) erros.push("sync-ml: variação do provider não gravada na linha");
+  if (/variation_id:\s+null\b|variation_id:\s+anuncio/.test(laco)) erros.push("sync-ml: variação forçada a null ou vinda do anúncio");
+  if (!/loja_id:\s+lojaId,/.test(laco)) erros.push("sync-ml: linha ML sem loja_id");
+  if (!/const faturamento\s+= valorUnit \* qtd;/.test(laco) || /for \(let \w+ = 0; \w+ < qtd|Array\.from\(\{ length: qtd/.test(s)) erros.push("sync-ml: receita fora de valorUnit × qtd ou quantidade vira linhas");
+  const variacao = corpoDe(s, /export function variacaoDoItemML\(/) ?? "";
+  if (!/const v = orderItem\?\.item\?\.variation_id;/.test(variacao) || /sku|title|price|anuncio/.test(variacao)) erros.push("sync-ml: variação não vem de orderItem.item.variation_id");
+  // (b) id novo
+  if (!/return `\$\{userId\}_ML_\$\{lojaId\}_\$\{orderId\}_\$\{itemId\}_\$\{variationId \?\? "nv"\}`;/.test(s) || !/id:\s+idPedidoML\(userId, lojaId, String\(order\.id\), mlItemId, variationId\),/.test(laco)) erros.push("sync-ml: id novo sem loja/variação");
+  // (c) resolução
+  const res = (() => { const i = s.indexOf("export function resolverIdsPedidosML"); return i < 0 ? "" : s.slice(i, s.indexOf("\nexport ", i + 10) < 0 ? undefined : s.indexOf("\n}\n", i) + 3); })();
+  if (!/const daLoja = existentes\.filter\(\(e\) => e\.loja_id === lojaId\);/.test(res)) erros.push("resolução: existentes de outra loja podem ser adotados");
+  if (!/if \(variacoes\.size === 1 && legados\.length === 1\) \{ saida\.push\(\{ \.\.\.l, id: legados\[0\]\.id \}\); continue; \}/.test(res)
+    || !/ambiguas\.set\(k, \{[^}]*\}\);\s*continue;/.test(res)) erros.push("resolução: adoção de variação sem exigir UMA variação/UMA legada, ou ambígua gravada");
+  if (/sku|nome|preco|valor_unit|anuncio|title|\.sort\(\)\[0\]|variacoes\]\[0\]/i.test(res.replace(/variacoes: \[\.\.\.variacoes\]\.sort\(\)/, ""))) erros.push("resolução: SKU/nome/preço/posição na identidade");
+  // (d) leitura e gravação
+  const leit = corpoDe(s, /async function lerPedidosMLExistentesDaLoja\(/) ?? "";
+  if (!/\.eq\("user_id", userId\)\s*\.eq\("marketplace", "ML"\)\s*\.eq\("loja_id", lojaId\)\s*\.in\("order_id"/.test(leit) || !/if \(error\) throw new ErroGravacaoPedidosML/.test(leit)) erros.push("sync-ml: leitura de existentes sem dono+ML+loja ou sem falhar");
+  const iRes = s.search(/const \{ linhas: resolvidas, ambiguas \} = resolverIdsPedidosML\(lojaId, rows, existentes\);/);
+  const iUp = s.search(/\.upsert\(resolvidas\.slice\(i, i \+ UPSERT_BATCH\), \{ onConflict: "id" \}\);\s*if \(error\) throw new ErroGravacaoPedidosML/);
+  const iRet = s.search(/return \{ found, inserted: resolvidas\.length/);
+  if (iRes < 0 || iUp < iRes || iRet < iUp) erros.push("sync-ml: gravação fora da resolução, erro de gravação ignorado ou sucesso antes da gravação");
+  // (e) A3
+  const cp = tiraComentarios(ler(raiz, SERVICO_CUSTO_VENDA));
+  if (!/variacaoInformada: venda\.variation_id !== null && venda\.variation_id !== undefined && venda\.variation_id !== ""/.test(cp)) erros.push("A3: venda ML com variação não usa o caminho exato");
+  return erros;
+}
+
 export function invariantesV2(raiz = RAIZ_V2, opcoes: { zonas?: boolean } = {}): string[] {
   const erros: string[] = [];
   for (const v of canonicoAlcancaLegado(raiz)) erros.push(`I1 canônico→legado: ${v}`);
@@ -886,6 +934,7 @@ export function invariantesV2(raiz = RAIZ_V2, opcoes: { zonas?: boolean } = {}):
   for (const v of observacaoNaUiNaoSoLeitura(raiz)) erros.push(`I11 I11_MARKETPLACE_STATUS_UI_IS_READ_ONLY: ${v}`);
   for (const v of vendasSemEscopoDeLoja(raiz)) erros.push(`I12 I12_SALES_STORE_SCOPE_IS_EXPLICIT: ${v}`);
   for (const v of custoDeVendaForaDeMeusProdutos(raiz)) erros.push(`I13 I13_SALES_COST_COMES_FROM_MEUS_PRODUTOS: ${v}`);
+  for (const v of identidadeVendaMLNaoExata(raiz)) erros.push(`I14 I14_ML_SALE_ITEM_IDENTITY_IS_EXACT: ${v}`);
   if (opcoes.zonas !== false) for (const v of verificarZonas(raiz)) erros.push(`Z zona protegida sem re-baseline: ${v}`);
   return erros;
 }

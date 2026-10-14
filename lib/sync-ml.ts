@@ -191,6 +191,90 @@ function gerarDias(from: string, to: string): string[] {
 export interface SyncMLResult {
   found:    number;
   inserted: number;
+  /** Vendas A4-B: itens com linha legada sem variação + 2+ variações na resposta — preservados, não corrigidos. */
+  legadoVariacaoAmbigua?: number;
+}
+
+// ── Vendas A4-B: identidade EXATA da linha de venda ML ──────────────────────
+//
+// Identidade = dono + loja + ML + pedido + item + variação (ou vazio). SKU, nome, preço e posição não
+// participam. Linha NOVA ganha id com loja e variação; linha LEGADA (`${userId}_ML_${order}_${item}`, sem
+// loja nem variação) mantém o PK: é reaproveitada quando é a mesma identidade, ou ADOTADA (recebe a
+// variação) só quando a resposta tem UMA única variação daquele item no pedido. Com 2+ variações e uma
+// legada sem variação, nada é chutado: a legada fica como está e o item é reportado (sem dupla contagem).
+// Histórico nunca é preenchido por inferência. Toda leitura/escrita é da loja da execução.
+
+/** Erro de GRAVAÇÃO dos pedidos ML: o sync falha (nunca "concluído" com lote perdido). Transitório. */
+export class ErroGravacaoPedidosML extends Error {}
+
+/** Id de uma linha NOVA: dono + ML + loja + pedido + item + variação ("nv" = sem variação). */
+export function idPedidoML(userId: string, lojaId: string, orderId: string, itemId: string, variationId: string | null): string {
+  return `${userId}_ML_${lojaId}_${orderId}_${itemId}_${variationId ?? "nv"}`;
+}
+
+/** Variação informada pelo provider para o item do pedido (null = item sem variação). */
+export function variacaoDoItemML(orderItem: any): string | null {
+  const v = orderItem?.item?.variation_id;
+  return v === null || v === undefined || String(v) === "" ? null : String(v);
+}
+
+/** Linha de `pedidos` já existente da MESMA loja (lida por dono + ML + loja + pedidos). */
+export interface PedidoMLExistente { id: string; order_id: string; ml_item_id: string | null; variation_id: string | null; loja_id: string | null }
+export interface AmbiguidadeVariacaoML { order_id: string; ml_item_id: string; idLegado: string; variacoes: string[] }
+
+/**
+ * Decide o PK de cada linha a gravar. `linhas` já vêm com o id NOVO (idPedidoML). Existentes de outra loja
+ * são ignorados (a leitura já é da loja; isto é defesa) — nenhuma linha de outra loja é adotada.
+ */
+export function resolverIdsPedidosML<T extends { id: string; order_id: string; ml_item_id: string; variation_id: string | null }>(
+  lojaId: string, linhas: readonly T[], existentes: readonly PedidoMLExistente[]
+): { linhas: T[]; ambiguas: AmbiguidadeVariacaoML[] } {
+  const chave = (o: string, i: string | null, v: string | null) => `${o}|${i ?? ""}|${v ?? ""}`;
+  const daLoja = existentes.filter((e) => e.loja_id === lojaId);
+  const exatos = new Map(daLoja.map((e) => [chave(e.order_id, e.ml_item_id, e.variation_id), e] as const));
+  const legadosSemVariacao = new Map<string, PedidoMLExistente[]>();
+  for (const e of daLoja) if (e.variation_id === null) {
+    const k = `${e.order_id}|${e.ml_item_id ?? ""}`;
+    legadosSemVariacao.set(k, [...(legadosSemVariacao.get(k) ?? []), e]);
+  }
+  const variacoesDoItem = new Map<string, Set<string>>();
+  for (const l of linhas) if (l.variation_id !== null) {
+    const k = `${l.order_id}|${l.ml_item_id}`;
+    variacoesDoItem.set(k, (variacoesDoItem.get(k) ?? new Set<string>()).add(l.variation_id));
+  }
+  const saida: T[] = [];
+  const ambiguas = new Map<string, AmbiguidadeVariacaoML>();
+  for (const l of linhas) {
+    const exato = exatos.get(chave(l.order_id, l.ml_item_id, l.variation_id));
+    if (exato) { saida.push({ ...l, id: exato.id }); continue; }
+    const k = `${l.order_id}|${l.ml_item_id}`;
+    const legados = legadosSemVariacao.get(k) ?? [];
+    if (l.variation_id !== null && legados.length > 0) {
+      const variacoes = variacoesDoItem.get(k)!;
+      if (variacoes.size === 1 && legados.length === 1) { saida.push({ ...l, id: legados[0].id }); continue; }
+      ambiguas.set(k, { order_id: l.order_id, ml_item_id: l.ml_item_id, idLegado: legados[0].id, variacoes: [...variacoes].sort() });
+      continue;
+    }
+    saida.push(l);
+  }
+  return { linhas: saida, ambiguas: [...ambiguas.values()] };
+}
+
+/** Linhas existentes da loja para os pedidos da resposta (dono + ML + loja + pedidos). Erro → falha. */
+async function lerPedidosMLExistentesDaLoja(userId: string, lojaId: string, orderIds: string[]): Promise<PedidoMLExistente[]> {
+  const existentes: PedidoMLExistente[] = [];
+  for (let i = 0; i < orderIds.length; i += 200) {
+    const { data, error } = await supabase()
+      .from("pedidos")
+      .select("id, order_id, ml_item_id, variation_id, loja_id")
+      .eq("user_id", userId)
+      .eq("marketplace", "ML")
+      .eq("loja_id", lojaId)
+      .in("order_id", orderIds.slice(i, i + 200));
+    if (error) throw new ErroGravacaoPedidosML(`[sync-ml] leitura de pedidos existentes falhou: ${error.message}`);
+    existentes.push(...((data ?? []) as PedidoMLExistente[]));
+  }
+  return existentes;
 }
 
 /** Loja ML já resolvida no servidor (dono + marketplace + credencial). */
@@ -350,7 +434,8 @@ export async function syncMLForUserV2(
       const qtd:       number = orderItem.quantity   ?? 1;
       const valorUnit: number = orderItem.unit_price ?? 0;
       const faturamento       = valorUnit * qtd;
-      const anuncio           = buscarAnuncioML(mapaAnuncios, lojaId, mlItemId, orderItem.item?.variation_id ?? null);
+      const variationId       = variacaoDoItemML(orderItem);   // Vendas A4-B: variação EXATA do provider
+      const anuncio           = buscarAnuncioML(mapaAnuncios, lojaId, mlItemId, variationId);
 
       const saleFeeML = typeof orderItem.sale_fee === "number" ? orderItem.sale_fee : null;
       let tarifaVenda: number;
@@ -378,7 +463,7 @@ export async function syncMLForUserV2(
       const roi            = custo > 0 ? (lucroLiquido / custo) * 100 : 0;
 
       rows.push({
-        id:              `${userId}_ML_${order.id}_${mlItemId}`,
+        id:              idPedidoML(userId, lojaId, String(order.id), mlItemId, variationId),
         user_id:         userId,
         marketplace:     "ML",
         order_id:        String(order.id),
@@ -388,7 +473,7 @@ export async function syncMLForUserV2(
         data_atualizacao_marketplace: dataAtualizacaoMarketplaceML,
         anuncio:         anuncio?.nome ?? orderItem.item?.title ?? mlItemId,
         ml_item_id:      mlItemId,
-        variation_id:    null,
+        variation_id:    variationId,
         conta,
         loja_id:         lojaId,
         sku:             anuncio?.sku ?? null,
@@ -413,11 +498,21 @@ export async function syncMLForUserV2(
     }
   }
 
+  // Vendas A4-B: PK de cada linha pela identidade exata (legada reaproveitada/adotada; nova com loja e
+  // variação); item legado ambíguo (2+ variações) não é gravado nem chutado — fica como está.
+  const existentes = await lerPedidosMLExistentesDaLoja(userId, lojaId, [...new Set(rows.map((r) => r.order_id as string))]);
+  const { linhas: resolvidas, ambiguas } = resolverIdsPedidosML(lojaId, rows, existentes);
+  for (const a of ambiguas) {
+    console.error(`[sync-ml] LEGACY_VARIATION_AMBIGUOUS loja=${lojaId} pedido=${a.order_id} item=${a.ml_item_id} variacoes=${a.variacoes.join(",")} — linha legada preservada`);
+  }
+
+  // Erro de gravação FALHA o sync (antes era ignorado: lote perdido em silêncio e sync "concluído").
   const UPSERT_BATCH = 250;
-  for (let i = 0; i < rows.length; i += UPSERT_BATCH) {
-    await supabase()
+  for (let i = 0; i < resolvidas.length; i += UPSERT_BATCH) {
+    const { error } = await supabase()
       .from("pedidos")
-      .upsert(rows.slice(i, i + UPSERT_BATCH), { onConflict: "id" });
+      .upsert(resolvidas.slice(i, i + UPSERT_BATCH), { onConflict: "id" });
+    if (error) throw new ErroGravacaoPedidosML(`[sync-ml] gravação de pedidos falhou (loja ${lojaId}, lote ${i / UPSERT_BATCH + 1}): ${error.message}`);
   }
 
   // Fase 4 Parte 2 (recalculo de dashboard_resumos_diarios) REMOVIDA
@@ -430,5 +525,5 @@ export async function syncMLForUserV2(
   // executada — reativar então (reintroduzir o bloco de coleta por conta +
   // a chamada a atualizarResumosDosDias, removidos nesta edição).
 
-  return { found, inserted: rows.length };
+  return { found, inserted: resolvidas.length, legadoVariacaoAmbigua: ambiguas.length };
 }
