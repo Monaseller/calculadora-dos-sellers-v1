@@ -13,6 +13,7 @@ import { LOJA_ML_INVALIDA, ML_STORE_SELECTION_REQUIRED, respostaSelecaoLojaML } 
 import { carregarMapaCustoProduto, financeiroDaVenda, identidadeDaVenda, resolverCustoProduto } from "@/lib/vendas/custo-produto";
 import { lerFinanceiroRealML } from "@/lib/vendas/ml-financeiro-leitura";
 import { candidatosRecuperacaoFinanceiraML } from "@/lib/vendas/ml-financeiro";
+import { metricasBrutasML, type MetricasBrutasML } from "@/lib/vendas/metricas-ml";
 
 // SEC-3-B1: dados sensiveis (SEC-3) so por service_role, server-side.
 // O cliente nasce sob demanda — nunca no import — a partir do helper
@@ -235,7 +236,8 @@ export async function GET(request: Request) {
   // páginas via .range(), mesmos filtros de sempre.
   function buildPedidosQuery(
     selectArg: string,
-    opts?: { count?: "exact"; head?: boolean }
+    opts?: { count?: "exact"; head?: boolean },
+    campo: typeof dateField = dateField,   // A3.3: as métricas brutas ML usam SEMPRE "criacao"
   ) {
     let q = supabase()
       .from("pedidos")
@@ -244,7 +246,7 @@ export async function GET(request: Request) {
       .eq("marketplace", "ML")
       .eq("loja_id", lojaLeitura);
 
-    if (dateField === "pagamento") {
+    if (campo === "pagamento") {
       q = q.or(
         `and(data_pagamento.gte.${dateFrom},data_pagamento.lte.${dateTo}),` +
         `and(data_pagamento.is.null,data_criacao.is.null,data.gte.${dateFrom},data.lte.${dateTo})`
@@ -372,6 +374,25 @@ export async function GET(request: Request) {
     });
   }
 
+  // Vendas A3.3: VENDAS BRUTAS ML — SEMPRE pela data de CRIAÇÃO (semântica do painel do ML, auditada), qualquer que seja
+  // o date_field da tela; loja inteira (filtros de SKU/status/envio da tela não se aplicam). Com date_field=criacao as
+  // linhas já lidas são a janela certa; senão, uma leitura paginada só das colunas da métrica. Falha → null (sem card).
+  let metricasML: (MetricasBrutasML & { base: "criacao" }) | null = null;
+  try {
+    let linhasCriacao: any[] = dateField === "criacao" ? pedidos : [];
+    for (let page = 0; dateField !== "criacao" && page < MAX_PAGES; page++) {
+      const { data, error } = await buildPedidosQuery("order_id, status, qtd, faturamento", undefined, "criacao")
+        .order("id", { ascending: true })
+        .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1);
+      if (error) throw new Error(error.message);
+      linhasCriacao = linhasCriacao.concat(data ?? []);
+      if ((data ?? []).length < PAGE_SIZE) break;
+    }
+    metricasML = { base: "criacao", ...metricasBrutasML(linhasCriacao) };
+  } catch (e) {
+    console.error(`[ml/vendas] métricas brutas ML indisponíveis: ${e instanceof Error ? e.message : e}`);
+  }
+
   // Vendas A3: custo do produto AO VIVO de Meus Produtos (UMA leitura paginada da loja, sem `ativo`).
   // `financeiro` é LIVE_CALCULATED; `custo`/`imposto`/`margemContrib`/`cadastrado` da linha seguem
   // LEGADOS (persistidos na sync) para quem ainda os lê — a tela de Vendas usa `financeiro`.
@@ -412,6 +433,8 @@ export async function GET(request: Request) {
     totalPedidos: totalOrders,
     rows,
     custoLiveDisponivel: mapaCusto.ok,
+    // Vendas A3.3: VENDAS BRUTAS ML (criação, inclui canceladas, sem pack_splitted) + canceladas — ver lib/vendas/metricas-ml.ts
+    metricasML,
     // Vendas A3.2-C.2: QUANTAS vendas pagas desta janela/loja precisam de recuperação financeira (sem linha
     // financeira ou com linha pendente) — só leitura do banco, só a contagem. A tela pede a recuperação em
     // POST /api/ml/vendas/financeiro com o CONTEXTO da janela; o servidor seleciona os pedidos (nunca aqui).

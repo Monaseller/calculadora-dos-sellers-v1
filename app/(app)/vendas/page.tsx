@@ -72,6 +72,8 @@ export default function VendasPage() {
   // Corrige o bug em que uma falha/timeout num marketplace derrubava o
   // faturamento total (o array combinado inteiro era substituído).
   const [mlRows,     setMlRows]     = useState<VendaRow[]>([]);
+  // Vendas A3.3: VENDAS BRUTAS ML (por CRIAÇÃO, como no painel do ML) — calculadas no servidor, loja inteira
+  const [metricasML, setMetricasML] = useState<{ pedidos: number; unidades: number; bruto: number; canceladas: number } | null>(null);
   const [shopeeRows, setShopeeRows] = useState<VendaRow[]>([]);
   const rows = [...mlRows, ...shopeeRows].sort((a, b) => b.data.localeCompare(a.data));
   const [mlLojaId,     setMlLojaId]     = useState<string | null>(null);
@@ -419,18 +421,18 @@ export default function VendasPage() {
       if (lojaMLRef.current !== lojaDaChamada) return { falhou: true, data: null };   // loja trocada no meio
       if (data?.codigo === "ML_STORE_SELECTION_REQUIRED") {
         const lojas = lojasMLDaRecusa(data.lojas);
-        setLojasML(lojas); setExigeEscolhaML(true); prontoMLRef.current = false; setMlRows([]);
+        setLojasML(lojas); setExigeEscolhaML(true); prontoMLRef.current = false; setMlRows([]); setMetricasML(null);
         return { falhou: true, data };
       }
       if (data?.codigo === "LOJA_ML_INVALIDA") {   // loja escolhida deixou de valer: sem fallback, nova escolha
         try { localStorage.removeItem(CHAVE_LOJA_ML_VENDAS); } catch {}
         lojaMLRef.current = null; prontoMLRef.current = false;
         setLojasML((ls) => (ls ?? []).filter((l) => l.id !== lojaDaChamada));
-        setLojaMLSel(null); setExigeEscolhaML(true); setMlRows([]); setMlLojaId(null);
+        setLojaMLSel(null); setExigeEscolhaML(true); setMlRows([]); setMlLojaId(null); setMetricasML(null);
         return { falhou: true, data };
       }
       if (data?.lojaId) setMlLojaId(data.lojaId);
-      if (!falhou) setMlRows((data.rows ?? []) as VendaRow[]);
+      if (!falhou) { setMlRows((data.rows ?? []) as VendaRow[]); setMetricasML(data.metricasML ?? null); }
       // A3.2-C.2: há vendas da janela sem financeiro (ou pendente) → dispara a ÚNICA rodada automática desta carga,
       // mandando só o CONTEXTO (loja + janela); o servidor escolhe os pedidos. A releitura não dispara outra.
       // A3.2-F: se ESTA leitura sincronizou (o sync já tentou o financeiro), a carga gasta a rodada sem POST.
@@ -688,7 +690,7 @@ export default function VendasPage() {
     if (!id || id === lojaMLRef.current) return;
     lojaMLRef.current = id; prontoMLRef.current = true;
     try { localStorage.setItem(CHAVE_LOJA_ML_VENDAS, id); } catch {}
-    setLojaMLSel(id); setExigeEscolhaML(false); setMlRows([]); setMlLojaId(null); setAvisoSyncML(null);   // a leitura vem do efeito abaixo
+    setLojaMLSel(id); setExigeEscolhaML(false); setMlRows([]); setMetricasML(null); setMlLojaId(null); setAvisoSyncML(null);   // a leitura vem do efeito abaixo
   }
 
   // Leitura ao montar E toda vez que o período, marketplace, date_field ou a loja ML escolhida mudar
@@ -1365,9 +1367,9 @@ export default function VendasPage() {
       {!loading && filteredRows.length > 0 && (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: "12px", marginBottom: "24px" }}>
           {[
-            { label: "Pedidos",       val: pedidosUnicos.toString(),         cor: "#fff" },
-            { label: "Unidades",      val: totais.qtd.toString(),            cor: "#fff" },
-            { label: "Faturamento",   val: moeda(totais.faturamento),        cor: "#fff" },
+            { label: "Pedidos pagos",     val: pedidosUnicos.toString(),         cor: "#fff" },
+            { label: "Unidades pagas",    val: totais.qtd.toString(),            cor: "#fff" },
+            { label: "Faturamento pago",  val: moeda(totais.faturamento),        cor: "#fff" },
             { label: "Margem Contrib.", val: `${moeda(live.lucro)}${live.estimados ? " (estimado)" : ""}${live.pendentes ? ` · ${live.pendentes} pend.` : ""}`, cor: live.lucro >= 0 ? "#00D97E" : "#ff4d4d" },
             { label: "MC %",          val: live.margemPct === null ? "pendente" : pct(live.margemPct), cor: (live.margemPct ?? 0) >= 0 ? "#00D97E" : "#ff4d4d" },
           ].map(({ label, val, cor }) => (
@@ -1379,6 +1381,33 @@ export default function VendasPage() {
               <div style={{ fontSize: "18px", fontWeight: 900, color: cor }}>{val}</div>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* ── Vendas A3.3: Mercado Livre como no painel do ML ─────────────────
+          Sempre por DATA DE CRIAÇÃO (o seletor de data acima vale para os cards pagos), loja inteira, inclui vendas
+          canceladas depois (sem as divididas em novos pedidos). Não é faturamento pago, líquido nem lucro. */}
+      {!loading && metricasML && lojaAtiva !== "Shopee" && (
+        <div style={{ marginBottom: "24px" }}>
+          <div style={{ fontSize: "11px", color: "#9099aa", marginBottom: "8px" }}>
+            Mercado Livre · como no painel do ML (por data de criação, inclui canceladas)
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: "12px" }}>
+            {[
+              { label: "Vendas brutas ML", val: moeda(metricasML.bruto) },
+              { label: "Vendas ML",        val: metricasML.pedidos.toString() },
+              { label: "Unidades ML",      val: metricasML.unidades.toString() },
+              { label: "Canceladas ML",    val: metricasML.canceladas.toString() },
+            ].map(({ label, val }) => (
+              <div key={label} style={{
+                background: "#111318", border: "1px solid rgba(255,230,0,0.15)",
+                borderRadius: "14px", padding: "14px 16px",
+              }}>
+                <div style={{ fontSize: "10px", fontWeight: 700, color: "#9099aa", marginBottom: "5px", letterSpacing: "0.3px" }}>{label.toUpperCase()}</div>
+                <div style={{ fontSize: "18px", fontWeight: 900, color: "#fff" }}>{val}</div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 

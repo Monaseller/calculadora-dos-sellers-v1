@@ -1210,6 +1210,19 @@ export function financeiroMLNaoReal(raiz = RAIZ_V2): string[] {
   const logsPorPedido = c.match(/log\(`\[ml-financeiro\] \$\{(g\.classe|DEFERIDO)\}/g) ?? [];
   if (!/export const AMOSTRAS_LOG_ML = 5;/.test(c) || logsPorPedido.length !== 2 || (c.match(/if \(amostra\((g\.classe|DEFERIDO)\)\) log\(`\[ml-financeiro\] \$\{(g\.classe|DEFERIDO)\}/g) ?? []).length !== 2
     || !/\} finally \{[\s\S]*log\(`\[ml-financeiro\] resumo /.test(wrap) || (c.match(/\[ml-financeiro\] resumo /g) ?? []).length !== 1) erros.push("coletor: log por pedido sem amostragem (O(n) linhas) ou resumo que pode não sair");
+  // A3.3 VOLUME ML (auditado): datas = dia BRT do INSTANTE (o ML manda −04:00 — truncar a string é proibido); pagamento só
+  // de estados com aprovação comprovada (approved, partially_refunded, in_mediation); cancelamento no buffer atualiza a
+  // linha (status não congela); pack_splitted fora das vendas brutas; vendas brutas SEMPRE por criação no GET
+  const vm = existsSync(join(raiz, "lib/vendas/metricas-ml.ts")) ? tiraComentarios(ler(raiz, "lib/vendas/metricas-ml.ts")) : "";
+  if (!/export const STATUS_PAGAMENTO_APROVADO_ML = \["approved", "partially_refunded", "in_mediation"\] as const;/.test(vm)
+    || !/return Number\.isFinite\(t\) \? new Date\(t - BRT_MS\)\.toISOString\(\)\.slice\(0, 10\) : null;/.test(vm)
+    || !/if \(cd\?\.code === "pack_splitted"\) return "pack_dividido";/.test(vm)
+    || !/export const STATUS_VENDA_BRUTA_ML: readonly StatusPedidoML\[\] = \["paid", "cancelled", "devolucao", "cancelado_interno"\];/.test(vm)
+    || !/export const STATUS_CANCELADA_ML: readonly StatusPedidoML\[\] = \["cancelled", "devolucao"\];/.test(vm)) erros.push("volume ML: data fora do dia BRT, pagamento de estado não comprovado, pack_splitted como venda ou canceladas fora do painel");
+  if (/date_created[^\n]*split\("T"\)|date_approved[^\n]*split\("T"\)|getTime\(\) - 3 \* 60 \* 60 \* 1000/.test(sy) || !/const dataCriacaoML = dataBRT\(order\.date_created\);/.test(sy)
+    || !/const dataPagamentoML = dataBRT\(pagamentoAprovadoML\(order\.payments\)\?\.date_approved\);/.test(sy) || !/o\._status = statusPedidoML\(o\._rawStatus, o\);/.test(sy)
+    || !/if \(\(dataPedido < dateFrom \|\| dataPedido > dateTo\) && !cancelado\) continue;/.test(sy)) erros.push("sync-ml: data truncada da string do provider, pagamento fora do critério comprovado ou cancelamento do buffer descartado (status congelado)");
+  if (!/let linhasCriacao: any\[\] = dateField === "criacao" \? pedidos : \[\];/.test(rg) || !/buildPedidosQuery\("order_id, status, qtd, faturamento", undefined, "criacao"\)/.test(rg) || !/metricasML = \{ base: "criacao", \.\.\.metricasBrutasML\(linhasCriacao\) \};/.test(rg)) erros.push("GET de Vendas: vendas brutas ML fora da data de criação");
   const mp = corpoDaFuncao(m, "mesclarPedidoFinanceiroML") ?? "", me = corpoDaFuncao(m, "mesclarEnvioFinanceiroML") ?? "";
   if (!/if \(b && b\.billing_status !== "PENDENTE"\) \{/.test(mp) || !/\} else if \(b && base\.billing_status === "PENDENTE"\) \{\s*base\.billing_tarifa = b\.billing_tarifa \?\? base\.billing_tarifa;/.test(mp)
     || !/if \(obtido\.descontos\) \{/.test(mp) || /descontos_status = "INDISPONIVEL"/.test(mp) || !/if \(o\.tarifa_origem === "PROVIDER" && o\.tarifa_venda !== null\)/.test(mp)

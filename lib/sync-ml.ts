@@ -24,6 +24,7 @@ import { LojaIdIntegrityError } from "@/lib/sync-errors";
 import { lerTodasAsPaginas } from "@/lib/anuncios/leitura-paginada";
 import { coletarFinanceiroML, JANELA_PROVIDER_MS, type DepsColetaML, type ResultadoColetaML } from "@/lib/vendas/ml-financeiro-coleta";
 import { lerFinanceiroRealML } from "@/lib/vendas/ml-financeiro-leitura";
+import { dataBRT, pagamentoAprovadoML, statusPedidoML } from "@/lib/vendas/metricas-ml";
 
 /** Chave do mapa de custo ML: LOJA | item | variacao ("" = item sem variacao). Nunca so dono + item. */
 export function chaveAnuncioML(lojaId: string, mlItemId: string, variationId: string | number | null | undefined): string {
@@ -351,12 +352,6 @@ export async function syncMLForUserV2(
   const diasFetch     = gerarDias(dateFetchFrom, dateTo);
 
   const STATUSES = ["paid", "confirmed", "payment_in_process", "cancelled"] as const;
-  const STATUS_MAP: Record<string, string> = {
-    paid:               "paid",
-    confirmed:          "pending",
-    payment_in_process: "pending",
-    cancelled:          "cancelled",
-  };
 
   const allByStatus = await Promise.all(
     STATUSES.map(status =>
@@ -381,14 +376,8 @@ export async function syncMLForUserV2(
       if (seenIds.has(o.id)) continue;
       seenIds.add(o.id);
 
-      if (o._rawStatus === "cancelled") {
-        const foiReembolsado = (o.payments ?? []).some(
-          (p: any) => p.status === "refunded" || p.status === "partially_refunded"
-        );
-        o._status = foiReembolsado ? "devolucao" : "cancelled";
-      } else {
-        o._status = STATUS_MAP[o._rawStatus] ?? "paid";
-      }
+      // Vendas A3.3: cancelado `pack_splitted` → pack_dividido; outro `internal` → cancelado_interno (auditado)
+      o._status = statusPedidoML(o._rawStatus, o);
 
       allOrders.push(o);
     }
@@ -403,44 +392,32 @@ export async function syncMLForUserV2(
   const now = new Date().toISOString();
 
   for (const order of allOrders) {
+    // Vendas A3.3: toda data é a do INSTANTE em BRT (o ML manda −04:00; truncar a string errava 00:00–00:59 BRT)
+    const cancelado = order._status !== "paid" && order._status !== "pending";
     let dataPedido: string;
-    if (order._status === "cancelled" || order._status === "devolucao") {
-      const ref = order.date_created ?? order.date_closed ?? "";
-      dataPedido = ref ? ref.split("T")[0] : dateFrom;
+    if (cancelado) {
+      dataPedido = dataBRT(order.date_created ?? order.date_closed) ?? dateFrom;
     } else {
-      const approvedPayment = (order.payments ?? []).find(
-        (p: any) => p.status === "approved" || p.status === "partially_refunded"
-      );
-      if (approvedPayment?.date_approved) {
-        const brt = new Date(new Date(approvedPayment.date_approved).getTime() - 3 * 60 * 60 * 1000);
-        dataPedido = brt.toISOString().split("T")[0];
-      } else {
-        const ref = order.date_created ?? "";
-        dataPedido = ref ? ref.split("T")[0] : dateFrom;
-      }
+      dataPedido = dataBRT(pagamentoAprovadoML(order.payments)?.date_approved) ?? dataBRT(order.date_created) ?? dateFrom;
     }
 
-    if (dataPedido < dateFrom || dataPedido > dateTo) continue;
+    // Vendas A3.3 STATUS: cancelamento de pedido criado na janela de busca (inclusive o buffer de dias anteriores) é
+    // gravado mesmo com a data fora do intervalo — a linha antiga deixa de ficar `paid` para sempre (venda cancelada ou
+    // dividida depois do sync do seu dia). Pedido pago fora do intervalo segue fora (o financeiro não muda de escopo).
+    if ((dataPedido < dateFrom || dataPedido > dateTo) && !cancelado) continue;
 
     // ── Fase B (2026-07-06): data_criacao / data_pagamento / data_atualizacao_marketplace ──
     // Regra oficial: docs/BUSINESS_RULES.md ("Arquitetura de três datas"). Mesma arquitetura
     // aplicada em lib/sync-shopee.ts, adaptada aos campos nativos do ML. Não altera `dataPedido`
     // nem a regra de relatório existente (coluna `data` continua exatamente como antes).
 
-    // data_criacao: sempre a partir de date_created, mesma extração de data que o
-    // código já usa nos ramos de fallback acima (sem shift extra de timezone —
-    // date_created do ML já vem com offset embutido no ISO string).
-    const dataCriacaoML = order.date_created ? String(order.date_created).split("T")[0] : null;
+    // data_criacao: dia em BRT do INSTANTE date_created (A3.3: o ML manda −04:00 — truncar a string punha as
+    // vendas de 00:00–00:59 BRT no dia anterior; auditado em 8 pedidos de 06→07/10).
+    const dataCriacaoML = dataBRT(order.date_created);
 
-    // data_pagamento: só quando existe pagamento aprovado (mesmo critério do bloco
-    // acima: status "approved" ou "partially_refunded" com date_approved). NULL sem
-    // fallback quando não há pagamento — mesma regra estrita usada na Shopee.
-    const approvedPaymentML = (order.payments ?? []).find(
-      (p: any) => p.status === "approved" || p.status === "partially_refunded"
-    );
-    const dataPagamentoML = approvedPaymentML?.date_approved
-      ? new Date(new Date(approvedPaymentML.date_approved).getTime() - 3 * 60 * 60 * 1000).toISOString().split("T")[0]
-      : null;
+    // data_pagamento: só com pagamento de aprovação COMPROVADA (approved, partially_refunded, in_mediation — A3.3) e
+    // date_approved; NULL sem fallback quando não há pagamento — mesma regra estrita usada na Shopee.
+    const dataPagamentoML = dataBRT(pagamentoAprovadoML(order.payments)?.date_approved);
 
     // data_atualizacao_marketplace: ML expõe `last_updated` no recurso de Order (não
     // verificado empiricamente nesta sessão contra uma resposta real da API — se o

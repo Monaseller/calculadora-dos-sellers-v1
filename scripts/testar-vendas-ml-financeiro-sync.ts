@@ -147,7 +147,9 @@ function respostaPadrao(u: URL): Resp {
   if (p === "/orders/search") {
     const st = u.searchParams.get("order.status");
     const de = u.searchParams.get("order.date_created.from") ?? "";
-    const r = Object.values(pedidosML).filter((o: any) => o.status === st && String(o.date_created).slice(0, 10) === de.slice(0, 10));
+    // como a API real: o dia da busca é o do INSTANTE (o ML manda −04:00), não o prefixo da string
+    const diaBRT = (iso: string) => new Date(Date.parse(iso) - 3 * 3600_000).toISOString().slice(0, 10);
+    const r = Object.values(pedidosML).filter((o: any) => o.status === st && diaBRT(String(o.date_created)) === de.slice(0, 10));
     return { status: 200, corpo: { results: r, paging: { total: r.length } } };
   }
   let m: RegExpExecArray | null;
@@ -1115,6 +1117,136 @@ async function principal() {
     chamadas = [];
     const r = await postRetry(janela());
     assert(r.corpo.candidatos === 1 && !chamadas.some((x) => x.caminho.includes(ORDER) || x.caminho.includes(SHIP) || x.caminho.includes(PACK)) && finDe(ORDER)?.billing_status === "CONFERIDO", `${JSON.stringify(r.corpo)} ${caminhos()}`);
+  });
+
+  secao("\n[10. A3.3 — volume ML: datas BRT, pagamento in_mediation, status atualizado, vendas brutas como no painel]");
+  const MV = await import("../lib/vendas/metricas-ml");
+  const pedidoML = (id: string, extra: Record<string, unknown> = {}) => orderGolden({ id: Number(id), pack_id: null, shipping: { id: Number(id.slice(-7)) }, ...extra });
+  const pagto = (status: string, date_approved: string | null) => ({ status, date_approved, transaction_amount: 41.24, shipping_cost: 0, marketplace_fee: 0 });
+  const linhaDe = (o: string) => db.pedidos.find((r) => r.order_id === o);
+  const syncDia = async (de: string, ate: string, noBuffer: boolean) => { silenciar(); try { return await SY.syncMLForUserV2(U, de, ate, undefined, noBuffer, contaA); } finally { restaurar(); } };
+
+  t("VOL-1. date_created −04:00 que atravessa a meia-noite BRT → dia BRT correto (inclusive no fim da janela)", () => {
+    assert(MV.dataBRT("2026-10-06T23:30:00.000-04:00") === "2026-10-07" && MV.dataBRT("2026-10-14T23:59:59.000-04:00") === "2026-10-15" && MV.dataBRT("2026-10-07T00:30:00.000-04:00") === "2026-10-07", "conversão BRT");
+    assert(MV.dataBRT(null) === null && MV.dataBRT("lixo") === null, "ausente/ilegível");
+  });
+  t("VOL-2. caso real 06/10 23:03 −04:00 → sync grava data_criacao E data 07/10 (e pagamento 07/10)", async () => {
+    semear(); const O = "2000018841441602";
+    pedidosML = { [O]: pedidoML(O, { date_created: "2026-10-06T23:03:10.000-04:00", date_closed: "2026-10-06T23:03:14.000-04:00", payments: [pagto("approved", "2026-10-06T23:03:14.000-04:00")] }) };
+    await syncDia("2026-10-07", "2026-10-07", true);
+    const r = linhaDe(O);
+    assert(r && r.data_criacao === "2026-10-07" && r.data_pagamento === "2026-10-07" && r.data === "2026-10-07", JSON.stringify(r && { c: r.data_criacao, p: r.data_pagamento, d: r.data }));
+  });
+  t("VOL-3. date_created que não cruza o dia permanece no mesmo dia", () => {
+    assert(MV.dataBRT("2026-10-07T12:00:00.000-04:00") === "2026-10-07" && MV.dataBRT("2026-10-07T07:07:00.000-03:00") === "2026-10-07", "mesmo dia");
+  });
+  t("VOL-4/5/6. paid + approved / partially_refunded / in_mediation com date_approved → data de pagamento (BRT)", async () => {
+    for (const st of ["approved", "partially_refunded", "in_mediation"]) assert(MV.dataBRT(MV.pagamentoAprovadoML([pagto(st, "2026-10-07T12:35:26.000-04:00")])?.date_approved) === "2026-10-07", `${st} sem data`);
+    semear(); const O = "2000018850823962";
+    pedidosML = { [O]: pedidoML(O, { date_created: "2026-10-07T12:34:56.000-04:00", payments: [{ ...pagto("in_mediation", "2026-10-07T12:35:26.000-04:00"), status_detail: "pending" }] }) };
+    await syncDia("2026-10-07", "2026-10-07", true);
+    const r = linhaDe(O);
+    assert(r?.status === "paid" && r?.data_pagamento === "2026-10-07", JSON.stringify(r && { s: r.status, p: r.data_pagamento }));
+  });
+  t("VOL-4b. pago com pagamento em dia diferente da criação: `data` e data_pagamento = dia BRT do PAGAMENTO; data_criacao = dia da criação", async () => {
+    semear(); const O = "2000018841441800";
+    // criado 06/10 23:50 BRT, aprovado 07/10 00:20 BRT (ambos com offset −04:00, como o ML manda)
+    pedidosML = { [O]: pedidoML(O, { date_created: "2026-10-06T22:50:00.000-04:00", payments: [pagto("approved", "2026-10-06T23:20:00.000-04:00")] }) };
+    await syncDia("2026-10-06", "2026-10-07", true);
+    const r = linhaDe(O);
+    assert(r && r.data === "2026-10-07" && r.data_pagamento === "2026-10-07" && r.data_criacao === "2026-10-06", JSON.stringify(r && { d: r.data, p: r.data_pagamento, c: r.data_criacao }));
+  });
+  t("VOL-7. sem aprovação comprovada não inventa data (pending/rejected/refunded/in_process; approved sem data)", () => {
+    for (const st of ["pending", "rejected", "refunded", "in_process", "cancelled", "authorized"]) assert(MV.pagamentoAprovadoML([pagto(st, "2026-10-07T12:00:00.000-04:00")]) === null, `${st} gerou data`);
+    assert(MV.pagamentoAprovadoML([pagto("approved", null)]) === null && MV.pagamentoAprovadoML(undefined) === null, "approved sem data / sem pagamentos");
+    assert(JSON.stringify(MV.STATUS_PAGAMENTO_APROVADO_ML) === JSON.stringify(["approved", "partially_refunded", "in_mediation"]), "lista de estados fora do auditado");
+  });
+  t("VOL-6b. data de pagamento já correta segue idêntica (−3 h de um instante absoluto = dia BRT)", () => {
+    const antigo = (iso: string) => new Date(new Date(iso).getTime() - 3 * 60 * 60 * 1000).toISOString().split("T")[0];
+    for (const iso of ["2026-10-06T23:03:14.000-04:00", "2026-10-07T02:59:59.000-03:00", "2026-10-14T21:30:00.000Z", "2026-10-15T02:59:59.999Z", "2026-10-15T03:00:00.000Z"]) assert(MV.dataBRT(iso) === antigo(iso), `${iso}: ${MV.dataBRT(iso)} ≠ ${antigo(iso)}`);
+  });
+
+  const L_ = (order_id: string, status: string, qtd = 1, faturamento = 10) => ({ order_id, status, qtd, faturamento });
+  t("VOL-8/9/11. paga e cancelada criadas na janela entram no bruto; canceladas contadas à parte", () => {
+    const m = MV.metricasBrutasML([L_("1", "paid"), L_("2", "devolucao"), L_("3", "cancelled")]);
+    assert(m.pedidos === 3 && m.canceladas === 2 && m.bruto === 30, JSON.stringify(m));
+  });
+  t("VOL-10. pack_splitted (pack_dividido) fora do bruto e das canceladas; cancelado interno (pack_creation_error) no bruto, fora das canceladas", () => {
+    const m = MV.metricasBrutasML([L_("1", "paid"), L_("2", "pack_dividido", 2, 50), L_("3", "cancelado_interno", 1, 7)]);
+    assert(m.pedidos === 2 && m.unidades === 2 && m.bruto === 17 && m.canceladas === 0, JSON.stringify(m));
+    assert(MV.statusPedidoML("cancelled", { cancel_detail: { group: "internal", code: "pack_splitted" } }) === "pack_dividido" && MV.statusPedidoML("cancelled", { cancel_detail: { group: "internal", code: "pack_creation_error" }, payments: [{ status: "refunded" }] }) === "cancelado_interno", "mapeamento internal");
+    assert(MV.statusPedidoML("cancelled", { cancel_detail: { group: "buyer", code: "buyer_cancel_express" }, payments: [{ status: "refunded" }] }) === "devolucao" && MV.statusPedidoML("cancelled", {}) === "cancelled" && MV.statusPedidoML("confirmed", {}) === "pending" && MV.statusPedidoML("paid", {}) === "paid", "mapeamento real");
+  });
+  t("VOL-12/13/14. unidades = Σ qtd; bruto = Σ unit_price × qtd; pedidos distintos (pack não colapsa; várias linhas = 1 pedido); pending fora", () => {
+    const m = MV.metricasBrutasML([L_("1", "paid", 2, 40), L_("1", "paid", 1, 15.5), L_("2", "paid", 1, 9.99), L_("3", "paid", 3, 30), L_("4", "pending", 1, 99)]);
+    assert(m.pedidos === 3 && m.unidades === 7 && m.bruto === 95.49, JSON.stringify(m));
+  });
+  t("VOL-8e. GET de Vendas: metricasML SEMPRE por criação (date_field=pagamento não muda a base) e inclui a cancelada", async () => {
+    semear(); const PAG = "2000018841441700", CAN = "2000018841441701";
+    pedidosML = { [PAG]: pedidoML(PAG), [CAN]: pedidoML(CAN, { status: "cancelled", cancel_detail: { group: "buyer", code: "buyer_cancel_express", date: `${DIA}T12:00:00.000-04:00` }, payments: [pagto("refunded", `${DIA}T10:07:30.000Z`)] }) };
+    await sync();
+    for (const campo of ["pagamento", "criacao"]) {
+      const g = await getVendas(`date_from=${DIA}&date_to=${DIA}&loja_id=${ML_A}&date_field=${campo}`);
+      const m = g.corpo.metricasML;
+      assert(m && m.base === "criacao" && m.pedidos === 2 && m.canceladas === 1 && c(m.bruto) === 8248, `${campo}: ${JSON.stringify(m)}`);
+    }
+  });
+
+  t("VOL-15. pedido pago e depois CANCELADO: o sync com buffer atualiza a linha antiga (deixa de ser paid)", async () => {
+    semear(); const O = "2000018971279400";
+    pedidosML = { [O]: pedidoML(O) };
+    await syncDia(DIA, DIA, true);
+    assert(linhaDe(O)?.status === "paid", "pré-condição");
+    pedidosML[O] = { ...pedidosML[O], status: "cancelled", cancel_detail: { group: "buyer", code: "buyer_cancel_express", date: "2026-10-15T10:00:00.000-04:00" }, payments: [pagto("refunded", `${DIA}T10:07:30.000Z`)] };
+    await syncDia("2026-10-16", "2026-10-16", false);   // cron de 2 dias depois: busca criação 11..16/10
+    const r = db.pedidos.filter((x) => x.order_id === O);
+    assert(r.length === 1 && r[0].status === "devolucao" && r[0].data_criacao === DIA, JSON.stringify(r.map((x) => ({ s: x.status, c: x.data_criacao }))));
+  });
+  t("VOL-16/17/18. pago e depois pack_splitted: original vira pack_dividido (fora do bruto); os substitutos contam; sem contagem dupla", async () => {
+    semear(); const O = "2000018971279500", S1 = "2000018971279501", S2 = "2000018971279502";
+    pedidosML = { [O]: pedidoML(O, { order_items: [{ item: { id: ITEM }, quantity: 2, unit_price: 20, sale_fee: 2 }] }) };
+    await syncDia(DIA, DIA, true);
+    pedidosML[O] = { ...pedidosML[O], status: "cancelled", cancel_detail: { group: "internal", code: "pack_splitted", date: `${DIA}T20:00:00.000-04:00` }, payments: [pagto("refunded", `${DIA}T10:07:30.000Z`)] };
+    pedidosML[S1] = pedidoML(S1, { pack_id: 2000015516689999, order_items: [{ item: { id: ITEM }, quantity: 1, unit_price: 20, sale_fee: 2 }] });
+    pedidosML[S2] = pedidoML(S2, { pack_id: 2000015516689999, order_items: [{ item: { id: ITEM }, quantity: 1, unit_price: 20, sale_fee: 2 }] });
+    await syncDia("2026-10-16", "2026-10-16", false);
+    await syncDia(DIA, DIA, true);   // substitutos (criados no dia) entram pelo sync do dia
+    assert(linhaDe(O)?.status === "pack_dividido" && linhaDe(S1)?.status === "paid" && linhaDe(S2)?.status === "paid", JSON.stringify([O, S1, S2].map((x) => linhaDe(x)?.status)));
+    const g = await getVendas(`date_from=${DIA}&date_to=${DIA}&loja_id=${ML_A}&date_field=pagamento`);
+    const m = g.corpo.metricasML;
+    assert(m.pedidos === 2 && m.unidades === 2 && c(m.bruto) === 4000 && m.canceladas === 0, JSON.stringify(m));
+    const pagos = (g.corpo.rows ?? []).filter((r: any) => r.status === "paid").map((r: any) => r.orderId).sort();
+    assert(JSON.stringify(pagos) === JSON.stringify([S1, S2]), `pagos=${pagos}`);
+  });
+  t("VOL-15b. pago FORA do intervalo no buffer segue fora (escopo do sync e do financeiro inalterado)", async () => {
+    semear(); const O = "2000018971279600";
+    pedidosML = { [O]: pedidoML(O) };
+    chamadas = [];
+    await syncDia("2026-10-16", "2026-10-16", false);
+    assert(!linhaDe(O) && !chamadas.some((x) => x.caminho.includes(`/orders/${O}/discounts`)), "pago do buffer gravado/enriquecido");
+  });
+
+  t("VOL-AUDIT. fixture real (07–14/10, momento do print): código de produção reproduz 1517 / 1608 / 57.408,29 / 63 canceladas; resíduo da camada de relatório do ML = 1 / 1 / 21,71", () => {
+    const fx = JSON.parse(readFileSync(join(process.cwd(), "scripts/fixtures/ml-volume-auditoria-2026-10-07-14.json"), "utf8"));
+    const PRINT = Date.parse(fx.print_ml.instante);
+    const linhas: any[] = [];
+    fx.pedidos.forEach(([criado, status, grupo, codigo, cancelado, pagamentos, itens]: any[], i: number) => {
+      if (Date.parse(criado) > PRINT) return;
+      const canceladoNoPrint = status === "cancelled" && cancelado && Date.parse(cancelado) <= PRINT;
+      const st = MV.statusPedidoML(canceladoNoPrint ? "cancelled" : "paid", { cancel_detail: { group: grupo, code: codigo }, payments: (pagamentos as string[]).map((s) => ({ status: s })) });
+      for (const [q, up] of itens) linhas.push({ order_id: `p${i}`, status: st, qtd: q, faturamento: q * up });
+    });
+    const m = MV.metricasBrutasML(linhas);
+    assert(m.pedidos === 1517 && m.unidades === 1608 && c(m.bruto) === 5740829 && m.canceladas === 63, JSON.stringify(m));
+    // auditoria (não regra de produção): ML_METRICS_REPORTING_LAYER_RESIDUAL
+    const residuo = { pedidos: fx.print_ml.vendas - m.pedidos, unidades: fx.print_ml.unidades - m.unidades, bruto: Math.round((fx.print_ml.bruto - m.bruto) * 100) / 100 };
+    assert(JSON.stringify(residuo) === JSON.stringify({ pedidos: 1, unidades: 1, bruto: 21.71 }) && fx.print_ml.canceladas === m.canceladas, `ML_METRICS_REPORTING_LAYER_RESIDUAL=${JSON.stringify(residuo)}`);
+  });
+  t("VOL-UI. cards pagos rotulados; linha ML separada e sempre por criação; financeiro A3.2 intocado", () => {
+    const pg = fonte("app/(app)/vendas/page.tsx");
+    assert(/label: "Pedidos pagos"/.test(pg) && /label: "Faturamento pago"/.test(pg) && /label: "Vendas brutas ML", val: moeda\(metricasML\.bruto\)/.test(pg) && /label: "Canceladas ML"/.test(pg) && /setMetricasML\(data\.metricasML \?\? null\)/.test(pg), "cards");
+    const rota = fonte("app/api/ml/vendas/route.ts");
+    assert(/metricasML = \{ base: "criacao", \.\.\.metricasBrutasML\(linhasCriacao\) \};/.test(rota) && /let linhasCriacao: any\[\] = dateField === "criacao" \? pedidos : \[\];/.test(rota), "rota fora da criação");
   });
 
   secao("\n[4. guard]");
