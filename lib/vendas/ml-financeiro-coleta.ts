@@ -87,6 +87,14 @@ export interface DepsColetaML {
   /** Relógio em ms (testes); padrão Date.now. */
   relogio?: () => number;
   log?: (linha: string) => void;
+  /**
+   * Vendas A3.4-C (financeiro LIVE das linhas visíveis): não consultar `/discounts`. O líquido não usa descontos — o
+   * desconto do vendedor já está no `unit_price` e o rebate já está na `sale_fee` (golden 41,24 − 4,19 − 6,95 = 30,10);
+   * eles só seriam registrados. Ausente/false = comportamento de sempre (sync e retry).
+   */
+  semDescontos?: boolean;
+  /** Rótulo do modo no resumo (padrão: sync | retry). */
+  modo?: string;
 }
 export interface FalhaFinanceiraML { order_id: string; pack_id: string | null; shipment_id: string | null; etapa: string; classe: ClasseFinanceiraML; http: number }
 export interface ResultadoColetaML {
@@ -131,7 +139,7 @@ export async function coletarFinanceiroML(
     // A3.2-F: o resumo sai SEMPRE (inclusive em falha de leitura/gravação), uma vez, e não depende das linhas anteriores
     r.adiados = ctx.adiados.size;
     const pl = r.planos;
-    log(`[ml-financeiro] resumo loja=${conta.lojaId} modo=${ctx.modoSync ? "sync" : "retry"} pedidos=${ctx.pedidos} ja_completos=${r.jaCompletos} gravados=${r.pedidos} actual=${r.actual} pendentes=${r.pendentes} transient=${r.transitorios} integracao=${r.integracao} provider_data_not_ready=${r.naoProntos} deferred_by_runtime_budget=${r.adiados} rate_limited=${r.limitados} lotes=${r.lotes} full=${pl.FULL_PIPELINE} billing_only=${pl.BILLING_ONLY} discounts_only=${pl.DISCOUNTS_ONLY} shipping_only=${pl.SHIPPING_ONLY} multi=${pl.MULTI_STAGE} logs_omitidos=${r.logsOmitidos}`);
+    log(`[ml-financeiro] resumo loja=${conta.lojaId} modo=${deps.modo ?? (ctx.modoSync ? "sync" : "retry")} pedidos=${ctx.pedidos} ja_completos=${r.jaCompletos} gravados=${r.pedidos} actual=${r.actual} pendentes=${r.pendentes} transient=${r.transitorios} integracao=${r.integracao} provider_data_not_ready=${r.naoProntos} deferred_by_runtime_budget=${r.adiados} rate_limited=${r.limitados} lotes=${r.lotes} full=${pl.FULL_PIPELINE} billing_only=${pl.BILLING_ONLY} discounts_only=${pl.DISCOUNTS_ONLY} shipping_only=${pl.SHIPPING_ONLY} multi=${pl.MULTI_STAGE} logs_omitidos=${r.logsOmitidos}`);
   }
 }
 
@@ -218,7 +226,7 @@ async function coletar(
 
   const obtidos = new Map<string, ObtidoPedidoML>();
   const envios = new Map<string, Promise<EnvioFinanceiroML | null>>();  // 1 GET por envio na execução inteira, mesmo concorrente
-  const precisa = (id: string, e: EtapaRecuperacaoML) => planos.get(id)!.etapas.includes(e);
+  const precisa = (id: string, e: EtapaRecuperacaoML) => planos.get(id)!.etapas.includes(e) && !(e === "descontos" && deps.semDescontos === true);
 
   /** Etapas do plano de UM pedido (sem billing — o billing é do lote). */
   async function etapasDoPedido(id: string): Promise<void> {

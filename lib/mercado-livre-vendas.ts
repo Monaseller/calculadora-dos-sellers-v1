@@ -819,7 +819,12 @@ export async function abrirLeitorPaginasFechamentoML(args: {
   readonly limiteExterno?: LimiteExterno;
   readonly portas?: PortasVendasML;
 }): Promise<
-  | { readonly ok: true; readonly ler: (dia: string, offset: number, ordem?: "date_asc" | "date_desc") => Promise<PaginaFechamentoML> }
+  | {
+      readonly ok: true;
+      readonly ler: (dia: string, offset: number, ordem?: "date_asc" | "date_desc") => Promise<PaginaFechamentoML>;
+      /** A3.4-C: o token JÁ resolvido, para o financeiro live da mesma página (server-side; nunca sai em resposta/log). */
+      readonly accessToken: string;
+    }
   | { readonly ok: false; readonly erro: ErroVendasML }
 > {
   if (!args.userId || !args.lojaId) return { ok: false, erro: "credencial_ausente" };
@@ -836,7 +841,7 @@ export async function abrirLeitorPaginasFechamentoML(args: {
     const linhas = p.resultados.filter((x): x is Record<string, unknown> => typeof x === "object" && x !== null);
     return { ok: true, resultados: linhas, total: p.total };
   };
-  return { ok: true, ler };
+  return { ok: true, ler, accessToken: resolvida.cred.accessToken };
 }
 
 /**

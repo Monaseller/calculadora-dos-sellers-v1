@@ -338,7 +338,8 @@ async function principal() {
     const [semCusto] = add(pedido({ order_items: [{ item: { id: "MLB999", title: "B", variation_id: null }, quantity: 1, unit_price: 20, sale_fee: 2.6 }] }));
     const l = await tudo("2026-09-10", "2026-09-10", "fechamento");
     const a = l.find((x) => x.orderId === comCusto)!.financeiro, b = l.find((x) => x.orderId === semCusto)!.financeiro;
-    assert(a && c(a.custoProduto) === 1800 && c(a.imposto) === 400 && c(a.tarifa) === 520 && c(a.lucro) === 4000 - 520 - 1800 - 400, JSON.stringify(a));
+    // A3.4-C: sem frete do vendedor confirmado (o ML falso não serve /shipments) o lucro fica PENDENTE — nunca só "receita − tarifa"
+    assert(a && c(a.custoProduto) === 1800 && c(a.imposto) === 400 && c(a.tarifa) === 520 && a.lucro === null && a.componentesML?.sellerShipping.status !== "CONFIRMED", JSON.stringify(a));
     assert(b && b.custoProduto === null && b.lucro === null && b.custoStatus === "PRODUCT_NOT_FOUND" && b.pendencias.includes("custo"), JSON.stringify(b));
     assert(lidas.includes("anuncios"), "Meus Produtos não lido");
   });
@@ -349,7 +350,7 @@ async function principal() {
     const mh = fonte("lib/vendas/ml-metricas-hibridas.ts").replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
     assert(!/total_amount|\.reduce\(|\+= /.test(mh) && /consultarVendasCanonicas\(/.test(mh), "fórmula própria nas métricas híbridas");
   });
-  t("HYB-17. paginação no servidor: ≤ 50 por busca, cursor dia:offset sem perder/duplicar; sale_fee → FEE_PROVIDER_CONFIRMED, sem → FINANCIAL_PENDING (sem tarifa estimada)", async () => {
+  t("HYB-17. paginação no servidor: ≤ 50 por busca, cursor dia:offset sem perder/duplicar; sale_fee → tarifa PROVIDER_ORDER, sem → PENDING (sem tarifa estimada)", async () => {
     semear();
     const ids = add(...Array.from({ length: 120 }, (_, i) => pedido({ date_closed: new Date(Date.parse(brt("2026-09-10", "08:00:00")) + i * 60_000).toISOString() })));
     const [semFee] = add(pedido({ order_items: [{ item: { id: "MLB111", title: "X", variation_id: null }, quantity: 1, unit_price: 20 }] }));
@@ -359,8 +360,8 @@ async function principal() {
     const vistos = l.map((x) => x.orderId);
     assert(vistos.length === 121 && new Set(vistos).size === 121 && ids.every((i) => vistos.includes(i)), `${vistos.length}/${new Set(vistos).size}`);
     const pend = l.find((x) => x.orderId === semFee)!;
-    assert(pend.estadoFinanceiro === "FINANCIAL_PENDING" && pend.saleFeeUnitario === null && pend.financeiro?.lucro === null && pend.financeiro?.tarifa === 0 && pend.financeiro?.pendencias.includes("financeiro"), JSON.stringify(pend.financeiro));
-    assert(l.filter((x) => x.orderId !== semFee).every((x) => x.estadoFinanceiro === "FEE_PROVIDER_CONFIRMED" && x.saleFeeUnitario === 2.6 && x.financeiro?.tarifaOrigem === "real"), "fee do provider");
+    assert(pend.financeiroML.fee.status === "PENDING" && pend.financeiroML.fee.value === null && pend.saleFeeUnitario === null && pend.financeiro?.lucro === null && pend.financeiro?.pendencias.includes("financeiro"), JSON.stringify(pend.financeiroML));
+    assert(l.filter((x) => x.orderId !== semFee).every((x) => x.financeiroML.fee.status === "CONFIRMED" && x.financeiroML.fee.source === "PROVIDER_ORDER" && x.financeiroML.fee.value === 2.6 && x.financeiro?.tarifaOrigem === "real"), "fee do provider");
     assert(TB.lerCursorTabelaML("2026-09-10:50")?.toString() !== "INVALIDO" && TB.lerCursorTabelaML("x") === "INVALIDO" && TB.lerCursorTabelaML("2026-09-10:10000") === "INVALIDO", "cursor");
   });
   t("HYB-17b. falha do provider: o cursor fica onde estava (nada pulado) e a linha do banco NÃO entra no lugar", async () => {
@@ -374,7 +375,7 @@ async function principal() {
     const r = await getRota(rotaPedidos, `loja_id=${ML_A}&de=2026-09-10&ate=2026-09-10&visao=fechamento`);
     const txt = JSON.stringify(r.corpo);
     assert(r.status === 200 && r.corpo.origem === "PROVIDER" && r.corpo.linhas.length === 2 && r.corpo.proximoCursor === null, txt.slice(0, 200));
-    assert(!txt.includes(TOKEN_A) && !txt.includes("COMPRADOR_NAO_PODE_VAZAR") && !/buyer|nickname/.test(txt), "vazou token/comprador");
+    assert(!txt.includes(TOKEN_A) && !txt.includes("COMPRADOR_NAO_PODE_VAZAR") && !/"buyer"|nickname/.test(txt), `vazou token/comprador: ${txt.includes(TOKEN_A)} ${txt.includes("COMPRADOR_NAO_PODE_VAZAR")} ${(/"buyer"|nickname/.exec(txt) ?? [""])[0]}`);   // buyerShipping é o frete do comprador (referência), não dado dele
     assert((await getRota(rotaPedidos, `loja_id=${ML_A}&de=2026-09-10&ate=2026-09-10&cursor=lixo`)).status === 400, "cursor inválido aceito");
     assert((await getRota(rotaPedidos, `loja_id=${ML_A}&de=2026-09-11&ate=2026-09-10`)).status === 400, "período invertido aceito");
   });

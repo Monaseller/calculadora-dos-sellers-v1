@@ -44,6 +44,25 @@ export interface DetalheFinanceiroML {
   motivo: "ok" | "tarifa" | "frete" | "frete_compartilhado" | "billing";
 }
 
+/**
+ * Vendas A3.4-C — componentes do financeiro LIVE de uma linha ML (provider, só a página visível). UNKNOWN ≠ ZERO:
+ * `value` null = desconhecido (nunca 0); 0 só quando o provider disse 0.
+ *   CONFIRMED  valor do provider (tarifa: sale_fee do pedido — PROVIDER_ORDER — ou conferida no billing — PROVIDER_BILLING)
+ *   DIVERGENT  billing ≠ sale_fee do pedido (> 0,01) — os dois valores ficam no detalhe; lucro pendente
+ *   SHARED_SHIPMENT_PENDING  envio de 2+ pedidos (ou pedido de 2+ linhas) sem rateio do provider — sem líquido individual
+ *   PROVIDER_NOT_READY       o ML ainda não expôs o dado (carência) — pendente
+ *   PENDING    não obtido (ausente, falha, prazo) — pendente
+ */
+export type StatusComponenteML = "CONFIRMED" | "PENDING" | "DIVERGENT" | "SHARED_SHIPMENT_PENDING" | "PROVIDER_NOT_READY";
+export interface ComponentesFinanceirosML {
+  fee: { value: number | null; source: "PROVIDER_ORDER" | "PROVIDER_BILLING" | null; status: StatusComponenteML; billingValue: number | null };
+  sellerShipping: { value: number | null; status: StatusComponenteML };
+  /** receiver.cost — pago pelo COMPRADOR: só referência, nunca subtraído. */
+  buyerShipping: { value: number | null; status: StatusComponenteML };
+  mlNet: { value: number | null; status: StatusComponenteML };
+  financialStatus: StatusComponenteML;
+}
+
 export interface FinanceiroVendaLive {
   origem: "LIVE_CALCULATED";
   custoStatus: StatusCustoVenda;
@@ -62,4 +81,6 @@ export interface FinanceiroVendaLive {
   margemPct: number | null;
   roi: number | null;
   pendencias: Array<"custo" | "financeiro">;
+  /** Vendas A3.4-C: componentes live da linha ML do provider (ausente nas linhas legadas/Shopee). */
+  componentesML?: ComponentesFinanceirosML | null;
 }

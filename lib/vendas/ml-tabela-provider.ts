@@ -12,9 +12,9 @@
  *             SÓ pedido pago cuja aprovação elegível MAIS ANTIGA (approved / partially_refunded / in_mediation com
  *             `date_approved` válido) cai, em BRT, dentro do período.
  *   custo     Meus Produtos (custo + insumos + imposto) — custo DESCONHECIDO nunca é zero (lucro pendente).
- *   financeiro por linha: FEE_PROVIDER_CONFIRMED (sale_fee do provider) ou FINANCIAL_PENDING (sem sale_fee: nenhuma
- *             tarifa estimada). Frete do vendedor e líquido conciliado ficam para a Parte C (order_id, shipping_id e
- *             sale_fee já saem em cada linha).
+ *   financeiro A3.4-C: SÓ das linhas desta página (pedidos pagos visíveis), live e sem gravar — tarifa real, frete do
+ *             vendedor real, líquido ML e então lucro/margem/MC (lib/vendas/ml-financeiro-live.ts). O prazo vale
+ *             para a requisição inteira (busca + financeiro); o que não coube volta PENDING.
  *
  * Nunca devolve dado do comprador nem token.
  */
@@ -22,12 +22,14 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { abrirLeitorPaginasFechamentoML, OFFSET_MAXIMO_ML, type PortasVendasML } from "@/lib/mercado-livre-vendas";
 import { normalizarPedidoML, pedidoMLContaNaVenda } from "@/lib/vendas/canonico/ml";
-import { carregarMapaCustoProduto, financeiroDaVenda, identidadeDaVenda, resolverCustoProduto, type FinanceiroVendaLive } from "@/lib/vendas/custo-produto";
+import { carregarMapaCustoProduto, type FinanceiroVendaLive } from "@/lib/vendas/custo-produto";
+import type { ComponentesFinanceirosML } from "@/lib/vendas/custo-produto-tipos";
+import { JANELA_PROVIDER_MS } from "@/lib/vendas/ml-financeiro-coleta";
+import { coletarFinanceiroLiveML, componentesDaLinhaML, financeiroLiveDaLinhaML, type DepsFinanceiroLiveML } from "@/lib/vendas/ml-financeiro-live";
 import { aprovacaoElegivelMaisAntigaML, dataBRT, statusPedidoML, type StatusPedidoML } from "@/lib/vendas/metricas-ml";
 import { somarDiasNoCalendario } from "@/lib/fuso-sao-paulo";
 
 export type VisaoTabelaML = "fechamento" | "pago";
-export type EstadoFinanceiroLinhaML = "FEE_PROVIDER_CONFIRMED" | "FINANCIAL_PENDING";
 export interface CursorTabelaML { dia: string; offset: number }
 
 /** Buscas por requisição (cada uma ≤ 50 pedidos): a página para ao juntar 50 linhas ou ao fim do período. */
@@ -54,8 +56,9 @@ export interface LinhaTabelaML {
   faturamento: number;
   /** `order_items[].sale_fee` (POR UNIDADE), como o provider devolveu. null = ausente. */
   saleFeeUnitario: number | null;
-  estadoFinanceiro: EstadoFinanceiroLinhaML;
-  /** Custo/imposto/lucro ao vivo de Meus Produtos. null = mapa de custo indisponível. */
+  /** A3.4-C: tarifa / frete do vendedor / frete do comprador / líquido ML desta linha, com status (UNKNOWN ≠ ZERO). */
+  financeiroML: ComponentesFinanceirosML;
+  /** Custo/imposto/lucro ao vivo de Meus Produtos + componentes. null = mapa de custo indisponível. */
   financeiro: FinanceiroVendaLive | null;
 }
 
@@ -92,7 +95,8 @@ export function lerCursorTabelaML(v: string | null): CursorTabelaML | null | "IN
 export const cursorTabelaMLParaTexto = (c: CursorTabelaML | null): string | null => (c ? `${c.dia}:${c.offset}` : null);
 
 /** Um pedido do provider → linhas da tabela (uma por item) ou [] quando fora da visão/período. Puro. */
-export function linhasDoPedidoML(o: Record<string, unknown>, ctx: { visao: VisaoTabelaML; de: string; ate: string; diaDaBusca: string }): Omit<LinhaTabelaML, "financeiro">[] {
+type LinhaBrutaML = Omit<LinhaTabelaML, "financeiro" | "financeiroML">;
+export function linhasDoPedidoML(o: Record<string, unknown>, ctx: { visao: VisaoTabelaML; de: string; ate: string; diaDaBusca: string }): LinhaBrutaML[] {
   const n = normalizarPedidoML(o);
   if (n.diaFechamento !== ctx.diaDaBusca) return [];          // borda: o pedido é do dia do SEU date_closed
   if (!pedidoMLContaNaVenda(n)) return [];                     // pack_splitted: a venda está nos substitutos
@@ -104,7 +108,7 @@ export function linhasDoPedidoML(o: Record<string, unknown>, ctx: { visao: Visao
   } else if (n.diaFechamento < ctx.de || n.diaFechamento > ctx.ate) return [];
   const shipping = (o.shipping ?? null) as Record<string, unknown> | null;
   const itens = Array.isArray(o.order_items) ? (o.order_items as unknown[]) : [];
-  const out: Omit<LinhaTabelaML, "financeiro">[] = [];
+  const out: LinhaBrutaML[] = [];
   for (const bruto of itens) {
     if (typeof bruto !== "object" || bruto === null) continue;
     const it = bruto as Record<string, unknown>;
@@ -117,26 +121,17 @@ export function linhasDoPedidoML(o: Record<string, unknown>, ctx: { visao: Visao
       itemId: texto(item.id), variacaoId: texto(item.variation_id), titulo: typeof item.title === "string" ? item.title : "",
       sku: texto(item.seller_sku) ?? texto(item.seller_custom_field),
       qtd, valorUnit, faturamento: Math.round(valorUnit * qtd * 100) / 100,
-      saleFeeUnitario: saleFee, estadoFinanceiro: saleFee !== null ? "FEE_PROVIDER_CONFIRMED" : "FINANCIAL_PENDING",
+      saleFeeUnitario: saleFee,
     });
   }
   return out;
 }
 
-/** Custo de Meus Produtos + tarifa SÓ do provider. Sem sale_fee: financeiro pendente (nunca tarifa estimada/zero). */
-export function financeiroDaLinhaML(l: Omit<LinhaTabelaML, "financeiro">, mapa: Parameters<typeof resolverCustoProduto>[0]): FinanceiroVendaLive {
-  const venda = { marketplace: "ML", ml_item_id: l.itemId, variation_id: l.variacaoId, qtd: l.qtd, faturamento: l.faturamento,
-    tarifa_venda: l.saleFeeUnitario, tarifa_origem: l.saleFeeUnitario !== null ? "PROVIDER" : null };
-  const f = financeiroDaVenda(venda, resolverCustoProduto(mapa, identidadeDaVenda(venda)), null);
-  if (l.estadoFinanceiro === "FEE_PROVIDER_CONFIRMED") return f;
-  return { ...f, qualidadeFinanceira: "PENDING", baseFinanceira: "SEM_BASE", tarifa: 0, tarifaOrigem: "legada", freteStatus: "pendente",
-    lucro: null, margemPct: null, roi: null, pendencias: [...new Set([...f.pendencias, "financeiro" as const])] };
-}
-
 export async function lerPaginaTabelaML(
   entrada: { userId: string; lojaId: string; de: string; ate: string; visao: VisaoTabelaML; cursor: CursorTabelaML | null },
-  deps: { cliente: SupabaseClient; portas?: PortasVendasML },
+  deps: { cliente: SupabaseClient; portas?: PortasVendasML; financeiro?: DepsFinanceiroLiveML; inicioMs?: number },
 ): Promise<PaginaTabelaML> {
+  const inicioMs = deps.inicioMs ?? Date.now();
   const { userId, lojaId, de, ate, visao } = entrada;
   const { primeiro, ultimo } = diasDeBuscaTabelaML(visao, de, ate);
   const vazia = (erro: string | null, cursor: CursorTabelaML | null = null, buscas = 0): PaginaTabelaML =>
@@ -148,7 +143,8 @@ export async function lerPaginaTabelaML(
   const leitor = await abrirLeitorPaginasFechamentoML({ userId, lojaId, portas: deps.portas });
   if (!leitor.ok) return vazia(leitor.erro, cursor);
 
-  const brutas: Omit<LinhaTabelaML, "financeiro">[] = [];
+  const brutas: LinhaBrutaML[] = [];
+  const pedidosDaPagina = new Map<string, Record<string, unknown>>();   // payload dos pedidos que viraram linha
   const diasTruncados: string[] = [];
   let buscas = 0, erro: string | null = null;
   while (cursor && buscas < MAX_BUSCAS_POR_PAGINA_TABELA_ML && brutas.length < LINHAS_POR_PAGINA_TABELA_ML) {
@@ -156,7 +152,10 @@ export async function lerPaginaTabelaML(
     const p = await leitor.ler(atual.dia, atual.offset, "date_desc");
     buscas++;
     if (!p.ok) { erro = p.erro; break; }   // o cursor fica onde estava: a próxima chamada repete esta busca
-    for (const o of p.resultados) brutas.push(...linhasDoPedidoML(o, { visao, de, ate, diaDaBusca: atual.dia }));
+    for (const o of p.resultados) {
+      const ls = linhasDoPedidoML(o, { visao, de, ate, diaDaBusca: atual.dia });
+      if (ls.length) { brutas.push(...ls); pedidosDaPagina.set(ls[0].orderId, o); }
+    }
     const proximo = atual.offset + p.resultados.length;
     const fimDoDia = p.resultados.length === 0 || (p.total !== null && proximo >= p.total);
     if (!fimDoDia && proximo >= OFFSET_MAXIMO_ML) diasTruncados.push(atual.dia);
@@ -165,7 +164,18 @@ export async function lerPaginaTabelaML(
   }
   if (erro !== null && brutas.length === 0) return vazia(erro, cursor, buscas);
 
+  // A3.4-C: financeiro live SÓ dos pedidos PAGOS desta página (nunca do período), dentro do prazo da requisição
+  const pagos = brutas.filter((l) => l.status === "paid").map((l) => l.orderId);
+  const fin = await coletarFinanceiroLiveML({ userId, lojaId, accessToken: leitor.accessToken },
+    [...new Set(pagos)].map((id) => pedidosDaPagina.get(id)!), { fetch: deps.portas?.buscar, ...deps.financeiro }, { ate: inicioMs + JANELA_PROVIDER_MS });
+  const pedidosPorEnvio = new Map<string, Set<string>>();
+  for (const l of brutas) if (l.shippingId) (pedidosPorEnvio.get(l.shippingId) ?? pedidosPorEnvio.set(l.shippingId, new Set()).get(l.shippingId)!).add(l.orderId);
+
   const mapa = await carregarMapaCustoProduto(deps.cliente, userId, "ML", lojaId);
-  const linhas: LinhaTabelaML[] = brutas.map((l) => ({ ...l, financeiro: mapa.ok ? financeiroDaLinhaML(l, mapa.mapa) : null }));
+  const linhas: LinhaTabelaML[] = brutas.map((l) => {
+    const f = { pedido: fin.pedidos.get(l.orderId) ?? null, envio: l.shippingId ? fin.envios.get(l.shippingId) ?? null : null };
+    const financeiroML = componentesDaLinhaML(l, { ...f, falhas: fin.falhas, envioCompartilhadoNaPagina: (pedidosPorEnvio.get(l.shippingId ?? "")?.size ?? 0) > 1 });
+    return { ...l, financeiroML, financeiro: mapa.ok ? financeiroLiveDaLinhaML(l, financeiroML, mapa.mapa, f) : null };
+  });
   return { origem: "PROVIDER", visao, periodo: { de, ate }, linhas, proximoCursor: cursor, buscas, custoDisponivel: mapa.ok, diasTruncados, erro };
 }

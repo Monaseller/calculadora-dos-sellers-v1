@@ -202,6 +202,10 @@ async function principal() {
   const getVendas = async (q: string) => { silenciar(); try { const r = await vendas.GET(new Request(`https://x.test/api/ml/vendas?${q}`, { headers: cab })); return { status: r.status, corpo: await r.json() as any }; } finally { restaurar(); } };
   const postRetry = async (corpo: unknown) => { silenciar(); try { const r = await retry.POST(new Request("https://x.test/api/ml/vendas/financeiro", { method: "POST", headers: { ...cab, "content-type": "application/json" }, body: JSON.stringify(corpo) })); return { status: r.status, corpo: await r.json() as any }; } finally { restaurar(); } };
   const fonte = (rel: string) => readFileSync(join(process.cwd(), rel), "utf8").replace(/\r\n/g, "\n");
+  // A3.4-C: a tela de Vendas NÃO dispara mais a recuperação PERSISTIDA nem lê o GET legado — o financeiro das linhas ML
+  // da tela é LIVE (só a página visível). A rota de recuperação segue existindo e testada (RETRYFIN/HISTFIN/BUDGET).
+  const telaSemRecuperacaoPersistida = (pg: string) =>
+    !/\/api\/ml\/vendas\/financeiro|retryFinanceiroRef|finPendente|deveRecuperarFinanceiroML/.test(pg) && (pg.match(/\/api\/ml\/vendas[?`"]/g) ?? []).length === 0;
   const logs: string[] = [];
   const depsFalsos = () => ({
     fetch: globalThis.fetch, esperar: async (ms: number) => { esperas.push(ms); },
@@ -341,9 +345,9 @@ async function principal() {
     const r = await getVendas(`date_from=${DIA}&date_to=${DIA}&loja_id=${ML_A}`);
     assert(r.corpo.financeiroPendente === 1 && (r.corpo.rows ?? []).some((x: any) => x.orderId === ORDER), JSON.stringify(r.corpo.financeiroPendente));
   });
-  t("RETRYFIN-6. a tela dispara a recuperação ao carregar (POST único com loja + janela, sem lista) e relê", async () => {
+  t("RETRYFIN-6. (A3.4-C) a tela NÃO dispara a recuperação persistida nem o GET legado; o financeiro da tela é live", async () => {
     const pg = fonte("app/(app)/vendas/page.tsx");
-    assert((pg.match(/\/api\/ml\/vendas\/financeiro/g) ?? []).length === 1 && /loja_id: finPendente\.lojaId/.test(pg) && /date_from: finPendente\.de, date_to: finPendente\.ate, date_field: finPendente\.campo/.test(pg) && !/order_ids/.test(pg) && /\.then\(\(\) => lerMarketplace\("ML", /.test(pg), "tela sem recuperação/releitura");
+    assert(telaSemRecuperacaoPersistida(pg) && /\/api\/ml\/vendas\/pedidos/.test(pg) && !/order_ids/.test(pg), "tela ainda depende da recuperação persistida/GET legado");
   });
   t("RETRYFIN-7/8. recuperação tenta SÓ o que precisa: ACTUAL da janela não é consultado", async () => {
     await comBillingPendente();
@@ -363,10 +367,9 @@ async function principal() {
     await postRetry(janela());
     assert(chamadas.length > 0 && chamadas.every((x) => x.token === TOKEN_A && x.metodo === "GET"), `tokens ${[...new Set(chamadas.map((x) => x.token))]}`);
   });
-  t("RETRYFIN-10. sem loop: uma rodada por carga (trava nunca é rearmada; a releitura não dispara outra)", async () => {
+  t("RETRYFIN-10. (A3.4-C) sem loop: a tela não dispara nenhuma rodada de recuperação persistida", async () => {
     const pg = fonte("app/(app)/vendas/page.tsx");
-    assert(/if \(deveRecuperarFinanceiroML\(\{ falhou, rodadaUsada: retryFinanceiroRef\.current, /.test(pg) && /retryFinanceiroRef\.current = true;/.test(pg) && !/retryFinanceiroRef\.current = false/.test(pg), "trava ausente");
-    assert(/useEffect\(\(\) => \{\s*if \(!finPendente\) return;[\s\S]{0,900}?\}, \[finPendente\]\);/.test(pg), "recuperação fora de efeito único");
+    assert(telaSemRecuperacaoPersistida(pg), "tela ainda dispara recuperação (loop possível)");
   });
   t("RETRYFIN-11. recuperação com sucesso → a releitura mostra ACTUAL 30,10 e nenhum pendente", async () => {
     await comBillingPendente();
@@ -449,7 +452,7 @@ async function principal() {
   });
   t("HISTFIN-12. uma carga da página → no máximo UMA rodada automática", async () => {
     const pg = fonte("app/(app)/vendas/page.tsx");
-    assert(/retryFinanceiroRef\.current = true;/.test(pg) && !/retryFinanceiroRef\.current = false/.test(pg) && (pg.match(/\/api\/ml\/vendas\/financeiro/g) ?? []).length === 1, "loop possível");
+    assert(telaSemRecuperacaoPersistida(pg), "tela ainda dispara recuperação (loop possível)");
   });
   t("HISTFIN-13. GET de Vendas: ZERO chamadas ao provider (com histórico sem financeiro)", async () => {
     historico([[ORDER]]); chamadas = [];
@@ -524,7 +527,7 @@ async function principal() {
   });
   t("BUDGET-8. página: no máximo UMA rodada automática por carga (sem loop)", async () => {
     const pg = fonte("app/(app)/vendas/page.tsx");
-    assert(/retryFinanceiroRef\.current = true;/.test(pg) && !/retryFinanceiroRef\.current = false/.test(pg) && (pg.match(/\/api\/ml\/vendas\/financeiro/g) ?? []).length === 1, "loop possível");
+    assert(telaSemRecuperacaoPersistida(pg), "tela ainda dispara recuperação (loop possível)");
   });
   t("BUDGET-9. sem teto 40: 70 vendas históricas sem financeiro com API saudável → as 70 na mesma requisição", async () => {
     historico(Array.from({ length: 70 }, (_, i) => [String(2000021000000000 + i)] as [string]));
@@ -609,7 +612,7 @@ async function principal() {
     const g = await getVendas(`date_from=${DIA}&date_to=${DIA}&loja_id=${ML_A}`);
     assert(chamadas.length === 0 && g.corpo.financeiroPendente === 1, `chamadas=${chamadas.length} pendente=${g.corpo.financeiroPendente}`);
     const pg = fonte("app/(app)/vendas/page.tsx");
-    assert(/retryFinanceiroRef\.current = true;/.test(pg) && !/retryFinanceiroRef\.current = false/.test(pg) && (pg.match(/\/api\/ml\/vendas\/financeiro/g) ?? []).length === 1, "loop possível");
+    assert(telaSemRecuperacaoPersistida(pg), "tela ainda dispara recuperação (loop possível)");
   });
 
   secao("\n[7. billing + descontos auditados em pedidos reais (A3.2-D)]");
@@ -985,7 +988,7 @@ async function principal() {
     const g2 = await getVendas(`date_from=${DIA}&date_to=${DIA}&loja_id=${ML_A}`);   // sem cache → sync automático
     assert(g2.corpo.financeiroTentadoNoSync === true && FL.deveRecuperarFinanceiroML({ falhou: false, rodadaUsada: false, financeiroPendente: g2.corpo.financeiroPendente, financeiroTentadoNoSync: g2.corpo.financeiroTentadoNoSync }) === false, JSON.stringify(g2.corpo.financeiroTentadoNoSync));
     const pg = fonte("app/(app)/vendas/page.tsx");
-    assert(/if \(!falhou && data\.financeiroTentadoNoSync === true\) retryFinanceiroRef\.current = true;/.test(pg), "carga sincronizada não gasta a rodada");
+    assert(telaSemRecuperacaoPersistida(pg), "tela ainda dispara recuperação na carga");
   });
   t("RATE-2. carga SEM sync e com pendentes → UMA rodada de POST", async () => {
     await comBillingPendente();
@@ -1003,7 +1006,7 @@ async function principal() {
   });
   t("RATE-4. novo refresh do navegador (carga nova, trava zerada) pode tentar de novo", () => {
     const pg = fonte("app/(app)/vendas/page.tsx");
-    assert(/const retryFinanceiroRef = useRef\(false\);/.test(pg) && !/retryFinanceiroRef\.current = false/.test(pg), "trava fora do ciclo da carga");
+    assert(telaSemRecuperacaoPersistida(pg), "tela ainda dispara recuperação");
     assert(FL.deveRecuperarFinanceiroML({ falhou: false, rodadaUsada: false, financeiroPendente: 3, financeiroTentadoNoSync: false }) === true, "carga nova não tenta");
   });
   t("RATE-5/10. lote de billing com 429 nas 3 tentativas → disjuntor aberto (1 linha agregada); 429 é TRANSIENT, nunca INTEGRATION", async () => {

@@ -1041,12 +1041,13 @@ export function lojaMLVendasNaoExplicita(raiz = RAIZ_V2): string[] {
   // 6. tela
   const pg = tiraComentarios(ler(raiz, PAGINA_VENDAS));
   if (!/from "\.\/loja-ml";/.test(pg)) erros.push(`${PAGINA_VENDAS}: não usa o helper puro de loja ML`);
-  if (!/if \(mkt === "ML" && !prontoMLRef\.current\) return/.test(pg)) erros.push(`${PAGINA_VENDAS}: lê ML antes de a loja estar decidida`);
-  const iSet = pg.search(/if \(mkt === "ML" && lojaDaChamada\) params\.set\("loja_id", lojaDaChamada\);/);
-  const iUrl = pg.search(/`\/api\/ml\/vendas\?\$\{params\}`/);
-  if (iSet < 0 || iUrl < 0 || iSet > iUrl) erros.push(`${PAGINA_VENDAS}: leitura ML sem loja_id antes da URL`);
-  if ((pg.match(/\/api\/ml\/vendas[?`"]/g) ?? []).length !== 1) erros.push(`${PAGINA_VENDAS}: chamada a /api/ml/vendas fora de lerMarketplace`);
-  if (!/if \(lojaMLRef\.current !== lojaDaChamada\) return \{ falhou: true, data: null \};/.test(pg)) erros.push(`${PAGINA_VENDAS}: resposta de outra loja não é descartada`);
+  // A3.4-C: a tela lê o ML SÓ pelas rotas A3.4 (métricas canônicas + tabela do provider) — o GET legado /api/ml/vendas
+  // não é chamado; cada leitura espera a loja decidida, leva `loja_id` e descarta a resposta de uma loja anterior
+  if ((pg.match(/if \(!prontoMLRef\.current\) return/g) ?? []).length !== 2) erros.push(`${PAGINA_VENDAS}: lê ML antes de a loja estar decidida`);
+  const comLoja = pg.match(/\.\.\.\(loja \? \{ loja_id: loja \} : \{\}\)/g) ?? [], urlsML = pg.match(/\/api\/ml\/vendas\/(metricas|pedidos)/g) ?? [];
+  if (comLoja.length !== 3 || urlsML.length !== 3) erros.push(`${PAGINA_VENDAS}: leitura ML sem loja_id (métricas GET/POST e tabela)`);
+  if ((pg.match(/\/api\/ml\/vendas[?`"]/g) ?? []).length !== 0) erros.push(`${PAGINA_VENDAS}: tela ainda chama o GET legado /api/ml/vendas`);
+  if ((pg.match(/if \(lojaMLRef\.current !== loja\) return/g) ?? []).length !== 2 || (pg.match(/if \(tratarRecusaLojaML\(d, loja\)\) return/g) ?? []).length !== 2) erros.push(`${PAGINA_VENDAS}: resposta de outra loja não é descartada (ou recusa de loja não tratada)`);
   if (!/data\?\.codigo === "ML_STORE_SELECTION_REQUIRED"/.test(pg) || !/data\?\.codigo === "LOJA_ML_INVALIDA"[\s\S]{0,200}?lojaMLRef\.current = null;/.test(pg)) erros.push(`${PAGINA_VENDAS}: 409/404 de loja sem tratamento (ou com fallback)`);
   if (!/const lojaId = mkt === "ML" \? lojaMLRef\.current : shopeeLojaId;/.test(pg)) erros.push(`${PAGINA_VENDAS}: job de sync ML sem a loja escolhida`);
   // A3.3.1: sem o fluxo legado de histórico (nenhum sync manual por janela na tela)
@@ -1069,6 +1070,9 @@ export const METRICAS_HIBRIDAS_ML = "lib/vendas/ml-metricas-hibridas.ts";
 export const TABELA_PROVIDER_ML = "lib/vendas/ml-tabela-provider.ts";
 export const HELPER_ML_PROVIDER_TELA = "app/(app)/vendas/ml-provider.ts";
 export const REGRA_CANONICA_ML = "lib/vendas/canonico/ml.ts";
+export const FINANCEIRO_LIVE_ML = "lib/vendas/ml-financeiro-live.ts";
+/** Quem pode importar o motor financeiro do provider: sync, retry, o financeiro live (A3.4-C) e a tabela (só o prazo). */
+export const IMPORTADORES_COLETOR_ML = ["lib/sync-ml.ts", "app/api/ml/vendas/financeiro/route.ts", FINANCEIRO_LIVE_ML, "lib/vendas/ml-tabela-provider.ts"];
 /**
  * I18_ML_SALES_ARE_CANONICAL_AND_PROVIDER_BACKED: (a) as métricas ML da tela vêm SÓ de consultarVendasCanonicas
  * (sem `pedidos`, sem provider, sem fórmula própria; refresh pelo coordenador existente com a flag canônica);
@@ -1092,7 +1096,15 @@ export function mlVendasForaDoCanonico(raiz = RAIZ_V2): string[] {
     [/carregarMapaCustoProduto\(deps\.cliente, userId, "ML", lojaId\)/, "custo de Meus Produtos"], [/if \(n\.diaFechamento !== ctx\.diaDaBusca\) return \[\];/, "dia do date_closed"]] as const)
     if (!re.test(tb)) erros.push(`${TABELA_PROVIDER_ML}: ${o} ausente`);
   if (!/somarDiasNoCalendario\(de, -1\), ultimo: somarDiasNoCalendario\(ate, 1\)/.test(tb)) erros.push(`${TABELA_PROVIDER_ML}: candidatos pagos fora de date_closed ±1 dia`);
-  if (!/lucro: null, margemPct: null, roi: null/.test(tb) || /0\.13|estimad/.test(tb)) erros.push(`${TABELA_PROVIDER_ML}: sem sale_fee o financeiro não fica pendente (tarifa estimada)`);
+  // A3.4-C: financeiro live SÓ dos pedidos pagos da página, no prazo da requisição; nada gravado; sem tarifa estimada
+  if (!/const pagos = brutas\.filter\(\(l\) => l\.status === "paid"\)\.map\(\(l\) => l\.orderId\);/.test(tb) || !/\{ ate: inicioMs \+ JANELA_PROVIDER_MS \}/.test(tb)
+    || !/coletarFinanceiroLiveML\(\{ userId, lojaId, accessToken: leitor\.accessToken \},\s*\[\.\.\.new Set\(pagos\)\]\.map\(\(id\) => pedidosDaPagina\.get\(id\)!\)/.test(tb) || /0\.13|estimad/.test(tb)) erros.push(`${TABELA_PROVIDER_ML}: financeiro fora da página visível/prazo, ou tarifa estimada`);
+  const fl2 = tiraComentarios(ler(raiz, FINANCEIRO_LIVE_ML));
+  if (/\.from\(|lerExistentes|supabase|upsert|insert\(/.test(fl2) || !/semDescontos: true,/.test(fl2) || !/gravarPedidos: async \(linhas\) => \{ for \(const l of linhas\) pedidos\.set\(l\.order_id, l\); \},/.test(fl2)) erros.push(`${FINANCEIRO_LIVE_ML}: financeiro live persiste/lê o banco ou consulta descontos`);
+  if (!/if \(l\.saleFeeUnitario === null\) fee = \{ value: null, source: null, status: "PENDING"/.test(fl2) || !/if \(!e \|\| e\.frete_vendedor === null \|\| e\.pedidos === null\) sellerShipping = \{ value: null, status: pendente \};/.test(fl2)
+    || !/const liq = liquidoPedidoML\(p!, e\);/.test(fl2) || !/lucro: lucroValido \? base\.lucro : null,/.test(fl2) || !/const lucroValido = confirmado && base\.baseFinanceira === "ML_RECONCILIADO";/.test(fl2)
+    || !/f\.envioCompartilhadoNaPagina \|\| e\.pedidos\.length !== 1 \|\| e\.pedidos\[0\] !== l\.orderId \|\| p!\.itens !== 1/.test(fl2) || /0\.13|estimad|receiver/.test(fl2.replace(/receiver\.cost/g, ""))) erros.push(`${FINANCEIRO_LIVE_ML}: UNKNOWN virou zero, frete compartilhado rateado, líquido fora da fórmula A3.2 ou lucro com componente pendente`);
+  for (const f of listar(raiz, "app", "lib").filter((x) => /\.(ts|tsx)$/.test(x))) if (/ml-financeiro-coleta/.test(tiraComentarios(ler(raiz, f))) && !IMPORTADORES_COLETOR_ML.includes(f)) erros.push(`${f}: motor financeiro do provider fora dos pontos aprovados`);
   // (c) uma regra só
   for (const f of listar(raiz, "app", "lib").filter((x) => /\.(ts|tsx)$/.test(x))) {
     const src = tiraComentarios(ler(raiz, f));
@@ -1254,9 +1266,9 @@ export function financeiroMLNaoReal(raiz = RAIZ_V2): string[] {
   const decide = corpoDaFuncao(fl, "deveRecuperarFinanceiroML") ?? "";
   // A3.2-F: carga que já sincronizou (o sync tentou o financeiro) NÃO dispara a recuperação — uma fonte por carga
   if (!/return !r\.falhou && !r\.rodadaUsada && r\.financeiroTentadoNoSync !== true && typeof r\.financeiroPendente === "number" && r\.financeiroPendente > 0;/.test(decide)
-    || !/if \(!falhou && data\.financeiroTentadoNoSync === true\) retryFinanceiroRef\.current = true;/.test(pgr)
     || !/financeiroTentadoNoSync = !!lojaML;/.test(rg) || (rg.match(/financeiroTentadoNoSync = !!lojaML;/g) ?? []).length !== (rg.match(/await \(lojaML && syncMLForUser\(/g) ?? []).length) erros.push("tela: recuperação financeira disparada na mesma carga de um sync que já tentou o financeiro (rajada de billing)");
-  if (!/if \(deveRecuperarFinanceiroML\(\{ falhou, rodadaUsada: retryFinanceiroRef\.current, financeiroPendente: data\?\.financeiroPendente, financeiroTentadoNoSync: data\?\.financeiroTentadoNoSync \}\)\) \{\s*retryFinanceiroRef\.current = true;/.test(pgr) || /retryFinanceiroRef\.current = false/.test(pgr) || /order_ids/.test(pgr) || (pgr.match(/\/api\/ml\/vendas\/financeiro/g) ?? []).length !== 1) erros.push("tela: recuperação sem trava de uma rodada por carga (loop), com lista de pedidos ou fora do ponto único");
+  // A3.4-C: a tela NÃO dispara a recuperação persistida (nem lê o GET legado) — o financeiro das linhas ML é live
+  if (/\/api\/ml\/vendas\/financeiro|deveRecuperarFinanceiroML|retryFinanceiroRef|finPendente/.test(pgr)) erros.push("tela: recuperação financeira persistida ainda disparada pela tela (o financeiro da tela é live, A3.4-C)");
   // leitor: dono + loja
   const l = tiraComentarios(ler(raiz, LEITOR_FIN_ML));
   if ((l.match(/\.eq\("user_id", userId\)\.eq\("loja_id", lojaId\)\.in\(/g) ?? []).length !== 2 || /fetch\(|mercadoli/.test(l)) erros.push("leitor: financeiro sem dono + loja, ou chama provider");

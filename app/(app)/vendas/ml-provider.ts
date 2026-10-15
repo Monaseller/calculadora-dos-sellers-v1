@@ -8,7 +8,7 @@
  *                              PARTIAL "Carregando… X/Y dias" (sem número), FAILED "indisponíveis". Nunca "ao vivo":
  *                              os números são do corpus canônico, não de uma leitura do provider.
  */
-import type { FinanceiroVendaLive } from "@/lib/vendas/custo-produto-tipos";
+import type { ComponentesFinanceirosML, FinanceiroVendaLive, StatusComponenteML } from "@/lib/vendas/custo-produto-tipos";
 
 export type StatusVendaTela = "paid" | "cancelled" | "devolucao" | "pending";
 
@@ -28,7 +28,7 @@ export interface LinhaProviderML {
   valorUnit: number;
   faturamento: number;
   saleFeeUnitario: number | null;
-  estadoFinanceiro: "FEE_PROVIDER_CONFIRMED" | "FINANCIAL_PENDING";
+  financeiroML: ComponentesFinanceirosML;
   financeiro: FinanceiroVendaLive | null;
 }
 
@@ -37,7 +37,7 @@ export interface VendaRowProviderML {
   frete: null; logistica: string; status: StatusVendaTela; valorUnit: number; qtd: number; faturamento: number;
   custo: number; imposto: number; tarifaVenda: number; freteComprador: number; freteVendedor: number;
   margemContrib: number; mcPercent: number; cadastrado: boolean; financeiro: FinanceiroVendaLive | null; packId: string | null;
-  origem: "PROVIDER"; shippingId: string | null; estadoFinanceiro: LinhaProviderML["estadoFinanceiro"];
+  origem: "PROVIDER"; shippingId: string | null; financeiroML: ComponentesFinanceirosML;
 }
 
 const STATUS_TELA: Record<string, StatusVendaTela> = { paid: "paid", pending: "pending", devolucao: "devolucao", cancelled: "cancelled", cancelado_interno: "cancelled" };
@@ -53,8 +53,19 @@ export function linhaProviderParaVendaRow(l: LinhaProviderML, visao: "fechamento
     // campos LEGADOS da linha: a tela usa `financeiro` (ao vivo); nada de valor inventado aqui
     custo: 0, imposto: 0, tarifaVenda: l.saleFeeUnitario ?? 0, freteComprador: 0, freteVendedor: 0, margemContrib: 0, mcPercent: 0,
     cadastrado: l.financeiro?.custoStatus === "PRODUCT_FOUND_WITH_COST",
-    financeiro: l.financeiro, packId: l.packId, origem: "PROVIDER", shippingId: l.shippingId, estadoFinanceiro: l.estadoFinanceiro,
+    financeiro: l.financeiro, packId: l.packId, origem: "PROVIDER", shippingId: l.shippingId, financeiroML: l.financeiroML,
   };
+}
+
+/**
+ * A3.4-C: texto de um componente financeiro do ML SEM valor confirmado — nunca "R$ 0,00" nem "não incluído" (que
+ * pareceria zero). Com valor, a tela mostra o valor.
+ */
+export function textoComponenteML(status: StatusComponenteML): string {
+  if (status === "PROVIDER_NOT_READY") return "Aguardando Mercado Livre";
+  if (status === "SHARED_SHIPMENT_PENDING") return "Pendente (envio compartilhado)";
+  if (status === "DIVERGENT") return "Pendente (divergente)";
+  return "Pendente";
 }
 
 export interface MetricasMLTela {

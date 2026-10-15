@@ -5,10 +5,10 @@ import { useDateField } from "@/lib/date-field-context";
 import { calcularUltimos7Dias, DATE_PRESETS } from "@/lib/date-range-utils";
 import { ASYNC_SYNC_JOBS_ENABLED } from "@/lib/feature-flags";
 import type { FinanceiroVendaLive } from "@/lib/vendas/custo-produto-tipos";
-import { avisoCustoLive, custoCadastradoLive, detalheLiquidoML, deveRecuperarFinanceiroML, seloLucroLive, textoFreteLive, totaisLive } from "./financeiro-live";
+import { avisoCustoLive, custoCadastradoLive, detalheLiquidoML, seloLucroLive, textoFreteLive, totaisLive } from "./financeiro-live";
 import { codigoAnuncio, codigoVenda, copiarCodigo } from "./codigos-venda";
 import { CHAVE_LOJA_ML_VENDAS, type LojaMLVendas, escolherLojaMLInicial, lojasMLDaLista, lojasMLDaRecusa } from "./loja-ml";
-import { cardsMetricasML, linhaProviderParaVendaRow, METRICAS_ML_INDISPONIVEIS, rotuloMetricasML, type LinhaProviderML, type MetricasMLTela } from "./ml-provider";
+import { cardsMetricasML, linhaProviderParaVendaRow, METRICAS_ML_INDISPONIVEIS, rotuloMetricasML, textoComponenteML, type LinhaProviderML, type MetricasMLTela } from "./ml-provider";
 
 // ── Tipos ──────────────────────────────────────────────────────────────────
 interface VendaRow {
@@ -73,17 +73,15 @@ export default function VendasPage() {
   // própria leitura tiver sucesso, nunca zerado pela falha do outro.
   // Corrige o bug em que uma falha/timeout num marketplace derrubava o
   // faturamento total (o array combinado inteiro era substituído).
-  const [mlRows,     setMlRows]     = useState<VendaRow[]>([]);
   // Vendas A3.4: métricas do ML SÓ do serviço canônico (GET /api/ml/vendas/metricas) e a tabela do ML lida do
-  // PROVIDER, paginada no servidor (GET /api/ml/vendas/pedidos). As linhas do legado (`mlRows`) NÃO são exibidas:
-  // status/data velhos do banco nunca vencem o provider (a leitura legada segue só pelo sync e pelo financeiro A3.2).
+  // PROVIDER, paginada no servidor, com o financeiro LIVE das linhas visíveis (GET /api/ml/vendas/pedidos — A3.4-C).
+  // A tela NÃO chama o GET legado /api/ml/vendas: status/data velhos do banco nunca vencem o provider.
   const [mlMetricas, setMlMetricas] = useState<MetricasMLTela | null>(null);
   const [mlProvider, setMlProvider] = useState<{ linhas: VendaRow[]; cursor: string | null; carregandoMais: boolean; erro: boolean } | null>(null);
   const [shopeeRows, setShopeeRows] = useState<VendaRow[]>([]);
   const mlLinhasProvider = (mlProvider?.linhas ?? []).filter(r => skuTags.length === 0
     || skuTags.some(f => (r.sku ?? "").toLowerCase().includes(f.toLowerCase()) || r.anuncio.toLowerCase().includes(f.toLowerCase())));
   const rows = [...mlLinhasProvider, ...shopeeRows].sort((a, b) => b.data.localeCompare(a.data));
-  const [mlLojaId,     setMlLojaId]     = useState<string | null>(null);
   // CDS V2 Vendas A5: loja ML EXPLÍCITA (uma por vez). `lojasML` null = lista ainda não carregada.
   const [lojasML,        setLojasML]        = useState<LojaMLVendas[] | null>(null);
   const [lojaMLSel,      setLojaMLSel]      = useState<string | null>(null);
@@ -92,10 +90,6 @@ export default function VendasPage() {
   const prontoMLRef = useRef(false);
   const listaMLFalhouRef = useRef(false);   // lista de lojas indisponível → sync com ML bloqueado (A5-B.1)
   const [codigoCopiado, setCodigoCopiado] = useState<string | null>(null);
-  // Vendas A3.2-C: financeiro ML pendente → UMA nova tentativa server-side por carga da página (sem loop).
-  const retryFinanceiroRef = useRef(false);
-  const [finPendente, setFinPendente] = useState<{ lojaId: string | null; de: string; ate: string; campo: string } | null>(null);
-  const [statusFinanceiro, setStatusFinanceiro] = useState<"atualizando" | "pendente" | null>(null);   // Vendas A3.2: feedback do copiar
   const [shopeeLojaId, setShopeeLojaId] = useState<string | null>(null);
   const [loading,   setLoading]   = useState(false);
   const [erro,      setErro]      = useState<string | null>(null);
@@ -128,35 +122,91 @@ export default function VendasPage() {
     setSkuTags(prev => prev.filter(t => t !== tag));
   }
 
-  // Lê o cache de UM marketplace por vez. Nunca sobrescreve nem zera as
-  // linhas do OUTRO marketplace, e — em caso de falha/timeout deste
-  // marketplace — nunca zera as próprias linhas já exibidas: só atualiza
-  // quando a leitura tem sucesso. Correção aprovada 2026-07-11: a antiga
-  // função `sync()` combinava os dois marketplaces num único array e
-  // substituía tudo de uma vez, então uma falha isolada (ex: timeout da
-  // Shopee) derrubava o faturamento total mesmo com o ML saudável.
+  // Vendas A5 + A3.4: recusa de loja nas leituras do ML (409 seleção / 404 inválida) — a mesma regra de sempre, agora
+  // nas rotas A3.4 (métricas e tabela). Sem fallback: a tela pede a escolha.
+  function tratarRecusaLojaML(data: any, lojaDaChamada: string | null): boolean {
+    if (data?.codigo === "ML_STORE_SELECTION_REQUIRED") {
+      setLojasML(lojasMLDaRecusa(data.lojas)); setExigeEscolhaML(true); prontoMLRef.current = false; setMlMetricas(null); setMlProvider(null);
+      return true;
+    }
+    if (data?.codigo === "LOJA_ML_INVALIDA") {   // loja escolhida deixou de valer: sem fallback, nova escolha
+      try { localStorage.removeItem(CHAVE_LOJA_ML_VENDAS); } catch {}
+      lojaMLRef.current = null; prontoMLRef.current = false;
+      setLojasML((ls) => (ls ?? []).filter((l) => l.id !== lojaDaChamada));
+      setLojaMLSel(null); setExigeEscolhaML(true); setMlMetricas(null); setMlProvider(null);
+      return true;
+    }
+    return false;
+  }
+
+  // Vendas A3.4 (Parte A): métricas do ML do serviço canônico. `revalidar` = pedido EXPLÍCITO (Sincronizar) → POST,
+  // que pede ao coordenador existente uma nova ingestão mesmo com o corpus fresco. Falha → "indisponíveis", sem número.
+  const lerMetricasML = useCallback(async (from: string, to: string, revalidar = false) => {
+    if (!prontoMLRef.current) return;
+    const loja = lojaMLRef.current;
+    let m: MetricasMLTela = METRICAS_ML_INDISPONIVEIS;
+    let d: any = null;
+    try {
+      const res = revalidar
+        ? await fetch("/api/ml/vendas/metricas", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ de: from, ate: to, ...(loja ? { loja_id: loja } : {}) }) })
+        : await fetch(`/api/ml/vendas/metricas?${new URLSearchParams({ de: from, ate: to, ...(loja ? { loja_id: loja } : {}) })}`);
+      d = await res.json().catch(() => null);
+      if (res.ok && (d?.estado === "COMPLETE" || d?.estado === "PARTIAL" || d?.estado === "FAILED")) m = d as MetricasMLTela;
+    } catch {}
+    if (lojaMLRef.current !== loja) return;   // loja trocada no meio: descarta
+    if (tratarRecusaLojaML(d, loja)) return;
+    setMlMetricas(m);
+  }, []); // eslint-disable-line
+
+  // Vendas A3.4 (Partes B/C): tabela do ML pelo PROVIDER, paginada no servidor (cursor dia:offset), com o financeiro
+  // live SÓ das linhas da página. `cursor` null = primeira página (substitui); com cursor = "Carregar mais" (acrescenta).
+  // Falha → aviso; NUNCA o legado no lugar. Devolve se a leitura deu certo.
+  const lerTabelaML = useCallback(async (from: string, to: string, cursor: string | null): Promise<boolean> => {
+    if (!prontoMLRef.current) return true;
+    const loja = lojaMLRef.current;
+    const visao = dateField === "pagamento" ? "pago" : "fechamento";
+    if (cursor) setMlProvider(p => (p ? { ...p, carregandoMais: true } : p));
+    const ctrl = new AbortController();
+    const tid = setTimeout(() => ctrl.abort(), 58000);   // a rota tem 60 s (busca + financeiro live com prazo)
+    let d: any = null;
+    try {
+      const res = await fetch(`/api/ml/vendas/pedidos?${new URLSearchParams({ de: from, ate: to, visao, ...(loja ? { loja_id: loja } : {}), ...(cursor ? { cursor } : {}) })}`, { signal: ctrl.signal });
+      d = await res.json().catch(() => null);
+    } catch {} finally { clearTimeout(tid); }
+    if (lojaMLRef.current !== loja) return false;
+    if (tratarRecusaLojaML(d, loja)) return false;
+    const linhas: VendaRow[] | null = Array.isArray(d?.linhas)
+      ? (d.linhas as LinhaProviderML[]).map(l => linhaProviderParaVendaRow(l, visao)).filter((r): r is NonNullable<typeof r> => r !== null)
+      : null;
+    setMlProvider(p => {
+      if (linhas === null) return cursor && p ? { ...p, carregandoMais: false, erro: true } : { linhas: [], cursor: null, carregandoMais: false, erro: true };
+      return { linhas: cursor && p ? [...p.linhas, ...linhas] : linhas, cursor: typeof d.proximoCursor === "string" ? d.proximoCursor : null, carregandoMais: false, erro: d.erro != null };
+    });
+    return linhas !== null;
+  }, [dateField]); // eslint-disable-line
+
+  // Lê UM marketplace por vez. Nunca sobrescreve nem zera as linhas do OUTRO marketplace, e — em caso de falha/timeout
+  // deste marketplace — nunca zera as próprias linhas já exibidas (correção aprovada 2026-07-11).
+  // Vendas A3.4-C: o ML não usa mais o GET legado — métricas canônicas + tabela do provider; `force` (Sincronizar) vira
+  // a revalidação EXPLÍCITA do canônico pelo coordenador existente.
   const lerMarketplace = useCallback(async (
     mkt: "ML" | "Shopee",
     from: string, to: string, tags: string[], filtros: string[] = [],
     force = false
   ) => {
+    if (mkt === "ML") {
+      const [, ok] = await Promise.all([lerMetricasML(from, to, force), lerTabelaML(from, to, null)]);
+      return { falhou: !ok, data: null as any };
+    }
     const params = new URLSearchParams({ date_from: from, date_to: to, date_field: dateField });
     if (tags.length > 0) params.set("sku", tags.join(","));
     const needsCancelled = filtros.includes("canceladas") || filtros.includes("devolucoes");
     if (needsCancelled) params.set("include_cancelled", "true");
-    // force=true (fluxo antigo, ENABLE_ASYNC_SYNC_JOBS=false — ver
-    // docs/DECISIONS.md 2026-07-13): pede sync inline na própria rota de
-    // leitura, exatamente como funcionava antes de 2026-07-11. Continua se
-    // beneficiando da separação mlRows/shopeeRows abaixo — uma falha aqui
-    // não zera o outro marketplace nem os dados já exibidos deste.
+    // force=true (fluxo antigo, ENABLE_ASYNC_SYNC_JOBS=false — ver docs/DECISIONS.md 2026-07-13): pede sync inline na
+    // própria rota de leitura da Shopee, exatamente como funcionava antes de 2026-07-11.
     if (force) params.set("sync", "1");
-    // Vendas A5: o ML só é lido com a loja decidida (lista carregada; com 2+ lojas, escolhida) e SEMPRE
-    // com `loja_id` quando há loja — a resposta de uma loja anterior é descartada.
-    const lojaDaChamada = mkt === "ML" ? lojaMLRef.current : null;
-    if (mkt === "ML" && !prontoMLRef.current) return { falhou: false, data: null };
-    if (mkt === "ML" && lojaDaChamada) params.set("loja_id", lojaDaChamada);
 
-    const url  = mkt === "ML" ? `/api/ml/vendas?${params}` : `/api/shopee/vendas?${params}`;
+    const url  = `/api/shopee/vendas?${params}`;
     const ctrl = new AbortController();
     // force=true faz sync inline (pode levar bem mais que uma leitura de
     // cache) — mesmo timeout generoso que o antigo forceSync já usava.
@@ -172,82 +222,15 @@ export default function VendasPage() {
     }
 
     const falhou = !data || data.erro;
-
-    if (mkt === "ML") {
-      if (lojaMLRef.current !== lojaDaChamada) return { falhou: true, data: null };   // loja trocada no meio
-      if (data?.codigo === "ML_STORE_SELECTION_REQUIRED") {
-        const lojas = lojasMLDaRecusa(data.lojas);
-        setLojasML(lojas); setExigeEscolhaML(true); prontoMLRef.current = false; setMlRows([]); setMlMetricas(null); setMlProvider(null);
-        return { falhou: true, data };
-      }
-      if (data?.codigo === "LOJA_ML_INVALIDA") {   // loja escolhida deixou de valer: sem fallback, nova escolha
-        try { localStorage.removeItem(CHAVE_LOJA_ML_VENDAS); } catch {}
-        lojaMLRef.current = null; prontoMLRef.current = false;
-        setLojasML((ls) => (ls ?? []).filter((l) => l.id !== lojaDaChamada));
-        setLojaMLSel(null); setExigeEscolhaML(true); setMlRows([]); setMlLojaId(null); setMlMetricas(null); setMlProvider(null);
-        return { falhou: true, data };
-      }
-      if (data?.lojaId) setMlLojaId(data.lojaId);
-      if (!falhou) setMlRows((data.rows ?? []) as VendaRow[]);
-      // A3.2-C.2: há vendas da janela sem financeiro (ou pendente) → dispara a ÚNICA rodada automática desta carga,
-      // mandando só o CONTEXTO (loja + janela); o servidor escolhe os pedidos. A releitura não dispara outra.
-      // A3.2-F: se ESTA leitura sincronizou (o sync já tentou o financeiro), a carga gasta a rodada sem POST.
-      if (!falhou && data.financeiroTentadoNoSync === true) retryFinanceiroRef.current = true;
-      if (deveRecuperarFinanceiroML({ falhou, rodadaUsada: retryFinanceiroRef.current, financeiroPendente: data?.financeiroPendente, financeiroTentadoNoSync: data?.financeiroTentadoNoSync })) {
-        retryFinanceiroRef.current = true;
-        setFinPendente({ lojaId: lojaDaChamada, de: from, ate: to, campo: dateField });
-      }
-      // falha no ML: mlRows permanece como estava — nunca zera.
-    } else {
-      if (data?.lojaId) setShopeeLojaId(data.lojaId);
-      setErroShopee(!!falhou);
-      setErroShopeeMsg(falhou ? (data?.mensagem ?? null) : null);
-      setShopeeSemDados(!falhou && !!data?.semDados);
-      if (!falhou) setShopeeRows((data.rows ?? []) as VendaRow[]);
-      // falha na Shopee: shopeeRows permanece como estava — nunca zera.
-    }
+    if (data?.lojaId) setShopeeLojaId(data.lojaId);
+    setErroShopee(!!falhou);
+    setErroShopeeMsg(falhou ? (data?.mensagem ?? null) : null);
+    setShopeeSemDados(!falhou && !!data?.semDados);
+    if (!falhou) setShopeeRows((data.rows ?? []) as VendaRow[]);
+    // falha na Shopee: shopeeRows permanece como estava — nunca zera.
 
     return { falhou, data };
-  }, [dateField]);
-
-  // Vendas A3.4 (Parte A): métricas do ML do serviço canônico. `revalidar` = pedido EXPLÍCITO (Sincronizar) → POST,
-  // que pede ao coordenador existente uma nova ingestão mesmo com o corpus fresco. Falha → "indisponíveis", sem número.
-  const lerMetricasML = useCallback(async (from: string, to: string, revalidar = false) => {
-    if (!prontoMLRef.current) return;
-    const loja = lojaMLRef.current;
-    let m: MetricasMLTela = METRICAS_ML_INDISPONIVEIS;
-    try {
-      const res = revalidar
-        ? await fetch("/api/ml/vendas/metricas", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ de: from, ate: to, ...(loja ? { loja_id: loja } : {}) }) })
-        : await fetch(`/api/ml/vendas/metricas?${new URLSearchParams({ de: from, ate: to, ...(loja ? { loja_id: loja } : {}) })}`);
-      const d = await res.json().catch(() => null);
-      if (res.ok && (d?.estado === "COMPLETE" || d?.estado === "PARTIAL" || d?.estado === "FAILED")) m = d as MetricasMLTela;
-    } catch {}
-    if (lojaMLRef.current !== loja) return;   // loja trocada no meio: descarta
-    setMlMetricas(m);
-  }, []);
-
-  // Vendas A3.4 (Parte B): tabela do ML pelo PROVIDER, paginada no servidor (cursor dia:offset). `cursor` null =
-  // primeira página (substitui); com cursor = "Carregar mais" (acrescenta). Falha → aviso; NUNCA o legado no lugar.
-  const lerTabelaML = useCallback(async (from: string, to: string, cursor: string | null) => {
-    if (!prontoMLRef.current) return;
-    const loja = lojaMLRef.current;
-    const visao = dateField === "pagamento" ? "pago" : "fechamento";
-    if (cursor) setMlProvider(p => (p ? { ...p, carregandoMais: true } : p));
-    let d: any = null;
-    try {
-      const res = await fetch(`/api/ml/vendas/pedidos?${new URLSearchParams({ de: from, ate: to, visao, ...(loja ? { loja_id: loja } : {}), ...(cursor ? { cursor } : {}) })}`);
-      d = await res.json().catch(() => null);
-    } catch {}
-    if (lojaMLRef.current !== loja) return;
-    const linhas: VendaRow[] | null = Array.isArray(d?.linhas)
-      ? (d.linhas as LinhaProviderML[]).map(l => linhaProviderParaVendaRow(l, visao)).filter((r): r is NonNullable<typeof r> => r !== null)
-      : null;
-    setMlProvider(p => {
-      if (linhas === null) return cursor && p ? { ...p, carregandoMais: false, erro: true } : { linhas: [], cursor: null, carregandoMais: false, erro: true };
-      return { linhas: cursor && p ? [...p.linhas, ...linhas] : linhas, cursor: typeof d.proximoCursor === "string" ? d.proximoCursor : null, carregandoMais: false, erro: d.erro != null };
-    });
-  }, [dateField]);
+  }, [dateField, lerMetricasML, lerTabelaML]);
 
   // Orquestra a leitura normal (montagem, mudança de filtro/data/date_field,
   // "Buscar", "Limpar"). NÃO dispara sincronização — só lê o cache atual.
@@ -265,8 +248,6 @@ export default function VendasPage() {
       const [resML, resShopee] = await Promise.all([
         lerML     ? lerMarketplace("ML",     from, to, tags, filtros) : Promise.resolve(null),
         lerShopee ? lerMarketplace("Shopee", from, to, tags, filtros) : Promise.resolve(null),
-        lerML     ? lerMetricasML(from, to) : Promise.resolve(null),
-        lerML     ? lerTabelaML(from, to, null) : Promise.resolve(null),
       ]);
 
       const mlFalhou     = lerML     && resML?.falhou;
@@ -276,7 +257,7 @@ export default function VendasPage() {
       // já exibido — se já havia linhas na tela, uma falha dupla e
       // temporária não deve substituir a tabela pela tela de "desconectado"
       // (mesma regra de preservação, aplicada também a este estado).
-      setSemConexao(!!(mlFalhou && shopeeFalhou) && mlRows.length === 0 && shopeeRows.length === 0);
+      setSemConexao(!!(mlFalhou && shopeeFalhou) && (mlProvider?.linhas.length ?? 0) === 0 && shopeeRows.length === 0);
 
       if (!(mlFalhou && shopeeFalhou)) {
         const dML     = resML?.data;
@@ -292,7 +273,7 @@ export default function VendasPage() {
     } finally {
       setLoading(false);
     }
-  }, [lerMarketplace, lerMetricasML, lerTabelaML, mlRows.length, shopeeRows.length]); // eslint-disable-line
+  }, [lerMarketplace, mlProvider?.linhas.length, shopeeRows.length]); // eslint-disable-line
 
   // ── Disparo de sincronização (botão "Sincronizar") ──────────────────────
   // Separado da leitura (refetchTudo/lerMarketplace) — aprovado 2026-07-11.
@@ -324,7 +305,6 @@ export default function VendasPage() {
           setAtualizando(prev => ({ ...prev, [chave]: false }));
           setSyncMsg(prev => ({ ...prev, [chave]: null }));
           lerMarketplace(mkt, dateFrom, dateTo, skuTags, [...filtrosCadastro, ...filtrosStatus]);
-          if (mkt === "ML") { lerMetricasML(dateFrom, dateTo); lerTabelaML(dateFrom, dateTo, null); }
           return;
         }
         if (data.status === "erro") {
@@ -408,8 +388,6 @@ export default function VendasPage() {
         alvosML     ? lerMarketplace("ML",     dateFrom, dateTo, skuTags, filtros, true) : Promise.resolve(),
         alvosShopee ? lerMarketplace("Shopee", dateFrom, dateTo, skuTags, filtros, true) : Promise.resolve(),
       ]);
-      // Vendas A3.4: atualização EXPLÍCITA do ML — revalida o canônico pelo coordenador e relê a tabela do provider
-      if (alvosML) await Promise.all([lerMetricasML(dateFrom, dateTo, true), lerTabelaML(dateFrom, dateTo, null)]);
       setUltimaSync(new Date().toLocaleTimeString("pt-BR"));
     } finally {
       setAtualizando(prev => ({
@@ -435,22 +413,6 @@ export default function VendasPage() {
       pararPolling("Shopee");
     };
   }, []);
-
-  // Vendas A3.2-C: nova tentativa do financeiro pendente (server-side, só os pendentes desta loja/página) e
-  // UMA releitura. Ainda pendente → aviso discreto; novo refresh do navegador tenta de novo.
-  useEffect(() => {
-    if (!finPendente) return;
-    let vivo = true;
-    setStatusFinanceiro("atualizando");
-    fetch("/api/ml/vendas/financeiro", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...(finPendente.lojaId ? { loja_id: finPendente.lojaId } : {}), date_from: finPendente.de, date_to: finPendente.ate, date_field: finPendente.campo }),
-    }).catch(() => null)
-      .then(() => lerMarketplace("ML", dateFrom, dateTo, skuTags, [...filtrosCadastro, ...filtrosStatus]))
-      .then((res) => { if (vivo) setStatusFinanceiro(Number((res as any)?.data?.financeiroPendente ?? 0) > 0 ? "pendente" : null); })
-      .catch(() => { if (vivo) setStatusFinanceiro("pendente"); });
-    return () => { vivo = false; };
-  }, [finPendente]); // eslint-disable-line
 
   // Vendas A5: lojas ML do dono (GET /api/lojas — só ativas). 1 → ela; 2+ → a salva neste navegador se
   // ainda está na lista, senão o dono escolhe. Falha da lista → a rota decide (loja única ou 409 seleção).
@@ -490,7 +452,7 @@ export default function VendasPage() {
     if (!id || id === lojaMLRef.current) return;
     lojaMLRef.current = id; prontoMLRef.current = true;
     try { localStorage.setItem(CHAVE_LOJA_ML_VENDAS, id); } catch {}
-    setLojaMLSel(id); setExigeEscolhaML(false); setMlRows([]); setMlMetricas(null); setMlProvider(null); setMlLojaId(null);   // a leitura vem do efeito abaixo
+    setLojaMLSel(id); setExigeEscolhaML(false); setMlMetricas(null); setMlProvider(null);   // a leitura vem do efeito abaixo
   }
 
   // Leitura ao montar E toda vez que o período, marketplace, date_field ou a loja ML escolhida mudar
@@ -1223,12 +1185,6 @@ export default function VendasPage() {
         </div>
       )}
 
-      {statusFinanceiro && (
-        <div style={{ margin: "0 0 12px", fontSize: "12px", fontWeight: 700, color: statusFinanceiro === "atualizando" ? "#9099aa" : "#ffb380" }}>
-          {statusFinanceiro === "atualizando" ? "Atualizando financeiro..." : "Financeiro ainda não atualizado"}
-        </div>
-      )}
-
       {erro && !semConexao && !loading && (
         <div style={{
           background: "rgba(255,77,77,0.08)", border: "1px solid rgba(255,77,77,0.2)",
@@ -1398,14 +1354,28 @@ export default function VendasPage() {
                       {(r.financeiro?.imposto ?? 0) > 0 ? `-${moeda(r.financeiro!.imposto!)}` : "—"}
                     </td>
                     {/* Tarifa */}
+                    {r.financeiro?.componentesML ? (() => { const fee = r.financeiro!.componentesML!.fee; return (
+                      <td style={{ ...tdStyle(true), color: fee.value != null ? "#ff6b6b" : "#9099aa" }} title={fee.status === "DIVERGENT" ? `Billing: ${fee.billingValue != null ? moeda(fee.billingValue) : "—"} · pedido: ${moeda(fee.value ?? 0)}` : fee.source === "PROVIDER_BILLING" ? "Tarifa do pedido conferida no billing do Mercado Livre" : fee.source === "PROVIDER_ORDER" ? "Tarifa do pedido (Mercado Livre)" : undefined}>
+                        {fee.value != null ? `-${moeda(fee.value)}${fee.status === "DIVERGENT" ? " (divergente)" : ""}` : textoComponenteML(fee.status)}
+                      </td>
+                    ); })() : (
                     <td style={{ ...tdStyle(true), color: "#ff6b6b" }} title={r.financeiro?.tarifaOrigem === "estimada" ? "Tarifa estimada (sem dado financeiro da Shopee)" : undefined}>{r.financeiro?.tarifaOrigem === "estimada" ? "≈" : ""}-{moeda(r.financeiro ? r.financeiro.tarifa : r.tarifaVenda)}</td>
+                    )}
                     {/* Frete Comprador */}
-                    <td style={{ ...tdStyle(true), color: "#9099aa" }}>—</td>
+                    <td style={{ ...tdStyle(true), color: "#9099aa" }} title={r.financeiro?.componentesML ? "Pago pelo comprador — só referência, não é descontado do líquido" : undefined}>
+                      {r.financeiro?.componentesML?.buyerShipping.value != null ? moeda(r.financeiro.componentesML.buyerShipping.value) : "—"}
+                    </td>
                     {/* Frete Vendedor */}
+                    {r.financeiro?.componentesML ? (() => { const fv = r.financeiro!.componentesML!.sellerShipping; return (
+                      <td style={{ ...tdStyle(true), color: fv.value != null ? "#ff6b6b" : "#9099aa" }}>{fv.value != null ? `-${moeda(fv.value)}` : textoComponenteML(fv.status)}</td>
+                    ); })() : (
                     <td style={{ ...tdStyle(true), color: r.financeiro?.freteVendedor != null ? "#ff6b6b" : "#9099aa" }}>{r.financeiro?.freteVendedor != null ? `-${moeda(r.financeiro.freteVendedor)}` : textoFreteLive(r.financeiro)}</td>
+                    )}
                     {/* Líquido ML (financeiro real: receita − tarifa líquida − frete do vendedor) */}
                     <td style={{ ...tdStyle(true), fontWeight: 700, color: r.financeiro?.liquidoMarketplace != null ? "#d7dbe5" : "#9099aa" }} title={detalheLiquidoML(r.financeiro) ?? undefined}>
-                      {r.financeiro?.liquidoMarketplace != null ? moeda(r.financeiro.liquidoMarketplace) : r.financeiro?.detalheML ? "pendente" : "—"}
+                      {r.financeiro?.componentesML
+                        ? (r.financeiro.componentesML.mlNet.value != null ? `${moeda(r.financeiro.componentesML.mlNet.value)}${r.financeiro.componentesML.mlNet.status === "DIVERGENT" ? " (divergente)" : ""}` : textoComponenteML(r.financeiro.componentesML.mlNet.status))
+                        : r.financeiro?.liquidoMarketplace != null ? moeda(r.financeiro.liquidoMarketplace) : r.financeiro?.detalheML ? "pendente" : "—"}
                     </td>
                     {/* Margem Contrib. */}
                     <td style={{ ...tdStyle(true), fontWeight: 800, color: r.financeiro?.lucro == null ? "#9099aa" : r.financeiro.lucro >= 0 ? "#00D97E" : "#ff4d4d" }}>
@@ -1414,7 +1384,7 @@ export default function VendasPage() {
                     </td>
                     {/* MC % */}
                     <td style={{ ...tdStyle(true), fontWeight: 800, color: r.financeiro?.margemPct == null ? "#9099aa" : r.financeiro.margemPct >= 0 ? "#00D97E" : "#ff4d4d" }}>
-                      {r.financeiro?.margemPct == null ? "—" : pct(r.financeiro.margemPct)}
+                      {r.financeiro?.margemPct == null ? (r.financeiro?.componentesML ? "pendente" : "—") : pct(r.financeiro.margemPct)}
                     </td>
                   </tr>
                 ))}
