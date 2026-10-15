@@ -149,7 +149,7 @@ function respostaPadrao(u: URL): Resp {
     const de = u.searchParams.get("order.date_created.from") ?? "";
     // como a API real: o dia da busca é o do INSTANTE (o ML manda −04:00), não o prefixo da string
     const diaBRT = (iso: string) => new Date(Date.parse(iso) - 3 * 3600_000).toISOString().slice(0, 10);
-    const r = Object.values(pedidosML).filter((o: any) => o.status === st && diaBRT(String(o.date_created)) === de.slice(0, 10));
+    const r = Object.values(pedidosML).filter((o: any) => (!st || o.status === st) && diaBRT(String(o.date_created)) === de.slice(0, 10));
     return { status: 200, corpo: { results: r, paging: { total: r.length } } };
   }
   let m: RegExpExecArray | null;
@@ -1293,6 +1293,52 @@ async function principal() {
     assert(!linhaDe(BUF) && linhaDe(HOJE_)?.status === "paid", "linhas fora do esperado");
     assert(chamadas.some((x) => x.caminho.includes(`/orders/${HOJE_}/discounts`)) && !chamadas.some((x) => x.caminho.includes(`/orders/${BUF}/discounts`)), "financeiro ampliou o escopo para o buffer");
   });
+
+  secao("\n[12. A3.4 — sync sem filtro de status: partially_refunded, fail-closed para status desconhecido]");
+  const pedidoSt = (id: string, status: string, pagamento = "approved") => pedidoML(id, { status, payments: [pagto(pagamento, `${DIA}T10:07:30.000Z`)] });
+  t("LIVE-ST-1. partially_refunded → paid (mapeamento e sync: linha paga com data de pagamento)", async () => {
+    assert(MV.statusPedidoML("partially_refunded", {}) === "paid" && MV.statusPedidoML("paid", {}) === "paid", "mapeamento");
+    semear(); const O = "2000018436237424";
+    pedidosML = { [O]: pedidoSt(O, "partially_refunded", "partially_refunded") };
+    await syncDia(DIA, DIA, true);
+    const r = linhaDe(O);
+    assert(r?.status === "paid" && r?.data_pagamento === DIA, JSON.stringify(r && { s: r.status, p: r.data_pagamento }));
+  });
+  t("LIVE-ST-2/3. status desconhecido e `invalid` → null (fail-closed): nunca viram paid e não são gravados", async () => {
+    for (const st of ["invalid", "status_que_nao_existe", "", "PAID", "pending_cancel"]) assert(MV.statusPedidoML(st, {}) === null, `${st || "(vazio)"} não é null`);
+    semear(); const A = "2000018436237500", B = "2000018436237501";
+    pedidosML = { [A]: pedidoSt(A, "invalid"), [B]: pedidoSt(B, "status_que_nao_existe") };
+    await syncDia(DIA, DIA, true);
+    assert(!linhaDe(A) && !linhaDe(B), "status desconhecido gravado");
+  });
+  t("LIVE-ST-4/5. payment_required, partially_paid (e confirmed, payment_in_process) → pending", () => {
+    for (const st of ["payment_required", "partially_paid", "confirmed", "payment_in_process"]) assert(MV.statusPedidoML(st, {}) === "pending", st);
+  });
+  t("LIVE-ST-6. UMA busca sem `order.status` por dia; pedido devolvido em dois dias (borda) vira UMA linha", async () => {
+    semear(); const O = "2000018436237600";
+    pedidosML = { [O]: pedidoML(O) };
+    const fetchOriginal = globalThis.fetch;
+    globalThis.fetch = (async (url: any, init?: any) => {   // a busca do dia anterior TAMBÉM devolve o pedido (o ML devolve ~1 h além do fim)
+      const u = new URL(String(url));
+      if (u.pathname === "/orders/search" && (u.searchParams.get("order.date_created.from") ?? "").startsWith("2026-10-13")) {
+        chamadas.push({ caminho: u.pathname + u.search, token: null, metodo: "GET" });
+        return { ok: true, status: 200, json: async () => ({ results: [pedidosML[O]], paging: { total: 1 } }) } as any;
+      }
+      return (fetchOriginal as any)(url, init);
+    }) as any;
+    try { chamadas = []; await syncDia("2026-10-13", DIA, true); } finally { globalThis.fetch = fetchOriginal; }
+    const buscas = chamadas.filter((x) => x.caminho.startsWith("/orders/search"));
+    assert(db.pedidos.filter((x) => x.order_id === O).length === 1, "pedido duplicado");
+    assert(buscas.length === 2 && buscas.every((x) => !x.caminho.includes("order.status")), `buscas=${buscas.map((x) => x.caminho.slice(0, 60)).join(" | ")}`);
+  });
+  t("LIVE-ST-7. os 18 partially_refunded de setembro são representáveis: 18 pedidos → 18 linhas pagas", async () => {
+    semear(); pedidosML = {};
+    const ids = Array.from({ length: 18 }, (_, i) => String(2000018436238000 + i));
+    for (const id of ids) pedidosML[id] = pedidoSt(id, "partially_refunded", i0(id) ? "approved" : "partially_refunded");
+    await syncDia(DIA, DIA, true);
+    assert(ids.every((id) => linhaDe(id)?.status === "paid" && linhaDe(id)?.data_pagamento === DIA), `${ids.filter((id) => linhaDe(id)?.status !== "paid").length} fora`);
+  });
+  const i0 = (id: string) => Number(id.slice(-1)) % 2 === 0;
 
   secao("\n[4. guard]");
   t("I17 (A3.2-C) limpo e invariantes V2 limpos", () => {

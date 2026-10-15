@@ -1185,11 +1185,12 @@ export function financeiroMLNaoReal(raiz = RAIZ_V2): string[] {
   const vm = existsSync(join(raiz, "lib/vendas/metricas-ml.ts")) ? tiraComentarios(ler(raiz, "lib/vendas/metricas-ml.ts")) : "";
   if (!/export const STATUS_PAGAMENTO_APROVADO_ML = \["approved", "partially_refunded", "in_mediation"\] as const;/.test(vm)
     || !/return Number\.isFinite\(t\) \? new Date\(t - BRT_MS\)\.toISOString\(\)\.slice\(0, 10\) : null;/.test(vm)
-    || !/if \(cd\?\.code === "pack_splitted"\) return "pack_dividido";/.test(vm)
+    || !/if \(cd\?\.code === "pack_splitted"\) return "pack_dividido";/.test(vm) || !/if \(\(STATUS_ML_PENDENTE as readonly string\[\]\)\.includes\(statusConsultado\)\) return "pending";\s*return null;\s*\}/.test(vm)
+    || !/export const STATUS_ML_PAGO = \["paid", "partially_refunded"\] as const;/.test(vm)
     || !/export const STATUS_VENDA_BRUTA_ML: readonly StatusPedidoML\[\] = \["paid", "cancelled", "devolucao", "cancelado_interno"\];/.test(vm)
     || !/export const STATUS_CANCELADA_ML: readonly StatusPedidoML\[\] = \["cancelled", "devolucao"\];/.test(vm)) erros.push("volume ML: data fora do dia BRT, pagamento de estado não comprovado, pack_splitted como venda ou canceladas fora do painel");
   if (/date_created[^\n]*split\("T"\)|date_approved[^\n]*split\("T"\)|getTime\(\) - 3 \* 60 \* 60 \* 1000/.test(sy) || !/const dataCriacaoML = dataBRT\(order\.date_created\);/.test(sy)
-    || !/const dataPagamentoML = dataBRT\(pagamentoAprovadoML\(order\.payments\)\?\.date_approved\);/.test(sy) || !/o\._status = statusPedidoML\(o\._rawStatus, o\);/.test(sy)
+    || !/const dataPagamentoML = dataBRT\(pagamentoAprovadoML\(order\.payments\)\?\.date_approved\);/.test(sy) || !/const status = statusPedidoML\(String\(o\.status \?\? ""\), o\);\s*if \(status === null\) continue;/.test(sy) || /order\.status=\$\{status\}`\s*:/.test(sy) === false || /STATUSES\.map/.test(sy)
     || !/if \(\(dataPedido < dateFrom \|\| dataPedido > dateTo\) && !cancelado\) continue;/.test(sy)
     || !/export const ML_STATUS_RECHECK_WINDOW_HOURS = 168;/.test(sy) || !/const dateFetchFrom = noBuffer \? dateFrom : addDias\(dateFrom, -ML_STATUS_RECHECK_WINDOW_HOURS \/ 24\);/.test(sy)) erros.push("sync-ml: janela de rechecagem ≠ 168 h, data truncada da string do provider, pagamento fora do critério comprovado ou cancelamento do buffer descartado (status congelado)");
   if (!/let linhasCriacao: any\[\] = dateField === "criacao" \? pedidos : \[\];/.test(rg) || !/buildPedidosQuery\("order_id, status, qtd, faturamento", undefined, "criacao"\)/.test(rg) || !/metricasML = \{ base: "criacao", \.\.\.metricasBrutasML\(linhasCriacao\) \};/.test(rg)) erros.push("GET de Vendas: vendas brutas ML fora da data de criação");

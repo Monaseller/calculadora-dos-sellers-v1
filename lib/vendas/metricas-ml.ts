@@ -37,12 +37,19 @@ export function pagamentoAprovadoML(payments: unknown): { date_approved: string 
   return lista.find((p) => (STATUS_PAGAMENTO_APROVADO_ML as readonly string[]).includes(p?.status) && !!p?.date_approved) ?? null;
 }
 
+/** A3.4: status do provider que são VENDA paga (o estorno parcial não desfaz a venda). */
+export const STATUS_ML_PAGO = ["paid", "partially_refunded"] as const;
+/** A3.4: status do provider de pedido ainda sem pagamento confirmado. */
+export const STATUS_ML_PENDENTE = ["confirmed", "payment_in_process", "payment_required", "partially_paid"] as const;
+
 /**
- * Status do pedido pelo status consultado no provider + `cancel_detail`. Cancelado `pack_splitted` → `pack_dividido`
+ * Status do pedido pelo `order.status` do PROVIDER + `cancel_detail`. Cancelado `pack_splitted` → `pack_dividido`
  * (a venda está nos pedidos que o substituíram); outro cancelamento do grupo `internal` → `cancelado_interno`
  * (venda bruta, mas não cancelamento do comprador); cancelado com pagamento reembolsado → `devolucao`; senão `cancelled`.
+ * A3.4 FAIL-CLOSED: `paid`/`partially_refunded` → paid; pendentes → pending; QUALQUER outro (`invalid`, desconhecido,
+ * ausente) → null — nunca vira venda paga por omissão (o sync não grava, a métrica não conta).
  */
-export function statusPedidoML(statusConsultado: string, order: any): StatusPedidoML {
+export function statusPedidoML(statusConsultado: string, order: any): StatusPedidoML | null {
   if (statusConsultado === "cancelled") {
     const cd = order?.cancel_detail;
     if (cd?.code === "pack_splitted") return "pack_dividido";
@@ -50,8 +57,9 @@ export function statusPedidoML(statusConsultado: string, order: any): StatusPedi
     const reembolsado = (order?.payments ?? []).some((p: any) => p?.status === "refunded" || p?.status === "partially_refunded");
     return reembolsado ? "devolucao" : "cancelled";
   }
-  if (statusConsultado === "confirmed" || statusConsultado === "payment_in_process") return "pending";
-  return "paid";
+  if ((STATUS_ML_PAGO as readonly string[]).includes(statusConsultado)) return "paid";
+  if ((STATUS_ML_PENDENTE as readonly string[]).includes(statusConsultado)) return "pending";
+  return null;
 }
 
 /** Status que contam em VENDAS BRUTAS ML (pedido criado e não substituído). `pending` fica fora: sem evidência no painel. */

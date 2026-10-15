@@ -141,7 +141,7 @@ async function fetchOrdersRange(
   token:    string,
   from:     string,
   to:       string,
-  status  = "paid"
+  status?:  string,   // A3.4: sem filtro por padrão — `order.status=partially_refunded` nem é aceito pela API (HTTP 400)
 ): Promise<any[]> {
   const orders: any[] = [];
   let offset  = 0;
@@ -151,7 +151,7 @@ async function fetchOrdersRange(
   for (;;) {
     const url =
       `https://api.mercadolibre.com/orders/search` +
-      `?seller=${sellerId}&order.status=${status}` +
+      `?seller=${sellerId}` + (status ? `&order.status=${status}` : "") +
       `&order.date_created.from=${encodeURIComponent(from)}` +
       `&order.date_created.to=${encodeURIComponent(to)}` +
       `&sort=date_asc` +
@@ -362,36 +362,33 @@ export async function syncMLForUserV2(
   const dateFetchFrom = noBuffer ? dateFrom : addDias(dateFrom, -ML_STATUS_RECHECK_WINDOW_HOURS / 24);
   const diasFetch     = gerarDias(dateFetchFrom, dateTo);
 
-  const STATUSES = ["paid", "confirmed", "payment_in_process", "cancelled"] as const;
-
-  const allByStatus = await Promise.all(
-    STATUSES.map(status =>
-      Promise.all(
-        diasFetch.map(d =>
-          fetchOrdersRange(
-            sellerId, token!,
-            `${d}T00:00:00.000-03:00`,
-            `${d}T23:59:59.999-03:00`,
-            status
-          ).catch(() => [] as any[])
-        )
-      ).then(results => results.flat().map(o => ({ ...o, _rawStatus: status })))
+  // Vendas A3.4: UMA busca SEM filtro de status por dia. A busca por status escondia `partially_refunded` (a API recusa
+  // esse filtro com HTTP 400): pedido estornado em parte antes do 1º sync nunca era gravado (2 em setembro/2026).
+  const porDia = await Promise.all(
+    diasFetch.map(d =>
+      fetchOrdersRange(
+        sellerId, token!,
+        `${d}T00:00:00.000-03:00`,
+        `${d}T23:59:59.999-03:00`,
+      ).catch(() => [] as any[])
     )
   );
 
   const seenIds = new Set<number>();
   const allOrders: any[] = [];
 
-  for (const grupo of allByStatus) {
-    for (const o of grupo) {
-      if (seenIds.has(o.id)) continue;
-      seenIds.add(o.id);
+  for (const o of porDia.flat()) {
+    // a busca devolve ~1 h além do fim do dia: o mesmo pedido pode vir em dois dias — entra uma vez
+    if (seenIds.has(o.id)) continue;
+    seenIds.add(o.id);
 
-      // Vendas A3.3: cancelado `pack_splitted` → pack_dividido; outro `internal` → cancelado_interno (auditado)
-      o._status = statusPedidoML(o._rawStatus, o);
+    // Vendas A3.3/A3.4: status do PRÓPRIO pedido; pack_splitted → pack_dividido; internal → cancelado_interno;
+    // desconhecido/invalid → null: FAIL-CLOSED, não é gravado (nunca vira paid por omissão)
+    const status = statusPedidoML(String(o.status ?? ""), o);
+    if (status === null) continue;
+    o._status = status;
 
-      allOrders.push(o);
-    }
+    allOrders.push(o);
   }
 
   const found = allOrders.length;

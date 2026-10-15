@@ -81,7 +81,8 @@ let PEDIDOS: any[] = [];
 globalThis.fetch = (async (url: any) => {
   const alvo = String(url);
   if (!alvo.includes("mercadolibre.com")) throw new Error(`rede proibida: ${alvo}`);
-  const pago = alvo.includes("order.status=paid");
+  // como a API real: sem `order.status` a busca devolve TODOS os status (A3.4 — o sync não filtra mais)
+  const pago = alvo.includes("order.status=paid") || !alvo.includes("order.status=");
   const corpo = alvo.includes("/orders/search") ? { results: pago ? PEDIDOS : [], paging: { total: pago ? PEDIDOS.length : 0 } } : {};
   return { ok: true, status: 200, json: async () => corpo, text: async () => JSON.stringify(corpo) } as any;
 }) as any;
