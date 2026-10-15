@@ -8,6 +8,7 @@ import type { FinanceiroVendaLive } from "@/lib/vendas/custo-produto-tipos";
 import { avisoCustoLive, custoCadastradoLive, detalheLiquidoML, deveRecuperarFinanceiroML, seloLucroLive, textoFreteLive, totaisLive } from "./financeiro-live";
 import { codigoAnuncio, codigoVenda, copiarCodigo } from "./codigos-venda";
 import { CHAVE_LOJA_ML_VENDAS, type LojaMLVendas, escolherLojaMLInicial, lojasMLDaLista, lojasMLDaRecusa } from "./loja-ml";
+import { cardsMetricasML, linhaProviderParaVendaRow, METRICAS_ML_INDISPONIVEIS, rotuloMetricasML, type LinhaProviderML, type MetricasMLTela } from "./ml-provider";
 
 // ── Tipos ──────────────────────────────────────────────────────────────────
 interface VendaRow {
@@ -18,7 +19,7 @@ interface VendaRow {
   marketplace:    string;
   sku:            string | null;
   mlItemId:       string;
-  frete:          "gratis" | "comprador";
+  frete:          "gratis" | "comprador" | null;   // null = ML do provider (frete/envio: Parte C)
   logistica:      string;
   status:         "paid" | "cancelled" | "devolucao" | "pending";
   valorUnit:      number;
@@ -35,6 +36,7 @@ interface VendaRow {
   // Vendas A3: custo/imposto/lucro AO VIVO de Meus Produtos (LIVE_CALCULATED). null = custo indisponível.
   financeiro?:    FinanceiroVendaLive | null;
   packId?:        string | null;   // ML (A3.2-B): código exibido = pack_id ?? order_id
+  origem?:        "PROVIDER";      // ML (A3.4): linha lida do provider (nunca do legado `pedidos`)
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -72,10 +74,15 @@ export default function VendasPage() {
   // Corrige o bug em que uma falha/timeout num marketplace derrubava o
   // faturamento total (o array combinado inteiro era substituído).
   const [mlRows,     setMlRows]     = useState<VendaRow[]>([]);
-  // Vendas A3.3: VENDAS BRUTAS ML (por CRIAÇÃO, como no painel do ML) — calculadas no servidor, loja inteira
-  const [metricasML, setMetricasML] = useState<{ pedidos: number; unidades: number; bruto: number; canceladas: number } | null>(null);
+  // Vendas A3.4: métricas do ML SÓ do serviço canônico (GET /api/ml/vendas/metricas) e a tabela do ML lida do
+  // PROVIDER, paginada no servidor (GET /api/ml/vendas/pedidos). As linhas do legado (`mlRows`) NÃO são exibidas:
+  // status/data velhos do banco nunca vencem o provider (a leitura legada segue só pelo sync e pelo financeiro A3.2).
+  const [mlMetricas, setMlMetricas] = useState<MetricasMLTela | null>(null);
+  const [mlProvider, setMlProvider] = useState<{ linhas: VendaRow[]; cursor: string | null; carregandoMais: boolean; erro: boolean } | null>(null);
   const [shopeeRows, setShopeeRows] = useState<VendaRow[]>([]);
-  const rows = [...mlRows, ...shopeeRows].sort((a, b) => b.data.localeCompare(a.data));
+  const mlLinhasProvider = (mlProvider?.linhas ?? []).filter(r => skuTags.length === 0
+    || skuTags.some(f => (r.sku ?? "").toLowerCase().includes(f.toLowerCase()) || r.anuncio.toLowerCase().includes(f.toLowerCase())));
+  const rows = [...mlLinhasProvider, ...shopeeRows].sort((a, b) => b.data.localeCompare(a.data));
   const [mlLojaId,     setMlLojaId]     = useState<string | null>(null);
   // CDS V2 Vendas A5: loja ML EXPLÍCITA (uma por vez). `lojasML` null = lista ainda não carregada.
   const [lojasML,        setLojasML]        = useState<LojaMLVendas[] | null>(null);
@@ -170,18 +177,18 @@ export default function VendasPage() {
       if (lojaMLRef.current !== lojaDaChamada) return { falhou: true, data: null };   // loja trocada no meio
       if (data?.codigo === "ML_STORE_SELECTION_REQUIRED") {
         const lojas = lojasMLDaRecusa(data.lojas);
-        setLojasML(lojas); setExigeEscolhaML(true); prontoMLRef.current = false; setMlRows([]); setMetricasML(null);
+        setLojasML(lojas); setExigeEscolhaML(true); prontoMLRef.current = false; setMlRows([]); setMlMetricas(null); setMlProvider(null);
         return { falhou: true, data };
       }
       if (data?.codigo === "LOJA_ML_INVALIDA") {   // loja escolhida deixou de valer: sem fallback, nova escolha
         try { localStorage.removeItem(CHAVE_LOJA_ML_VENDAS); } catch {}
         lojaMLRef.current = null; prontoMLRef.current = false;
         setLojasML((ls) => (ls ?? []).filter((l) => l.id !== lojaDaChamada));
-        setLojaMLSel(null); setExigeEscolhaML(true); setMlRows([]); setMlLojaId(null); setMetricasML(null);
+        setLojaMLSel(null); setExigeEscolhaML(true); setMlRows([]); setMlLojaId(null); setMlMetricas(null); setMlProvider(null);
         return { falhou: true, data };
       }
       if (data?.lojaId) setMlLojaId(data.lojaId);
-      if (!falhou) { setMlRows((data.rows ?? []) as VendaRow[]); setMetricasML(data.metricasML ?? null); }
+      if (!falhou) setMlRows((data.rows ?? []) as VendaRow[]);
       // A3.2-C.2: há vendas da janela sem financeiro (ou pendente) → dispara a ÚNICA rodada automática desta carga,
       // mandando só o CONTEXTO (loja + janela); o servidor escolhe os pedidos. A releitura não dispara outra.
       // A3.2-F: se ESTA leitura sincronizou (o sync já tentou o financeiro), a carga gasta a rodada sem POST.
@@ -203,6 +210,45 @@ export default function VendasPage() {
     return { falhou, data };
   }, [dateField]);
 
+  // Vendas A3.4 (Parte A): métricas do ML do serviço canônico. `revalidar` = pedido EXPLÍCITO (Sincronizar) → POST,
+  // que pede ao coordenador existente uma nova ingestão mesmo com o corpus fresco. Falha → "indisponíveis", sem número.
+  const lerMetricasML = useCallback(async (from: string, to: string, revalidar = false) => {
+    if (!prontoMLRef.current) return;
+    const loja = lojaMLRef.current;
+    let m: MetricasMLTela = METRICAS_ML_INDISPONIVEIS;
+    try {
+      const res = revalidar
+        ? await fetch("/api/ml/vendas/metricas", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ de: from, ate: to, ...(loja ? { loja_id: loja } : {}) }) })
+        : await fetch(`/api/ml/vendas/metricas?${new URLSearchParams({ de: from, ate: to, ...(loja ? { loja_id: loja } : {}) })}`);
+      const d = await res.json().catch(() => null);
+      if (res.ok && (d?.estado === "COMPLETE" || d?.estado === "PARTIAL" || d?.estado === "FAILED")) m = d as MetricasMLTela;
+    } catch {}
+    if (lojaMLRef.current !== loja) return;   // loja trocada no meio: descarta
+    setMlMetricas(m);
+  }, []);
+
+  // Vendas A3.4 (Parte B): tabela do ML pelo PROVIDER, paginada no servidor (cursor dia:offset). `cursor` null =
+  // primeira página (substitui); com cursor = "Carregar mais" (acrescenta). Falha → aviso; NUNCA o legado no lugar.
+  const lerTabelaML = useCallback(async (from: string, to: string, cursor: string | null) => {
+    if (!prontoMLRef.current) return;
+    const loja = lojaMLRef.current;
+    const visao = dateField === "pagamento" ? "pago" : "fechamento";
+    if (cursor) setMlProvider(p => (p ? { ...p, carregandoMais: true } : p));
+    let d: any = null;
+    try {
+      const res = await fetch(`/api/ml/vendas/pedidos?${new URLSearchParams({ de: from, ate: to, visao, ...(loja ? { loja_id: loja } : {}), ...(cursor ? { cursor } : {}) })}`);
+      d = await res.json().catch(() => null);
+    } catch {}
+    if (lojaMLRef.current !== loja) return;
+    const linhas: VendaRow[] | null = Array.isArray(d?.linhas)
+      ? (d.linhas as LinhaProviderML[]).map(l => linhaProviderParaVendaRow(l, visao)).filter((r): r is NonNullable<typeof r> => r !== null)
+      : null;
+    setMlProvider(p => {
+      if (linhas === null) return cursor && p ? { ...p, carregandoMais: false, erro: true } : { linhas: [], cursor: null, carregandoMais: false, erro: true };
+      return { linhas: cursor && p ? [...p.linhas, ...linhas] : linhas, cursor: typeof d.proximoCursor === "string" ? d.proximoCursor : null, carregandoMais: false, erro: d.erro != null };
+    });
+  }, [dateField]);
+
   // Orquestra a leitura normal (montagem, mudança de filtro/data/date_field,
   // "Buscar", "Limpar"). NÃO dispara sincronização — só lê o cache atual.
   // Disparo de sync é responsabilidade separada: ver dispararSincronizar().
@@ -219,6 +265,8 @@ export default function VendasPage() {
       const [resML, resShopee] = await Promise.all([
         lerML     ? lerMarketplace("ML",     from, to, tags, filtros) : Promise.resolve(null),
         lerShopee ? lerMarketplace("Shopee", from, to, tags, filtros) : Promise.resolve(null),
+        lerML     ? lerMetricasML(from, to) : Promise.resolve(null),
+        lerML     ? lerTabelaML(from, to, null) : Promise.resolve(null),
       ]);
 
       const mlFalhou     = lerML     && resML?.falhou;
@@ -244,7 +292,7 @@ export default function VendasPage() {
     } finally {
       setLoading(false);
     }
-  }, [lerMarketplace, mlRows.length, shopeeRows.length]); // eslint-disable-line
+  }, [lerMarketplace, lerMetricasML, lerTabelaML, mlRows.length, shopeeRows.length]); // eslint-disable-line
 
   // ── Disparo de sincronização (botão "Sincronizar") ──────────────────────
   // Separado da leitura (refetchTudo/lerMarketplace) — aprovado 2026-07-11.
@@ -276,6 +324,7 @@ export default function VendasPage() {
           setAtualizando(prev => ({ ...prev, [chave]: false }));
           setSyncMsg(prev => ({ ...prev, [chave]: null }));
           lerMarketplace(mkt, dateFrom, dateTo, skuTags, [...filtrosCadastro, ...filtrosStatus]);
+          if (mkt === "ML") { lerMetricasML(dateFrom, dateTo); lerTabelaML(dateFrom, dateTo, null); }
           return;
         }
         if (data.status === "erro") {
@@ -359,6 +408,8 @@ export default function VendasPage() {
         alvosML     ? lerMarketplace("ML",     dateFrom, dateTo, skuTags, filtros, true) : Promise.resolve(),
         alvosShopee ? lerMarketplace("Shopee", dateFrom, dateTo, skuTags, filtros, true) : Promise.resolve(),
       ]);
+      // Vendas A3.4: atualização EXPLÍCITA do ML — revalida o canônico pelo coordenador e relê a tabela do provider
+      if (alvosML) await Promise.all([lerMetricasML(dateFrom, dateTo, true), lerTabelaML(dateFrom, dateTo, null)]);
       setUltimaSync(new Date().toLocaleTimeString("pt-BR"));
     } finally {
       setAtualizando(prev => ({
@@ -373,7 +424,7 @@ export default function VendasPage() {
       dispararSincronizarInline();
       return;
     }
-    if (lojaAtiva === "todos" || lojaAtiva === "ML")     dispararUm("ML");
+    if (lojaAtiva === "todos" || lojaAtiva === "ML")     { dispararUm("ML"); lerMetricasML(dateFrom, dateTo, true); }
     if (lojaAtiva === "todos" || lojaAtiva === "Shopee") dispararUm("Shopee");
   }
 
@@ -439,7 +490,7 @@ export default function VendasPage() {
     if (!id || id === lojaMLRef.current) return;
     lojaMLRef.current = id; prontoMLRef.current = true;
     try { localStorage.setItem(CHAVE_LOJA_ML_VENDAS, id); } catch {}
-    setLojaMLSel(id); setExigeEscolhaML(false); setMlRows([]); setMetricasML(null); setMlLojaId(null);   // a leitura vem do efeito abaixo
+    setLojaMLSel(id); setExigeEscolhaML(false); setMlRows([]); setMlMetricas(null); setMlProvider(null); setMlLojaId(null);   // a leitura vem do efeito abaixo
   }
 
   // Leitura ao montar E toda vez que o período, marketplace, date_field ou a loja ML escolhida mudar
@@ -554,6 +605,13 @@ export default function VendasPage() {
   // Conta ordens únicas PAGAS (igual ao critério de totais.faturamento)
   // BUG 3 FIX: antes contava todos os status incluindo cancelados, divergindo da Shopee
   const pedidosUnicos = new Set(filteredRows.filter(r => r.status === "paid").map(r => r.orderId)).size;
+
+  // Vendas A3.4: os cards pagos somam o PERÍODO inteiro — as linhas do ML vêm paginadas do provider, então os cards
+  // ficam só com a Shopee (o ML tem a própria linha, do serviço canônico). Nunca total parcial como se fosse do período.
+  const cardsRows = filteredRows.filter(r => r.marketplace !== "ML" && r.status === "paid");
+  const cardsTotais = cardsRows.reduce((acc, r) => ({ faturamento: acc.faturamento + r.faturamento, qtd: acc.qtd + r.qtd }), { faturamento: 0, qtd: 0 });
+  const cardsLive = totaisLive(cardsRows);
+  const cardsPedidos = new Set(cardsRows.map(r => r.orderId)).size;
 
   // ── Estilos reutilizáveis ────────────────────────────────────────────────
   const inputStyle: React.CSSProperties = {
@@ -1066,14 +1124,15 @@ export default function VendasPage() {
       </div>
 
       {/* ── Cards de resumo ─────────────────────────────────────────────── */}
-      {!loading && filteredRows.length > 0 && (
+      {!loading && lojaAtiva !== "ML" && cardsRows.length > 0 && (<>
+        {lojaAtiva === "todos" && <div style={{ fontSize: "11px", color: "#9099aa", marginBottom: "8px" }}>Shopee</div>}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: "12px", marginBottom: "24px" }}>
           {[
-            { label: "Pedidos pagos",     val: pedidosUnicos.toString(),         cor: "#fff" },
-            { label: "Unidades pagas",    val: totais.qtd.toString(),            cor: "#fff" },
-            { label: "Faturamento pago",  val: moeda(totais.faturamento),        cor: "#fff" },
-            { label: "Margem Contrib.", val: `${moeda(live.lucro)}${live.estimados ? " (estimado)" : ""}${live.pendentes ? ` · ${live.pendentes} pend.` : ""}`, cor: live.lucro >= 0 ? "#00D97E" : "#ff4d4d" },
-            { label: "MC %",          val: live.margemPct === null ? "pendente" : pct(live.margemPct), cor: (live.margemPct ?? 0) >= 0 ? "#00D97E" : "#ff4d4d" },
+            { label: "Pedidos pagos",     val: cardsPedidos.toString(),          cor: "#fff" },
+            { label: "Unidades pagas",    val: cardsTotais.qtd.toString(),       cor: "#fff" },
+            { label: "Faturamento pago",  val: moeda(cardsTotais.faturamento),   cor: "#fff" },
+            { label: "Margem Contrib.", val: `${moeda(cardsLive.lucro)}${cardsLive.estimados ? " (estimado)" : ""}${cardsLive.pendentes ? ` · ${cardsLive.pendentes} pend.` : ""}`, cor: cardsLive.lucro >= 0 ? "#00D97E" : "#ff4d4d" },
+            { label: "MC %",          val: cardsLive.margemPct === null ? "pendente" : pct(cardsLive.margemPct), cor: (cardsLive.margemPct ?? 0) >= 0 ? "#00D97E" : "#ff4d4d" },
           ].map(({ label, val, cor }) => (
             <div key={label} style={{
               background: "#111318", border: "1px solid rgba(255,255,255,0.07)",
@@ -1084,32 +1143,29 @@ export default function VendasPage() {
             </div>
           ))}
         </div>
-      )}
+      </>)}
 
-      {/* ── Vendas A3.3: Mercado Livre como no painel do ML ─────────────────
-          Sempre por DATA DE CRIAÇÃO (o seletor de data acima vale para os cards pagos), loja inteira, inclui vendas
-          canceladas depois (sem as divididas em novos pedidos). Não é faturamento pago, líquido nem lucro. */}
-      {!loading && metricasML && lojaAtiva !== "Shopee" && (
+      {/* ── Vendas A3.4: Mercado Livre — SÓ o serviço canônico (order.date_closed BRT, sem pack_splitted) ─────────
+          Vendas / Unidades / Vendas brutas, como no painel do ML; sem card de canceladas (não há equivalente do ML).
+          COMPLETE "dados confirmados"; PARTIAL "Carregando… X/Y dias" SEM número; FAILED "indisponíveis". */}
+      {!loading && mlMetricas && lojaAtiva !== "Shopee" && (
         <div style={{ marginBottom: "24px" }}>
-          <div style={{ fontSize: "11px", color: "#9099aa", marginBottom: "8px" }}>
-            Mercado Livre · como no painel do ML (por data de criação, inclui canceladas)
+          <div style={{ fontSize: "11px", color: mlMetricas.estado === "FAILED" ? "#ff6b6b" : "#9099aa", marginBottom: "8px" }}>
+            {rotuloMetricasML(mlMetricas)}
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: "12px" }}>
-            {[
-              { label: "Vendas brutas ML", val: moeda(metricasML.bruto) },
-              { label: "Vendas ML",        val: metricasML.pedidos.toString() },
-              { label: "Unidades ML",      val: metricasML.unidades.toString() },
-              { label: "Canceladas ML",    val: metricasML.canceladas.toString() },
-            ].map(({ label, val }) => (
-              <div key={label} style={{
-                background: "#111318", border: "1px solid rgba(255,230,0,0.15)",
-                borderRadius: "14px", padding: "14px 16px",
-              }}>
-                <div style={{ fontSize: "10px", fontWeight: 700, color: "#9099aa", marginBottom: "5px", letterSpacing: "0.3px" }}>{label.toUpperCase()}</div>
-                <div style={{ fontSize: "18px", fontWeight: 900, color: "#fff" }}>{val}</div>
-              </div>
-            ))}
-          </div>
+          {cardsMetricasML(mlMetricas).length > 0 && (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: "12px" }}>
+              {cardsMetricasML(mlMetricas).map(({ label, valor, tipo }) => (
+                <div key={label} style={{
+                  background: "#111318", border: "1px solid rgba(255,230,0,0.15)",
+                  borderRadius: "14px", padding: "14px 16px",
+                }}>
+                  <div style={{ fontSize: "10px", fontWeight: 700, color: "#9099aa", marginBottom: "5px", letterSpacing: "0.3px" }}>{label.toUpperCase()}</div>
+                  <div style={{ fontSize: "18px", fontWeight: 900, color: "#fff" }}>{tipo === "moeda" ? moeda(valor) : valor.toString()}</div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -1310,7 +1366,9 @@ export default function VendasPage() {
                     <td style={tdStyle()}>{celulaCodigo(codigoAnuncio(r), `a:${r.marketplace}:${r.orderId}:${r.mlItemId}`)}</td>
                     {/* Frete */}
                     <td style={tdStyle()}>
-                      {r.frete === "gratis"
+                      {r.frete === null
+                        ? <span style={{ color: "#9099aa", fontSize: "11px" }}>—</span>
+                        : r.frete === "gratis"
                         ? <span style={{ fontSize: "11px", color: "#00D97E", fontWeight: 700, background: "rgba(0,217,126,0.1)", padding: "2px 8px", borderRadius: "6px" }}>🚚 Grátis</span>
                         : <span style={{ fontSize: "11px", color: "#9099aa", fontWeight: 600, background: "rgba(255,255,255,0.05)", padding: "2px 8px", borderRadius: "6px" }}>📦 Comprador</span>
                       }
@@ -1365,7 +1423,7 @@ export default function VendasPage() {
               <tfoot>
                 <tr style={{ background: "rgba(255,106,0,0.06)", borderTop: "2px solid rgba(255,106,0,0.2)" }}>
                   <td colSpan={8} style={{ ...tdStyle(), fontWeight: 800, color: "#ff6b00", fontSize: "11px", letterSpacing: "0.3px" }}>
-                    TOTAL — {filteredRows.length} linha{filteredRows.length !== 1 ? "s" : ""}
+                    TOTAL — {filteredRows.length} linha{filteredRows.length !== 1 ? "s" : ""}{mlProvider?.cursor && lojaAtiva !== "Shopee" ? " carregadas (há mais vendas do ML)" : ""}
                   </td>
                   <td style={tdStyle(true)}></td>
                   <td style={{ ...tdStyle(true), fontWeight: 800 }}>{totais.qtd}</td>
@@ -1386,6 +1444,23 @@ export default function VendasPage() {
               </tfoot>
             </table>
           </div>
+        </div>
+      )}
+
+      {/* ── Vendas A3.4: tabela do ML paginada no servidor (provider) ── */}
+      {!loading && lojaAtiva !== "Shopee" && mlProvider && (mlProvider.cursor || mlProvider.erro) && (
+        <div style={{ display: "flex", alignItems: "center", gap: "12px", marginTop: "12px" }}>
+          {mlProvider.erro && <span style={{ fontSize: "12px", color: "#ff6b6b" }}>Não foi possível ler todas as vendas do Mercado Livre agora.</span>}
+          {(mlProvider.cursor || mlProvider.erro) && (
+            <button
+              type="button"
+              disabled={mlProvider.carregandoMais}
+              onClick={() => lerTabelaML(dateFrom, dateTo, mlProvider.erro && !mlProvider.cursor ? null : mlProvider.cursor)}
+              style={{ padding: "9px 14px", borderRadius: "10px", background: "rgba(255,230,0,0.08)", border: "1px solid rgba(255,230,0,0.25)", color: "#FFE600", fontWeight: 700, fontSize: "12px", cursor: mlProvider.carregandoMais ? "wait" : "pointer" }}
+            >
+              {mlProvider.carregandoMais ? "Carregando…" : mlProvider.cursor ? "Carregar mais vendas do Mercado Livre" : "Tentar de novo"}
+            </button>
+          )}
         </div>
       )}
 

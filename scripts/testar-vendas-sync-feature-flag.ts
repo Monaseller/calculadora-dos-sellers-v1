@@ -178,7 +178,8 @@ async function principal() {
     const arquivos = (d: string): string[] => readdirSync(join(RAIZ, d)).flatMap((n) => { const p = `${d}/${n}`; return statSync(join(RAIZ, p)).isDirectory() ? arquivos(p) : /\.(tsx?|jsx?)$/.test(n) ? [p] : []; });
     const usam = [...arquivos("app"), ...arquivos("lib"), ...(statSync(join(RAIZ, "components"), { throwIfNoEntry: false }) ? arquivos("components") : [])]
       .filter((f) => /flag-canonica|syncCanonicoVendasHabilitado|ENABLE_CANONICAL_SALES_SYNC/.test(readFileSync(join(RAIZ, f), "utf8")) && f !== HELPER);
-    assert(usam.sort().join() === ROTAS.slice().sort().join(), `importadores: ${usam}`);
+    // Vendas A3.4: o refresh do ML na tela pede ao coordenador existente SOB a mesma flag canonica (server-only)
+    assert(usam.sort().join() === [...ROTAS, "lib/vendas/ml-metricas-hibridas.ts"].sort().join(), `importadores: ${usam}`);
     for (const f of usam) assert(!/^["']use client["']/m.test(readFileSync(join(RAIZ, f), "utf8")), `${f} e client`);
   });
   t("K/L. V2: Vendas/Dashboard/legado protegidos por zonas + invariantes (sem cerca de diff); a tela de Vendas segue governada pela flag publica", () => {

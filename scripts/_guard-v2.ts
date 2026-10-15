@@ -1064,6 +1064,51 @@ export function lojaMLVendasNaoExplicita(raiz = RAIZ_V2): string[] {
   return erros;
 }
 
+// ── I18: Mercado Livre HÍBRIDO na tela de Vendas (Vendas A3.4) ─────────────────────
+export const METRICAS_HIBRIDAS_ML = "lib/vendas/ml-metricas-hibridas.ts";
+export const TABELA_PROVIDER_ML = "lib/vendas/ml-tabela-provider.ts";
+export const HELPER_ML_PROVIDER_TELA = "app/(app)/vendas/ml-provider.ts";
+export const REGRA_CANONICA_ML = "lib/vendas/canonico/ml.ts";
+/**
+ * I18_ML_SALES_ARE_CANONICAL_AND_PROVIDER_BACKED: (a) as métricas ML da tela vêm SÓ de consultarVendasCanonicas
+ * (sem `pedidos`, sem provider, sem fórmula própria; refresh pelo coordenador existente com a flag canônica);
+ * (b) a tabela ML vem SÓ do provider (sem `pedidos`), pela regra canônica de pack_splitted, status fail-closed,
+ * aprovação elegível mais antiga e custo de Meus Produtos; (c) UMA regra: o literal `pack_splitted` e o cálculo
+ * `calcularMetricasML(` só existem na camada canônica (nenhuma segunda fórmula de vendas brutas ML em app/ ou lib/);
+ * (d) a tela não tem card de canceladas do ML, não chama o corpus de "ao vivo" e não exibe as linhas legadas do ML.
+ */
+export function mlVendasForaDoCanonico(raiz = RAIZ_V2): string[] {
+  const erros: string[] = [];
+  const mh = tiraComentarios(ler(raiz, METRICAS_HIBRIDAS_ML));
+  if (!/consultarVendasCanonicas\(\{ userId, marketplace: "mercado_livre", lojaId, de, ate \}/.test(mh)) erros.push(`${METRICAS_HIBRIDAS_ML}: métricas fora do serviço canônico`);
+  if (/from\("pedidos"\)|fetch\(|calcularMetricasML|total_amount|\.reduce\(/.test(mh)) erros.push(`${METRICAS_HIBRIDAS_ML}: lê o legado/provider ou calcula a métrica por conta própria`);
+  if (!/avaliarNecessidadeDeSync\(cliente, \{[^}]*origem: "usuario" \}/.test(mh) || !/garantirProximaAcao\(cliente, a\.userId, \[av\], \{ habilitado: deps\.habilitado \?\? syncCanonicoVendasHabilitado\(\) \}\)/.test(mh)) erros.push(`${METRICAS_HIBRIDAS_ML}: refresh fora do coordenador existente ou da flag canônica`);
+  if (!/metricas: \{ vendas: m\.pedidos, unidades: m\.unidades, vendasBrutas: m\.vendas \}/.test(mh)) erros.push(`${METRICAS_HIBRIDAS_ML}: projeção das métricas canônicas alterada`);
+  const tb = tiraComentarios(ler(raiz, TABELA_PROVIDER_ML));
+  if (/from\("pedidos"\)|lerFinanceiroRealML/.test(tb)) erros.push(`${TABELA_PROVIDER_ML}: tabela lê o banco legado (status/data velhos venceriam o provider)`);
+  for (const [re, o] of [[/abrirLeitorPaginasFechamentoML\(/, "leitor do provider"], [/if \(!pedidoMLContaNaVenda\(n\)\) return \[\];/, "regra canônica de pack_splitted"],
+    [/const status = statusPedidoML\(String\(o\.status \?\? ""\), o\);/, "status fail-closed"], [/aprovacaoElegivelMaisAntigaML\(o\.payments\)/, "aprovação mais antiga"],
+    [/if \(status !== "paid" \|\| dataPagamento === null \|\| dataPagamento < ctx\.de \|\| dataPagamento > ctx\.ate\) return \[\];/, "visão paga pelo período"],
+    [/carregarMapaCustoProduto\(deps\.cliente, userId, "ML", lojaId\)/, "custo de Meus Produtos"], [/if \(n\.diaFechamento !== ctx\.diaDaBusca\) return \[\];/, "dia do date_closed"]] as const)
+    if (!re.test(tb)) erros.push(`${TABELA_PROVIDER_ML}: ${o} ausente`);
+  if (!/somarDiasNoCalendario\(de, -1\), ultimo: somarDiasNoCalendario\(ate, 1\)/.test(tb)) erros.push(`${TABELA_PROVIDER_ML}: candidatos pagos fora de date_closed ±1 dia`);
+  if (!/lucro: null, margemPct: null, roi: null/.test(tb) || /0\.13|estimad/.test(tb)) erros.push(`${TABELA_PROVIDER_ML}: sem sale_fee o financeiro não fica pendente (tarifa estimada)`);
+  // (c) uma regra só
+  for (const f of listar(raiz, "app", "lib").filter((x) => /\.(ts|tsx)$/.test(x))) {
+    const src = tiraComentarios(ler(raiz, f));
+    if (f !== REGRA_CANONICA_ML && /["'`]pack_splitted["'`]/.test(src)) erros.push(`${f}: literal pack_splitted fora da regra canônica`);
+    if (!f.startsWith("lib/vendas/canonico/") && /calcularMetricasML\(/.test(src)) erros.push(`${f}: calcularMetricasML fora da camada canônica`);
+    if (/metricasBrutasML|STATUS_VENDA_BRUTA_ML/.test(src)) erros.push(`${f}: segunda fórmula de vendas brutas ML`);
+  }
+  // (d) tela
+  const pg = tiraComentarios(ler(raiz, PAGINA_VENDAS)), hp = tiraComentarios(ler(raiz, HELPER_ML_PROVIDER_TELA));
+  if (/Canceladas ML|metricasML\.canceladas/.test(pg) || /cancel/i.test(corpoDaFuncao(hp, "cardsMetricasML") ?? "cancel")) erros.push(`${PAGINA_VENDAS}: card de canceladas do ML (sem equivalente no painel)`);
+  if (!/"Mercado Livre · dados confirmados"/.test(hp) || !/`Carregando dados do Mercado Livre — \$\{m\.dias\.confirmados\}\/\$\{m\.dias\.total\} dias`/.test(hp) || !/"Dados do Mercado Livre indisponíveis"/.test(hp) || /ao vivo|AO VIVO/i.test(hp)) erros.push(`${HELPER_ML_PROVIDER_TELA}: rótulos de estado fora do contrato (ou corpus chamado de ao vivo)`);
+  if (!/if \(m\.estado !== "COMPLETE" \|\| !m\.metricas\) return \[\];/.test(hp)) erros.push(`${HELPER_ML_PROVIDER_TELA}: número mostrado fora de COMPLETE`);
+  if (!/const rows = \[\.\.\.mlLinhasProvider, \.\.\.shopeeRows\]/.test(pg) || /\[\.\.\.mlRows,/.test(pg)) erros.push(`${PAGINA_VENDAS}: linhas legadas do ML exibidas (o banco venceria o provider)`);
+  return erros;
+}
+
 // ── I17: financeiro REAL do Mercado Livre (Vendas A3.2-B) ───────────────────────────
 export const MODULO_FIN_ML = "lib/vendas/ml-financeiro.ts";
 export const COLETOR_FIN_ML = "lib/vendas/ml-financeiro-coleta.ts";
@@ -1185,15 +1230,15 @@ export function financeiroMLNaoReal(raiz = RAIZ_V2): string[] {
   const vm = existsSync(join(raiz, "lib/vendas/metricas-ml.ts")) ? tiraComentarios(ler(raiz, "lib/vendas/metricas-ml.ts")) : "";
   if (!/export const STATUS_PAGAMENTO_APROVADO_ML = \["approved", "partially_refunded", "in_mediation"\] as const;/.test(vm)
     || !/return Number\.isFinite\(t\) \? new Date\(t - BRT_MS\)\.toISOString\(\)\.slice\(0, 10\) : null;/.test(vm)
-    || !/if \(cd\?\.code === "pack_splitted"\) return "pack_dividido";/.test(vm) || !/if \(\(STATUS_ML_PENDENTE as readonly string\[\]\)\.includes\(statusConsultado\)\) return "pending";\s*return null;\s*\}/.test(vm)
+    || !/if \(codigoDeCancelamentoML\(order \?\? \{\}\) === CANCELAMENTO_DE_PACOTE_REFEITO\) return "pack_dividido";/.test(vm) || !/if \(\(STATUS_ML_PENDENTE as readonly string\[\]\)\.includes\(statusConsultado\)\) return "pending";\s*return null;\s*\}/.test(vm)
     || !/export const STATUS_ML_PAGO = \["paid", "partially_refunded"\] as const;/.test(vm)
-    || !/export const STATUS_VENDA_BRUTA_ML: readonly StatusPedidoML\[\] = \["paid", "cancelled", "devolucao", "cancelado_interno"\];/.test(vm)
     || !/export const STATUS_CANCELADA_ML: readonly StatusPedidoML\[\] = \["cancelled", "devolucao"\];/.test(vm)) erros.push("volume ML: data fora do dia BRT, pagamento de estado não comprovado, pack_splitted como venda ou canceladas fora do painel");
   if (/date_created[^\n]*split\("T"\)|date_approved[^\n]*split\("T"\)|getTime\(\) - 3 \* 60 \* 60 \* 1000/.test(sy) || !/const dataCriacaoML = dataBRT\(order\.date_created\);/.test(sy)
     || !/const dataPagamentoML = dataBRT\(pagamentoAprovadoML\(order\.payments\)\?\.date_approved\);/.test(sy) || !/const status = statusPedidoML\(String\(o\.status \?\? ""\), o\);\s*if \(status === null\) continue;/.test(sy) || /order\.status=\$\{status\}`\s*:/.test(sy) === false || /STATUSES\.map/.test(sy)
     || !/if \(\(dataPedido < dateFrom \|\| dataPedido > dateTo\) && !cancelado\) continue;/.test(sy)
     || !/export const ML_STATUS_RECHECK_WINDOW_HOURS = 168;/.test(sy) || !/const dateFetchFrom = noBuffer \? dateFrom : addDias\(dateFrom, -ML_STATUS_RECHECK_WINDOW_HOURS \/ 24\);/.test(sy)) erros.push("sync-ml: janela de rechecagem ≠ 168 h, data truncada da string do provider, pagamento fora do critério comprovado ou cancelamento do buffer descartado (status congelado)");
-  if (!/let linhasCriacao: any\[\] = dateField === "criacao" \? pedidos : \[\];/.test(rg) || !/buildPedidosQuery\("order_id, status, qtd, faturamento", undefined, "criacao"\)/.test(rg) || !/metricasML = \{ base: "criacao", \.\.\.metricasBrutasML\(linhasCriacao\) \};/.test(rg)) erros.push("GET de Vendas: vendas brutas ML fora da data de criação");
+  // A3.4: a rota legada NÃO calcula métrica ML sobre `pedidos` (a métrica é do serviço canônico — ver I18)
+  if (/metricasML|metricasBrutasML|linhasCriacao/.test(rg)) erros.push("GET de Vendas: métrica ML sobre o legado `pedidos` de volta na rota principal");
   const mp = corpoDaFuncao(m, "mesclarPedidoFinanceiroML") ?? "", me = corpoDaFuncao(m, "mesclarEnvioFinanceiroML") ?? "";
   if (!/if \(b && b\.billing_status !== "PENDENTE"\) \{/.test(mp) || !/\} else if \(b && base\.billing_status === "PENDENTE"\) \{\s*base\.billing_tarifa = b\.billing_tarifa \?\? base\.billing_tarifa;/.test(mp)
     || !/if \(obtido\.descontos\) \{/.test(mp) || /descontos_status = "INDISPONIVEL"/.test(mp) || !/if \(o\.tarifa_origem === "PROVIDER" && o\.tarifa_venda !== null\)/.test(mp)
@@ -1249,6 +1294,7 @@ export function invariantesV2(raiz = RAIZ_V2, opcoes: { zonas?: boolean } = {}):
   for (const v of identidadeVendaMLNaoNoBanco(raiz)) erros.push(`I15 I15_ML_SALE_IDENTITY_IS_DB_UNIQUE: ${v}`);
   for (const v of lojaMLVendasNaoExplicita(raiz)) erros.push(`I16 I16_ML_VENDAS_STORE_IS_EXPLICIT: ${v}`);
   for (const v of financeiroMLNaoReal(raiz)) erros.push(`I17 I17_ML_FINANCIAL_RECONCILIATION_IS_REAL: ${v}`);
+  for (const v of mlVendasForaDoCanonico(raiz)) erros.push(`I18 I18_ML_SALES_ARE_CANONICAL_AND_PROVIDER_BACKED: ${v}`);
   if (opcoes.zonas !== false) for (const v of verificarZonas(raiz)) erros.push(`Z zona protegida sem re-baseline: ${v}`);
   return erros;
 }

@@ -414,6 +414,166 @@ function numeroOuZero(v: unknown): number {
  * O passo 4 nao pode virar passo 3: a API nao o oferece (medido), e
  * pedi-lo a ela devolveria a loja inteira com status 200.
  */
+/**
+ * Vendas A3.4 — UMA pagina de `/orders/search` de UM dia civil de Sao Paulo.
+ *
+ * Extraida da varredura SEM mudar nada do que ela faz: a mesma URL, a mesma
+ * espera de 429, o mesmo orcamento, o mesmo token. A tabela paginada da tela
+ * de Vendas (`lerPaginaFechamentosDoDiaML`) le por aqui — uma segunda copia
+ * do 429/timeout seria a garantia de que uma das duas regrediria.
+ */
+type PaginaLidaML =
+  | { readonly ok: true; readonly resultados: readonly unknown[]; readonly total: number | null }
+  | { readonly ok: false; readonly erroFatal: ErroVendasML | null };
+
+async function lerUmaPaginaML(args: {
+  readonly credencial: { readonly accessToken: string; readonly sellerId: string };
+  readonly campoDeData: string;
+  readonly dia: string;
+  readonly offset: number;
+  readonly limite?: number;
+  readonly ordem?: "date_asc" | "date_desc";
+  readonly limiteExterno?: LimiteExterno;
+  readonly buscar: typeof fetch;
+}): Promise<PaginaLidaML> {
+  const { credencial, campoDeData, dia, offset, limiteExterno, buscar } = args;
+  /** Quantas vezes esta pagina levou 429. Zera a cada pagina nova. */
+  let esperas = 0;
+  for (;;) {
+      const url = new URL(ENDPOINT);
+      url.searchParams.set("seller", credencial.sellerId);
+      // ── SEM `order.status` — a autoridade e o PAGAMENTO ───────────
+      //
+      // `order.status=paid` estava aqui, e escondia dinheiro real.
+      //
+      // MEDIDO em 10/09..20/09 (`medir-ml-janela-divergente.ts`): com o
+      // filtro, 3305 pedidos e 125845.26; sem ele, 3314 e 126138.55. Os 9
+      // pedidos de diferenca tem `order.status = partially_refunded` com
+      // pagamento `approved` — ou seja, exatamente o caso que a regra
+      // deste arquivo diz contar, e que o filtro removia antes de a regra
+      // ser aplicada. Duas autoridades sobre o mesmo numero, discordando.
+      //
+      // Custo medido da remocao: 128 paginas contra 123 na mesma janela de
+      // 16 dias (+4%). Nada do que entra passa a contar sozinho — pedido
+      // cancelado tem pagamento `refunded`, e `pagamentoQueConta` continua
+      // recusando (e, medido, o `paid_amount` desses e 0.00).
+      //
+      // Um dia civil INTEIRO no fuso de Sao Paulo. Cortar a meia-noite
+      // perderia o dia que a pessoa pediu.
+      //
+      // As fronteiras saem de `fuso-sao-paulo.ts`, que descobre o offset
+      // VIGENTE naquele dia em vez de supor -03:00. Se o horario de verao
+      // voltar, o filtro acompanha sem ninguem mexer aqui.
+      url.searchParams.set(
+        `${campoDeData}.from`, inicioDoDiaEmSaoPaulo(dia) ?? `${dia}T00:00:00.000-03:00`);
+      url.searchParams.set(
+        `${campoDeData}.to`, fimDoDiaEmSaoPaulo(dia) ?? `${dia}T23:59:59.999-03:00`);
+      url.searchParams.set("sort", args.ordem ?? "date_asc");
+      url.searchParams.set("limit", String(args.limite ?? LIMITE_POR_PAGINA));
+      url.searchParams.set("offset", String(offset));
+
+      const teto = limiteExterno === undefined
+        ? TIMEOUT_MS
+        : Math.min(TIMEOUT_MS, limiteExterno.restanteMs());
+      // Orcamento esgotado NAO e falha: o que ja foi lido vale, e a
+      // subjanela volta INCOMPLETA. Descartar desperdicaria trabalho real;
+      // mentir que esta completa daria um total errado.
+      if (teto <= 0) return { ok: false, erroFatal: null };
+
+      const controlador = new AbortController();
+      const relogio = setTimeout(() => controlador.abort(), teto);
+      const propagar = () => controlador.abort();
+      const doOrcamento = limiteExterno?.signal;
+      if (doOrcamento?.aborted) controlador.abort();
+      else doOrcamento?.addEventListener("abort", propagar, { once: true });
+
+      let resposta: Response;
+      try {
+        resposta = await buscar(url.toString(), {
+          headers: { Authorization: `Bearer ${credencial.accessToken}` },
+          signal: controlador.signal,
+        });
+      } catch {
+        // Falha de rede na PRIMEIRA pagina do PRIMEIRO dia e falha da
+        // consulta. Aqui ela e so uma subjanela incompleta — quem decide
+        // se ha resposta e o agregador, olhando o conjunto.
+        return { ok: false, erroFatal: null };
+      } finally {
+        clearTimeout(relogio);
+        doOrcamento?.removeEventListener("abort", propagar);
+      }
+
+      // ── 429 nao condena a conta; ele pede espera ──────────────────
+      //
+      // No desenho antigo 429 era fatal, ao lado de 401 e 403. MEDIDO que
+      // isso estava errado em dois sentidos: em ondas de 6 o provedor
+      // devolveu 429 em 3 dias de uma passada — e um 429 abortava a
+      // consulta inteira, transformando uma pedida de calma em "nao foi
+      // possivel". A mesma pagina, pedida de novo depois de uma espera,
+      // responde.
+      if (resposta.status === 429 && esperas < TENTATIVAS_APOS_429) {
+        esperas += 1;
+        const espera = 400 * Math.pow(3, esperas - 1);
+        const teto429 = limiteExterno === undefined
+          ? espera
+          : Math.min(espera, limiteExterno.restanteMs());
+        // Sem orcamento para esperar, nao ha o que esperar.
+        if (teto429 <= 0) {
+          return { ok: false, erroFatal: null };
+        }
+        await new Promise((r) => setTimeout(r, teto429));
+        continue;
+      }
+
+      if (!resposta.ok) {
+        return {
+          ok: false,
+          // 401/403 falam da CONTA, e nao deste dia: eles condenam a
+          // consulta inteira, e nao ha por que varrer os outros 35 dias
+          // para receber o mesmo 401. 429 ja foi tratado acima, e se
+          // chegou aqui e porque as esperas acabaram — dia incompleto,
+          // nao consulta perdida.
+          erroFatal: resposta.status === 401 || resposta.status === 403
+            ? codigoDoStatus(resposta.status) : null,
+        };
+      }
+
+      let corpo: unknown;
+      try { corpo = await resposta.json(); } catch {
+        return { ok: false, erroFatal: null };
+      }
+      if (typeof corpo !== "object" || corpo === null) {
+        return { ok: false, erroFatal: null };
+      }
+      const resultados = (corpo as Record<string, unknown>).results;
+      if (!Array.isArray(resultados)) {
+        return { ok: false, erroFatal: null };
+      }
+      const total = (corpo as { paging?: { total?: unknown } }).paging?.total;
+      return { ok: true, resultados, total: typeof total === "number" && Number.isFinite(total) ? total : null };
+  }
+}
+
+/**
+ * A credencial da loja, pelo PAR `(lojaId, userId)` — `getMLLojaById` (renova o token quando precisa). O token so vive
+ * aqui dentro e nas chamadas; nunca sai em retorno de erro nem em log.
+ */
+async function resolverCredencialDaVarredura(
+  userId: string, lojaId: string, limiteExterno: LimiteExterno | undefined, portas: PortasVendasML | undefined,
+): Promise<{ ok: true; cred: { accessToken: string; sellerId: string } } | { ok: false; erro: ErroVendasML }> {
+  const resolver = portas?.resolverCredencial ?? getMLLojaById;
+  let credencial: Awaited<ReturnType<typeof getMLLojaById>>;
+  try {
+    credencial = await resolver(lojaId, userId, limiteExterno);
+  } catch {
+    return { ok: false, erro: "indisponivel" };
+  }
+  if (credencial === null || !credencial.accessToken || !credencial.sellerId) {
+    return { ok: false, erro: "credencial_ausente" };
+  }
+  return { ok: true, cred: { accessToken: credencial.accessToken, sellerId: credencial.sellerId } };
+}
+
 /** O que a varredura compartilhada devolve. */
 interface Varredura {
   readonly subjanelas: readonly Subjanela[];
@@ -444,19 +604,11 @@ async function varrerDias(args: {
 }): Promise<Varredura> {
   const { userId, lojaId, campoDeData, dias, limiteExterno, portas } = args;
 
-  const resolver = portas?.resolverCredencial ?? getMLLojaById;
   const buscar = portas?.buscar ?? fetch;
 
-  let credencial: Awaited<ReturnType<typeof getMLLojaById>>;
-  try {
-    credencial = await resolver(lojaId, userId, limiteExterno);
-  } catch {
-    return { subjanelas: [], erro: "indisponivel" };
-  }
-  if (credencial === null || !credencial.accessToken || !credencial.sellerId) {
-    return { subjanelas: [], erro: "credencial_ausente" };
-  }
-
+  const resolvida = await resolverCredencialDaVarredura(userId, lojaId, limiteExterno, portas);
+  if (!resolvida.ok) return { subjanelas: [], erro: resolvida.erro };
+  const cred = resolvida.cred;
   const lerSubjanela = async (dia: string): Promise<Subjanela> => {
     const brutos: Record<string, unknown>[] = [];
     let paginas = 0;
@@ -480,127 +632,18 @@ async function varrerDias(args: {
       // era esse o jeito antigo. Andar pelo tamanho real do lote cobre a
       // lacuna: pedi 51, vieram 40, o proximo pedido comeca em 40.
       let offset = 0;
-      /** Quantas vezes esta pagina levou 429. Zera a cada pagina nova. */
-      let esperas = 0;
       for (;;) {
       if (paginas >= MAX_PAGINAS_POR_DIA) {
         return { brutos, paginas, completa: false, erroFatal: null };
       }
 
-      const url = new URL(ENDPOINT);
-      url.searchParams.set("seller", credencial.sellerId);
-      // ── SEM `order.status` — a autoridade e o PAGAMENTO ───────────
-      //
-      // `order.status=paid` estava aqui, e escondia dinheiro real.
-      //
-      // MEDIDO em 10/09..20/09 (`medir-ml-janela-divergente.ts`): com o
-      // filtro, 3305 pedidos e 125845.26; sem ele, 3314 e 126138.55. Os 9
-      // pedidos de diferenca tem `order.status = partially_refunded` com
-      // pagamento `approved` — ou seja, exatamente o caso que a regra
-      // deste arquivo diz contar, e que o filtro removia antes de a regra
-      // ser aplicada. Duas autoridades sobre o mesmo numero, discordando.
-      //
-      // Custo medido da remocao: 128 paginas contra 123 na mesma janela de
-      // 16 dias (+4%). Nada do que entra passa a contar sozinho — pedido
-      // cancelado tem pagamento `refunded`, e `pagamentoQueConta` continua
-      // recusando (e, medido, o `paid_amount` desses e 0.00).
-      //
-      // Um dia civil INTEIRO no fuso de Sao Paulo. Cortar a meia-noite
-      // perderia o dia que a pessoa pediu.
-      //
-      // As fronteiras saem de `fuso-sao-paulo.ts`, que descobre o offset
-      // VIGENTE naquele dia em vez de supor -03:00. Se o horario de verao
-      // voltar, o filtro acompanha sem ninguem mexer aqui.
-      url.searchParams.set(
-        `${campoDeData}.from`, inicioDoDiaEmSaoPaulo(dia) ?? `${dia}T00:00:00.000-03:00`);
-      url.searchParams.set(
-        `${campoDeData}.to`, fimDoDiaEmSaoPaulo(dia) ?? `${dia}T23:59:59.999-03:00`);
-      url.searchParams.set("sort", "date_asc");
-      url.searchParams.set("limit", String(LIMITE_POR_PAGINA));
-      url.searchParams.set("offset", String(offset));
-
-      const teto = limiteExterno === undefined
-        ? TIMEOUT_MS
-        : Math.min(TIMEOUT_MS, limiteExterno.restanteMs());
-      // Orcamento esgotado NAO e falha: o que ja foi lido vale, e a
-      // subjanela volta INCOMPLETA. Descartar desperdicaria trabalho real;
-      // mentir que esta completa daria um total errado.
-      if (teto <= 0) return { brutos, paginas, completa: false, erroFatal: null };
-
-      const controlador = new AbortController();
-      const relogio = setTimeout(() => controlador.abort(), teto);
-      const propagar = () => controlador.abort();
-      const doOrcamento = limiteExterno?.signal;
-      if (doOrcamento?.aborted) controlador.abort();
-      else doOrcamento?.addEventListener("abort", propagar, { once: true });
-
-      let resposta: Response;
-      try {
-        resposta = await buscar(url.toString(), {
-          headers: { Authorization: `Bearer ${credencial.accessToken}` },
-          signal: controlador.signal,
-        });
-      } catch {
-        // Falha de rede na PRIMEIRA pagina do PRIMEIRO dia e falha da
-        // consulta. Aqui ela e so uma subjanela incompleta — quem decide
-        // se ha resposta e o agregador, olhando o conjunto.
-        return { brutos, paginas, completa: false, erroFatal: null };
-      } finally {
-        clearTimeout(relogio);
-        doOrcamento?.removeEventListener("abort", propagar);
-      }
-
-      // ── 429 nao condena a conta; ele pede espera ──────────────────
-      //
-      // No desenho antigo 429 era fatal, ao lado de 401 e 403. MEDIDO que
-      // isso estava errado em dois sentidos: em ondas de 6 o provedor
-      // devolveu 429 em 3 dias de uma passada — e um 429 abortava a
-      // consulta inteira, transformando uma pedida de calma em "nao foi
-      // possivel". A mesma pagina, pedida de novo depois de uma espera,
-      // responde.
-      if (resposta.status === 429 && esperas < TENTATIVAS_APOS_429) {
-        esperas += 1;
-        const espera = 400 * Math.pow(3, esperas - 1);
-        const teto429 = limiteExterno === undefined
-          ? espera
-          : Math.min(espera, limiteExterno.restanteMs());
-        // Sem orcamento para esperar, nao ha o que esperar.
-        if (teto429 <= 0) {
-          return { brutos, paginas, completa: false, erroFatal: null };
-        }
-        await new Promise((r) => setTimeout(r, teto429));
-        continue;
-      }
-
-      if (!resposta.ok) {
-        return {
-          brutos, paginas, completa: false,
-          // 401/403 falam da CONTA, e nao deste dia: eles condenam a
-          // consulta inteira, e nao ha por que varrer os outros 35 dias
-          // para receber o mesmo 401. 429 ja foi tratado acima, e se
-          // chegou aqui e porque as esperas acabaram — dia incompleto,
-          // nao consulta perdida.
-          erroFatal: resposta.status === 401 || resposta.status === 403
-            ? codigoDoStatus(resposta.status) : null,
-        };
-      }
-      esperas = 0;
-
-      let corpo: unknown;
-      try { corpo = await resposta.json(); } catch {
-        return { brutos, paginas, completa: false, erroFatal: null };
-      }
-      if (typeof corpo !== "object" || corpo === null) {
-        return { brutos, paginas, completa: false, erroFatal: null };
-      }
-      const resultados = (corpo as Record<string, unknown>).results;
-      if (!Array.isArray(resultados)) {
-        return { brutos, paginas, completa: false, erroFatal: null };
-      }
+      const pagina = await lerUmaPaginaML({ credencial: cred, campoDeData, dia, offset, limiteExterno, buscar });
+      if (!pagina.ok) return { brutos, paginas, completa: false, erroFatal: pagina.erroFatal };
+      const resultados = pagina.resultados;
 
       paginas += 1;
-      const totalDaPagina = (corpo as { paging?: { total?: unknown } }).paging?.total;
-      if (typeof totalDaPagina === "number" && Number.isFinite(totalDaPagina)) {
+      const totalDaPagina = pagina.total;
+      if (totalDaPagina !== null) {
         totaisRelatados.add(totalDaPagina);
       }
       for (const item of resultados) {
@@ -752,6 +795,48 @@ export async function varrerFechamentosDoDiaML(args: {
   if (v.erro !== null || v.subjanelas.length !== 1) return { brutos: [], paginas: 0, completa: false, erro: v.erro ?? "indisponivel" };
   const s = v.subjanelas[0];
   return { brutos: s.brutos, paginas: s.paginas, completa: s.completa, erro: null };
+}
+
+/** Vendas A3.4: teto de linhas por busca da tabela paginada (o provider aceita ate 51; a tela pede 50). */
+export const LIMITE_POR_BUSCA_TABELA_ML = 50;
+/** Vendas A3.4: o `/orders/search` recusa offset >= 10000 — um dia com mais que isso fica marcado, nunca inventado. */
+export const OFFSET_MAXIMO_ML = 10_000;
+
+export type PaginaFechamentoML =
+  | { readonly ok: true; readonly resultados: readonly Record<string, unknown>[]; readonly total: number | null }
+  | { readonly ok: false; readonly erro: ErroVendasML };
+
+/**
+ * Vendas A3.4 (Parte B) — leitor de PAGINAS por `order.date_closed` para a tabela de Vendas.
+ *
+ * A credencial e resolvida UMA vez (mesmo `getMLLojaById` da varredura); cada `ler(dia, offset)` e UMA busca pela
+ * mesma `lerUmaPaginaML` da varredura (429 com espera, orcamento, timeout). Crua: o recorte do dia, a regra de
+ * `pack_splitted` e o status sao de quem consome — aqui nao ha regra de venda.
+ */
+export async function abrirLeitorPaginasFechamentoML(args: {
+  readonly userId: string;
+  readonly lojaId: string;
+  readonly limiteExterno?: LimiteExterno;
+  readonly portas?: PortasVendasML;
+}): Promise<
+  | { readonly ok: true; readonly ler: (dia: string, offset: number, ordem?: "date_asc" | "date_desc") => Promise<PaginaFechamentoML> }
+  | { readonly ok: false; readonly erro: ErroVendasML }
+> {
+  if (!args.userId || !args.lojaId) return { ok: false, erro: "credencial_ausente" };
+  const resolvida = await resolverCredencialDaVarredura(args.userId, args.lojaId, args.limiteExterno, args.portas);
+  if (!resolvida.ok) return resolvida;
+  const buscar = args.portas?.buscar ?? fetch;
+  const ler = async (dia: string, offset: number, ordem: "date_asc" | "date_desc" = "date_desc"): Promise<PaginaFechamentoML> => {
+    if (!ehDataIso(dia) || !Number.isInteger(offset) || offset < 0 || offset >= OFFSET_MAXIMO_ML) return { ok: false, erro: "resposta_invalida" };
+    const p = await lerUmaPaginaML({
+      credencial: resolvida.cred, campoDeData: CAMPO_DE_FECHAMENTO, dia, offset,
+      limite: LIMITE_POR_BUSCA_TABELA_ML, ordem, limiteExterno: args.limiteExterno, buscar,
+    });
+    if (!p.ok) return { ok: false, erro: p.erroFatal ?? "indisponivel" };
+    const linhas = p.resultados.filter((x): x is Record<string, unknown> => typeof x === "object" && x !== null);
+    return { ok: true, resultados: linhas, total: p.total };
+  };
+  return { ok: true, ler };
 }
 
 /**

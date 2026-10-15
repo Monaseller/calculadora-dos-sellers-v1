@@ -1166,29 +1166,23 @@ async function principal() {
     for (const iso of ["2026-10-06T23:03:14.000-04:00", "2026-10-07T02:59:59.000-03:00", "2026-10-14T21:30:00.000Z", "2026-10-15T02:59:59.999Z", "2026-10-15T03:00:00.000Z"]) assert(MV.dataBRT(iso) === antigo(iso), `${iso}: ${MV.dataBRT(iso)} ≠ ${antigo(iso)}`);
   });
 
-  const L_ = (order_id: string, status: string, qtd = 1, faturamento = 10) => ({ order_id, status, qtd, faturamento });
-  t("VOL-8/9/11. paga e cancelada criadas na janela entram no bruto; canceladas contadas à parte", () => {
-    const m = MV.metricasBrutasML([L_("1", "paid"), L_("2", "devolucao"), L_("3", "cancelled")]);
-    assert(m.pedidos === 3 && m.canceladas === 2 && m.bruto === 30, JSON.stringify(m));
+  // A3.4: a métrica ML (Vendas / Unidades / Vendas brutas) é SÓ do serviço canônico — a fórmula por criação sobre
+  // `pedidos` (metricasBrutasML) foi removida; aqui fica a CLASSIFICAÇÃO de status que o sync grava.
+  t("VOL-8/9/11. (A3.4) a métrica legada por criação não existe mais; canceladas reais = cancelled + devolucao (só interno)", () => {
+    assert((MV as any).metricasBrutasML === undefined && (MV as any).STATUS_VENDA_BRUTA_ML === undefined, "fórmula legada de vendas brutas ML ainda exportada");
+    assert(JSON.stringify(MV.STATUS_CANCELADA_ML) === JSON.stringify(["cancelled", "devolucao"]), "canceladas fora do auditado");
   });
-  t("VOL-10. pack_splitted (pack_dividido) fora do bruto e das canceladas; cancelado interno (pack_creation_error) no bruto, fora das canceladas", () => {
-    const m = MV.metricasBrutasML([L_("1", "paid"), L_("2", "pack_dividido", 2, 50), L_("3", "cancelado_interno", 1, 7)]);
-    assert(m.pedidos === 2 && m.unidades === 2 && m.bruto === 17 && m.canceladas === 0, JSON.stringify(m));
+  t("VOL-10. pack_splitted → pack_dividido (pela constante canônica); cancelado interno (pack_creation_error) → cancelado_interno", () => {
     assert(MV.statusPedidoML("cancelled", { cancel_detail: { group: "internal", code: "pack_splitted" } }) === "pack_dividido" && MV.statusPedidoML("cancelled", { cancel_detail: { group: "internal", code: "pack_creation_error" }, payments: [{ status: "refunded" }] }) === "cancelado_interno", "mapeamento internal");
     assert(MV.statusPedidoML("cancelled", { cancel_detail: { group: "buyer", code: "buyer_cancel_express" }, payments: [{ status: "refunded" }] }) === "devolucao" && MV.statusPedidoML("cancelled", {}) === "cancelled" && MV.statusPedidoML("confirmed", {}) === "pending" && MV.statusPedidoML("paid", {}) === "paid", "mapeamento real");
   });
-  t("VOL-12/13/14. unidades = Σ qtd; bruto = Σ unit_price × qtd; pedidos distintos (pack não colapsa; várias linhas = 1 pedido); pending fora", () => {
-    const m = MV.metricasBrutasML([L_("1", "paid", 2, 40), L_("1", "paid", 1, 15.5), L_("2", "paid", 1, 9.99), L_("3", "paid", 3, 30), L_("4", "pending", 1, 99)]);
-    assert(m.pedidos === 3 && m.unidades === 7 && m.bruto === 95.49, JSON.stringify(m));
-  });
-  t("VOL-8e. GET de Vendas: metricasML SEMPRE por criação (date_field=pagamento não muda a base) e inclui a cancelada", async () => {
+  t("VOL-8e. (A3.4) GET legado de Vendas NÃO devolve métrica ML sobre `pedidos` (nos dois date_field)", async () => {
     semear(); const PAG = "2000018841441700", CAN = "2000018841441701";
     pedidosML = { [PAG]: pedidoML(PAG), [CAN]: pedidoML(CAN, { status: "cancelled", cancel_detail: { group: "buyer", code: "buyer_cancel_express", date: `${DIA}T12:00:00.000-04:00` }, payments: [pagto("refunded", `${DIA}T10:07:30.000Z`)] }) };
     await sync();
     for (const campo of ["pagamento", "criacao"]) {
       const g = await getVendas(`date_from=${DIA}&date_to=${DIA}&loja_id=${ML_A}&date_field=${campo}`);
-      const m = g.corpo.metricasML;
-      assert(m && m.base === "criacao" && m.pedidos === 2 && m.canceladas === 1 && c(m.bruto) === 8248, `${campo}: ${JSON.stringify(m)}`);
+      assert(g.status === 200 && !("metricasML" in g.corpo), `${campo}: ${JSON.stringify(Object.keys(g.corpo))}`);
     }
   });
 
@@ -1213,8 +1207,6 @@ async function principal() {
     await syncDia(DIA, DIA, true);   // substitutos (criados no dia) entram pelo sync do dia
     assert(linhaDe(O)?.status === "pack_dividido" && linhaDe(S1)?.status === "paid" && linhaDe(S2)?.status === "paid", JSON.stringify([O, S1, S2].map((x) => linhaDe(x)?.status)));
     const g = await getVendas(`date_from=${DIA}&date_to=${DIA}&loja_id=${ML_A}&date_field=pagamento`);
-    const m = g.corpo.metricasML;
-    assert(m.pedidos === 2 && m.unidades === 2 && c(m.bruto) === 4000 && m.canceladas === 0, JSON.stringify(m));
     const pagos = (g.corpo.rows ?? []).filter((r: any) => r.status === "paid").map((r: any) => r.orderId).sort();
     assert(JSON.stringify(pagos) === JSON.stringify([S1, S2]), `pagos=${pagos}`);
   });
@@ -1226,7 +1218,7 @@ async function principal() {
     assert(!linhaDe(O) && !chamadas.some((x) => x.caminho.includes(`/orders/${O}/discounts`)), "pago do buffer gravado/enriquecido");
   });
 
-  t("VOL-AUDIT. fixture real (07–14/10, momento do print): código de produção reproduz 1517 / 1608 / 57.408,29 / 63 canceladas; resíduo da camada de relatório do ML = 1 / 1 / 21,71", () => {
+  t("VOL-AUDIT. fixture real (07–14/10, momento do print): a classificação de status reproduz as 63 canceladas reais (API_CANCELLED_COUNT, só interno)", () => {
     const fx = JSON.parse(readFileSync(join(process.cwd(), "scripts/fixtures/ml-volume-auditoria-2026-10-07-14.json"), "utf8"));
     const PRINT = Date.parse(fx.print_ml.instante);
     const linhas: any[] = [];
@@ -1236,17 +1228,14 @@ async function principal() {
       const st = MV.statusPedidoML(canceladoNoPrint ? "cancelled" : "paid", { cancel_detail: { group: grupo, code: codigo }, payments: (pagamentos as string[]).map((s) => ({ status: s })) });
       for (const [q, up] of itens) linhas.push({ order_id: `p${i}`, status: st, qtd: q, faturamento: q * up });
     });
-    const m = MV.metricasBrutasML(linhas);
-    assert(m.pedidos === 1517 && m.unidades === 1608 && c(m.bruto) === 5740829 && m.canceladas === 63, JSON.stringify(m));
-    // auditoria (não regra de produção): ML_METRICS_REPORTING_LAYER_RESIDUAL
-    const residuo = { pedidos: fx.print_ml.vendas - m.pedidos, unidades: fx.print_ml.unidades - m.unidades, bruto: Math.round((fx.print_ml.bruto - m.bruto) * 100) / 100 };
-    assert(JSON.stringify(residuo) === JSON.stringify({ pedidos: 1, unidades: 1, bruto: 21.71 }) && fx.print_ml.canceladas === m.canceladas, `ML_METRICS_REPORTING_LAYER_RESIDUAL=${JSON.stringify(residuo)}`);
+    const canceladas = new Set(linhas.filter((l) => (MV.STATUS_CANCELADA_ML as readonly string[]).includes(String(l.status))).map((l) => l.order_id)).size;
+    assert(canceladas === 63 && fx.print_ml.canceladas === canceladas, `canceladas=${canceladas}`);
   });
-  t("VOL-UI. cards pagos rotulados; linha ML separada e sempre por criação; financeiro A3.2 intocado", () => {
+  t("VOL-UI. (A3.4) cards pagos rotulados; linha ML do serviço canônico, sem canceladas; rota legada sem métrica ML", () => {
     const pg = fonte("app/(app)/vendas/page.tsx");
-    assert(/label: "Pedidos pagos"/.test(pg) && /label: "Faturamento pago"/.test(pg) && /label: "Vendas brutas ML", val: moeda\(metricasML\.bruto\)/.test(pg) && /label: "Canceladas ML"/.test(pg) && /setMetricasML\(data\.metricasML \?\? null\)/.test(pg), "cards");
+    assert(/label: "Pedidos pagos"/.test(pg) && /label: "Faturamento pago"/.test(pg) && !/Canceladas ML/.test(pg) && /\{rotuloMetricasML\(mlMetricas\)\}/.test(pg) && /cardsMetricasML\(mlMetricas\)/.test(pg), "cards");
     const rota = fonte("app/api/ml/vendas/route.ts");
-    assert(/metricasML = \{ base: "criacao", \.\.\.metricasBrutasML\(linhasCriacao\) \};/.test(rota) && /let linhasCriacao: any\[\] = dateField === "criacao" \? pedidos : \[\];/.test(rota), "rota fora da criação");
+    assert(!/metricasML|metricasBrutasML|linhasCriacao/.test(rota), "rota legada ainda calcula métrica ML");
   });
 
   secao("\n[11. A3.3.1 — janela de rechecagem de status = 168 h (cron/auto-sync)]");
