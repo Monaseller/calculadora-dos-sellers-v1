@@ -9,7 +9,8 @@
  *
  * BUG 2 CORRIGIDO: Historico buscava 6 dias quando pediu 1 (buffer desnecessario).
  *   -> noBuffer=true (Historico): busca EXATAMENTE o range solicitado
- *   -> noBuffer=false (Cron diario): estende -5 dias para capturar boletos
+ *   -> noBuffer=false (Cron diario/auto-sync): estende ML_STATUS_RECHECK_WINDOW_HOURS (7 dias) para trás
+ *      (boletos e rechecagem de status de vendas recentes)
  *
  * BUG 3 NOVO: Retry com backoff exponencial (3 tentativas, 1s->2s->4s).
  *
@@ -173,6 +174,16 @@ async function fetchOrdersRange(
 
   return orders;
 }
+
+/**
+ * Vendas A3.3.1 — JANELA DE RECHECAGEM de status (decisão aprovada): o sync de rotina (noBuffer=false: cron e
+ * auto-sync) busca pedidos CRIADOS até 168 h antes do início do intervalo; cancelamentos (inclusive pack_splitted)
+ * achados nessa janela atualizam a linha existente (pago fora do intervalo continua fora — o financeiro não muda de
+ * escopo). Evidência (auditoria real 07–14/10/2026, 112 cancelamentos): até 151,6 h após a criação
+ * (shipment_not_delivered); os 120 h (5 dias) anteriores não cobriam. NÃO é o limite de devoluções tardias (fase
+ * separada) — é só a reconciliação de status recente.
+ */
+export const ML_STATUS_RECHECK_WINDOW_HOURS = 168;
 
 function addDias(iso: string, n: number): string {
   const d = new Date(`${iso}T12:00:00Z`);
@@ -347,8 +358,8 @@ export async function syncMLForUserV2(
 
   // CORRECAO BUG 2:
   // noBuffer=true  (Historico): busca EXATAMENTE o range pedido
-  // noBuffer=false (Cron diario): estende -5 dias para capturar boletos
-  const dateFetchFrom = noBuffer ? dateFrom : addDias(dateFrom, -5);
+  // noBuffer=false (Cron diario/auto-sync): estende a janela de rechecagem (7 dias) — boletos + status recente
+  const dateFetchFrom = noBuffer ? dateFrom : addDias(dateFrom, -ML_STATUS_RECHECK_WINDOW_HOURS / 24);
   const diasFetch     = gerarDias(dateFetchFrom, dateTo);
 
   const STATUSES = ["paid", "confirmed", "payment_in_process", "cancelled"] as const;

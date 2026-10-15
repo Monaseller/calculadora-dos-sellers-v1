@@ -1249,6 +1249,51 @@ async function principal() {
     assert(/metricasML = \{ base: "criacao", \.\.\.metricasBrutasML\(linhasCriacao\) \};/.test(rota) && /let linhasCriacao: any\[\] = dateField === "criacao" \? pedidos : \[\];/.test(rota), "rota fora da criação");
   });
 
+  secao("\n[11. A3.3.1 — janela de rechecagem de status = 168 h (cron/auto-sync)]");
+  const DX = "2026-10-21", DX0 = Date.parse("2026-10-21T03:00:00.000Z");   // início do intervalo do sync = 00:00 BRT
+  const criadoHa = (horas: number) => new Date(DX0 - horas * 3600_000 - 4 * 3600_000).toISOString().replace("Z", "-04:00");   // como o ML manda (−04:00)
+  const canceladoDepois = async (O: string, horas: number) => {
+    semear(); const iso = criadoHa(horas);
+    pedidosML = { [O]: pedidoML(O, { date_created: iso, date_closed: iso, payments: [pagto("approved", iso)] }) };
+    const dia = MV.dataBRT(iso)!;
+    await syncDia(dia, dia, true);
+    assert(linhaDe(O)?.status === "paid", `pré-condição ${horas} h`);
+    pedidosML[O] = { ...pedidosML[O], status: "cancelled", cancel_detail: { group: "shipment", code: "shipment_not_delivered", date: "2026-10-21T08:00:00.000-04:00" }, payments: [pagto("refunded", iso)] };
+    chamadas = [];
+    await syncDia(DX, DX, false);
+    return linhaDe(O)?.status;
+  };
+  t("WINDOW-0. constante explícita: 168 h (7 dias)", () => {
+    assert(SY.ML_STATUS_RECHECK_WINDOW_HOURS === 168, String(SY.ML_STATUS_RECHECK_WINDOW_HOURS));
+  });
+  for (const [n, horas, rotulo] of [["1", 120, "120 h"], ["2", 151.6, "151,6 h"], ["3", 167 + 59 / 60, "167 h 59 min"]] as const) {
+    t(`WINDOW-${n}. venda criada há ${rotulo} e cancelada depois → ainda dentro da rechecagem (linha deixa de ser paid)`, async () => {
+      const st = await canceladoDepois(`20000189700${n}0001`, horas);
+      assert(st === "devolucao", `status=${st}`);
+    });
+  }
+  t("WINDOW-4. criada há 168 h + 1 min → fora da rechecagem de rotina (a linha fica como está — dívida de devoluções tardias)", async () => {
+    const st = await canceladoDepois("2000018970040001", 168 + 1 / 60);
+    assert(st === "paid", `status=${st}`);
+    assert(chamadas.some((x) => x.caminho.includes("date_created.from=2026-10-14T")) && !chamadas.some((x) => x.caminho.includes("date_created.from=2026-10-13T")), "dias buscados fora de 14..21/10");
+  });
+  t("WINDOW-5. paga antiga fora da janela não entra no fetch normal (nem vira linha)", async () => {
+    semear(); const O = "2000018970050001", iso = criadoHa(168 + 1 / 60);
+    pedidosML = { [O]: pedidoML(O, { date_created: iso, date_closed: iso, payments: [pagto("approved", iso)] }) };
+    chamadas = [];
+    await syncDia(DX, DX, false);
+    assert(!linhaDe(O) && !chamadas.some((x) => x.caminho.includes(O)), "paga fora da janela buscada/gravada");
+  });
+  t("WINDOW-6. escopo do financeiro inalterado: paga DENTRO da janela (fora do intervalo) não é gravada nem enriquecida; a do intervalo sim", async () => {
+    semear(); const BUF = "2000018970060001", HOJE_ = "2000018970060002";
+    const isoBuf = criadoHa(100), isoHoje = new Date(DX0 + 10 * 3600_000).toISOString();
+    pedidosML = { [BUF]: pedidoML(BUF, { date_created: isoBuf, date_closed: isoBuf, payments: [pagto("approved", isoBuf)] }), [HOJE_]: pedidoML(HOJE_, { date_created: isoHoje, date_closed: isoHoje, payments: [pagto("approved", isoHoje)] }) };
+    chamadas = [];
+    await syncDia(DX, DX, false);
+    assert(!linhaDe(BUF) && linhaDe(HOJE_)?.status === "paid", "linhas fora do esperado");
+    assert(chamadas.some((x) => x.caminho.includes(`/orders/${HOJE_}/discounts`)) && !chamadas.some((x) => x.caminho.includes(`/orders/${BUF}/discounts`)), "financeiro ampliou o escopo para o buffer");
+  });
+
   secao("\n[4. guard]");
   t("I17 (A3.2-C) limpo e invariantes V2 limpos", () => {
     const v = [...G2.financeiroMLNaoReal(), ...G2.invariantesV2(undefined, { zonas: false })];
