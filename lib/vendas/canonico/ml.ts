@@ -37,7 +37,7 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { diaEmSaoPaulo } from "@/lib/fuso-sao-paulo";
-import { diasDoIntervalo, emParalelo, intervaloSaoPaulo, LOJAS_EM_PARALELO, paginar } from "./shopee";
+import { aplicarKeyset, diasDoIntervalo, emParalelo, falhaDeLeitura, intervaloSaoPaulo, LOJAS_EM_PARALELO, paginarKeyset } from "./shopee";
 import { prefixoObservado } from "./periodo";
 import type { Completude, DiaObservadoLoja, ParcialObservadoLoja } from "./tipos";
 
@@ -293,17 +293,17 @@ export async function lerVendasML(
   let consultaLojas = cliente.from("lojas").select("id").eq("user_id", userId).eq("marketplace", "ML");
   if (args.lojaIds) consultaLojas = consultaLojas.in("id", args.lojaIds);
   const { data: lojas, error: errLojas } = await consultaLojas;
-  if (errLojas) throw new Error("leitura_falhou");
+  if (errLojas) falhaDeLeitura("ml_lojas", errLojas);
   const lojaIds = ((lojas ?? []) as { id: string }[]).map((l) => l.id);
   if (args.lojaIds && args.lojaIds.some((id) => !lojaIds.includes(id))) throw new Error("loja_invalida");
 
   // DESEMPENHO: lojas em paralelo (teto), paginas em ondas e janelas junto com os pedidos — mesmos SELECTs, mesma ordem.
   const resultados: ResultadoVendasLojaML[] = await emParalelo(lojaIds, LOJAS_EM_PARALELO, async (lojaId): Promise<ResultadoVendasLojaML> => {
-    const linhasP = paginar<Record<string, unknown>>((a, b) => cliente.from("ml_pedidos")
+    // KEYSET por (date_closed, order_id) no indice (user_id, loja_id, date_closed): sem OFFSET e sem varrer a PK da loja
+    const linhasP = paginarKeyset<Record<string, unknown>>("ml_pedidos", "date_closed", "order_id", (cursor, limite) => aplicarKeyset(cliente.from("ml_pedidos")
       .select("loja_id, order_id, date_closed, cancel_detail_code, total_amount, unidades, fetched_at")
       .eq("user_id", userId).eq("loja_id", lojaId)
-      .gte("date_closed", inicio.toISOString()).lt("date_closed", fim.toISOString())
-      .order("order_id", { ascending: true }).range(a, b));
+      .gte("date_closed", inicio.toISOString()).lt("date_closed", fim.toISOString()), "date_closed", "order_id", cursor, limite));
     // o builder do Supabase so dispara no `.then`: Promise.resolve o poe em voo agora
     const jobsP = Promise.resolve(cliente.from("sync_jobs")
       .select("campo_tempo, janela_inicio, janela_fim, listagem_completa, status")
@@ -318,7 +318,7 @@ export async function lerVendasML(
       unidades: r.unidades === null ? null : Number(r.unidades), fetchedAt: (r.fetched_at as string) ?? null,
     }));
     const { data: jobs, error: errJobs } = await jobsP;
-    if (errJobs) throw new Error("leitura_falhou");
+    if (errJobs) falhaDeLeitura("ml_janelas", errJobs);
     const janelas: JanelaFechamentoML[] = ((jobs ?? []) as Record<string, unknown>[]).map((j) => ({
       campoTempo: String(j.campo_tempo), inicio: String(j.janela_inicio), fim: String(j.janela_fim),
       listagemCompleta: (j.listagem_completa as boolean | null) ?? null, status: String(j.status),

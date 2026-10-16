@@ -61,7 +61,10 @@ function clienteFalso() {
         k === "eq" ? String(r[col]) === String(v) : k === "in" ? (v as any[]).map(String).includes(String(r[col]))
           : k === "is" ? (r[col] ?? null) === v : k === "gte" ? cmp(r[col], v, (a, b) => a >= b) : k === "lte" ? cmp(r[col], v, (a, b) => a <= b)
           : k === "gt" ? cmp(r[col], v, (a, b) => a > b) : k === "lt" ? cmp(r[col], v, (a, b) => a < b)
-          : k === "not" ? ((v as [string, any])[0] === "is" ? (r[col] ?? null) !== (v as [string, any])[1] : true) : true);
+          : k === "not" ? ((v as [string, any])[0] === "is" ? (r[col] ?? null) !== (v as [string, any])[1] : true)
+          // `or` do PostgREST como a leitura keyset o envia: col.gt."v",col2.gt."v2" (qualquer termo verdadeiro)
+          : k === "or" ? String(v).split(/,(?=[a-z_]+\.gt\.)/).some((t) => { const m = t.match(/^([a-z_]+)\.gt\."(.*)"$/); if (!m) throw new Error(`or invalido: ${t}`); return cmp(r[m[1]], m[2], (a, b) => a > b); })
+          : true);
       const exec = () => {
         if (falharTabela === tabela) return { data: null, error: { message: `falha simulada em ${tabela}` } };
         const ls = (db[tabela] ??= []);
@@ -85,6 +88,7 @@ function clienteFalso() {
           else if (p === "select") { if (a[1]?.head) st.head = true; }
           else if (["eq", "in", "is", "gte", "lte", "gt", "lt"].includes(p)) st.filtros.push([p, a[0], a[1]]);
           else if (p === "not") st.filtros.push(["not", a[0], [a[1], a[2]]]);
+          else if (p === "or") st.filtros.push(["or", "", a[0]]);
           else if (p === "order") st.ordens.push([a[0], a[1]?.ascending !== false]);
           else if (p === "range") { st.ini = a[0]; st.fim = a[1] + 1; }
           else if (p === "limit") st.fim = st.ini + a[0];

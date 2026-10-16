@@ -450,10 +450,20 @@ const LOTE_IN = 150;
 /**
  * DESEMPENHO (gate do Dashboard): leituras independentes em paralelo, com teto. So muda QUANDO cada SELECT sai —
  * nao o que ele le, nem a ordem do resultado, nem regra alguma. O tempo era a soma de ~350 idas e voltas em serie.
+ * As paginas de pedidos NAO entram aqui: sao keyset (cada uma depende da ultima linha da anterior).
  */
-const PAGINAS_EM_PARALELO = 4;
 const LOTES_EM_PARALELO = 6;
 export const LOJAS_EM_PARALELO = 3;
+
+/**
+ * Falha de SELECT da leitura canonica: registra a etapa e o codigo PostgreSQL (ex.: 57014 = statement timeout) —
+ * nunca valores, filtros, ids de pedido, tokens ou dados de comprador — e falha fechado (`leitura_falhou`).
+ */
+export function falhaDeLeitura(etapa: string, error: unknown): never {
+  const codigo = error && typeof error === "object" && typeof (error as { code?: unknown }).code === "string" ? (error as { code: string }).code : null;
+  console.error(`[vendas-canonico] leitura falhou etapa=${etapa} codigo=${codigo ?? "desconhecido"}`);
+  throw new Error("leitura_falhou");
+}
 
 /** `fn` sobre cada item com no maximo `limite` em voo; o resultado sai na ORDEM dos itens. Primeiro erro rejeita. */
 export async function emParalelo<T, R>(itens: readonly T[], limite: number, fn: (x: T, i: number) => Promise<R>): Promise<R[]> {
@@ -465,22 +475,59 @@ export async function emParalelo<T, R>(itens: readonly T[], limite: number, fn: 
 }
 
 /**
- * Paginas de PAGINA linhas em ondas de PAGINAS_EM_PARALELO, concatenadas na ordem. Para na primeira pagina curta —
- * exatamente onde o laco sequencial pararia (paginas seguintes da mesma onda sao descartadas).
+ * Cursor KEYSET: (valor da coluna de ordem, id unico) da ULTIMA linha lida. `valor` null = a coluna de ordem e
+ * constante NULL no recorte (ex.: nao pagos, `pay_time IS NULL`) — o cursor anda so pelo id.
  */
-export async function paginar<T>(consulta: (de: number, ate: number) => PromiseLike<{ data: unknown; error: unknown }>): Promise<T[]> {
+export type CursorKeyset = { valor: string | null; id: string };
+
+/** Valor do cursor dentro do `or(...)` do PostgREST: entre aspas; aspas/barra invertida nunca sao esperadas → falha fechado. */
+const literalKeyset = (v: string): string => {
+  if (/["\\]/.test(v)) throw new Error("leitura_falhou");
+  return `"${v}"`;
+};
+
+/**
+ * Aplica a pagina keyset sobre uma consulta ja filtrada pelo periodo: ORDER BY (coluna, id) e, depois da 1a pagina,
+ * (coluna, id) > cursor — escrito como `coluna >= v AND (coluna > v OR id > i)`, que o Postgres atende com o
+ * indice (user_id, loja_id, coluna) como LIMITE da faixa (sem OFFSET: cada pagina custa o mesmo).
+ * Mesmos pedidos, sem perda nem duplicata: a ordem (coluna, id) e total porque o id e unico na loja.
+ */
+export function aplicarKeyset<Q>(q: Q, coluna: string, id: string, cursor: CursorKeyset | null, limite: number): Q {
+  // o builder do PostgREST e fluente e generico demais para tipar aqui sem perder a cadeia
+  let c = q as any;
+  if (cursor) {
+    c = cursor.valor === null ? c.gt(id, cursor.id)
+      : c.gte(coluna, cursor.valor).or(`${coluna}.gt.${literalKeyset(cursor.valor)},${id}.gt.${literalKeyset(cursor.id)}`);
+  }
+  return c.order(coluna, { ascending: true }).order(id, { ascending: true }).limit(limite) as Q;
+}
+
+/**
+ * Todas as linhas, em paginas KEYSET de PAGINA (sequenciais: cada uma comeca depois da ultima linha da anterior).
+ * Para na primeira pagina curta. Falha de qualquer pagina → `leitura_falhou` (nunca resultado parcial). Um id que
+ * reaparece (cursor parado, cursor que anda devagar, filtro ignorado) → falha fechado na hora: nunca laco longo,
+ * nunca linha contada duas vezes.
+ */
+export async function paginarKeyset<T extends Record<string, unknown>>(
+  etapa: string, coluna: string, id: string,
+  pagina: (cursor: CursorKeyset | null, limite: number) => PromiseLike<{ data: unknown; error: unknown }>,
+): Promise<T[]> {
   const out: T[] = [];
-  for (let onda = 0; ; onda += PAGINAS_EM_PARALELO) {
-    const paginas = await Promise.all(Array.from({ length: PAGINAS_EM_PARALELO }, async (_, k) => {
-      const de = (onda + k) * PAGINA;
-      const { data, error } = await consulta(de, de + PAGINA - 1);
-      if (error) throw new Error("leitura_falhou");
-      return (data ?? []) as T[];
-    }));
-    for (const lote of paginas) {
-      out.push(...lote);
-      if (lote.length < PAGINA) return out;
+  const vistos = new Set<string>();
+  let cursor: CursorKeyset | null = null;
+  for (;;) {
+    const { data, error } = await pagina(cursor, PAGINA);
+    if (error) falhaDeLeitura(etapa, error);
+    const lote = (data ?? []) as T[];
+    for (const linha of lote) {
+      const k = String(linha[id]);
+      if (vistos.has(k)) falhaDeLeitura(etapa, { code: "linha_repetida" });
+      vistos.add(k);
     }
+    out.push(...lote);
+    if (lote.length < PAGINA) return out;
+    const ultima = lote[lote.length - 1];
+    cursor = { valor: ultima[coluna] === null || ultima[coluna] === undefined ? null : String(ultima[coluna]), id: String(ultima[id]) };
   }
 }
 
@@ -516,7 +563,7 @@ export async function lerVendasShopee(
   let consultaLojas = cliente.from("lojas").select("id").eq("user_id", userId).eq("marketplace", "Shopee");
   if (args.lojaIds) consultaLojas = consultaLojas.in("id", args.lojaIds);
   const { data: lojas, error: errLojas } = await consultaLojas;
-  if (errLojas) throw new Error("leitura_falhou");
+  if (errLojas) falhaDeLeitura("shopee_lojas", errLojas);
   const lojaIds = ((lojas ?? []) as { id: string }[]).map((l) => l.id);
   if (args.lojaIds && args.lojaIds.some((id) => !lojaIds.includes(id))) throw new Error("loja_invalida");
 
@@ -526,12 +573,11 @@ export async function lerVendasShopee(
     const ancora = args.ancorasDescoberta?.[lojaId];
     // so o corpus que pode conter pagamentos do periodo (mesmo `desde` de A)
     const desdeIso = new Date(ancora ? new Date(ancora).getTime() : inicio.getTime() - LIMITE_POLITICA_PAGAMENTO_MS).toISOString();
-    const linhasP = paginar<Record<string, unknown>>((a, b) => cliente
+    const linhasP = paginarKeyset<Record<string, unknown>>("shopee_pedidos_pagos", "pay_time", "order_sn", (cursor, limite) => aplicarKeyset(cliente
       .from("shopee_pedidos")
       .select("loja_id, order_sn, order_status, create_time, pay_time, update_time, detail_fetched_at, escrow_fetched_at, escrow_update_time, original_shopee_discount, pix_discount")
       .eq("user_id", userId).eq("loja_id", lojaId)
-      .gte("pay_time", inicio.toISOString()).lt("pay_time", fim.toISOString())
-      .order("order_sn", { ascending: true }).range(a, b));
+      .gte("pay_time", inicio.toISOString()).lt("pay_time", fim.toISOString()), "pay_time", "order_sn", cursor, limite));
     // o builder do Supabase so dispara no `.then`: Promise.resolve o poe em voo agora
     const jobsP = Promise.resolve(cliente.from("sync_jobs")
       .select("loja_id, campo_tempo, janela_inicio, janela_fim, listagem_completa, status")
@@ -558,7 +604,7 @@ export async function lerVendasShopee(
         .select("order_id, qtd, valor_unit, escrow_voucher_seller, escrow_voucher_shopee, escrow_coin")
         .eq("user_id", userId).eq("marketplace", "Shopee").eq("loja_id", lojaId)
         .in("order_id", lote);
-      if (error) throw new Error("leitura_falhou");
+      if (error) falhaDeLeitura("shopee_itens", error);
       return ((data ?? []) as Record<string, unknown>[]).map((r): ItemShopeeCanonico => ({
         lojaId, orderSn: String(r.order_id), precoUnitario: Number(r.valor_unit), quantidade: Number(r.qtd),
         voucherVendedor: r.escrow_voucher_seller === null ? null : Number(r.escrow_voucher_seller),
@@ -570,7 +616,7 @@ export async function lerVendasShopee(
     // So janelas de DESCOBERTA (create_time): update_time nao prova nada.
     // Sem filtro pelo periodo: a cadeia comeca na ancora, bem antes dele.
     const { data: jobs, error: errJobs } = await jobsP;
-    if (errJobs) throw new Error("leitura_falhou");
+    if (errJobs) falhaDeLeitura("shopee_janelas", errJobs);
     const janelas: JanelaListagem[] = ((jobs ?? []) as Record<string, unknown>[]).map((j) => ({
       lojaId, campoTempo: j.campo_tempo as JanelaListagem["campoTempo"],
       inicio: String(j.janela_inicio), fim: String(j.janela_fim),
@@ -648,11 +694,11 @@ async function observadoPorDiaShopee(cliente: SupabaseClient, a: {
     }
     return out;
   }
-  const linhas = await paginar<Record<string, unknown>>((x, y) => {
-    let q = cliente.from("shopee_pedidos").select("order_sn, create_time, detail_fetched_at")
+  const linhas = await paginarKeyset<Record<string, unknown>>("shopee_pedidos_nao_pagos", "pay_time", "order_sn", (cursor, limite) => {
+    let q = cliente.from("shopee_pedidos").select("order_sn, pay_time, create_time, detail_fetched_at")
       .eq("user_id", a.userId).eq("loja_id", a.lojaId).is("pay_time", null).gte("create_time", a.desdeIso).lt("create_time", a.fimIso);
     if (ESTADOS_TERMINAIS_VERIFICADOS.length) q = q.not("order_status", "in", `(${ESTADOS_TERMINAIS_VERIFICADOS.join(",")})`);
-    return q.order("order_sn", { ascending: true }).range(x, y);
+    return aplicarKeyset(q, "pay_time", "order_sn", cursor, limite);
   });
   const naoPagos: NaoPagoShopee[] = linhas.map((r) => ({ createTime: (r.create_time as string) ?? null, detailFetchedAt: (r.detail_fetched_at as string) ?? null }));
   const fim = a.fim.getTime();
@@ -680,7 +726,7 @@ export async function contarNaoPagosSemObservacaoShopee(
     q = sem ? q.is("detail_fetched_at", null) : q.lt("detail_fetched_at", a.fimIso);
     if (ESTADOS_TERMINAIS_VERIFICADOS.length) q = q.not("order_status", "in", `(${ESTADOS_TERMINAIS_VERIFICADOS.join(",")})`);
     const { count, error } = await q;
-    if (error || count === null || count === undefined) throw new Error("leitura_falhou");
+    if (error || count === null || count === undefined) falhaDeLeitura("shopee_contagem_nao_pagos", error);
     total += count;
   }
   return total;
@@ -692,7 +738,7 @@ export async function contarEscrowPendenteShopee(
 ): Promise<number> {
   const { count, error } = await cliente.from("shopee_pedidos").select("order_sn", { count: "exact", head: true })
     .eq("user_id", a.userId).eq("loja_id", a.lojaId).eq("escrow_pendente", true).gte("pay_time", a.inicioIso).lt("pay_time", a.fimIso);
-  if (error || count === null || count === undefined) throw new Error("leitura_falhou");
+  if (error || count === null || count === undefined) falhaDeLeitura("shopee_contagem_escrow", error);
   return count;
 }
 

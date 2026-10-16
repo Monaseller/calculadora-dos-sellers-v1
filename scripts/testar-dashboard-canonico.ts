@@ -327,6 +327,12 @@ async function principal() {
     assert(/legadoIndisponivel \? "—"/.test(pg), "legado indisponível vira zero");
   });
 
+  t("L10. CORREÇÃO 57014: 5xx da rota registra código + etapa tipados (sem dono, loja, filtro ou valor); 4xx não polui o log", () => {
+    const rota = readFileSync(join(RAIZ, "app/api/vendas/resumo-canonico/route.ts"), "utf8").replace(/\r\n/g, "\n");
+    assert(rota.includes('if (status >= 500) console.error(`[GET /api/vendas/resumo-canonico] ${e.codigo} ${e.detalhe ?? ""}`.trim());'), "5xx sem log tipado");
+    assert(!/console\.error\([^)]*(userId|filtro|lojaId|request\.url)/.test(rota), "log com dado do pedido");
+  });
+
   await fila;
   console.log(`\n${falhou === 0 ? "✓" : "✗"} DASHBOARD-CANONICO — ${passou} passaram, ${falhou} falharam`);
   process.exit(falhou === 0 ? 0 : 1);

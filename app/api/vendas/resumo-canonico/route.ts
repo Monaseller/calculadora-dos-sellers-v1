@@ -27,7 +27,10 @@ export async function GET(request: Request) {
     return NextResponse.json(await consultarResumoVendasDashboard(userId, filtro));
   } catch (e) {
     if (e instanceof ErroVendasCanonicas) {
-      return NextResponse.json({ erro: e.codigo }, { status: statusDoErroResumo(e) });
+      const status = statusDoErroResumo(e);
+      // 5xx: codigo + etapa tipados (ex.: LEITURA_FALHOU mercado_livre:leitura_falhou) — sem filtro, dono, loja ou valor
+      if (status >= 500) console.error(`[GET /api/vendas/resumo-canonico] ${e.codigo} ${e.detalhe ?? ""}`.trim());
+      return NextResponse.json({ erro: e.codigo }, { status });
     }
     console.error("[GET /api/vendas/resumo-canonico] falha:", e instanceof Error ? e.message : String(e));
     return NextResponse.json({ erro: "Não foi possível carregar o resumo de vendas." }, { status: 500 });

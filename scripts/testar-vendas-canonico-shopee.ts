@@ -465,34 +465,172 @@ async function principal() {
     assert(!/from ["'](react|next\/)/.test(s) && !/@\/components|@\/app/.test(s), "importa UI");
   });
 
-  // ── GATE DE DESEMPENHO: leituras em paralelo — mesmo conjunto, mesma ordem, mesma parada ──
-  const fonte = (n: number, falharEm = -1) => {
-    const linhas = Array.from({ length: n }, (_, i) => ({ i }));
-    const chamadas: number[] = [];
-    const consulta = async (de: number, ate: number) => {
-      chamadas.push(de);
-      await new Promise((r) => setTimeout(r, (7 * de) % 5));   // respostas fora de ordem
-      return de === falharEm ? { data: null, error: { message: "x" } } : { data: linhas.slice(de, ate + 1), error: null };
-    };
-    return { consulta, chamadas };
+  // ── CORRECAO DO 57014: paginacao KEYSET (data, id) — sem OFFSET, sem varrer a PK; mesmo conjunto, sem perda/duplicata ──
+  const ML = await import("../lib/vendas/canonico/ml");
+  /** Banco em memoria com a semantica do PostgREST que os leitores usam (inclusive `or`, `order` multiplo e `limit`). */
+  const bancoKeyset = (tabelas: Record<string, any[]>, opc: { falhar?: (tabela: string, n: number) => boolean; ignorarCursor?: boolean } = {}) => {
+    const chamadas: { tabela: string; filtros: string[]; ordens: string[]; limite: number | null; or: string | null; range: boolean; head: boolean }[] = [];
+    const ts = (v: unknown) => typeof v === "string" && /^\d{4}-\d\d-\d\dT/.test(v) ? Date.parse(v) : NaN;
+    const cmp = (a: any, b: any) => { const x = ts(a), y = ts(b); if (!isNaN(x) && !isNaN(y)) return x - y; return a < b ? -1 : a > b ? 1 : 0; };
+    const nulo = (v: unknown) => v === null || v === undefined;
+    return { from(tabela: string) {
+      const q = { tabela, filtros: [] as string[], ordens: [] as string[], limite: null as number | null, or: null as string | null, range: false, head: false };
+      const preds: ((r: any) => boolean)[] = [];
+      chamadas.push(q);
+      const api: any = {
+        select(_c: string, o?: { head?: boolean }) { if (o?.head) q.head = true; return api; },
+        eq(c: string, v: any) { q.filtros.push(`eq:${c}`); preds.push((r) => String(r[c]) === String(v)); return api; },
+        gte(c: string, v: any) { q.filtros.push(`gte:${c}`); preds.push((r) => !nulo(r[c]) && cmp(r[c], v) >= 0); return api; },
+        lt(c: string, v: any) { q.filtros.push(`lt:${c}`); preds.push((r) => !nulo(r[c]) && cmp(r[c], v) < 0); return api; },
+        gt(c: string, v: any) { q.filtros.push(`gt:${c}`); if (!opc.ignorarCursor) preds.push((r) => !nulo(r[c]) && cmp(r[c], v) > 0); return api; },
+        is(c: string, v: any) { q.filtros.push(`is:${c}`); preds.push((r) => (r[c] ?? null) === v); return api; },
+        in(c: string, vs: any[]) { q.filtros.push(`in:${c}`); preds.push((r) => vs.map(String).includes(String(r[c]))); return api; },
+        not(c: string, _op: string, _v: string) { q.filtros.push(`not:${c}`); return api; },
+        or(expr: string) {
+          q.or = expr;
+          const termos = expr.split(/,(?=[a-z_]+\.gt\.)/).map((t) => { const m = t.match(/^([a-z_]+)\.gt\."(.*)"$/); if (!m) throw new Error(`or invalido: ${t}`); return m; });
+          if (!opc.ignorarCursor) preds.push((r) => termos.some(([, c, v]) => !nulo(r[c]) && cmp(r[c], v) > 0));
+          return api;
+        },
+        order(c: string) { q.ordens.push(c); return api; },
+        limit(n: number) { q.limite = n; return api; },
+        range() { q.range = true; return api; },
+        then(ok: any, ko: any) {
+          const n = chamadas.filter((x) => x.tabela === tabela).length;
+          if (opc.falhar?.(tabela, n)) return Promise.resolve({ data: null, count: null, error: { code: "57014", message: "canceling statement due to statement timeout" } }).then(ok, ko);
+          let linhas = (tabelas[tabela] ?? []).filter((r) => preds.every((p) => p(r)));
+          if (q.head) return Promise.resolve({ data: null, count: linhas.length, error: null }).then(ok, ko);
+          linhas = [...linhas].sort((a, b) => { for (const c of q.ordens) { const d = nulo(a[c]) && nulo(b[c]) ? 0 : nulo(a[c]) ? 1 : nulo(b[c]) ? -1 : cmp(a[c], b[c]); if (d) return d; } return 0; });
+          if (q.limite !== null) linhas = linhas.slice(0, q.limite);
+          return Promise.resolve({ data: linhas, error: null }).then(ok, ko);
+        },
+      };
+      return api;
+    }, chamadas };
   };
-  t("PG-1. paginar em ondas: 4.321 linhas → TODAS, na ordem, sem duplicata; para na 1a página curta", async () => {
-    const f = fonte(4321);
-    const r = await S.paginar<{ i: number }>(f.consulta);
-    assert(r.length === 4321 && r.every((x, k) => x.i === k), `len ${r.length}`);
-    assert(JSON.stringify([...f.chamadas].sort((x, y) => x - y)) === JSON.stringify([0, 1000, 2000, 3000, 4000, 5000, 6000, 7000]), JSON.stringify(f.chamadas));   // 2 ondas; 5000–7000 vazias, descartadas
+  const capturarErros = async <T,>(f: () => Promise<T>) => {
+    const antes = console.error; const msgs: string[] = []; console.error = (...a: any[]) => { msgs.push(a.map(String).join(" ")); };
+    try { return { r: await f(), msgs, erro: null as string | null }; } catch (e: any) { return { r: null as T | null, msgs, erro: e?.message ?? String(e) }; } finally { console.error = antes; }
+  };
+
+  // ML: 2.600 pedidos de setembro numa loja; 1.500 deles no MESMO segundo (atravessa as paginas 1→2); bordas de dia/mes;
+  // outra loja do mesmo dono e outro dono com os mesmos order_id (isolamento)
+  const DONO = "dono-ks", ML_K = "aaaaaaaa-0000-4000-8000-0000000000ks", ML_K2 = "aaaaaaaa-0000-4000-8000-0000000000k2";
+  const mlPedido = (loja: string, user: string, i: number, quando: string, valor = 10) => ({ user_id: user, loja_id: loja, order_id: `2000${String(i).padStart(7, "0")}`,
+    date_closed: quando, cancel_detail_code: null, total_amount: valor, unidades: 1 + (i % 3), fetched_at: "2026-10-15T00:00:00.000Z" });
+  const mundoML = () => {
+    const ped: any[] = [];
+    for (let i = 0; i < 2600; i++) {
+      const quando = i < 1500 ? "2026-09-10T15:00:00.000Z"                                  // 1.500 empatados no timestamp
+        : new Date(Date.parse("2026-09-01T03:00:00.000Z") + (i * 997 % 2592000) * 1000).toISOString();
+      ped.push(mlPedido(ML_K, DONO, (i * 7919) % 100000, quando, 10 + (i % 17)));            // order_id fora da ordem da data
+    }
+    ped.push(mlPedido(ML_K, DONO, 99990, "2026-09-01T03:00:00.000Z", 1));                  // 1a fronteira: 01/09 00:00 SP (entra)
+    ped.push(mlPedido(ML_K, DONO, 99991, "2026-10-01T02:59:59.999Z", 2));                  // 30/09 23:59:59.999 SP (entra)
+    ped.push(mlPedido(ML_K, DONO, 99992, "2026-10-01T03:00:00.000Z", 1000));               // 01/10 00:00 SP (fora)
+    ped.push(mlPedido(ML_K, DONO, 99993, "2026-09-01T02:59:59.999Z", 1000));               // 31/08 23:59:59.999 SP (fora)
+    for (let i = 0; i < 300; i++) ped.push(mlPedido(ML_K2, DONO, i, "2026-09-10T15:00:00.000Z", 5));
+    for (let i = 0; i < 300; i++) ped.push({ ...mlPedido(ML_K, "outro-dono", i, "2026-09-10T15:00:00.000Z", 5) });
+    return {
+      lojas: [{ id: ML_K, user_id: DONO, marketplace: "ML" }, { id: ML_K2, user_id: DONO, marketplace: "ML" }],
+      ml_pedidos: ped,
+      sync_jobs: [ML_K, ML_K2].map((l) => ({ user_id: DONO, loja_id: l, marketplace: "ML", campo_tempo: "date_closed", janela_inicio: "2026-08-25T03:00:00.000Z", janela_fim: "2026-10-05T03:00:00.000Z", listagem_completa: true, status: "concluido" })),
+    };
+  };
+  const esperadoML = (m: any, loja: string) => {
+    const set = m.ml_pedidos.filter((p: any) => p.user_id === DONO && p.loja_id === loja && Date.parse(p.date_closed) >= Date.parse("2026-09-01T03:00:00.000Z") && Date.parse(p.date_closed) < Date.parse("2026-10-01T03:00:00.000Z"));
+    // a mesma conversao que o leitor faz da linha do banco
+    return { n: set.length, metricas: ML.calcularMetricasML(set.map((r: any) => ({ lojaId: r.loja_id, orderId: r.order_id, dateClosed: r.date_closed, cancelCode: r.cancel_detail_code, totalAmount: r.total_amount, unidades: r.unidades, fetchedAt: r.fetched_at }))) };
+  };
+  t("KS-1. ML: 2.604 pedidos (1.500 no MESMO segundo, cruzando páginas) → todos exatamente 1x; fronteiras de dia/mês em BRT; métricas = cálculo oficial", async () => {
+    const m = mundoML(); const b = bancoKeyset(m);
+    const r = await ML.lerVendasML(b as any, { userId: DONO, de: "2026-09-01", ate: "2026-09-30", lojaIds: [ML_K] });
+    const e = esperadoML(m, ML_K);
+    assert(e.n === 2602, `pré-condição ${e.n}`);
+    assert(r.lojas[0].completude === "COMPLETE" && JSON.stringify(r.lojas[0].metricas) === JSON.stringify(e.metricas), `${JSON.stringify(r.lojas[0].metricas)} ≠ ${JSON.stringify(e.metricas)}`);
+    const pags = b.chamadas.filter((c) => c.tabela === "ml_pedidos");
+    assert(pags.length === 3 && pags.every((c) => !c.range && c.limite === 1000 && JSON.stringify(c.ordens) === JSON.stringify(["date_closed", "order_id"])), JSON.stringify(pags.map((c) => [c.limite, c.ordens, c.range])));
+    assert(pags[0].or === null && pags[1].or !== null && /^date_closed\.gt\."[^"]+",order_id\.gt\."[^"]+"$/.test(pags[1].or!) && pags[1].filtros.filter((f) => f === "gte:date_closed").length === 2, JSON.stringify(pags[1]));
   });
-  t("PG-2. paginar: múltiplo EXATO de 1000 (3000) termina com todas; 0 linhas → vazio; < 1000 → uma onda", async () => {
-    const a3 = await S.paginar<{ i: number }>(fonte(3000).consulta);
-    assert(a3.length === 3000 && a3[2999].i === 2999, `3000 → ${a3.length}`);
-    assert((await S.paginar(fonte(0).consulta)).length === 0, "vazio");
-    const f = fonte(707); const r = await S.paginar<{ i: number }>(f.consulta);
-    assert(r.length === 707 && f.chamadas.length === 4, `707 → ${r.length} / ${f.chamadas.length} chamadas`);
+  t("KS-2. ML: isolamento — outra loja do dono e outro dono com os MESMOS order_id/timestamps nunca entram; loja 2 sozinha = 300", async () => {
+    const m = mundoML();
+    const r = await ML.lerVendasML(bancoKeyset(m) as any, { userId: DONO, de: "2026-09-01", ate: "2026-09-30" });
+    const k = r.lojas.find((l: any) => l.lojaId === ML_K)!, k2 = r.lojas.find((l: any) => l.lojaId === ML_K2)!;
+    assert(JSON.stringify(k.metricas) === JSON.stringify(esperadoML(m, ML_K).metricas) && k2.metricas!.pedidos === 300 && k2.metricas!.vendas === 1500, JSON.stringify([k.metricas, k2.metricas]));
   });
-  t("PG-3. paginar: erro em QUALQUER página da onda → leitura_falhou (nunca resultado parcial)", async () => {
-    let e = ""; try { await S.paginar(fonte(4321, 2000).consulta); } catch (x: any) { e = x.message; }
+  t("KS-3. keyset: múltiplo EXATO de 1000 (3.000) termina com todas (última página vazia); 0 → vazio; 2.500 empatados no mesmo valor → sem perda/duplicata", async () => {
+    for (const [n, empatados] of [[3000, false], [0, false], [2500, true]] as const) {
+      const linhas = Array.from({ length: n }, (_, i) => ({ id: `K${String((i * 37) % n).padStart(5, "0")}`, dt: empatados ? "2026-09-10T15:00:00.000Z" : new Date(Date.parse("2026-09-01T03:00:00.000Z") + Math.floor(i / 3) * 1000).toISOString() }));
+      const b = bancoKeyset({ x: linhas });
+      const r = await S.paginarKeyset<any>("teste", "dt", "id", (cur, lim) => S.aplicarKeyset(b.from("x").select("*"), "dt", "id", cur, lim));
+      const ids = r.map((x) => x.id);
+      assert(r.length === n && new Set(ids).size === n, `${n}: ${r.length} / únicos ${new Set(ids).size}`);
+      assert(b.chamadas.length === Math.floor(n / 1000) + 1, `${n}: ${b.chamadas.length} páginas`);
+    }
+  });
+  t("KS-4. falha em página INTERMEDIÁRIA (57014 na 2a) → leitura_falhou, nunca parcial; log com etapa + código, sem filtros/ids/dono", async () => {
+    const m = mundoML();
+    const c = await capturarErros(() => ML.lerVendasML(bancoKeyset(m, { falhar: (t, n) => t === "ml_pedidos" && n === 2 }) as any, { userId: DONO, de: "2026-09-01", ate: "2026-09-30", lojaIds: [ML_K] }));
+    assert(c.erro === "leitura_falhou", c.erro ?? "não lançou");
+    assert(c.msgs.length === 1 && c.msgs[0] === "[vendas-canonico] leitura falhou etapa=ml_pedidos codigo=57014", JSON.stringify(c.msgs));
+    assert(!c.msgs[0].includes(DONO) && !c.msgs[0].includes(ML_K) && !/2000\d{7}/.test(c.msgs[0]), "log vaza dado");
+  });
+  t("KS-5. cursor que não avança numa página cheia (banco ignorando o filtro) → falha fechado na 2a página, nunca laço", async () => {
+    const linhas = Array.from({ length: 2500 }, (_, i) => ({ id: `K${i}`, dt: "2026-09-10T15:00:00.000Z" }));
+    // teto do simulador: sem a trava, o laco acabaria so aqui (6a pagina, outro codigo) — o teste falha, nao trava
+    const b = bancoKeyset({ x: linhas }, { ignorarCursor: true, falhar: (_t, n) => n > 5 });
+    const c = await capturarErros(() => S.paginarKeyset<any>("teste", "dt", "id", (cur, lim) => S.aplicarKeyset(b.from("x").select("*"), "dt", "id", cur, lim)));
+    assert(c.erro === "leitura_falhou" && b.chamadas.length === 2 && c.msgs.some((x) => x.includes("codigo=linha_repetida")), `${c.erro} / ${b.chamadas.length} / ${c.msgs.join(" | ")}`);
+  });
+  t("KS-6. valor do cursor com aspas/barra → falha fechado (nunca monta filtro com conteúdo arbitrário)", () => {
+    let e = ""; try { S.aplicarKeyset(bancoKeyset({}).from("x"), "dt", "id", { valor: '2026"x', id: "1" }, 1000); } catch (x: any) { e = x.message; }
     assert(e === "leitura_falhou", e || "não lançou");
   });
+
+  // Shopee: 2.300 pagos (1.200 no mesmo segundo) com itens + 1.150 NÃO pagos (pay_time NULL) no recorte da regra B
+  const SH_K = "aaaaaaaa-0000-4000-8000-000000000shk";
+  const mundoShopee = (detalheNaoPagos: string) => {
+    const sp: any[] = [], itens: any[] = [];
+    for (let i = 0; i < 2300; i++) {
+      const pay = i < 1200 ? "2026-09-12T18:00:00.000Z" : new Date(Date.parse("2026-09-01T03:00:00.000Z") + (i * 1013 % 2592000) * 1000).toISOString();
+      const sn = `SN${String((i * 7907) % 100000).padStart(6, "0")}`;
+      sp.push({ user_id: DONO, loja_id: SH_K, order_sn: sn, order_status: "COMPLETED", create_time: new Date(Date.parse(pay) - 3600000).toISOString(), pay_time: pay, update_time: pay,
+        detail_fetched_at: "2026-10-15T00:00:00.000Z", escrow_fetched_at: "2026-10-15T00:00:00.000Z", escrow_update_time: pay, original_shopee_discount: 0, pix_discount: 0 });
+      itens.push({ user_id: DONO, marketplace: "Shopee", loja_id: SH_K, order_id: sn, qtd: 1 + (i % 2), valor_unit: 20, escrow_voucher_seller: 0, escrow_voucher_shopee: 0, escrow_coin: 0 });
+    }
+    for (let i = 0; i < 1150; i++) sp.push({ user_id: DONO, loja_id: SH_K, order_sn: `NP${String((i * 31) % 5000).padStart(5, "0")}`, order_status: "CANCELLED",
+      create_time: "2026-09-05T12:00:00.000Z", pay_time: null, update_time: "2026-09-05T12:00:00.000Z", detail_fetched_at: detalheNaoPagos,
+      escrow_fetched_at: null, escrow_update_time: null, original_shopee_discount: null, pix_discount: null });
+    return { lojas: [{ id: SH_K, user_id: DONO, marketplace: "Shopee" }], shopee_pedidos: sp, pedidos: itens,
+      sync_jobs: [{ user_id: DONO, loja_id: SH_K, marketplace: "Shopee", campo_tempo: "create_time", janela_inicio: "2026-08-15T03:00:00.000Z", janela_fim: "2026-10-05T03:00:00.000Z", listagem_completa: true, status: "concluido" }] };
+  };
+  t("KS-7. Shopee: 2.300 pagos (1.200 empatados) → todos 1x, itens de todos, métricas = cálculo oficial; páginas keyset (pay_time, order_sn)", async () => {
+    const m = mundoShopee("2026-10-15T00:00:00.000Z"); const b = bancoKeyset(m);
+    const r = await S.lerVendasShopee(b as any, { userId: DONO, de: "2026-09-01", ate: "2026-09-30" });
+    const pagos = m.shopee_pedidos.filter((p: any) => p.pay_time).map((r: any) => ({ lojaId: r.loja_id, orderSn: r.order_sn, orderStatus: r.order_status, createTime: r.create_time, payTime: r.pay_time, updateTime: r.update_time,
+      detailFetchedAt: r.detail_fetched_at, escrowFetchedAt: r.escrow_fetched_at, escrowUpdateTime: r.escrow_update_time, originalShopeeDiscount: r.original_shopee_discount, pixDiscount: r.pix_discount }));
+    const its = m.pedidos.map((r: any) => ({ lojaId: r.loja_id, orderSn: r.order_id, precoUnitario: r.valor_unit, quantidade: r.qtd, voucherVendedor: 0, voucherShopee: 0, moedas: 0 }));
+    const esperado = S.calcularMetricasShopee(pagos, its).metricas;
+    assert(r.lojas[0].completude === "COMPLETE" && JSON.stringify(r.lojas[0].metricas) === JSON.stringify(esperado) && esperado.pedidos === 2300, `${r.lojas[0].completude} ${JSON.stringify(r.lojas[0].metricas)}`);
+    const pags = b.chamadas.filter((c) => c.tabela === "shopee_pedidos" && !c.head);
+    assert(pags.length === 3 && pags.every((c) => !c.range && JSON.stringify(c.ordens) === JSON.stringify(["pay_time", "order_sn"])), JSON.stringify(pags.map((c) => c.ordens)));
+  });
+  t("KS-8. Shopee não pagos (pay_time NULL): 1.150 linhas em keyset só pelo order_sn — conferência com a contagem oficial PASSA (nada perdido)", async () => {
+    const m = mundoShopee("2026-09-20T00:00:00.000Z");   // observados ANTES do fim → período não COMPLETE → lê as linhas
+    const b = bancoKeyset(m);
+    const r = await S.lerVendasShopee(b as any, { userId: DONO, de: "2026-09-01", ate: "2026-09-30", observado: true });
+    const dias = Object.values(r.lojas[0].observadoPorDia ?? {});
+    assert(r.lojas[0].completude !== "COMPLETE" && dias.length === 30 && !dias.some((d: any) => d.motivos.includes("nao_pagos_divergem_da_contagem_oficial")), JSON.stringify(dias.slice(0, 2)));
+    const np = b.chamadas.filter((c) => c.tabela === "shopee_pedidos" && !c.head && c.filtros.includes("is:pay_time"));
+    assert(np.length === 2 && np[1].filtros.includes("gt:order_sn") && np[1].or === null && JSON.stringify(np[0].ordens) === JSON.stringify(["pay_time", "order_sn"]), JSON.stringify(np.map((c) => c.filtros)));
+  });
+  t("KS-9. nenhuma leitura de pedidos usa OFFSET/range (o padrão que estourou 8 s)", () => {
+    for (const f of ["lib/vendas/canonico/ml.ts", "lib/vendas/canonico/shopee.ts"]) {
+      const src = readFileSync(join(RAIZ, f), "utf8").replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
+      assert(!/\.range\(/.test(src) && !/PAGINAS_EM_PARALELO/.test(src), `${f}: range/offset ou páginas em paralelo`);
+    }
+  });
+
   t("PG-4. emParalelo: resultado na ORDEM dos itens, teto de concorrência respeitado, erro rejeita", async () => {
     let voo = 0, pico = 0;
     const r = await S.emParalelo(Array.from({ length: 20 }, (_, i) => i), 6, async (x) => {
