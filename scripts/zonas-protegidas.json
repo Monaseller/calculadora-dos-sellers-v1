@@ -15,7 +15,7 @@
   "arquivos": {
     ".env.example": "c4b82f1f45595370fe6763493db862602a861a64a9d58f0fd237954fe574637d",
     "app/(app)/dashboard/page.tsx": "7a6fdadbd2b588c4e3f7580512615fab91464608b10fa6933324f3ab78ae9028",
-    "app/(app)/vendas/page.tsx": "4b8e8aa19f238c22eae0fc88f0cadf65666d2bac55f9c6e5c0fef5c6f9e783f9",
+    "app/(app)/vendas/page.tsx": "0722e3e5b8a396b015a7eae82d984d46a8a677a8a4d417718aefcd3358e8948c",
     "lib/comissoes-mercado-livre.ts": "3f7f976661e8f4dc57d35902834e77228cc1941f809b2aa2a5e0bd2a18d5c557",
     "lib/comissoes-shopee.ts": "1ca7224be8e6e09f855171c457a58210562dd4a0584a6196e612081cda4b9a40",
     "lib/shopee-financeiro.ts": "6bba23a2ce2a52cc9385162f9d5b426a59814136512ac876f42564d2ade6235a",

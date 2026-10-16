@@ -360,7 +360,7 @@ async function principal() {
   });
   t("C-23. o refresh canônico segue pelo coordenador (Sincronizar → POST de métricas com revalidar), sem depender do GET legado", async () => {
     const pg = fonte("app/(app)/vendas/page.tsx").replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
-    assert(/if \(mkt === "ML"\) \{\s*const \[, ok\] = await Promise\.all\(\[lerMetricasML\(from, to, force\), lerTabelaML\(from, to, null\)\]\);/.test(pg), "Sincronizar do ML fora da revalidação canônica");
+    assert(/if \(mkt === "ML"\) \{\s*const \[, t\] = await Promise\.all\(\[lerMetricasML\(from, to, force\), lerTabelaML\(from, to, null, force\)\]\);/.test(pg), "Sincronizar do ML fora da revalidação canônica");
     semear();
     db.sync_jobs = [{ id: "j0", user_id: U, loja_id: ML_A, marketplace: "ML", tipo: "backfill", campo_tempo: "date_closed", janela_inicio: "2026-09-01T03:00:00.000Z", janela_fim: "2026-09-05T03:00:00.000Z", listagem_completa: true, status: "concluido", concluido_em: "2026-10-05T12:00:00.000Z", criado_em: "2026-10-05T12:00:00.000Z" }];
     silenciar(); let m: any;

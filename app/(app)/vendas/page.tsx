@@ -9,6 +9,7 @@ import { avisoCustoLive, custoCadastradoLive, detalheLiquidoML, seloLucroLive, t
 import { codigoAnuncio, codigoVenda, copiarCodigo } from "./codigos-venda";
 import { CHAVE_LOJA_ML_VENDAS, type LojaMLVendas, escolherLojaMLInicial, lojasMLDaLista, lojasMLDaRecusa } from "./loja-ml";
 import { cardsMetricasML, linhaProviderParaVendaRow, METRICAS_ML_INDISPONIVEIS, rotuloMetricasML, textoComponenteML, type LinhaProviderML, type MetricasMLTela } from "./ml-provider";
+import { chaveMetricasML, chaveTabelaML, classificarRespostaML, criarControleConsultasML } from "./ml-consultas";
 
 // ── Tipos ──────────────────────────────────────────────────────────────────
 interface VendaRow {
@@ -91,6 +92,13 @@ export default function VendasPage() {
   const listaMLFalhouRef = useRef(false);   // lista de lojas indisponível → sync com ML bloqueado (A5-B.1)
   const [codigoCopiado, setCodigoCopiado] = useState<string | null>(null);
   const [shopeeLojaId, setShopeeLojaId] = useState<string | null>(null);
+  // Vendas A3.4 (P1): cada leitura do ML é uma CONSULTA (loja + período [+ visão]) com geração — resposta de consulta
+  // substituída é descartada (P1-1); a mesma consulta não é refeita por filtro local (P1-4). O ML tem loading PRÓPRIO:
+  // a tabela + financeiro live não seguram a página nem a Shopee (P1-3).
+  const [ctlMetricasML] = useState(criarControleConsultasML);
+  const [ctlTabelaML] = useState(criarControleConsultasML);
+  const [mlCarregando, setMlCarregando] = useState(false);
+  const shopeeEmVoo = useRef<{ url: string; promessa: Promise<{ falhou: any; data: any }> } | null>(null);
   const [loading,   setLoading]   = useState(false);
   const [erro,      setErro]      = useState<string | null>(null);
   const [semConexao, setSemConexao] = useState(false);
@@ -127,6 +135,7 @@ export default function VendasPage() {
   function tratarRecusaLojaML(data: any, lojaDaChamada: string | null): boolean {
     if (data?.codigo === "ML_STORE_SELECTION_REQUIRED") {
       setLojasML(lojasMLDaRecusa(data.lojas)); setExigeEscolhaML(true); prontoMLRef.current = false; setMlMetricas(null); setMlProvider(null);
+      ctlMetricasML.invalidar(); ctlTabelaML.invalidar(); setMlCarregando(false);
       return true;
     }
     if (data?.codigo === "LOJA_ML_INVALIDA") {   // loja escolhida deixou de valer: sem fallback, nova escolha
@@ -134,55 +143,71 @@ export default function VendasPage() {
       lojaMLRef.current = null; prontoMLRef.current = false;
       setLojasML((ls) => (ls ?? []).filter((l) => l.id !== lojaDaChamada));
       setLojaMLSel(null); setExigeEscolhaML(true); setMlMetricas(null); setMlProvider(null);
+      ctlMetricasML.invalidar(); ctlTabelaML.invalidar(); setMlCarregando(false);
       return true;
     }
     return false;
   }
 
   // Vendas A3.4 (Parte A): métricas do ML do serviço canônico. `revalidar` = pedido EXPLÍCITO (Sincronizar) → POST,
-  // que pede ao coordenador existente uma nova ingestão mesmo com o corpus fresco. Falha → "indisponíveis", sem número.
-  const lerMetricasML = useCallback(async (from: string, to: string, revalidar = false) => {
+  // que pede ao coordenador existente uma nova ingestão mesmo com o corpus fresco. Falha → "indisponíveis", sem número;
+  // sem conta ML (SEM_CONTA) → a seção some. Só a resposta da consulta VIGENTE é aplicada (P1-1).
+  const lerMetricasML = useCallback(async (from: string, to: string, revalidar = false, forcar = revalidar) => {
     if (!prontoMLRef.current) return;
     const loja = lojaMLRef.current;
-    let m: MetricasMLTela = METRICAS_ML_INDISPONIVEIS;
+    const bilhete = ctlMetricasML.iniciar(chaveMetricasML(loja, from, to), forcar);
+    if (!bilhete) return;   // a mesma consulta já está em voo/carregada (P1-4)
+    if (bilhete.novaChave) setMlMetricas(null);   // nunca os números de outro período sob o filtro novo
+    let ok = false;
     let d: any = null;
     try {
       const res = revalidar
         ? await fetch("/api/ml/vendas/metricas", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ de: from, ate: to, ...(loja ? { loja_id: loja } : {}) }) })
         : await fetch(`/api/ml/vendas/metricas?${new URLSearchParams({ de: from, ate: to, ...(loja ? { loja_id: loja } : {}) })}`);
+      ok = res.ok;
       d = await res.json().catch(() => null);
-      if (res.ok && (d?.estado === "COMPLETE" || d?.estado === "PARTIAL" || d?.estado === "FAILED")) m = d as MetricasMLTela;
     } catch {}
+    if (!ctlMetricasML.vigente(bilhete)) return;   // resposta de consulta substituída: descarta
     if (lojaMLRef.current !== loja) return;   // loja trocada no meio: descarta
     if (tratarRecusaLojaML(d, loja)) return;
-    setMlMetricas(m);
+    const r = classificarRespostaML(ok, d, (c) => c.estado === "COMPLETE" || c.estado === "PARTIAL" || c.estado === "FAILED");
+    setMlMetricas(r === "OK" ? (d as MetricasMLTela) : r === "SEM_CONTA" ? null : METRICAS_ML_INDISPONIVEIS);
   }, []); // eslint-disable-line
 
   // Vendas A3.4 (Partes B/C): tabela do ML pelo PROVIDER, paginada no servidor (cursor dia:offset), com o financeiro
-  // live SÓ das linhas da página. `cursor` null = primeira página (substitui); com cursor = "Carregar mais" (acrescenta).
-  // Falha → aviso; NUNCA o legado no lugar. Devolve se a leitura deu certo.
-  const lerTabelaML = useCallback(async (from: string, to: string, cursor: string | null): Promise<boolean> => {
-    if (!prontoMLRef.current) return true;
+  // live SÓ das linhas da página. `cursor` null = primeira página de uma consulta (substitui); com cursor = "Carregar
+  // mais" da consulta VIGENTE (acrescenta). Falha → aviso; NUNCA o legado no lugar. Sem conta ML → a seção some.
+  const lerTabelaML = useCallback(async (from: string, to: string, cursor: string | null, forcar = false): Promise<"OK" | "SEM_CONTA" | "FALHA" | "IGNORADA"> => {
+    if (!prontoMLRef.current) return "IGNORADA";
     const loja = lojaMLRef.current;
     const visao = dateField === "pagamento" ? "pago" : "fechamento";
+    const bilhete = cursor ? ctlTabelaML.vigenteAgora() : ctlTabelaML.iniciar(chaveTabelaML(loja, from, to, visao), forcar);
+    if (!bilhete) return "IGNORADA";   // a mesma consulta já está em voo/carregada: filtro local não reconsulta (P1-4)
     if (cursor) setMlProvider(p => (p ? { ...p, carregandoMais: true } : p));
+    else { if (bilhete.novaChave) setMlProvider(null); setMlCarregando(true); }
     const ctrl = new AbortController();
     const tid = setTimeout(() => ctrl.abort(), 58000);   // a rota tem 60 s (busca + financeiro live com prazo)
+    let ok = false;
     let d: any = null;
     try {
       const res = await fetch(`/api/ml/vendas/pedidos?${new URLSearchParams({ de: from, ate: to, visao, ...(loja ? { loja_id: loja } : {}), ...(cursor ? { cursor } : {}) })}`, { signal: ctrl.signal });
+      ok = res.ok;
       d = await res.json().catch(() => null);
     } catch {} finally { clearTimeout(tid); }
-    if (lojaMLRef.current !== loja) return false;
-    if (tratarRecusaLojaML(d, loja)) return false;
-    const linhas: VendaRow[] | null = Array.isArray(d?.linhas)
-      ? (d.linhas as LinhaProviderML[]).map(l => linhaProviderParaVendaRow(l, visao)).filter((r): r is NonNullable<typeof r> => r !== null)
+    if (!ctlTabelaML.vigente(bilhete)) return "IGNORADA";   // consulta substituída (loja/período/visão/página): não toca estado
+    if (lojaMLRef.current !== loja) return "IGNORADA";
+    if (!cursor) setMlCarregando(false);
+    if (tratarRecusaLojaML(d, loja)) return "FALHA";
+    const r = classificarRespostaML(ok, d, (c) => Array.isArray(c.linhas));
+    if (r === "SEM_CONTA") { setMlProvider(null); return "SEM_CONTA"; }
+    const linhas: VendaRow[] | null = r === "OK"
+      ? (d.linhas as LinhaProviderML[]).map(l => linhaProviderParaVendaRow(l, visao)).filter((x): x is NonNullable<typeof x> => x !== null)
       : null;
     setMlProvider(p => {
       if (linhas === null) return cursor && p ? { ...p, carregandoMais: false, erro: true } : { linhas: [], cursor: null, carregandoMais: false, erro: true };
       return { linhas: cursor && p ? [...p.linhas, ...linhas] : linhas, cursor: typeof d.proximoCursor === "string" ? d.proximoCursor : null, carregandoMais: false, erro: d.erro != null };
     });
-    return linhas !== null;
+    return linhas !== null ? "OK" : "FALHA";
   }, [dateField]); // eslint-disable-line
 
   // Lê UM marketplace por vez. Nunca sobrescreve nem zera as linhas do OUTRO marketplace, e — em caso de falha/timeout
@@ -195,8 +220,8 @@ export default function VendasPage() {
     force = false
   ) => {
     if (mkt === "ML") {
-      const [, ok] = await Promise.all([lerMetricasML(from, to, force), lerTabelaML(from, to, null)]);
-      return { falhou: !ok, data: null as any };
+      const [, t] = await Promise.all([lerMetricasML(from, to, force), lerTabelaML(from, to, null, force)]);
+      return { falhou: t === "FALHA" || t === "SEM_CONTA", data: null as any };
     }
     const params = new URLSearchParams({ date_from: from, date_to: to, date_field: dateField });
     if (tags.length > 0) params.set("sku", tags.join(","));
@@ -207,6 +232,14 @@ export default function VendasPage() {
     if (force) params.set("sync", "1");
 
     const url  = `/api/shopee/vendas?${params}`;
+    // P1-4: a MESMA leitura da Shopee já em voo (ex.: data trocada) é reaproveitada, não repetida
+    if (!force && shopeeEmVoo.current?.url === url) return shopeeEmVoo.current.promessa;
+    const promessa = lerShopee(url);
+    shopeeEmVoo.current = { url, promessa };
+    try { return await promessa; } finally { if (shopeeEmVoo.current?.promessa === promessa) shopeeEmVoo.current = null; }
+  }, [dateField, lerMetricasML, lerTabelaML]); // eslint-disable-line
+
+  async function lerShopee(url: string): Promise<{ falhou: any; data: any }> {
     const ctrl = new AbortController();
     // force=true faz sync inline (pode levar bem mais que uma leitura de
     // cache) — mesmo timeout generoso que o antigo forceSync já usava.
@@ -230,7 +263,7 @@ export default function VendasPage() {
     // falha na Shopee: shopeeRows permanece como estava — nunca zera.
 
     return { falhou, data };
-  }, [dateField, lerMetricasML, lerTabelaML]);
+  }
 
   // Orquestra a leitura normal (montagem, mudança de filtro/data/date_field,
   // "Buscar", "Limpar"). NÃO dispara sincronização — só lê o cache atual.
@@ -241,29 +274,18 @@ export default function VendasPage() {
   ) => {
     setLoading(true);
     setErro(null);
+    const lerML     = loja === "todos" || loja === "ML";
+    const lerShopee = loja === "todos" || loja === "Shopee";
+    // P1-3: o ML (métricas + tabela + financeiro live das linhas visíveis) corre POR FORA do loading global — tem o
+    // próprio `mlCarregando`; a Shopee e a página não esperam o financeiro do ML.
+    const pML = lerML ? lerMarketplace("ML", from, to, tags, filtros) : Promise.resolve(null);
+    let resShopee: { falhou: any; data: any } | null = null;
     try {
-      const lerML     = loja === "todos" || loja === "ML";
-      const lerShopee = loja === "todos" || loja === "Shopee";
-
-      const [resML, resShopee] = await Promise.all([
-        lerML     ? lerMarketplace("ML",     from, to, tags, filtros) : Promise.resolve(null),
-        lerShopee ? lerMarketplace("Shopee", from, to, tags, filtros) : Promise.resolve(null),
-      ]);
-
-      const mlFalhou     = lerML     && resML?.falhou;
-      const shopeeFalhou = lerShopee && resShopee?.falhou;
-
-      // "Nenhuma conta conectada" só faz sentido quando não há NENHUM dado
-      // já exibido — se já havia linhas na tela, uma falha dupla e
-      // temporária não deve substituir a tabela pela tela de "desconectado"
-      // (mesma regra de preservação, aplicada também a este estado).
-      setSemConexao(!!(mlFalhou && shopeeFalhou) && (mlProvider?.linhas.length ?? 0) === 0 && shopeeRows.length === 0);
-
-      if (!(mlFalhou && shopeeFalhou)) {
-        const dML     = resML?.data;
+      resShopee = lerShopee ? await lerMarketplace("Shopee", from, to, tags, filtros) : null;
+      if (!(lerShopee && resShopee?.falhou)) {
         const dShopee = resShopee?.data;
-        setTotalPedidos((dML?.totalPedidos ?? 0) + (dShopee?.totalPedidos ?? 0));
-        const rawConta = dML?.conta || dShopee?.conta || "";
+        setTotalPedidos(dShopee?.totalPedidos ?? 0);
+        const rawConta = dShopee?.conta || "";
         const contaNorm = rawConta.toLowerCase().replace(/(?:^|\s)\S/g, (c: string) => c.toUpperCase());
         setConta(contaNorm);
         setUltimaSync(new Date().toLocaleTimeString("pt-BR"));
@@ -273,6 +295,12 @@ export default function VendasPage() {
     } finally {
       setLoading(false);
     }
+    // "Nenhuma conta conectada" só faz sentido quando os DOIS falharam e não há NENHUM dado já exibido — se já havia
+    // linhas na tela, uma falha dupla e temporária não deve substituir a tabela pela tela de "desconectado".
+    const resML = await pML.catch(() => null);
+    const mlFalhou     = lerML     && resML?.falhou;
+    const shopeeFalhou = lerShopee && resShopee?.falhou;
+    setSemConexao(!!(mlFalhou && shopeeFalhou) && (mlProvider?.linhas.length ?? 0) === 0 && shopeeRows.length === 0);
   }, [lerMarketplace, mlProvider?.linhas.length, shopeeRows.length]); // eslint-disable-line
 
   // ── Disparo de sincronização (botão "Sincronizar") ──────────────────────
@@ -304,7 +332,9 @@ export default function VendasPage() {
         if (data.status === "concluido") {
           setAtualizando(prev => ({ ...prev, [chave]: false }));
           setSyncMsg(prev => ({ ...prev, [chave]: null }));
-          lerMarketplace(mkt, dateFrom, dateTo, skuTags, [...filtrosCadastro, ...filtrosStatus]);
+          // P1-4: job concluído → releitura FORÇADA do ML (a mesma consulta, dados novos); a Shopee relê como sempre
+          if (mkt === "ML") { lerMetricasML(dateFrom, dateTo, false, true); lerTabelaML(dateFrom, dateTo, null, true); }
+          else lerMarketplace(mkt, dateFrom, dateTo, skuTags, [...filtrosCadastro, ...filtrosStatus]);
           return;
         }
         if (data.status === "erro") {
@@ -453,6 +483,7 @@ export default function VendasPage() {
     lojaMLRef.current = id; prontoMLRef.current = true;
     try { localStorage.setItem(CHAVE_LOJA_ML_VENDAS, id); } catch {}
     setLojaMLSel(id); setExigeEscolhaML(false); setMlMetricas(null); setMlProvider(null);   // a leitura vem do efeito abaixo
+    ctlMetricasML.invalidar(); ctlTabelaML.invalidar(); setMlCarregando(false);   // nada pendente da loja anterior vale
   }
 
   // Leitura ao montar E toda vez que o período, marketplace, date_field ou a loja ML escolhida mudar
@@ -667,7 +698,7 @@ export default function VendasPage() {
           <DateRangePicker
             from={dateFrom}
             to={dateTo}
-            onChange={(f, t) => { setDateFrom(f); setDateTo(t); refetchTudo(f, t, skuTags, [...filtrosCadastro, ...filtrosStatus]); }}
+            onChange={(f, t) => { setDateFrom(f); setDateTo(t); }}   // a leitura vem do efeito de período (uma vez só)
           />
         </div>
         {/* Plataforma */}
@@ -1216,7 +1247,14 @@ export default function VendasPage() {
         </div>
       )}
 
-      {!loading && !semConexao && !erro && filteredRows.length === 0 && (
+      {/* P1-3: o ML carrega por conta própria (tabela + financeiro live) — aviso discreto, sem segurar a página */}
+      {!loading && mlCarregando && lojaAtiva !== "Shopee" && (
+        <div style={{ margin: "0 0 12px", fontSize: "12px", fontWeight: 700, color: "#9099aa" }}>
+          ⟳ Buscando vendas do Mercado Livre e o financeiro das linhas…
+        </div>
+      )}
+
+      {!loading && !semConexao && !erro && filteredRows.length === 0 && !(mlCarregando && lojaAtiva !== "Shopee") && (
         <div style={{
           textAlign: "center", padding: "60px 20px",
           background: "#111318", border: "1px solid rgba(255,255,255,0.07)", borderRadius: "20px",
@@ -1425,7 +1463,7 @@ export default function VendasPage() {
             <button
               type="button"
               disabled={mlProvider.carregandoMais}
-              onClick={() => lerTabelaML(dateFrom, dateTo, mlProvider.erro && !mlProvider.cursor ? null : mlProvider.cursor)}
+              onClick={() => (mlProvider.cursor ? lerTabelaML(dateFrom, dateTo, mlProvider.cursor) : lerTabelaML(dateFrom, dateTo, null, true))}
               style={{ padding: "9px 14px", borderRadius: "10px", background: "rgba(255,230,0,0.08)", border: "1px solid rgba(255,230,0,0.25)", color: "#FFE600", fontWeight: 700, fontSize: "12px", cursor: mlProvider.carregandoMais ? "wait" : "pointer" }}
             >
               {mlProvider.carregandoMais ? "Carregando…" : mlProvider.cursor ? "Carregar mais vendas do Mercado Livre" : "Tentar de novo"}
