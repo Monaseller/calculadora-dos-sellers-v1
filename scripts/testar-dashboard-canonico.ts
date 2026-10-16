@@ -264,6 +264,22 @@ async function principal() {
     assert(p("marketplace=amazon&de=2026-10-04&ate=2026-10-04") === null && p("marketplace=todos&de=04/10/2026&ate=2026-10-04") === null && p("marketplace=todos&de=2026-10-04&ate=2026-10-04&loja_id=") === null, "invalidos");
   });
 
+  t("L4. MULTI-LOJA: loja_ids=a,b → lista (dedup); vazio, item malformado ou junto com loja_id → null (400, nunca 'todas')", () => {
+    const p = (q: string) => R.lerFiltroResumoDashboard(new URLSearchParams(q));
+    const A = "aaaaaaaa-0000-4000-8000-00000000000a", B = "aaaaaaaa-0000-4000-8000-0000000001aa";
+    const f = p(`marketplace=todos&de=2026-10-04&ate=2026-10-04&loja_ids=${A},${B},${A}`);
+    assert(f && JSON.stringify(f.lojaIds) === JSON.stringify([A, B]) && f.lojaId === null, JSON.stringify(f));
+    for (const q of ["loja_ids=", `loja_ids=${A},`, "loja_ids=nao-e-uuid", `loja_ids=${A}&loja_id=${B}`]) assert(p(`marketplace=todos&de=2026-10-04&ate=2026-10-04&${q}`) === null, `${q} aceito`);
+    assert(p("marketplace=todos&de=2026-10-04&ate=2026-10-04")?.lojaIds === null, "sem loja_ids mudou");
+  });
+  t("L5. Dashboard envia EXATAMENTE a seleção: todas → sem filtro; 1 → loja_id; 2+ → loja_ids; clique alterna só aquela loja (nunca vazio)", () => {
+    const pg = readFileSync(join(RAIZ, "app/(app)/dashboard/page.tsx"), "utf8").replace(/\r\n/g, "\n");
+    assert(/\.\.\.\(todasSelecionadas \? \{\} : idsSelecionados\.length === 1 \? \{ loja_id: idsSelecionados\[0\] \} : \{ loja_ids: idsSelecionados\.join\(","\) \}\),/.test(pg), "query canônica fora da seleção");
+    assert(/const marketplaceCanonico = todasSelecionadas \|\| mktsSelecionados\.size !== 1 \? "todos" : mktsSelecionados\.has\("Shopee"\) \? "shopee" : "mercado_livre";/.test(pg), "marketplace da seleção");
+    assert(/if \(atual\.has\(id\)\) \{ if \(atual\.size === 1\) return; atual\.delete\(id\); \}\s*else atual\.add\(id\);/.test(pg) && !/onChange\(new Set\(\[id\]\)\); \/\/ seleciona exclusivamente/.test(pg), "dropdown ainda exclusivo / permite seleção vazia");
+    assert(!/const lojaUnica = !todasSelecionadas && selecionadasArr\.length === 1/.test(pg), "regra antiga (2 de 3 → todos sem filtro) ainda presente");
+  });
+
   await fila;
   console.log(`\n${falhou === 0 ? "✓" : "✗"} DASHBOARD-CANONICO — ${passou} passaram, ${falhou} falharam`);
   process.exit(falhou === 0 ? 0 : 1);

@@ -5,7 +5,8 @@
  * lidos da camada canonica (consultarVendasCanonicas). O dono e SEMPRE a
  * sessao; `loja_id` so restringe dentro das lojas desse dono.
  *
- *   ?marketplace=mercado_livre|shopee|todos  &de=AAAA-MM-DD  &ate=AAAA-MM-DD  [&loja_id=uuid]
+ *   ?marketplace=mercado_livre|shopee|todos  &de=AAAA-MM-DD  &ate=AAAA-MM-DD  [&loja_id=uuid | &loja_ids=uuid,uuid]
+ *   (MULTI-LOJA: `loja_ids` = exatamente as lojas selecionadas, cada uma validada contra o dono)
  *
  * So leitura: nenhuma chamada a ML/Shopee, nenhum sync_job, nenhum worker.
  */

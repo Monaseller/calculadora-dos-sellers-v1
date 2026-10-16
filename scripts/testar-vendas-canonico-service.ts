@@ -510,6 +510,49 @@ async function principal() {
     assert(!/\.filter\(|l\.user_id|\.range\(/.test(corpo), "filtro em memoria / listagem global");
   });
 
+  console.log("\n[MS. MULTI-LOJA — conjunto explícito de lojas (loja_ids)]");
+  const soma = (rs: any[]) => ({ pedidos: rs.reduce((a, r) => a + r.metricas.combinadas.pedidos, 0), unidades: rs.reduce((a, r) => a + r.metricas.combinadas.unidades, 0),
+    vendas: Math.round(rs.reduce((a, r) => a + Math.round(r.metricas.combinadas.vendas * 100), 0)) / 100 });
+  const c3 = (r: any) => JSON.stringify({ pedidos: r.metricas.combinadas.pedidos, unidades: r.metricas.combinadas.unidades, vendas: r.metricas.combinadas.vendas });
+  const so = async (m: string, loja: string) => consultar({ userId: RD, marketplace: m, lojaId: loja, ...D04 });
+  t("MS-1. todas as lojas (sem filtro) = soma exata de cada loja isolada (ML_A + ML_B + Shopee)", async () => {
+    const [a, b, s, todas] = [await so("mercado_livre", ML_A), await so("mercado_livre", ML_B), await so("shopee", SH_A), await consultar({ userId: RD, marketplace: "todos", ...D04 })];
+    assert(c3(todas) === JSON.stringify(soma([a, b, s])), `${c3(todas)} ≠ ${JSON.stringify(soma([a, b, s]))}`);
+  });
+  t("MS-2. 2 de 3 (ML_A + Shopee): soma das DUAS; a loja desmarcada (ML_B) não entra; marketplace todos", async () => {
+    const [a, s] = [await so("mercado_livre", ML_A), await so("shopee", SH_A)];
+    const r = await consultar({ userId: RD, marketplace: "todos", lojaIds: [ML_A, SH_A], ...D04 });
+    assert(c3(r) === JSON.stringify(soma([a, s])) && r.cobertura.lojas.map((l: any) => l.lojaId).sort().join() === [ML_A, SH_A].sort().join(), c3(r));
+    assert(!r.cobertura.lojas.some((l: any) => l.lojaId === ML_B) && JSON.stringify(r.lojaIds) === JSON.stringify([ML_A, SH_A]), "loja desmarcada no escopo");
+  });
+  t("MS-3. duas lojas do MESMO marketplace (ML_A + ML_B) com marketplace mercado_livre = soma das duas, mesmo motor", async () => {
+    const [a, b] = [await so("mercado_livre", ML_A), await so("mercado_livre", ML_B)];
+    const r = await consultar({ userId: RD, marketplace: "mercado_livre", lojaIds: [ML_B, ML_A], ...D04 });
+    assert(c3(r) === JSON.stringify(soma([a, b])) && r.metricas.shopee === null, c3(r));
+  });
+  t("MS-4. loja de OUTRO dono no conjunto → LOJA_FORA_DO_OWNER (a consulta inteira cai; nada de 'o resto')", async () => {
+    assert(await erroDe(() => consultar({ userId: RD, marketplace: "todos", lojaIds: [ML_A, ML_X], ...D04 })) === "LOJA_FORA_DO_OWNER", "outro dono aceito");
+    assert(await erroDe(() => consultar({ userId: RD, marketplace: "todos", lojaIds: [SH_X], ...D04 })) === "LOJA_FORA_DO_OWNER", "Shopee de outro dono aceita");
+  });
+  t("MS-5. loja de marketplace diferente do pedido → MARKETPLACE_INVALIDO", async () => {
+    assert(await erroDe(() => consultar({ userId: RD, marketplace: "shopee", lojaIds: [SH_A, ML_A], ...D04 })) === "MARKETPLACE_INVALIDO", "ML aceito em consulta shopee");
+  });
+  t("MS-6. conjunto vazio/malformado ou junto com lojaId → erro (nunca vira 'todas')", async () => {
+    for (const ids of [[], [""], [ML_A, ""]]) assert(await erroDe(() => consultar({ userId: RD, marketplace: "todos", lojaIds: ids, ...D04 })) === "LOJA_FORA_DO_OWNER", `${JSON.stringify(ids)} aceito`);
+    assert(await erroDe(() => consultar({ userId: RD, marketplace: "todos", lojaId: ML_A, lojaIds: [SH_A], ...D04 })) === "LOJA_FORA_DO_OWNER", "lojaId + lojaIds aceito");
+  });
+  t("MS-7. loja repetida no conjunto não conta duas vezes", async () => {
+    const a = await so("mercado_livre", ML_A);
+    const r = await consultar({ userId: RD, marketplace: "mercado_livre", lojaIds: [ML_A, ML_A, ML_A], ...D04 });
+    assert(c3(r) === c3(a) && r.cobertura.lojas.length === 1, c3(r));
+  });
+  t("MS-8. compatibilidade: conjunto de UMA loja = lojaId; consulta sem filtro inalterada; dono B isolado", async () => {
+    const um = await consultar({ userId: RD, marketplace: "shopee", lojaIds: [SH_A], ...D04 }), lj = await so("shopee", SH_A);
+    assert(c3(um) === c3(lj) && um.estado === lj.estado, "lojaIds=[x] ≠ lojaId=x");
+    const outro = await consultar({ userId: OUTRO, marketplace: "todos", ...D04 }), outroSet = await consultar({ userId: OUTRO, marketplace: "todos", lojaIds: [ML_X, SH_X], ...D04 });
+    assert(c3(outro) === c3(outroSet) && !outro.cobertura.lojas.some((l: any) => [ML_A, ML_B, SH_A].includes(l.lojaId)), "isolamento por dono");
+  });
+
   await fila;
   console.log(`\n${falhou === 0 ? "✓" : "✗"} VENDAS-CANONICO-SERVICE — ${passou} passaram, ${falhou} falharam`);
   process.exit(falhou === 0 ? 0 : 1);

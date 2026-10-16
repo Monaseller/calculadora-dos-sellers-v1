@@ -25,6 +25,12 @@ export interface ConsultaVendasCanonicas {
   userId: string;
   marketplace: MarketplaceConsulta;
   lojaId?: string | null;
+  /**
+   * MULTI-LOJA: um CONJUNTO explícito de lojas do dono (ex.: ML + uma das Shopee). Cada loja é validada contra o dono e
+   * o marketplace pedido; loja inválida é ERRO (nunca vira "todas"); exclusivo com `lojaId`. Ausente = comportamento de
+   * sempre (uma loja ou todas).
+   */
+  lojaIds?: string[] | null;
   /** Ausente = CUSTOM (exige de/ate). */
   preset?: PresetPeriodoVendas;
   de?: string;
@@ -97,6 +103,8 @@ export interface ResultadoVendasCanonicas {
   userId: string;
   marketplace: MarketplaceConsulta;
   lojaId: string | null;
+  /** MULTI-LOJA: o conjunto pedido (deduplicado), ou null. */
+  lojaIds: string[] | null;
   periodo: PeriodoVendasResolvido;
   partes: PartesDoPeriodo;
   metricas: {

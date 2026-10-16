@@ -18,6 +18,8 @@ import {
 export interface FiltroResumoDashboard {
   marketplace: MarketplaceConsulta;
   lojaId: string | null;
+  /** MULTI-LOJA: as lojas selecionadas (2+); null = uma loja (`lojaId`) ou todas. */
+  lojaIds?: string[] | null;
   /** Dia civil America/Sao_Paulo (AAAA-MM-DD), inclusivo. */
   de: string;
   /** Dia civil America/Sao_Paulo (AAAA-MM-DD), inclusivo. */
@@ -39,15 +41,23 @@ export interface ResumoVendasDashboard {
 
 const MARKETPLACES: readonly MarketplaceConsulta[] = ["mercado_livre", "shopee", "todos"];
 const DIA = /^\d{4}-\d{2}-\d{2}$/;
+const ID_LOJA = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Le e valida os parametros da rota. null = parametro invalido (400). */
 export function lerFiltroResumoDashboard(p: URLSearchParams): FiltroResumoDashboard | null {
   const marketplace = (p.get("marketplace") ?? "todos") as MarketplaceConsulta;
   const de = p.get("de") ?? "", ate = p.get("ate") ?? "";
   const loja = p.get("loja_id");
+  const lojas = p.get("loja_ids");
   if (!MARKETPLACES.includes(marketplace) || !DIA.test(de) || !DIA.test(ate)) return null;
   if (loja !== null && loja.trim() === "") return null;
-  return { marketplace, lojaId: loja, de, ate };
+  // MULTI-LOJA: `loja_ids=a,b` — vazio, item vazio/malformado ou junto com loja_id é 400 (nunca vira "todas")
+  if (lojas !== null) {
+    const ids = lojas.split(",").map((x) => x.trim());
+    if (loja !== null || ids.length === 0 || ids.some((x) => !ID_LOJA.test(x))) return null;
+    return { marketplace, lojaId: null, lojaIds: [...new Set(ids)], de, ate };
+  }
+  return { marketplace, lojaId: loja, lojaIds: null, de, ate };
 }
 
 /** Projeta o resultado canonico SO nos campos que os 4 cards usam. */
@@ -74,7 +84,7 @@ export function statusDoErroResumo(e: ErroVendasCanonicas): number {
 /** Consulta canonica do dono autenticado → resumo dos 4 cards. */
 export async function consultarResumoVendasDashboard(userId: string, f: FiltroResumoDashboard, deps: DependenciasConsultaVendas = {}): Promise<ResumoVendasDashboard> {
   try {
-    const r = await consultarVendasCanonicas({ userId, marketplace: f.marketplace, lojaId: f.lojaId, de: f.de, ate: f.ate }, deps);
+    const r = await consultarVendasCanonicas({ userId, marketplace: f.marketplace, lojaId: f.lojaId, lojaIds: f.lojaIds ?? null, de: f.de, ate: f.ate }, deps);
     return resumoParaDashboard(r);
   } catch (e) {
     // dono sem nenhuma loja do marketplace pedido: estado neutro, sem numero

@@ -466,13 +466,12 @@ function LojasDropdown({ lojas, selecionadas, onChange }: {
     : `${selecionadas.size} lojas`;
 
   function toggleLoja(id: string) {
-    // Seleção exclusiva: clicar numa loja mostra só ela
-    // Clicar na mesma loja já selecionada volta pra "todas"
-    if (selecionadas.size === 1 && selecionadas.has(id)) {
-      onChange(new Set(lojas.map(l => l.id))); // volta pra todas
-    } else {
-      onChange(new Set([id])); // seleciona exclusivamente
-    }
+    // MULTI-LOJA: cada clique marca/desmarca SÓ aquela loja (qualquer combinação: 1, 2 ou todas).
+    // A última loja marcada não pode ser desmarcada — seleção vazia nunca vira "todas" em silêncio.
+    const atual = todas ? new Set(lojas.map(l => l.id)) : new Set(selecionadas);
+    if (atual.has(id)) { if (atual.size === 1) return; atual.delete(id); }
+    else atual.add(id);
+    onChange(atual);
   }
   function toggleTodas() {
     onChange(new Set(lojas.map(l => l.id)));
@@ -727,13 +726,16 @@ export default function DashboardPage() {
       urlShopee: buscarShopee ? `/api/shopee/vendas?date_from=${from}&date_to=${to}&date_field=${dateField}&_reqid=${reqId}` : null,
     });
 
-    // D16: filtro canonico dos 4 cards principais — a mesma selecao do dropdown
-    // (uma loja → o marketplace dela + loja_id; todas → "todos"). O dono e a sessao no servidor.
-    const todasSelecionadas = lojasArr.length === 0 || sel.size === 0 || sel.size === lojasArr.length;
-    const lojaUnica = !todasSelecionadas && selecionadasArr.length === 1 ? selecionadasArr[0] : null;
+    // D16 + MULTI-LOJA: filtro canonico dos 4 cards principais = EXATAMENTE a selecao do dropdown.
+    // todas → "todos" sem filtro; uma loja → loja_id; 2+ lojas → loja_ids (cada uma validada no servidor).
+    // Uma loja desmarcada nunca entra; selecao invalida nunca vira "todas" (o servidor recusa).
+    const todasSelecionadas = lojasArr.length === 0 || sel.size === 0 || (selecionadasArr.length === lojasArr.length && sel.size === lojasArr.length);
+    const idsSelecionados = selecionadasArr.length > 0 ? selecionadasArr.map(l => l.id) : Array.from(sel);
+    const mktsSelecionados = new Set(selecionadasArr.map(l => l.marketplace));
+    const marketplaceCanonico = todasSelecionadas || mktsSelecionados.size !== 1 ? "todos" : mktsSelecionados.has("Shopee") ? "shopee" : "mercado_livre";
     const qCanonico = new URLSearchParams({
-      marketplace: lojaUnica ? (lojaUnica.marketplace === "Shopee" ? "shopee" : "mercado_livre") : "todos",
-      de: from, ate: to, ...(lojaUnica ? { loja_id: lojaUnica.id } : {}),
+      marketplace: marketplaceCanonico, de: from, ate: to,
+      ...(todasSelecionadas ? {} : idsSelecionados.length === 1 ? { loja_id: idsSelecionados[0] } : { loja_ids: idsSelecionados.join(",") }),
     });
 
     try {

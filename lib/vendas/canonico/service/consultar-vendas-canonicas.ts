@@ -74,6 +74,13 @@ export async function consultarVendasCanonicas(
   if (!MARKETPLACES_CONSULTA.includes(marketplace)) throw new ErroVendasCanonicas("MARKETPLACE_INVALIDO", "marketplace_desconhecido");
   const lojaId = args.lojaId ?? null;
   if (lojaId !== null && (typeof lojaId !== "string" || lojaId === "")) throw new ErroVendasCanonicas("LOJA_FORA_DO_OWNER", "loja_id_invalido");
+  // MULTI-LOJA: conjunto explícito — vazio/malformado é erro (nunca "todas"); junto com lojaId é ambíguo
+  const lojaIdsPedido = args.lojaIds ?? null;
+  if (lojaIdsPedido !== null && (!Array.isArray(lojaIdsPedido) || lojaIdsPedido.length === 0 || lojaIdsPedido.some((x) => typeof x !== "string" || x === ""))) {
+    throw new ErroVendasCanonicas("LOJA_FORA_DO_OWNER", "loja_ids_invalido");
+  }
+  if (lojaIdsPedido !== null && lojaId !== null) throw new ErroVendasCanonicas("LOJA_FORA_DO_OWNER", "loja_id_e_loja_ids");
+  const lojaIds = lojaIdsPedido === null ? null : [...new Set(lojaIdsPedido)];
 
   let periodo: PeriodoVendasResolvido;
   try {
@@ -93,13 +100,22 @@ export async function consultarVendasCanonicas(
     if (!loja) throw new ErroVendasCanonicas("LOJA_FORA_DO_OWNER");
     if (!selecionados.includes(DE_SYNC[loja.marketplace])) throw new ErroVendasCanonicas("MARKETPLACE_INVALIDO", "loja_de_outro_marketplace");
     escopo = [loja];
+  } else if (lojaIds !== null) {
+    // cada loja do conjunto: do DONO e do marketplace pedido — uma inválida derruba a consulta (nada de "o resto")
+    escopo = [];
+    for (const id of lojaIds) {
+      const loja = linhas.find((l) => l.id === id);
+      if (!loja) throw new ErroVendasCanonicas("LOJA_FORA_DO_OWNER");
+      if (!selecionados.includes(DE_SYNC[loja.marketplace])) throw new ErroVendasCanonicas("MARKETPLACE_INVALIDO", "loja_de_outro_marketplace");
+      escopo.push(loja);
+    }
   } else {
     escopo = linhas.filter((l) => selecionados.includes(DE_SYNC[l.marketplace]));
   }
   if (!escopo.length) throw new ErroVendasCanonicas("PERIODO_SEM_COBERTURA", "nenhuma_loja_no_escopo");
 
   const consultados = selecionados.filter((m) => escopo.some((l) => DE_SYNC[l.marketplace] === m));
-  const semLoja = lojaId === null ? selecionados.filter((m) => !consultados.includes(m)) : [];
+  const semLoja = lojaId === null && lojaIds === null ? selecionados.filter((m) => !consultados.includes(m)) : [];
   const idsDe = (m: MarketplaceLoja) => escopo.filter((l) => DE_SYNC[l.marketplace] === m).map((l) => l.id);
 
   // ── 3. partes do periodo (D14): MESMAS fronteiras para todos os marketplaces ──
@@ -243,7 +259,7 @@ export async function consultarVendasCanonicas(
   const observados = lojas.map((l) => l.parteAtual?.observadoAte ?? null).filter((x): x is string => x !== null).sort();
 
   return {
-    userId, marketplace, lojaId, periodo, partes,
+    userId, marketplace, lojaId, lojaIds, periodo, partes,
     metricas: {
       combinadas,
       mercadoLivre: comMetricas ? totalML : null,
