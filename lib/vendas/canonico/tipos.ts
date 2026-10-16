@@ -53,6 +53,8 @@ export interface ResultadoVendasLoja {
   descobertaDesde?: string;
   /** SALES-CANONICAL-D14: so quando o chamador pede `parcial: true`. */
   parcial?: ParcialObservadoLoja<MetricasVendas>;
+  /** ETAPA 2A: as MESMAS metricas por dia de pagamento em Sao Paulo (so quando pedido e so com `metricas`). */
+  porDia?: Record<string, MetricasVendas>;
 }
 
 /**
@@ -73,6 +75,8 @@ export interface ParcialObservadoLoja<M> {
   motivos: string[];
   /** So quando o prefixo e COMPLETE. */
   metricas: M | null;
+  /** ETAPA 2A: as MESMAS metricas por dia civil de Sao Paulo (so quando pedido e so com `metricas`). */
+  porDia?: Record<string, M>;
 }
 
 export interface ResultadoVendas {

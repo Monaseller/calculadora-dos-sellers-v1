@@ -24,6 +24,9 @@ type Loja = {
 type ResumoCanonicoDashboard = {
   estado: string; parcial: boolean; observadoAte: string | null;
   metricas: { faturamento: number; pedidos: number; unidades: number; ticket: number } | null;
+  /** ETAPA 2A: serie diaria canonica (soma = metricas) e separacao por marketplace — mesma consulta dos cards. */
+  serie?: { dia: string; faturamento: number; pedidos: number; unidades: number }[] | null;
+  porMarketplace?: { mercadoLivre: { faturamento: number; pedidos: number; unidades: number } | null; shopee: { faturamento: number; pedidos: number; unidades: number } | null } | null;
 };
 type DiaData = {
   data: string; label: string; faturamento: number; lucro: number;
@@ -247,8 +250,14 @@ function PieChartSection({ items }: { items: { label: string; value: number; col
   );
 }
 
-function AreaChartSection({ dias }: { dias: DiaData[] }) {
+function AreaChartSection({ dias, mostrarLucro = true, semDados = null }: { dias: DiaData[]; mostrarLucro?: boolean; semDados?: string | null }) {
   const [hov, setHov] = useState<number | null>(null);
+  // ETAPA 2A: sem serie confirmada o grafico DIZ isso — nunca cai para outra fonte
+  if (semDados) return (
+    <div style={{ height: 200, display: "flex", alignItems: "center", justifyContent: "center", color: "#94A3B8", fontSize: 13, textAlign: "center" }}>
+      {semDados}
+    </div>
+  );
   if (dias.length < 2) return (
     <div style={{ height: 200, display: "flex", alignItems: "center", justifyContent: "center", color: "#94A3B8", fontSize: 13 }}>
       Selecione um periodo com mais de 1 dia para ver o grafico
@@ -283,7 +292,7 @@ function AreaChartSection({ dias }: { dias: DiaData[] }) {
   return (
     <div>
       <div style={{ display: "flex", gap: 20, marginBottom: 16 }}>
-        {[["#FF7A00", "Faturamento"], ["#22C55E", "Lucro"]].map(([c, l]) => (
+        {(mostrarLucro ? [["#FF7A00", "Faturamento"], ["#22C55E", "Lucro"]] : [["#FF7A00", "Faturamento"]]).map(([c, l]) => (
           <div key={l} style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <div style={{ width: 12, height: 3, borderRadius: 2, background: c }} />
             <span style={{ fontSize: 12, color: "#94A3B8", fontWeight: 600 }}>{l}</span>
@@ -320,13 +329,13 @@ function AreaChartSection({ dias }: { dias: DiaData[] }) {
           </text>
         ))}
         <path d={toSmoothPath(fat, true)} fill="url(#gf)" />
-        <path d={toSmoothPath(luc, true)} fill="url(#gl)" />
+        {mostrarLucro && <path d={toSmoothPath(luc, true)} fill="url(#gl)" />}
         <path d={toSmoothPath(fat)} stroke="#FF7A00" strokeWidth="2" fill="none" strokeLinecap="round" />
-        <path d={toSmoothPath(luc)} stroke="#22C55E" strokeWidth="2" fill="none" strokeLinecap="round" />
+        {mostrarLucro && <path d={toSmoothPath(luc)} stroke="#22C55E" strokeWidth="2" fill="none" strokeLinecap="round" />}
         {hovX !== null && hov !== null && (
           <>
             <line x1={hovX.toFixed(1)} y1="0" x2={hovX.toFixed(1)} y2={H} stroke="#94A3B8" strokeWidth="1" strokeDasharray="3,4" />
-            {[{ data: fat, color: "#FF7A00" }, { data: luc, color: "#22C55E" }].map(({ data, color }) => {
+            {(mostrarLucro ? [{ data: fat, color: "#FF7A00" }, { data: luc, color: "#22C55E" }] : [{ data: fat, color: "#FF7A00" }]).map(({ data, color }) => {
               const pts = toPoints(data);
               const pt = pts[hov];
               return pt ? (
@@ -635,6 +644,10 @@ export default function DashboardPage() {
     ? new Date(resumoCanonico.observadoAte).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", timeZone: "America/Sao_Paulo" })
     : null;
   const subSemCanonico = resumoCanonico ? "sincronizando" : "indisponivel";
+  // ETAPA 2A: grafico diario CANONICO — a mesma consulta (lojas selecionadas, criterios de data, completude) dos cards
+  const diasCanonicos: DiaData[] = (resumoCanonico?.serie ?? []).map(d => ({ data: d.dia, label: fmtData(d.dia), faturamento: d.faturamento, lucro: 0, custo: 0, comissao: 0, frete: 0 }));
+  const graficoSemDados = resumoCanonico?.serie ? null
+    : resumoCanonico ? "Grafico disponivel quando o periodo estiver confirmado (sincronizando)" : "Grafico indisponivel";
   const [dias,     setDias]     = useState<DiaData[]>([]);
   const [tops,       setTops]       = useState<TopProduto[]>([]);
   const [loss,       setLoss]       = useState<TopProduto[]>([]);
@@ -786,8 +799,8 @@ export default function DashboardPage() {
       const shopeeRows = shopeeRowsFull.filter((r: VendaRow) => r.status === "paid");
       const rows: VendaRow[] = [...mlRows, ...shopeeRows];
 
-      // Detecta se há dados de ambas as plataformas
-      setShowBothMkt(mlRows.length > 0 && shopeeRows.length > 0);
+      // ETAPA 2A: "ha as duas plataformas" vem da separacao CANONICA da selecao (nao das linhas legadas)
+      setShowBothMkt(!!(canonData?.porMarketplace?.mercadoLivre?.pedidos && canonData?.porMarketplace?.shopee?.pedidos));
 
       const fat       = rows.reduce((s, r) => s + r.faturamento, 0);
       const lucro     = rows.reduce((s, r) => s + r.margemContrib, 0);
@@ -1081,11 +1094,11 @@ export default function DashboardPage() {
               selecionadas={lojasSelecionadas}
               onChange={(ids) => {
                 // [DIAG-DATAS] temporário — remover após a auditoria
-                console.log("[DIAG-DATAS] LojasDropdown.onChange — vai chamar carregar() DIRETO e também via useEffect (setLojasSelecionadas)", {
+                console.log("[DIAG-DATAS] LojasDropdown.onChange — a leitura vem do useEffect (setLojasSelecionadas)", {
                   idsNovos: Array.from(ids), dateFrom, dateTo,
                 });
+                // ETAPA 2A: so muda a selecao — o efeito [dateFrom, dateTo, lojasSelecionadas] le UMA vez (antes: 2 leituras)
                 setLojasSelecionadas(ids);
-                carregar(dateFrom, dateTo, ids);
               }}
             />
             <DateRangePicker from={dateFrom} to={dateTo} onChange={(f, t) => {
@@ -1133,23 +1146,23 @@ export default function DashboardPage() {
             gridTemplateColumns: "repeat(auto-fill, minmax(175px, 1fr))",
             gap: 14, marginBottom: 24, animationDelay: "0.05s",
           }}>
-            <KpiCard icon="💰" label="Faturamento"   value={mc ? fmtBRL(mc.faturamento) : "—"} sub={mc ? `${mc.unidades} unid.${ateCanonico ? ` · até ${ateCanonico}` : ""}` : subSemCanonico} color="#FF7A00" spark={sparkFat} />
-            <KpiCard icon="✨" label="Lucro Liquido" value={fmtBRL(kpis.lucro, true)}        color={kpis.lucro >= 0 ? "#22C55E" : "#EF4444"} spark={sparkLuc} sub="apos custos" />
-            <KpiCard icon="📊" label="Margem Media"  value={`${kpis.margem.toFixed(1)}%`}    color={kpis.margem >= 20 ? "#22C55E" : kpis.margem >= 10 ? "#FFB000" : "#EF4444"} sub="contribuicao" />
+            <KpiCard icon="💰" label="Faturamento"   value={mc ? fmtBRL(mc.faturamento) : "—"} sub={mc ? `${mc.unidades} unid.${ateCanonico ? ` · até ${ateCanonico}` : ""}` : subSemCanonico} color="#FF7A00" spark={diasCanonicos.map(d => d.faturamento)} />
+            <KpiCard icon="✨" label="Lucro Liquido" value={fmtBRL(kpis.lucro, true)}        color={kpis.lucro >= 0 ? "#22C55E" : "#EF4444"} spark={sparkLuc} sub="legado · nao reconciliado" />
+            <KpiCard icon="📊" label="Margem Media"  value={`${kpis.margem.toFixed(1)}%`}    color={kpis.margem >= 20 ? "#22C55E" : kpis.margem >= 10 ? "#FFB000" : "#EF4444"} sub="legado · nao reconciliado" />
             <KpiCard icon="📦" label="Pedidos"       value={mc ? String(mc.pedidos) : "—"}    color="#6366F1" sub={mc ? "pagos" : subSemCanonico} />
             <KpiCard icon="🎯" label="Ticket Medio"  value={mc ? fmtBRL(mc.ticket) : "—"} color="#FFB000" sub={mc ? "por pedido" : subSemCanonico} />
-            <KpiCard icon="🔄" label="ROI"           value={`${kpis.roi.toFixed(0)}%`}       color={kpis.roi >= 50 ? "#22C55E" : "#FFB000"} sub="retorno s/ custo" />
-            <KpiCard icon="🏷️" label="Comissoes"    value={fmtBRL(kpis.comissoes, true)}     color="#EF4444" sub="taxas marketplace" />
+            <KpiCard icon="🔄" label="ROI"           value={`${kpis.roi.toFixed(0)}%`}       color={kpis.roi >= 50 ? "#22C55E" : "#FFB000"} sub="legado · nao reconciliado" />
+            <KpiCard icon="🏷️" label="Comissoes"    value={fmtBRL(kpis.comissoes, true)}     color="#EF4444" sub="legado · nao reconciliado" />
             <KpiCard icon="📈" label="Unidades"      value={mc ? String(mc.unidades) : "—"}   color="#06B6D4" sub={mc ? "vendidas" : subSemCanonico} />
           </div>
 
           {/* EVOLUCAO + BALANCETE */}
           <div className="dash-anim" style={{ display: "grid", gridTemplateColumns: "1fr 260px", gap: 16, marginBottom: 24, animationDelay: "0.1s" }}>
-            <Section title="Evolucao de Vendas" subtitle="Faturamento e lucro no periodo selecionado">
+            <Section title="Evolucao de Vendas" subtitle="Faturamento por dia · mesma fonte dos cards (lojas selecionadas)">
               <div style={{ display: "grid", gridTemplateColumns: "1fr 220px", gap: 20, alignItems: "center" }}>
-                <AreaChartSection dias={dias} />
+                <AreaChartSection dias={diasCanonicos} mostrarLucro={false} semDados={graficoSemDados} />
                 <div style={{ borderLeft: "1px solid #1E293B", paddingLeft: 20 }}>
-                  <div style={{ fontSize: 11, fontWeight: 700, color: "#94A3B8", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 12 }}>Composicao</div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "#94A3B8", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 12 }}>Composicao · legado</div>
                   <PieChartSection items={[
                     { label: "Lucro Liquido", value: Math.max(totalLucro, 0), color: "#22C55E" },
                     { label: "Custo Produtos", value: totalCusto, color: "#6366F1" },
@@ -1160,7 +1173,7 @@ export default function DashboardPage() {
               </div>
             </Section>
 
-            <Section title="Balancete" subtitle="Composicao do resultado">
+            <Section title="Balancete" subtitle="Composicao do resultado · legado, nao reconciliado">
               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                 {balItems.map(item => {
                   const maxAbs = Math.max(...balItems.map(i => Math.abs(i.value)), 1);
@@ -1191,7 +1204,7 @@ export default function DashboardPage() {
                   {topsML.length > 0 && (
                     <Section
                       title="🛒 Top Produtos — Mercado Livre"
-                      subtitle={`${topsML.length} melhores por faturamento`}
+                      subtitle={`${topsML.length} melhores por faturamento · legado`}
                       action={<span style={{ fontSize: 11, color: "#22C55E", fontWeight: 700 }}>ML</span>}
                     >
                       <div style={{
@@ -1213,7 +1226,7 @@ export default function DashboardPage() {
                   {topsShopee.length > 0 && (
                     <Section
                       title="🛍 Top Produtos — Shopee"
-                      subtitle={`${topsShopee.length} melhores por faturamento`}
+                      subtitle={`${topsShopee.length} melhores por faturamento · legado (Shopee: loja do cookie)`}
                       action={<span style={{ fontSize: 11, color: "#EE4D2D", fontWeight: 700 }}>Shopee</span>}
                     >
                       <div style={{
@@ -1236,7 +1249,7 @@ export default function DashboardPage() {
                 // Uma plataforma: top 10 completo
                 <Section
                   title="🏆 Top Produtos"
-                  subtitle="Melhores anuncios no periodo"
+                  subtitle="Melhores anuncios no periodo · legado, nao reconciliado"
                   action={<span style={{ fontSize: 11, color: "#94A3B8" }}>{tops.length} produtos</span>}
                 >
                   <div style={{

@@ -280,6 +280,25 @@ async function principal() {
     assert(!/const lojaUnica = !todasSelecionadas && selecionadasArr\.length === 1/.test(pg), "regra antiga (2 de 3 → todos sem filtro) ainda presente");
   });
 
+  t("L6. ETAPA 2A: resumo traz a série diária (soma = cards) e a separação por marketplace da MESMA consulta", () => {
+    const base: any = { estado: "COMPLETE_FRESH", completo: true, parcial: false, observadoAte: null, periodo: { de: "2026-10-03", ate: "2026-10-04" },
+      metricas: { combinadas: { pedidos: 3, unidades: 4, vendas: 30.5 }, mercadoLivre: { pedidos: 1, unidades: 1, vendas: 10 }, shopee: { pedidos: 2, unidades: 3, vendas: 20.5, cancelados: 0, vendasSemDescontosPlataforma: 20 } },
+      serieDiaria: [{ dia: "2026-10-03", pedidos: 1, unidades: 1, vendas: 10 }, { dia: "2026-10-04", pedidos: 2, unidades: 3, vendas: 20.5 }] };
+    const r = R.resumoParaDashboard(base);
+    assert(JSON.stringify(r.serie) === JSON.stringify([{ dia: "2026-10-03", faturamento: 10, pedidos: 1, unidades: 1 }, { dia: "2026-10-04", faturamento: 20.5, pedidos: 2, unidades: 3 }]), JSON.stringify(r.serie));
+    assert(r.porMarketplace?.mercadoLivre?.faturamento === 10 && r.porMarketplace?.shopee?.pedidos === 2, JSON.stringify(r.porMarketplace));
+    const sem = R.resumoParaDashboard({ ...base, metricas: { ...base.metricas, combinadas: null }, serieDiaria: null });
+    assert(sem.serie === null && sem.porMarketplace === null && sem.metricas === null, "sem métricas mostrou série/separação");
+  });
+  t("L7. ETAPA 2A: Dashboard — gráfico e sparkline da série canônica (sem lucro legado), 'duas plataformas' pela separação canônica, UMA leitura por clique, indicadores legados rotulados", () => {
+    const pg = readFileSync(join(RAIZ, "app/(app)/dashboard/page.tsx"), "utf8").replace(/\r\n/g, "\n");
+    assert(/<AreaChartSection dias=\{diasCanonicos\} mostrarLucro=\{false\} semDados=\{graficoSemDados\} \/>/.test(pg) && /spark=\{diasCanonicos\.map\(d => d\.faturamento\)\}/.test(pg), "gráfico/sparkline fora da série canônica");
+    assert(/setShowBothMkt\(!!\(canonData\?\.porMarketplace\?\.mercadoLivre\?\.pedidos && canonData\?\.porMarketplace\?\.shopee\?\.pedidos\)\);/.test(pg) && !/setShowBothMkt\(mlRows\.length > 0/.test(pg), "duas plataformas pelas linhas legadas");
+    assert(!/setLojasSelecionadas\(ids\);\s*carregar\(dateFrom, dateTo, ids\);/.test(pg), "clique ainda lê duas vezes");
+    assert((pg.match(/legado · nao reconciliado/g) ?? []).length === 4 && /Balancete" subtitle="Composicao do resultado · legado, nao reconciliado"/.test(pg), "indicadores legados sem rótulo");
+    assert(/R\.consultarResumoVendasDashboard|serieDiaria: true/.test(readFileSync(join(RAIZ, "lib/vendas/canonico/dashboard-resumo.ts"), "utf8")), "resumo não pede a série");
+  });
+
   await fila;
   console.log(`\n${falhou === 0 ? "✓" : "✗"} DASHBOARD-CANONICO — ${passou} passaram, ${falhou} falharam`);
   process.exit(falhou === 0 ? 0 : 1);

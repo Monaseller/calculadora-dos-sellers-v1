@@ -31,7 +31,7 @@
  */
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { inicioDoDiaEmSaoPaulo, somarDiasNoCalendario } from "@/lib/fuso-sao-paulo";
+import { diaEmSaoPaulo, inicioDoDiaEmSaoPaulo, somarDiasNoCalendario } from "@/lib/fuso-sao-paulo";
 import type {
   Completude, ComponentesVendasShopee, MetricasVendas, ParcialObservadoLoja, ResultadoVendas, ResultadoVendasLoja,
 } from "./tipos";
@@ -182,6 +182,27 @@ export function calcularMetricasShopee(
       moedas: reais(moedas), subsidioShopee: reais(subsidio), descontoPix: reais(pix),
     },
   };
+}
+
+/**
+ * ETAPA 2A — as MESMAS metricas (calcularMetricasShopee) por dia civil de Sao Paulo do `pay_time`. Nenhuma formula
+ * nova: cada dia e o calculo oficial sobre os SEUS pedidos (os itens de outros dias sao ignorados pela propria funcao);
+ * os dias sao disjuntos, entao a soma (em centavos) e o total.
+ */
+export function porDiaShopee(pedidos: PedidoShopeeCanonico[], itens: ItemShopeeCanonico[]): Record<string, MetricasVendas> {
+  const grupos = new Map<string, PedidoShopeeCanonico[]>();
+  for (const p of pedidos) {
+    const dia = diaEmSaoPaulo(p.payTime);
+    if (dia === null) throw new ErroGraoShopee(`pay_time_invalido:${chave(p.lojaId, p.orderSn)}`);
+    (grupos.get(dia) ?? grupos.set(dia, []).get(dia)!).push(p);
+  }
+  const porPedido = new Map<string, ItemShopeeCanonico[]>();
+  for (const it of itens) { const k = chave(it.lojaId, it.orderSn); (porPedido.get(k) ?? porPedido.set(k, []).get(k)!).push(it); }
+  const out: Record<string, MetricasVendas> = {};
+  for (const [dia, g] of [...grupos].sort((a, b) => a[0].localeCompare(b[0]))) {
+    out[dia] = calcularMetricasShopee(g, g.flatMap((p) => porPedido.get(chave(p.lojaId, p.orderSn)) ?? [])).metricas;
+  }
+  return out;
 }
 
 /** Pedidos cujo pay_time cai em [inicio, fim). */
@@ -405,6 +426,8 @@ export async function lerVendasShopee(
     userId: string; de: string; ate: string; lojaIds?: string[];
     /** SALES-CANONICAL-D14 (padrao false): acrescenta `parcial` por loja; sem ele o resultado e o de sempre. */
     parcial?: boolean;
+    /** ETAPA 2A (padrao false): acrescenta `porDia` por loja (so quando COMPLETE / prefixo COMPLETE). */
+    porDia?: boolean;
     /**
      * DISCOVERY_ANCHOR por loja (ISO), explicita e comprovada. Ainda nao ha
      * onde persisti-la (proposta de schema no S2-D3-B2.1): sem ela, A e
@@ -483,13 +506,14 @@ export async function lerVendasShopee(
       pedidosPagos: pedidos, itens, naoPagosSemObservacaoPosPeriodo: naoPagos });
     const extra = { dimensoes: av.dimensoes, estadoEm: av.estadoEm, baseDescoberta: av.baseDescoberta, descobertaDesde: av.descobertaDesde,
       ...(args.parcial === true ? { parcial: await parcialObservadoShopee(cliente, { userId, lojaId, inicio, fim, janelas,
-        ancora: ancora ? new Date(ancora) : null, desdeIso, pedidos, itens }) } : {}) };
+        ancora: ancora ? new Date(ancora) : null, desdeIso, pedidos, itens, porDia: args.porDia === true }) } : {}) };
     if (av.completude !== "COMPLETE") {
       resultados.push({ lojaId, completude: av.completude, motivos: av.motivos, metricas: null, componentes: null, ...extra });
       continue;
     }
     const { metricas, componentes } = calcularMetricasShopee(pedidos, itens);
-    resultados.push({ lojaId, completude: av.completude, motivos: av.motivos, metricas, componentes, ...extra });
+    resultados.push({ lojaId, completude: av.completude, motivos: av.motivos, metricas, componentes, ...extra,
+      ...(args.porDia === true ? { porDia: porDiaShopee(pedidos, itens) } : {}) });
   }
 
   const completude: Completude = resultados.every((r) => r.completude === "COMPLETE")
@@ -507,7 +531,7 @@ export async function lerVendasShopee(
  */
 async function parcialObservadoShopee(cliente: SupabaseClient, a: {
   userId: string; lojaId: string; inicio: Date; fim: Date; janelas: JanelaListagem[]; ancora: Date | null; desdeIso: string;
-  pedidos: PedidoShopeeCanonico[]; itens: ItemShopeeCanonico[];
+  pedidos: PedidoShopeeCanonico[]; itens: ItemShopeeCanonico[]; porDia?: boolean;
 }): Promise<ParcialObservadoLoja<MetricasVendas>> {
   const p = prefixoObservado(alcanceDescobertaCriacao(a.janelas, new Date(a.desdeIso).getTime()), a.inicio, a.fim);
   if (p.estado !== "OBSERVADO_ATE") return { estado: p.estado, observadoAte: null, completude: null, motivos: [], metricas: null };
@@ -516,7 +540,8 @@ async function parcialObservadoShopee(cliente: SupabaseClient, a: {
   const av = avaliarCompletudeShopee({ inicio: a.inicio, fim: p.ate, janelas: a.janelas, ancoraDescoberta: a.ancora,
     pedidosPagos: pagos, itens: a.itens, naoPagosSemObservacaoPosPeriodo: naoPagos });
   return { estado: p.estado, observadoAte: p.ate.toISOString(), completude: av.completude, motivos: av.motivos,
-    metricas: av.completude === "COMPLETE" ? calcularMetricasShopee(pagos, a.itens).metricas : null };
+    metricas: av.completude === "COMPLETE" ? calcularMetricasShopee(pagos, a.itens).metricas : null,
+    ...(a.porDia === true && av.completude === "COMPLETE" ? { porDia: porDiaShopee(pagos, a.itens) } : {}) };
 }
 
 /**

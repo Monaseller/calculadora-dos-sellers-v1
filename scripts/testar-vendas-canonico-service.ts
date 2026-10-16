@@ -553,6 +553,52 @@ async function principal() {
     assert(c3(outro) === c3(outroSet) && !outro.cobertura.lojas.some((l: any) => [ML_A, ML_B, SH_A].includes(l.lojaId)), "isolamento por dono");
   });
 
+  console.log("\n[SD. ETAPA 2A — série diária canônica (mesmos leitores, por dia de São Paulo)]");
+  const P3 = { preset: "CUSTOM" as const, de: "2026-10-03", ate: "2026-10-05" };   // bordas: 2998 = 03/10 23:59:59 SP; 2997 = 05/10 00:00 SP
+  const somaSerie = (s: any[]) => ({ pedidos: s.reduce((a, d) => a + d.pedidos, 0), unidades: s.reduce((a, d) => a + d.unidades, 0), vendas: Math.round(s.reduce((a, d) => a + Math.round(d.vendas * 100), 0)) / 100 });
+  t("SD-1. todas as lojas, 3 dias: a série cobre CADA dia do período e a soma = combinadas (centavo exato)", async () => {
+    const r = await consultar({ userId: RD, marketplace: "todos", ...P3, serieDiaria: true });
+    assert(r.metricas.combinadas !== null, "pré-condição: período coberto");
+    const c = r.metricas.combinadas!;
+    const s = r.serieDiaria!;
+    assert(s && JSON.stringify(s.map((d: any) => d.dia)) === JSON.stringify(["2026-10-03", "2026-10-04", "2026-10-05"]), JSON.stringify(s?.map((d: any) => d.dia)));
+    assert(JSON.stringify(somaSerie(s)) === JSON.stringify({ pedidos: c.pedidos, unidades: c.unidades, vendas: c.vendas }), `${JSON.stringify(somaSerie(s))} ≠ ${JSON.stringify(c)}`);
+  });
+  t("SD-2. fuso de São Paulo nas bordas: 23:59:59 SP fica no dia 03; 00:00 SP no dia 05; pack_splitted fora", async () => {
+    const s = (await consultar({ userId: RD, marketplace: "mercado_livre", lojaId: ML_A, ...P3, serieDiaria: true })).serieDiaria!;
+    const d = Object.fromEntries(s.map((x: any) => [x.dia, x]));
+    assert(d["2026-10-03"].pedidos === 1 && d["2026-10-03"].vendas === 500 && d["2026-10-05"].pedidos === 1 && d["2026-10-05"].vendas === 400, JSON.stringify(d));
+    assert(d["2026-10-04"].pedidos === 211 && d["2026-10-04"].vendas === 7220.62, `04/10 ${JSON.stringify(d["2026-10-04"])} (pack_splitted entrou?)`);
+  });
+  t("SD-3. cada dia da série = a consulta canônica daquele dia sozinho (mesma regra, não uma fórmula paralela)", async () => {
+    const s = (await consultar({ userId: RD, marketplace: "todos", ...P3, serieDiaria: true })).serieDiaria!;
+    for (const d of s) {
+      const um = await consultar({ userId: RD, marketplace: "todos", preset: "CUSTOM", de: d.dia, ate: d.dia });
+      assert(um.metricas.combinadas && um.metricas.combinadas.pedidos === d.pedidos && um.metricas.combinadas.unidades === d.unidades && um.metricas.combinadas.vendas === d.vendas, `${d.dia}: ${JSON.stringify(d)} ≠ ${JSON.stringify(um.metricas.combinadas)}`);
+    }
+  });
+  t("SD-4. série respeita loja_ids: a loja desmarcada (ML_B) não entra em nenhum dia", async () => {
+    const com = (await consultar({ userId: RD, marketplace: "todos", ...P3, serieDiaria: true })).serieDiaria!;
+    const sem = (await consultar({ userId: RD, marketplace: "todos", lojaIds: [ML_A, SH_A], ...P3, serieDiaria: true })).serieDiaria!;
+    const b = (await consultar({ userId: RD, marketplace: "mercado_livre", lojaId: ML_B, ...P3, serieDiaria: true })).serieDiaria!;
+    for (let i = 0; i < com.length; i++) assert(com[i].pedidos === sem[i].pedidos + b[i].pedidos && Math.round(com[i].vendas * 100) === Math.round((sem[i].vendas + b[i].vendas) * 100), `${com[i].dia}`);
+    assert(somaSerie(b).pedidos === 2, "pré-condição ML_B");
+  });
+  t("SD-5. sem cobertura (INCOMPLETE) a série é null — nunca um gráfico de período não confirmado", async () => {
+    const d = mundo(); d.sync_jobs = d.sync_jobs.filter((j: any) => j.loja_id !== SH_A);
+    const r = await consultar({ userId: RD, marketplace: "todos", ...P3, serieDiaria: true }, d);
+    assert(r.estado === "INCOMPLETE" && r.metricas.combinadas === null && r.serieDiaria === null, `${r.estado} ${JSON.stringify(r.serieDiaria)}`);
+  });
+  t("SD-7. loja INATIVA no escopo: o leitor tem os dias, mas o período é INCOMPLETE → sem série (gating pelos cards, sem erro)", async () => {
+    const d = mundo(); d.lojas = d.lojas.map((l: any) => (l.id === ML_B ? { ...l, ativo: false } : l));
+    const r = await consultar({ userId: RD, marketplace: "todos", ...P3, serieDiaria: true }, d);
+    assert(r.estado === "INCOMPLETE" && r.metricas.combinadas === null && r.serieDiaria === null, `${r.estado} serie=${JSON.stringify(r.serieDiaria)?.slice(0, 80)}`);
+  });
+  t("SD-6. compatibilidade: sem pedir, nenhum campo novo e os mesmos números", async () => {
+    const a = await consultar({ userId: RD, marketplace: "todos", ...P3 }), b = await consultar({ userId: RD, marketplace: "todos", ...P3, serieDiaria: true });
+    assert(!("serieDiaria" in a) && JSON.stringify(a.metricas) === JSON.stringify(b.metricas) && a.estado === b.estado, "consulta sem série mudou");
+  });
+
   await fila;
   console.log(`\n${falhou === 0 ? "✓" : "✗"} VENDAS-CANONICO-SERVICE — ${passou} passaram, ${falhou} falharam`);
   process.exit(falhou === 0 ? 0 : 1);

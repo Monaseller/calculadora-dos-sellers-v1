@@ -27,6 +27,10 @@ export interface FiltroResumoDashboard {
 }
 
 export interface MetricasResumoDashboard { faturamento: number; pedidos: number; unidades: number; ticket: number }
+/** ETAPA 2A: um dia do grafico — as MESMAS metricas dos cards, por dia (faturamento = `vendas` canonico). */
+export interface DiaResumoDashboard { dia: string; faturamento: number; pedidos: number; unidades: number }
+/** ETAPA 2A: total de cada marketplace da selecao (null = marketplace fora da selecao ou sem metrica). */
+export interface MarketplaceResumoDashboard { faturamento: number; pedidos: number; unidades: number }
 
 export interface ResumoVendasDashboard {
   /** Estado canonico, ou SEM_LOJA_NO_ESCOPO quando o dono nao tem loja no filtro. */
@@ -37,6 +41,10 @@ export interface ResumoVendasDashboard {
   observadoAte: string | null;
   periodo: { de: string; ate: string };
   metricas: MetricasResumoDashboard | null;
+  /** ETAPA 2A: serie diaria (soma = metricas); null quando nao ha metricas. */
+  serie: DiaResumoDashboard[] | null;
+  /** ETAPA 2A: separacao por marketplace, da MESMA consulta (null sem metricas). */
+  porMarketplace: { mercadoLivre: MarketplaceResumoDashboard | null; shopee: MarketplaceResumoDashboard | null } | null;
 }
 
 const MARKETPLACES: readonly MarketplaceConsulta[] = ["mercado_livre", "shopee", "todos"];
@@ -60,13 +68,18 @@ export function lerFiltroResumoDashboard(p: URLSearchParams): FiltroResumoDashbo
   return { marketplace, lojaId: loja, lojaIds: null, de, ate };
 }
 
-/** Projeta o resultado canonico SO nos campos que os 4 cards usam. */
+const mkt = (m: { pedidos: number; unidades: number; vendas: number } | null): MarketplaceResumoDashboard | null =>
+  m ? { faturamento: m.vendas, pedidos: m.pedidos, unidades: m.unidades } : null;
+
+/** Projeta o resultado canonico SO nos campos que o Dashboard usa (4 cards, grafico diario, separacao por marketplace). */
 export function resumoParaDashboard(r: ResultadoVendasCanonicas): ResumoVendasDashboard {
   const c = r.metricas.combinadas;
   return {
     estado: r.estado, completo: r.completo, parcial: r.parcial, observadoAte: r.observadoAte,
     periodo: { de: r.periodo.de, ate: r.periodo.ate },
     metricas: c ? { faturamento: c.vendas, pedidos: c.pedidos, unidades: c.unidades, ticket: c.pedidos > 0 ? c.vendas / c.pedidos : 0 } : null,
+    serie: c && r.serieDiaria ? r.serieDiaria.map((d) => ({ dia: d.dia, faturamento: d.vendas, pedidos: d.pedidos, unidades: d.unidades })) : null,
+    porMarketplace: c ? { mercadoLivre: mkt(r.metricas.mercadoLivre), shopee: mkt(r.metricas.shopee) } : null,
   };
 }
 
@@ -84,12 +97,12 @@ export function statusDoErroResumo(e: ErroVendasCanonicas): number {
 /** Consulta canonica do dono autenticado → resumo dos 4 cards. */
 export async function consultarResumoVendasDashboard(userId: string, f: FiltroResumoDashboard, deps: DependenciasConsultaVendas = {}): Promise<ResumoVendasDashboard> {
   try {
-    const r = await consultarVendasCanonicas({ userId, marketplace: f.marketplace, lojaId: f.lojaId, lojaIds: f.lojaIds ?? null, de: f.de, ate: f.ate }, deps);
+    const r = await consultarVendasCanonicas({ userId, marketplace: f.marketplace, lojaId: f.lojaId, lojaIds: f.lojaIds ?? null, de: f.de, ate: f.ate, serieDiaria: true }, deps);
     return resumoParaDashboard(r);
   } catch (e) {
     // dono sem nenhuma loja do marketplace pedido: estado neutro, sem numero
     if (e instanceof ErroVendasCanonicas && e.codigo === "PERIODO_SEM_COBERTURA") {
-      return { estado: "SEM_LOJA_NO_ESCOPO", completo: false, parcial: false, observadoAte: null, periodo: { de: f.de, ate: f.ate }, metricas: null };
+      return { estado: "SEM_LOJA_NO_ESCOPO", completo: false, parcial: false, observadoAte: null, periodo: { de: f.de, ate: f.ate }, metricas: null, serie: null, porMarketplace: null };
     }
     throw e;
   }

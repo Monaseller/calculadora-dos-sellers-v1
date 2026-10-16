@@ -139,6 +139,22 @@ export function calcularMetricasML(pedidos: PedidoMLCanonico[]): MetricasVendasM
   return { pedidos: n, unidades, vendas: vendas / 100 };
 }
 
+/**
+ * ETAPA 2A — as MESMAS metricas (calcularMetricasML) por dia civil de Sao Paulo do `date_closed`. Nenhuma formula
+ * nova: cada dia e o calculo oficial sobre o SEU subconjunto; os dias sao disjuntos, entao a soma (em centavos) e o total.
+ */
+export function porDiaML(pedidos: PedidoMLCanonico[]): Record<string, MetricasVendasML> {
+  const grupos = new Map<string, PedidoMLCanonico[]>();
+  for (const p of pedidos) {
+    const dia = diaEmSaoPaulo(p.dateClosed);
+    if (dia === null) throw new ErroGraoML(`date_closed_invalido:${p.lojaId}|${p.orderId}`);
+    (grupos.get(dia) ?? grupos.set(dia, []).get(dia)!).push(p);
+  }
+  const out: Record<string, MetricasVendasML> = {};
+  for (const [dia, g] of [...grupos].sort((a, b) => a[0].localeCompare(b[0]))) out[dia] = calcularMetricasML(g);
+  return out;
+}
+
 /** Fechados em [inicio, fim) — o mesmo recorte do dia de Sao Paulo. */
 export function filtrarFechadosNoIntervalo(pedidos: PedidoMLCanonico[], inicio: Date, fim: Date): PedidoMLCanonico[] {
   const a = inicio.getTime(), b = fim.getTime();
@@ -202,6 +218,8 @@ export function avaliarCompletudeML(args: { inicio: Date; fim: Date; janelas: Ja
 
 export interface ResultadoVendasLojaML {
   lojaId: string; completude: Completude; motivos: string[]; metricas: MetricasVendasML | null; estadoEm: string | null;
+  /** ETAPA 2A: so com `porDia: true` e so quando COMPLETE. */
+  porDia?: Record<string, MetricasVendasML>;
   /** SALES-CANONICAL-D14: so quando o chamador pede `parcial: true`. */
   parcial?: ParcialObservadoLoja<MetricasVendasML>;
 }
@@ -211,13 +229,14 @@ export interface ResultadoVendasLojaML {
  * periodo aberto. observadoAte = alcance da cadeia date_closed (a MESMA de
  * avaliarCompletudeML); avaliado pelas MESMAS funcoes puras. Nenhuma regra nova.
  */
-export function parcialObservadoML(inicio: Date, fim: Date, janelas: JanelaFechamentoML[], pedidos: PedidoMLCanonico[]): ParcialObservadoLoja<MetricasVendasML> {
+export function parcialObservadoML(inicio: Date, fim: Date, janelas: JanelaFechamentoML[], pedidos: PedidoMLCanonico[], porDia = false): ParcialObservadoLoja<MetricasVendasML> {
   const p = prefixoObservado(alcanceFechamentoML(janelas, inicio.getTime()), inicio, fim);
   if (p.estado !== "OBSERVADO_ATE") return { estado: p.estado, observadoAte: null, completude: null, motivos: [], metricas: null };
   const noPrefixo = filtrarFechadosNoIntervalo(pedidos, inicio, p.ate);
   const av = avaliarCompletudeML({ inicio, fim: p.ate, janelas, pedidos: noPrefixo });
   return { estado: p.estado, observadoAte: p.ate.toISOString(), completude: av.completude, motivos: av.motivos,
-    metricas: av.completude === "COMPLETE" ? calcularMetricasML(noPrefixo) : null };
+    metricas: av.completude === "COMPLETE" ? calcularMetricasML(noPrefixo) : null,
+    ...(porDia && av.completude === "COMPLETE" ? { porDia: porDiaML(noPrefixo) } : {}) };
 }
 export interface ResultadoVendasML {
   marketplace: "ML";
@@ -239,7 +258,7 @@ const PAGINA = 1000;
 export async function lerVendasML(
   cliente: SupabaseClient,
   /** `parcial` (D14, padrao false): acrescenta `parcial` por loja; sem ele o resultado e o de sempre. */
-  args: { userId: string; de: string; ate: string; lojaIds?: string[]; parcial?: boolean },
+  args: { userId: string; de: string; ate: string; lojaIds?: string[]; parcial?: boolean; porDia?: boolean },
 ): Promise<ResultadoVendasML> {
   const { userId, de, ate } = args;
   if (!userId) throw new Error("user_id_ausente");
@@ -283,7 +302,8 @@ export async function lerVendasML(
     const av = avaliarCompletudeML({ inicio, fim, janelas, pedidos });
     resultados.push({ lojaId, completude: av.completude, motivos: av.motivos, estadoEm: av.estadoEm,
       metricas: av.completude === "COMPLETE" ? calcularMetricasML(pedidos) : null,
-      ...(args.parcial === true ? { parcial: parcialObservadoML(inicio, fim, janelas, pedidos) } : {}) });
+      ...(args.porDia === true && av.completude === "COMPLETE" ? { porDia: porDiaML(pedidos) } : {}),
+      ...(args.parcial === true ? { parcial: parcialObservadoML(inicio, fim, janelas, pedidos, args.porDia === true) } : {}) });
   }
   const completude: Completude = resultados.every((r) => r.completude === "COMPLETE")
     ? "COMPLETE" : resultados.some((r) => r.completude === "FAILED") ? "FAILED" : "PARTIAL";

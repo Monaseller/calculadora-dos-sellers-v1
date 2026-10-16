@@ -31,6 +31,8 @@ export interface ConsultaVendasCanonicas {
    * sempre (uma loja ou todas).
    */
   lojaIds?: string[] | null;
+  /** ETAPA 2A (padrao false): devolve `serieDiaria` — as mesmas metricas por dia, so quando ha `combinadas`. */
+  serieDiaria?: boolean;
   /** Ausente = CUSTOM (exige de/ate). */
   preset?: PresetPeriodoVendas;
   de?: string;
@@ -54,6 +56,12 @@ export class ErroVendasCanonicas extends Error {
 
 /** O que soma entre marketplaces: cada `vendas` e o numero OFICIAL do painel do seu marketplace. */
 export interface MetricasCombinadas { pedidos: number; unidades: number; vendas: number }
+
+/**
+ * ETAPA 2A — um dia civil de Sao Paulo do periodo, com as MESMAS metricas dos cards (leitores oficiais, por dia).
+ * Dia sem venda num periodo coberto = zeros (zero comprovado). Com hoje: o dia atual vale ate `observadoAte`.
+ */
+export interface SerieDiariaVendas { dia: string; pedidos: number; unidades: number; vendas: number }
 
 export type EstadoCobertura = "COMPLETE" | "PARTIAL" | "INCOMPLETE";
 export type EstadoFrescor = "FRESH" | "STALE" | "IN_PROGRESS" | "DESCONHECIDO";
@@ -133,6 +141,8 @@ export interface ResultadoVendasCanonicas {
   completo: boolean;
   /** frescor FRESH (null quando nao ha metricas). */
   fresco: boolean | null;
+  /** ETAPA 2A: so quando pedida; null sem `combinadas` (nunca serie de periodo incompleto). Soma dos dias = combinadas. */
+  serieDiaria?: SerieDiariaVendas[] | null;
   /** D14: o MENOR observadoAte entre as lojas (as metricas valem ate ai). null fora de PARTIAL com metricas. */
   observadoAte: string | null;
 }

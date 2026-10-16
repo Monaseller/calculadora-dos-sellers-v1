@@ -29,10 +29,11 @@ import { lerVendasML, somarMetricasML, type MetricasVendasML, type ResultadoVend
 import { lerVendasShopee, somarMetricas } from "../shopee";
 import type { Completude, ComponentesVendasShopee, MetricasVendas, ParcialObservadoLoja, ResultadoVendas } from "../tipos";
 import { ErroPeriodoVendas, resolverPeriodoVendas, type PeriodoVendasResolvido } from "../periodo";
+import { somarDiasNoCalendario } from "@/lib/fuso-sao-paulo";
 import {
   ErroVendasCanonicas, type ConsultaVendasCanonicas, type DependenciasConsultaVendas, type EstadoCobertura, type EstadoConsulta,
   type EstadoFrescor, type LojaVendasCanonicas, type MarketplaceConsulta, type MarketplaceLoja, type MetricasCombinadas,
-  type ParteAtualLoja, type PartesDoPeriodo, type ResultadoVendasCanonicas,
+  type ParteAtualLoja, type PartesDoPeriodo, type ResultadoVendasCanonicas, type SerieDiariaVendas,
 } from "./tipos";
 
 const MARKETPLACES_CONSULTA: readonly MarketplaceConsulta[] = ["mercado_livre", "shopee", "todos"];
@@ -131,8 +132,8 @@ export async function consultarVendasCanonicas(
   // ── 4. valores: SO os leitores oficiais, SO dos marketplaces com loja no escopo ──
   const lerParte = (m: MarketplaceLoja, parte: { de: string; ate: string }, parcial: boolean): Promise<ResultadoVendasML | ResultadoVendas> =>
     protegido<ResultadoVendasML | ResultadoVendas>(m, () => m === "mercado_livre"
-      ? lerVendasML(cliente, { userId, de: parte.de, ate: parte.ate, lojaIds: idsDe(m), ...(parcial ? { parcial: true } : {}) })
-      : lerVendasShopee(cliente, { userId, de: parte.de, ate: parte.ate, lojaIds: idsDe(m), ...(parcial ? { parcial: true } : {}) }));
+      ? lerVendasML(cliente, { userId, de: parte.de, ate: parte.ate, lojaIds: idsDe(m), ...(parcial ? { parcial: true } : {}), ...(args.serieDiaria === true ? { porDia: true } : {}) })
+      : lerVendasShopee(cliente, { userId, de: parte.de, ate: parte.ate, lojaIds: idsDe(m), ...(parcial ? { parcial: true } : {}), ...(args.serieDiaria === true ? { porDia: true } : {}) }));
   const leiturasFechada = new Map<MarketplaceLoja, ResultadoVendasML | ResultadoVendas>();
   const leiturasAtual = new Map<MarketplaceLoja, ResultadoVendasML | ResultadoVendas>();
   for (const m of consultados) {
@@ -250,6 +251,34 @@ export async function consultarVendasCanonicas(
     combinadas = somarMetricasML(partesSoma);
   }
 
+  // ── 8. ETAPA 2A: serie diaria — SO com `combinadas` (a mesma gating dos cards). Por loja, o `porDia` do PROPRIO leitor
+  //    (as mesmas funcoes de metrica sobre o subconjunto de cada dia); a parte de hoje e a mesma escolha da metrica atual
+  //    (dia COMPLETE ou prefixo observado). Soma em centavos pelo leitor oficial; dia sem venda num periodo coberto = 0.
+  //    Defesa: se a soma dos dias nao bater com `combinadas`, a serie nao sai (nunca um grafico que contradiz o card).
+  let serieDiaria: SerieDiariaVendas[] | null = null;
+  if (args.serieDiaria === true && combinadas !== null) {
+    const porDia = new Map<string, { pedidos: number; unidades: number; vendas: number }[]>();
+    let faltou = false;
+    for (const l of escopo) {
+      const mkt = DE_SYNC[l.marketplace];
+      const rf = fechada ? lojaDe(leiturasFechada, mkt, l.id) : null;
+      const ra = hoje ? lojaDe(leiturasAtual, mkt, l.id) : null;
+      const partes = [rf?.porDia, ra ? (ra.completude === "COMPLETE" ? ra.porDia : ra.parcial?.porDia) : undefined];
+      if ((fechada && !partes[0]) || (hoje && !partes[1])) { faltou = true; break; }
+      for (const parte of partes) for (const [dia, m] of Object.entries(parte ?? {})) {
+        (porDia.get(dia) ?? porDia.set(dia, []).get(dia)!).push({ pedidos: m.pedidos, unidades: m.unidades, vendas: m.vendas });
+      }
+    }
+    if (!faltou) {
+      const dias: SerieDiariaVendas[] = [];
+      for (let d = periodo.de; d <= periodo.ate; d = somarDiasNoCalendario(d, 1)) dias.push({ dia: d, ...somarMetricasML(porDia.get(d) ?? []) });
+      const fora = [...porDia.keys()].some((d) => d < periodo.de || d > periodo.ate);
+      const soma = somarMetricasML(dias);
+      // os dois lados vem de somarMetricasML (centavos → reais): igualdade estrita e exata, sem aritmetica aqui
+      if (!fora && soma.pedidos === combinadas.pedidos && soma.unidades === combinadas.unidades && soma.vendas === combinadas.vendas) serieDiaria = dias;
+    }
+  }
+
   const frescor = combinarFrescor(lojas.map((l) => l.frescor));
   const motivosFrescor = [...new Set(lojas.flatMap((l) => l.motivosFrescor.map((m) => `${l.marketplace}:${l.lojaId}:${m}`)))];
 
@@ -260,6 +289,7 @@ export async function consultarVendasCanonicas(
 
   return {
     userId, marketplace, lojaId, lojaIds, periodo, partes,
+    ...(args.serieDiaria === true ? { serieDiaria } : {}),
     metricas: {
       combinadas,
       mercadoLivre: comMetricas ? totalML : null,
@@ -285,6 +315,7 @@ interface LeituraLoja {
   metricas: MetricasVendasML | MetricasVendas | null;
   componentes?: ComponentesVendasShopee | null;
   parcial?: ParcialObservadoLoja<MetricasVendasML | MetricasVendas>;
+  porDia?: Record<string, MetricasVendasML | MetricasVendas>;
 }
 
 /** Soma de centavo do PROPRIO leitor do marketplace (somarMetricasML / somarMetricas). null se faltar qualquer parte. */
