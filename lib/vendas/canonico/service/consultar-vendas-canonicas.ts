@@ -27,13 +27,14 @@ import { POLITICA_SYNC_PROPOSTA } from "@/lib/vendas/sync/planejamento";
 import type { AvaliacaoLojaSync, MarketplaceSync } from "@/lib/vendas/sync/tipos";
 import { lerVendasML, somarMetricasML, type MetricasVendasML, type ResultadoVendasML } from "../ml";
 import { lerVendasShopee, somarMetricas } from "../shopee";
-import type { Completude, ComponentesVendasShopee, MetricasVendas, ParcialObservadoLoja, ResultadoVendas } from "../tipos";
+import type { Completude, ComponentesVendasShopee, DiaObservadoLoja, MetricasVendas, ParcialObservadoLoja, ResultadoVendas } from "../tipos";
 import { ErroPeriodoVendas, resolverPeriodoVendas, type PeriodoVendasResolvido } from "../periodo";
 import { somarDiasNoCalendario } from "@/lib/fuso-sao-paulo";
+import { comporObservado, type LojaObservada } from "./compor-observado";
 import {
   ErroVendasCanonicas, type ConsultaVendasCanonicas, type DependenciasConsultaVendas, type EstadoCobertura, type EstadoConsulta,
   type EstadoFrescor, type LojaVendasCanonicas, type MarketplaceConsulta, type MarketplaceLoja, type MetricasCombinadas,
-  type ParteAtualLoja, type PartesDoPeriodo, type ResultadoVendasCanonicas, type SerieDiariaVendas,
+  type ObservadoVendas, type ParteAtualLoja, type PartesDoPeriodo, type ResultadoVendasCanonicas, type SerieDiariaVendas,
 } from "./tipos";
 
 const MARKETPLACES_CONSULTA: readonly MarketplaceConsulta[] = ["mercado_livre", "shopee", "todos"];
@@ -130,29 +131,31 @@ export async function consultarVendasCanonicas(
   const politica = deps.politica ?? POLITICA_SYNC_PROPOSTA;
 
   // ── 4. valores: SO os leitores oficiais, SO dos marketplaces com loja no escopo ──
+  const opcoes = { ...(args.serieDiaria === true ? { porDia: true } : {}), ...(args.observado === true ? { observado: true } : {}) };
   const lerParte = (m: MarketplaceLoja, parte: { de: string; ate: string }, parcial: boolean): Promise<ResultadoVendasML | ResultadoVendas> =>
     protegido<ResultadoVendasML | ResultadoVendas>(m, () => m === "mercado_livre"
-      ? lerVendasML(cliente, { userId, de: parte.de, ate: parte.ate, lojaIds: idsDe(m), ...(parcial ? { parcial: true } : {}), ...(args.serieDiaria === true ? { porDia: true } : {}) })
-      : lerVendasShopee(cliente, { userId, de: parte.de, ate: parte.ate, lojaIds: idsDe(m), ...(parcial ? { parcial: true } : {}), ...(args.serieDiaria === true ? { porDia: true } : {}) }));
+      ? lerVendasML(cliente, { userId, de: parte.de, ate: parte.ate, lojaIds: idsDe(m), ...(parcial ? { parcial: true } : {}), ...opcoes })
+      : lerVendasShopee(cliente, { userId, de: parte.de, ate: parte.ate, lojaIds: idsDe(m), ...(parcial ? { parcial: true } : {}), ...opcoes }));
   const leiturasFechada = new Map<MarketplaceLoja, ResultadoVendasML | ResultadoVendas>();
   const leiturasAtual = new Map<MarketplaceLoja, ResultadoVendasML | ResultadoVendas>();
-  for (const m of consultados) {
-    if (fechada) leiturasFechada.set(m, await lerParte(m, fechada, false));
-    if (hoje) leiturasAtual.set(m, await lerParte(m, { de: hoje.de, ate: hoje.ate }, true));
-  }
+  // DESEMPENHO: as leituras (marketplace × parte) sao independentes — em paralelo; cada uma vai para o SEU mapa
+  await Promise.all(consultados.flatMap((m) => [
+    ...(fechada ? [lerParte(m, fechada, false).then((r) => { leiturasFechada.set(m, r); })] : []),
+    ...(hoje ? [lerParte(m, { de: hoje.de, ate: hoje.ate }, true).then((r) => { leiturasAtual.set(m, r); })] : []),
+  ]));
   const lojaDe = (mapa: Map<MarketplaceLoja, ResultadoVendasML | ResultadoVendas>, m: MarketplaceLoja, id: string): LeituraLoja | null =>
     ((mapa.get(m)?.lojas ?? []) as LeituraLoja[]).find((r) => r.lojaId === id) ?? null;
 
   // ── 5. frescor da parte fechada: SO o avaliador do coordenador (lojas ATIVAS; leitura pura) ──
   const avaliacoes = new Map<string, AvaliacaoLojaSync>();
-  if (fechada) for (const m of consultados) {
+  if (fechada) await Promise.all(consultados.map(async (m) => {
     const ativas = escopo.filter((l) => DE_SYNC[l.marketplace] === m && l.ativo);
-    if (!ativas.length) continue;
+    if (!ativas.length) return;
     const av = await protegido(`frescor_${m}`, () => avaliarNecessidadeDeSync(cliente,
       { userId, marketplace: PARA_SYNC[m], lojaId: lojaId ?? undefined, de: fechada.de, ate: fechada.ate, origem: "usuario" },
       { agoraMs, politica }));
     for (const a of av.lojas) avaliacoes.set(a.lojaId, a);
-  }
+  }));
   // dia corrente = faixa mais recente da politica canonica (a mesma do planejador)
   const intervaloAtualMs = politica.faixas[0]?.intervaloMs ?? 0;
 
@@ -287,9 +290,39 @@ export async function consultarVendasCanonicas(
       : frescor === "FRESH" ? "COMPLETE_FRESH" : "COMPLETE_STALE";
   const observados = lojas.map((l) => l.parteAtual?.observadoAte ?? null).filter((x): x is string => x !== null).sort();
 
+  // ── 9. ETAPA 3: valores OBSERVADOS por dia — classificacao de cada dia pelo PROPRIO leitor (o dia avaliado sozinho),
+  //    hoje pela MESMA escolha da parte atual (dia COMPLETE, prefixo COMPLETE ou prefixo observado). Nao muda
+  //    estado/cobertura/metricas; a composicao recusa contradizer `combinadas`.
+  let observado: ObservadoVendas | null = null;
+  if (args.observado === true) {
+    const diasPeriodo: string[] = [];
+    for (let d = periodo.de; d <= periodo.ate; d = somarDiasNoCalendario(d, 1)) diasPeriodo.push(d);
+    const observadoAteHoje: string[] = [];
+    const lojasObservadas: LojaObservada[] = escopo.map((l) => {
+      const mkt = DE_SYNC[l.marketplace];
+      const rf = fechada ? lojaDe(leiturasFechada, mkt, l.id) : null;
+      const ra = hoje ? lojaDe(leiturasAtual, mkt, l.id) : null;
+      const dias: LojaObservada["dias"] = { ...(rf?.observadoPorDia ?? {}) };
+      if (hoje) {
+        const p = ra?.parcial;
+        let m: MetricasCombinadas | null = null, ate: string | null = null;
+        if (ra && ra.completude === "COMPLETE" && ra.metricas) { m = ra.metricas; ate = hoje.fimExclusivo; }
+        else if (p && p.estado === "OBSERVADO_ATE" && p.completude === "COMPLETE" && p.metricas) { m = p.metricas; ate = p.observadoAte; }
+        else if (p && p.estado === "OBSERVADO_ATE" && p.observadas) { m = p.observadas; ate = p.observadoAte; }
+        else if (ra?.observadoPorDia?.[hoje.de]?.metricas) { m = ra.observadoPorDia[hoje.de].metricas; ate = hoje.fimExclusivo; }
+        dias[hoje.de] = m ? { estado: "PROVISORIO", metricas: m, motivos: [] } : { estado: "SEM_DADOS", metricas: null, motivos: ["PARTE_ATUAL_NAO_OBSERVADA"] };
+        if (ate) observadoAteHoje.push(ate);
+      }
+      return { lojaId: l.id, marketplace: mkt, dias };
+    });
+    observado = comporObservado({ dias: diasPeriodo, lojas: lojasObservadas, hoje: hoje?.de ?? null,
+      observadoAteHoje: observadoAteHoje.sort()[0] ?? null, estado, combinadas });
+  }
+
   return {
     userId, marketplace, lojaId, lojaIds, periodo, partes,
     ...(args.serieDiaria === true ? { serieDiaria } : {}),
+    ...(args.observado === true ? { observado } : {}),
     metricas: {
       combinadas,
       mercadoLivre: comMetricas ? totalML : null,
@@ -316,6 +349,7 @@ interface LeituraLoja {
   componentes?: ComponentesVendasShopee | null;
   parcial?: ParcialObservadoLoja<MetricasVendasML | MetricasVendas>;
   porDia?: Record<string, MetricasVendasML | MetricasVendas>;
+  observadoPorDia?: Record<string, DiaObservadoLoja<MetricasVendasML | MetricasVendas>>;
 }
 
 /** Soma de centavo do PROPRIO leitor do marketplace (somarMetricasML / somarMetricas). null se faltar qualquer parte. */

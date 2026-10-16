@@ -24,13 +24,19 @@ type Loja = {
 type ResumoCanonicoDashboard = {
   estado: string; parcial: boolean; observadoAte: string | null;
   metricas: { faturamento: number; pedidos: number; unidades: number; ticket: number } | null;
-  /** ETAPA 2A: serie diaria canonica (soma = metricas) e separacao por marketplace — mesma consulta dos cards. */
-  serie?: { dia: string; faturamento: number; pedidos: number; unidades: number }[] | null;
+  /** ETAPA 3: o que `metricas` representa — CONFIRMADO / PROVISORIO / INCOMPLETO (falta dia) / SEM_DADOS. */
+  situacao?: "CONFIRMADO" | "PROVISORIO" | "INCOMPLETO" | "SEM_DADOS" | null;
+  dias?: { confirmados: number; provisorios: number; semDados: string[] } | null;
+  provisorio?: { faturamento: number; pedidos: number; unidades: number } | null;
+  /** ETAPA 2A/3: serie diaria canonica (soma dos dias com valor = metricas) — mesmo objeto dos cards. SEM_DADOS = null. */
+  serie?: { dia: string; estado: "CONFIRMADO" | "PROVISORIO" | "SEM_DADOS"; faturamento: number | null; pedidos: number | null; unidades: number | null; observadoAte: string | null }[] | null;
   porMarketplace?: { mercadoLivre: { faturamento: number; pedidos: number; unidades: number } | null; shopee: { faturamento: number; pedidos: number; unidades: number } | null } | null;
 };
 type DiaData = {
   data: string; label: string; faturamento: number; lucro: number;
   custo: number; comissao: number; frete: number;
+  /** ETAPA 3 (serie canonica): PROVISORIO = valor observado que pode mudar; SEM_DADOS = lacuna (nunca zero). */
+  estado?: "CONFIRMADO" | "PROVISORIO" | "SEM_DADOS";
 };
 type TopProduto = {
   mlItemId: string; nome: string; sku: string | null;
@@ -268,6 +274,12 @@ function AreaChartSection({ dias, mostrarLucro = true, semDados = null }: { dias
   const fat = dias.map(d => d.faturamento);
   const luc = dias.map(d => Math.max(d.lucro, 0));
   const maxV = Math.max(...fat, 1);
+  // ETAPA 3: dia SEM_DADOS nao tem ponto (lacuna, nunca zero); a linha so liga dias consecutivos com valor
+  const temValor = (i: number) => dias[i]?.estado !== "SEM_DADOS";
+  const trechos: number[][] = [];
+  dias.forEach((_, i) => { if (!temValor(i)) return; const ult = trechos[trechos.length - 1]; if (ult && ult[ult.length - 1] === i - 1) ult.push(i); else trechos.push([i]); });
+  const xDe = (i: number) => (i / (dias.length - 1)) * W;
+  const larguraDia = W / Math.max(dias.length - 1, 1);
 
   function toPoints(data: number[]) {
     return data.map((v, i) => ({
@@ -275,15 +287,16 @@ function AreaChartSection({ dias, mostrarLucro = true, semDados = null }: { dias
       y: H - (Math.max(v, 0) / maxV) * H * 0.85 - H * 0.05,
     }));
   }
-  function toSmoothPath(data: number[], fill = false) {
-    const pts = toPoints(data);
+  function toSmoothPath(data: number[], fill = false, idx?: number[]) {
+    const todos = toPoints(data);
+    const pts = idx ? idx.map(i => todos[i]) : todos;
     let d = `M ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)}`;
     for (let i = 1; i < pts.length; i++) {
       const cx1 = pts[i - 1].x + (pts[i].x - pts[i - 1].x) / 3;
       const cx2 = pts[i].x - (pts[i].x - pts[i - 1].x) / 3;
       d += ` C ${cx1.toFixed(1)} ${pts[i - 1].y.toFixed(1)}, ${cx2.toFixed(1)} ${pts[i].y.toFixed(1)}, ${pts[i].x.toFixed(1)} ${pts[i].y.toFixed(1)}`;
     }
-    if (fill) d += ` L ${pts[pts.length - 1].x.toFixed(1)} ${H} L 0 ${H} Z`;
+    if (fill) d += ` L ${pts[pts.length - 1].x.toFixed(1)} ${H} L ${pts[0].x.toFixed(1)} ${H} Z`;
     return d;
   }
 
@@ -328,16 +341,22 @@ function AreaChartSection({ dias, mostrarLucro = true, semDados = null }: { dias
             {fmtBRL(maxV * p, true)}
           </text>
         ))}
-        <path d={toSmoothPath(fat, true)} fill="url(#gf)" />
+        {dias.map((d, i) => d.estado === "SEM_DADOS" || d.estado === "PROVISORIO" ? (
+          <rect key={`b${i}`} data-estado-dia={d.estado} x={Math.max(xDe(i) - larguraDia / 2, 0).toFixed(1)} y="0" width={larguraDia.toFixed(1)} height={H}
+            fill={d.estado === "SEM_DADOS" ? "#475569" : "#FFB000"} fillOpacity={d.estado === "SEM_DADOS" ? 0.18 : 0.07} />
+        ) : null)}
+        {trechos.map((t, k) => <path key={`f${k}`} d={toSmoothPath(fat, true, t)} fill="url(#gf)" />)}
         {mostrarLucro && <path d={toSmoothPath(luc, true)} fill="url(#gl)" />}
-        <path d={toSmoothPath(fat)} stroke="#FF7A00" strokeWidth="2" fill="none" strokeLinecap="round" />
+        {trechos.map((t, k) => t.length > 1
+          ? <path key={`l${k}`} d={toSmoothPath(fat, false, t)} stroke="#FF7A00" strokeWidth="2" fill="none" strokeLinecap="round" />
+          : <circle key={`l${k}`} cx={xDe(t[0]).toFixed(1)} cy={toPoints(fat)[t[0]].y.toFixed(1)} r="3" fill="#FF7A00" />)}
         {mostrarLucro && <path d={toSmoothPath(luc)} stroke="#22C55E" strokeWidth="2" fill="none" strokeLinecap="round" />}
         {hovX !== null && hov !== null && (
           <>
             <line x1={hovX.toFixed(1)} y1="0" x2={hovX.toFixed(1)} y2={H} stroke="#94A3B8" strokeWidth="1" strokeDasharray="3,4" />
             {(mostrarLucro ? [{ data: fat, color: "#FF7A00" }, { data: luc, color: "#22C55E" }] : [{ data: fat, color: "#FF7A00" }]).map(({ data, color }) => {
               const pts = toPoints(data);
-              const pt = pts[hov];
+              const pt = temValor(hov) ? pts[hov] : undefined;
               return pt ? (
                 <g key={color}>
                   <circle cx={pt.x.toFixed(1)} cy={pt.y.toFixed(1)} r="5" fill={color} />
@@ -362,8 +381,11 @@ function AreaChartSection({ dias, mostrarLucro = true, semDados = null }: { dias
           border: "1px solid #334155", fontSize: 12,
         }}>
           <span style={{ color: "#94A3B8", fontWeight: 700 }}>{dias[hov]?.label}</span>
-          <span style={{ color: "#FF7A00", fontWeight: 700 }}>Fat: {fmtBRL(dias[hov]?.faturamento ?? 0)}</span>
-          <span style={{ color: "#22C55E", fontWeight: 700 }}>Lucro: {fmtBRL(Math.max(dias[hov]?.lucro ?? 0, 0))}</span>
+          <span style={{ color: "#FF7A00", fontWeight: 700 }}>Fat: {temValor(hov) ? fmtBRL(dias[hov]?.faturamento ?? 0) : "sem dados"}</span>
+          {dias[hov]?.estado && <span style={{ color: dias[hov].estado === "CONFIRMADO" ? "#22C55E" : dias[hov].estado === "PROVISORIO" ? "#FFB000" : "#94A3B8", fontWeight: 700 }}>
+            {dias[hov].estado === "CONFIRMADO" ? "confirmado" : dias[hov].estado === "PROVISORIO" ? "provisorio" : "sem dados"}
+          </span>}
+          {mostrarLucro && <span style={{ color: "#22C55E", fontWeight: 700 }}>Lucro: {fmtBRL(Math.max(dias[hov]?.lucro ?? 0, 0))}</span>}
         </div>
       )}
     </div>
@@ -638,16 +660,28 @@ export default function DashboardPage() {
   });
   // D16: Faturamento, Pedidos, Unidades e Ticket vem da camada canonica (null = indisponivel)
   const [resumoCanonico, setResumoCanonico] = useState<ResumoCanonicoDashboard | null>(null);
+  // ETAPA 3: a fonte legada (Lucro/Margem/ROI/Comissoes) nao respondeu para a selecao — esses cards mostram "—"
+  const [legadoIndisponivel, setLegadoIndisponivel] = useState(false);
   // Sem metrica canonica (periodo incompleto / sem observacao) o card mostra "—", nunca 0 nem o legado.
   const mc = resumoCanonico?.metricas ?? null;
   const ateCanonico = resumoCanonico?.parcial && resumoCanonico.observadoAte
     ? new Date(resumoCanonico.observadoAte).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", timeZone: "America/Sao_Paulo" })
     : null;
-  const subSemCanonico = resumoCanonico ? "sincronizando" : "indisponivel";
-  // ETAPA 2A: grafico diario CANONICO — a mesma consulta (lojas selecionadas, criterios de data, completude) dos cards
-  const diasCanonicos: DiaData[] = (resumoCanonico?.serie ?? []).map(d => ({ data: d.dia, label: fmtData(d.dia), faturamento: d.faturamento, lucro: 0, custo: 0, comissao: 0, frete: 0 }));
+  const subSemCanonico = resumoCanonico ? "sem dados observados" : "indisponivel";
+  // ETAPA 2A/3: grafico diario CANONICO — o MESMO objeto dos cards (lojas selecionadas, criterios de data, estado de cada dia)
+  const diasCanonicos: DiaData[] = (resumoCanonico?.serie ?? []).map(d => ({ data: d.dia, label: fmtData(d.dia), faturamento: d.faturamento ?? 0, lucro: 0, custo: 0, comissao: 0, frete: 0, estado: d.estado }));
   const graficoSemDados = resumoCanonico?.serie ? null
-    : resumoCanonico ? "Grafico disponivel quando o periodo estiver confirmado (sincronizando)" : "Grafico indisponivel";
+    : resumoCanonico ? "Sem dados observados para o periodo (sincronizando)" : "Grafico indisponivel";
+  // ETAPA 3: o que o total dos cards e — nunca um total parcial apresentado como definitivo
+  const situacao = mc ? (resumoCanonico?.situacao ?? null) : null;
+  const nDias = resumoCanonico?.serie?.length ?? 0;
+  const semDadosDias = resumoCanonico?.dias?.semDados ?? [];
+  const selo = situacao === "CONFIRMADO" ? "confirmado" : situacao === "PROVISORIO" ? "provisorio" : situacao === "INCOMPLETO" ? `incompleto · faltam ${semDadosDias.length} dia(s)` : null;
+  const avisoSituacao = situacao === "PROVISORIO"
+    ? `Valores provisorios: ${resumoCanonico?.dias ? `${resumoCanonico.dias.confirmados} de ${nDias} dia(s) confirmados` : "periodo ainda nao confirmado"}${resumoCanonico?.provisorio && resumoCanonico.provisorio.pedidos > 0 ? ` · ${fmtBRL(resumoCanonico.provisorio.faturamento)} ainda podem mudar` : ""}${ateCanonico ? ` · hoje ate ${ateCanonico}` : ""}.`
+    : situacao === "INCOMPLETO"
+      ? `Total parcial: sem dados de ${semDadosDias.length} dia(s) (${semDadosDias.map(fmtData).join(", ")}). Os valores abaixo somam so os dias com dados e NAO sao o total do periodo.`
+      : null;
   const [dias,     setDias]     = useState<DiaData[]>([]);
   const [tops,       setTops]       = useState<TopProduto[]>([]);
   const [loss,       setLoss]       = useState<TopProduto[]>([]);
@@ -782,8 +816,16 @@ export default function DashboardPage() {
       setMlConectado(mlOk);
       setShopeeConectado(shopeeOk);
 
+      setLegadoIndisponivel(!mlOk && !shopeeOk);
       if (!mlOk && !shopeeOk) {
-        setErro(mlData?.mensagem || "Nenhum marketplace conectado.");
+        // ETAPA 3: o legado falhou (ex.: Shopee multi-loja sem loja_id → 409), mas os cards canonicos tem resposta propria —
+        // a tela segue com eles; os indicadores legados mostram "—" (nunca zero, nunca bloqueiam o canonico)
+        if (!canonData) setErro(mlData?.mensagem || "Nenhum marketplace conectado.");
+        // nada da selecao anterior sobrevive nos blocos legados
+        setKpis({ faturamento: 0, pedidos: 0, ticket: 0, lucro: 0, margem: 0, unidades: 0, roi: 0, comissoes: 0 });
+        setScore(0); setDias([]); setSparkFat([]); setSparkLuc([]);
+        setTops([]); setLoss([]); setTopsML([]); setTopsShopee([]); setAlertas([]);
+        setShowBothMkt(!!(canonData?.porMarketplace?.mercadoLivre?.pedidos && canonData?.porMarketplace?.shopee?.pedidos));
         setLoading(false);
         return;
       }
@@ -1140,20 +1182,32 @@ export default function DashboardPage() {
 
       {!loading && !erro && (
         <>
+          {avisoSituacao && (
+            <div data-situacao={situacao ?? ""} style={{
+              background: situacao === "INCOMPLETO" ? "rgba(148,163,184,0.08)" : "rgba(255,176,0,0.08)",
+              border: `1px solid ${situacao === "INCOMPLETO" ? "rgba(148,163,184,0.3)" : "rgba(255,176,0,0.3)"}`,
+              borderRadius: 12, padding: "10px 16px", color: situacao === "INCOMPLETO" ? "#CBD5E1" : "#FCD34D", fontSize: 12, marginBottom: 16,
+            }}>
+              {avisoSituacao}
+            </div>
+          )}
           {/* KPI CARDS */}
           <div className="dash-anim" style={{
             display: "grid",
             gridTemplateColumns: "repeat(auto-fill, minmax(175px, 1fr))",
             gap: 14, marginBottom: 24, animationDelay: "0.05s",
           }}>
-            <KpiCard icon="💰" label="Faturamento"   value={mc ? fmtBRL(mc.faturamento) : "—"} sub={mc ? `${mc.unidades} unid.${ateCanonico ? ` · até ${ateCanonico}` : ""}` : subSemCanonico} color="#FF7A00" spark={diasCanonicos.map(d => d.faturamento)} />
-            <KpiCard icon="✨" label="Lucro Liquido" value={fmtBRL(kpis.lucro, true)}        color={kpis.lucro >= 0 ? "#22C55E" : "#EF4444"} spark={sparkLuc} sub="legado · nao reconciliado" />
-            <KpiCard icon="📊" label="Margem Media"  value={`${kpis.margem.toFixed(1)}%`}    color={kpis.margem >= 20 ? "#22C55E" : kpis.margem >= 10 ? "#FFB000" : "#EF4444"} sub="legado · nao reconciliado" />
-            <KpiCard icon="📦" label="Pedidos"       value={mc ? String(mc.pedidos) : "—"}    color="#6366F1" sub={mc ? "pagos" : subSemCanonico} />
-            <KpiCard icon="🎯" label="Ticket Medio"  value={mc ? fmtBRL(mc.ticket) : "—"} color="#FFB000" sub={mc ? "por pedido" : subSemCanonico} />
-            <KpiCard icon="🔄" label="ROI"           value={`${kpis.roi.toFixed(0)}%`}       color={kpis.roi >= 50 ? "#22C55E" : "#FFB000"} sub="legado · nao reconciliado" />
-            <KpiCard icon="🏷️" label="Comissoes"    value={fmtBRL(kpis.comissoes, true)}     color="#EF4444" sub="legado · nao reconciliado" />
-            <KpiCard icon="📈" label="Unidades"      value={mc ? String(mc.unidades) : "—"}   color="#06B6D4" sub={mc ? "vendidas" : subSemCanonico} />
+            <KpiCard icon="💰" label="Faturamento"   value={mc ? fmtBRL(mc.faturamento) : "—"} sub={mc ? `${mc.unidades} unid.${selo ? ` · ${selo}` : ""}${ateCanonico ? ` · até ${ateCanonico}` : ""}` : subSemCanonico} color="#FF7A00" spark={diasCanonicos.filter(d => d.estado !== "SEM_DADOS").map(d => d.faturamento)} />
+            <KpiCard icon="✨" label="Lucro Liquido" value={legadoIndisponivel ? "—" : fmtBRL(kpis.lucro, true)}        color={kpis.lucro >= 0 ? "#22C55E" : "#EF4444"} spark={sparkLuc} sub="legado · nao reconciliado" />
+            <KpiCard icon="📊" label="Margem Media"  value={legadoIndisponivel ? "—" : `${kpis.margem.toFixed(1)}%`}    color={kpis.margem >= 20 ? "#22C55E" : kpis.margem >= 10 ? "#FFB000" : "#EF4444"} sub="legado · nao reconciliado" />
+            <KpiCard icon="📦" label="Pedidos"       value={mc ? String(mc.pedidos) : "—"}    color="#6366F1" sub={mc ? `pagos${selo ? ` · ${selo}` : ""}` : subSemCanonico} />
+            <KpiCard icon="🎯" label="Ticket Medio"  value={mc ? fmtBRL(mc.ticket) : "—"} color="#FFB000" sub={mc ? `por pedido${selo ? ` · ${selo}` : ""}` : subSemCanonico} />
+            <KpiCard icon="🔄" label="ROI"           value={legadoIndisponivel ? "—" : `${kpis.roi.toFixed(0)}%`}       color={kpis.roi >= 50 ? "#22C55E" : "#FFB000"} sub="legado · nao reconciliado" />
+            <KpiCard icon="🏷️" label="Comissoes"    value={legadoIndisponivel ? "—" : fmtBRL(kpis.comissoes, true)}     color="#EF4444" sub="legado · nao reconciliado" />
+            <KpiCard icon="📈" label="Unidades"      value={mc ? String(mc.unidades) : "—"}   color="#06B6D4" sub={mc ? `vendidas${selo ? ` · ${selo}` : ""}` : subSemCanonico} />
+          </div>
+          <div data-legado-aviso style={{ fontSize: 11, color: "#64748B", margin: "-14px 0 20px" }}>
+            {legadoIndisponivel ? "Lucro, Margem, ROI e Comissoes: fonte legada indisponivel para esta selecao." : "Lucro, Margem, ROI e Comissoes: fonte legada, nao reconciliada e nao consolidada por loja."}
           </div>
 
           {/* EVOLUCAO + BALANCETE */}
@@ -1175,7 +1229,8 @@ export default function DashboardPage() {
 
             <Section title="Balancete" subtitle="Composicao do resultado · legado, nao reconciliado">
               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                {balItems.map(item => {
+                {legadoIndisponivel && <div style={{ fontSize: 12, color: "#94A3B8" }}>Fonte legada indisponivel para esta selecao.</div>}
+                {!legadoIndisponivel && balItems.map(item => {
                   const maxAbs = Math.max(...balItems.map(i => Math.abs(i.value)), 1);
                   const pct = (Math.abs(item.value) / maxAbs) * 100;
                   return (

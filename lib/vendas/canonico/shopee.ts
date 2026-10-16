@@ -33,7 +33,7 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { diaEmSaoPaulo, inicioDoDiaEmSaoPaulo, somarDiasNoCalendario } from "@/lib/fuso-sao-paulo";
 import type {
-  Completude, ComponentesVendasShopee, MetricasVendas, ParcialObservadoLoja, ResultadoVendas, ResultadoVendasLoja,
+  Completude, ComponentesVendasShopee, DiaObservadoLoja, MetricasVendas, ParcialObservadoLoja, ResultadoVendas, ResultadoVendasLoja,
 } from "./tipos";
 import { prefixoObservado } from "./periodo";
 
@@ -89,6 +89,19 @@ export function intervaloSaoPaulo(de: string, ate: string): { inicio: Date; fim:
   const f = inicioDoDiaEmSaoPaulo(somarDiasNoCalendario(ate, 1));
   if (i === null || f === null || ate < de) throw new Error("periodo_invalido");
   return { inicio: new Date(i), fim: new Date(f) };
+}
+
+/** ETAPA 3: os dias civis de Sao Paulo de [inicio, fim), cada um com o MESMO recorte de intervaloSaoPaulo(dia, dia). */
+export function diasDoIntervalo(inicio: Date, fim: Date): { dia: string; inicio: Date; fim: Date }[] {
+  const out: { dia: string; inicio: Date; fim: Date }[] = [];
+  let dia = diaEmSaoPaulo(inicio.toISOString());
+  while (dia !== null) {
+    const iv = intervaloSaoPaulo(dia, dia);
+    if (iv.inicio.getTime() >= fim.getTime()) break;
+    out.push({ dia, inicio: iv.inicio, fim: iv.fim });
+    dia = somarDiasNoCalendario(dia, 1);
+  }
+  return out;
 }
 
 /**
@@ -388,6 +401,39 @@ export function avaliarCompletudeShopee(args: {
   return { completude: falhou ? "FAILED" : "PARTIAL", motivos, ...base };
 }
 
+/** ETAPA 3: um pedido do corpus sem pagamento conhecido (as colunas que a dimensao B usa). */
+export interface NaoPagoShopee { createTime: string | null; detailFetchedAt: string | null }
+
+/**
+ * ETAPA 3 — cada dia civil de Sao Paulo de [inicio, fim) avaliado SOZINHO, com as MESMAS funcoes
+ * (avaliarCompletudeShopee / calcularMetricasShopee) e o dia como periodo. A contagem B de cada dia e o MESMO recorte
+ * de contarNaoPagosSemObservacaoShopee (criados em [desde do dia, fim do dia), detail ausente ou anterior ao fim do
+ * dia) sobre as linhas `naoPagos` — que o leitor so usa depois de conferir contra a contagem oficial do periodo.
+ *   COMPLETE do dia → CONFIRMADO; descoberta do dia provada (A) e valores presentes → PROVISORIO; senao SEM_DADOS.
+ */
+export function diasObservadosShopee(a: {
+  inicio: Date; fim: Date; janelas: JanelaListagem[]; ancoraDescoberta: Date | null;
+  pedidos: PedidoShopeeCanonico[]; itens: ItemShopeeCanonico[]; naoPagos: NaoPagoShopee[];
+}): Record<string, DiaObservadoLoja<MetricasVendas>> {
+  const out: Record<string, DiaObservadoLoja<MetricasVendas>> = {};
+  for (const { dia, inicio, fim } of diasDoIntervalo(a.inicio, a.fim)) {
+    const b = fim.getTime();
+    const desde = a.ancoraDescoberta !== null ? a.ancoraDescoberta.getTime() : inicio.getTime() - LIMITE_POLITICA_PAGAMENTO_MS;
+    const naoPagosDia = a.naoPagos.filter((n) => {
+      const c = n.createTime ? new Date(n.createTime).getTime() : NaN;
+      return c >= desde && c < b && (n.detailFetchedAt === null || new Date(n.detailFetchedAt).getTime() < b);
+    }).length;
+    const pagos = filtrarPagosNoIntervalo(a.pedidos, inicio, fim);
+    const av = avaliarCompletudeShopee({ inicio, fim, janelas: a.janelas, ancoraDescoberta: a.ancoraDescoberta,
+      pedidosPagos: pagos, itens: a.itens, naoPagosSemObservacaoPosPeriodo: naoPagosDia });
+    if (av.completude === "COMPLETE") { out[dia] = { estado: "CONFIRMADO", metricas: calcularMetricasShopee(pagos, a.itens).metricas, motivos: [] }; continue; }
+    let metricas: MetricasVendas | null = null;
+    if (av.dimensoes.descoberta) { try { metricas = calcularMetricasShopee(pagos, a.itens).metricas; } catch (e) { if (!(e instanceof ErroGraoShopee)) throw e; } }
+    out[dia] = metricas ? { estado: "PROVISORIO", metricas, motivos: av.motivos } : { estado: "SEM_DADOS", metricas: null, motivos: av.motivos };
+  }
+  return out;
+}
+
 /**
  * Status Shopee VERIFICADOS como terminais (nao mudam mais). Vazio de
  * proposito: nenhum foi verificado contra documentacao/comportamento ainda
@@ -401,15 +447,40 @@ export const ESTADOS_TERMINAIS_VERIFICADOS: readonly string[] = [];
 
 const PAGINA = 1000;
 const LOTE_IN = 150;
+/**
+ * DESEMPENHO (gate do Dashboard): leituras independentes em paralelo, com teto. So muda QUANDO cada SELECT sai —
+ * nao o que ele le, nem a ordem do resultado, nem regra alguma. O tempo era a soma de ~350 idas e voltas em serie.
+ */
+const PAGINAS_EM_PARALELO = 4;
+const LOTES_EM_PARALELO = 6;
+export const LOJAS_EM_PARALELO = 3;
 
-async function paginar<T>(consulta: (de: number, ate: number) => PromiseLike<{ data: unknown; error: unknown }>): Promise<T[]> {
+/** `fn` sobre cada item com no maximo `limite` em voo; o resultado sai na ORDEM dos itens. Primeiro erro rejeita. */
+export async function emParalelo<T, R>(itens: readonly T[], limite: number, fn: (x: T, i: number) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(itens.length);
+  let proximo = 0;
+  const trabalhador = async () => { while (proximo < itens.length) { const i = proximo++; out[i] = await fn(itens[i], i); } };
+  await Promise.all(Array.from({ length: Math.min(limite, itens.length) }, trabalhador));
+  return out;
+}
+
+/**
+ * Paginas de PAGINA linhas em ondas de PAGINAS_EM_PARALELO, concatenadas na ordem. Para na primeira pagina curta —
+ * exatamente onde o laco sequencial pararia (paginas seguintes da mesma onda sao descartadas).
+ */
+export async function paginar<T>(consulta: (de: number, ate: number) => PromiseLike<{ data: unknown; error: unknown }>): Promise<T[]> {
   const out: T[] = [];
-  for (let de = 0; ; de += PAGINA) {
-    const { data, error } = await consulta(de, de + PAGINA - 1);
-    if (error) throw new Error("leitura_falhou");
-    const lote = (data ?? []) as T[];
-    out.push(...lote);
-    if (lote.length < PAGINA) return out;
+  for (let onda = 0; ; onda += PAGINAS_EM_PARALELO) {
+    const paginas = await Promise.all(Array.from({ length: PAGINAS_EM_PARALELO }, async (_, k) => {
+      const de = (onda + k) * PAGINA;
+      const { data, error } = await consulta(de, de + PAGINA - 1);
+      if (error) throw new Error("leitura_falhou");
+      return (data ?? []) as T[];
+    }));
+    for (const lote of paginas) {
+      out.push(...lote);
+      if (lote.length < PAGINA) return out;
+    }
   }
 }
 
@@ -428,6 +499,8 @@ export async function lerVendasShopee(
     parcial?: boolean;
     /** ETAPA 2A (padrao false): acrescenta `porDia` por loja (so quando COMPLETE / prefixo COMPLETE). */
     porDia?: boolean;
+    /** ETAPA 3 (padrao false): acrescenta `observadoPorDia` (e `parcial.observadas`); o resto nao muda. */
+    observado?: boolean;
     /**
      * DISCOVERY_ANCHOR por loja (ISO), explicita e comprovada. Ainda nao ha
      * onde persisti-la (proposta de schema no S2-D3-B2.1): sem ela, A e
@@ -447,14 +520,26 @@ export async function lerVendasShopee(
   const lojaIds = ((lojas ?? []) as { id: string }[]).map((l) => l.id);
   if (args.lojaIds && args.lojaIds.some((id) => !lojaIds.includes(id))) throw new Error("loja_invalida");
 
-  const resultados: ResultadoVendasLoja[] = [];
-  for (const lojaId of lojaIds) {
-    const linhas = await paginar<Record<string, unknown>>((a, b) => cliente
+  const resultados: ResultadoVendasLoja[] = await emParalelo(lojaIds, LOJAS_EM_PARALELO, async (lojaId): Promise<ResultadoVendasLoja> => {
+    // janelas e contagem B nao dependem dos pedidos: saem junto com a leitura deles
+    const fimIso = fim.toISOString();
+    const ancora = args.ancorasDescoberta?.[lojaId];
+    // so o corpus que pode conter pagamentos do periodo (mesmo `desde` de A)
+    const desdeIso = new Date(ancora ? new Date(ancora).getTime() : inicio.getTime() - LIMITE_POLITICA_PAGAMENTO_MS).toISOString();
+    const linhasP = paginar<Record<string, unknown>>((a, b) => cliente
       .from("shopee_pedidos")
       .select("loja_id, order_sn, order_status, create_time, pay_time, update_time, detail_fetched_at, escrow_fetched_at, escrow_update_time, original_shopee_discount, pix_discount")
       .eq("user_id", userId).eq("loja_id", lojaId)
       .gte("pay_time", inicio.toISOString()).lt("pay_time", fim.toISOString())
       .order("order_sn", { ascending: true }).range(a, b));
+    // o builder do Supabase so dispara no `.then`: Promise.resolve o poe em voo agora
+    const jobsP = Promise.resolve(cliente.from("sync_jobs")
+      .select("loja_id, campo_tempo, janela_inicio, janela_fim, listagem_completa, status")
+      .eq("user_id", userId).eq("loja_id", lojaId).eq("marketplace", "Shopee")
+      .eq("campo_tempo", "create_time").not("janela_inicio", "is", null));
+    const naoPagosP = contarNaoPagosSemObservacaoShopee(cliente, { userId, lojaId, desdeIso, fimIso });
+    naoPagosP.catch(() => {}); jobsP.catch(() => {});   // erro tratado no await abaixo (sem rejeicao solta)
+    const linhas = await linhasP;
     const pedidos: PedidoShopeeCanonico[] = linhas.map((r) => ({
       lojaId: String(r.loja_id), orderSn: String(r.order_sn), orderStatus: (r.order_status as string) ?? null,
       createTime: (r.create_time as string) ?? null,
@@ -465,28 +550,26 @@ export async function lerVendasShopee(
       pixDiscount: r.pix_discount === null ? null : Number(r.pix_discount),
     }));
 
-    const itens: ItemShopeeCanonico[] = [];
     const sns = pedidos.map((p) => p.orderSn);
-    for (let i = 0; i < sns.length; i += LOTE_IN) {
+    const lotes: string[][] = [];
+    for (let i = 0; i < sns.length; i += LOTE_IN) lotes.push(sns.slice(i, i + LOTE_IN));
+    const itens: ItemShopeeCanonico[] = (await emParalelo(lotes, LOTES_EM_PARALELO, async (lote) => {
       const { data, error } = await cliente.from("pedidos")
         .select("order_id, qtd, valor_unit, escrow_voucher_seller, escrow_voucher_shopee, escrow_coin")
         .eq("user_id", userId).eq("marketplace", "Shopee").eq("loja_id", lojaId)
-        .in("order_id", sns.slice(i, i + LOTE_IN));
+        .in("order_id", lote);
       if (error) throw new Error("leitura_falhou");
-      for (const r of (data ?? []) as Record<string, unknown>[]) itens.push({
+      return ((data ?? []) as Record<string, unknown>[]).map((r): ItemShopeeCanonico => ({
         lojaId, orderSn: String(r.order_id), precoUnitario: Number(r.valor_unit), quantidade: Number(r.qtd),
         voucherVendedor: r.escrow_voucher_seller === null ? null : Number(r.escrow_voucher_seller),
         voucherShopee: r.escrow_voucher_shopee === null ? null : Number(r.escrow_voucher_shopee),
         moedas: r.escrow_coin === null ? null : Number(r.escrow_coin),
-      });
-    }
+      }));
+    })).flat();
 
     // So janelas de DESCOBERTA (create_time): update_time nao prova nada.
     // Sem filtro pelo periodo: a cadeia comeca na ancora, bem antes dele.
-    const { data: jobs, error: errJobs } = await cliente.from("sync_jobs")
-      .select("loja_id, campo_tempo, janela_inicio, janela_fim, listagem_completa, status")
-      .eq("user_id", userId).eq("loja_id", lojaId).eq("marketplace", "Shopee")
-      .eq("campo_tempo", "create_time").not("janela_inicio", "is", null);
+    const { data: jobs, error: errJobs } = await jobsP;
     if (errJobs) throw new Error("leitura_falhou");
     const janelas: JanelaListagem[] = ((jobs ?? []) as Record<string, unknown>[]).map((j) => ({
       lojaId, campoTempo: j.campo_tempo as JanelaListagem["campoTempo"],
@@ -497,24 +580,21 @@ export async function lerVendasShopee(
     // B: pedidos do corpus sem pagamento conhecido e sem observacao depois
     // do periodo (poderiam ter sido pagos nele). Nenhum status terminal e
     // presumido (ESTADOS_TERMINAIS_VERIFICADOS).
-    const fimIso = fim.toISOString();
-    const ancora = args.ancorasDescoberta?.[lojaId];
-    // so o corpus que pode conter pagamentos do periodo (mesmo `desde` de A)
-    const desdeIso = new Date(ancora ? new Date(ancora).getTime() : inicio.getTime() - LIMITE_POLITICA_PAGAMENTO_MS).toISOString();
-    const naoPagos = await contarNaoPagosSemObservacaoShopee(cliente, { userId, lojaId, desdeIso, fimIso });
+    const naoPagos = await naoPagosP;
     const av = avaliarCompletudeShopee({ inicio, fim, janelas, ancoraDescoberta: ancora ? new Date(ancora) : null,
       pedidosPagos: pedidos, itens, naoPagosSemObservacaoPosPeriodo: naoPagos });
     const extra = { dimensoes: av.dimensoes, estadoEm: av.estadoEm, baseDescoberta: av.baseDescoberta, descobertaDesde: av.descobertaDesde,
+      ...(args.observado === true ? { observadoPorDia: await observadoPorDiaShopee(cliente, { userId, lojaId, inicio, fim, janelas,
+        ancora: ancora ? new Date(ancora) : null, desdeIso, fimIso, naoPagosOficial: naoPagos, completo: av.completude === "COMPLETE", pedidos, itens }) } : {}),
       ...(args.parcial === true ? { parcial: await parcialObservadoShopee(cliente, { userId, lojaId, inicio, fim, janelas,
-        ancora: ancora ? new Date(ancora) : null, desdeIso, pedidos, itens, porDia: args.porDia === true }) } : {}) };
+        ancora: ancora ? new Date(ancora) : null, desdeIso, pedidos, itens, porDia: args.porDia === true, observado: args.observado === true }) } : {}) };
     if (av.completude !== "COMPLETE") {
-      resultados.push({ lojaId, completude: av.completude, motivos: av.motivos, metricas: null, componentes: null, ...extra });
-      continue;
+      return { lojaId, completude: av.completude, motivos: av.motivos, metricas: null, componentes: null, ...extra };
     }
     const { metricas, componentes } = calcularMetricasShopee(pedidos, itens);
-    resultados.push({ lojaId, completude: av.completude, motivos: av.motivos, metricas, componentes, ...extra,
-      ...(args.porDia === true ? { porDia: porDiaShopee(pedidos, itens) } : {}) });
-  }
+    return { lojaId, completude: av.completude, motivos: av.motivos, metricas, componentes, ...extra,
+      ...(args.porDia === true ? { porDia: porDiaShopee(pedidos, itens) } : {}) };
+  });
 
   const completude: Completude = resultados.every((r) => r.completude === "COMPLETE")
     ? "COMPLETE" : resultados.some((r) => r.completude === "FAILED") ? "FAILED" : "PARTIAL";
@@ -531,7 +611,7 @@ export async function lerVendasShopee(
  */
 async function parcialObservadoShopee(cliente: SupabaseClient, a: {
   userId: string; lojaId: string; inicio: Date; fim: Date; janelas: JanelaListagem[]; ancora: Date | null; desdeIso: string;
-  pedidos: PedidoShopeeCanonico[]; itens: ItemShopeeCanonico[]; porDia?: boolean;
+  pedidos: PedidoShopeeCanonico[]; itens: ItemShopeeCanonico[]; porDia?: boolean; observado?: boolean;
 }): Promise<ParcialObservadoLoja<MetricasVendas>> {
   const p = prefixoObservado(alcanceDescobertaCriacao(a.janelas, new Date(a.desdeIso).getTime()), a.inicio, a.fim);
   if (p.estado !== "OBSERVADO_ATE") return { estado: p.estado, observadoAte: null, completude: null, motivos: [], metricas: null };
@@ -539,9 +619,50 @@ async function parcialObservadoShopee(cliente: SupabaseClient, a: {
   const naoPagos = await contarNaoPagosSemObservacaoShopee(cliente, { userId: a.userId, lojaId: a.lojaId, desdeIso: a.desdeIso, fimIso: p.ate.toISOString() });
   const av = avaliarCompletudeShopee({ inicio: a.inicio, fim: p.ate, janelas: a.janelas, ancoraDescoberta: a.ancora,
     pedidosPagos: pagos, itens: a.itens, naoPagosSemObservacaoPosPeriodo: naoPagos });
+  // ETAPA 3: valor do prefixo so com a descoberta provada (A); sem a prova de estado/financeiro ele e provisorio
+  let observadas: MetricasVendas | null = null;
+  if (a.observado === true && av.dimensoes.descoberta) {
+    try { observadas = calcularMetricasShopee(pagos, a.itens).metricas; } catch (e) { if (!(e instanceof ErroGraoShopee)) throw e; }
+  }
   return { estado: p.estado, observadoAte: p.ate.toISOString(), completude: av.completude, motivos: av.motivos,
     metricas: av.completude === "COMPLETE" ? calcularMetricasShopee(pagos, a.itens).metricas : null,
-    ...(a.porDia === true && av.completude === "COMPLETE" ? { porDia: porDiaShopee(pagos, a.itens) } : {}) };
+    ...(a.porDia === true && av.completude === "COMPLETE" ? { porDia: porDiaShopee(pagos, a.itens) } : {}),
+    ...(a.observado === true ? { observadas } : {}) };
+}
+
+/**
+ * ETAPA 3 — `observadoPorDia` de uma loja. Periodo COMPLETE ⇒ todo dia dele e COMPLETE (subconjunto de cada prova
+ * A/B/C), entao cada dia e CONFIRMADO com o calculo oficial do seu subconjunto — sem leitura extra. Fora disso le as
+ * linhas nao pagas do MESMO recorte da dimensao B e so as usa se reproduzirem a contagem OFICIAL do periodo
+ * (contarNaoPagosSemObservacaoShopee); divergencia (ex.: corpus mudou entre as leituras) → todo dia SEM_DADOS.
+ */
+async function observadoPorDiaShopee(cliente: SupabaseClient, a: {
+  userId: string; lojaId: string; inicio: Date; fim: Date; janelas: JanelaListagem[]; ancora: Date | null;
+  desdeIso: string; fimIso: string; naoPagosOficial: number; completo: boolean;
+  pedidos: PedidoShopeeCanonico[]; itens: ItemShopeeCanonico[];
+}): Promise<Record<string, DiaObservadoLoja<MetricasVendas>>> {
+  if (a.completo) {
+    const out: Record<string, DiaObservadoLoja<MetricasVendas>> = {};
+    for (const d of diasDoIntervalo(a.inicio, a.fim)) {
+      out[d.dia] = { estado: "CONFIRMADO", metricas: calcularMetricasShopee(filtrarPagosNoIntervalo(a.pedidos, d.inicio, d.fim), a.itens).metricas, motivos: [] };
+    }
+    return out;
+  }
+  const linhas = await paginar<Record<string, unknown>>((x, y) => {
+    let q = cliente.from("shopee_pedidos").select("order_sn, create_time, detail_fetched_at")
+      .eq("user_id", a.userId).eq("loja_id", a.lojaId).is("pay_time", null).gte("create_time", a.desdeIso).lt("create_time", a.fimIso);
+    if (ESTADOS_TERMINAIS_VERIFICADOS.length) q = q.not("order_status", "in", `(${ESTADOS_TERMINAIS_VERIFICADOS.join(",")})`);
+    return q.order("order_sn", { ascending: true }).range(x, y);
+  });
+  const naoPagos: NaoPagoShopee[] = linhas.map((r) => ({ createTime: (r.create_time as string) ?? null, detailFetchedAt: (r.detail_fetched_at as string) ?? null }));
+  const fim = a.fim.getTime();
+  const conferida = naoPagos.filter((n) => n.detailFetchedAt === null || new Date(n.detailFetchedAt).getTime() < fim).length;
+  if (conferida !== a.naoPagosOficial) {
+    const out: Record<string, DiaObservadoLoja<MetricasVendas>> = {};
+    for (const d of diasDoIntervalo(a.inicio, a.fim)) out[d.dia] = { estado: "SEM_DADOS", metricas: null, motivos: ["nao_pagos_divergem_da_contagem_oficial"] };
+    return out;
+  }
+  return diasObservadosShopee({ inicio: a.inicio, fim: a.fim, janelas: a.janelas, ancoraDescoberta: a.ancora, pedidos: a.pedidos, itens: a.itens, naoPagos });
 }
 
 /**

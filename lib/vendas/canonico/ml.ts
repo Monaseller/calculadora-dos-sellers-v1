@@ -37,9 +37,9 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { diaEmSaoPaulo } from "@/lib/fuso-sao-paulo";
-import { intervaloSaoPaulo } from "./shopee";
+import { diasDoIntervalo, emParalelo, intervaloSaoPaulo, LOJAS_EM_PARALELO, paginar } from "./shopee";
 import { prefixoObservado } from "./periodo";
-import type { Completude, ParcialObservadoLoja } from "./tipos";
+import type { Completude, DiaObservadoLoja, ParcialObservadoLoja } from "./tipos";
 
 /** O UNICO cancelamento que tira o pedido da venda bruta. */
 export const CANCELAMENTO_DE_PACOTE_REFEITO = "pack_splitted";
@@ -214,12 +214,35 @@ export function avaliarCompletudeML(args: { inicio: Date; fim: Date; janelas: Ja
   return { completude: falhou ? "FAILED" : "PARTIAL", motivos, estadoEm };
 }
 
+/**
+ * ETAPA 3 — cada dia civil de Sao Paulo de [inicio, fim) avaliado SOZINHO, com as MESMAS funcoes
+ * (avaliarCompletudeML / alcanceFechamentoML / calcularMetricasML) e o dia como periodo. Nenhuma regra nova:
+ *   COMPLETE do dia → CONFIRMADO; descoberta do dia provada (cadeia date_closed alcanca o fim do dia) e valores
+ *   presentes → PROVISORIO (estado ainda nao provado final); senao SEM_DADOS (sem numero).
+ */
+export function diasObservadosML(inicio: Date, fim: Date, janelas: JanelaFechamentoML[], pedidos: PedidoMLCanonico[]): Record<string, DiaObservadoLoja<MetricasVendasML>> {
+  const out: Record<string, DiaObservadoLoja<MetricasVendasML>> = {};
+  for (const { dia, inicio: a, fim: b } of diasDoIntervalo(inicio, fim)) {
+    const doDia = filtrarFechadosNoIntervalo(pedidos, a, b);
+    const av = avaliarCompletudeML({ inicio: a, fim: b, janelas, pedidos: doDia });
+    if (av.completude === "COMPLETE") { out[dia] = { estado: "CONFIRMADO", metricas: calcularMetricasML(doDia), motivos: [] }; continue; }
+    const alcance = alcanceFechamentoML(janelas, a.getTime());
+    const descoberta = alcance !== null && alcance >= b.getTime();
+    let metricas: MetricasVendasML | null = null;
+    if (descoberta) { try { metricas = calcularMetricasML(doDia); } catch (e) { if (!(e instanceof ErroGraoML)) throw e; } }
+    out[dia] = metricas ? { estado: "PROVISORIO", metricas, motivos: av.motivos } : { estado: "SEM_DADOS", metricas: null, motivos: av.motivos };
+  }
+  return out;
+}
+
 // ── Leitura do banco (server-side, dono SEMPRE explicito) ────────────
 
 export interface ResultadoVendasLojaML {
   lojaId: string; completude: Completude; motivos: string[]; metricas: MetricasVendasML | null; estadoEm: string | null;
   /** ETAPA 2A: so com `porDia: true` e so quando COMPLETE. */
   porDia?: Record<string, MetricasVendasML>;
+  /** ETAPA 3: so com `observado: true` — cada dia avaliado sozinho (CONFIRMADO / PROVISORIO / SEM_DADOS). */
+  observadoPorDia?: Record<string, DiaObservadoLoja<MetricasVendasML>>;
   /** SALES-CANONICAL-D14: so quando o chamador pede `parcial: true`. */
   parcial?: ParcialObservadoLoja<MetricasVendasML>;
 }
@@ -229,14 +252,18 @@ export interface ResultadoVendasLojaML {
  * periodo aberto. observadoAte = alcance da cadeia date_closed (a MESMA de
  * avaliarCompletudeML); avaliado pelas MESMAS funcoes puras. Nenhuma regra nova.
  */
-export function parcialObservadoML(inicio: Date, fim: Date, janelas: JanelaFechamentoML[], pedidos: PedidoMLCanonico[], porDia = false): ParcialObservadoLoja<MetricasVendasML> {
+export function parcialObservadoML(inicio: Date, fim: Date, janelas: JanelaFechamentoML[], pedidos: PedidoMLCanonico[], porDia = false, observado = false): ParcialObservadoLoja<MetricasVendasML> {
   const p = prefixoObservado(alcanceFechamentoML(janelas, inicio.getTime()), inicio, fim);
   if (p.estado !== "OBSERVADO_ATE") return { estado: p.estado, observadoAte: null, completude: null, motivos: [], metricas: null };
   const noPrefixo = filtrarFechadosNoIntervalo(pedidos, inicio, p.ate);
   const av = avaliarCompletudeML({ inicio, fim: p.ate, janelas, pedidos: noPrefixo });
+  // ETAPA 3: o prefixo e OBSERVADO_ATE = a cadeia de descoberta o cobre; sem prova de estado o valor e so provisorio
+  let observadas: MetricasVendasML | null = null;
+  if (observado) { try { observadas = calcularMetricasML(noPrefixo); } catch (e) { if (!(e instanceof ErroGraoML)) throw e; } }
   return { estado: p.estado, observadoAte: p.ate.toISOString(), completude: av.completude, motivos: av.motivos,
     metricas: av.completude === "COMPLETE" ? calcularMetricasML(noPrefixo) : null,
-    ...(porDia && av.completude === "COMPLETE" ? { porDia: porDiaML(noPrefixo) } : {}) };
+    ...(porDia && av.completude === "COMPLETE" ? { porDia: porDiaML(noPrefixo) } : {}),
+    ...(observado ? { observadas } : {}) };
 }
 export interface ResultadoVendasML {
   marketplace: "ML";
@@ -248,8 +275,6 @@ export interface ResultadoVendasML {
   total: MetricasVendasML | null;
 }
 
-const PAGINA = 1000;
-
 /**
  * Vendas ML do periodo [de, ate] (datas civis de Sao Paulo) a partir do
  * corpus `ml_pedidos`. Lojas resolvidas DINAMICAMENTE em `lojas` pelo dono
@@ -258,7 +283,8 @@ const PAGINA = 1000;
 export async function lerVendasML(
   cliente: SupabaseClient,
   /** `parcial` (D14, padrao false): acrescenta `parcial` por loja; sem ele o resultado e o de sempre. */
-  args: { userId: string; de: string; ate: string; lojaIds?: string[]; parcial?: boolean; porDia?: boolean },
+  /** `observado` (ETAPA 3, padrao false): acrescenta `observadoPorDia` (e `parcial.observadas`); o resto nao muda. */
+  args: { userId: string; de: string; ate: string; lojaIds?: string[]; parcial?: boolean; porDia?: boolean; observado?: boolean },
 ): Promise<ResultadoVendasML> {
   const { userId, de, ate } = args;
   if (!userId) throw new Error("user_id_ausente");
@@ -271,40 +297,39 @@ export async function lerVendasML(
   const lojaIds = ((lojas ?? []) as { id: string }[]).map((l) => l.id);
   if (args.lojaIds && args.lojaIds.some((id) => !lojaIds.includes(id))) throw new Error("loja_invalida");
 
-  const resultados: ResultadoVendasLojaML[] = [];
-  for (const lojaId of lojaIds) {
-    const pedidos: PedidoMLCanonico[] = [];
-    for (let deP = 0; ; deP += PAGINA) {
-      const { data, error } = await cliente.from("ml_pedidos")
-        .select("loja_id, order_id, date_closed, cancel_detail_code, total_amount, unidades, fetched_at")
-        .eq("user_id", userId).eq("loja_id", lojaId)
-        .gte("date_closed", inicio.toISOString()).lt("date_closed", fim.toISOString())
-        .order("order_id", { ascending: true }).range(deP, deP + PAGINA - 1);
-      if (error) throw new Error("leitura_falhou");
-      const lote = (data ?? []) as Record<string, unknown>[];
-      for (const r of lote) pedidos.push({
-        lojaId: String(r.loja_id), orderId: String(r.order_id), dateClosed: (r.date_closed as string) ?? null,
-        cancelCode: (r.cancel_detail_code as string) ?? null,
-        totalAmount: r.total_amount === null ? null : Number(r.total_amount),
-        unidades: r.unidades === null ? null : Number(r.unidades), fetchedAt: (r.fetched_at as string) ?? null,
-      });
-      if (lote.length < PAGINA) break;
-    }
-    const { data: jobs, error: errJobs } = await cliente.from("sync_jobs")
+  // DESEMPENHO: lojas em paralelo (teto), paginas em ondas e janelas junto com os pedidos — mesmos SELECTs, mesma ordem.
+  const resultados: ResultadoVendasLojaML[] = await emParalelo(lojaIds, LOJAS_EM_PARALELO, async (lojaId): Promise<ResultadoVendasLojaML> => {
+    const linhasP = paginar<Record<string, unknown>>((a, b) => cliente.from("ml_pedidos")
+      .select("loja_id, order_id, date_closed, cancel_detail_code, total_amount, unidades, fetched_at")
+      .eq("user_id", userId).eq("loja_id", lojaId)
+      .gte("date_closed", inicio.toISOString()).lt("date_closed", fim.toISOString())
+      .order("order_id", { ascending: true }).range(a, b));
+    // o builder do Supabase so dispara no `.then`: Promise.resolve o poe em voo agora
+    const jobsP = Promise.resolve(cliente.from("sync_jobs")
       .select("campo_tempo, janela_inicio, janela_fim, listagem_completa, status")
       .eq("user_id", userId).eq("loja_id", lojaId).eq("marketplace", "ML")
-      .eq("campo_tempo", "date_closed").not("janela_inicio", "is", null);
+      .eq("campo_tempo", "date_closed").not("janela_inicio", "is", null));
+    jobsP.catch(() => {});   // erro tratado no await abaixo (sem rejeicao solta)
+    const linhas = await linhasP;
+    const pedidos: PedidoMLCanonico[] = linhas.map((r) => ({
+      lojaId: String(r.loja_id), orderId: String(r.order_id), dateClosed: (r.date_closed as string) ?? null,
+      cancelCode: (r.cancel_detail_code as string) ?? null,
+      totalAmount: r.total_amount === null ? null : Number(r.total_amount),
+      unidades: r.unidades === null ? null : Number(r.unidades), fetchedAt: (r.fetched_at as string) ?? null,
+    }));
+    const { data: jobs, error: errJobs } = await jobsP;
     if (errJobs) throw new Error("leitura_falhou");
     const janelas: JanelaFechamentoML[] = ((jobs ?? []) as Record<string, unknown>[]).map((j) => ({
       campoTempo: String(j.campo_tempo), inicio: String(j.janela_inicio), fim: String(j.janela_fim),
       listagemCompleta: (j.listagem_completa as boolean | null) ?? null, status: String(j.status),
     }));
     const av = avaliarCompletudeML({ inicio, fim, janelas, pedidos });
-    resultados.push({ lojaId, completude: av.completude, motivos: av.motivos, estadoEm: av.estadoEm,
+    return ({ lojaId, completude: av.completude, motivos: av.motivos, estadoEm: av.estadoEm,
       metricas: av.completude === "COMPLETE" ? calcularMetricasML(pedidos) : null,
       ...(args.porDia === true && av.completude === "COMPLETE" ? { porDia: porDiaML(pedidos) } : {}),
-      ...(args.parcial === true ? { parcial: parcialObservadoML(inicio, fim, janelas, pedidos, args.porDia === true) } : {}) });
-  }
+      ...(args.observado === true ? { observadoPorDia: diasObservadosML(inicio, fim, janelas, pedidos) } : {}),
+      ...(args.parcial === true ? { parcial: parcialObservadoML(inicio, fim, janelas, pedidos, args.porDia === true, args.observado === true) } : {}) });
+  });
   const completude: Completude = resultados.every((r) => r.completude === "COMPLETE")
     ? "COMPLETE" : resultados.some((r) => r.completude === "FAILED") ? "FAILED" : "PARTIAL";
   const total = completude === "COMPLETE" ? somarMetricasML(resultados.map((r) => r.metricas!)) : null;

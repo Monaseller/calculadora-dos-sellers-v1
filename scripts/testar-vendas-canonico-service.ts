@@ -404,7 +404,7 @@ async function principal() {
     assert(escritas.length === 0, escritas.join());
     assert(fetches === 0, `fetch=${fetches}`);
   });
-  const SERVICO = ["lib/vendas/canonico/service/consultar-vendas-canonicas.ts", "lib/vendas/canonico/service/tipos.ts", "lib/vendas/canonico/service/index.ts", "lib/vendas/canonico/periodo.ts"];
+  const SERVICO = ["lib/vendas/canonico/service/consultar-vendas-canonicas.ts", "lib/vendas/canonico/service/tipos.ts", "lib/vendas/canonico/service/index.ts", "lib/vendas/canonico/periodo.ts", "lib/vendas/canonico/service/compor-observado.ts"];
   t("6b. servico: sem sync-on-read, sem provider, sem token, sem job, sem React/Next/fetch", () => {
     for (const f of SERVICO) {
       const s = semComentarios(fonte(f));
@@ -597,6 +597,129 @@ async function principal() {
   t("SD-6. compatibilidade: sem pedir, nenhum campo novo e os mesmos números", async () => {
     const a = await consultar({ userId: RD, marketplace: "todos", ...P3 }), b = await consultar({ userId: RD, marketplace: "todos", ...P3, serieDiaria: true });
     assert(!("serieDiaria" in a) && JSON.stringify(a.metricas) === JSON.stringify(b.metricas) && a.estado === b.estado, "consulta sem série mudou");
+  });
+
+  console.log("\n[OB. ETAPA 3 — valores OBSERVADOS por dia (CONFIRMADO / PROVISORIO / SEM_DADOS), sem mudar a prova]");
+  const OC = await import("../lib/vendas/canonico/service/compor-observado");
+  const SH = await import("../lib/vendas/canonico/shopee");
+  const P3o = { preset: "CUSTOM" as const, de: "2026-10-03", ate: "2026-10-05" };
+  const soma3 = (ds: any[]) => ({ pedidos: ds.reduce((a, d) => a + d.pedidos, 0), unidades: ds.reduce((a, d) => a + d.unidades, 0), vendas: Math.round(ds.reduce((a, d) => a + Math.round(d.vendas * 100), 0)) / 100 });
+  const obs = (args: any, d?: any, ag?: number) => consultar({ userId: RD, marketplace: "todos", ...args, observado: true }, d, [], ag);
+  t("OB-1. período COMPLETE: todo dia CONFIRMADO, situação CONFIRMADO, total = combinadas e dias = série 2A (mesmos números)", async () => {
+    const r = await consultar({ userId: RD, marketplace: "todos", ...P3o, serieDiaria: true, observado: true });
+    const o = r.observado!;
+    assert(r.estado.startsWith("COMPLETE") && o && o.situacao === "CONFIRMADO" && o.dias.every((d: any) => d.estado === "CONFIRMADO"), JSON.stringify(o?.dias));
+    assert(JSON.stringify(o.total) === JSON.stringify(r.metricas.combinadas) && o.diasSemDados.length === 0 && o.diasConfirmados === 3, JSON.stringify(o.total));
+    assert(JSON.stringify(o.dias.map((d: any) => [d.dia, d.pedidos, d.unidades, d.vendas])) === JSON.stringify(r.serieDiaria!.map((d: any) => [d.dia, d.pedidos, d.unidades, d.vendas])), "dias ≠ série 2A");
+    assert(o.provisorio.pedidos === 0 && JSON.stringify(o.confirmado) === JSON.stringify(o.total), "confirmado ≠ total");
+  });
+  t("OB-2. ML observado ANTES do fim do dia: estado segue INCOMPLETE (prova intacta), combinadas null, mas o dia sai PROVISÓRIO com os MESMOS valores", async () => {
+    const ref = (await obs(P3o)).observado!;
+    const d = mundo(); for (const p of d.ml_pedidos) if (p.loja_id === ML_A && p.date_closed.startsWith("2026-10-04T1")) p.fetched_at = "2026-10-04T20:00:00.000Z";
+    const r = await obs(P3o, d);
+    assert(r.estado === "INCOMPLETE" && r.metricas.combinadas === null, `prova mudou: ${r.estado}`);
+    const o = r.observado!;
+    assert(o.situacao === "PROVISORIO" && o.dias.find((x: any) => x.dia === "2026-10-04")!.estado === "PROVISORIO" && o.dias.find((x: any) => x.dia === "2026-10-03")!.estado === "CONFIRMADO", JSON.stringify(o.dias.map((x: any) => x.estado)));
+    assert(JSON.stringify(o.total) === JSON.stringify(ref.total), `${JSON.stringify(o.total)} ≠ ${JSON.stringify(ref.total)}`);
+    assert(o.provisorio.pedidos > 0 && Math.round((o.confirmado.vendas + o.provisorio.vendas) * 100) === Math.round(o.total!.vendas * 100), "confirmado + provisório ≠ total");
+  });
+  t("OB-3. Shopee: não pago criado em 02/10 observado em 03/10 bloqueia 03–05 (regra B por dia) → PROVISÓRIO; 02/10 (fim antes da obs.) segue CONFIRMADO", async () => {
+    const d = mundo();
+    d.shopee_pedidos.push({ user_id: RD, loja_id: SH_A, order_sn: "NP1", order_status: "CANCELLED", create_time: "2026-10-02T15:00:00.000Z", pay_time: null,
+      update_time: "2026-10-03T12:00:00.000Z", detail_fetched_at: "2026-10-03T12:00:00.000Z", escrow_fetched_at: null, escrow_update_time: null, original_shopee_discount: null, pix_discount: null, escrow_pendente: false });
+    const r = await consultar({ userId: RD, marketplace: "shopee", lojaId: SH_A, preset: "CUSTOM", de: "2026-10-02", ate: "2026-10-05", observado: true }, d);
+    const e = Object.fromEntries(r.observado!.dias.map((x: any) => [x.dia, x.estado]));
+    assert(r.estado === "INCOMPLETE" && e["2026-10-02"] === "CONFIRMADO" && e["2026-10-03"] === "PROVISORIO" && e["2026-10-04"] === "PROVISORIO" && e["2026-10-05"] === "PROVISORIO", JSON.stringify(e));
+    assert(r.observado!.total!.pedidos === 707 && r.observado!.total!.vendas === 16480.02, JSON.stringify(r.observado!.total));
+  });
+  t("OB-4. descoberta não provada num dia → SEM_DADOS (null, nunca zero) e o dia combinado NÃO vira a soma das outras lojas; situação INCOMPLETO", async () => {
+    const d = mundo(); d.sync_jobs.find((j: any) => j.loja_id === SH_A).janela_fim = "2026-10-05T03:00:00.000Z";
+    const r = await obs(P3o, d);
+    const o = r.observado!, d05 = o.dias.find((x: any) => x.dia === "2026-10-05")!;
+    assert(d05.estado === "SEM_DADOS" && d05.pedidos === null && d05.vendas === null, JSON.stringify(d05));
+    assert(o.situacao === "INCOMPLETO" && JSON.stringify(o.diasSemDados) === JSON.stringify(["2026-10-05"]), JSON.stringify(o));
+    assert(JSON.stringify(o.total) === JSON.stringify(soma3(o.dias.filter((x: any) => x.estado !== "SEM_DADOS"))), "total ≠ soma dos dias com valor");
+    assert(r.metricas.combinadas === null && r.estado === "INCOMPLETE", "prova mudou");
+  });
+  t("OB-5. dia sem venda confirmado = ZERO comprovado (não null); dia SEM_DADOS = null (nunca zero)", async () => {
+    const o = (await obs(P3o)).observado!;
+    const d03sh = (await consultar({ userId: RD, marketplace: "shopee", lojaId: SH_A, ...P3o, observado: true })).observado!.dias.find((x: any) => x.dia === "2026-10-03")!;
+    assert(d03sh.estado === "CONFIRMADO" && d03sh.pedidos === 0 && d03sh.vendas === 0, JSON.stringify(d03sh));
+    assert(o.dias.every((x: any) => (x.estado === "SEM_DADOS") === (x.vendas === null)), "null só em SEM_DADOS");
+  });
+  t("OB-6. cada loja isolada, cada par e as três: observado = soma EXATA das lojas da seleção; desmarcada nunca entra", async () => {
+    const um = async (q: any) => (await consultar({ userId: RD, ...P3o, observado: true, ...q })).observado!.total!;
+    const a = await um({ marketplace: "mercado_livre", lojaId: ML_A }), b = await um({ marketplace: "mercado_livre", lojaId: ML_B }), s = await um({ marketplace: "shopee", lojaId: SH_A });
+    const combos: [any, any[]][] = [
+      [{ marketplace: "todos", lojaIds: [ML_A, ML_B] }, [a, b]], [{ marketplace: "todos", lojaIds: [ML_A, SH_A] }, [a, s]], [{ marketplace: "todos", lojaIds: [ML_B, SH_A] }, [b, s]],
+      [{ marketplace: "todos" }, [a, b, s]],
+    ];
+    for (const [q, partes] of combos) {
+      const t2 = await um(q);
+      assert(JSON.stringify(t2) === JSON.stringify(soma3(partes)), `${JSON.stringify(q)}: ${JSON.stringify(t2)} ≠ ${JSON.stringify(soma3(partes))}`);
+    }
+    const sel = (await consultar({ userId: RD, ...P3o, observado: true, marketplace: "todos", lojaIds: [ML_A, SH_A] })).observado!;
+    assert(sel.porMarketplace.mercadoLivre!.pedidos === a.pedidos && sel.porMarketplace.shopee!.pedidos === s.pedidos, "separação por marketplace");
+  });
+  t("OB-7. período com HOJE observado: hoje é PROVISÓRIO (nunca CONFIRMADO) com observadoAte; prefixo sem prova de estado vira valor provisório", async () => {
+    const d = mundo();
+    for (const id of [ML_A, ML_B]) d.sync_jobs.push({ ...jobML(id, RD), id: `h-${id}`, janela_inicio: "2026-10-06T03:00:00.000Z", janela_fim: "2026-10-07T14:00:00.000Z" });
+    d.sync_jobs.push({ ...jobShopee(SH_A, RD), id: "h-sh", janela_inicio: "2026-10-06T03:00:00.000Z", janela_fim: "2026-10-07T14:00:00.000Z" });
+    d.ml_pedidos.push({ user_id: RD, loja_id: ML_A, order_id: "HOJE1", date_closed: "2026-10-07T10:00:00.000Z", cancel_detail_code: null, total_amount: 55.5, unidades: 2, fetched_at: OBS });
+    const r = await obs({ preset: "CUSTOM", de: "2026-10-05", ate: "2026-10-07" }, d);
+    const o = r.observado!, h = o.dias.find((x: any) => x.dia === "2026-10-07")!;
+    assert(h.estado === "PROVISORIO" && h.pedidos === 1 && h.vendas === 55.5 && h.observadoAte === "2026-10-07T14:00:00.000Z", JSON.stringify(h));
+    assert(o.dias.find((x: any) => x.dia === "2026-10-06")!.estado === "CONFIRMADO" && o.situacao === "PROVISORIO", JSON.stringify(o.dias));
+    assert(r.metricas.combinadas === null, "a prova do prefixo não existe — combinadas tem de seguir null");
+  });
+  t("OB-8. HOJE sem observação → SEM_DADOS (nunca zero); período INCOMPLETO com o dia listado", async () => {
+    const r = await obs({ preset: "CUSTOM", de: "2026-10-05", ate: "2026-10-07" });
+    const h = r.observado!.dias.find((x: any) => x.dia === "2026-10-07")!;
+    assert(h.estado === "SEM_DADOS" && h.vendas === null && r.observado!.diasSemDados.includes("2026-10-07"), JSON.stringify(h));
+  });
+  t("OB-9. linhas não pagas que NÃO reproduzem a contagem oficial (corpus mudou) → todo dia da loja SEM_DADOS (fail closed)", async () => {
+    const regs: Reg[] = []; const base = clienteFalso(mundo(), regs, escritas);
+    const desvio = { ...base, from(tab: string) { const q = base.from(tab); if (tab !== "shopee_pedidos") return q;
+      return new Proxy(q, { get(alvo: any, p: string) { if (p !== "select") return alvo[p];
+        return (c: string, o?: any) => { const r2 = alvo.select(c, o); if (!o?.head) return r2;
+          return new Proxy(r2, { get(a2: any, p2: string) { if (p2 === "then") return (ok: any, ko: any) => a2.then((v: any) => ({ ...v, count: (v.count ?? 0) + 1 })).then(ok, ko); const f = a2[p2]; return typeof f === "function" ? (...x: any[]) => { const y = f(...x); return y === a2 ? new Proxy(a2, this as any) : y; } : f; } }); }; } }); } };
+    const r = await V.consultarVendasCanonicas({ userId: RD, marketplace: "shopee", lojaId: SH_A, ...P3o, observado: true }, { cliente: desvio, agoraMs: AGORA });
+    assert(r.observado!.dias.every((x: any) => x.estado === "SEM_DADOS") && r.observado!.situacao === "SEM_DADOS" && r.observado!.total === null, JSON.stringify(r.observado));
+  });
+  t("OB-10. compatibilidade: sem `observado` nenhum campo novo; com ele, estado/cobertura/métricas idênticos", async () => {
+    const a = await consultar({ userId: RD, marketplace: "todos", ...P3o }), b = await obs(P3o);
+    assert(!("observado" in a) && a.estado === b.estado && JSON.stringify(a.metricas) === JSON.stringify(b.metricas) && JSON.stringify(a.cobertura) === JSON.stringify(b.cobertura), "consulta mudou");
+  });
+  t("OB-11. defesas da composição (divergência ARTIFICIAL): total ≠ combinadas por 1 centavo → null; COMPLETE com dia provisório → null; hoje nunca CONFIRMADO", () => {
+    const dia = (e: any, v: number) => ({ estado: e, metricas: e === "SEM_DADOS" ? null : { pedidos: 1, unidades: 1, vendas: v }, motivos: [] });
+    const lojas = [{ lojaId: "a", marketplace: "mercado_livre" as const, dias: { "2026-10-01": dia("CONFIRMADO", 10), "2026-10-02": dia("CONFIRMADO", 5.5) } }];
+    const ok = OC.comporObservado({ dias: ["2026-10-01", "2026-10-02"], lojas, hoje: null, observadoAteHoje: null, estado: "COMPLETE_FRESH", combinadas: { pedidos: 2, unidades: 2, vendas: 15.5 } });
+    assert(ok && ok.situacao === "CONFIRMADO" && ok.total!.vendas === 15.5, JSON.stringify(ok));
+    assert(OC.comporObservado({ dias: ["2026-10-01", "2026-10-02"], lojas, hoje: null, observadoAteHoje: null, estado: "COMPLETE_FRESH", combinadas: { pedidos: 2, unidades: 2, vendas: 15.51 } }) === null, "1 centavo de divergência passou");
+    assert(OC.comporObservado({ dias: ["2026-10-01", "2026-10-02"], lojas, hoje: null, observadoAteHoje: null, estado: "COMPLETE_FRESH", combinadas: { pedidos: 3, unidades: 2, vendas: 15.5 } }) === null, "pedido a mais passou");
+    const prov = [{ ...lojas[0], dias: { ...lojas[0].dias, "2026-10-02": dia("PROVISORIO", 5.5) } }];
+    assert(OC.comporObservado({ dias: ["2026-10-01", "2026-10-02"], lojas: prov, hoje: null, observadoAteHoje: null, estado: "COMPLETE_FRESH", combinadas: null }) === null, "COMPLETE com dia provisório passou");
+    const h = OC.comporObservado({ dias: ["2026-10-01", "2026-10-02"], lojas, hoje: "2026-10-02", observadoAteHoje: "x", estado: "PARTIAL_FRESH", combinadas: null })!;
+    assert(h.dias[1].estado === "PROVISORIO" && h.situacao === "PROVISORIO", JSON.stringify(h.dias));
+    const duas = [lojas[0], { lojaId: "b", marketplace: "shopee" as const, dias: { "2026-10-01": dia("CONFIRMADO", 1), "2026-10-02": dia("SEM_DADOS", 0) } }];
+    const m = OC.comporObservado({ dias: ["2026-10-01", "2026-10-02"], lojas: duas, hoje: null, observadoAteHoje: null, estado: "INCOMPLETE", combinadas: null })!;
+    assert(m.dias[1].estado === "SEM_DADOS" && m.dias[1].vendas === null && m.total!.vendas === 11 && m.situacao === "INCOMPLETO", JSON.stringify(m));
+    assert(m.porMarketplace.mercadoLivre!.vendas === 10 && m.porMarketplace.shopee!.vendas === 1, "separação fora dos dias incluídos");
+  });
+  t("OB-13. ML: dia FECHADO sem descoberta provada (cadeia date_closed termina antes) → SEM_DADOS, mesmo sem pedido nenhum (nunca zero)", async () => {
+    const r = await consultar({ userId: RD, marketplace: "mercado_livre", lojaId: ML_A, preset: "CUSTOM", de: "2026-10-05", ate: "2026-10-06", observado: true });
+    const e = Object.fromEntries(r.observado!.dias.map((x: any) => [x.dia, [x.estado, x.vendas]]));
+    assert(JSON.stringify(e) === JSON.stringify({ "2026-10-05": ["CONFIRMADO", 400], "2026-10-06": ["SEM_DADOS", null] }), JSON.stringify(e));
+  });
+  t("OB-12. regra B por dia é o MESMO recorte da contagem oficial (desde = início do dia − prazo; detail < fim do dia)", () => {
+    const j = [{ lojaId: "s", campoTempo: "create_time" as const, inicio: "2026-09-01T03:00:00.000Z", fim: "2026-10-20T03:00:00.000Z", listagemCompleta: true, status: "concluido" }];
+    const iv = SH.intervaloSaoPaulo("2026-10-12", "2026-10-13");
+    const np = (c: string, d: string | null) => ({ createTime: c, detailFetchedAt: d });
+    const dias = SH.diasObservadosShopee({ inicio: iv.inicio, fim: iv.fim, janelas: j, ancoraDescoberta: null, pedidos: [], itens: [],
+      naoPagos: [np("2026-10-02T03:00:00.000Z", "2026-10-13T02:00:00.000Z"), np("2026-10-02T02:59:59.000Z", null)] });
+    // 12/10: desde 02/10 03:00Z → o 1º conta (obs. antes do fim 13/10 03:00Z); o 2º (02:59:59) fica fora do recorte
+    // 13/10: desde 03/10 03:00Z → nenhum dos dois no recorte
+    assert(dias["2026-10-12"].estado === "PROVISORIO" && dias["2026-10-13"].estado === "CONFIRMADO", JSON.stringify(dias));
   });
 
   await fila;

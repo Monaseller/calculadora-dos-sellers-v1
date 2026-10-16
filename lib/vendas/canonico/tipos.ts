@@ -55,7 +55,21 @@ export interface ResultadoVendasLoja {
   parcial?: ParcialObservadoLoja<MetricasVendas>;
   /** ETAPA 2A: as MESMAS metricas por dia de pagamento em Sao Paulo (so quando pedido e so com `metricas`). */
   porDia?: Record<string, MetricasVendas>;
+  /** ETAPA 3 (so com `observado: true`): cada dia civil do periodo avaliado SOZINHO pelas mesmas funcoes. */
+  observadoPorDia?: Record<string, DiaObservadoLoja<MetricasVendas>>;
 }
+
+/**
+ * ETAPA 3 — um dia civil de Sao Paulo de UMA loja, avaliado pelas MESMAS funcoes de completude e de metricas do
+ * leitor, com o dia como periodo. Nenhuma regra nova e nenhuma regra relaxada:
+ *
+ *   CONFIRMADO  a completude do dia e COMPLETE (a mesma prova de uma consulta daquele dia sozinho).
+ *   PROVISORIO  a DESCOBERTA do dia esta provada (todo pedido do dia esta no corpus) e os valores existem, mas o
+ *               estado ainda nao foi provado final (ex.: observado antes do fim do dia). Valor observado, pode mudar.
+ *   SEM_DADOS   descoberta nao provada ou valor ausente: nenhum numero (nunca zero).
+ */
+export type EstadoDiaObservado = "CONFIRMADO" | "PROVISORIO" | "SEM_DADOS";
+export interface DiaObservadoLoja<M> { estado: EstadoDiaObservado; metricas: M | null; motivos: string[] }
 
 /**
  * SALES-CANONICAL-D14 — o prefixo OBSERVADO [inicio, observadoAte) de um
@@ -77,6 +91,11 @@ export interface ParcialObservadoLoja<M> {
   metricas: M | null;
   /** ETAPA 2A: as MESMAS metricas por dia civil de Sao Paulo (so quando pedido e so com `metricas`). */
   porDia?: Record<string, M>;
+  /**
+   * ETAPA 3 (so com `observado: true`, so em OBSERVADO_ATE): as MESMAS metricas do prefixo quando a descoberta esta
+   * provada e os valores existem, mesmo sem a prova de estado. Valor PROVISORIO — nunca usado como `metricas`.
+   */
+  observadas?: M | null;
 }
 
 export interface ResultadoVendas {

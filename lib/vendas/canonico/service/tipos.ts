@@ -13,11 +13,12 @@
  *   estado     COMPLETE_FRESH | COMPLETE_STALE | PARTIAL_FRESH |
  *              PARTIAL_STALE | PARTIAL_SEM_OBSERVACAO_ATUAL | INCOMPLETE.
  */
-import type { Completude, ComponentesVendasShopee, MetricasVendas } from "../tipos";
+import type { Completude, ComponentesVendasShopee, EstadoDiaObservado, MetricasVendas } from "../tipos";
 import type { MetricasVendasML } from "../ml";
 import type { PeriodoVendasResolvido, PresetPeriodoVendas } from "../periodo";
 import type { PoliticaSync } from "@/lib/vendas/sync/tipos";
 
+export type { EstadoDiaObservado } from "../tipos";
 export type MarketplaceConsulta = "mercado_livre" | "shopee" | "todos";
 export type MarketplaceLoja = Exclude<MarketplaceConsulta, "todos">;
 
@@ -33,6 +34,8 @@ export interface ConsultaVendasCanonicas {
   lojaIds?: string[] | null;
   /** ETAPA 2A (padrao false): devolve `serieDiaria` — as mesmas metricas por dia, so quando ha `combinadas`. */
   serieDiaria?: boolean;
+  /** ETAPA 3 (padrao false): devolve `observado` — os valores OBSERVADOS por dia, com a classificacao de cada dia. */
+  observado?: boolean;
   /** Ausente = CUSTOM (exige de/ate). */
   preset?: PresetPeriodoVendas;
   de?: string;
@@ -62,6 +65,45 @@ export interface MetricasCombinadas { pedidos: number; unidades: number; vendas:
  * Dia sem venda num periodo coberto = zeros (zero comprovado). Com hoje: o dia atual vale ate `observadoAte`.
  */
 export interface SerieDiariaVendas { dia: string; pedidos: number; unidades: number; vendas: number }
+
+/**
+ * ETAPA 3 — um dia do periodo, somado entre as lojas do escopo, com o PIOR estado entre elas
+ * (SEM_DADOS > PROVISORIO > CONFIRMADO). Hoje nunca e CONFIRMADO. SEM_DADOS = nenhum numero (null, nunca zero):
+ * um dia com qualquer loja sem dados nao vira a soma das outras.
+ */
+export interface DiaObservadoVendas {
+  dia: string;
+  estado: EstadoDiaObservado;
+  pedidos: number | null;
+  unidades: number | null;
+  vendas: number | null;
+  /** So no dia de hoje: ate quando os valores foram observados (o menor entre as lojas). */
+  observadoAte: string | null;
+}
+
+/**
+ * ETAPA 3 — situacao do periodo para quem exibe valores observados:
+ *   CONFIRMADO  estado COMPLETE_* (a prova do periodo inteiro) — todo dia CONFIRMADO.
+ *   PROVISORIO  todo dia tem valor, mas o periodo nao esta provado (algum dia provisorio, hoje, ou revalidacao).
+ *   INCOMPLETO  ha dia SEM_DADOS: o total e so dos dias com valor e NAO e o total do periodo.
+ *   SEM_DADOS   nenhum dia com valor.
+ */
+export type SituacaoObservado = "CONFIRMADO" | "PROVISORIO" | "INCOMPLETO" | "SEM_DADOS";
+
+export interface ObservadoVendas {
+  situacao: SituacaoObservado;
+  /** Todo dia civil do periodo, em ordem. Cards e grafico usam ESTE array (os totais abaixo sao a soma dele). */
+  dias: DiaObservadoVendas[];
+  /** Soma dos dias com valor (CONFIRMADO + PROVISORIO); null quando nenhum dia tem valor. */
+  total: MetricasCombinadas | null;
+  confirmado: MetricasCombinadas;
+  provisorio: MetricasCombinadas;
+  /** Separacao por marketplace sobre os MESMOS dias com valor (null = marketplace fora do escopo). */
+  porMarketplace: { mercadoLivre: MetricasCombinadas | null; shopee: MetricasCombinadas | null };
+  diasConfirmados: number;
+  diasProvisorios: number;
+  diasSemDados: string[];
+}
 
 export type EstadoCobertura = "COMPLETE" | "PARTIAL" | "INCOMPLETE";
 export type EstadoFrescor = "FRESH" | "STALE" | "IN_PROGRESS" | "DESCONHECIDO";
@@ -143,6 +185,11 @@ export interface ResultadoVendasCanonicas {
   fresco: boolean | null;
   /** ETAPA 2A: so quando pedida; null sem `combinadas` (nunca serie de periodo incompleto). Soma dos dias = combinadas. */
   serieDiaria?: SerieDiariaVendas[] | null;
+  /**
+   * ETAPA 3: so quando pedido. NAO muda `estado`, `cobertura` nem `metricas` (a prova continua a mesma). null quando a
+   * defesa de consistencia recusa (total observado ≠ `combinadas`, ou periodo COMPLETE com dia nao confirmado).
+   */
+  observado?: ObservadoVendas | null;
   /** D14: o MENOR observadoAte entre as lojas (as metricas valem ate ai). null fora de PARTIAL com metricas. */
   observadoAte: string | null;
 }

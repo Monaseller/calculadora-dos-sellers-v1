@@ -285,18 +285,46 @@ async function principal() {
       metricas: { combinadas: { pedidos: 3, unidades: 4, vendas: 30.5 }, mercadoLivre: { pedidos: 1, unidades: 1, vendas: 10 }, shopee: { pedidos: 2, unidades: 3, vendas: 20.5, cancelados: 0, vendasSemDescontosPlataforma: 20 } },
       serieDiaria: [{ dia: "2026-10-03", pedidos: 1, unidades: 1, vendas: 10 }, { dia: "2026-10-04", pedidos: 2, unidades: 3, vendas: 20.5 }] };
     const r = R.resumoParaDashboard(base);
-    assert(JSON.stringify(r.serie) === JSON.stringify([{ dia: "2026-10-03", faturamento: 10, pedidos: 1, unidades: 1 }, { dia: "2026-10-04", faturamento: 20.5, pedidos: 2, unidades: 3 }]), JSON.stringify(r.serie));
+    assert(JSON.stringify(r.serie) === JSON.stringify([{ dia: "2026-10-03", estado: "CONFIRMADO", faturamento: 10, pedidos: 1, unidades: 1, observadoAte: null }, { dia: "2026-10-04", estado: "CONFIRMADO", faturamento: 20.5, pedidos: 2, unidades: 3, observadoAte: null }]), JSON.stringify(r.serie));
+    assert(r.situacao === "CONFIRMADO", `situacao ${r.situacao}`);
     assert(r.porMarketplace?.mercadoLivre?.faturamento === 10 && r.porMarketplace?.shopee?.pedidos === 2, JSON.stringify(r.porMarketplace));
     const sem = R.resumoParaDashboard({ ...base, metricas: { ...base.metricas, combinadas: null }, serieDiaria: null });
     assert(sem.serie === null && sem.porMarketplace === null && sem.metricas === null, "sem métricas mostrou série/separação");
   });
   t("L7. ETAPA 2A: Dashboard — gráfico e sparkline da série canônica (sem lucro legado), 'duas plataformas' pela separação canônica, UMA leitura por clique, indicadores legados rotulados", () => {
     const pg = readFileSync(join(RAIZ, "app/(app)/dashboard/page.tsx"), "utf8").replace(/\r\n/g, "\n");
-    assert(/<AreaChartSection dias=\{diasCanonicos\} mostrarLucro=\{false\} semDados=\{graficoSemDados\} \/>/.test(pg) && /spark=\{diasCanonicos\.map\(d => d\.faturamento\)\}/.test(pg), "gráfico/sparkline fora da série canônica");
+    assert(/<AreaChartSection dias=\{diasCanonicos\} mostrarLucro=\{false\} semDados=\{graficoSemDados\} \/>/.test(pg) && /spark=\{diasCanonicos\.filter\(d => d\.estado !== "SEM_DADOS"\)\.map\(d => d\.faturamento\)\}/.test(pg), "gráfico/sparkline fora da série canônica");
     assert(/setShowBothMkt\(!!\(canonData\?\.porMarketplace\?\.mercadoLivre\?\.pedidos && canonData\?\.porMarketplace\?\.shopee\?\.pedidos\)\);/.test(pg) && !/setShowBothMkt\(mlRows\.length > 0/.test(pg), "duas plataformas pelas linhas legadas");
     assert(!/setLojasSelecionadas\(ids\);\s*carregar\(dateFrom, dateTo, ids\);/.test(pg), "clique ainda lê duas vezes");
     assert((pg.match(/legado · nao reconciliado/g) ?? []).length === 4 && /Balancete" subtitle="Composicao do resultado · legado, nao reconciliado"/.test(pg), "indicadores legados sem rótulo");
     assert(/R\.consultarResumoVendasDashboard|serieDiaria: true/.test(readFileSync(join(RAIZ, "lib/vendas/canonico/dashboard-resumo.ts"), "utf8")), "resumo não pede a série");
+  });
+
+  t("L8. ETAPA 3: com `observado`, cards, gráfico e separação saem DELE (mesmos números); INCOMPLETO lista os dias; SEM_DADOS = null", () => {
+    const dias = [{ dia: "2026-10-03", estado: "CONFIRMADO", pedidos: 1, unidades: 1, vendas: 10, observadoAte: null },
+      { dia: "2026-10-04", estado: "PROVISORIO", pedidos: 2, unidades: 3, vendas: 20.5, observadoAte: null },
+      { dia: "2026-10-05", estado: "SEM_DADOS", pedidos: null, unidades: null, vendas: null, observadoAte: null }];
+    const r = R.resumoParaDashboard({ estado: "INCOMPLETE", completo: false, parcial: false, observadoAte: null, periodo: { de: "2026-10-03", ate: "2026-10-05" },
+      metricas: { combinadas: null, mercadoLivre: null, shopee: null },
+      observado: { situacao: "INCOMPLETO", dias, total: { pedidos: 3, unidades: 4, vendas: 30.5 }, confirmado: { pedidos: 1, unidades: 1, vendas: 10 }, provisorio: { pedidos: 2, unidades: 3, vendas: 20.5 },
+        porMarketplace: { mercadoLivre: { pedidos: 3, unidades: 4, vendas: 30.5 }, shopee: null }, diasConfirmados: 1, diasProvisorios: 1, diasSemDados: ["2026-10-05"] } } as any);
+    assert(r.metricas!.faturamento === 30.5 && r.metricas!.pedidos === 3 && r.metricas!.unidades === 4 && r.metricas!.ticket === 30.5 / 3, JSON.stringify(r.metricas));
+    assert(r.situacao === "INCOMPLETO" && JSON.stringify(r.dias) === JSON.stringify({ confirmados: 1, provisorios: 1, semDados: ["2026-10-05"] }) && r.provisorio!.faturamento === 20.5, JSON.stringify(r));
+    const comValor = r.serie!.filter((d) => d.estado !== "SEM_DADOS");
+    assert(comValor.reduce((a, d) => a + d.pedidos!, 0) === r.metricas!.pedidos && Math.round(comValor.reduce((a, d) => a + d.faturamento! * 100, 0)) === Math.round(r.metricas!.faturamento * 100), "soma do gráfico ≠ cards");
+    assert(r.serie![2].faturamento === null && r.porMarketplace!.mercadoLivre!.pedidos === 3 && r.porMarketplace!.shopee === null, JSON.stringify(r.serie![2]));
+    const nada = R.resumoParaDashboard({ estado: "INCOMPLETE", completo: false, parcial: false, observadoAte: null, periodo: { de: "2026-10-05", ate: "2026-10-05" },
+      metricas: { combinadas: null, mercadoLivre: null, shopee: null },
+      observado: { situacao: "SEM_DADOS", dias: [dias[2]], total: null, confirmado: { pedidos: 0, unidades: 0, vendas: 0 }, provisorio: { pedidos: 0, unidades: 0, vendas: 0 }, porMarketplace: { mercadoLivre: null, shopee: null }, diasConfirmados: 0, diasProvisorios: 0, diasSemDados: ["2026-10-05"] } } as any);
+    assert(nada.metricas === null && nada.serie === null && nada.situacao === "SEM_DADOS", "SEM_DADOS virou número");
+  });
+  t("L9. ETAPA 3: Dashboard pede `observado`; página rotula provisório/incompleto, lacuna no gráfico, e legado indisponível não bloqueia os cards canônicos", () => {
+    const pg = readFileSync(join(RAIZ, "app/(app)/dashboard/page.tsx"), "utf8").replace(/\r\n/g, "\n");
+    assert(/serieDiaria: true, observado: true/.test(readFileSync(join(RAIZ, "lib/vendas/canonico/dashboard-resumo.ts"), "utf8")), "resumo não pede observado");
+    assert(/NAO sao o total do periodo/.test(pg) && /Valores provisorios/.test(pg) && /incompleto · faltam/.test(pg), "rótulos de situação ausentes");
+    assert(/const temValor = \(i: number\) => dias\[i\]\?\.estado !== "SEM_DADOS"/.test(pg) && /data-estado-dia/.test(pg), "gráfico sem lacuna/estado por dia");
+    assert(/if \(!canonData\) setErro\(/.test(pg) && !/if \(!mlOk && !shopeeOk\) \{\n\s*setErro\(/.test(pg), "legado ainda bloqueia o canônico");
+    assert(/legadoIndisponivel \? "—"/.test(pg), "legado indisponível vira zero");
   });
 
   await fila;

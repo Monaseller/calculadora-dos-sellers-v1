@@ -465,6 +465,45 @@ async function principal() {
     assert(!/from ["'](react|next\/)/.test(s) && !/@\/components|@\/app/.test(s), "importa UI");
   });
 
+  // ── GATE DE DESEMPENHO: leituras em paralelo — mesmo conjunto, mesma ordem, mesma parada ──
+  const fonte = (n: number, falharEm = -1) => {
+    const linhas = Array.from({ length: n }, (_, i) => ({ i }));
+    const chamadas: number[] = [];
+    const consulta = async (de: number, ate: number) => {
+      chamadas.push(de);
+      await new Promise((r) => setTimeout(r, (7 * de) % 5));   // respostas fora de ordem
+      return de === falharEm ? { data: null, error: { message: "x" } } : { data: linhas.slice(de, ate + 1), error: null };
+    };
+    return { consulta, chamadas };
+  };
+  t("PG-1. paginar em ondas: 4.321 linhas → TODAS, na ordem, sem duplicata; para na 1a página curta", async () => {
+    const f = fonte(4321);
+    const r = await S.paginar<{ i: number }>(f.consulta);
+    assert(r.length === 4321 && r.every((x, k) => x.i === k), `len ${r.length}`);
+    assert(JSON.stringify([...f.chamadas].sort((x, y) => x - y)) === JSON.stringify([0, 1000, 2000, 3000, 4000, 5000, 6000, 7000]), JSON.stringify(f.chamadas));   // 2 ondas; 5000–7000 vazias, descartadas
+  });
+  t("PG-2. paginar: múltiplo EXATO de 1000 (3000) termina com todas; 0 linhas → vazio; < 1000 → uma onda", async () => {
+    const a3 = await S.paginar<{ i: number }>(fonte(3000).consulta);
+    assert(a3.length === 3000 && a3[2999].i === 2999, `3000 → ${a3.length}`);
+    assert((await S.paginar(fonte(0).consulta)).length === 0, "vazio");
+    const f = fonte(707); const r = await S.paginar<{ i: number }>(f.consulta);
+    assert(r.length === 707 && f.chamadas.length === 4, `707 → ${r.length} / ${f.chamadas.length} chamadas`);
+  });
+  t("PG-3. paginar: erro em QUALQUER página da onda → leitura_falhou (nunca resultado parcial)", async () => {
+    let e = ""; try { await S.paginar(fonte(4321, 2000).consulta); } catch (x: any) { e = x.message; }
+    assert(e === "leitura_falhou", e || "não lançou");
+  });
+  t("PG-4. emParalelo: resultado na ORDEM dos itens, teto de concorrência respeitado, erro rejeita", async () => {
+    let voo = 0, pico = 0;
+    const r = await S.emParalelo(Array.from({ length: 20 }, (_, i) => i), 6, async (x) => {
+      voo++; pico = Math.max(pico, voo); await new Promise((ok) => setTimeout(ok, (x * 7) % 4)); voo--; return x * 10;
+    });
+    assert(JSON.stringify(r) === JSON.stringify(Array.from({ length: 20 }, (_, i) => i * 10)) && pico <= 6 && pico > 1, `pico ${pico}`);
+    let e = ""; try { await S.emParalelo([1, 2, 3], 2, async (x) => { if (x === 2) throw new Error("boom"); return x; }); } catch (x: any) { e = x.message; }
+    assert(e === "boom", e || "não lançou");
+    assert((await S.emParalelo([], 3, async (x) => x)).length === 0, "vazio");
+  });
+
   await fila;
   console.log(`\n${falhou === 0 ? "✓" : "✗"} VENDAS-CANONICO-SHOPEE — ${passou} passaram, ${falhou} falharam`);
   process.exit(falhou === 0 ? 0 : 1);
