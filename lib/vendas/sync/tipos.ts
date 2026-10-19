@@ -48,6 +48,11 @@ export interface JobExistenteSync {
 export interface SinaisShopeeSync {
   escrowPendentes: number;
   naoObservadosAposPeriodo: number;
+  /**
+   * P1-B: faixas de CRIACAO (dias civis de SP, contiguos) dos nao pagos pendentes — o alvo do refresh. `ultimaObservacao`
+   * = maior detail_fetched_at entre eles (null: nenhum foi detalhado). Ausente = chamador que so conta (janela toda).
+   */
+  faixasPendentes?: { inicio: string; fim: string; ultimaObservacao: string | null }[];
 }
 
 /** intraday (D15B): observacao do dia corrente ate T — nunca cobertura de periodo fechado. */
