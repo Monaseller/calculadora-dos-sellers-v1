@@ -57,12 +57,18 @@ async function principal() {
 
   // ── duplo de banco (lojas, sync_jobs, shopee_pedidos) que impoe o indice unico real ──
   type Reg = { tabela: string; op: string; filtros: [string, string, unknown][] };
-  function bancoFalso(lojas: { id: string; user_id: string; marketplace: string; ativo: boolean }[], jobs: Record<string, any>[] = []) {
+  // P1: teto = max-rows do PostgREST (corta TODA resposta, sem erro); falharPagina = N-esima leitura de sync_jobs da 57014;
+  // aoLerPagina = gancho apos a N-esima pagina de sync_jobs (insercao concorrente)
+  type OpcBanco = { teto?: number; falharPagina?: number; aoLerPagina?: (n: number, db: Record<string, any[]>) => void };
+  function bancoFalso(lojas: { id: string; user_id: string; marketplace: string; ativo: boolean }[], jobs: Record<string, any>[] = [], opc: OpcBanco = {}) {
     const regs: Reg[] = []; const db: Record<string, any[]> = { lojas, sync_jobs: jobs, shopee_pedidos: [] };
+    let paginasSJ = 0;
     const cliente: any = { from(tabela: string) {
       const r: Reg = { tabela, op: "select", filtros: [] }; regs.push(r); let head = false; let inserir: any = null;
+      // P1: ORDER BY + LIMIT + gt como o PostgREST (lerJobsDasLojas pagina por id)
+      let ordem: string | null = null; let limite: number | null = null;
       const casa = (l: any) => r.filtros.every(([op, c, v]: any) => op === "eq" ? String(l[c]) === String(v) : op === "in" ? v.map(String).includes(String(l[c]))
-        : op === "is" ? (l[c] ?? null) === v : op === "gte" ? l[c] >= v : op === "lt" ? l[c] < v : true);
+        : op === "is" ? (l[c] ?? null) === v : op === "gte" ? l[c] >= v : op === "lt" ? l[c] < v : op === "gt" ? String(l[c]) > String(v) : true);
       const q: any = new Proxy({}, { get(_a, p: string) {
         if (p === "then") return (ok: any) => {
           if (inserir) {
@@ -73,13 +79,21 @@ async function principal() {
             return ok({ data: { id: novo.id }, error: null });
           }
           // a projecao "modo:checkpoint->>modo" do PostgREST
-          const d = (db[tabela] ?? []).filter(casa).map((l: any) => (tabela === "sync_jobs" ? { ...l, modo: l.checkpoint?.modo ?? null } : l));
+          const leituraSJ = tabela === "sync_jobs" && !head ? ++paginasSJ : 0;
+          if (leituraSJ && opc.falharPagina === leituraSJ) return ok({ data: null, error: { code: "57014", message: "canceling statement due to statement timeout" } });
+          let d = (db[tabela] ?? []).filter(casa).map((l: any) => (tabela === "sync_jobs" ? { ...l, modo: l.checkpoint?.modo ?? null } : l));
+          if (ordem) d = [...d].sort((x: any, y: any) => (String(x[ordem!]) < String(y[ordem!]) ? -1 : String(x[ordem!]) > String(y[ordem!]) ? 1 : 0));
+          if (limite !== null) d = d.slice(0, limite);
+          if (opc.teto !== undefined && !head) d = d.slice(0, opc.teto);
+          if (leituraSJ) opc.aoLerPagina?.(leituraSJ, db);
           return ok(head ? { data: null, count: d.length, error: null } : { data: d, error: null });
         };
         if (p === "select") return (_c: string, o?: any) => { if (o?.head) head = true; return q; };
         if (p === "insert") return (linha: any) => { r.op = "insert"; inserir = { ...linha }; r.filtros.push(["insert_user", "user_id", linha.user_id]); return q; };
         if (p === "single") return () => q;
-        return (...a: any[]) => { if (["eq", "in", "is", "gte", "lt"].includes(p)) r.filtros.push([p, a[0], a[1]]); return q; };
+        if (p === "order") return (c: string) => { ordem = c; return q; };
+        if (p === "limit") return (n: number) => { limite = n; return q; };
+        return (...a: any[]) => { if (["eq", "in", "is", "gte", "lt", "gt"].includes(p)) r.filtros.push([p, a[0], a[1]]); return q; };
       } });
       return q;
     } };
@@ -446,6 +460,109 @@ async function principal() {
     for (const [f, s] of fontes) if (f !== "planejamento.ts") assert(!/idadeMaxDias:\s*\d/.test(s), `${f} duplica politica`);
     const canon = readFileSync(join(RAIZ, "lib/vendas/canonico/shopee.ts"), "utf8");
     assert(/export const LIMITE_POLITICA_PAGAMENTO_MS = 10 \* 24 \* 3600 \* 1000;/.test(canon), "limite mudou");
+  });
+
+  // ── P1: lerJobsDasLojas paginado — o PostgREST corta toda resposta em 1000 linhas SEM erro ──
+  console.log("\n[CP. P1 coordenador: leitura de TODOS os jobs (teto de 1000 por resposta)]");
+  const pad = (i: number) => String(i).padStart(5, "0");
+  // jobs COMPLETOS de 2025 (nao tocam o periodo avaliado): so empurram a janela util para fora da 1a pagina
+  const lixoML = (n: number, lojaId: string, dono = UID) => Array.from({ length: n }, (_, i) => linhaML(lojaId, "2025-01-01", "2025-01-01", {
+    id: `sj-${lojaId.slice(0, 2)}-${pad(i)}`, user_id: dono, janela_inicio: new Date(Date.parse("2025-01-01T03:00:00Z") + i * 3600e3).toISOString(), janela_fim: new Date(Date.parse("2025-01-01T03:00:00Z") + (i + 1) * 3600e3).toISOString() }));
+  const linhaSP = (lojaId: string, ini: string, fim: string, o: Record<string, any> = {}) => ({ id: `r${++seq}`, user_id: UID, loja_id: lojaId, marketplace: "Shopee", campo_tempo: "create_time",
+    janela_inicio: ini, janela_fim: fim, status: "concluido", listagem_completa: true, concluido_em: new Date(AGORA - H).toISOString(), criado_em: new Date(AGORA - 2 * H).toISOString(), checkpoint: null, tipo: "backfill", ...o });
+  const lixoSP = (n: number, lojaId: string) => Array.from({ length: n }, (_, i) => linhaSP(lojaId, new Date(Date.parse("2025-01-01T03:00:00Z") + i * 3600e3).toISOString(),
+    new Date(Date.parse("2025-01-01T03:00:00Z") + (i + 1) * 3600e3).toISOString(), { id: `sj-${lojaId.slice(0, 2)}-${pad(i)}` }));
+  const embaralhar = <X,>(xs: X[]) => xs.map((x, i) => [(i * 7919) % 104729, x] as const).sort((a, b) => a[0] - b[0]).map(([, x]) => x);
+  // o que o coordenador decidia ANTES (leitura unica cortada): as 1000 primeiras por id, na MESMA conversao de lerJobsDasLojas
+  const comoJob = (r: any): JobExistenteSync => ({ id: r.id, lojaId: r.loja_id, marketplace: r.marketplace, campoTempo: r.campo_tempo ?? null, janelaInicio: r.janela_inicio ?? null,
+    janelaFim: r.janela_fim ?? null, status: r.status, listagemCompleta: r.listagem_completa ?? null, concluidoEm: r.concluido_em ?? null, criadoEm: r.criado_em,
+    catchup: r.campo_tempo == null && r.janela_inicio == null && r.checkpoint?.modo === "escrow_catchup", tipo: r.tipo ?? null, dateFrom: r.date_from ?? null, dateTo: r.date_to ?? null } as JobExistenteSync);
+  const cortado = (rows: any[], lojaId: string) => rows.filter((r) => r.user_id === UID && r.loja_id === lojaId).sort((a, b) => (a.id < b.id ? -1 : 1)).slice(0, 1000).map(comoJob);
+  const paginasSJ = (b: ReturnType<typeof bancoFalso>) => b.regs.filter((r) => r.tabela === "sync_jobs" && r.op === "select");
+  const resumo = (l: AvaliacaoLojaSync) => `${l.cobertura}/${l.frescor}/${l.proximaAcao.acao}${jobDa(l) ? ` ${jobDa(l)!.proposito} ${jobDa(l)!.inicio}→${jobDa(l)!.fim}` : ""}`;
+
+  t("CP-1. ML com 1.501 jobs, janela util com o MAIOR id, teto 1000 → COMPLETE/FRESH/NOOP (antes: descoberta indevida); 3 paginas por id", async () => {
+    const util = linhaML(MLA, "2026-10-01", "2026-10-05", { id: "sj-zz-zzzzz" });
+    const rows = [...lixoML(1500, MLA), util];
+    const b = bancoFalso(lojasBase(), rows, { teto: 1000 });
+    const a = (await avaliarDB(b, { marketplace: "ML", lojaId: MLA, de: "2026-10-01", ate: "2026-10-05" })).lojas[0];
+    const antes = av(ml(MLA), "2026-10-01", "2026-10-05", cortado(rows, MLA));
+    assert(resumo(a) === "COMPLETE/FRESH/NOOP", resumo(a));
+    assert(antes.cobertura === "PARTIAL" && antes.proximaAcao.acao === "CREATE_DISCOVERY_JOB", `pré-condição (corte) ${resumo(antes)}`);
+    const pags = paginasSJ(b);
+    assert(pags.length === 3 && !pags[0].filtros.some(([op]) => op === "gt") && pags.slice(1).every((p) => p.filtros.some(([op, c]) => op === "gt" && c === "id")), `${pags.length} paginas`);
+  });
+  t("CP-2. Shopee (Monamor) com 1.202 jobs, cadeia create_time com os MAIORES ids → COMPLETE/NOOP (antes: descoberta da janela inteira)", async () => {
+    const util = [linhaSP(SPA, "2026-09-21T03:00:00.000Z", "2026-10-01T03:00:00.000Z", { id: "sj-zz-zzzz1" }), linhaSP(SPA, "2026-10-01T03:00:00.000Z", "2026-10-04T03:00:00.000Z", { id: "sj-zz-zzzz2" })];
+    const rows = embaralhar([...lixoSP(1200, SPA), ...util]);
+    const b = bancoFalso(lojasBase(), rows, { teto: 1000 });
+    const a = (await avaliarDB(b, { marketplace: "Shopee", lojaId: SPA, de: "2026-10-01", ate: "2026-10-03" })).lojas[0];
+    const antes = av(sp(SPA), "2026-10-01", "2026-10-03", cortado(rows, SPA), { sinaisShopee: SEM_SINAIS });
+    assert(resumo(a) === "COMPLETE/FRESH/NOOP", resumo(a));
+    assert(antes.proximaAcao.acao === "CREATE_DISCOVERY_JOB", `pré-condição (corte) ${resumo(antes)}`);
+  });
+  t("CP-3. Shopee (R.D.): só a janela ANTIGA da cadeia cai fora da 1a página → antes DESCOBERTA de datas antigas já provadas; agora a ação do conjunto completo", async () => {
+    // espelha o caso real: R.D. pedia DESCOBERTA 25/07→28/07 porque a janela mais antiga da cadeia estava cortada
+    const antiga = linhaSP(SPB, "2026-09-21T03:00:00.000Z", "2026-10-01T03:00:00.000Z", { id: "sj-zz-zzzzz" });
+    const recente = linhaSP(SPB, "2026-10-01T03:00:00.000Z", "2026-10-04T03:00:00.000Z", { id: "sj-00-00000" });
+    const rows = [...lixoSP(1100, SPB), antiga, recente];
+    const b = bancoFalso(lojasBase(), rows, { teto: 1000 });
+    const agora = (await avaliarDB(b, { marketplace: "Shopee", lojaId: SPB, de: "2026-10-01", ate: "2026-10-03" })).lojas[0];
+    const completo = av(sp(SPB), "2026-10-01", "2026-10-03", rows.map(comoJob), { sinaisShopee: SEM_SINAIS });
+    const antes = av(sp(SPB), "2026-10-01", "2026-10-03", cortado(rows, SPB), { sinaisShopee: SEM_SINAIS });
+    assert(resumo(agora) === resumo(completo) && resumo(agora) === "COMPLETE/FRESH/NOOP", `${resumo(agora)} ≠ ${resumo(completo)}`);
+    assert(antes.proximaAcao.acao === "CREATE_DISCOVERY_JOB" && (jobDa(antes)!.inicio ?? "") < "2026-10-01", `pré-condição: o corte pedia descoberta antiga — ${resumo(antes)}`);
+  });
+  t("CP-4. várias lojas na MESMA leitura (in loja_id) com outro dono intercalado: todas as páginas levam dono+lojas; nada de outro dono/loja; decisões = conjunto completo", async () => {
+    const rows = [...lixoML(700, MLA), linhaML(MLA, "2026-10-01", "2026-10-05", { id: "sj-zz-zzzz9" }), ...lixoSP(700, SPA),
+      linhaSP(SPA, "2026-09-21T03:00:00.000Z", "2026-10-01T03:00:00.000Z", { id: "sj-zz-zzzz7" }), linhaSP(SPA, "2026-10-01T03:00:00.000Z", "2026-10-04T03:00:00.000Z", { id: "sj-zz-zzzz8" }),
+      ...lixoML(900, MLX, OUTRO).map((r) => ({ ...r, id: `sj-${r.id.slice(3)}x` }))];
+    const b = bancoFalso(lojasBase(), embaralhar(rows), { teto: 1000 });
+    const lidos = await C.lerJobsDasLojas(b.cliente, UID, [MLA, SPA]);
+    assert(lidos.length === 1403 && new Set(lidos.map((j) => j.id)).size === 1403 && lidos.every((j) => j.lojaId === MLA || j.lojaId === SPA), `${lidos.length}`);
+    assert(paginasSJ(b).every((p) => p.filtros.some(([op, c, v]) => op === "eq" && c === "user_id" && v === UID) && p.filtros.some(([op, c]) => op === "in" && c === "loja_id")), "página sem dono/lojas");
+    const avs = await avaliarDB(b, { marketplace: "TODOS", de: "2026-10-01", ate: "2026-10-03" });
+    const porLoja = Object.fromEntries(avs.lojas.map((l) => [l.lojaId, resumo(l)]));
+    assert(porLoja[MLA] === "COMPLETE/FRESH/NOOP" && porLoja[SPA] === "COMPLETE/FRESH/NOOP" && !(MLX in porLoja), JSON.stringify(porLoja));
+  });
+  t("CP-5/6/9. falha em página INTERMEDIÁRIA → avaliação e garantirProximaAcao lançam leitura_falhou; NENHUM job criado, nenhum insert tentado", async () => {
+    const rows = [...lixoML(1500, MLA), linhaML(MLA, "2026-10-01", "2026-10-05", { id: "sj-zz-zzzzz" })];
+    const b1 = bancoFalso(lojasBase(), rows, { teto: 1000, falharPagina: 2 });
+    let e1 = ""; try { await avaliarDB(b1, { marketplace: "ML", lojaId: MLA, de: "2026-10-01", ate: "2026-10-05" }); } catch (e: any) { e1 = e.message; }
+    // avaliação feita com um conjunto que pede job (sem a janela útil) + a leitura do garantir falhando na 2a página
+    const aval = await avaliarDB(bancoFalso(lojasBase(), lixoML(10, MLA)), { marketplace: "ML", lojaId: MLA, de: "2026-10-01", ate: "2026-10-05" });
+    assert(aval.lojas[0].proximaAcao.acao === "CREATE_DISCOVERY_JOB", "pré-condição: a avaliação pede job");
+    const b2 = bancoFalso(lojasBase(), rows.map((r) => ({ ...r })), { teto: 1000, falharPagina: 2 });
+    const antes = b2.db.sync_jobs.length;
+    const erros: string[] = []; const ce = console.error; console.error = (...a: any[]) => { erros.push(a.join(" ")); };
+    let e2 = ""; try { await C.garantirProximaAcao(b2.cliente, UID, [aval], { habilitado: true }); } catch (e: any) { e2 = e.message; } finally { console.error = ce; }
+    assert(e1 === "leitura_falhou" && e2 === "leitura_falhou", `${e1} / ${e2}`);
+    assert(b2.db.sync_jobs.length === antes && !b2.regs.some((r) => r.op === "insert"), "job criado com leitura parcial");
+    assert(erros.length === 1 && erros[0] === "[vendas-canonico] leitura falhou etapa=coordenador_jobs codigo=57014", JSON.stringify(erros));
+  });
+  t("CP-7. mudança na ORDEM de inserção das janelas → mesmo conjunto e mesmas decisões", async () => {
+    const rows = [...lixoML(1300, MLA), linhaML(MLA, "2026-10-01", "2026-10-05", { id: "sj-zz-zzzzz" })];
+    const r1 = (await avaliarDB(bancoFalso(lojasBase(), rows, { teto: 1000 }), { marketplace: "ML", lojaId: MLA, de: "2026-09-28", ate: "2026-10-05" })).lojas[0];
+    const r2 = (await avaliarDB(bancoFalso(lojasBase(), embaralhar(rows), { teto: 1000 }), { marketplace: "ML", lojaId: MLA, de: "2026-09-28", ate: "2026-10-05" })).lojas[0];
+    const r3 = (await avaliarDB(bancoFalso(lojasBase(), [...rows].reverse(), { teto: 1000 }), { marketplace: "ML", lojaId: MLA, de: "2026-09-28", ate: "2026-10-05" })).lojas[0];
+    assert(resumo(r1) === resumo(r2) && resumo(r2) === resumo(r3) && r1.proximaAcao.acao === "CREATE_DISCOVERY_JOB", `${resumo(r1)} | ${resumo(r2)} | ${resumo(r3)}`);
+  });
+  t("CP-8. inserção CONCORRENTE entre páginas: cada job que já existia aparece 1x; o novo acima do cursor pode entrar, o abaixo não; nunca duplicata", async () => {
+    const rows = [...lixoML(1500, MLA), linhaML(MLA, "2026-10-01", "2026-10-05", { id: "sj-zz-zzzzz" })];
+    const novos = { baixo: linhaML(MLA, "2026-09-01", "2026-09-01", { id: "sj-11-00000a" }), alto: linhaML(MLA, "2026-09-02", "2026-09-02", { id: "sj-zz-zzzzzz" }) };
+    const b = bancoFalso(lojasBase(), [...rows], { teto: 1000, aoLerPagina: (n, db) => { if (n === 1) db.sync_jobs.push(novos.baixo, novos.alto); } });
+    const lidos = await C.lerJobsDasLojas(b.cliente, UID, [MLA]);
+    const ids = lidos.map((j) => j.id);
+    assert(new Set(ids).size === ids.length && rows.every((r) => ids.filter((x) => x === r.id).length === 1), "job existente perdido/duplicado");
+    assert(ids.includes(novos.alto.id) && !ids.includes(novos.baixo.id) && ids.length === rows.length + 1, `${ids.length}`);
+    // a decisão continua legítima: a janela útil foi lida
+    assert(P.avaliarLoja({ loja: ml(MLA), de: "2026-10-01", ate: "2026-10-05", agoraMs: AGORA, jobs: lidos, politica: POL, origem: "usuario" }).proximaAcao.acao === "NOOP", "decisão");
+  });
+  t("CP-10. o coordenador só LÊ sync_jobs por lerJanelasSyncJobs (as outras referências são escrita: insert); nenhum select solto", () => {
+    const src = readFileSync(join(RAIZ, "lib/vendas/sync/coordenador.ts"), "utf8").replace(/\r\n/g, "\n");
+    const usos = [...src.matchAll(/\.from\("sync_jobs"\)/g)].map((m) => ({ antes: src.slice(Math.max(0, m.index! - 120), m.index!), depois: src.slice(m.index!, m.index! + 30) }));
+    assert(usos.length >= 2, `${usos.length}`);
+    for (const u of usos) assert(/\.insert\(/.test(u.depois) || /lerJanelasSyncJobs<Record<string, any>>\("coordenador_jobs", \(apos, limite\) => \{\s*let q = cliente$/.test(u.antes), `leitura solta: ${u.depois}`);
   });
 
   await fila;

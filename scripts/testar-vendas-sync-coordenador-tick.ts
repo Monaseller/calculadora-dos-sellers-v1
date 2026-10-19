@@ -55,9 +55,10 @@ async function principal() {
       rpc: async () => { rpcs++; return { data: null, error: { code: "PROIBIDO" } }; },
       from(tabela: string) {
         const r: Reg = { tabela, op: "select", colunas: "", filtros: [] }; regs.push(r); let head = false; let inserir: any = null;
-        let ordem: string | null = null; let faixa: [number, number] | null = null;
+        let ordem: string | null = null; let faixa: [number, number] | null = null; let limite: number | null = null;
         const casa = (l: any) => r.filtros.every(([op, c, v]: any) => op === "eq" ? String(l[c]) === String(v) : op === "in" ? v.map(String).includes(String(l[c]))
-          : op === "is" ? (l[c] ?? null) === v : op === "notnull" ? (l[c] ?? null) !== null : op === "gte" ? l[c] >= v : op === "lt" ? l[c] < v : true);
+          : op === "is" ? (l[c] ?? null) === v : op === "notnull" ? (l[c] ?? null) !== null : op === "gte" ? l[c] >= v : op === "lt" ? l[c] < v
+          : op === "gt" ? String(l[c]) > String(v) : true);
         const q: any = new Proxy({}, { get(_a, p: string) {
           if (p === "then") return (ok: any) => {
             if (o.falhar?.(tabela, r.filtros)) return ok({ data: null, error: { code: "XX000", message: `falha interna ${SEGREDO_FALSO}` } });
@@ -69,8 +70,10 @@ async function principal() {
               return ok({ data: { id: novo.id }, error: null });
             }
             let d = (db[tabela] ?? []).filter(casa).map((l: any) => (tabela === "sync_jobs" ? { ...l, modo: l.checkpoint?.modo ?? null } : l));
-            if (ordem) d = [...d].sort((x: any, y: any) => String(x[ordem!]).localeCompare(String(y[ordem!])));
+            // P1: ORDER BY id do PostgREST e por codigo de caractere (a leitura paginada exige ids crescentes)
+            if (ordem) d = [...d].sort((x: any, y: any) => ordem === "id" ? (String(x.id) < String(y.id) ? -1 : String(x.id) > String(y.id) ? 1 : 0) : String(x[ordem!]).localeCompare(String(y[ordem!])));
             if (faixa) d = d.slice(faixa[0], faixa[1] + 1);
+            if (limite !== null) d = d.slice(0, limite);
             return ok(head ? { data: null, count: d.length, error: null } : { data: d, error: null });
           };
           if (p === "select") return (c: string, op?: any) => { r.colunas = c; if (op?.head) head = true; return q; };
@@ -78,8 +81,9 @@ async function principal() {
           if (p === "single") return () => q;
           if (p === "order") return (c: string) => { ordem = c; return q; };
           if (p === "range") return (a: number, z: number) => { faixa = [a, z]; return q; };
+          if (p === "limit") return (n: number) => { limite = n; return q; };
           if (p === "not") return (c: string, o: string, v: unknown) => { if (o === "is" && v === null) r.filtros.push(["notnull", c, null]); return q; };
-          return (...a: any[]) => { if (["eq", "in", "is", "gte", "lt"].includes(p)) r.filtros.push([p, a[0], a[1]]); return q; };
+          return (...a: any[]) => { if (["eq", "in", "is", "gte", "lt", "gt"].includes(p)) r.filtros.push([p, a[0], a[1]]); return q; };
         } });
         return q;
       },

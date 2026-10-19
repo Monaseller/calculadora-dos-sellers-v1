@@ -25,14 +25,21 @@ import { agregar, avaliarLoja, proximaAcaoCombinada } from "./planejamento";
 import type {
   AvaliacaoLojaSync, AvaliacaoSync, JobExistenteSync, JobPlanejado, LojaAtivaSync, MarketplaceSync, OrigemPedido, PoliticaSync, ProximaAcao, SinaisShopeeSync,
 } from "./tipos";
+// P1: a MESMA leitura paginada de sync_jobs dos leitores canonicos (keyset por id, fim so na pagina vazia, falha fechada)
+import { lerJanelasSyncJobs } from "@/lib/vendas/canonico/shopee";
 
 export async function lerJobsDasLojas(cliente: SupabaseClient, userId: string, lojaIds: string[]): Promise<JobExistenteSync[]> {
   if (!lojaIds.length) return [];
-  const { data, error } = await cliente.from("sync_jobs")
-    .select("id, loja_id, marketplace, campo_tempo, janela_inicio, janela_fim, status, listagem_completa, concluido_em, criado_em, tipo, date_from, date_to, modo:checkpoint->>modo")
-    .eq("user_id", userId).in("loja_id", lojaIds);
-  if (error) throw new Error("leitura_falhou");
-  return ((data ?? []) as Record<string, any>[]).map((r) => ({ id: r.id, lojaId: r.loja_id, marketplace: r.marketplace, campoTempo: r.campo_tempo ?? null,
+  // P1: TODOS os jobs, paginados por id — a leitura unica era cortada em 1000 linhas pelo PostgREST (sem erro) e o
+  // planejamento via buraco de cobertura onde nao havia. Pagina com erro → leitura_falhou: nenhuma decisao com conjunto parcial.
+  const data = await lerJanelasSyncJobs<Record<string, any>>("coordenador_jobs", (apos, limite) => {
+    let q = cliente.from("sync_jobs")
+      .select("id, loja_id, marketplace, campo_tempo, janela_inicio, janela_fim, status, listagem_completa, concluido_em, criado_em, tipo, date_from, date_to, modo:checkpoint->>modo")
+      .eq("user_id", userId).in("loja_id", lojaIds);
+    if (apos !== null) q = q.gt("id", apos);
+    return q.order("id", { ascending: true }).limit(limite);
+  });
+  return data.map((r) => ({ id: r.id, lojaId: r.loja_id, marketplace: r.marketplace, campoTempo: r.campo_tempo ?? null,
     janelaInicio: r.janela_inicio ?? null, janelaFim: r.janela_fim ?? null, status: r.status, listagemCompleta: r.listagem_completa ?? null,
     concluidoEm: r.concluido_em ?? null, criadoEm: r.criado_em,
     catchup: r.campo_tempo == null && r.janela_inicio == null && r.modo === "escrow_catchup",
