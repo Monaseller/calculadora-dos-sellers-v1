@@ -497,14 +497,17 @@ async function principal() {
     const vendas = readFileSync(join(RAIZ, "app/(app)/vendas/DateRangePicker.tsx"), "utf8");
     assert(/left: 0,/.test(vendas) && !/cds-filtro-periodo/.test(vendas), "componente compartilhado alterado");
   });
-  t("L24. P1 card de valor: o valor do KPI nunca é cortado — fonte por container query proporcional ao nº de caracteres (até 24px), quebra em vez de cortar", () => {
+  t("L24. P1 card de valor: o valor do KPI inteiro numa linha — fonte por container query proporcional ao nº de caracteres (até 24px, 0,62em/caractere na fonte efetiva), nowrap; sem container query quebra em vez de esconder", () => {
     const pg = readFileSync(join(RAIZ, "app/(app)/dashboard/page.tsx"), "utf8").replace(/\r\n/g, "\n");
     const card = pg.slice(pg.indexOf("function KpiCard("), pg.indexOf("function KpiCard(") + 2600);
     assert(/className="cds-kpi"/.test(card) && /className="cds-kpi-valor" data-kpi-valor style=\{\{ \["--cds-kpi-chars" as string\]: Math\.max\(value\.length, 1\)/.test(card), "card sem container / sem nº de caracteres");
     const valor = card.slice(card.indexOf("data-kpi-valor"), card.indexOf("{value}</div>"));
     assert(!/fontSize/.test(valor) && !/nowrap|ellipsis/.test(valor), "fonte fixa inline ou corte no valor");
     assert(/\.cds-kpi \{ container-type: inline-size; \}/.test(pg)
-      && /\.cds-kpi-valor \{ font-size: 24px; line-height: 1\.15; overflow-wrap: anywhere; font-size: clamp\(14px, calc\(100cqi \/ \(var\(--cds-kpi-chars\) \* 0\.55\)\), 24px\); \}/.test(pg), "regra de encaixe do valor ausente");
+      && /\.cds-kpi-valor \{ font-size: 24px; line-height: 1\.15; white-space: nowrap; font-size: clamp\(14px, calc\(100cqi \/ \(var\(--cds-kpi-chars\) \* 0\.62\)\), 24px\); \}/.test(pg), "regra de encaixe do valor ausente");
+    // nowrap só onde o encaixe existe: sem container query o valor quebra a linha (nunca some no overflow: hidden do card)
+    assert(/@supports not \(font-size: 1cqi\) \{ \.cds-kpi-valor \{ white-space: normal; overflow-wrap: anywhere; \} \}/.test(pg), "sem fallback para navegador sem container query");
+    assert((pg.match(/\.cds-kpi-valor \{/g) ?? []).length === 2, "regra duplicada/sobrescrita do valor");
   });
 
   await fila;

@@ -930,11 +930,13 @@ export default function DashboardPage() {
         .dash-anim { animation: fadeUp 0.4s ease both; }
         /* P1 (filtros): o painel do calendario (componente compartilhado, inalterado) nao sai da janela no Dashboard */
         .cds-filtro-periodo div[style*="position: absolute"] { max-width: calc(100vw - 32px); flex-wrap: wrap; overflow-x: auto; }
-        /* P1: valor do KPI nunca cortado — até 24px; encolhe só quando não cabe na largura do card (~0,55em por caractere
-           em Nunito Sans 900, medido: "R$ 13.351.474,80" cabe num card de 175px); sem container query o navegador fica
-           nos 24px e quebra a linha em vez de cortar */
+        /* P1: valor do KPI inteiro e numa linha só — até 24px; encolhe só quando não cabe na largura do card (~0,62em por
+           caractere na fonte EFETIVA do app, Arial 900 — no Windows a face larga —, medido no Chrome: "R$ 99.999.999,99"
+           cabe num card de 175px); nowrap: nunca separa as casas decimais */
         .cds-kpi { container-type: inline-size; }
-        .cds-kpi-valor { font-size: 24px; line-height: 1.15; overflow-wrap: anywhere; font-size: clamp(14px, calc(100cqi / (var(--cds-kpi-chars) * 0.55)), 24px); }
+        .cds-kpi-valor { font-size: 24px; line-height: 1.15; white-space: nowrap; font-size: clamp(14px, calc(100cqi / (var(--cds-kpi-chars) * 0.62)), 24px); }
+        /* navegador sem container query: fica nos 24px — quebra a linha em vez de esconder caracteres no overflow do card */
+        @supports not (font-size: 1cqi) { .cds-kpi-valor { white-space: normal; overflow-wrap: anywhere; } }
       `}</style>
 
       {/* HERO */}
