@@ -119,8 +119,9 @@ export default function TopBar() {
 
       <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
 
-        {/* ── Seletor de data (Fase D) — Data de Pagamento (padrão) / Data de Criação ── */}
-        <div
+        {/* ── Seletor de data (Fase D) — Data de Pagamento (padrão) / Data de Criação ──
+             P1 (filtros): oculto no Dashboard — a consulta canonica tem criterio FIXO (ML: fechamento; Shopee: pagamento) */}
+        {path !== "/dashboard" && <div
           title="Define a data usada para filtrar e calcular todas as telas: Data de Pagamento (visão financeira) ou Data de Criação (visão operacional)."
           style={{
             display: "flex", alignItems: "center",
@@ -149,12 +150,13 @@ export default function TopBar() {
               </button>
             );
           })}
-        </div>
+        </div>}
 
-        {/* ── Seletor de loja ── */}
+        {/* ── Seletor de loja ATIVA (acoes manuais) — nao e a selecao de lojas do Dashboard ── */}
         <div ref={dropRef} style={{ position: "relative" }}>
           <button
             onClick={() => setDropdown(d => !d)}
+            title="Loja ativa para acoes manuais (importar anuncios, ajustes). Nao muda as lojas consultadas no Dashboard."
             style={{
               display: "flex", alignItems: "center", gap: "8px",
               background: labelAtiva ? "rgba(255,224,0,0.08)" : "rgba(255,255,255,0.04)",
@@ -180,6 +182,9 @@ export default function TopBar() {
               background: "#14161f", border: "1px solid rgba(255,255,255,0.1)",
               borderRadius: "12px", padding: "8px", boxShadow: "0 8px 32px rgba(0,0,0,0.5)", zIndex: 9999,
             }}>
+              <div style={{ padding: "6px 12px 8px", fontSize: "11px", color: "#9099aa", lineHeight: 1.5 }}>
+                Loja ativa para acoes manuais. Nao muda as lojas consultadas no Dashboard.
+              </div>
               {lojas.length === 0 ? (
                 <div style={{ padding: "12px 14px", color: "#9099aa", fontSize: "13px" }}>
                   Nenhuma loja conectada ainda

@@ -2,7 +2,8 @@
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import DateRangePicker from "../vendas/DateRangePicker";
 import { chaveConsultaCanonica, criarFilaConsulta, type FilaConsulta } from "./consulta-canonica";
-import { addDays, calcularUltimos7Dias } from "@/lib/date-range-utils";
+import * as F from "./filtros-lojas";
+import { addDays, calcularUltimos7Dias, hojeISOBrasilia } from "@/lib/date-range-utils";
 
 type VendaRow = {
   orderId: string; data: string; anuncio: string; status: string;
@@ -19,6 +20,8 @@ type Anuncio = {
 };
 type Loja = {
   id: string; nome: string; marketplace: string; nickname: string | null; ativo: boolean;
+  /** Id externo (ML: seller_id; Shopee: shop_id, gravado em seller_id) e o nome calculado pela rota (nome real → apelido real → fallback tecnico). */
+  seller_id?: string | null; nome_exibicao?: string | null;
 };
 /** D16: GET /api/vendas/resumo-canonico — so os campos que os 4 cards principais usam. */
 type ResumoCanonicoDashboard = {
@@ -503,6 +506,14 @@ function AlertBadge({ icon, title, msg, color }: { icon: string; title: string; 
   );
 }
 
+/**
+ * Seletor de lojas do Dashboard (qualquer combinacao das lojas do dono).
+ *   - cada quadradinho mostra o estado REAL (tambem com todas marcadas);
+ *   - "Todas as lojas": marcado com todas, parcial (–) com uma parte; clicar marca todas e, com todas marcadas, nao muda nada;
+ *   - clicar na loja marca/desmarca SO ela; "Somente esta" seleciona exclusivamente ela;
+ *   - nunca vazio (a ultima marcada nao desmarca).
+ * Nao e a "loja ativa" da TopBar (essa so vale para acoes manuais).
+ */
 function LojasDropdown({ lojas, selecionadas, onChange }: {
   lojas: Loja[];
   selecionadas: Set<string>;
@@ -520,77 +531,69 @@ function LojasDropdown({ lojas, selecionadas, onChange }: {
     return () => document.removeEventListener("mousedown", handler);
   }, []);
 
-  const todas = lojas.length === 0 || selecionadas.size === lojas.length || selecionadas.size === 0;
-  const label = lojas.length === 0
-    ? "Minhas lojas"
-    : todas
-    ? "Todas as lojas"
-    : selecionadas.size === 1
-    ? (lojas.find(l => selecionadas.has(l.id))?.nickname ?? "1 loja")
-    : `${selecionadas.size} lojas`;
-
-  function toggleLoja(id: string) {
-    // MULTI-LOJA: cada clique marca/desmarca SÓ aquela loja (qualquer combinação: 1, 2 ou todas).
-    // A última loja marcada não pode ser desmarcada — seleção vazia nunca vira "todas" em silêncio.
-    const atual = todas ? new Set(lojas.map(l => l.id)) : new Set(selecionadas);
-    if (atual.has(id)) { if (atual.size === 1) return; atual.delete(id); }
-    else atual.add(id);
-    onChange(atual);
-  }
-  function toggleTodas() {
-    onChange(new Set(lojas.map(l => l.id)));
-  }
+  // regras puras em ./filtros-lojas (selecao vazia so antes de /api/lojas responder = todas, como a consulta canonica)
+  const marcadas = F.marcadasDe(lojas, selecionadas);
+  const nMarcadas = marcadas.size;
+  const estadoTodas = F.estadoTodas(lojas, selecionadas);
+  const label = F.rotuloSeletor(lojas, selecionadas);
+  const aplicar = (nova: Set<string> | null) => { if (nova) onChange(nova); };
 
   const mktColor = (m: string) => m === "Shopee" ? "#EE4D2D" : "#22C55E";
   const mktLabel = (m: string) => m === "Shopee" ? "🟠" : "🟢";
+  const caixa = (marcada: boolean | "parcial", cor: string) => (
+    <div style={{
+      width: 16, height: 16, borderRadius: 4, flexShrink: 0,
+      background: marcada ? cor : "transparent",
+      border: `2px solid ${marcada ? cor : "#334155"}`,
+      display: "flex", alignItems: "center", justifyContent: "center",
+    }}>
+      {marcada === "parcial" ? <span style={{ color: "#fff", fontSize: 12, fontWeight: 900, lineHeight: 1 }}>–</span>
+        : marcada ? <span style={{ color: "#fff", fontSize: 10, fontWeight: 900 }}>✓</span> : null}
+    </div>
+  );
 
   return (
     <div ref={ref} style={{ position: "relative" }}>
       <button
+        type="button"
+        data-seletor-lojas
         onClick={() => setAberto(v => !v)}
         style={{
           display: "flex", alignItems: "center", gap: 8,
           background: "#0F172A", border: "1px solid #334155",
           borderRadius: 10, padding: "8px 14px", cursor: "pointer",
           color: "#fff", fontSize: 13, fontWeight: 700,
-          transition: "border-color 0.15s",
+          transition: "border-color 0.15s", maxWidth: "calc(100vw - 32px)",
         }}
         onMouseEnter={e => (e.currentTarget.style.borderColor = "#FF7A00")}
         onMouseLeave={e => (e.currentTarget.style.borderColor = "#334155")}
       >
         <span style={{ fontSize: 14 }}>🏪</span>
-        <span>{label}</span>
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
         <span style={{ color: "#94A3B8", fontSize: 11, marginLeft: 2 }}>{aberto ? "▲" : "▼"}</span>
       </button>
 
       {aberto && (
         <div style={{
-          position: "absolute", top: "calc(100% + 8px)", right: 0,
+          position: "absolute", top: "calc(100% + 8px)", left: 0,
           background: "#0F172A", border: "1px solid #1E293B",
-          borderRadius: 14, padding: 8, minWidth: 220, zIndex: 999,
+          borderRadius: 14, padding: 8, minWidth: 280, maxWidth: "calc(100vw - 32px)", zIndex: 999,
           boxShadow: "0 16px 48px rgba(0,0,0,0.6)",
         }}>
           {/* Todas */}
           <div
-            onClick={toggleTodas}
+            data-estado-todas={estadoTodas}
+            onClick={() => aplicar(F.selecionarTodas(lojas, selecionadas))}
             style={{
               display: "flex", alignItems: "center", gap: 10,
               padding: "9px 12px", borderRadius: 10, cursor: "pointer",
-              background: todas ? "rgba(255,122,0,0.1)" : "transparent",
+              background: estadoTodas === "todas" ? "rgba(255,122,0,0.1)" : "transparent",
               marginBottom: 4,
             }}
-            onMouseEnter={e => { if (!todas) (e.currentTarget as HTMLDivElement).style.background = "rgba(255,255,255,0.04)"; }}
-            onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.background = todas ? "rgba(255,122,0,0.1)" : "transparent"; }}
           >
-            <div style={{
-              width: 16, height: 16, borderRadius: 4, flexShrink: 0,
-              background: todas ? "#FF7A00" : "transparent",
-              border: `2px solid ${todas ? "#FF7A00" : "#334155"}`,
-              display: "flex", alignItems: "center", justifyContent: "center",
-            }}>
-              {todas && <span style={{ color: "#fff", fontSize: 10, fontWeight: 900 }}>✓</span>}
-            </div>
-            <span style={{ fontSize: 13, fontWeight: 700, color: todas ? "#FF7A00" : "#fff" }}>Todas as lojas</span>
+            {caixa(estadoTodas === "todas" ? true : nMarcadas > 0 ? "parcial" : false, "#FF7A00")}
+            <span style={{ fontSize: 13, fontWeight: 700, color: estadoTodas === "todas" ? "#FF7A00" : "#fff", flex: 1 }}>Todas as lojas</span>
+            <span style={{ fontSize: 11, color: "#94A3B8" }}>{nMarcadas} de {lojas.length}</span>
           </div>
 
           {lojas.length === 0 && (
@@ -603,40 +606,47 @@ function LojasDropdown({ lojas, selecionadas, onChange }: {
           {lojas.length > 0 && <div style={{ height: 1, background: "#1E293B", margin: "4px 0 8px" }} />}
 
           {lojas.map(loja => {
-            const sel = selecionadas.has(loja.id);
+            const sel = marcadas.has(loja.id);
             const cor = mktColor(loja.marketplace);
+            const r = F.rotuloLoja(loja);
             return (
               <div
                 key={loja.id}
-                onClick={() => toggleLoja(loja.id)}
+                data-loja-id={loja.id}
+                data-marcada={sel ? "true" : "false"}
+                onClick={() => aplicar(F.alternarLoja(lojas, selecionadas, loja.id))}
                 style={{
                   display: "flex", alignItems: "center", gap: 10,
                   padding: "9px 12px", borderRadius: 10, cursor: "pointer",
-                  background: sel && !todas ? `${cor}10` : "transparent",
+                  background: sel ? `${cor}10` : "transparent",
                   marginBottom: 2,
                 }}
-                onMouseEnter={e => { (e.currentTarget as HTMLDivElement).style.background = sel && !todas ? `${cor}18` : "rgba(255,255,255,0.04)"; }}
-                onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.background = sel && !todas ? `${cor}10` : "transparent"; }}
               >
-                <div style={{
-                  width: 16, height: 16, borderRadius: 4, flexShrink: 0,
-                  background: sel && !todas ? cor : "transparent",
-                  border: `2px solid ${sel && !todas ? cor : "#334155"}`,
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                }}>
-                  {sel && !todas && <span style={{ color: "#fff", fontSize: 10, fontWeight: 900 }}>✓</span>}
-                </div>
+                {caixa(sel, cor)}
                 <span style={{ fontSize: 11 }}>{mktLabel(loja.marketplace)}</span>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 13, fontWeight: 600, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {(loja.nickname ?? loja.nome)} {loja.marketplace === "ML" ? "Mercado Livre" : loja.marketplace}
+                    {r.principal}
                   </div>
-                  <div style={{ fontSize: 10, color: cor, fontWeight: 700 }}>{loja.marketplace === "ML" ? "Mercado Livre" : "Shopee"}</div>
+                  <div style={{ fontSize: 10, color: r.temNomeReal ? cor : "#64748B", fontWeight: 700 }}>{r.secundario}</div>
                 </div>
-                <div style={{ width: 6, height: 6, borderRadius: "50%", background: cor, flexShrink: 0, boxShadow: `0 0 6px ${cor}` }} />
+                <button
+                  type="button"
+                  data-somente={loja.id}
+                  onClick={e => { e.stopPropagation(); aplicar(F.somenteEsta(lojas, selecionadas, loja.id)); }}
+                  style={{
+                    flexShrink: 0, padding: "3px 8px", borderRadius: 6, border: "1px solid #334155",
+                    background: "transparent", color: "#94A3B8", fontSize: 10, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap",
+                  }}
+                >
+                  Somente esta
+                </button>
               </div>
             );
           })}
+          <div style={{ fontSize: 10, color: "#64748B", padding: "8px 12px 4px", lineHeight: 1.5 }}>
+            Lojas consultadas neste Dashboard. A loja ativa da barra superior vale so para acoes manuais.
+          </div>
         </div>
       )}
     </div>
@@ -916,6 +926,8 @@ export default function DashboardPage() {
         @keyframes fadeUp { from { opacity:0; transform:translateY(16px); } to { opacity:1; transform:translateY(0); } }
         @keyframes pulse  { 0%,100% { opacity:1; } 50% { opacity:.5; } }
         .dash-anim { animation: fadeUp 0.4s ease both; }
+        /* P1 (filtros): o painel do calendario (componente compartilhado, inalterado) nao sai da janela no Dashboard */
+        .cds-filtro-periodo div[style*="position: absolute"] { max-width: calc(100vw - 32px); flex-wrap: wrap; overflow-x: auto; }
       `}</style>
 
       {/* HERO */}
@@ -932,7 +944,7 @@ export default function DashboardPage() {
           background: "radial-gradient(circle, rgba(255,122,0,0.12) 0%, transparent 70%)",
           pointerEvents: "none",
         }} />
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 16 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
           <div>
             <div style={{ fontSize: 26, fontWeight: 900, color: "#fff", marginBottom: 6 }}>
               {saudacao()}, {conta} 👋
@@ -941,27 +953,25 @@ export default function DashboardPage() {
               {hoje2.charAt(0).toUpperCase() + hoje2.slice(1)}
             </div>
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          {/* P1 (filtros): barra alinhada a esquerda, abaixo da saudacao — [Periodo] [Lojas]; os menus abrem para dentro da tela */}
+          <div data-barra-filtros style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", justifyContent: "flex-start" }}>
+            <div className="cds-filtro-periodo">
+              <DateRangePicker from={dateFrom} to={dateTo} onChange={(f, t) => { setDateFrom(f); setDateTo(t); }} />
+            </div>
             <LojasDropdown
               lojas={lojas}
               selecionadas={lojasSelecionadas}
-              onChange={(ids) => {
-                // [DIAG-DATAS] temporário — remover após a auditoria
-                console.log("[DIAG-DATAS] LojasDropdown.onChange — a leitura vem do useEffect (setLojasSelecionadas)", {
-                  idsNovos: Array.from(ids), dateFrom, dateTo,
-                });
-                // ETAPA 2A: so muda a selecao — o efeito [dateFrom, dateTo, lojasSelecionadas] le UMA vez (antes: 2 leituras)
-                setLojasSelecionadas(ids);
-              }}
+              // so muda a selecao — o efeito [dateFrom, dateTo, lojasSelecionadas] pede UMA consulta (debounce + fila)
+              onChange={(ids) => setLojasSelecionadas(ids)}
             />
-            <DateRangePicker from={dateFrom} to={dateTo} onChange={(f, t) => {
-              // [DIAG-DATAS] temporário — remover após a auditoria
-              console.log("[DIAG-DATAS] DashboardPage recebeu onChange do DateRangePicker", {
-                fRecebido: f, tRecebido: t, dateFromAntes: dateFrom, dateToAntes: dateTo,
-                rangeInvalido: f > t,
-              });
-              setDateFrom(f); setDateTo(t);
-            }} />
+            {dateTo >= hojeISOBrasilia() && (
+              <span data-inclui-hoje style={{ fontSize: 11, fontWeight: 700, color: "#FCD34D", background: "rgba(255,176,0,0.08)", border: "1px solid rgba(255,176,0,0.3)", borderRadius: 999, padding: "4px 10px" }}>
+                inclui hoje · valores provisorios
+              </span>
+            )}
+          </div>
+          <div style={{ fontSize: 11, color: "#64748B" }}>
+            Criterio de data: Mercado Livre pela data de fechamento · Shopee pela data de pagamento (horario de Brasilia).
           </div>
         </div>
       </div>

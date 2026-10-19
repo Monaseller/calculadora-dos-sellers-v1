@@ -276,7 +276,11 @@ async function principal() {
     const pg = readFileSync(join(RAIZ, "app/(app)/dashboard/page.tsx"), "utf8").replace(/\r\n/g, "\n");
     assert(/\.\.\.\(todasSelecionadas \? \{\} : idsSelecionados\.length === 1 \? \{ loja_id: idsSelecionados\[0\] \} : \{ loja_ids: idsSelecionados\.join\(","\) \}\),/.test(pg), "query canônica fora da seleção");
     assert(/const marketplaceCanonico = todasSelecionadas \|\| mktsSelecionados\.size !== 1 \? "todos" : mktsSelecionados\.has\("Shopee"\) \? "shopee" : "mercado_livre";/.test(pg), "marketplace da seleção");
-    assert(/if \(atual\.has\(id\)\) \{ if \(atual\.size === 1\) return; atual\.delete\(id\); \}\s*else atual\.add\(id\);/.test(pg) && !/onChange\(new Set\(\[id\]\)\); \/\/ seleciona exclusivamente/.test(pg), "dropdown ainda exclusivo / permite seleção vazia");
+    // P1 (filtros): a regra de alternar vive no módulo puro; o clique na LINHA alterna (o exclusivo é só o botão "Somente esta")
+    const fl = readFileSync(join(RAIZ, "app/(app)/dashboard/filtros-lojas.ts"), "utf8").replace(/\r\n/g, "\n");
+    assert(/if \(atual\.has\(id\)\) \{ if \(atual\.size === 1\) return null; atual\.delete\(id\); \}\s*else atual\.add\(id\);/.test(fl)
+      && /onClick=\{\(\) => aplicar\(F\.alternarLoja\(lojas, selecionadas, loja\.id\)\)\}/.test(pg)
+      && /onClick=\{e => \{ e\.stopPropagation\(\); aplicar\(F\.somenteEsta\(lojas, selecionadas, loja\.id\)\); \}\}/.test(pg), "dropdown ainda exclusivo / permite seleção vazia");
     assert(!/const lojaUnica = !todasSelecionadas && selecionadasArr\.length === 1/.test(pg), "regra antiga (2 de 3 → todos sem filtro) ainda presente");
   });
 
@@ -429,6 +433,69 @@ async function principal() {
     assert(f.aplicadas.length === 0, `aplicou depois de desmontar: ${JSON.stringify(f.aplicadas)}`);
     f.fila.pedir("b"); await f.avancar(400); f.fila.tentarDeNovo();
     assert(JSON.stringify(f.pedidas) === JSON.stringify(["a"]), `consultou depois de desmontar: ${f.pedidas}`);
+  });
+
+  // ── P1 (filtros): regras puras do seletor de lojas e atalhos de data ──
+  const FL = await import("../app/(app)/dashboard/filtros-lojas");
+  const LJ = [
+    { id: "ml", nome: "MONAMOR", marketplace: "ML", nickname: "MONAMOR", seller_id: "744240004", nome_exibicao: "MONAMOR" },
+    { id: "s1", nome: "Shopee 419809235", marketplace: "Shopee", nickname: "Shopee 419809235", seller_id: "419809235", nome_exibicao: "Shopee 419809235" },
+    { id: "s2", nome: "Shopee 481902588", marketplace: "Shopee", nickname: "Shopee 481902588", seller_id: "481902588", nome_exibicao: "Shopee 481902588" },
+  ];
+  const conj = (x: Set<string> | null) => (x ? [...x].sort().join(",") : "null");
+  t("L19. P1 filtros: com TODAS marcadas o estado real é {ml,s1,s2} (os 3 quadradinhos marcados), 'Todas' = todas; clicar no ML DESMARCA só o ML", () => {
+    const todas = new Set(["ml", "s1", "s2"]);
+    assert(conj(FL.marcadasDe(LJ, todas)) === "ml,s1,s2" && FL.estadoTodas(LJ, todas) === "todas", "estado com todas");
+    assert(conj(FL.marcadasDe(LJ, new Set())) === "ml,s1,s2", "vazio (antes de /api/lojas) = todas");
+    assert(conj(FL.alternarLoja(LJ, todas, "ml")) === "s1,s2", "clique no ML não desmarcou só o ML");
+    assert(conj(FL.alternarLoja(LJ, new Set(["s1"]), "ml")) === "ml,s1", "clique marca sem afetar as outras");
+  });
+  t("L20. P1 filtros: as 7 combinações por 'Somente esta' + alternar; 'Todas' parcial→todas e todas→nada; nunca vazio", () => {
+    const combos = [["ml"], ["s1"], ["s2"], ["ml", "s1"], ["ml", "s2"], ["s1", "s2"], ["ml", "s1", "s2"]];
+    for (const alvo of combos) {
+      let sel: Set<string> = new Set(["ml", "s1", "s2"]);
+      sel = FL.somenteEsta(LJ, sel, alvo[0]) ?? sel;
+      for (const id of alvo.slice(1)) sel = FL.alternarLoja(LJ, sel, id) ?? sel;
+      assert(conj(sel) === [...alvo].sort().join(","), `${alvo}: ${conj(sel)}`);
+      assert(FL.estadoTodas(LJ, sel) === (alvo.length === 3 ? "todas" : "parcial"), `${alvo}: estado`);
+    }
+    assert(FL.selecionarTodas(LJ, new Set(["ml", "s1", "s2"])) === null, "'Todas' com todas marcadas mudou a seleção");
+    assert(conj(FL.selecionarTodas(LJ, new Set(["s2"]))) === "ml,s1,s2", "'Todas' a partir de parcial");
+    assert(FL.alternarLoja(LJ, new Set(["s1"]), "s1") === null, "deixou a seleção vazia");
+    assert(FL.somenteEsta(LJ, new Set(["s1"]), "s1") === null && FL.alternarLoja(LJ, new Set(["s1"]), "x") === null && FL.somenteEsta(LJ, new Set(["s1"]), "x") === null, "loja desconhecida/sem efeito");
+  });
+  t("L21. P1 filtros: rótulo inequívoco sem nome fixo — nome real + 'marketplace · id'; fallback técnico vira 'marketplace · id' + 'sem apelido cadastrado'; contador no botão", () => {
+    const ml = FL.rotuloLoja(LJ[0]), s1 = FL.rotuloLoja(LJ[1]);
+    assert(ml.principal === "MONAMOR" && ml.secundario === "Mercado Livre · 744240004" && ml.temNomeReal, JSON.stringify(ml));
+    assert(s1.principal === "Shopee · 419809235" && s1.secundario === "sem apelido cadastrado" && !s1.temNomeReal, JSON.stringify(s1));
+    assert(FL.rotuloLoja({ ...LJ[1], nome_exibicao: "Loja Teste" }).principal === "Loja Teste", "nome real ignorado");
+    assert(FL.rotuloSeletor(LJ, new Set(["ml", "s1", "s2"])) === "Todas as lojas · 3 de 3" && FL.rotuloSeletor(LJ, new Set(["s1", "s2"])) === "2 de 3 lojas" && FL.rotuloSeletor(LJ, new Set(["s2"])) === "Shopee · 481902588 · 1 de 3", "contador");
+    const fonte = readFileSync(join(RAIZ, "app/(app)/dashboard/filtros-lojas.ts"), "utf8").replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
+    assert(!/419809235|481902588|744240004|Monamor|MONAMOR|R\.D\./i.test(fonte), "nome/id de cliente fixo no seletor");
+  });
+  t("L22. P1 datas: atalhos em Brasília — 23:30 BRT ainda é o dia; 00:30 BRT já é o seguinte; 7/30 dias incluem hoje; virada de mês", async () => {
+    const DR = await import("../lib/date-range-utils");
+    const DataReal = Date;
+    const em = (iso: string, f: () => any) => { (globalThis as any).Date = class extends DataReal { constructor(...a: any[]) { super(...((a.length ? a : [iso]) as [string])); } static now() { return DataReal.parse(iso); } }; try { return f(); } finally { (globalThis as any).Date = DataReal; } };
+    assert(em("2026-10-02T02:30:00.000Z", () => DR.calcularHoje().from) === "2026-10-01", "23:30 BRT de 01/10");
+    assert(em("2026-10-02T03:30:00.000Z", () => DR.calcularHoje().from) === "2026-10-02", "00:30 BRT de 02/10");
+    const s7 = em("2026-10-01T15:00:00.000Z", () => DR.calcularUltimos7Dias()), s30 = em("2026-10-01T15:00:00.000Z", () => DR.calcularUltimos30Dias());
+    assert(s7.from === "2026-09-25" && s7.to === "2026-10-01" && s30.from === "2026-09-02" && s30.to === "2026-10-01", JSON.stringify([s7, s30]));
+    const on = em("2026-10-01T15:00:00.000Z", () => DR.calcularOntem());
+    assert(on.from === "2026-09-30" && on.to === "2026-09-30", JSON.stringify(on));
+  });
+  t("L23. P1 filtros: barra [Período] [Lojas] à esquerda abaixo da saudação; menus para dentro da tela; 'inclui hoje'; TopBar sem o seletor de data no Dashboard e com a loja ativa explicada", () => {
+    const pg = readFileSync(join(RAIZ, "app/(app)/dashboard/page.tsx"), "utf8").replace(/\r\n/g, "\n");
+    const barra = pg.slice(pg.indexOf("<div data-barra-filtros"), pg.indexOf("inclui hoje · valores provisorios"));
+    assert(barra.indexOf("<DateRangePicker") > 0 && barra.indexOf("<DateRangePicker") < barra.indexOf("<LojasDropdown") && /justifyContent: "flex-start"/.test(barra), "ordem/alinhamento da barra");
+    assert(/position: "absolute", top: "calc\(100% \+ 8px\)", left: 0,/.test(pg) && /maxWidth: "calc\(100vw - 32px\)", zIndex: 999/.test(pg), "menu de lojas fora da tela");
+    assert(/\.cds-filtro-periodo div\[style\*="position: absolute"\] \{ max-width: calc\(100vw - 32px\)/.test(pg), "calendário fora da tela");
+    assert(/\{dateTo >= hojeISOBrasilia\(\) && \(/.test(pg), "sem indicação de 'inclui hoje'");
+    assert((pg.match(/^export /gm) ?? []).length === 1, "page.tsx exporta além do default (Next recusa)");
+    const tb = readFileSync(join(RAIZ, "components/TopBar.tsx"), "utf8");
+    assert(/\{path !== "\/dashboard" && <div/.test(tb) && /Nao muda as lojas consultadas no Dashboard/.test(tb), "TopBar: seletor de data no Dashboard / loja ativa sem explicação");
+    const vendas = readFileSync(join(RAIZ, "app/(app)/vendas/DateRangePicker.tsx"), "utf8");
+    assert(/left: 0,/.test(vendas) && !/cds-filtro-periodo/.test(vendas), "componente compartilhado alterado");
   });
 
   await fila;
