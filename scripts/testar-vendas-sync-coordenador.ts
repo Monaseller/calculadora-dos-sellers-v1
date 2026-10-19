@@ -11,7 +11,10 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 // SALES-SYNC-D15B2: excecao EXATA do patch D15B — A2-ML so tolera o hunk de exclusao de intraday (HUNK_A2_ML)
-import { planejarMLSemD15B } from "./_excecao-d15b-intraday";
+import { planejarMLSemD15B, reconstruirBaseD15B } from "./_excecao-d15b-intraday";
+// P1 sync_jobs: excecao EXATA da correcao A (atual − P1 = 8978451, que reconstroi d631748 pela D15B)
+import { PATCH_P1, reconstruirBaseP1, reverterP1 } from "./_excecao-p1-sync-jobs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import type { AvaliacaoLojaSync, JobExistenteSync, LojaAtivaSync, PoliticaSync } from "../lib/vendas/sync/tipos";
 
 let passou = 0, falhou = 0;
@@ -557,6 +560,23 @@ async function principal() {
     assert(ids.includes(novos.alto.id) && !ids.includes(novos.baixo.id) && ids.length === rows.length + 1, `${ids.length}`);
     // a decisão continua legítima: a janela útil foi lida
     assert(P.avaliarLoja({ loja: ml(MLA), de: "2026-10-01", ate: "2026-10-05", agoraMs: AGORA, jobs: lidos, politica: POL, origem: "usuario" }).proximaAcao.acao === "NOOP", "decisão");
+  });
+  t("CP-D15B. cadeia de exceções EXATA para a correção A: coordenador.ts − P1 = 8978451 (byte a byte) e esse resultado − D15B = d631748; P1 cobre SÓ o coordenador", () => {
+    assert(JSON.stringify(Object.keys(PATCH_P1)) === JSON.stringify(["lib/vendas/sync/coordenador.ts"]), `excecao P1 cobre arquivo a mais: ${Object.keys(PATCH_P1)}`);
+    const tmp = mkdtempSync(join(RAIZ, ".tmp-excecao-p1-"));
+    try {
+      for (const f of Object.keys(PATCH_P1)) {
+        const p1 = reconstruirBaseP1(RAIZ, f);
+        assert(p1.valido, `${f}: ${p1.motivo}`);
+        mkdirSync(join(tmp, f, ".."), { recursive: true });
+        writeFileSync(join(tmp, f), reverterP1(RAIZ, f)!, "utf8");
+        const d15b = reconstruirBaseD15B(tmp, f);
+        assert(d15b.valido, `${f}: cadeia D15B ${d15b.motivo}`);
+      }
+      // os demais arquivos de sync da D15B continuam reconstruindo DIRETO (nenhuma mudanca P1 neles nesta release)
+      for (const f of ["lib/vendas/sync/planejamento.ts", "lib/vendas/sync/tipos.ts", "lib/vendas/sync/coordenador-tick.ts"])
+        assert(reconstruirBaseD15B(RAIZ, f).valido, `${f} saiu da D15B`);
+    } finally { rmSync(tmp, { recursive: true, force: true }); }
   });
   t("CP-10. o coordenador só LÊ sync_jobs por lerJanelasSyncJobs (as outras referências são escrita: insert); nenhum select solto", () => {
     const src = readFileSync(join(RAIZ, "lib/vendas/sync/coordenador.ts"), "utf8").replace(/\r\n/g, "\n");
