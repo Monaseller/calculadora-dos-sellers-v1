@@ -327,11 +327,14 @@ async function principal() {
 
   console.log("\n[5. leitura do banco (duplo)]");
   // duplo minimo: registra filtros e devolve linhas por tabela
-  type Reg = { tabela: string; filtros: [string, string, unknown][]; head?: boolean };
+  type Reg = { tabela: string; filtros: [string, string, unknown][]; head?: boolean; ordens?: string[]; limite?: number };
   function clienteFalso(dados: Record<string, any[]>, regs: Reg[]) {
     return {
       from(tabela: string) {
-        const r: Reg = { tabela, filtros: [] }; regs.push(r);
+        const r: Reg = { tabela, filtros: [], ordens: [] }; regs.push(r);
+        // ORDER BY + LIMIT como o PostgREST (a leitura paginada de sync_jobs depende dos dois)
+        const ordenar = (d: any[]) => { const o = [...d].sort((a, b) => { for (const k of r.ordens!) { if (a[k] < b[k]) return -1; if (a[k] > b[k]) return 1; } return 0; });
+          return r.limite === undefined ? o : o.slice(0, r.limite); };
         const casa = (l: any) => r.filtros.every(([op, col, valor]) => {
           const v = valor as any;
           return op === "eq" ? String(l[col]) === String(v) : op === "in" ? (v as any[]).map(String).includes(String(l[col]))
@@ -339,17 +342,22 @@ async function principal() {
             : op === "is" ? (l[col] ?? null) === v : true;
         });
         const c: any = new Proxy({}, { get(_a, p: string) {
-          if (p === "then") return (ok: any) => { const d = (dados[tabela] ?? []).filter(casa); return ok(r.head ? { data: null, count: d.length, error: null } : { data: d, error: null }); };
+          if (p === "then") return (ok: any) => { const d = (dados[tabela] ?? []).filter(casa); return ok(r.head ? { data: null, count: d.length, error: null } : { data: ordenar(d), error: null }); };
           if (p === "range") return (a: number, b: number) => Promise.resolve({ data: (dados[tabela] ?? []).filter(casa).slice(a, b + 1), error: null });
           if (p === "select") return (_cols: string, o?: { head?: boolean }) => { if (o?.head) r.head = true; return c; };
-          return (...args: any[]) => { if (["eq", "in", "gte", "lt", "gt", "is"].includes(p)) r.filtros.push([p, args[0], args[1]]); return c; };
+          return (...args: any[]) => {
+            if (["eq", "in", "gte", "lt", "gt", "is"].includes(p)) r.filtros.push([p, args[0], args[1]]);
+            if (p === "order") r.ordens!.push(args[0]);
+            if (p === "limit") r.limite = args[0];
+            return c;
+          };
         } });
         return c;
       },
     } as any;
   }
   const UID = "dono-a", OUTRO = "dono-b", L2 = "22222222-2222-4222-8222-222222222222";
-  const jobsCorpus = () => corpus().map((j) => ({ user_id: UID, loja_id: LOJA, marketplace: "Shopee", campo_tempo: "create_time",
+  const jobsCorpus = () => corpus().map((j, i) => ({ id: `sj-${String(i).padStart(4, "0")}`, user_id: UID, loja_id: LOJA, marketplace: "Shopee", campo_tempo: "create_time",
     janela_inicio: j.inicio, janela_fim: j.fim, listagem_completa: true, status: "concluido" }));
   const base = () => ({
     lojas: [{ id: LOJA, user_id: UID, marketplace: "Shopee" }, { id: L2, user_id: OUTRO, marketplace: "Shopee" }],
@@ -362,7 +370,7 @@ async function principal() {
     pedidos: [{ user_id: UID, marketplace: "Shopee", loja_id: LOJA, order_id: "X", qtd: 2, valor_unit: 10, escrow_voucher_seller: 1, escrow_voucher_shopee: 0, escrow_coin: 0 }],
     sync_jobs: [...jobsCorpus(),
       // a evidencia de update_time NAO e nem lida para completude
-      { user_id: UID, loja_id: LOJA, marketplace: "Shopee", campo_tempo: "update_time", janela_inicio: "2026-10-01T00:00:00.000Z", janela_fim: "2026-10-09T00:00:00.000Z", listagem_completa: true, status: "concluido" }],
+      { id: "sj-upd", user_id: UID, loja_id: LOJA, marketplace: "Shopee", campo_tempo: "update_time", janela_inicio: "2026-10-01T00:00:00.000Z", janela_fim: "2026-10-09T00:00:00.000Z", listagem_completa: true, status: "concluido" }],
   });
   const ANC = { [LOJA]: ANCORA.toISOString() };
   t("5a. dono em TODA consulta; so pedidos pagos no dia; corpus da ancora → COMPLETE; total = loja", async () => {
@@ -468,7 +476,8 @@ async function principal() {
   // ── CORRECAO DO 57014: paginacao KEYSET (data, id) — sem OFFSET, sem varrer a PK; mesmo conjunto, sem perda/duplicata ──
   const ML = await import("../lib/vendas/canonico/ml");
   /** Banco em memoria com a semantica do PostgREST que os leitores usam (inclusive `or`, `order` multiplo e `limit`). */
-  const bancoKeyset = (tabelas: Record<string, any[]>, opc: { falhar?: (tabela: string, n: number) => boolean; ignorarCursor?: boolean } = {}) => {
+  // teto = max-rows do PostgREST (corta TODA resposta, sem erro); ignorarOrdem = servidor que nao aplica ORDER BY
+  const bancoKeyset = (tabelas: Record<string, any[]>, opc: { falhar?: (tabela: string, n: number) => boolean; ignorarCursor?: boolean; teto?: number; ignorarOrdem?: boolean } = {}) => {
     const chamadas: { tabela: string; filtros: string[]; ordens: string[]; limite: number | null; or: string | null; range: boolean; head: boolean }[] = [];
     const ts = (v: unknown) => typeof v === "string" && /^\d{4}-\d\d-\d\dT/.test(v) ? Date.parse(v) : NaN;
     const cmp = (a: any, b: any) => { const x = ts(a), y = ts(b); if (!isNaN(x) && !isNaN(y)) return x - y; return a < b ? -1 : a > b ? 1 : 0; };
@@ -500,8 +509,9 @@ async function principal() {
           if (opc.falhar?.(tabela, n)) return Promise.resolve({ data: null, count: null, error: { code: "57014", message: "canceling statement due to statement timeout" } }).then(ok, ko);
           let linhas = (tabelas[tabela] ?? []).filter((r) => preds.every((p) => p(r)));
           if (q.head) return Promise.resolve({ data: null, count: linhas.length, error: null }).then(ok, ko);
-          linhas = [...linhas].sort((a, b) => { for (const c of q.ordens) { const d = nulo(a[c]) && nulo(b[c]) ? 0 : nulo(a[c]) ? 1 : nulo(b[c]) ? -1 : cmp(a[c], b[c]); if (d) return d; } return 0; });
+          if (!opc.ignorarOrdem) linhas = [...linhas].sort((a, b) => { for (const c of q.ordens) { const d = nulo(a[c]) && nulo(b[c]) ? 0 : nulo(a[c]) ? 1 : nulo(b[c]) ? -1 : cmp(a[c], b[c]); if (d) return d; } return 0; });
           if (q.limite !== null) linhas = linhas.slice(0, q.limite);
+          if (opc.teto !== undefined) linhas = linhas.slice(0, opc.teto);
           return Promise.resolve({ data: linhas, error: null }).then(ok, ko);
         },
       };
@@ -534,7 +544,7 @@ async function principal() {
     return {
       lojas: [{ id: ML_K, user_id: DONO, marketplace: "ML" }, { id: ML_K2, user_id: DONO, marketplace: "ML" }],
       ml_pedidos: ped,
-      sync_jobs: [ML_K, ML_K2].map((l) => ({ user_id: DONO, loja_id: l, marketplace: "ML", campo_tempo: "date_closed", janela_inicio: "2026-08-25T03:00:00.000Z", janela_fim: "2026-10-05T03:00:00.000Z", listagem_completa: true, status: "concluido" })),
+      sync_jobs: [ML_K, ML_K2].map((l) => ({ id: `sj-${l}`, user_id: DONO, loja_id: l, marketplace: "ML", campo_tempo: "date_closed", janela_inicio: "2026-08-25T03:00:00.000Z", janela_fim: "2026-10-05T03:00:00.000Z", listagem_completa: true, status: "concluido" })),
     };
   };
   const esperadoML = (m: any, loja: string) => {
@@ -602,7 +612,7 @@ async function principal() {
       create_time: "2026-09-05T12:00:00.000Z", pay_time: null, update_time: "2026-09-05T12:00:00.000Z", detail_fetched_at: detalheNaoPagos,
       escrow_fetched_at: null, escrow_update_time: null, original_shopee_discount: null, pix_discount: null });
     return { lojas: [{ id: SH_K, user_id: DONO, marketplace: "Shopee" }], shopee_pedidos: sp, pedidos: itens,
-      sync_jobs: [{ user_id: DONO, loja_id: SH_K, marketplace: "Shopee", campo_tempo: "create_time", janela_inicio: "2026-08-15T03:00:00.000Z", janela_fim: "2026-10-05T03:00:00.000Z", listagem_completa: true, status: "concluido" }] };
+      sync_jobs: [{ id: "sj-shk", user_id: DONO, loja_id: SH_K, marketplace: "Shopee", campo_tempo: "create_time", janela_inicio: "2026-08-15T03:00:00.000Z", janela_fim: "2026-10-05T03:00:00.000Z", listagem_completa: true, status: "concluido" }] };
   };
   t("KS-7. Shopee: 2.300 pagos (1.200 empatados) → todos 1x, itens de todos, métricas = cálculo oficial; páginas keyset (pay_time, order_sn)", async () => {
     const m = mundoShopee("2026-10-15T00:00:00.000Z"); const b = bancoKeyset(m);
@@ -628,6 +638,111 @@ async function principal() {
     for (const f of ["lib/vendas/canonico/ml.ts", "lib/vendas/canonico/shopee.ts"]) {
       const src = readFileSync(join(RAIZ, f), "utf8").replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
       assert(!/\.range\(/.test(src) && !/PAGINAS_EM_PARALELO/.test(src), `${f}: range/offset ou páginas em paralelo`);
+    }
+  });
+
+  // ── P1 sync_jobs: o PostgREST corta toda resposta em max-rows (1000) SEM erro — as janelas sao lidas em paginas keyset por id ──
+  const pad = (i: number) => String(i).padStart(5, "0");
+  // embaralha de forma deterministica (a ordem de insercao nunca e a do id)
+  const embaralhar = <X,>(xs: X[]) => xs.map((x, i) => [((i * 7919) % 104729), x] as const).sort((a, b) => a[0] - b[0]).map(([, x]) => x);
+  // janelas COMPLETAS que nao tocam o periodo (2025): so empurram a janela util para fora da 1a pagina
+  const lixo = (n: number, loja: string, mp: "ML" | "Shopee") => Array.from({ length: n }, (_, i) => ({ id: `sj-${pad(i)}`, user_id: DONO, loja_id: loja, marketplace: mp,
+    campo_tempo: mp === "ML" ? "date_closed" : "create_time", janela_inicio: new Date(Date.parse("2025-01-01T03:00:00.000Z") + i * 1800_000).toISOString(),
+    janela_fim: new Date(Date.parse("2025-01-01T03:00:00.000Z") + (i + 1) * 1800_000).toISOString(), listagem_completa: true, status: "concluido" }));
+  const paginaJanelas = (b: ReturnType<typeof bancoKeyset>) => (apos: string | null, lim: number) => {
+    let q: any = b.from("x").select("*"); if (apos !== null) q = q.gt("id", apos); return q.order("id", { ascending: true }).limit(lim);
+  };
+  const SH_J = "aaaaaaaa-0000-4000-8000-000000000shj", ML_J = "aaaaaaaa-0000-4000-8000-0000000000mj";
+  const mundoJanelasShopee = (nLixo: number) => {
+    const sp: any[] = [], itens: any[] = [];
+    for (let i = 0; i < 3; i++) {
+      const pay = `2026-09-1${i}T15:00:00.000Z`, sn = `SJ${i}`;
+      sp.push({ user_id: DONO, loja_id: SH_J, order_sn: sn, order_status: "COMPLETED", create_time: new Date(Date.parse(pay) - 3600000).toISOString(), pay_time: pay, update_time: pay,
+        detail_fetched_at: "2026-10-15T00:00:00.000Z", escrow_fetched_at: "2026-10-15T00:00:00.000Z", escrow_update_time: pay, original_shopee_discount: 1, pix_discount: 0 });
+      itens.push({ user_id: DONO, marketplace: "Shopee", loja_id: SH_J, order_id: sn, qtd: 1 + i, valor_unit: 25, escrow_voucher_seller: 0, escrow_voucher_shopee: 0, escrow_coin: 0 });
+    }
+    // a janela que prova setembro (desde 22/08) tem o MAIOR id: so aparece depois da 1a pagina
+    const ancora = { id: "sj-zzzzz", user_id: DONO, loja_id: SH_J, marketplace: "Shopee", campo_tempo: "create_time", janela_inicio: "2026-08-15T03:00:00.000Z", janela_fim: "2026-10-05T03:00:00.000Z", listagem_completa: true, status: "concluido" };
+    return { lojas: [{ id: SH_J, user_id: DONO, marketplace: "Shopee" }], shopee_pedidos: sp, pedidos: itens, sync_jobs: embaralhar([ancora, ...lixo(nLixo, SH_J, "Shopee")]) };
+  };
+  const chamadasJanelas = (b: ReturnType<typeof bancoKeyset>) => b.chamadas.filter((c) => c.tabela === "sync_jobs");
+
+  t("SJ-1. Shopee: 2.345 janelas, âncora FORA da 1a página, teto 1000 → COMPLETE; 4 páginas (1000/1000/345/0) por id, dono/loja/campo em todas; métricas = cálculo oficial", async () => {
+    const m = mundoJanelasShopee(2344); const b = bancoKeyset(m, { teto: 1000 });
+    const primeiraPagina = [...m.sync_jobs].sort((x, y) => (x.id < y.id ? -1 : 1)).slice(0, 1000).map((j) => j.id);
+    assert(!primeiraPagina.includes("sj-zzzzz"), "pré-condição: âncora deveria estar fora da 1a página");
+    const r = await S.lerVendasShopee(b as any, { userId: DONO, de: "2026-09-01", ate: "2026-09-30" });
+    const pagos = m.shopee_pedidos.map((r: any) => ({ lojaId: r.loja_id, orderSn: r.order_sn, orderStatus: r.order_status, createTime: r.create_time, payTime: r.pay_time, updateTime: r.update_time,
+      detailFetchedAt: r.detail_fetched_at, escrowFetchedAt: r.escrow_fetched_at, escrowUpdateTime: r.escrow_update_time, originalShopeeDiscount: r.original_shopee_discount, pixDiscount: r.pix_discount }));
+    const its = m.pedidos.map((r: any) => ({ lojaId: r.loja_id, orderSn: r.order_id, precoUnitario: r.valor_unit, quantidade: r.qtd, voucherVendedor: 0, voucherShopee: 0, moedas: 0 }));
+    const esperado = S.calcularMetricasShopee(pagos, its).metricas;
+    assert(r.lojas[0].completude === "COMPLETE" && JSON.stringify(r.total) === JSON.stringify(esperado) && esperado.pedidos === 3, `${r.lojas[0].completude} ${r.lojas[0].motivos} ${JSON.stringify(r.total)}`);
+    const pags = chamadasJanelas(b);
+    assert(pags.length === 4 && pags.every((c) => JSON.stringify(c.ordens) === JSON.stringify(["id"]) && c.limite === 1000 && !c.range), JSON.stringify(pags.map((c) => [c.ordens, c.limite])));
+    assert(!pags[0].filtros.includes("gt:id") && pags.slice(1).every((c) => c.filtros.includes("gt:id")), "cursor por id a partir da 2a página");
+    assert(pags.every((c) => ["eq:user_id", "eq:loja_id", "eq:marketplace", "eq:campo_tempo", "not:janela_inicio"].every((f) => c.filtros.includes(f))), "filtro perdido numa página");
+  });
+  t("SJ-2. ML: 1.500 janelas fora de ordem de inserção, âncora com o maior id → COMPLETE com todas; mesma loja nas 2 páginas", async () => {
+    const ped = [0, 1, 2].map((i) => ({ user_id: DONO, loja_id: ML_J, order_id: `9000${i}`, date_closed: `2026-09-2${i}T15:00:00.000Z`, cancel_detail_code: null, total_amount: 10 + i, unidades: 1, fetched_at: "2026-10-15T00:00:00.000Z" }));
+    const ancora = { id: "sj-zzzzz", user_id: DONO, loja_id: ML_J, marketplace: "ML", campo_tempo: "date_closed", janela_inicio: "2026-09-01T03:00:00.000Z", janela_fim: "2026-10-01T03:00:00.000Z", listagem_completa: true, status: "concluido" };
+    const m = { lojas: [{ id: ML_J, user_id: DONO, marketplace: "ML" }], ml_pedidos: ped, sync_jobs: embaralhar([ancora, ...lixo(1499, ML_J, "ML")]) };
+    const b = bancoKeyset(m, { teto: 1000 });
+    const r = await ML.lerVendasML(b as any, { userId: DONO, de: "2026-09-01", ate: "2026-09-30" });
+    const esperado = ML.calcularMetricasML(ped.map((r) => ({ lojaId: r.loja_id, orderId: r.order_id, dateClosed: r.date_closed, cancelCode: r.cancel_detail_code, totalAmount: r.total_amount, unidades: r.unidades, fetchedAt: r.fetched_at })));
+    assert(r.lojas[0].completude === "COMPLETE" && JSON.stringify(r.total) === JSON.stringify(esperado) && esperado.pedidos === 3, `${r.lojas[0].completude} ${JSON.stringify(r.total)}`);
+    const pags = chamadasJanelas(b);
+    assert(pags.length === 3 && pags.every((c) => JSON.stringify(c.ordens) === JSON.stringify(["id"]) && c.filtros.includes("eq:loja_id") && c.filtros.includes("eq:campo_tempo")), JSON.stringify(pags.map((c) => c.filtros)));
+  });
+  t("SJ-3. EXATAMENTE 1000 janelas → 1000, com a página vazia confirmando o fim (2 idas); 999 → 999 (página curta não é fim: 2 idas); 0 → vazio (1 ida)", async () => {
+    for (const [n, idas] of [[1000, 2], [999, 2], [0, 1]] as const) {
+      const b = bancoKeyset({ x: embaralhar(lixo(n, SH_J, "Shopee")) }, { teto: 1000 });
+      const r = await S.lerJanelasSyncJobs<any>("teste_janelas", paginaJanelas(b));
+      assert(r.length === n && b.chamadas.length === idas, `${n}: ${r.length} linhas / ${b.chamadas.length} idas`);
+    }
+  });
+  t("SJ-4. 2.500 janelas embaralhadas, teto MENOR que o limite (300 < 1000) → todas, cada uma 1x, ids estritamente crescentes (sem lacuna nem duplicata)", async () => {
+    const todas = lixo(2500, SH_J, "Shopee");
+    for (const teto of [1000, 300]) {
+      const b = bancoKeyset({ x: embaralhar(todas) }, { teto });
+      const r = await S.lerJanelasSyncJobs<any>("teste_janelas", paginaJanelas(b));
+      const ids = r.map((x) => x.id);
+      assert(ids.length === 2500 && new Set(ids).size === 2500 && ids.every((id, i) => i === 0 || id > ids[i - 1]) && JSON.stringify(ids) === JSON.stringify(todas.map((j) => j.id)),
+        `teto ${teto}: ${ids.length} / ${new Set(ids).size}`);
+      assert(b.chamadas.length === Math.ceil(2500 / teto) + 1, `teto ${teto}: ${b.chamadas.length} idas`);   // + a página vazia
+    }
+  });
+  t("SJ-5. falha na 2a página (57014) → leitura_falhou, nunca o conjunto da 1a; log só com etapa + código", async () => {
+    const b = bancoKeyset({ x: lixo(1500, SH_J, "Shopee") }, { teto: 1000, falhar: (_t, n) => n === 2 });
+    const c = await capturarErros(() => S.lerJanelasSyncJobs<any>("teste_janelas", paginaJanelas(b)));
+    assert(c.erro === "leitura_falhou" && c.r === null && b.chamadas.length === 2, `${c.erro} / ${b.chamadas.length}`);
+    assert(c.msgs.length === 1 && c.msgs[0] === "[vendas-canonico] leitura falhou etapa=teste_janelas codigo=57014", JSON.stringify(c.msgs));
+    // e no leitor: a falha da 2a página de janelas derruba a loja inteira (nunca completude de um conjunto cortado)
+    const m = mundoJanelasShopee(2344);
+    const c2 = await capturarErros(() => S.lerVendasShopee(bancoKeyset(m, { teto: 1000, falhar: (t, n) => t === "sync_jobs" && n === 2 }) as any, { userId: DONO, de: "2026-09-01", ate: "2026-09-30" }));
+    assert(c2.erro === "leitura_falhou" && c2.msgs.some((x) => x === "[vendas-canonico] leitura falhou etapa=shopee_janelas codigo=57014"), `${c2.erro} ${JSON.stringify(c2.msgs)}`);
+  });
+  t("SJ-6. ordem estável exigida: servidor sem ORDER BY, ou ignorando o cursor (repete a página) → falha fechado na hora, nunca laço", async () => {
+    const semOrdem = bancoKeyset({ x: embaralhar(lixo(1500, SH_J, "Shopee")) }, { teto: 1000, ignorarOrdem: true });
+    const a = await capturarErros(() => S.lerJanelasSyncJobs<any>("teste_janelas", paginaJanelas(semOrdem)));
+    assert(a.erro === "leitura_falhou" && a.msgs.some((x) => x.includes("codigo=ordem_instavel")) && semOrdem.chamadas.length === 1, `${a.erro} ${semOrdem.chamadas.length} ${a.msgs}`);
+    const semCursor = bancoKeyset({ x: lixo(1500, SH_J, "Shopee") }, { teto: 1000, ignorarCursor: true, falhar: (_t, n) => n > 4 });
+    const b = await capturarErros(() => S.lerJanelasSyncJobs<any>("teste_janelas", paginaJanelas(semCursor)));
+    assert(b.erro === "leitura_falhou" && b.msgs.some((x) => x.includes("codigo=ordem_instavel")) && semCursor.chamadas.length === 2, `${b.erro} ${semCursor.chamadas.length} ${b.msgs}`);
+  });
+  t("SJ-7. janela sem id (coluna não selecionada) → falha fechado: sem id não há cursor nem prova de unicidade", async () => {
+    const b = bancoKeyset({ x: lixo(3, SH_J, "Shopee").map(({ id: _id, ...resto }) => resto) });
+    const c = await capturarErros(() => S.lerJanelasSyncJobs<any>("teste_janelas", paginaJanelas(b)));
+    assert(c.erro === "leitura_falhou" && c.msgs.some((x) => x.includes("codigo=janela_sem_id")), `${c.erro} ${c.msgs}`);
+  });
+  t("SJ-8. nenhuma leitura de sync_jobs dos 3 leitores (Shopee, ML, híbrido ML) fica fora da paginação", () => {
+    for (const f of ["lib/vendas/canonico/shopee.ts", "lib/vendas/canonico/ml.ts", "lib/vendas/ml-metricas-hibridas.ts"]) {
+      const src = readFileSync(join(RAIZ, f), "utf8").replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
+      const leituras = [...src.matchAll(/\.from\("sync_jobs"\)/g)];
+      assert(leituras.length >= 1, `${f}: nenhuma leitura encontrada`);
+      for (const l of leituras) {
+        const antes = src.slice(Math.max(0, l.index! - 160), l.index!);
+        assert(/lerJanelasSyncJobs<Record<string, unknown>>\("[a-z_]+", \(apos, limite\) => \{\s*let q = cliente$/.test(antes), `${f}: leitura de sync_jobs fora de lerJanelasSyncJobs`);
+      }
     }
   });
 

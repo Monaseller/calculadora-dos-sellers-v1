@@ -149,23 +149,31 @@ async function principal() {
   });
 
   console.log("\n[6. multi-loja e dono (leitura do banco, duplo)]");
-  type Reg = { tabela: string; filtros: [string, string, unknown][] };
+  type Reg = { tabela: string; filtros: [string, string, unknown][]; ordens?: string[]; limite?: number };
   function clienteFalso(dados: Record<string, any[]>, regs: Reg[]) {
     return { from(tabela: string) {
-      const r: Reg = { tabela, filtros: [] }; regs.push(r);
+      const r: Reg = { tabela, filtros: [], ordens: [] }; regs.push(r);
       const casa = (l: any) => r.filtros.every(([op, col, v]: any) => op === "eq" ? String(l[col]) === String(v) : op === "in" ? v.map(String).includes(String(l[col]))
-        : op === "gte" ? l[col] >= v : op === "lt" ? l[col] < v : true);
+        : op === "gte" ? l[col] >= v : op === "lt" ? l[col] < v : op === "gt" ? l[col] > v : true);
+      // ORDER BY + LIMIT como o PostgREST (a leitura paginada de sync_jobs depende dos dois)
+      const ordenar = (d: any[]) => { const o = [...d].sort((a, b) => { for (const k of r.ordens!) { if (a[k] < b[k]) return -1; if (a[k] > b[k]) return 1; } return 0; });
+        return r.limite === undefined ? o : o.slice(0, r.limite); };
       const c: any = new Proxy({}, { get(_a, p: string) {
-        if (p === "then") return (ok: any) => ok({ data: (dados[tabela] ?? []).filter(casa), error: null });
+        if (p === "then") return (ok: any) => ok({ data: ordenar((dados[tabela] ?? []).filter(casa)), error: null });
         if (p === "range") return (a: number, b: number) => Promise.resolve({ data: (dados[tabela] ?? []).filter(casa).slice(a, b + 1), error: null });
-        return (...args: any[]) => { if (["eq", "in", "gte", "lt"].includes(p)) r.filtros.push([p, args[0], args[1]]); return c; };
+        return (...args: any[]) => {
+          if (["eq", "in", "gte", "lt", "gt"].includes(p)) r.filtros.push([p, args[0], args[1]]);
+          if (p === "order") r.ordens!.push(args[0]);
+          if (p === "limit") r.limite = args[0];
+          return c;
+        };
       } });
       return c;
     } } as any;
   }
   const linha = (lojaId: string, user: string, orderId: string, total: number, unid: number, closed = "2026-10-02T15:00:00.000Z") =>
     ({ user_id: user, loja_id: lojaId, order_id: orderId, date_closed: closed, cancel_detail_code: null, total_amount: total, unidades: unid, fetched_at: "2026-10-05T12:00:00.000Z" });
-  const jobs = (lojaId: string, user: string) => ({ user_id: user, loja_id: lojaId, marketplace: "ML", campo_tempo: "date_closed",
+  const jobs = (lojaId: string, user: string) => ({ id: `sj-${lojaId}`, user_id: user, loja_id: lojaId, marketplace: "ML", campo_tempo: "date_closed",
     janela_inicio: "2026-10-01T03:00:00.000Z", janela_fim: "2026-10-04T03:00:00.000Z", listagem_completa: true, status: "concluido" });
   const base = () => ({
     lojas: [{ id: LOJA_A, user_id: UID, marketplace: "ML" }, { id: LOJA_B, user_id: UID, marketplace: "ML" }, { id: LOJA_X, user_id: OUTRO, marketplace: "ML" }],

@@ -19,7 +19,7 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getSupabaseServidor } from "@/lib/estudio-anuncios/supabase-servidor";
 import { alcanceFechamentoML, type JanelaFechamentoML } from "@/lib/vendas/canonico/ml";
-import { intervaloSaoPaulo } from "@/lib/vendas/canonico/shopee";
+import { intervaloSaoPaulo, lerJanelasSyncJobs } from "@/lib/vendas/canonico/shopee";
 import { consultarVendasCanonicas, ErroVendasCanonicas, type DependenciasConsultaVendas, type EstadoConsulta, type ResultadoVendasCanonicas } from "@/lib/vendas/canonico/service";
 import { avaliarNecessidadeDeSync, garantirProximaAcao } from "@/lib/vendas/sync/coordenador";
 import { syncCanonicoVendasHabilitado } from "@/lib/vendas/sync/flag-canonica";
@@ -75,13 +75,17 @@ export function classificarMetricasML(r: ResultadoVendasCanonicas, lojaId: strin
 }
 
 /** Dias do período com cobertura `date_closed` provada (a MESMA cadeia de janelas do leitor canônico). */
+// Todas as janelas, paginadas (P1 sync_jobs); pagina com erro → lança `leitura_falhou` — o chamador mostra 0 dias provados.
 async function diasConfirmados(cliente: SupabaseClient, userId: string, lojaId: string, dias: string[], hoje: string | null): Promise<number> {
-  const { data, error } = await cliente.from("sync_jobs")
-    .select("campo_tempo, janela_inicio, janela_fim, listagem_completa, status")
-    .eq("user_id", userId).eq("loja_id", lojaId).eq("marketplace", "ML")
-    .eq("campo_tempo", "date_closed").not("janela_inicio", "is", null);
-  if (error) return 0;
-  const janelas: JanelaFechamentoML[] = ((data ?? []) as Record<string, unknown>[]).map((j) => ({
+  const linhas = await lerJanelasSyncJobs<Record<string, unknown>>("ml_hibrido_janelas", (apos, limite) => {
+    let q = cliente.from("sync_jobs")
+      .select("id, campo_tempo, janela_inicio, janela_fim, listagem_completa, status")
+      .eq("user_id", userId).eq("loja_id", lojaId).eq("marketplace", "ML")
+      .eq("campo_tempo", "date_closed").not("janela_inicio", "is", null);
+    if (apos !== null) q = q.gt("id", apos);
+    return q.order("id", { ascending: true }).limit(limite);
+  });
+  const janelas: JanelaFechamentoML[] = linhas.map((j) => ({
     campoTempo: String(j.campo_tempo), inicio: String(j.janela_inicio), fim: String(j.janela_fim),
     listagemCompleta: (j.listagem_completa as boolean | null) ?? null, status: String(j.status),
   }));

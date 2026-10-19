@@ -28,7 +28,7 @@ let fetches = 0;
 (globalThis as any).fetch = async () => { fetches++; throw new Error("REDE_PROIBIDA"); };
 
 // ── duplo do Supabase (mesmo do servico D13) ──
-type Reg = { tabela: string; filtros: [string, string, unknown][]; head?: boolean };
+type Reg = { tabela: string; filtros: [string, string, unknown][]; head?: boolean; ordens?: string[]; limite?: number };
 const ESCRITAS = ["insert", "update", "upsert", "delete"];
 const escritas: string[] = [];
 function clienteFalso(dados: Record<string, any[]>, regs: Reg[] = []) {
@@ -36,7 +36,10 @@ function clienteFalso(dados: Record<string, any[]>, regs: Reg[] = []) {
   return {
     rpc(nome: string) { escritas.push(`rpc:${nome}`); return Promise.resolve({ data: null, error: { message: "proibido" } }); },
     from(tabela: string) {
-      const r: Reg = { tabela, filtros: [] }; regs.push(r);
+      const r: Reg = { tabela, filtros: [], ordens: [] }; regs.push(r);
+      // ORDER BY + LIMIT como o PostgREST (a leitura paginada de sync_jobs depende dos dois)
+      const ordenar = (d: any[]) => { const o = [...d].sort((a, b) => { for (const k of r.ordens!) { if (a[k] < b[k]) return -1; if (a[k] > b[k]) return 1; } return 0; });
+        return r.limite === undefined ? o : o.slice(0, r.limite); };
       const casa = (l: any) => r.filtros.every(([op, col, v]: any) => {
         if (op === "eq") return String(l[col]) === String(v);
         if (op === "in") return (v as any[]).map(String).includes(String(l[col]));
@@ -52,13 +55,15 @@ function clienteFalso(dados: Record<string, any[]>, regs: Reg[] = []) {
       });
       const linhas = () => (dados[tabela] ?? []).filter(casa);
       const c: any = new Proxy({}, { get(_a, p: string) {
-        if (p === "then") return (ok: any, ko: any) => Promise.resolve(r.head ? { data: null, count: linhas().length, error: null } : { data: linhas(), error: null }).then(ok, ko);
+        if (p === "then") return (ok: any, ko: any) => Promise.resolve(r.head ? { data: null, count: linhas().length, error: null } : { data: ordenar(linhas()), error: null }).then(ok, ko);
         if (p === "range") return (a: number, b: number) => Promise.resolve({ data: linhas().slice(a, b + 1), error: null });
         if (p === "select") return (_c: string, o?: { head?: boolean }) => { if (o?.head) r.head = true; return c; };
         if (ESCRITAS.includes(p)) return () => { escritas.push(`${p}:${tabela}`); return c; };
         return (...args: any[]) => {
           if (["eq", "in", "gte", "lt", "gt", "is"].includes(p)) r.filtros.push([p, args[0], args[1]]);
           if (p === "not") r.filtros.push(["not", args[0], [args[1], args[2]]]);
+          if (p === "order") r.ordens!.push(args[0]);
+          if (p === "limit") r.limite = args[0];
           return c;
         };
       } });

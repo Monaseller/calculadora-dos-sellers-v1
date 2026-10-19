@@ -49,6 +49,7 @@ type Linha = Record<string, any>;
 let db: Record<string, Linha[]> = {};
 let lidas: string[] = [];
 let falharTabela: string | null = null;
+let tetoLinhas = Infinity;   // max-rows do PostgREST: corta TODA resposta de leitura, sem erro
 let seq = 0;
 function clienteFalso() {
   return {
@@ -76,7 +77,7 @@ function clienteFalso() {
         let out = ls.filter(casa).map((r) => ({ ...r }));
         for (const [col, asc] of [...st.ordens].reverse()) out.sort((a, b) => (asc ? 1 : -1) * (String(a[col] ?? "") < String(b[col] ?? "") ? -1 : String(a[col] ?? "") > String(b[col] ?? "") ? 1 : 0));
         if (st.head) return { data: null, error: null, count: out.length };
-        out = out.slice(st.ini, Math.min(out.length, st.fim));
+        out = out.slice(st.ini, Math.min(out.length, st.fim)).slice(0, tetoLinhas);
         return st.unico ? { data: out[0] ?? null, error: null } : { data: out, error: null, count: out.length };
       };
       const b: any = new Proxy({}, { get(_a, p: string) {
@@ -158,7 +159,7 @@ const semear = (jobs: Linha[] = [jobFechamento(SET_INI, SET_FIM)]) => {
   db = { lojas: [lojaML()], ml_pedidos: corpusSetembro(), sync_jobs: jobs, anuncios: [],
     // LEGADO com status/data velhos: nunca pode aparecer na métrica nem na tabela
     pedidos: [{ id: "leg-1", user_id: U, marketplace: "ML", loja_id: ML_A, order_id: "LEGADO", status: "paid", data: "2026-09-03", data_criacao: "2026-09-03", data_pagamento: "2026-09-03", qtd: 999, faturamento: 99999 }] };
-  lidas = []; buscas = []; pedidosML = {}; falharTabela = null; falharBusca = 0;
+  lidas = []; buscas = []; pedidosML = {}; falharTabela = null; falharBusca = 0; tetoLinhas = Infinity;
 };
 const c = (v: number) => Math.round(v * 100);
 
@@ -218,6 +219,18 @@ async function principal() {
     assert(m.estado === "PARTIAL" && m.metricas === null && m.dias.confirmados === 10 && m.dias.total === 30, JSON.stringify({ e: m.estado, d: m.dias }));
     assert(HP.rotuloMetricasML(m as any) === "Carregando dados do Mercado Livre — 10/30 dias" && HP.cardsMetricasML(m as any).length === 0, HP.rotuloMetricasML(m as any));
     assert(revalidacoes.length === 1 && revalidacoes[0].de === "2026-09-01" && revalidacoes[0].ate === "2026-09-30" && m.revalidacao === "JOB_CRIADO", JSON.stringify(revalidacoes));
+  });
+  t("HYB-SJ. P1 sync_jobs: 1.500 janelas e teto de 1000 linhas por resposta, janela útil com o MAIOR id → X/Y dias e o COMPLETE de setembro não perdem a janela", async () => {
+    // janelas completas de 2025 (não tocam setembro): empurram a janela útil para fora da 1a página
+    const lixo = () => Array.from({ length: 1500 }, (_, i) => jobFechamento(new Date(Date.parse("2025-01-01T03:00:00.000Z") + i * 1800_000).toISOString(),
+      new Date(Date.parse("2025-01-01T03:00:00.000Z") + (i + 1) * 1800_000).toISOString(), { id: `sj-${String(i).padStart(5, "0")}` }));
+    semear([jobFechamento(SET_INI, "2026-09-11T03:00:00.000Z", { id: "sj-zzzzz" }), ...lixo()]); tetoLinhas = 1000; revalidacoes = [];
+    const p = await metricas("2026-09-01", "2026-09-30");
+    assert(p.estado === "PARTIAL" && p.metricas === null && p.dias.confirmados === 10 && p.dias.total === 30, JSON.stringify({ e: p.estado, d: p.dias }));
+    semear([jobFechamento(SET_INI, SET_FIM, { id: "sj-zzzzz" }), ...lixo()]); tetoLinhas = 1000; revalidacoes = [];
+    const m = await metricas("2026-09-01", "2026-09-30");
+    assert(m.estado === "COMPLETE" && m.metricas?.vendas === 10896 && m.metricas?.unidades === 11358 && c(m.metricas!.vendasBrutas) === c(393745.59) && m.dias.confirmados === 30,
+      JSON.stringify({ e: m.estado, m: m.metricas, d: m.dias }));
   });
   t("HYB-3b. refresh = MECANISMO EXISTENTE: coordenador real cria UM sync_job date_closed (flag canônica ligada); desligada só avalia", async () => {
     semear([jobFechamento(SET_INI, "2026-09-11T03:00:00.000Z")]);

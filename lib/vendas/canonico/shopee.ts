@@ -532,6 +532,41 @@ export async function paginarKeyset<T extends Record<string, unknown>>(
 }
 
 /**
+ * P1 sync_jobs — TODAS as janelas de uma consulta de `sync_jobs`, em paginas KEYSET pelo `id` (PK uuid: chave unica,
+ * ordem total e estavel). O PostgREST corta toda resposta no teto de linhas do projeto (max-rows, hoje 1000) SEM erro:
+ * uma leitura unica perdia janelas — e a ancora da cadeia de cobertura — sem ninguem saber.
+ *
+ *   fim       so na pagina VAZIA. Pagina cheia ou curta nunca e tratada como fim: o teto pode ser MENOR que o limite
+ *             pedido (uma pagina "curta" seria so o teto). Custa uma ida a mais por leitura.
+ *   ordem     cada pagina precisa vir com ids estritamente crescentes e depois do cursor; id fora de ordem, repetido
+ *             ou ausente (o servidor ignorou ORDER BY / filtro) → falha fechado.
+ *   falha     erro de qualquer pagina → `leitura_falhou`. Nunca devolve um conjunto parcial.
+ *   inserts   janela criada DURANTE a leitura pode aparecer ou nao (como numa leitura unica um instante antes ou depois);
+ *             toda janela que ja existia aparece exatamente uma vez — o cursor por id nao pula nem repete linha.
+ */
+export const PAGINA_SYNC_JOBS = 1000;
+export async function lerJanelasSyncJobs<T extends Record<string, unknown>>(
+  etapa: string,
+  pagina: (aposId: string | null, limite: number) => PromiseLike<{ data: unknown; error: unknown }>,
+): Promise<T[]> {
+  const out: T[] = [];
+  let cursor: string | null = null;
+  for (;;) {
+    const { data, error } = await pagina(cursor, PAGINA_SYNC_JOBS);
+    if (error) falhaDeLeitura(etapa, error);
+    const lote = (data ?? []) as T[];
+    if (lote.length === 0) return out;
+    for (const linha of lote) {
+      const id = linha.id;
+      if (typeof id !== "string" || id === "") falhaDeLeitura(etapa, { code: "janela_sem_id" });
+      if (cursor !== null && !(id > cursor)) falhaDeLeitura(etapa, { code: "ordem_instavel" });
+      cursor = id;
+    }
+    out.push(...lote);
+  }
+}
+
+/**
  * Vendas canonicas Shopee de um usuario, por loja e no total, para o
  * periodo [de, ate] (dias de Sao Paulo, inclusivos).
  *
@@ -579,10 +614,14 @@ export async function lerVendasShopee(
       .eq("user_id", userId).eq("loja_id", lojaId)
       .gte("pay_time", inicio.toISOString()).lt("pay_time", fim.toISOString()), "pay_time", "order_sn", cursor, limite));
     // o builder do Supabase so dispara no `.then`: Promise.resolve o poe em voo agora
-    const jobsP = Promise.resolve(cliente.from("sync_jobs")
-      .select("loja_id, campo_tempo, janela_inicio, janela_fim, listagem_completa, status")
-      .eq("user_id", userId).eq("loja_id", lojaId).eq("marketplace", "Shopee")
-      .eq("campo_tempo", "create_time").not("janela_inicio", "is", null));
+    const jobsP = lerJanelasSyncJobs<Record<string, unknown>>("shopee_janelas", (apos, limite) => {
+      let q = cliente.from("sync_jobs")
+        .select("id, loja_id, campo_tempo, janela_inicio, janela_fim, listagem_completa, status")
+        .eq("user_id", userId).eq("loja_id", lojaId).eq("marketplace", "Shopee")
+        .eq("campo_tempo", "create_time").not("janela_inicio", "is", null);
+      if (apos !== null) q = q.gt("id", apos);
+      return q.order("id", { ascending: true }).limit(limite);
+    });
     const naoPagosP = contarNaoPagosSemObservacaoShopee(cliente, { userId, lojaId, desdeIso, fimIso });
     naoPagosP.catch(() => {}); jobsP.catch(() => {});   // erro tratado no await abaixo (sem rejeicao solta)
     const linhas = await linhasP;
@@ -615,9 +654,8 @@ export async function lerVendasShopee(
 
     // So janelas de DESCOBERTA (create_time): update_time nao prova nada.
     // Sem filtro pelo periodo: a cadeia comeca na ancora, bem antes dele.
-    const { data: jobs, error: errJobs } = await jobsP;
-    if (errJobs) falhaDeLeitura("shopee_janelas", errJobs);
-    const janelas: JanelaListagem[] = ((jobs ?? []) as Record<string, unknown>[]).map((j) => ({
+    const jobs = await jobsP;
+    const janelas: JanelaListagem[] = jobs.map((j) => ({
       lojaId, campoTempo: j.campo_tempo as JanelaListagem["campoTempo"],
       inicio: String(j.janela_inicio), fim: String(j.janela_fim),
       listagemCompleta: (j.listagem_completa as boolean | null) ?? null, status: String(j.status),

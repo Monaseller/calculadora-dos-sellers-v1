@@ -37,7 +37,7 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { diaEmSaoPaulo } from "@/lib/fuso-sao-paulo";
-import { aplicarKeyset, diasDoIntervalo, emParalelo, falhaDeLeitura, intervaloSaoPaulo, LOJAS_EM_PARALELO, paginarKeyset } from "./shopee";
+import { aplicarKeyset, diasDoIntervalo, emParalelo, falhaDeLeitura, intervaloSaoPaulo, lerJanelasSyncJobs, LOJAS_EM_PARALELO, paginarKeyset } from "./shopee";
 import { prefixoObservado } from "./periodo";
 import type { Completude, DiaObservadoLoja, ParcialObservadoLoja } from "./tipos";
 
@@ -304,11 +304,15 @@ export async function lerVendasML(
       .select("loja_id, order_id, date_closed, cancel_detail_code, total_amount, unidades, fetched_at")
       .eq("user_id", userId).eq("loja_id", lojaId)
       .gte("date_closed", inicio.toISOString()).lt("date_closed", fim.toISOString()), "date_closed", "order_id", cursor, limite));
-    // o builder do Supabase so dispara no `.then`: Promise.resolve o poe em voo agora
-    const jobsP = Promise.resolve(cliente.from("sync_jobs")
-      .select("campo_tempo, janela_inicio, janela_fim, listagem_completa, status")
-      .eq("user_id", userId).eq("loja_id", lojaId).eq("marketplace", "ML")
-      .eq("campo_tempo", "date_closed").not("janela_inicio", "is", null));
+    // todas as janelas, paginadas (o teto de linhas do PostgREST cortava a leitura unica); a 1a pagina sai ja
+    const jobsP = lerJanelasSyncJobs<Record<string, unknown>>("ml_janelas", (apos, limite) => {
+      let q = cliente.from("sync_jobs")
+        .select("id, campo_tempo, janela_inicio, janela_fim, listagem_completa, status")
+        .eq("user_id", userId).eq("loja_id", lojaId).eq("marketplace", "ML")
+        .eq("campo_tempo", "date_closed").not("janela_inicio", "is", null);
+      if (apos !== null) q = q.gt("id", apos);
+      return q.order("id", { ascending: true }).limit(limite);
+    });
     jobsP.catch(() => {});   // erro tratado no await abaixo (sem rejeicao solta)
     const linhas = await linhasP;
     const pedidos: PedidoMLCanonico[] = linhas.map((r) => ({
@@ -317,9 +321,8 @@ export async function lerVendasML(
       totalAmount: r.total_amount === null ? null : Number(r.total_amount),
       unidades: r.unidades === null ? null : Number(r.unidades), fetchedAt: (r.fetched_at as string) ?? null,
     }));
-    const { data: jobs, error: errJobs } = await jobsP;
-    if (errJobs) falhaDeLeitura("ml_janelas", errJobs);
-    const janelas: JanelaFechamentoML[] = ((jobs ?? []) as Record<string, unknown>[]).map((j) => ({
+    const jobs = await jobsP;
+    const janelas: JanelaFechamentoML[] = jobs.map((j) => ({
       campoTempo: String(j.campo_tempo), inicio: String(j.janela_inicio), fim: String(j.janela_fim),
       listagemCompleta: (j.listagem_completa as boolean | null) ?? null, status: String(j.status),
     }));

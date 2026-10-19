@@ -14,7 +14,7 @@
   ],
   "arquivos": {
     ".env.example": "c4b82f1f45595370fe6763493db862602a861a64a9d58f0fd237954fe574637d",
-    "app/(app)/dashboard/page.tsx": "10ad82c5e66bfd258cf14f4b5026d06d590005a146b073fbf67c392740d6a4e9",
+    "app/(app)/dashboard/page.tsx": "aadedadf11528df60c91718a53a243e5357aead338b540f85da262699d24e480",
     "app/(app)/vendas/page.tsx": "0722e3e5b8a396b015a7eae82d984d46a8a677a8a4d417718aefcd3358e8948c",
     "lib/comissoes-mercado-livre.ts": "3f7f976661e8f4dc57d35902834e77228cc1941f809b2aa2a5e0bd2a18d5c557",
     "lib/comissoes-shopee.ts": "1ca7224be8e6e09f855171c457a58210562dd4a0584a6196e612081cda4b9a40",

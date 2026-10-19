@@ -179,6 +179,7 @@ function KpiCard({ icon, label, value, sub, color, spark, diff }: {
   const isUp = diff === undefined || diff >= 0;
   return (
     <div
+      className="cds-kpi"
       onMouseEnter={() => setHov(true)}
       onMouseLeave={() => setHov(false)}
       style={{
@@ -205,7 +206,8 @@ function KpiCard({ icon, label, value, sub, color, spark, diff }: {
         {spark && spark.length > 1 && <Sparkline data={spark} color={color} />}
       </div>
       <div style={{ fontSize: 11, fontWeight: 700, color: "#94A3B8", textTransform: "uppercase", letterSpacing: "0.6px", marginBottom: 6 }}>{label}</div>
-      <div style={{ fontSize: 24, fontWeight: 900, color: "#fff", letterSpacing: "-0.5px", marginBottom: 6 }}>{value}</div>
+      {/* P1: o valor cabe inteiro no card (fonte proporcional à largura do card e ao nº de caracteres; ver .cds-kpi-valor) */}
+      <div className="cds-kpi-valor" data-kpi-valor style={{ ["--cds-kpi-chars" as string]: Math.max(value.length, 1), fontWeight: 900, color: "#fff", letterSpacing: "-0.5px", marginBottom: 6 }}>{value}</div>
       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
         {diff !== undefined && (
           <span style={{ fontSize: 12, fontWeight: 700, color: isUp ? "#22C55E" : "#EF4444" }}>
@@ -928,6 +930,11 @@ export default function DashboardPage() {
         .dash-anim { animation: fadeUp 0.4s ease both; }
         /* P1 (filtros): o painel do calendario (componente compartilhado, inalterado) nao sai da janela no Dashboard */
         .cds-filtro-periodo div[style*="position: absolute"] { max-width: calc(100vw - 32px); flex-wrap: wrap; overflow-x: auto; }
+        /* P1: valor do KPI nunca cortado — até 24px; encolhe só quando não cabe na largura do card (~0,55em por caractere
+           em Nunito Sans 900, medido: "R$ 13.351.474,80" cabe num card de 175px); sem container query o navegador fica
+           nos 24px e quebra a linha em vez de cortar */
+        .cds-kpi { container-type: inline-size; }
+        .cds-kpi-valor { font-size: 24px; line-height: 1.15; overflow-wrap: anywhere; font-size: clamp(14px, calc(100cqi / (var(--cds-kpi-chars) * 0.55)), 24px); }
       `}</style>
 
       {/* HERO */}
