@@ -294,9 +294,9 @@ async function principal() {
   t("L7. ETAPA 2A: Dashboard — gráfico e sparkline da série canônica (sem lucro legado), 'duas plataformas' pela separação canônica, UMA leitura por clique, indicadores legados rotulados", () => {
     const pg = readFileSync(join(RAIZ, "app/(app)/dashboard/page.tsx"), "utf8").replace(/\r\n/g, "\n");
     assert(/<AreaChartSection dias=\{diasCanonicos\} mostrarLucro=\{false\} semDados=\{graficoSemDados\} \/>/.test(pg) && /spark=\{diasCanonicos\.filter\(d => d\.estado !== "SEM_DADOS"\)\.map\(d => d\.faturamento\)\}/.test(pg), "gráfico/sparkline fora da série canônica");
-    assert(/setShowBothMkt\(!!\(canonData\?\.porMarketplace\?\.mercadoLivre\?\.pedidos && canonData\?\.porMarketplace\?\.shopee\?\.pedidos\)\);/.test(pg) && !/setShowBothMkt\(mlRows\.length > 0/.test(pg), "duas plataformas pelas linhas legadas");
+    assert(/setShowBothMkt\(!!\(r\.dados\?\.porMarketplace\?\.mercadoLivre\?\.pedidos && r\.dados\?\.porMarketplace\?\.shopee\?\.pedidos\)\);/.test(pg) && !/setShowBothMkt\(mlRows\.length > 0/.test(pg), "duas plataformas pelas linhas legadas");
     assert(!/setLojasSelecionadas\(ids\);\s*carregar\(dateFrom, dateTo, ids\);/.test(pg), "clique ainda lê duas vezes");
-    assert((pg.match(/legado · nao reconciliado/g) ?? []).length === 4 && /Balancete" subtitle="Composicao do resultado · legado, nao reconciliado"/.test(pg), "indicadores legados sem rótulo");
+    assert((pg.match(/pendente · nao reconciliado/g) ?? []).length === 4 && /Balancete" subtitle="Composicao do resultado · legado, nao reconciliado"/.test(pg), "indicadores legados sem rótulo");
     assert(/R\.consultarResumoVendasDashboard|serieDiaria: true/.test(readFileSync(join(RAIZ, "lib/vendas/canonico/dashboard-resumo.ts"), "utf8")), "resumo não pede a série");
   });
 
@@ -323,14 +323,112 @@ async function principal() {
     assert(/serieDiaria: true, observado: true/.test(readFileSync(join(RAIZ, "lib/vendas/canonico/dashboard-resumo.ts"), "utf8")), "resumo não pede observado");
     assert(/NAO sao o total do periodo/.test(pg) && /Valores provisorios/.test(pg) && /incompleto · faltam/.test(pg), "rótulos de situação ausentes");
     assert(/const temValor = \(i: number\) => dias\[i\]\?\.estado !== "SEM_DADOS"/.test(pg) && /data-estado-dia/.test(pg), "gráfico sem lacuna/estado por dia");
-    assert(/if \(!canonData\) setErro\(/.test(pg) && !/if \(!mlOk && !shopeeOk\) \{\n\s*setErro\(/.test(pg), "legado ainda bloqueia o canônico");
-    assert(/legadoIndisponivel \? "—"/.test(pg), "legado indisponível vira zero");
+    // P1: o legado saiu do carregamento — nada dele pode esconder os cards canônicos; os indicadores legados ficam "—"
+    assert(!/setErro\(/.test(pg) && !/mlOk|shopeeOk/.test(pg), "legado ainda decide erro da tela");
+    assert((pg.match(/value="—"/g) ?? []).length === 4, "indicador legado com valor");
   });
 
   t("L10. CORREÇÃO 57014: 5xx da rota registra código + etapa tipados (sem dono, loja, filtro ou valor); 4xx não polui o log", () => {
     const rota = readFileSync(join(RAIZ, "app/api/vendas/resumo-canonico/route.ts"), "utf8").replace(/\r\n/g, "\n");
     assert(rota.includes('if (status >= 500) console.error(`[GET /api/vendas/resumo-canonico] ${e.codigo} ${e.detalhe ?? ""}`.trim());'), "5xx sem log tipado");
     assert(!/console\.error\([^)]*(userId|filtro|lojaId|request\.url)/.test(rota), "log com dado do pedido");
+  });
+
+  t("L11. P1: o Dashboard consulta SÓ a rota canônica (sem /api/ml/vendas, /api/shopee/vendas, thumbnails); fila com debounce; 'Conecte sua conta' só sem loja", () => {
+    const pg = readFileSync(join(RAIZ, "app/(app)/dashboard/page.tsx"), "utf8").replace(/\r\n/g, "\n");
+    const codigo = pg.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
+    assert(!/fetch\(`?\/api\/(ml|shopee)\/vendas/.test(codigo) && !/item-thumbnails/.test(codigo), "Dashboard ainda chama rota legada de vendas");
+    assert((codigo.match(/fetch\(/g) ?? []).length === 4 && /fetch\(`\/api\/vendas\/resumo-canonico\?\$\{chave\}`\)/.test(codigo), "fetches inesperados");   // me, anuncios, lojas, canonico
+    assert(/const DEBOUNCE_FILTROS_MS = 400;/.test(pg) && /criarFilaConsulta<ResumoCanonicoDashboard>\(\{\s*debounceMs: DEBOUNCE_FILTROS_MS/.test(pg), "sem fila/debounce");
+    assert(/\{estadoLojas === "vazio" && \(/.test(pg) && (codigo.replace(/\{\/\*[\s\S]*?\*\/\}/g, "").match(/Conecte sua conta/g) ?? []).length === 1, "'Conecte sua conta' fora do caso sem loja");
+    assert(/Nao foi possivel carregar os dados agora\./.test(pg) && /Tentar novamente/.test(pg) && /filaRef\.current\?\.tentarDeNovo\(\)/.test(pg), "falha temporária sem mensagem/retentativa");
+    assert(/\{!loading && estadoLojas === "ok" && \(/.test(pg), "a tela some por falha");
+    assert(/const LEGADO_FINANCEIRO_NO_DASHBOARD = false;/.test(pg) && /data-legado-pendente/.test(pg), "bloco legado sem pendência");
+    assert(/\{mc && mc\.pedidos === 0 && \(/.test(pg), "'Nenhuma venda' pelo legado");
+    // revisao: as 4 areas mantem a estrutura, com valores pendentes; nenhuma faz requisicao (o total de fetch segue 4)
+    for (const area of ["top-produtos", "saude", "inteligencia"]) assert(pg.includes(`data-legado-pendente="${area}"`), `area ${area} sem estrutura`);
+    assert(/title="🔔 Alertas"/.test(pg) && /title="🩺 Saude Financeira"/.test(pg) && /title="🏆 Top Produtos"/.test(pg) && /Centro de Inteligencia CDS/.test(pg), "titulos das areas ausentes");
+    assert(/const PENDENTE = "Pendente de reconciliacao";/.test(pg) && !/function AvisoPendente[\s\S]{0,400}fetch\(/.test(pg), "pendencia sem texto ou com requisicao");
+  });
+
+  // ── P1: fila de consultas do Dashboard (pura) — relógio e servidor simulados, corridas determinísticas ──
+  const FQ = await import("../app/(app)/dashboard/consulta-canonica");
+  const montarFila = () => {
+    let agora = 0; const timers: { fn: () => void; em: number; vivo: boolean }[] = [];
+    const pedidas: string[] = []; const aplicadas: [string, boolean][] = []; const ocupado: boolean[] = [];
+    const pendentes = new Map<string, ((ok: boolean) => void)[]>();
+    const fila = FQ.criarFilaConsulta<string>({
+      debounceMs: 400,
+      executar: (chave) => { pedidas.push(chave); return new Promise((ok) => { (pendentes.get(chave) ?? pendentes.set(chave, []).get(chave)!).push((sucesso) => ok({ ok: sucesso, dados: sucesso ? `dados:${chave}` : null })); }); },
+      aplicar: (chave, r) => { aplicadas.push([chave, r.ok]); },
+      ocupado: (c) => ocupado.push(c),
+      agendar: (fn, ms) => { const t = { fn, em: agora + ms, vivo: true }; timers.push(t); return t; },
+      cancelar: (h) => { (h as { vivo: boolean }).vivo = false; },
+    });
+    const avancar = async (ms: number) => { agora += ms; for (const t of timers) if (t.vivo && t.em <= agora) { t.vivo = false; t.fn(); } await new Promise((r) => setTimeout(r, 0)); };
+    const responder = async (chave: string, sucesso = true) => { const l = pendentes.get(chave); assert(l && l.length, `nenhuma consulta pendente de ${chave}`); l.shift()!(sucesso); await new Promise((r) => setTimeout(r, 0)); await new Promise((r) => setTimeout(r, 0)); };
+    return { fila, avancar, responder, pedidas, aplicadas, ocupado };
+  };
+  t("L12. P1 debounce: 5 trocas em 300 ms → UMA consulta, com a ÚLTIMA seleção; nada antes de 400 ms de silêncio", async () => {
+    const f = montarFila();
+    for (const k of ["a", "b", "c", "d", "e"]) { f.fila.pedir(k); await f.avancar(60); }
+    assert(f.pedidas.length === 0, `consultou antes do debounce: ${f.pedidas}`);
+    await f.avancar(400);
+    assert(JSON.stringify(f.pedidas) === JSON.stringify(["e"]), JSON.stringify(f.pedidas));
+    await f.responder("e");
+    assert(JSON.stringify(f.aplicadas) === JSON.stringify([["e", true]]), JSON.stringify(f.aplicadas));
+  });
+  t("L13. P1 um em voo: seleção nova durante uma consulta NÃO abre outra em paralelo; ao terminar, consulta a ÚLTIMA (intermediárias puladas); a antiga não é aplicada", async () => {
+    const f = montarFila();
+    f.fila.pedir("a"); await f.avancar(400);
+    f.fila.pedir("b"); await f.avancar(400); f.fila.pedir("c"); await f.avancar(400);
+    assert(JSON.stringify(f.pedidas) === JSON.stringify(["a"]), `paralelo: ${f.pedidas}`);
+    await f.responder("a");                                   // resposta de "a" chega com "c" desejada
+    assert(f.aplicadas.length === 0, `antiga aplicada: ${JSON.stringify(f.aplicadas)}`);
+    assert(JSON.stringify(f.pedidas) === JSON.stringify(["a", "c"]), `não consultou a última: ${f.pedidas}`);
+    await f.responder("c");
+    assert(JSON.stringify(f.aplicadas) === JSON.stringify([["c", true]]), JSON.stringify(f.aplicadas));
+  });
+  t("L14. P1 dedupe: a mesma seleção já exibida ou já em voo não reconsulta; volta a uma seleção anterior reconsulta (é outra chave)", async () => {
+    const f = montarFila();
+    f.fila.pedir("a"); await f.avancar(400); f.fila.pedir("a"); await f.avancar(400);
+    assert(f.pedidas.length === 1, `duplicou em voo: ${f.pedidas}`);
+    await f.responder("a"); f.fila.pedir("a"); await f.avancar(400);
+    assert(f.pedidas.length === 1, `reconsultou a exibida: ${f.pedidas}`);
+    f.fila.pedir("b"); await f.avancar(400); await f.responder("b"); f.fila.pedir("a"); await f.avancar(400);
+    assert(JSON.stringify(f.pedidas) === JSON.stringify(["a", "b", "a"]), JSON.stringify(f.pedidas));
+  });
+  t("L15. P1 falha: 503/timeout chega como ok=false (aplicado, sem exceção); 'Tentar novamente' reconsulta a MESMA seleção na hora", async () => {
+    const f = montarFila();
+    f.fila.pedir("a"); await f.avancar(400); await f.responder("a", false);
+    assert(JSON.stringify(f.aplicadas) === JSON.stringify([["a", false]]), JSON.stringify(f.aplicadas));
+    f.fila.tentarDeNovo();
+    assert(JSON.stringify(f.pedidas) === JSON.stringify(["a", "a"]), `retry não reconsultou: ${f.pedidas}`);
+    await f.responder("a", true);
+    assert(JSON.stringify(f.aplicadas[1]) === JSON.stringify(["a", true]), JSON.stringify(f.aplicadas));
+  });
+  t("L16. P1 executar que REJEITA (rede caiu) vira ok=false — a fila não trava e a próxima seleção é consultada", async () => {
+    let n = 0; const aplicadas: [string, boolean][] = [];
+    const fila = FQ.criarFilaConsulta<string>({ debounceMs: 0, executar: async (c) => { n++; if (c === "x") throw new Error("rede"); return { ok: true, dados: c }; },
+      aplicar: (c, r) => aplicadas.push([c, r.ok]), agendar: (fn) => { fn(); return null; }, cancelar: () => {} });
+    fila.pedir("x"); await new Promise((r) => setTimeout(r, 5)); fila.pedir("y"); await new Promise((r) => setTimeout(r, 5));
+    assert(n === 2 && JSON.stringify(aplicadas) === JSON.stringify([["x", false], ["y", true]]), JSON.stringify(aplicadas));
+  });
+  t("L17. P1 'carregando' fica ligado enquanto a seleção desejada não chegou (inclusive esperando a anterior) e desliga só com ela", async () => {
+    const f = montarFila();
+    f.fila.pedir("a"); await f.avancar(400); f.fila.pedir("b"); await f.avancar(400);
+    await f.responder("a");
+    assert(f.ocupado[f.ocupado.length - 1] === true, `desligou com a resposta antiga: ${f.ocupado}`);
+    await f.responder("b");
+    assert(f.ocupado[f.ocupado.length - 1] === false, `não desligou: ${f.ocupado}`);
+  });
+  t("L18. P1 página desmontada: nenhuma resposta é aplicada e nada novo é consultado", async () => {
+    const f = montarFila();
+    f.fila.pedir("a"); await f.avancar(400); f.fila.encerrar();          // a seleção ATUAL está em voo quando a página sai
+    await f.responder("a");
+    assert(f.aplicadas.length === 0, `aplicou depois de desmontar: ${JSON.stringify(f.aplicadas)}`);
+    f.fila.pedir("b"); await f.avancar(400); f.fila.tentarDeNovo();
+    assert(JSON.stringify(f.pedidas) === JSON.stringify(["a"]), `consultou depois de desmontar: ${f.pedidas}`);
   });
 
   await fila;

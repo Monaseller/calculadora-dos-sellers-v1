@@ -1,7 +1,7 @@
 "use client";
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import DateRangePicker from "../vendas/DateRangePicker";
-import { useDateField } from "@/lib/date-field-context";
+import { chaveConsultaCanonica, criarFilaConsulta, type FilaConsulta } from "./consulta-canonica";
 import { addDays, calcularUltimos7Dias } from "@/lib/date-range-utils";
 
 type VendaRow = {
@@ -32,6 +32,39 @@ type ResumoCanonicoDashboard = {
   serie?: { dia: string; estado: "CONFIRMADO" | "PROVISORIO" | "SEM_DADOS"; faturamento: number | null; pedidos: number | null; unidades: number | null; observadoAte: string | null }[] | null;
   porMarketplace?: { mercadoLivre: { faturamento: number; pedidos: number; unidades: number } | null; shopee: { faturamento: number; pedidos: number; unidades: number } | null } | null;
 };
+/** P1: espera depois da ultima mudanca de periodo/lojas antes de consultar (filtros alternados rapido = UMA consulta). */
+const DEBOUNCE_FILTROS_MS = 400;
+/**
+ * P1: os blocos financeiros LEGADOS (lucro, margem, ROI, comissoes, balancete, top produtos, saude, Centro de
+ * Inteligencia) nao sao calculados no Dashboard — dependiam de /api/ml/vendas e /api/shopee/vendas, nao reconciliados e
+ * nao consolidados por loja. Ficam marcados como pendentes ate o calculo consolidado existir.
+ */
+const LEGADO_FINANCEIRO_NO_DASHBOARD = false;
+
+/**
+ * Parametros da consulta canonica = EXATAMENTE a selecao do dropdown: todas → "todos" sem filtro; uma loja → loja_id;
+ * 2+ lojas → loja_ids (cada uma validada no servidor). Uma loja desmarcada nunca entra; selecao invalida nunca vira
+ * "todas" (o servidor recusa).
+ */
+function montarConsultaCanonica(from: string, to: string, sel: Set<string>, lojasArr: Loja[]): URLSearchParams {
+  const selecionadasArr = lojasArr.filter(l => sel.size === 0 || sel.has(l.id));
+  const todasSelecionadas = lojasArr.length === 0 || sel.size === 0 || (selecionadasArr.length === lojasArr.length && sel.size === lojasArr.length);
+  const idsSelecionados = selecionadasArr.length > 0 ? selecionadasArr.map(l => l.id) : Array.from(sel);
+  const mktsSelecionados = new Set(selecionadasArr.map(l => l.marketplace));
+  const marketplaceCanonico = todasSelecionadas || mktsSelecionados.size !== 1 ? "todos" : mktsSelecionados.has("Shopee") ? "shopee" : "mercado_livre";
+  return new URLSearchParams({
+    marketplace: marketplaceCanonico, de: from, ate: to,
+    ...(todasSelecionadas ? {} : idsSelecionados.length === 1 ? { loja_id: idsSelecionados[0] } : { loja_ids: idsSelecionados.join(",") }),
+  });
+}
+
+/** Saudacao: o nome da conta vem das lojas (antes vinha da resposta legada do ML). */
+function nomeDaConta(lojasArr: Loja[]): string {
+  const base = lojasArr.find(l => l.marketplace === "ML") ?? lojasArr[0];
+  const bruto = (base?.nickname || base?.nome || "CDS").trim();
+  return bruto.toLowerCase().replace(/(?:^|\s)\S/g, (c: string) => c.toUpperCase());
+}
+
 type DiaData = {
   data: string; label: string; faturamento: number; lucro: number;
   custo: number; comissao: number; frete: number;
@@ -610,6 +643,18 @@ function LojasDropdown({ lojas, selecionadas, onChange }: {
   );
 }
 
+/** P1: texto unico dos indicadores sem fonte confiavel. */
+const PENDENTE = "Pendente de reconciliacao";
+
+/** P1: aviso de area sem fonte reconciliada — nao faz requisicao e nao mostra numero. */
+function AvisoPendente({ texto }: { texto: string }) {
+  return (
+    <div style={{ fontSize: 12, color: "#94A3B8", lineHeight: 1.6, padding: "14px 16px", background: "rgba(148,163,184,0.05)", border: "1px dashed #1E293B", borderRadius: 12 }}>
+      {texto}
+    </div>
+  );
+}
+
 function Section({ title, subtitle, action, children }: {
   title: string; subtitle?: string; action?: React.ReactNode; children: React.ReactNode;
 }) {
@@ -638,30 +683,25 @@ export default function DashboardPage() {
 
   const [dateFrom, setDateFrom] = useState(ultimos7.from);
   const [dateTo,   setDateTo]   = useState(ultimos7.to);
-  // Fase D (2026-07-06): seletor global (TopBar) — afeta KPIs, gráficos, balancete,
-  // top produtos e comparativo ML×Shopee desta página.
-  const { dateField } = useDateField();
+  // P1: o seletor global de campo de data (TopBar) nao se aplica aqui — a base temporal canonica e fixa
+  // (ML: date_closed; Shopee: pay_time, ambos em BRT); ele so alimentava as rotas legadas, que sairam do Dashboard.
   const [loading,  setLoading]  = useState(true);
-  const [erro,     setErro]     = useState<string | null>(null);
   const [conta,    setConta]    = useState("CDS");
-  const [mlConectado,     setMlConectado]     = useState(false);
-  const [shopeeConectado, setShopeeConectado] = useState(false);
   const [lojas,            setLojas]            = useState<Loja[]>([]);
   const [lojasSelecionadas, setLojasSelecionadas] = useState<Set<string>>(new Set());
-  // Corrige a race condition do carregamento inicial (2026-07-13, ver
-  // docs/BUGS.md): so passa a chamar carregar() depois que /api/lojas
-  // respondeu pelo menos uma vez (sucesso, vazio ou falha) — elimina o
-  // primeiro carregar() "as cegas" que disparava antes das lojas existirem.
-  const [lojasProntas, setLojasProntas] = useState(false);
+  // P1: o que /api/lojas respondeu — "Conecte sua conta" so com "vazio" (nenhuma loja); falha nao e "sem conta"
+  const [estadoLojas, setEstadoLojas] = useState<"carregando" | "ok" | "vazio" | "falha">("carregando");
+  // P1: a ultima consulta canonica falhou (timeout/503/504/rede) — a tela continua, com aviso e "Tentar novamente"
+  const [falhaCanonico, setFalhaCanonico] = useState(false);
 
+  // P1: valores dos blocos financeiros LEGADOS — ficam nos iniciais: o calculo legado nao roda no Dashboard
+  // (LEGADO_FINANCEIRO_NO_DASHBOARD = false) e esses blocos aparecem como pendentes.
   const [kpis, setKpis] = useState({
     faturamento: 0, pedidos: 0, ticket: 0, lucro: 0,
     margem: 0, unidades: 0, roi: 0, comissoes: 0,
   });
   // D16: Faturamento, Pedidos, Unidades e Ticket vem da camada canonica (null = indisponivel)
   const [resumoCanonico, setResumoCanonico] = useState<ResumoCanonicoDashboard | null>(null);
-  // ETAPA 3: a fonte legada (Lucro/Margem/ROI/Comissoes) nao respondeu para a selecao — esses cards mostram "—"
-  const [legadoIndisponivel, setLegadoIndisponivel] = useState(false);
   // Sem metrica canonica (periodo incompleto / sem observacao) o card mostra "—", nunca 0 nem o legado.
   const mc = resumoCanonico?.metricas ?? null;
   const ateCanonico = resumoCanonico?.parcial && resumoCanonico.observadoAte
@@ -692,15 +732,8 @@ export default function DashboardPage() {
   const [anuncios, setAnuncios] = useState<Anuncio[]>([]);
   // Refs estáveis — evitam double-load quando anuncios carrega de forma assíncrona
   const anunciosRef = useRef<Anuncio[]>([]);
+  // Ref estavel das lojas — a consulta canonica monta os parametros a partir dela
   const lojasRef    = useRef<Loja[]>([]);
-  // Correção da race condition (2026-07-13, ver docs/BUGS.md e
-  // docs/DECISIONS.md): reqCounterRef identifica de forma incremental cada
-  // chamada de carregar(); abortRef guarda o AbortController da chamada em
-  // andamento. Juntos garantem que só a chamada mais recente possa aplicar
-  // setState, e que a chamada anterior seja efetivamente cancelada (aparece
-  // como "canceled"/"aborted" no Network) em vez de só ser ignorada.
-  const reqCounterRef = useRef(0);
-  const abortRef      = useRef<AbortController | null>(null);
   const [score,    setScore]    = useState(0);
   const [sparkFat, setSparkFat] = useState<number[]>([]);
   const [sparkLuc, setSparkLuc] = useState<number[]>([]);
@@ -722,7 +755,10 @@ export default function DashboardPage() {
           .catch(() => {});
       })
       .catch(() => {});
+  }, []);
 
+  const carregarLojas = useCallback(() => {
+    setEstadoLojas("carregando");
     fetch("/api/lojas")
       // 5xx não é "zero lojas": sem esta checagem, uma queda do banco
       // faria o dashboard carregar como se a conta não tivesse loja.
@@ -732,277 +768,52 @@ export default function DashboardPage() {
           lojasRef.current = data;
           setLojas(data);
           setLojasSelecionadas(new Set(data.map(l => l.id)));
+          setConta(nomeDaConta(data));
+          setEstadoLojas("ok");
+        } else {
+          setEstadoLojas("vazio");
+          setLoading(false);
         }
       })
-      .catch(() => {})
-      // Correção (2026-07-13): independente de sucesso/vazio/falha, libera o
-      // carregamento principal só depois desta resposta — elimina o
-      // carregar() "as cegas" que disparava antes de saber quais lojas existem.
-      .finally(() => setLojasProntas(true));
+      .catch(() => { setEstadoLojas("falha"); setLoading(false); });
+  }, []);
+  useEffect(() => { carregarLojas(); }, [carregarLojas]);
+
+  // P1 (estabilizacao): o Dashboard le SO /api/vendas/resumo-canonico. As rotas legadas (/api/ml/vendas,
+  // /api/shopee/vendas) e os thumbnails do ML deixaram de ser chamados aqui — eram as consultas mais pesadas do banco
+  // (select=* de ate 21 s) e disparavam auto-sync/renovacao de token a cada troca de filtro. Elas seguem existindo
+  // para os outros consumidores. A fila garante: debounce, UMA consulta em voo, sempre a ultima selecao, sem duplicata.
+  const filaRef = useRef<FilaConsulta | null>(null);
+  useEffect(() => {
+    const fila = criarFilaConsulta<ResumoCanonicoDashboard>({
+      debounceMs: DEBOUNCE_FILTROS_MS,
+      executar: async (chave) => {
+        try {
+          const r = await fetch(`/api/vendas/resumo-canonico?${chave}`);
+          return r.ok ? { ok: true, dados: (await r.json()) as ResumoCanonicoDashboard } : { ok: false, dados: null };
+        } catch {
+          return { ok: false, dados: null };
+        }
+      },
+      aplicar: (_chave, r) => {
+        setResumoCanonico(r.ok ? r.dados : null);
+        setFalhaCanonico(!r.ok);
+        // "ha as duas plataformas" vem da separacao CANONICA da selecao
+        setShowBothMkt(!!(r.dados?.porMarketplace?.mercadoLivre?.pedidos && r.dados?.porMarketplace?.shopee?.pedidos));
+      },
+      ocupado: setLoading,
+      agendar: (fn, ms) => setTimeout(fn, ms),
+      cancelar: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
+    });
+    filaRef.current = fila;
+    return () => { fila.encerrar(); filaRef.current = null; };
   }, []);
 
-  const carregar = useCallback(async (from: string, to: string, lojasAtivas?: Set<string>) => {
-    // Cancela a chamada anterior (se ainda estiver em voo) e assume esta
-    // como a única válida a partir de agora.
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    const reqId = ++reqCounterRef.current;
-    const ehAtual = () => reqId === reqCounterRef.current;
-    const tInicio = Date.now();
-
-    // [DIAG-DATAS] temporário — remover após a auditoria
-    console.log(`[DIAG-DATAS] carregar() INICIO request #${reqId}`, {
-      from, to, dateField, presetOuManual: "ver DateRangePicker",
-      lojasSelecionadas: Array.from((lojasAtivas ?? lojasSelecionadas)),
-      timestamp: new Date().toISOString(),
-    });
-
-    setLoading(true);
-    setErro(null);
-    const sel = lojasAtivas ?? lojasSelecionadas;
-    // Determina quais marketplaces buscar baseado nas lojas selecionadas
-    const lojasArr = lojasRef.current.length > 0 ? lojasRef.current : [];
-    const selecionadasArr = lojasArr.filter(l => sel.size === 0 || sel.has(l.id));
-    const buscarML     = selecionadasArr.length === 0 || selecionadasArr.some(l => l.marketplace === "ML");
-    const buscarShopee = selecionadasArr.length === 0 || selecionadasArr.some(l => l.marketplace === "Shopee");
-
-    console.log(`[DIAG-DATAS] carregar() #${reqId} marketplaces`, {
-      buscarML, buscarShopee, lojasArrLength: lojasArr.length, selecionadasArrLength: selecionadasArr.length,
-      urlML: buscarML ? `/api/ml/vendas?date_from=${from}&date_to=${to}&date_field=${dateField}&_reqid=${reqId}` : null,
-      urlShopee: buscarShopee ? `/api/shopee/vendas?date_from=${from}&date_to=${to}&date_field=${dateField}&_reqid=${reqId}` : null,
-    });
-
-    // D16 + MULTI-LOJA: filtro canonico dos 4 cards principais = EXATAMENTE a selecao do dropdown.
-    // todas → "todos" sem filtro; uma loja → loja_id; 2+ lojas → loja_ids (cada uma validada no servidor).
-    // Uma loja desmarcada nunca entra; selecao invalida nunca vira "todas" (o servidor recusa).
-    const todasSelecionadas = lojasArr.length === 0 || sel.size === 0 || (selecionadasArr.length === lojasArr.length && sel.size === lojasArr.length);
-    const idsSelecionados = selecionadasArr.length > 0 ? selecionadasArr.map(l => l.id) : Array.from(sel);
-    const mktsSelecionados = new Set(selecionadasArr.map(l => l.marketplace));
-    const marketplaceCanonico = todasSelecionadas || mktsSelecionados.size !== 1 ? "todos" : mktsSelecionados.has("Shopee") ? "shopee" : "mercado_livre";
-    const qCanonico = new URLSearchParams({
-      marketplace: marketplaceCanonico, de: from, ate: to,
-      ...(todasSelecionadas ? {} : idsSelecionados.length === 1 ? { loja_id: idsSelecionados[0] } : { loja_ids: idsSelecionados.join(",") }),
-    });
-
-    try {
-      // Fase D (2026-07-06): date_field propagado às duas APIs (Fase C já suporta o parâmetro)
-      const [mlData, shopeeData, canonData] = await Promise.all([
-        buscarML     ? fetch(`/api/ml/vendas?date_from=${from}&date_to=${to}&date_field=${dateField}&_reqid=${reqId}`, { signal: controller.signal }).then(r => r.json()).catch(err => { if (err?.name === "AbortError") throw err; return null; })     : Promise.resolve(null),
-        buscarShopee ? fetch(`/api/shopee/vendas?date_from=${from}&date_to=${to}&date_field=${dateField}&_reqid=${reqId}`, { signal: controller.signal }).then(r => r.json()).catch(err => { if (err?.name === "AbortError") throw err; return null; }) : Promise.resolve(null),
-        fetch(`/api/vendas/resumo-canonico?${qCanonico}`, { signal: controller.signal }).then(r => (r.ok ? r.json() : null)).catch(err => { if (err?.name === "AbortError") throw err; return null; }) as Promise<ResumoCanonicoDashboard | null>,
-      ]);
-
-      // [DIAG-DATAS] temporário
-      console.log(`[DIAG-DATAS] carregar() #${reqId} CHECKPOINT 1 (pós Promise.all)`, {
-        ehAtual: ehAtual(), reqCounterAtual: reqCounterRef.current,
-        msDesdeInicio: Date.now() - tInicio,
-        mlData: mlData ? { erro: mlData.erro, semConexao: mlData.semConexao, totalPedidos: mlData.totalPedidos, rowsLength: mlData.rows?.length } : null,
-        shopeeData: shopeeData ? { erro: shopeeData.erro, semConexao: shopeeData.semConexao, totalPedidos: shopeeData.totalPedidos, rowsLength: shopeeData.rows?.length } : null,
-      });
-
-      // Uma chamada mais nova já começou enquanto esta esperava a rede —
-      // esta resposta é obsoleta, não aplica nenhum setState.
-      if (!ehAtual()) {
-        console.log(`[DIAG-DATAS] carregar() #${reqId} DESCARTADO no checkpoint 1 (obsoleto)`);
-        return;
-      }
-
-      setResumoCanonico(canonData);
-
-      const mlOk     = mlData     && !mlData.erro;
-      const shopeeOk = shopeeData && !shopeeData.erro && !shopeeData.semConexao;
-
-      setMlConectado(mlOk);
-      setShopeeConectado(shopeeOk);
-
-      setLegadoIndisponivel(!mlOk && !shopeeOk);
-      if (!mlOk && !shopeeOk) {
-        // ETAPA 3: o legado falhou (ex.: Shopee multi-loja sem loja_id → 409), mas os cards canonicos tem resposta propria —
-        // a tela segue com eles; os indicadores legados mostram "—" (nunca zero, nunca bloqueiam o canonico)
-        if (!canonData) setErro(mlData?.mensagem || "Nenhum marketplace conectado.");
-        // nada da selecao anterior sobrevive nos blocos legados
-        setKpis({ faturamento: 0, pedidos: 0, ticket: 0, lucro: 0, margem: 0, unidades: 0, roi: 0, comissoes: 0 });
-        setScore(0); setDias([]); setSparkFat([]); setSparkLuc([]);
-        setTops([]); setLoss([]); setTopsML([]); setTopsShopee([]); setAlertas([]);
-        setShowBothMkt(!!(canonData?.porMarketplace?.mercadoLivre?.pedidos && canonData?.porMarketplace?.shopee?.pedidos));
-        setLoading(false);
-        return;
-      }
-
-      // Usa o primeiro nome disponível e normaliza capitalização (ML retorna em CAPS)
-      const rawConta = (mlOk ? mlData.conta : null) || (shopeeOk ? shopeeData.conta : null) || "CDS";
-      const contaNome = rawConta.toLowerCase().replace(/(?:^|\s)\S/g, (c: string) => c.toUpperCase());
-      setConta(contaNome);
-
-      const mlRowsFull     = (mlOk     ? mlData.rows     ?? [] : []) as VendaRow[];
-      const shopeeRowsFull = (shopeeOk ? shopeeData.rows ?? [] : []) as VendaRow[];
-      const mlRows     = mlRowsFull.filter((r: VendaRow) => r.status === "paid");
-      const shopeeRows = shopeeRowsFull.filter((r: VendaRow) => r.status === "paid");
-      const rows: VendaRow[] = [...mlRows, ...shopeeRows];
-
-      // ETAPA 2A: "ha as duas plataformas" vem da separacao CANONICA da selecao (nao das linhas legadas)
-      setShowBothMkt(!!(canonData?.porMarketplace?.mercadoLivre?.pedidos && canonData?.porMarketplace?.shopee?.pedidos));
-
-      const fat       = rows.reduce((s, r) => s + r.faturamento, 0);
-      const lucro     = rows.reduce((s, r) => s + r.margemContrib, 0);
-      const custo     = rows.reduce((s, r) => s + r.custo, 0);
-      const comissoes = rows.reduce((s, r) => s + r.tarifaVenda, 0);
-      const frete     = rows.reduce((s, r) => s + r.freteComprador + r.freteVendedor, 0);
-      const unidades  = rows.reduce((s, r) => s + r.qtd, 0);
-      const pedidos   = new Set(rows.map(r => r.orderId)).size;
-      const ticket    = pedidos > 0 ? fat / pedidos : 0;
-      const margem    = fat > 0 ? (lucro / fat) * 100 : 0;
-      const roi       = custo > 0 ? (lucro / custo) * 100 : 0;
-
-      // [DIAG-DATAS] temporário — remover após a auditoria
-      console.log(`[DIAG-DATAS] carregar() #${reqId} pré-setKpis`, {
-        mlRowsFullLength: mlRowsFull.length, shopeeRowsFullLength: shopeeRowsFull.length,
-        mlRowsPagasLength: mlRows.length, shopeeRowsPagasLength: shopeeRows.length,
-        totalRowsPagas: rows.length,
-        fat, pedidos, lucro,
-      });
-      setKpis({ faturamento: fat, pedidos, ticket, lucro, margem, unidades, roi, comissoes });
-
-      let s = 0;
-      if (margem >= 20) s += 40; else if (margem >= 10) s += 20; else if (margem > 0) s += 10;
-      if (pedidos > 0) s += 20;
-      if (fat > 1000) s += 20;
-      if (roi > 50) s += 20;
-      setScore(Math.min(s, 100));
-
-      const mapaD = new Map<string, DiaData>();
-      let cur = from;
-      while (cur <= to) {
-        mapaD.set(cur, { data: cur, label: fmtData(cur), faturamento: 0, lucro: 0, custo: 0, comissao: 0, frete: 0 });
-        cur = addDays(cur, 1);
-      }
-      for (const r of rows) {
-        const d = mapaD.get(r.data);
-        if (d) {
-          d.faturamento += r.faturamento;
-          d.lucro       += r.margemContrib;
-          d.custo       += r.custo;
-          d.comissao    += r.tarifaVenda;
-          d.frete       += r.freteComprador + r.freteVendedor;
-        }
-      }
-      const diasArr = Array.from(mapaD.values()).sort((a, b) => a.data.localeCompare(b.data));
-      setDias(diasArr);
-      setSparkFat(diasArr.map(d => d.faturamento));
-      setSparkLuc(diasArr.map(d => Math.max(d.lucro, 0)));
-
-      // Constrói mapa de tops por marketplace
-      function buildTops(rowsSubset: VendaRow[]): { all: TopProduto[]; tops: TopProduto[]; loss: TopProduto[] } {
-        const mapA = new Map<string, TopProduto>();
-        for (const r of rowsSubset) {
-          const key = r.mlItemId || r.anuncio;
-          const ex  = mapA.get(key);
-          const rawThumb = anunciosRef.current.find(a => a.ml_item_id === r.mlItemId || a.ml_item_id?.split("-")[0] === r.mlItemId?.split("-")[0])?.thumbnail ?? null;
-          const thumb = rawThumb ? rawThumb.replace("http://", "https://") : null;
-          if (ex) {
-            ex.faturamento += r.faturamento;
-            ex.lucro       += r.margemContrib;
-            ex.qtd         += r.qtd;
-          } else {
-            mapA.set(key, { mlItemId: r.mlItemId, nome: r.anuncio, sku: r.sku, thumbnail: thumb, faturamento: r.faturamento, lucro: r.margemContrib, qtd: r.qtd, margem: 0 });
-          }
-        }
-        const all = Array.from(mapA.values()).map(p => ({ ...p, margem: p.faturamento > 0 ? (p.lucro / p.faturamento) * 100 : 0 }));
-        return {
-          all,
-          tops: [...all].sort((a, b) => b.faturamento - a.faturamento).slice(0, 10),
-          loss: [...all].filter(p => p.lucro < 0).sort((a, b) => a.lucro - b.lucro).slice(0, 5),
-        };
-      }
-
-      const builtAll    = buildTops(rows);
-      const builtML     = buildTops(mlRows);
-      const builtShopee = buildTops(shopeeRows);
-
-      const topsSorted = builtAll.tops;
-      const lossSorted = builtAll.loss;
-
-      // Busca thumbnails para itens ML sem thumbnail
-      const semThumb = topsSorted.concat(lossSorted).filter(p => !p.thumbnail && p.mlItemId);
-      if (semThumb.length) {
-        const ids = [...new Set(semThumb.map(p => p.mlItemId))].join(",");
-        try {
-          const tr = await fetch(`/api/ml/item-thumbnails?ids=${ids}`);
-          const tMap: Record<string, string> = await tr.json();
-          topsSorted.forEach(p => { if (!p.thumbnail && tMap[p.mlItemId]) p.thumbnail = tMap[p.mlItemId]; });
-          lossSorted.forEach(p => { if (!p.thumbnail && tMap[p.mlItemId]) p.thumbnail = tMap[p.mlItemId]; });
-          builtML.tops.forEach(p => { if (!p.thumbnail && tMap[p.mlItemId]) p.thumbnail = tMap[p.mlItemId]; });
-        } catch { /* silencioso */ }
-      }
-
-      // Segundo ponto de checagem: o fetch de thumbnails acima é outro
-      // "await" — uma chamada mais nova pode ter começado enquanto ele
-      // rodava. Se sim, não aplica este segundo lote de setState.
-      // [DIAG-DATAS] temporário
-      console.log(`[DIAG-DATAS] carregar() #${reqId} CHECKPOINT 2 (pós thumbnails)`, {
-        ehAtual: ehAtual(), reqCounterAtual: reqCounterRef.current, msDesdeInicio: Date.now() - tInicio,
-      });
-      if (!ehAtual()) {
-        console.log(`[DIAG-DATAS] carregar() #${reqId} DESCARTADO no checkpoint 2 (obsoleto)`);
-        return;
-      }
-
-      setTops(topsSorted);
-      setLoss(lossSorted);
-      setTopsML(builtML.tops);
-      setTopsShopee(builtShopee.tops);
-
-      const todosOsProdutos = builtAll.all;
-      const al: typeof alertas = [];
-      const semMargem = todosOsProdutos.filter(p => p.margem < 10 && p.margem >= 0);
-      if (semMargem.length) al.push({ icon: "⚠️", title: `${semMargem.length} produto${semMargem.length > 1 ? "s" : ""} com margem abaixo de 10%`, msg: "Revise o preco ou os custos destes anuncios.", color: "#FFB000" });
-      const prejuizo = todosOsProdutos.filter(p => p.lucro < 0);
-      if (lossSorted.length) al.push({ icon: "🔴", title: `${prejuizo.length} produto${prejuizo.length > 1 ? "s" : ""} gerando prejuizo`, msg: "Estes anuncios custam mais do que rendem.", color: "#EF4444" });
-      if (margem > 0 && margem < 15) al.push({ icon: "📉", title: "Margem geral abaixo do recomendado", msg: "A meta saudavel e acima de 15% de margem liquida.", color: "#EF4444" });
-      if (!al.length && pedidos > 0) al.push({ icon: "✅", title: "Tudo certo por aqui!", msg: "Seus anuncios estao com boa saude financeira.", color: "#22C55E" });
-      setAlertas(al);
-
-    } catch (e) {
-      // AbortError = esta chamada foi cancelada por uma mais nova — não é
-      // erro real, não deve aparecer para o usuário nem mexer em nenhum estado.
-      if ((e as any)?.name === "AbortError") {
-        console.log(`[DIAG-DATAS] carregar() #${reqId} ABORTADO (AbortError) — cancelado por chamada mais nova`);
-        return;
-      }
-      console.error("[dashboard] carregar error:", e);
-      console.log(`[DIAG-DATAS] carregar() #${reqId} ERRO NAO-ABORT`, { erro: String(e), ehAtual: ehAtual() });
-      if (ehAtual()) setErro("Erro ao carregar dados.");
-    }
-    console.log(`[DIAG-DATAS] carregar() #${reqId} FIM`, {
-      ehAtual: ehAtual(), reqCounterAtual: reqCounterRef.current, msTotal: Date.now() - tInicio,
-    });
-    if (ehAtual()) setLoading(false);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dateField]); // anuncios e lojas acessados via ref; dateField é dependência real (Fase D) — nova referência força refetch ao trocar o seletor
-
   useEffect(() => {
-    // [DIAG-DATAS] temporário — remover após a auditoria
-    console.log("[DIAG-DATAS] useEffect(dateFrom,dateTo,lojasSelecionadas,lojasProntas,carregar) DISPAROU", {
-      dateFrom, dateTo, lojasProntas, lojasSelecionadas: Array.from(lojasSelecionadas),
-      timestamp: new Date().toISOString(),
-    });
-    // Só carrega depois que /api/lojas respondeu (ver setLojasProntas) —
-    // elimina o carregar() inicial "as cegas" que rodava antes de saber
-    // quais lojas existem, e que causava o duplo-fetch na carga da página.
-    if (!lojasProntas) {
-      console.log("[DIAG-DATAS] useEffect abortou: lojasProntas ainda false");
-      return;
-    }
-    carregar(dateFrom, dateTo, lojasSelecionadas);
-    // Cleanup: cancela a requisição em andamento se as deps mudarem de novo
-    // (nova troca de filtro/loja) antes desta terminar, ou se a página
-    // desmontar. Reforça o abort já feito no início de carregar().
-    return () => {
-      console.log("[DIAG-DATAS] useEffect CLEANUP (deps mudaram de novo ou desmontou) — abortando request em andamento");
-      abortRef.current?.abort();
-    };
-  }, [dateFrom, dateTo, lojasSelecionadas, lojasProntas, carregar]);
+    // so consulta depois que /api/lojas respondeu com lojas (sem loja nao ha o que consultar)
+    if (estadoLojas !== "ok" || !filaRef.current) return;
+    filaRef.current.pedir(chaveConsultaCanonica(montarConsultaCanonica(dateFrom, dateTo, lojasSelecionadas, lojasRef.current)));
+  }, [dateFrom, dateTo, lojasSelecionadas, estadoLojas]);
 
   const totalCusto    = dias.reduce((s, d) => s + d.custo, 0);
   const totalComissao = dias.reduce((s, d) => s + d.comissao, 0);
@@ -1155,20 +966,31 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* ERROR */}
-      {erro && (
-        <div style={{
+      {/* P1: "Conecte sua conta" SO quando o dono nao tem nenhuma loja; falha temporaria tem outra mensagem */}
+      {estadoLojas === "vazio" && (
+        <div data-aviso="sem-loja" style={{
           background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.25)",
           borderRadius: 14, padding: "14px 20px", color: "#fca5a5", fontSize: 13, marginBottom: 24,
         }}>
-          ⚠️ {erro.includes("conectado") || erro.includes("expirada")
-            ? "Conecte sua conta do Mercado Livre ou Shopee em Configuracoes para ver os dados."
-            : erro}
+          ⚠️ Conecte sua conta do Mercado Livre ou Shopee em Configuracoes para ver os dados.
+        </div>
+      )}
+      {(estadoLojas === "falha" || (estadoLojas === "ok" && falhaCanonico && !loading)) && (
+        <div data-aviso="falha-temporaria" style={{
+          display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap",
+          background: "rgba(255,176,0,0.08)", border: "1px solid rgba(255,176,0,0.3)",
+          borderRadius: 14, padding: "12px 20px", color: "#FCD34D", fontSize: 13, marginBottom: 24,
+        }}>
+          <span>⚠️ Nao foi possivel carregar os dados agora.</span>
+          <button type="button" onClick={() => (estadoLojas === "falha" ? carregarLojas() : filaRef.current?.tentarDeNovo())}
+            style={{ padding: "6px 14px", borderRadius: 8, border: "1px solid rgba(255,176,0,0.5)", background: "rgba(255,176,0,0.12)", color: "#FCD34D", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+            Tentar novamente
+          </button>
         </div>
       )}
 
       {/* SKELETON */}
-      {loading && (
+      {loading && estadoLojas !== "vazio" && estadoLojas !== "falha" && (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 14, marginBottom: 24 }}>
           {[...Array(8)].map((_, i) => (
             <div key={i} style={{ background: "#0F172A", border: "1px solid #1E293B", borderRadius: 16, padding: 20, height: 110 }}>
@@ -1180,7 +1002,7 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {!loading && !erro && (
+      {!loading && estadoLojas === "ok" && (
         <>
           {avisoSituacao && (
             <div data-situacao={situacao ?? ""} style={{
@@ -1198,16 +1020,16 @@ export default function DashboardPage() {
             gap: 14, marginBottom: 24, animationDelay: "0.05s",
           }}>
             <KpiCard icon="💰" label="Faturamento"   value={mc ? fmtBRL(mc.faturamento) : "—"} sub={mc ? `${mc.unidades} unid.${selo ? ` · ${selo}` : ""}${ateCanonico ? ` · até ${ateCanonico}` : ""}` : subSemCanonico} color="#FF7A00" spark={diasCanonicos.filter(d => d.estado !== "SEM_DADOS").map(d => d.faturamento)} />
-            <KpiCard icon="✨" label="Lucro Liquido" value={legadoIndisponivel ? "—" : fmtBRL(kpis.lucro, true)}        color={kpis.lucro >= 0 ? "#22C55E" : "#EF4444"} spark={sparkLuc} sub="legado · nao reconciliado" />
-            <KpiCard icon="📊" label="Margem Media"  value={legadoIndisponivel ? "—" : `${kpis.margem.toFixed(1)}%`}    color={kpis.margem >= 20 ? "#22C55E" : kpis.margem >= 10 ? "#FFB000" : "#EF4444"} sub="legado · nao reconciliado" />
+            <KpiCard icon="✨" label="Lucro Liquido" value="—"        color={kpis.lucro >= 0 ? "#22C55E" : "#EF4444"} spark={sparkLuc} sub="pendente · nao reconciliado" />
+            <KpiCard icon="📊" label="Margem Media"  value="—"    color={kpis.margem >= 20 ? "#22C55E" : kpis.margem >= 10 ? "#FFB000" : "#EF4444"} sub="pendente · nao reconciliado" />
             <KpiCard icon="📦" label="Pedidos"       value={mc ? String(mc.pedidos) : "—"}    color="#6366F1" sub={mc ? `pagos${selo ? ` · ${selo}` : ""}` : subSemCanonico} />
             <KpiCard icon="🎯" label="Ticket Medio"  value={mc ? fmtBRL(mc.ticket) : "—"} color="#FFB000" sub={mc ? `por pedido${selo ? ` · ${selo}` : ""}` : subSemCanonico} />
-            <KpiCard icon="🔄" label="ROI"           value={legadoIndisponivel ? "—" : `${kpis.roi.toFixed(0)}%`}       color={kpis.roi >= 50 ? "#22C55E" : "#FFB000"} sub="legado · nao reconciliado" />
-            <KpiCard icon="🏷️" label="Comissoes"    value={legadoIndisponivel ? "—" : fmtBRL(kpis.comissoes, true)}     color="#EF4444" sub="legado · nao reconciliado" />
+            <KpiCard icon="🔄" label="ROI"           value="—"       color={kpis.roi >= 50 ? "#22C55E" : "#FFB000"} sub="pendente · nao reconciliado" />
+            <KpiCard icon="🏷️" label="Comissoes"    value="—"     color="#EF4444" sub="pendente · nao reconciliado" />
             <KpiCard icon="📈" label="Unidades"      value={mc ? String(mc.unidades) : "—"}   color="#06B6D4" sub={mc ? `vendidas${selo ? ` · ${selo}` : ""}` : subSemCanonico} />
           </div>
           <div data-legado-aviso style={{ fontSize: 11, color: "#64748B", margin: "-14px 0 20px" }}>
-            {legadoIndisponivel ? "Lucro, Margem, ROI e Comissoes: fonte legada indisponivel para esta selecao." : "Lucro, Margem, ROI e Comissoes: fonte legada, nao reconciliada e nao consolidada por loja."}
+            Lucro, Margem, ROI e Comissoes: pendentes de reconciliacao — nao calculados no Dashboard (nunca valores nao consolidados das lojas).
           </div>
 
           {/* EVOLUCAO + BALANCETE */}
@@ -1216,7 +1038,8 @@ export default function DashboardPage() {
               <div style={{ display: "grid", gridTemplateColumns: "1fr 220px", gap: 20, alignItems: "center" }}>
                 <AreaChartSection dias={diasCanonicos} mostrarLucro={false} semDados={graficoSemDados} />
                 <div style={{ borderLeft: "1px solid #1E293B", paddingLeft: 20 }}>
-                  <div style={{ fontSize: 11, fontWeight: 700, color: "#94A3B8", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 12 }}>Composicao · legado</div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "#94A3B8", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 12 }}>Composicao · pendente</div>
+                  <div style={{ fontSize: 12, color: "#94A3B8", marginBottom: 8 }}>Lucro, custos, comissoes e fretes pendentes de reconciliacao.</div>
                   <PieChartSection items={[
                     { label: "Lucro Liquido", value: Math.max(totalLucro, 0), color: "#22C55E" },
                     { label: "Custo Produtos", value: totalCusto, color: "#6366F1" },
@@ -1229,8 +1052,8 @@ export default function DashboardPage() {
 
             <Section title="Balancete" subtitle="Composicao do resultado · legado, nao reconciliado">
               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                {legadoIndisponivel && <div style={{ fontSize: 12, color: "#94A3B8" }}>Fonte legada indisponivel para esta selecao.</div>}
-                {!legadoIndisponivel && balItems.map(item => {
+                <div style={{ fontSize: 12, color: "#94A3B8" }}>Pendente de reconciliacao — nao calculado no Dashboard.</div>
+                {LEGADO_FINANCEIRO_NO_DASHBOARD && balItems.map(item => {
                   const maxAbs = Math.max(...balItems.map(i => Math.abs(i.value)), 1);
                   const pct = (Math.abs(item.value) / maxAbs) * 100;
                   return (
@@ -1325,6 +1148,80 @@ export default function DashboardPage() {
             </div>
           )}
 
+          {/* P1: Top Produtos, Saude Financeira, Alertas e Centro de Inteligencia mantem a ESTRUTURA visual; o que dependia do
+              calculo legado (lucro/margem/ROI/custos nao reconciliados) aparece como "Pendente de reconciliacao" / "Dados
+              indisponiveis" — nunca zero, "Critico" ou alerta inventado. So "Pedidos" tem fonte confiavel (canonica). Nenhuma
+              destas areas faz requisicao. */}
+          {!LEGADO_FINANCEIRO_NO_DASHBOARD && (
+            <>
+              <div data-legado-pendente="top-produtos" className="dash-anim" style={{ marginBottom: 24, animationDelay: "0.15s" }}>
+                <Section title="🏆 Top Produtos" subtitle="Melhores anuncios no periodo · dados indisponiveis">
+                  <AvisoPendente texto="Dados indisponiveis: o ranking por produto depende de receita e custo por item ainda nao reconciliados entre as lojas." />
+                </Section>
+              </div>
+
+              <div className="dash-anim" style={{ display: "flex", flexDirection: "column", gap: 16, marginBottom: 24, animationDelay: "0.2s" }}>
+                <Section title="🩺 Saude Financeira" subtitle="Baseada em margem, volume e retorno · pendente de reconciliacao">
+                  <div data-legado-pendente="saude" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                    {[
+                      { label: "Margem", valor: PENDENTE, confiavel: false },
+                      { label: "ROI", valor: PENDENTE, confiavel: false },
+                      { label: "Pedidos", valor: mc ? String(mc.pedidos) : "Dados indisponiveis", confiavel: !!mc },
+                      { label: "Lucro", valor: PENDENTE, confiavel: false },
+                    ].map(item => (
+                      <div key={item.label} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <span style={{ fontSize: 12, color: "#94A3B8" }}>{item.label}</span>
+                        <span style={{ fontSize: 13, fontWeight: 700, color: item.confiavel ? "#fff" : "#64748B" }}>{item.valor}</span>
+                      </div>
+                    ))}
+                  </div>
+                </Section>
+                <Section title="🔔 Alertas" subtitle="Atencao necessaria">
+                  <AvisoPendente texto="Pendente de reconciliacao: alertas de margem e prejuizo so sao gerados com custos e tarifas confiaveis — nenhum alerta e criado sem fonte." />
+                </Section>
+              </div>
+
+              <div data-legado-pendente="inteligencia" className="dash-anim" style={{ animationDelay: "0.25s", marginBottom: 24 }}>
+                <div style={{
+                  background: "linear-gradient(135deg, #07090F 0%, #110A00 50%, #07090F 100%)",
+                  border: "1px solid rgba(255,122,0,0.18)", borderRadius: 24, padding: "28px 32px",
+                }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 24 }}>
+                    <div style={{
+                      width: 46, height: 46, borderRadius: 14, background: "linear-gradient(135deg, rgba(255,122,0,0.2), rgba(255,122,0,0.05))",
+                      border: "1px solid rgba(255,122,0,0.3)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22,
+                    }}>🧠</div>
+                    <div>
+                      <div style={{ fontSize: 18, fontWeight: 900, color: "#fff", letterSpacing: "-0.3px" }}>Centro de Inteligencia CDS</div>
+                      <div style={{ fontSize: 12, color: "rgba(255,122,0,0.8)", fontWeight: 600 }}>Analise automatica da sua operacao · pendente de reconciliacao</div>
+                    </div>
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "220px 1fr", gap: 20, marginBottom: 20 }}>
+                    <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,122,0,0.12)", borderRadius: 18, padding: "20px 16px", textAlign: "center" }}>
+                      <div style={{ fontSize: 11, fontWeight: 700, color: "#94A3B8", letterSpacing: "0.6px", marginBottom: 12 }}>SCORE CDS</div>
+                      <div style={{ fontSize: 26, fontWeight: 900, color: "#64748B" }}>—</div>
+                      <div style={{ fontSize: 11, color: "#64748B", marginTop: 6 }}>{PENDENTE}</div>
+                    </div>
+                    <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,122,0,0.12)", borderRadius: 18, padding: "20px 24px" }}>
+                      <div style={{ fontSize: 11, fontWeight: 700, color: "#94A3B8", letterSpacing: "0.6px", marginBottom: 14 }}>IMPACTO FINANCEIRO ESTIMADO</div>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                        {["Lucro adicional estimado", "Reducao de prejuizo", "Produtos a corrigir", "Margem projetada"].map(label => (
+                          <div key={label} style={{ padding: "12px 14px", borderRadius: 12, background: "rgba(148,163,184,0.04)", border: "1px solid rgba(148,163,184,0.12)" }}>
+                            <div style={{ fontSize: 11, color: "#94A3B8", marginBottom: 3 }}>{label}</div>
+                            <div style={{ fontSize: 13, fontWeight: 800, color: "#64748B" }}>{PENDENTE}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                  <AvisoPendente texto="Insights e acoes recomendadas ficam indisponiveis ate o calculo financeiro consolidado (custos, tarifas e fretes por loja) estar reconciliado." />
+                </div>
+              </div>
+            </>
+          )}
+
+          {LEGADO_FINANCEIRO_NO_DASHBOARD && (
+            <>
           {/* PREJUIZO + SAUDE + ALERTAS */}
           <div className="dash-anim" style={{ display: "grid", gridTemplateColumns: loss.length ? "1fr 260px" : "1fr", gap: 16, marginBottom: 24, animationDelay: "0.2s" }}>
             <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -1556,7 +1453,10 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          {kpis.pedidos === 0 && (
+            </>
+          )}
+
+          {mc && mc.pedidos === 0 && (
             <div style={{
               marginTop: 24, background: "#0F172A", border: "1px dashed #1E293B",
               borderRadius: 20, padding: 60, textAlign: "center",

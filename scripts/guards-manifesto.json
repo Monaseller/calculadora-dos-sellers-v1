@@ -102,7 +102,7 @@
     "scripts/testar-cron-sync.ts": "63a71ceade2fcbcbee18af0b563050cd78b76ea6bb8f5cea2df644d5a6436109",
     "scripts/testar-custos.ts": "0872b4a478fa63fa706ff17d6cac45638e3ef0faa09f5cd95ae7b4f6b75010de",
     "scripts/testar-cutover-rotas-ml.ts": "c784a336d0fa17e6fc129e438115cd1e729ee67ad0d1817539cc78610a42f4c0",
-    "scripts/testar-dashboard-canonico.ts": "801e34a1606c4c6702187d8ce251ab094b1675bdbc1389b6eec5d105dc187907",
+    "scripts/testar-dashboard-canonico.ts": "722d4d3ebc29dc5e41272b69553a721972d840387c6ee7bd0b545b3028ee5535",
     "scripts/testar-default-privileges.ts": "3ae47bada24b06a7c3aa65093ebd11fdeb949c653b93140d4c9cc91edbd53d60",
     "scripts/testar-desconectar.ts": "7b2bfd7a214f3f777e569eef5114d4f13cab490631574e0b7a9f2e31884ecd25",
     "scripts/testar-direcao-criativa.ts": "88f335f6819d29e2c9dbe441dc11f943d77bfc48e48ce1bbfb3c4539af065c5a",
