@@ -770,6 +770,55 @@ export async function contarNaoPagosSemObservacaoShopee(
   return total;
 }
 
+/**
+ * P1-B (agendamento do coordenador) — as LINHAS da MESMA populacao de contarNaoPagosSemObservacaoShopee (mesmos
+ * filtros; so order_sn, create_time e detail_fetched_at), em keyset (create_time, order_sn). NAO decide nada: quem
+ * agenda aplica o proprio criterio. A contagem canonica e a completude seguem intocadas. Pagina com erro → leitura_falhou.
+ */
+export async function listarNaoPagosSemObservacaoShopee(
+  cliente: SupabaseClient, a: { userId: string; lojaId: string; desdeIso: string; fimIso: string },
+): Promise<{ orderSn: string; createTime: string | null; detailFetchedAt: string | null }[]> {
+  const ler = (sem: boolean) => paginarKeyset<Record<string, unknown>>("shopee_lista_nao_pagos", "create_time", "order_sn", (cursor, limite) => {
+    let q = cliente.from("shopee_pedidos").select("order_sn, create_time, detail_fetched_at")
+      .eq("user_id", a.userId).eq("loja_id", a.lojaId).is("pay_time", null).gte("create_time", a.desdeIso).lt("create_time", a.fimIso);
+    q = sem ? q.is("detail_fetched_at", null) : q.lt("detail_fetched_at", a.fimIso);
+    if (ESTADOS_TERMINAIS_VERIFICADOS.length) q = q.not("order_status", "in", `(${ESTADOS_TERMINAIS_VERIFICADOS.join(",")})`);
+    return aplicarKeyset(q, "create_time", "order_sn", cursor, limite);
+  });
+  const linhas = [...(await ler(false)), ...(await ler(true))];
+  return linhas.map((r) => ({ orderSn: String(r.order_sn), createTime: (r.create_time as string) ?? null, detailFetchedAt: (r.detail_fetched_at as string) ?? null }));
+}
+
+/**
+ * P1-B (agendamento, DESEMPENHO) — SUPERCONJUNTO exato dos nao pagos que podem estar pendentes pelo criterio de prazo do
+ * coordenador, numa UNICA consulta (cada pagina da listagem completa revarre todos os nao pagos da loja: nao ha indice
+ * por create_time). Para os criados em [S, E) — faixas de 7 dias a partir de `desde` — so interessa quem foi visto antes
+ * de min(fim, E + prazo): criado antes de E, visto em E + prazo ou depois, ja foi visto depois de criacao + prazo. Mais
+ * os nunca detalhados. E SUBCONJUNTO da populacao canonica (visto antes do fim). Resposta CHEIA (teto de linhas do
+ * PostgREST) → a listagem completa paginada: nunca omite. Quem agenda aplica o criterio EXATO. Erro → leitura_falhou.
+ */
+export async function listarCandidatosNaoPagosPorPrazoShopee(
+  cliente: SupabaseClient, a: { userId: string; lojaId: string; desdeIso: string; fimIso: string; prazoMs: number },
+): Promise<{ orderSn: string; createTime: string | null; detailFetchedAt: string | null }[]> {
+  const desde = Date.parse(a.desdeIso), fim = Date.parse(a.fimIso), FAIXA = 7 * 24 * 3600 * 1000;
+  if (!Number.isFinite(desde) || !Number.isFinite(fim) || !(a.prazoMs > 0)) falhaDeLeitura("shopee_candidatos_nao_pagos", { code: "parametro_invalido" });
+  const iso = (ms: number) => literalKeyset(new Date(ms).toISOString());
+  const grupos = ["detail_fetched_at.is.null"];
+  for (let s = desde; s < fim; s += FAIXA) {
+    const e = Math.min(s + FAIXA, fim);
+    grupos.push(`and(create_time.gte.${iso(s)},create_time.lt.${iso(e)},detail_fetched_at.lt.${iso(Math.min(fim, e + a.prazoMs))})`);
+  }
+  let q = cliente.from("shopee_pedidos").select("order_sn, create_time, detail_fetched_at")
+    .eq("user_id", a.userId).eq("loja_id", a.lojaId).is("pay_time", null).gte("create_time", a.desdeIso).lt("create_time", a.fimIso)
+    .or(grupos.join(","));
+  if (ESTADOS_TERMINAIS_VERIFICADOS.length) q = q.not("order_status", "in", `(${ESTADOS_TERMINAIS_VERIFICADOS.join(",")})`);
+  const { data, error } = await q.order("create_time", { ascending: true }).order("order_sn", { ascending: true }).limit(PAGINA);
+  if (error) falhaDeLeitura("shopee_candidatos_nao_pagos", error);
+  const linhas = (data ?? []) as Record<string, unknown>[];
+  if (linhas.length >= PAGINA) return listarNaoPagosSemObservacaoShopee(cliente, a);   // pode ter sido cortada: a populacao exata
+  return linhas.map((r) => ({ orderSn: String(r.order_sn), createTime: (r.create_time as string) ?? null, detailFetchedAt: (r.detail_fetched_at as string) ?? null }));
+}
+
 /** Dimensao C (contagem): pagos no periodo com escrow pendente (coluna gerada escrow_pendente). */
 export async function contarEscrowPendenteShopee(
   cliente: SupabaseClient, a: { userId: string; lojaId: string; inicioIso: string; fimIso: string },

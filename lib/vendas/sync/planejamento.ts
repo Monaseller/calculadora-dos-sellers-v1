@@ -148,6 +148,34 @@ function avaliarFalhas(jobs: JobExistenteSync[], iv: Iv, desdeSucessoMs: number,
   return { estado: "ok" };
 }
 
+/**
+ * P1-B: tentativas que NAO resolveram uma pendencia de nao pagos — jobs em erro sobre a faixa E jobs CONCLUIDOS que a
+ * contem e foram CRIADOS depois da ultima observacao dos pendentes (rodaram e o pedido nao foi reobservado: detalhe
+ * falho, por exemplo). Mesma politica de avaliarFalhas (teto, espera): nunca recria sem fim um job que nao atende o
+ * sinal, e o esgotamento fica VISIVEL (nunca "resolvido" em silencio).
+ */
+function avaliarTentativasPendencia(jobs: JobExistenteSync[], iv: Iv, desdeMs: number, pol: PoliticaSync, agoraMs: number): { estado: "ok" | "esperar" | "esgotado"; ate?: string } {
+  const corte = Math.max(desdeMs, agoraMs - pol.janelaContagemFalhasMs);
+  const tentativas = jobs.filter((j) => (j.status === "erro" && sobrepoe(j, iv)) || (completo(j) && contem(j, iv) && t(j.criadoEm) > desdeMs))
+    .map((j) => (j.status === "erro" ? t(j.concluidoEm) || t(j.criadoEm) : t(j.concluidoEm))).filter((x) => x > corte);
+  if (tentativas.length >= pol.maxFalhasPorNecessidade) return { estado: "esgotado" };
+  const ultima = Math.max(...tentativas, -Infinity);
+  if (tentativas.length && agoraMs - ultima < pol.esperaAposFalhaMs) return { estado: "esperar", ate: isoDe(ultima + pol.esperaAposFalhaMs) };
+  return { estado: "ok" };
+}
+
+/**
+ * P1-B: segmentos cortados TAMBEM nas fronteiras de idade da politica (agora − 7, − 30, − 90 dias): cada trecho tem
+ * UMA faixa de idade e usa o intervalo dela (o segmento herda a observacao do job que o contem — o corte nao muda isso).
+ */
+function cortarPorIdade(segs: SegmentoObservado[], pol: PoliticaSync, agoraMs: number): SegmentoObservado[] {
+  const fronteiras = pol.faixas.map((f) => agoraMs - f.idadeMaxDias * DIA_MS);
+  return segs.flatMap((s) => {
+    const cortes = [s.inicio, ...fronteiras.filter((x) => x > s.inicio && x < s.fim).sort((a, b) => a - b), s.fim];
+    return cortes.slice(1).map((fim, i) => ({ inicio: cortes[i], fim, ultimaMs: s.ultimaMs }));
+  });
+}
+
 interface Parcial {
   cobertura: Cobertura; frescor: Exclude<Frescor, "IN_PROGRESS">; motivos: string[]; faltando: Intervalo[]; desatualizado: Intervalo[];
   necessidades: Necessidade[]; esperaAte: string | null; esgotado: string[]; andamento: string[];
@@ -257,19 +285,36 @@ function planejarShopee(loja: LojaAtivaSync, de: string, ate: string, agoraMs: n
   if (!lacunas.length) {
     // Frescor por SEGMENTO (SALES-SYNC-A2): um refresh mais novo substitui o
     // job antigo onde reobservou; o trecho NAO reobservado mantem a idade dele.
-    const segs = observacaoPorSegmento(feitos, necessario);
-    const intervalo = intervaloDeFrescor(pol, necessario[1], agoraMs, origem);
-    const velhos = intervalo === null ? [] : uniao(segs.filter((s) => s.ultimaMs === null || agoraMs - s.ultimaMs > intervalo).map((s) => [s.inicio, s.fim] as Iv));
-    // nao pago sem observacao pos-periodo: qualquer ponto da janela pode ter o pedido → reler a janela toda
-    const alvos: Iv[] = sinais.naoObservadosAposPeriodo > 0 ? [necessario] : velhos;
+    // P1-B (frescor POR IDADE, so background/bootstrap — a janela de MANUTENCAO de ~100 dias): cada trecho usa o
+    // intervalo da faixa da PROPRIA idade (POLITICA_SYNC_PROPOSTA, valores inalterados): ate 7 dias → 6 h; ate 30 → 24 h;
+    // ate 90 → 7 dias; mais velho → nunca em background. Antes o fim da janela impunha 6 h aos ~100 dias.
+    // Pedido do USUARIO segue como era: o periodo pedido inteiro pelo intervalo do fim dele (revalidacao explicita intacta).
+    const porIdade = origem !== "usuario";
+    const segs = porIdade ? cortarPorIdade(observacaoPorSegmento(feitos, necessario), pol, agoraMs) : observacaoPorSegmento(feitos, necessario);
+    const velhos = uniao(segs.filter((s) => {
+      // ja cortado nas fronteiras: o PONTO MEDIO tem a faixa do trecho todo (a ponta pode cair exatamente na fronteira)
+      const intervalo = intervaloDeFrescor(pol, porIdade ? (s.inicio + s.fim) / 2 : necessario[1], agoraMs, origem);
+      return intervalo !== null && (s.ultimaMs === null || agoraMs - s.ultimaMs > intervalo);
+    }).map((s) => [s.inicio, s.fim] as Iv));
+    // P1-B (mirar a pendencia): nao pago pendente → reler SO as faixas de CRIACAO onde ele esta (o sinal as informa);
+    // sem faixas (chamador que so conta) → a janela toda, como antes. Nunca o bloco mais recente por padrao.
+    const pendencias: { iv: Iv; desdeMs: number }[] = sinais.naoObservadosAposPeriodo <= 0 ? []
+      : sinais.faixasPendentes
+        ? sinais.faixasPendentes.map((f) => ({ iv: [Math.max(t(f.inicio), necessario[0]), Math.min(t(f.fim), necessario[1])] as Iv, desdeMs: f.ultimaObservacao ? t(f.ultimaObservacao) : -Infinity }))
+          .filter((p) => p.iv[1] > p.iv[0])
+        : [{ iv: necessario, desdeMs: -Infinity }];
     if (sinais.naoObservadosAposPeriodo > 0) motivos.push(`nao_pagos_sem_observacao_pos_periodo:${sinais.naoObservadosAposPeriodo}`);
     if (velhos.length) motivos.push("observacao_velha");
+    const alvos: { iv: Iv; desdeMs: number | null }[] = [...velhos.map((iv) => ({ iv, desdeMs: null })), ...pendencias];
     if (alvos.length) {
-      stale = true; desat.push(...alvos.map(([x, y]) => ({ inicio: isoDe(x), fim: isoDe(y) })));
-      if (!ativos.length) for (const iv of alvos) {
-        // falhas contam a partir da observacao efetiva DESTE trecho (nao de um job antigo de outro trecho)
-        const f = avaliarFalhas(descoberta, iv, observacaoEfetivaDaJanela(feitos, iv) ?? -Infinity, pol, agoraMs);
-        if (f.estado === "esgotado") { motivos.push("refresh_falhas_repetidas"); esgotado.push("refresh_falhas_repetidas"); }
+      stale = true; desat.push(...alvos.map(({ iv: [x, y] }) => ({ inicio: isoDe(x), fim: isoDe(y) })));
+      if (!ativos.length) for (const { iv, desdeMs } of alvos) {
+        // velho: falhas a partir da observacao efetiva DESTE trecho; pendencia: tentativas que nao a resolveram
+        const f = desdeMs === null
+          ? avaliarFalhas(descoberta, iv, observacaoEfetivaDaJanela(feitos, iv) ?? -Infinity, pol, agoraMs)
+          : avaliarTentativasPendencia(descoberta, iv, desdeMs, pol, agoraMs);
+        const marca = desdeMs === null ? "refresh_falhas_repetidas" : "pendencia_nao_pagos_sem_efeito";
+        if (f.estado === "esgotado") { motivos.push(marca); esgotado.push(marca); }
         else if (f.estado === "esperar") espera = espera && espera > f.ate! ? espera : f.ate!;
         else necessidades.push(...janelaJob(iv[0], iv[1], "refresh").map((job) => ({ job, tipo: "refresh" as const, prioridade: prioridadeDe(origem, "refresh", recente) })));
       }

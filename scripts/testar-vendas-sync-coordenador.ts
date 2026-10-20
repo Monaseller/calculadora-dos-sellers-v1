@@ -12,7 +12,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 // SALES-SYNC-D15B2: excecao EXATA do patch D15B — A2-ML so tolera o hunk de exclusao de intraday (HUNK_A2_ML)
 import { planejarMLSemD15B, reconstruirBaseD15B } from "./_excecao-d15b-intraday";
-// P1 sync_jobs: excecao EXATA da correcao A (atual − P1 = 8978451, que reconstroi d631748 pela D15B)
+// P1 sync_jobs: excecao EXATA das correcoes A e B (atual − P1 = 8978451, que reconstroi d631748 pela D15B)
 import { PATCH_P1, reconstruirBaseP1, reverterP1 } from "./_excecao-p1-sync-jobs";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import type { AvaliacaoLojaSync, JobExistenteSync, LojaAtivaSync, PoliticaSync } from "../lib/vendas/sync/tipos";
@@ -62,16 +62,32 @@ async function principal() {
   type Reg = { tabela: string; op: string; filtros: [string, string, unknown][] };
   // P1: teto = max-rows do PostgREST (corta TODA resposta, sem erro); falharPagina = N-esima leitura de sync_jobs da 57014;
   // aoLerPagina = gancho apos a N-esima pagina de sync_jobs (insercao concorrente)
-  type OpcBanco = { teto?: number; falharPagina?: number; aoLerPagina?: (n: number, db: Record<string, any[]>) => void };
+  // falharPedidos = toda leitura de shopee_pedidos da erro (timeout) — nunca pode virar "zero pendentes"
+  // falharLinhasPedidos = so as leituras de LINHAS de shopee_pedidos falham (as contagens HEAD passam)
+  type OpcBanco = { teto?: number; falharPagina?: number; aoLerPagina?: (n: number, db: Record<string, any[]>) => void; falharPedidos?: boolean; falharLinhasPedidos?: boolean };
+  // a arvore logica do PostgREST (or/and com col.op."valor"), como a consulta de candidatos e o cursor keyset a enviam
+  const dividir = (s: string) => { const out: string[] = []; let prof = 0, aspas = false, ini = 0;
+    for (let i = 0; i < s.length; i++) { const ch = s[i]; if (ch === '"') aspas = !aspas; else if (!aspas && ch === "(") prof++; else if (!aspas && ch === ")") prof--;
+      else if (!aspas && prof === 0 && ch === ",") { out.push(s.slice(ini, i)); ini = i + 1; } }
+    out.push(s.slice(ini)); return out; };
+  const termo = (l: any, t: string): boolean => {
+    const g = t.match(/^(and|or)\(([\s\S]*)\)$/); if (g) return g[1] === "and" ? dividir(g[2]).every((x) => termo(l, x)) : dividir(g[2]).some((x) => termo(l, x));
+    const k = t.match(/^([a-z_]+)\.(is|gte|lt|gt|eq)\.([\s\S]*)$/); if (!k) throw new Error(`termo PostgREST invalido: ${t}`);
+    const [, c, op, bruto] = k; const v = bruto.replace(/^"([\s\S]*)"$/, "$1");
+    if (op === "is") return (l[c] ?? null) === (v === "null" ? null : v);
+    if (l[c] === null || l[c] === undefined) return false;
+    const x = String(l[c]); return op === "gte" ? x >= v : op === "lt" ? x < v : op === "gt" ? x > v : x === v;
+  };
   function bancoFalso(lojas: { id: string; user_id: string; marketplace: string; ativo: boolean }[], jobs: Record<string, any>[] = [], opc: OpcBanco = {}) {
     const regs: Reg[] = []; const db: Record<string, any[]> = { lojas, sync_jobs: jobs, shopee_pedidos: [] };
     let paginasSJ = 0;
     const cliente: any = { from(tabela: string) {
       const r: Reg = { tabela, op: "select", filtros: [] }; regs.push(r); let head = false; let inserir: any = null;
       // P1: ORDER BY + LIMIT + gt como o PostgREST (lerJobsDasLojas pagina por id)
-      let ordem: string | null = null; let limite: number | null = null;
+      let ordem: string | null = null; let limite: number | null = null; const ordens: string[] = [];
       const casa = (l: any) => r.filtros.every(([op, c, v]: any) => op === "eq" ? String(l[c]) === String(v) : op === "in" ? v.map(String).includes(String(l[c]))
-        : op === "is" ? (l[c] ?? null) === v : op === "gte" ? l[c] >= v : op === "lt" ? l[c] < v : op === "gt" ? String(l[c]) > String(v) : true);
+        : op === "is" ? (l[c] ?? null) === v : op === "gte" ? l[c] >= v : op === "lt" ? l[c] < v : op === "gt" ? String(l[c]) > String(v)
+        : op === "or" ? dividir(String(v)).some((x) => termo(l, x)) : true);
       const q: any = new Proxy({}, { get(_a, p: string) {
         if (p === "then") return (ok: any) => {
           if (inserir) {
@@ -84,8 +100,10 @@ async function principal() {
           // a projecao "modo:checkpoint->>modo" do PostgREST
           const leituraSJ = tabela === "sync_jobs" && !head ? ++paginasSJ : 0;
           if (leituraSJ && opc.falharPagina === leituraSJ) return ok({ data: null, error: { code: "57014", message: "canceling statement due to statement timeout" } });
+          if (tabela === "shopee_pedidos" && (opc.falharPedidos || (opc.falharLinhasPedidos && !head))) return ok({ data: null, count: null, error: { code: "57014", message: "canceling statement due to statement timeout" } });
+          (r as any).head = head;
           let d = (db[tabela] ?? []).filter(casa).map((l: any) => (tabela === "sync_jobs" ? { ...l, modo: l.checkpoint?.modo ?? null } : l));
-          if (ordem) d = [...d].sort((x: any, y: any) => (String(x[ordem!]) < String(y[ordem!]) ? -1 : String(x[ordem!]) > String(y[ordem!]) ? 1 : 0));
+          if (ordens.length) d = [...d].sort((x: any, y: any) => { for (const k of ordens) { const a = String(x[k]), b = String(y[k]); if (a !== b) return a < b ? -1 : 1; } return 0; });
           if (limite !== null) d = d.slice(0, limite);
           if (opc.teto !== undefined && !head) d = d.slice(0, opc.teto);
           if (leituraSJ) opc.aoLerPagina?.(leituraSJ, db);
@@ -94,8 +112,9 @@ async function principal() {
         if (p === "select") return (_c: string, o?: any) => { if (o?.head) head = true; return q; };
         if (p === "insert") return (linha: any) => { r.op = "insert"; inserir = { ...linha }; r.filtros.push(["insert_user", "user_id", linha.user_id]); return q; };
         if (p === "single") return () => q;
-        if (p === "order") return (c: string) => { ordem = c; return q; };
+        if (p === "order") return (c: string) => { ordem = c; ordens.push(c); return q; };
         if (p === "limit") return (n: number) => { limite = n; return q; };
+        if (p === "or") return (e: string) => { r.filtros.push(["or", "", e]); return q; };
         return (...a: any[]) => { if (["eq", "in", "is", "gte", "lt", "gt"].includes(p)) r.filtros.push([p, a[0], a[1]]); return q; };
       } });
       return q;
@@ -561,8 +580,190 @@ async function principal() {
     // a decisão continua legítima: a janela útil foi lida
     assert(P.avaliarLoja({ loja: ml(MLA), de: "2026-10-01", ate: "2026-10-05", agoraMs: AGORA, jobs: lidos, politica: POL, origem: "usuario" }).proximaAcao.acao === "NOOP", "decisão");
   });
-  t("CP-D15B. cadeia de exceções EXATA para a correção A: coordenador.ts − P1 = 8978451 (byte a byte) e esse resultado − D15B = d631748; P1 cobre SÓ o coordenador", () => {
-    assert(JSON.stringify(Object.keys(PATCH_P1)) === JSON.stringify(["lib/vendas/sync/coordenador.ts"]), `excecao P1 cobre arquivo a mais: ${Object.keys(PATCH_P1)}`);
+  // ── P1-B: sinal de nao pagos do coordenador + refresh mirando a pendencia + frescor por idade (planejador REAL, offline) ──
+  console.log("\n[CB. P1-B laço de refresh Shopee: sinal por prazo, alvo = pendência, frescor por idade]");
+  const DIA = 24 * H, d = (n: number) => new Date(AGORA - n * DIA).toISOString();
+  const MAN = { marketplace: "Shopee", lojaId: SPA, de: "2026-07-08", ate: "2026-10-05" };   // manutencao: [hoje − 90, ontem]
+  const pedidoSP = (lojaId: string, sn: string, criado: string, obs: string | null, o: Record<string, any> = {}) =>
+    ({ user_id: UID, loja_id: lojaId, order_sn: sn, order_status: "CANCELLED", create_time: criado, pay_time: null, detail_fetched_at: obs, escrow_pendente: false, ...o });
+  // casos (AGORA = 06/10 17:00Z): C1 visto DEPOIS do prazo; C2 visto ANTES; C3 UNPAID no prazo; C4 pago tarde ainda nao visto;
+  // C5 mudanca hipotetica (visto antes do prazo); C6 nunca detalhado; C7 visto depois do prazo (mudanca posterior hipotetica)
+  const CASOS = () => [
+    pedidoSP(SPA, "C1", d(60), d(40)), pedidoSP(SPA, "C2", d(30), d(28)), pedidoSP(SPA, "C3", d(2), d(1), { order_status: "UNPAID" }),
+    pedidoSP(SPA, "C4", d(8), d(7), { order_status: "UNPAID" }), pedidoSP(SPA, "C5", d(40), d(35)), pedidoSP(SPA, "C6", d(20), null), pedidoSP(SPA, "C7", d(45), d(20))];
+  const coberturaSP = (lojaId: string, concl = AGORA - H) => [linhaSP(lojaId, "2026-06-20T03:00:00.000Z", "2026-10-06T03:00:00.000Z", { id: `cov-${lojaId.slice(0, 2)}`, concluido_em: new Date(concl).toISOString(), criado_em: new Date(concl - H).toISOString() })];
+  const bancoCasos = (pedidos = CASOS()) => { const b = bancoFalso(lojasBase(), coberturaSP(SPA)); b.db.shopee_pedidos.push(...pedidos); return b; };
+  const avDB = async (b: ReturnType<typeof bancoFalso>, origem: "background" | "usuario" = "background", args: any = MAN) => (await avaliarDB(b, { ...args, origem })).lojas[0];
+  // planejador com origem usuario: pede a listagem EXPLICITAMENTE (o Dashboard nao pede)
+  const avDBListar = async (b: ReturnType<typeof bancoFalso>, args: any = MAN) =>
+    (await C.avaliarNecessidadeDeSync(b.cliente, { userId: UID, ...args, origem: "usuario" }, { agoraMs: AGORA, politica: POL, listarPendentes: true })).lojas[0];
+  const leiturasPedidos = (b: ReturnType<typeof bancoFalso>) => { const rs = b.regs.filter((r) => r.tabela === "shopee_pedidos");
+    return { total: rs.length, linhas: rs.filter((r) => !(r as any).head).length }; };
+  const diasAlvo = (l: AvaliacaoLojaSync) => l.necessidades.filter((n) => n.job.proposito === "refresh").map((n) => `${n.job.de}→${n.job.ate}`);
+
+  t("CB-1. C1–C7 (background): pendentes = C2,C3,C4,C5,C6 (nunca detalhado conta); C1/C7 vistos depois do prazo NÃO motivam o sinal; alvo = os DIAS de criação deles", async () => {
+    const l = await avDB(bancoCasos());
+    assert(l.motivos.includes("nao_pagos_sem_observacao_pos_periodo:5"), l.motivos.join());
+    const alvos = diasAlvo(l).sort();
+    // C5 (27/08), C2 (06/09), C6 (16/09), C4 (28/09), C3 (04/10) — cada um no proprio dia civil de SP
+    assert(JSON.stringify(alvos) === JSON.stringify(["2026-08-27→2026-08-27", "2026-09-06→2026-09-06", "2026-09-16→2026-09-16", "2026-09-28→2026-09-28", "2026-10-04→2026-10-04"]), JSON.stringify(alvos));
+    assert(jobDa(l)!.de === "2026-10-04" && l.frescor === "STALE", resumo(l));
+  });
+  t("CB-2. USUÁRIO: definição canônica (C1 e C7 também). Frescor do Dashboard = SÓ a contagem (nenhuma linha lida); planejador do usuário que pede a listagem mira as 7 faixas", async () => {
+    const b = bancoCasos(); const l = await avDB(b, "usuario");
+    assert(l.motivos.includes("nao_pagos_sem_observacao_pos_periodo:7") && l.frescor === "STALE", `${l.motivos}`);
+    const lp = leiturasPedidos(b);
+    assert(lp.linhas === 0 && lp.total === 3, `Dashboard leu linhas: ${JSON.stringify(lp)}`);   // 2 contagens HEAD + escrow, como antes da B
+    const pl = await avDBListar(bancoCasos());
+    assert(pl.motivos.includes("nao_pagos_sem_observacao_pos_periodo:7") && diasAlvo(pl).length === 7, `${pl.motivos} ${diasAlvo(pl)}`);
+  });
+  t("CB-3. o laço ACABA: cada job relê a sua faixa e some do sinal; 5 jobs distintos, nenhum repetido; C4 sai porque foi PAGO (não por prazo)", async () => {
+    const b = bancoCasos(); const feitos: string[] = [];
+    for (let i = 0; i < 12; i++) {
+      const l = await avDB(b); const j = jobDa(l);
+      if (!j || l.proximaAcao.acao !== "CREATE_REFRESH_JOB") break;
+      const chave = `${j.inicio}|${j.fim}`; assert(!feitos.includes(chave), `job repetido ${chave}`); feitos.push(chave);
+      // o job roda: reobserva os pedidos criados na janela dele (C4 aparece PAGO)
+      for (const p of b.db.shopee_pedidos) if (p.create_time >= j.inicio! && p.create_time < j.fim!) { p.detail_fetched_at = new Date(AGORA - 60_000).toISOString(); if (p.order_sn === "C4") p.pay_time = d(2); }
+      b.db.sync_jobs.push(linhaSP(SPA, j.inicio!, j.fim!, { criado_em: new Date(AGORA - 120_000).toISOString(), concluido_em: new Date(AGORA - 30_000).toISOString() }));
+    }
+    const fim = await avDB(b);
+    assert(feitos.length === 5 && !fim.motivos.some((m) => m.startsWith("nao_pagos_sem_observacao")) && fim.proximaAcao.acao === "NOOP", `${feitos.length} ${resumo(fim)} ${fim.motivos}`);
+  });
+  t("CB-4. falha no DETALHE (job conclui e o pedido continua sem observação): espera, depois esgota VISÍVEL — nunca resolvido em silêncio, nunca laço", async () => {
+    const b = bancoCasos([pedidoSP(SPA, "C3", d(2), d(1), { order_status: "UNPAID" })]);
+    const janela = (await avDB(b)).necessidades[0].job;
+    const tentativa = (minAtras: number) => b.db.sync_jobs.push(linhaSP(SPA, janela.inicio!, janela.fim!, { criado_em: new Date(AGORA - (minAtras + 2) * 60_000).toISOString(), concluido_em: new Date(AGORA - minAtras * 60_000).toISOString() }));
+    tentativa(5);
+    const l1 = await avDB(b);
+    assert(l1.proximaAcao.acao === "WAIT_RETRY" && l1.motivos.includes("nao_pagos_sem_observacao_pos_periodo:1"), `${resumo(l1)} ${l1.motivos}`);
+    tentativa(200); tentativa(400);
+    const l2 = await avDB(b);
+    assert(l2.proximaAcao.acao === "FAILED" && l2.motivos.includes("pendencia_nao_pagos_sem_efeito") && l2.frescor === "STALE" && l2.motivos.includes("nao_pagos_sem_observacao_pos_periodo:1"), `${resumo(l2)} ${l2.motivos}`);
+  });
+  t("CB-5. um job que REALMENTE observou (criado ANTES da observação) não conta como tentativa sem efeito (C3 no prazo volta no dia seguinte, legítimo)", async () => {
+    const b = bancoCasos([pedidoSP(SPA, "C3", d(2), d(1), { order_status: "UNPAID" })]);
+    const janela = (await avDB(b)).necessidades[0].job;
+    // tres jobs criados ANTES da observacao d(1) (foram eles que observaram): nao sao tentativas sem efeito — nada esgota
+    for (const concl of [0.999, 0.995, 0.991]) b.db.sync_jobs.push(linhaSP(SPA, janela.inicio!, janela.fim!, { criado_em: d(1.01), concluido_em: d(concl) }));
+    const l = await avDB(b);
+    assert(l.proximaAcao.acao === "CREATE_REFRESH_JOB" && jobDa(l)!.de === "2026-10-04", resumo(l));
+  });
+  t("CB-6. frescor POR IDADE: ≤7 dias → 6 h; 8–30 → 24 h; 31–90 → 7 dias; >90 nunca em background (segmentos cortados nas fronteiras)", () => {
+    const cobre = (ini: string, fim: string, conclH: number) => jobSP(SPA, ini, fim, { concluidoEm: new Date(AGORA - conclH * H).toISOString(), criadoEm: new Date(AGORA - conclH * H - H).toISOString() });
+    // uma janela UNICA cobrindo tudo, observada ha 8 h: so a faixa ≤7 dias fica velha
+    const a = av(sp(SPA), "2026-07-08", "2026-10-05", [cobre("2026-06-20T03:00:00.000Z", "2026-10-06T03:00:00.000Z", 8)], { sinaisShopee: SEM_SINAIS, origem: "background" });
+    const desat = a.desatualizado.map((x) => `${x.inicio}→${x.fim}`);
+    assert(desat.length === 1 && desat[0] === `${d(7)}→2026-10-06T03:00:00.000Z`, JSON.stringify(desat));
+    // observada ha 30 h: velhas ≤7 e 8–30 (contiguas = um trecho), frescas 31–90
+    const b30 = av(sp(SPA), "2026-07-08", "2026-10-05", [cobre("2026-06-20T03:00:00.000Z", "2026-10-06T03:00:00.000Z", 30)], { sinaisShopee: SEM_SINAIS, origem: "background" });
+    assert(b30.desatualizado.length === 1 && b30.desatualizado[0].inicio === d(30), JSON.stringify(b30.desatualizado));
+    // observada ha 8 dias: tudo ate 90 dias velho, o resto (>90) nao
+    const b8 = av(sp(SPA), "2026-07-08", "2026-10-05", [cobre("2026-06-20T03:00:00.000Z", "2026-10-06T03:00:00.000Z", 8 * 24)], { sinaisShopee: SEM_SINAIS, origem: "background" });
+    assert(b8.desatualizado.length === 1 && b8.desatualizado[0].inicio === d(90), JSON.stringify(b8.desatualizado));
+    // antes desta correcao a janela inteira (~100 dias) virava velha com 6 h
+    assert(!a.desatualizado.some((x) => x.inicio < d(8)), "6 h aplicado a janela inteira");
+  });
+  t("CB-7. virada de DIA e de MÊS: criado 23:59 SP de 30/09 conta em 30/09; 30/09 e 01/10 viram UMA faixa contígua", async () => {
+    const b = bancoCasos([pedidoSP(SPA, "V1", "2026-10-01T02:59:00.000Z", null), pedidoSP(SPA, "V2", "2026-10-01T03:00:00.000Z", null)]);
+    const l = await avDB(b);
+    assert(JSON.stringify(diasAlvo(l)) === JSON.stringify(["2026-09-30→2026-10-01"]) && l.motivos.includes("nao_pagos_sem_observacao_pos_periodo:2"), `${diasAlvo(l)} ${l.motivos}`);
+  });
+  t("CB-8. três lojas: cada loja só vê os SEUS pedidos e jobs (dono + loja em toda leitura); ML intocado", async () => {
+    const b = bancoFalso(lojasBase(), [...coberturaSP(SPA), ...coberturaSP(SPB), linhaML(MLA, "2026-10-01", "2026-10-05")]);
+    b.db.shopee_pedidos.push(pedidoSP(SPA, "A1", d(30), d(28)), pedidoSP(SPB, "B1", d(20), null), pedidoSP(SPB, "B2", d(20), null, { user_id: OUTRO }));
+    const avs = await avaliarDB(b, { marketplace: "TODOS", de: "2026-07-08", ate: "2026-10-05", origem: "background" });
+    const por = Object.fromEntries(avs.lojas.map((l) => [l.lojaId, l]));
+    assert(por[SPA].motivos.includes("nao_pagos_sem_observacao_pos_periodo:1") && JSON.stringify(diasAlvo(por[SPA])) === JSON.stringify(["2026-09-06→2026-09-06"]), `${por[SPA].motivos}`);
+    assert(por[SPB].motivos.includes("nao_pagos_sem_observacao_pos_periodo:1") && JSON.stringify(diasAlvo(por[SPB])) === JSON.stringify(["2026-09-16→2026-09-16"]), `${por[SPB].motivos}`);
+    const leituras = b.regs.filter((r) => r.tabela === "shopee_pedidos");
+    assert(leituras.length > 0 && leituras.every((r) => r.filtros.some(([op, c, v]) => op === "eq" && c === "user_id" && v === UID) && r.filtros.some(([op, c]) => op === "eq" && c === "loja_id")), "leitura sem dono/loja");
+  });
+  t("CB-9. mais de 100 dias: pedido pendente criado antes de hoje − 100 fica FORA da manutenção (limite explícito); pedido do usuário para o período o alcança", async () => {
+    const velho = pedidoSP(SPA, "V100", d(120), null);
+    const l = await avDB(bancoCasos([velho]));
+    assert(!l.motivos.some((m) => m.startsWith("nao_pagos")) && diasAlvo(l).length === 0, l.motivos.join());
+    const b = bancoFalso(lojasBase(), [linhaSP(SPA, "2026-05-20T03:00:00.000Z", "2026-06-20T03:00:00.000Z", { id: "cov-v" })]);
+    b.db.shopee_pedidos.push(velho);
+    const u = await avDBListar(b, { marketplace: "Shopee", lojaId: SPA, de: "2026-06-08", ate: "2026-06-12" });
+    assert(u.motivos.includes("nao_pagos_sem_observacao_pos_periodo:1") && diasAlvo(u).includes("2026-06-08→2026-06-08"), `${u.motivos} ${diasAlvo(u)}`);
+  });
+  t("CB-10. a LISTAGEM canônica é a MESMA população da contagem canônica (sem pendente perdido); sem pendentes → nenhuma listagem", async () => {
+    const CS2 = await import("../lib/vendas/canonico/shopee");
+    const b = bancoCasos();
+    const args = { userId: UID, lojaId: SPA, desdeIso: "2026-06-28T03:00:00.000Z", fimIso: "2026-10-06T03:00:00.000Z" };
+    const n = await CS2.contarNaoPagosSemObservacaoShopee(b.cliente, args), lista = await CS2.listarNaoPagosSemObservacaoShopee(b.cliente, args);
+    assert(n === 7 && lista.length === 7 && new Set(lista.map((x) => x.orderSn)).size === 7, `${n} ${lista.length}`);
+    // background: UMA consulta de candidatos (sem as 2 contagens HEAD) + escrow, com ou sem pendente
+    const vazio = bancoCasos([]); await avDB(vazio);
+    const cheio = bancoCasos(); await avDB(cheio);
+    assert(JSON.stringify(leiturasPedidos(vazio)) === JSON.stringify({ total: 2, linhas: 1 }) && JSON.stringify(leiturasPedidos(cheio)) === JSON.stringify({ total: 2, linhas: 1 }),
+      `${JSON.stringify(leiturasPedidos(vazio))} / ${JSON.stringify(leiturasPedidos(cheio))}`);
+  });
+  t("CB-13. candidatos = superconjunto EXATO: os mesmos pendentes que a listagem completa (C1–C7 e 400 aleatórios); a árvore or/and filtra no servidor", async () => {
+    const CS2 = await import("../lib/vendas/canonico/shopee");
+    const args = { userId: UID, lojaId: SPA, desdeIso: "2026-06-28T03:00:00.000Z", fimIso: "2026-10-06T03:00:00.000Z" };
+    let x = 7; const rnd = () => { x = (x * 1103515245 + 12345) % 2147483648; return x / 2147483648; };
+    const aleatorios = Array.from({ length: 400 }, (_, i) => { const c = AGORA - rnd() * 100 * DIA; const o = rnd() < 0.1 ? null : c + rnd() * 30 * DIA;
+      return pedidoSP(SPA, `R${i}`, new Date(c).toISOString(), o === null ? null : new Date(Math.min(o, AGORA)).toISOString()); });
+    const b = bancoCasos([...CASOS(), ...aleatorios]);
+    const fim = Date.parse(args.fimIso), P = CS2.LIMITE_POLITICA_PAGAMENTO_MS;
+    const pend = (rs: any[]) => rs.filter((r) => r.detailFetchedAt === null || Date.parse(r.detailFetchedAt) < Math.min(fim, Date.parse(r.createTime) + P)).map((r) => r.orderSn).sort().join();
+    const completa = await CS2.listarNaoPagosSemObservacaoShopee(b.cliente, args), cand = await CS2.listarCandidatosNaoPagosPorPrazoShopee(b.cliente, { ...args, prazoMs: P });
+    assert(pend(completa) === pend(cand) && pend(cand).length > 0 && cand.length < completa.length, `${cand.length} de ${completa.length}`);
+  });
+  t("CB-14. resposta CHEIA de candidatos (teto 1000) → a listagem completa paginada: 1.205 nunca detalhados, todos contados, nenhum omitido", async () => {
+    const muitos = Array.from({ length: 1205 }, (_, i) => pedidoSP(SPA, `N${String(i).padStart(5, "0")}`, new Date(AGORA - (10 + (i % 60)) * DIA).toISOString(), null));
+    const b = bancoFalso(lojasBase(), coberturaSP(SPA), { teto: 1000 }); b.db.shopee_pedidos.push(...muitos);
+    const l = await avDB(b);
+    assert(l.motivos.includes("nao_pagos_sem_observacao_pos_periodo:1205"), l.motivos.join());
+    assert(leiturasPedidos(b).linhas >= 3, JSON.stringify(leiturasPedidos(b)));   // candidatos (cheia) + paginas da listagem completa
+  });
+  t("CB-16. C8: visto DEPOIS de criação + 10 dias, mas dentro da margem da faixa (está nos candidatos): background NÃO o conta (prazo exato em memória); usuário conta", async () => {
+    // faixa semanal comeca em desde (28/06 03:00Z) + 7 semanas = 16/08 03:00Z; criado 1 h depois, visto 12 dias depois
+    const c8 = pedidoSP(SPA, "C8", "2026-08-16T04:00:00.000Z", "2026-08-28T04:00:00.000Z");
+    const CS2 = await import("../lib/vendas/canonico/shopee");
+    const b = bancoCasos([c8]);
+    const cand = await CS2.listarCandidatosNaoPagosPorPrazoShopee(b.cliente, { userId: UID, lojaId: SPA, desdeIso: "2026-06-28T03:00:00.000Z", fimIso: "2026-10-06T03:00:00.000Z", prazoMs: CS2.LIMITE_POLITICA_PAGAMENTO_MS });
+    assert(cand.length === 1, `pré-condição: C8 deveria estar nos candidatos (${cand.length})`);
+    const l = await avDB(b);
+    assert(!l.motivos.some((m) => m.startsWith("nao_pagos")) && diasAlvo(l).length === 0, l.motivos.join());
+    const u = await avDB(bancoCasos([c8]), "usuario");
+    assert(u.motivos.includes("nao_pagos_sem_observacao_pos_periodo:1"), u.motivos.join());
+  });
+  t("CB-17. SÓ a leitura de linhas falha (contagens HEAD ok) → leitura_falhou: o sinal nunca vira 'zero pendentes'", async () => {
+    const b = bancoFalso(lojasBase(), coberturaSP(SPA), { falharLinhasPedidos: true }); b.db.shopee_pedidos.push(...CASOS());
+    const ce = console.error; console.error = () => {};
+    let e = ""; try { await avDB(b); } catch (x: any) { e = x.message; } finally { console.error = ce; }
+    assert(e === "leitura_falhou", e || "nao lancou");
+  });
+  t("CB-15. erro/timeout na leitura de pedidos → leitura_falhou (background e Dashboard): nunca 'zero pendentes', nunca FRESH", async () => {
+    for (const origem of ["background", "usuario"] as const) {
+      const b = bancoFalso(lojasBase(), coberturaSP(SPA), { falharPedidos: true }); b.db.shopee_pedidos.push(...CASOS());
+      const erros: string[] = []; const ce = console.error; console.error = (...a: any[]) => { erros.push(a.join(" ")); };
+      let e = ""; try { await avDB(b, origem); } catch (x: any) { e = x.message; } finally { console.error = ce; }
+      assert(e === "leitura_falhou", `${origem}: ${e || "nao lancou"}`);
+    }
+  });
+  t("CB-11. as regras canônicas seguem intocadas: contarNaoPagosSemObservacaoShopee igual a 6d3dad0; prazo NÃO duplicado no coordenador", () => {
+    const base = execFileSync("git", ["show", "6d3dad0:lib/vendas/canonico/shopee.ts"], { cwd: RAIZ, encoding: "utf8" }).replace(/\r\n/g, "\n");
+    const atual = readFileSync(join(RAIZ, "lib/vendas/canonico/shopee.ts"), "utf8").replace(/\r\n/g, "\n");
+    const fn = (s: string) => s.slice(s.indexOf("export async function contarNaoPagosSemObservacaoShopee("), s.indexOf("/** Dimensao C (contagem)"));
+    const semNova = (s: string) => s.replace(/\n\/\*\*\n \* P1-B \(agendamento[\s\S]*?\n}\n/g, "");
+    assert(fn(base) === semNova(fn(atual)) && fn(base).length > 200, "contagem canonica alterada");
+    const coord = readFileSync(join(RAIZ, "lib/vendas/sync/coordenador.ts"), "utf8");
+    assert(!/10 \* 24 \* 3600/.test(coord) && /LIMITE_POLITICA_PAGAMENTO_MS/.test(coord), "prazo duplicado no coordenador");
+  });
+
+  t("CB-12. C7 (visto depois do prazo, mudança posterior hipotética) NÃO motiva o sinal, mas o frescor por IDADE relê a faixa dele", async () => {
+    const c7 = pedidoSP(SPA, "C7", d(45), d(20));
+    const b = bancoFalso(lojasBase(), coberturaSP(SPA, AGORA - 8 * 24 * H));   // cobertura observada ha 8 dias: a faixa 31–90 vence (7 dias)
+    b.db.shopee_pedidos.push(c7);
+    const l = await avDB(b);
+    assert(!l.motivos.some((m) => m.startsWith("nao_pagos")) && l.motivos.includes("observacao_velha"), l.motivos.join());
+    assert(l.desatualizado.some((x) => x.inicio <= c7.create_time && x.fim > c7.create_time), JSON.stringify(l.desatualizado));
+  });
+  t("CB-D15B. cadeia de exceções EXATA: atual − P1 = 8978451 (byte a byte) e esse resultado − D15B = d631748, nos 3 arquivos de sync tocados", () => {
     const tmp = mkdtempSync(join(RAIZ, ".tmp-excecao-p1-"));
     try {
       for (const f of Object.keys(PATCH_P1)) {
@@ -573,11 +774,11 @@ async function principal() {
         const d15b = reconstruirBaseD15B(tmp, f);
         assert(d15b.valido, `${f}: cadeia D15B ${d15b.motivo}`);
       }
-      // os demais arquivos de sync da D15B continuam reconstruindo DIRETO (nenhuma mudanca P1 neles nesta release)
-      for (const f of ["lib/vendas/sync/planejamento.ts", "lib/vendas/sync/tipos.ts", "lib/vendas/sync/coordenador-tick.ts"])
-        assert(reconstruirBaseD15B(RAIZ, f).valido, `${f} saiu da D15B`);
+      assert(JSON.stringify(Object.keys(PATCH_P1).sort()) === JSON.stringify(["lib/vendas/sync/coordenador.ts", "lib/vendas/sync/planejamento.ts", "lib/vendas/sync/tipos.ts"]), "excecao P1 cobre arquivo a mais/a menos");
+      assert(reconstruirBaseD15B(RAIZ, "lib/vendas/sync/coordenador-tick.ts").valido, "coordenador-tick.ts saiu da D15B");
     } finally { rmSync(tmp, { recursive: true, force: true }); }
   });
+
   t("CP-10. o coordenador só LÊ sync_jobs por lerJanelasSyncJobs (as outras referências são escrita: insert); nenhum select solto", () => {
     const src = readFileSync(join(RAIZ, "lib/vendas/sync/coordenador.ts"), "utf8").replace(/\r\n/g, "\n");
     const usos = [...src.matchAll(/\.from\("sync_jobs"\)/g)].map((m) => ({ antes: src.slice(Math.max(0, m.index! - 120), m.index!), depois: src.slice(m.index!, m.index! + 30) }));
