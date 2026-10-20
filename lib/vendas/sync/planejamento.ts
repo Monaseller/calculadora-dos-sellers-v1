@@ -28,7 +28,7 @@ import {
 } from "./intraday";
 import type {
   AvaliacaoLojaSync, AvaliacaoSync, Cobertura, Frescor, Intervalo, JobExistenteSync, JobPlanejado, LojaAtivaSync, Necessidade,
-  OrigemPedido, PoliticaSync, ProximaAcao, SinaisShopeeSync, Sincronizacao,
+  OrigemPedido, PoliticaSync, ProximaAcao, SinaisShopeeSync, Sincronizacao, TamanhoJobShopee,
 } from "./tipos";
 
 const DIA_MS = 24 * 3600 * 1000;
@@ -55,6 +55,29 @@ export const POLITICA_SYNC_PROPOSTA: PoliticaSync = {
   janelaContagemFalhasMs: 24 * 3600 * 1000,
   maxDiasPorJobML: 7,
   horizonteRecenteDias: 30,
+};
+
+/**
+ * E2.1 — tamanho dos jobs Shopee de manutencao/bootstrap. A fila serial (um job ativo por loja) so deixa o intraday
+ * entrar ENTRE jobs: um job de 14 dias de historico (todos os pedidos ausentes do banco → detalhe + escrow de cada um)
+ * bloqueava o incremental por 1 a 3 h. O tamanho da janela sai do trabalho ESTIMADO, com densidade e fracao de escrow
+ * MEDIDAS pelos proprios jobs ja concluidos (nunca a densidade de outra epoca). Alvo de 16 fatias estimadas (com a
+ * margem de seguranca, o trabalho real fica abaixo): simulacao com o tick real e worker compartilhado (E2.1) — p90
+ * ~20 min por job, intraday nunca esperando um job planejado de horas; o historico anda nas vagas que a manutencao
+ * deixa. Capacidade por fatia conservadora (medida em producao, 20/10: detalhe ~700, escrow ~92–130, listagem ~1800).
+ */
+export const TAMANHO_JOB_SHOPEE: TamanhoJobShopee = {
+  alvoFatias: 16,
+  pedidosPorFatia: { listar: 1800, detalhe: 700, escrow: 100 },
+  fracaoEscrowSemMedida: 1,
+  pisoFracaoEscrow: 0.05,
+  fatorSeguranca: 1.5,
+  sondaMs: 6 * 3600 * 1000,
+  minimoMs: 3600 * 1000,
+  maximoMs: 7 * DIA_MS,
+  gradeMs: 3600 * 1000,
+  vizinhancaMs: 3 * DIA_MS,
+  crescimentoMaximo: 2,
 };
 
 /**
@@ -154,14 +177,97 @@ function avaliarFalhas(jobs: JobExistenteSync[], iv: Iv, desdeSucessoMs: number,
  * falho, por exemplo). Mesma politica de avaliarFalhas (teto, espera): nunca recria sem fim um job que nao atende o
  * sinal, e o esgotamento fica VISIVEL (nunca "resolvido" em silencio).
  */
-function avaliarTentativasPendencia(jobs: JobExistenteSync[], iv: Iv, desdeMs: number, pol: PoliticaSync, agoraMs: number): { estado: "ok" | "esperar" | "esgotado"; ate?: string } {
+function avaliarTentativasPendencia(jobs: JobExistenteSync[], iv: Iv, desdeMs: number, pol: PoliticaSync, agoraMs: number): { estado: "ok" | "esperar" | "esgotado"; ate?: string; restante: Iv[] } {
   const corte = Math.max(desdeMs, agoraMs - pol.janelaContagemFalhasMs);
-  const tentativas = jobs.filter((j) => (j.status === "erro" && sobrepoe(j, iv)) || (completo(j) && contem(j, iv) && t(j.criadoEm) > desdeMs))
-    .map((j) => (j.status === "erro" ? t(j.concluidoEm) || t(j.criadoEm) : t(j.concluidoEm))).filter((x) => x > corte);
-  if (tentativas.length >= pol.maxFalhasPorNecessidade) return { estado: "esgotado" };
+  // E2.1: o refresh da faixa pode vir em VARIOS jobs menores — uma tentativa concluida e uma RODADA (a uniao dos jobs
+  // criados depois da observacao cobre a faixa inteira). Um job que contem a faixa sozinho continua sendo uma rodada.
+  const r = rodadasSobre(jobs, iv, desdeMs);
+  const tentativas = [...jobs.filter((j) => j.status === "erro" && sobrepoe(j, iv)).map((j) => t(j.concluidoEm) || t(j.criadoEm)), ...r.rodadas]
+    .filter((x) => x > corte);
+  if (tentativas.length >= pol.maxFalhasPorNecessidade) return { estado: "esgotado", restante: [] };
   const ultima = Math.max(...tentativas, -Infinity);
-  if (tentativas.length && agoraMs - ultima < pol.esperaAposFalhaMs) return { estado: "esperar", ate: isoDe(ultima + pol.esperaAposFalhaMs) };
-  return { estado: "ok" };
+  if (tentativas.length && agoraMs - ultima < pol.esperaAposFalhaMs) return { estado: "esperar", ate: isoDe(ultima + pol.esperaAposFalhaMs), restante: [] };
+  // so o trecho que a rodada EM CURSO ainda nao cobriu: sem isso o mesmo pedaço seria recriado sem fim e a rodada nunca fecharia
+  return { estado: "ok", restante: r.restante };
+}
+
+/**
+ * E2.1: rodadas completas sobre `iv` — jobs create_time completos CRIADOS depois de `desdeMs`, em ordem de conclusao;
+ * a rodada fecha (no concluido_em do job que a completou) quando a UNIAO deles contem `iv` (bordas compartilhadas).
+ * `restante` = o que a rodada em curso ainda nao cobriu (a faixa inteira quando nenhuma esta em curso).
+ */
+function rodadasSobre(jobs: JobExistenteSync[], iv: Iv, desdeMs: number): { rodadas: number[]; restante: Iv[] } {
+  const candidatos = jobs.filter((j) => completo(j) && !j.catchup && j.janelaInicio && j.janelaFim && t(j.criadoEm) > desdeMs && sobrepoe(j, iv)
+    && Number.isFinite(t(j.concluidoEm))).sort((x, y) => t(x.concluidoEm) - t(y.concluidoEm));
+  const rodadas: number[] = []; let cob: Iv[] = [];
+  for (const j of candidatos) {
+    cob = uniao([...cob, [t(j.janelaInicio), t(j.janelaFim)]]);
+    if (!subtrair(iv, cob).length) { rodadas.push(t(j.concluidoEm)); cob = []; }
+  }
+  return { rodadas, restante: subtrair(iv, cob) };
+}
+
+/**
+ * E2.1: comprimento da janela de um job Shopee de manutencao/bootstrap que TERMINA em b (trecho [a, b]). `jobs` = os
+ * da loja. Referencias = jobs create_time COMPLETOS (nunca intraday) com `listados` medido.
+ *   refresh     o trecho JA foi listado: cada pedaço dele usa a densidade e a fracao de escrow MEDIDAS pelo job
+ *               concluido mais recente que o contem (× fatorSeguranca; escrow nunca abaixo do piso); a janela vai de b
+ *               para tras ate o trabalho somado chegar ao alvo — um dia de campanha pesa so onde esta;
+ *   descoberta  os pedidos do trecho nunca foram listados por job de cobertura — podem nem estar no banco: densidade =
+ *               a MAIOR medida entre as referencias a ate `vizinhancaMs` (× fatorSeguranca) e escrow de todos
+ *               (fracaoEscrowSemMedida), salvo a parte que o INTRADAY ja observou (fechamento do dia anterior), que usa
+ *               a fracao medida pelo vizinho mais recente;
+ *   sem referencia por perto → sondaMs; nunca mais que crescimentoMaximo × a maior janela de referencia (sai da sonda
+ *   devagar). Densidade ZERO medida → o teto do crescimento. Sempre em [minimoMs, maximoMs].
+ */
+export function comprimentoJanelaShopee(a: number, b: number, proposito: "descoberta" | "refresh", jobs: JobExistenteSync[], tam: TamanhoJobShopee): number {
+  const medidos = jobs.filter((j) => j.campoTempo === "create_time" && completo(j) && !ehJobIntraday(j) && j.janelaInicio && j.janelaFim
+    && typeof j.listados === "number" && t(j.janelaFim) > t(j.janelaInicio));
+  const perto = medidos.filter((j) => t(j.janelaInicio) < b + tam.vizinhancaMs && t(j.janelaFim) > a - tam.vizinhancaMs);
+  const limitar = (ms: number) => Math.min(tam.maximoMs, Math.max(tam.minimoMs, ms));
+  const vistoIntraday = jobs.filter((j) => completo(j) && j.campoTempo === "create_time" && ehJobIntraday(j)).map((j) => [t(j.janelaInicio), t(j.janelaFim)] as Iv);
+  const naoVistoEm = ([x, y]: Iv) => subtrair([x, y], vistoIntraday).reduce((s, [p, q]) => s + (q - p), 0) / (y - x);
+  // FECHAMENTO (D15B): o ultimo dia do trecho que o intraday ja observou (≥95%) e relistado INTEIRO, num job so, como
+  // antes — os pedidos dele ja estao no banco, com escrow lido pelo intraday; nunca vira fila de pedaços a meia-noite
+  if (proposito === "descoberta" && naoVistoEm([Math.max(a, b - DIA_MS), b]) <= 0.05) return limitar(Math.min(b - a, DIA_MS));
+  if (!perto.length) return limitar(tam.sondaMs);
+  const teto = tam.crescimentoMaximo * Math.max(...perto.map((j) => t(j.janelaFim) - t(j.janelaInicio)));
+  const densidade = Math.max(...perto.map((j) => j.listados! / (t(j.janelaFim) - t(j.janelaInicio)))) * tam.fatorSeguranca;
+  const fracaoDe = (j: JobExistenteSync | undefined) =>
+    j && typeof j.escrowsNecessarios === "number" && j.listados! > 0 ? Math.min(1, j.escrowsNecessarios / j.listados!) : tam.fracaoEscrowSemMedida;
+  const maisRecente = (js: JobExistenteSync[]) => [...js].sort((x, y) => t(y.concluidoEm) - t(x.concluidoEm))[0];
+  const f = tam.pedidosPorFatia;
+  const fatiasPorPedido = (fracao: number) => 1 / f.listar + 1 / f.detalhe + Math.max(tam.pisoFracaoEscrow, fracao) / f.escrow;
+  if (proposito === "refresh") {
+    const sobre = medidos.filter((j) => t(j.janelaInicio) < b && t(j.janelaFim) > a);
+    const cortes = [...new Set([a, b, ...sobre.flatMap((j) => [t(j.janelaInicio), t(j.janelaFim)]).filter((x) => x > a && x < b)])].sort((x, y) => y - x);
+    let trabalho = 0;
+    for (let i = 0; i + 1 < cortes.length; i++) {
+      const [q, p] = [cortes[i], cortes[i + 1]];
+      const j = maisRecente(sobre.filter((x) => t(x.janelaInicio) <= p && t(x.janelaFim) >= q));
+      // pedaço sem medida propria (job legado): a densidade da vizinhanca e escrow de todos
+      const dens = j ? (j.listados! / (t(j.janelaFim) - t(j.janelaInicio))) * tam.fatorSeguranca : densidade;
+      const porMs = dens * fatiasPorPedido(fracaoDe(j));
+      if (porMs > 0 && trabalho + (q - p) * porMs >= tam.alvoFatias) return limitar(Math.min(b - q + (tam.alvoFatias - trabalho) / porMs, teto));
+      trabalho += (q - p) * porMs;
+    }
+    return limitar(Math.min(b - a, teto));
+  }
+  const naoVisto = naoVistoEm([a, b]);
+  const fracao = naoVisto * tam.fracaoEscrowSemMedida + (1 - naoVisto) * fracaoDe(maisRecente(perto));
+  const ms = densidade > 0 ? tam.alvoFatias / (densidade * fatiasPorPedido(fracao)) : Infinity;
+  return limitar(Math.min(ms, teto));
+}
+
+/**
+ * E2.1: o PROXIMO pedaço de [a, b] para manutencao/bootstrap — o mais recente, [inicio, b], com inicio na grade (o
+ * escolhedor ja preferia o fim mais recente). So ele vira necessidade: o resto do trecho e planejado depois que este
+ * concluir (o concluido sai do trecho pela cobertura/frescor por segmento — o progresso fica, a borda e compartilhada,
+ * sem lacuna) e nada de historico fica enfileirado a frente do intraday.
+ */
+export function proximoPedacoCriacao(a: number, b: number, comprimentoMs: number, gradeMs: number): { inicio: Date; fim: Date } {
+  if (!(b > a) || !(comprimentoMs > 0) || !(gradeMs > 0)) throw new Error("janela_invalida");
+  return { inicio: new Date(Math.max(a, Math.floor((b - comprimentoMs) / gradeMs) * gradeMs)), fim: new Date(b) };
 }
 
 /**
@@ -255,8 +361,15 @@ function planejarShopee(loja: LojaAtivaSync, de: string, ate: string, agoraMs: n
   const faltando = subtrair(necessario, [...feitos, ...ativos].map((j) => [t(j.janelaInicio), t(j.janelaFim)] as Iv));
   const andamento = [...ativos.filter((j) => sobrepoe(j, necessario)).map((j) => j.id), ...(catchupAtivo ? [catchupAtivo.id] : [])];
   const recente = agoraMs - necessario[1] <= pol.horizonteRecenteDias * DIA_MS;
+  // E2.1: manutencao/bootstrap em jobs de trabalho ESTIMADO limitado (o intraday entra entre eles); pedido do USUARIO
+  // como era (blocos de 14 dias — revalidacao explicita intacta)
+  const tam = pol.tamanhoJobShopee ?? TAMANHO_JOB_SHOPEE;
+  const daLoja = jobs.filter((j) => j.lojaId === loja.id && j.marketplace === "Shopee");   // com intraday: so para medir o que ele ja viu
+  const janelas = (a: number, b: number, proposito: "descoberta" | "refresh") => origem === "usuario"
+    ? planejarJanelasCriacao(new Date(a), new Date(b))
+    : [proximoPedacoCriacao(a, b, comprimentoJanelaShopee(Math.max(a, b - tam.maximoMs), b, proposito, daLoja, tam), tam.gradeMs)];
   const janelaJob = (a: number, b: number, proposito: "descoberta" | "refresh"): JobPlanejado[] =>
-    planejarJanelasCriacao(new Date(a), new Date(b)).map((w) => ({
+    janelas(a, b, proposito).map((w) => ({
       chave: `Shopee|${loja.id}|create_time|${w.inicio.toISOString()}|${w.fim.toISOString()}|${proposito}`, marketplace: "Shopee", lojaId: loja.id,
       campoTempo: "create_time", inicio: w.inicio.toISOString(), fim: w.fim.toISOString(), de: diaCivil(w.inicio.getTime()), ate: diaCivil(w.fim.getTime() - 1), proposito }));
   const motivos: string[] = []; const necessidades: Necessidade[] = []; const esgotado: string[] = []; let espera: string | null = null;
@@ -310,13 +423,15 @@ function planejarShopee(loja: LojaAtivaSync, de: string, ate: string, agoraMs: n
       stale = true; desat.push(...alvos.map(({ iv: [x, y] }) => ({ inicio: isoDe(x), fim: isoDe(y) })));
       if (!ativos.length) for (const { iv, desdeMs } of alvos) {
         // velho: falhas a partir da observacao efetiva DESTE trecho; pendencia: tentativas que nao a resolveram
-        const f = desdeMs === null
+        const f: { estado: "ok" | "esperar" | "esgotado"; ate?: string; restante?: Iv[] } = desdeMs === null
           ? avaliarFalhas(descoberta, iv, observacaoEfetivaDaJanela(feitos, iv) ?? -Infinity, pol, agoraMs)
           : avaliarTentativasPendencia(descoberta, iv, desdeMs, pol, agoraMs);
         const marca = desdeMs === null ? "refresh_falhas_repetidas" : "pendencia_nao_pagos_sem_efeito";
         if (f.estado === "esgotado") { motivos.push(marca); esgotado.push(marca); }
         else if (f.estado === "esperar") espera = espera && espera > f.ate! ? espera : f.ate!;
-        else necessidades.push(...janelaJob(iv[0], iv[1], "refresh").map((job) => ({ job, tipo: "refresh" as const, prioridade: prioridadeDe(origem, "refresh", recente) })));
+        // E2.1: pendencia → so o que a rodada em curso ainda nao releu (velho: o trecho todo — o que ja foi relido saiu dele)
+        else for (const [x, y] of f.restante ?? [iv])
+          necessidades.push(...janelaJob(x, y, "refresh").map((job) => ({ job, tipo: "refresh" as const, prioridade: prioridadeDe(origem, "refresh", recente) })));
       }
     }
   }

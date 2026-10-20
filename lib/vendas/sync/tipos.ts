@@ -42,6 +42,12 @@ export interface JobExistenteSync {
   tipo?: string | null;
   dateFrom?: string | null;
   dateTo?: string | null;
+  /**
+   * E2.1: contadores do PROPRIO job (progresso.listados / progresso.escrow_necessarios) — so para estimar o tamanho
+   * dos proximos jobs Shopee de manutencao (densidade de pedidos e fracao de escrow MEDIDAS). null = desconhecido.
+   */
+  listados?: number | null;
+  escrowsNecessarios?: number | null;
 }
 
 /** Sinais de estado da Shopee (contagens do servico canonico, sem valores). */
@@ -127,4 +133,34 @@ export interface PoliticaSync {
   maxDiasPorJobML: number;
   /** "Recente" para a prioridade da fila. */
   horizonteRecenteDias: number;
+  /** E2.1: tamanho dos jobs Shopee de manutencao/bootstrap. Ausente = TAMANHO_JOB_SHOPEE (planejamento.ts). */
+  tamanhoJobShopee?: TamanhoJobShopee;
+}
+
+/**
+ * E2.1: como o planejador limita o TRABALHO estimado de cada job Shopee de manutencao/bootstrap (origem != usuario),
+ * para que o intraday da loja (fila serial) volte a cada fronteira de job. Estimativa, nunca garantia de duracao.
+ */
+export interface TamanhoJobShopee {
+  /** Trabalho-alvo por job, em fatias do worker (~40 s cada, um job por invocacao). */
+  alvoFatias: number;
+  /** Capacidade CONSERVADORA de uma fatia, por fase do motor (pedidos por fatia). */
+  pedidosPorFatia: { listar: number; detalhe: number; escrow: number };
+  /** Fracao de pedidos que exigem escrow quando nao ha medida (pedido ausente do banco: todos). */
+  fracaoEscrowSemMedida: number;
+  /** Menor fracao de escrow assumida, mesmo com medida menor. */
+  pisoFracaoEscrow: number;
+  /** Margem sobre a densidade MEDIA medida (pico dentro da janela de referencia). */
+  fatorSeguranca: number;
+  /** Janela sem nenhuma referencia medida por perto (densidade desconhecida). */
+  sondaMs: number;
+  minimoMs: number;
+  /** Teto absoluto (abaixo do limite de 14 dias da get_order_list). */
+  maximoMs: number;
+  /** Inicio das janelas alinhado a esta grade (UTC; o fuso de SP tem offset de hora inteira). */
+  gradeMs: number;
+  /** Raio, em volta do trecho, onde jobs concluidos servem de referencia de densidade. */
+  vizinhancaMs: number;
+  /** Uma janela nunca passa deste multiplo da MAIOR janela de referencia (crescimento limitado a partir da sonda). */
+  crescimentoMaximo: number;
 }

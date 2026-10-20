@@ -14,6 +14,8 @@ import { join } from "node:path";
 import { planejarMLSemD15B, reconstruirBaseD15B } from "./_excecao-d15b-intraday";
 // P1 sync_jobs: excecao EXATA das correcoes A e B (atual − P1 = 8978451, que reconstroi d631748 pela D15B)
 import { PATCH_P1, reconstruirBaseP1, reverterP1 } from "./_excecao-p1-sync-jobs";
+// E2.1: excecao EXATA do tamanho dos jobs Shopee (atual − E21 = 5e135e6, que reconstroi 8978451 pela P1)
+import { PATCH_E21, reconstruirBaseE21, reverterE21 } from "./_excecao-e21-tamanho-jobs";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import type { AvaliacaoLojaSync, JobExistenteSync, LojaAtivaSync, PoliticaSync } from "../lib/vendas/sync/tipos";
 
@@ -102,7 +104,10 @@ async function principal() {
           if (leituraSJ && opc.falharPagina === leituraSJ) return ok({ data: null, error: { code: "57014", message: "canceling statement due to statement timeout" } });
           if (tabela === "shopee_pedidos" && (opc.falharPedidos || (opc.falharLinhasPedidos && !head))) return ok({ data: null, count: null, error: { code: "57014", message: "canceling statement due to statement timeout" } });
           (r as any).head = head;
-          let d = (db[tabela] ?? []).filter(casa).map((l: any) => (tabela === "sync_jobs" ? { ...l, modo: l.checkpoint?.modo ?? null } : l));
+          // E2.1: e "listados:progresso->>listados, escrows:progresso->>escrow_necessarios" (->> devolve TEXTO)
+          const txt = (v: unknown) => (v === undefined || v === null ? null : String(v));
+          let d = (db[tabela] ?? []).filter(casa).map((l: any) => (tabela === "sync_jobs"
+            ? { ...l, modo: l.checkpoint?.modo ?? null, listados: txt(l.progresso?.listados), escrows: txt(l.progresso?.escrow_necessarios) } : l));
           if (ordens.length) d = [...d].sort((x: any, y: any) => { for (const k of ordens) { const a = String(x[k]), b = String(y[k]); if (a !== b) return a < b ? -1 : 1; } return 0; });
           if (limite !== null) d = d.slice(0, limite);
           if (opc.teto !== undefined && !head) d = d.slice(0, opc.teto);
@@ -305,8 +310,11 @@ async function principal() {
     const s30 = P.avaliarBootstrap({ loja: sp(SPB), agoraMs: AGORA, jobs: [], politica: POL, horizonte: "ULTIMOS_30_DIAS" });
     const js = s30.necessidades.map((n) => n.job);
     assert(js.every((x) => x.campoTempo === "create_time" && Date.parse(x.fim!) - Date.parse(x.inicio!) <= 14 * 24 * H) && jobDa(s30)!.fim === "2026-10-06T03:00:00.000Z", JSON.stringify(js.map((x) => [x.inicio, x.fim])));
-    const ord = [...js].sort((a, b) => Date.parse(a.inicio!) - Date.parse(b.inicio!));
-    assert(ord[0].inicio === new Date(Date.parse("2026-09-06T03:00:00Z") - CS.LIMITE_POLITICA_PAGAMENTO_MS).toISOString(), `inicio ${ord[0].inicio}`);
+    // E2.1: o ALVO de cobertura e o mesmo (desde 06/09 − prazo); a necessidade e so o PROXIMO pedaço (o mais recente) —
+    // loja nova, nenhuma densidade medida → a sonda de 6 h; o resto vem depois que ele concluir (CE21)
+    assert(s30.faltando.length === 1 && s30.faltando[0].inicio === new Date(Date.parse("2026-09-06T03:00:00Z") - CS.LIMITE_POLITICA_PAGAMENTO_MS).toISOString()
+      && s30.faltando[0].fim === "2026-10-06T03:00:00.000Z", JSON.stringify(s30.faltando));
+    assert(js.length === 1 && Date.parse(js[0].fim!) - Date.parse(js[0].inicio!) === P.TAMANHO_JOB_SHOPEE.sondaMs, JSON.stringify(js.map((x) => [x.inicio, x.fim])));
   });
 
   console.log("\n[dono, flag, catch-up, worker]");
@@ -591,7 +599,10 @@ async function principal() {
   const CASOS = () => [
     pedidoSP(SPA, "C1", d(60), d(40)), pedidoSP(SPA, "C2", d(30), d(28)), pedidoSP(SPA, "C3", d(2), d(1), { order_status: "UNPAID" }),
     pedidoSP(SPA, "C4", d(8), d(7), { order_status: "UNPAID" }), pedidoSP(SPA, "C5", d(40), d(35)), pedidoSP(SPA, "C6", d(20), null), pedidoSP(SPA, "C7", d(45), d(20))];
-  const coberturaSP = (lojaId: string, concl = AGORA - H) => [linhaSP(lojaId, "2026-06-20T03:00:00.000Z", "2026-10-06T03:00:00.000Z", { id: `cov-${lojaId.slice(0, 2)}`, concluido_em: new Date(concl).toISOString(), criado_em: new Date(concl - H).toISOString() })];
+  // E2.1: a cobertura traz a densidade MEDIDA (3.000 pedidos em 108 dias, 1% com escrow) — o refresh de uma faixa de
+  // poucos dias cabe em UM job, como antes; o caso SEM medida (sonda de 6 h) e o de densidade alta estao nos CE21
+  const coberturaSP = (lojaId: string, concl = AGORA - H) => [linhaSP(lojaId, "2026-06-20T03:00:00.000Z", "2026-10-06T03:00:00.000Z", { id: `cov-${lojaId.slice(0, 2)}`, concluido_em: new Date(concl).toISOString(), criado_em: new Date(concl - H).toISOString(),
+    progresso: { listados: 3000, escrow_necessarios: 30 } })];
   const bancoCasos = (pedidos = CASOS()) => { const b = bancoFalso(lojasBase(), coberturaSP(SPA)); b.db.shopee_pedidos.push(...pedidos); return b; };
   const avDB = async (b: ReturnType<typeof bancoFalso>, origem: "background" | "usuario" = "background", args: any = MAN) => (await avaliarDB(b, { ...args, origem })).lojas[0];
   // planejador com origem usuario: pede a listagem EXPLICITAMENTE (o Dashboard nao pede)
@@ -763,20 +774,199 @@ async function principal() {
     assert(!l.motivos.some((m) => m.startsWith("nao_pagos")) && l.motivos.includes("observacao_velha"), l.motivos.join());
     assert(l.desatualizado.some((x) => x.inicio <= c7.create_time && x.fim > c7.create_time), JSON.stringify(l.desatualizado));
   });
-  t("CB-D15B. cadeia de exceções EXATA: atual − P1 = 8978451 (byte a byte) e esse resultado − D15B = d631748, nos 3 arquivos de sync tocados", () => {
-    const tmp = mkdtempSync(join(RAIZ, ".tmp-excecao-p1-"));
+
+  // ── E2.1: jobs Shopee de manutencao/bootstrap com trabalho estimado LIMITADO (o intraday entra entre eles) ──
+  console.log("\n[CE21. tamanho dos jobs Shopee de manutencao/bootstrap]");
+  const TAM = P.TAMANHO_JOB_SHOPEE;
+  const FIM_HIST = Date.parse("2026-06-30T03:00:00.000Z"), INI_ANO = Date.parse("2026-01-01T03:00:00.000Z") - CS.LIMITE_POLITICA_PAGAMENTO_MS, FIM_COB = Date.parse("2026-10-06T03:00:00.000Z");
+  const isoE = (ms: number) => new Date(ms).toISOString();
+  // cobertura MEDIDA de 30/06 a 06/10 em blocos de 14 dias (1.000 pedidos/dia, sem escrow pendente), observada ha 1 h
+  const cobMedida = (lojaId = SPA, porDia = 1000, o: Partial<JobExistenteSync> = {}) => { const js: JobExistenteSync[] = [];
+    for (let a = FIM_HIST; a < FIM_COB; a += 14 * DIA) { const b = Math.min(a + 14 * DIA, FIM_COB);
+      js.push(jobSP(lojaId, isoE(a), isoE(b), { listados: Math.round(porDia * (b - a) / DIA), escrowsNecessarios: 0, criadoEm: isoE(AGORA - 3 * H), ...o })); }
+    return js; };
+  const bootAno = (jobs: JobExistenteSync[], agoraMs = AGORA, pol: PoliticaSync = POL) => P.avaliarBootstrap({ loja: sp(SPA), agoraMs, jobs, politica: pol, horizonte: "ANO_CORRENTE" });
+  const custo = (fracao: number) => 1 / TAM.pedidosPorFatia.listar + 1 / TAM.pedidosPorFatia.detalhe + fracao / TAM.pedidosPorFatia.escrow;
+  const dur = (j: { inicio: string | null; fim: string | null }) => Date.parse(j.fim!) - Date.parse(j.inicio!);
+  const intra = (lojaId: string, ini: number, fim: number, o: Partial<JobExistenteSync> = {}) => { const dia = new Date(ini - 3 * H).toISOString().slice(0, 10);
+    return jobSP(lojaId, isoE(ini), isoE(fim), { tipo: "incremental", dateFrom: dia, dateTo: dia, concluidoEm: isoE(fim + 5 * 60e3), criadoEm: isoE(fim), ...o }); };
+
+  t("CE21-1. histórico ausente do banco: o 1o job é SÓ o pedaço mais recente, do tamanho do trabalho-alvo pela densidade MEDIDA do vizinho (escrow de todos)", () => {
+    const l = bootAno(cobMedida());
+    const j = jobDa(l)!;
+    // 1.000/dia × 1,5 de margem; descoberta sem intraday → fracao 1 → L = alvo / (densidade × custo)
+    const L = TAM.alvoFatias / ((1000 * TAM.fatorSeguranca / DIA) * custo(1));
+    assert(j.proposito === "descoberta" && j.fim === isoE(FIM_HIST) && l.proximaAcao.acao === "CREATE_DISCOVERY_JOB" && l.proximaAcao.prioridade === 5, resumo(l));
+    assert(j.inicio === isoE(Math.floor((FIM_HIST - L) / H) * H) && dur(j) < DIA && dur(j) >= L, `${j.inicio} L=${(L / H).toFixed(2)}h`);
+    assert(l.necessidades.length === 1 && l.faltando.length === 1 && l.faltando[0].inicio === isoE(INI_ANO) && l.faltando[0].fim === isoE(FIM_HIST), JSON.stringify(l.faltando));
+  });
+  t("CE21-2. sem densidade medida → sonda de 6 h; depois cresce no máximo 2× por passo (nunca salta para 7 dias de uma vez)", () => {
+    const k = (jobs: JobExistenteSync[]) => jobDa(P.avaliarBootstrap({ loja: sp(SPB), agoraMs: AGORA, jobs, politica: POL, horizonte: "ULTIMOS_7_DIAS" }))!;
+    const j1 = k([]); assert(dur(j1) === TAM.sondaMs && j1.fim === isoE(FIM_COB), `${j1.inicio}→${j1.fim}`);
+    const feitos: JobExistenteSync[] = [jobSP(SPB, j1.inicio!, j1.fim!, { listados: 0, escrowsNecessarios: 0 })];
+    const j2 = k(feitos); assert(dur(j2) === 2 * TAM.sondaMs && j2.fim === j1.inicio, `${j2.inicio}→${j2.fim}`);
+    feitos.push(jobSP(SPB, j2.inicio!, j2.fim!, { listados: 0, escrowsNecessarios: 0 }));
+    const j3 = k(feitos); assert(dur(j3) === 4 * TAM.sondaMs && j3.fim === j2.inicio, `${j3.inicio}→${j3.fim}`);
+  });
+  t("CE21-3. histórico inteiro drenado pedaço a pedaço (dias de campanha 5×, perfil horário): união = lacuna EXATA, bordas compartilhadas, sem sobreposição, sem chave repetida, termina", () => {
+    const perfil = (ms: number) => { const h = new Date(ms - 3 * H).getUTCHours(); return h < 7 ? 0.3 : h < 10 ? 1 : 1.45; };
+    const campanha = (ms: number) => { const d = new Date(ms - 3 * H); return d.getUTCDate() === d.getUTCMonth() + 1 ? 5 : 1; };
+    const pedidos = (a: number, b: number) => { let n = 0; for (let x = a; x < b; x += 15 * 60e3) n += (1000 / 96) * perfil(x) * campanha(x) * Math.min(1, (b - x) / (15 * 60e3)); return Math.round(n); };
+    const jobs = cobMedida(); const feitos: JobExistenteSync[] = []; const chaves = new Set<string>(); let passos = 0, acimaDoAlvo = 0, acimaFora = 0;
+    for (;;) {
+      const l = bootAno([...jobs, ...feitos]); const j = jobDa(l);
+      if (!j || j.proposito !== "descoberta") break;
+      assert(++passos < 2000, "nao termina");
+      assert(!chaves.has(j.chave), `chave repetida ${j.chave}`); chaves.add(j.chave);
+      assert(dur(j) <= TAM.maximoMs && dur(j) >= TAM.minimoMs - H && Date.parse(j.inicio!) % H === 0 || Date.parse(j.inicio!) === INI_ANO, `${j.inicio}→${j.fim}`);
+      const n = pedidos(Date.parse(j.inicio!), Date.parse(j.fim!));
+      const fatias = n * custo(0.9);
+      if (fatias > TAM.alvoFatias) { acimaDoAlvo++; let c = false; for (let x = Date.parse(j.inicio!); x < Date.parse(j.fim!); x += H) if (campanha(x) > 1) c = true; if (!c) acimaFora++; }
+      feitos.push(jobSP(SPA, j.inicio!, j.fim!, { listados: n, escrowsNecessarios: Math.round(n * 0.9), criadoEm: isoE(AGORA - 2 * H) }));
+    }
+    const ord = [...feitos].sort((a, b) => Date.parse(a.janelaInicio!) - Date.parse(b.janelaInicio!));
+    assert(ord[0].janelaInicio === isoE(INI_ANO) && ord[ord.length - 1].janelaFim === isoE(FIM_HIST), `${ord[0].janelaInicio} ${ord[ord.length - 1].janelaFim}`);
+    for (let i = 1; i < ord.length; i++) assert(ord[i].janelaInicio === ord[i - 1].janelaFim, `borda ${ord[i - 1].janelaFim} / ${ord[i].janelaInicio}`);
+    const fim = bootAno([...jobs, ...feitos]);
+    assert(fim.cobertura === "COMPLETE" && !fim.faltando.length, resumo(fim));
+    // pedaço acima do alvo SO quando contem dia de campanha (densidade 5× que o vizinho nao mostrava) — limite conhecido
+    assert(acimaFora === 0, `${acimaFora} pedaços acima do alvo sem campanha`);
+    console.log(`        (${passos} pedaços; ${acimaDoAlvo} acima do alvo, todos com dia de campanha)`);
+  });
+  t("CE21-4. fila serial: intraday vencido passa À FRENTE do histórico; dentro da cadência o histórico anda; com job ativo NADA novo (nunca dois)", () => {
+    const base = cobMedida();
+    const ultimo = (fim: number) => intra(SPA, Date.parse("2026-10-06T03:00:00.000Z"), fim);
+    const escolha = (jobs: JobExistenteSync[]) => {
+      const i = P.avaliarIntradayLoja({ loja: sp(SPA), agoraMs: AGORA, jobs, politica: POL });
+      return P.proximaAcaoCombinada([bootAno(jobs), i.avaliacao], jobs);
+    };
+    const vencido = escolha([...base, ultimo(AGORA - 30 * 60e3)]);
+    assert(vencido.acao === "CREATE_REFRESH_JOB" && vencido.job.proposito === "intraday", JSON.stringify(vencido));
+    const cadencia = escolha([...base, ultimo(AGORA - 15 * 60e3)]);
+    assert(cadencia.acao === "CREATE_DISCOVERY_JOB" && cadencia.job.fim === isoE(FIM_HIST), JSON.stringify(cadencia));
+    const ativo = jobSP(SPA, cadencia.job.inicio!, cadencia.job.fim!, { status: "rodando", listagemCompleta: false, concluidoEm: null });
+    const espera = escolha([...base, ultimo(AGORA - 30 * 60e3), ativo]);
+    assert(espera.acao === "WAIT_ACTIVE_JOB", JSON.stringify(espera));
+  });
+  t("CE21-5. pedido do USUÁRIO inalterado: blocos de 14 dias (revalidação explícita), todas as janelas listadas", () => {
+    const u = av(sp(SPA), "2026-08-01", "2026-09-30", cobMedida(SPA).map((j) => ({ ...j, concluidoEm: isoE(AGORA - 40 * DIA) })), { sinaisShopee: SEM_SINAIS, origem: "usuario" });
+    const js = u.necessidades.map((n) => n.job);
+    const l = JM.limitesDaJanela("2026-08-01", "2026-09-30")!;
+    assert(js.length > 1 && js.every((j) => dur(j) <= 14 * DIA) && js.some((j) => dur(j) === 14 * DIA), JSON.stringify(js.map((j) => [j.inicio, j.fim])));
+    assert(js.some((j) => j.fim === l.fim.toISOString()), "fim do periodo");
+  });
+  t("CE21-6. pendência de não pagos em VÁRIOS pedaços: a rodada avança (nunca repete o pedaço), espera 30 min ao fechar, esgota VISÍVEL na 3a — nunca laço", () => {
+    // densidade alta medida (1M em 108 dias, metade com escrow): o refresh de UM dia vira varios pedaços
+    const cob = jobSP(SPA, "2026-06-20T03:00:00.000Z", isoE(FIM_COB), { listados: 1_000_000, escrowsNecessarios: 500_000, criadoEm: d(2.1), concluidoEm: d(2) });
+    const faixa = { inicio: "2026-10-04T03:00:00.000Z", fim: "2026-10-05T03:00:00.000Z", ultimaObservacao: d(1.5) };
+    const sinais = { escrowPendentes: 0, naoObservadosAposPeriodo: 1, faixasPendentes: [faixa] };
+    let agora = AGORA; const feitos: JobExistenteSync[] = [];
+    const avaliar = () => P.avaliarLoja({ loja: sp(SPA), de: "2026-07-08", ate: "2026-10-05", agoraMs: agora, jobs: [cob, ...feitos], politica: { ...POL, faixas: [{ idadeMaxDias: 7, intervaloMs: 400 * H }, { idadeMaxDias: 90, intervaloMs: 400 * H }] }, origem: "background", sinaisShopee: sinais });
+    const rodada = () => { const vistos = new Set<string>(); let n = 0;
+      for (;;) { const l = avaliar(); const j = jobDa(l);
+        if (!j) return { n, fim: l };
+        assert(j.proposito === "refresh" && Date.parse(j.inicio!) >= Date.parse(faixa.inicio) && Date.parse(j.fim!) <= Date.parse(faixa.fim), `fora da faixa ${j.inicio}→${j.fim}`);
+        assert(!vistos.has(j.chave), `pedaço repetido na rodada: ${j.inicio}→${j.fim}`); vistos.add(j.chave); n++;
+        // roda e conclui, mas o pedido continua sem observacao (falha no detalhe)
+        // a mesma densidade da cobertura (o pedaço mede o que ela media): o proximo pedaço continua pequeno
+        const qtd = Math.round(1_000_000 * dur(j) / (108 * DIA));
+        feitos.push(jobSP(SPA, j.inicio!, j.fim!, { criadoEm: isoE(agora), concluidoEm: isoE(agora + 60e3), listados: qtd, escrowsNecessarios: Math.round(qtd / 2) })); agora += 2 * 60e3; } };
+    const r1 = rodada();
+    assert(r1.n > 1 && r1.fim.proximaAcao.acao === "WAIT_RETRY", `${r1.n} ${resumo(r1.fim)}`);
+    agora += 31 * 60e3; const r2 = rodada(); assert(r2.n === r1.n && r2.fim.proximaAcao.acao === "WAIT_RETRY", `${r2.n} ${resumo(r2.fim)}`);
+    agora += 31 * 60e3; const r3 = rodada();
+    assert(r3.fim.proximaAcao.acao === "FAILED" && r3.fim.motivos.includes("pendencia_nao_pagos_sem_efeito") && r3.fim.frescor === "STALE", `${r3.n} ${resumo(r3.fim)} ${r3.fim.motivos}`);
+    agora += 31 * 60e3; const r4 = avaliar(); assert(r4.proximaAcao.acao === "FAILED" && !jobDa(r4), resumo(r4));
+  });
+  t("CE21-7. refresh: a fração de escrow MEDIDA pelo último job do trecho manda no tamanho (muito escrow → pedaço menor)", () => {
+    // periodo de manutencao inteiro COBERTO (de 15/07: necessario desde 05/07) e observado ha 8 h → so o frescor ≤7 dias vence
+    const comF = (f: number) => { const l = av(sp(SPA), "2026-07-15", "2026-10-05",
+      cobMedida(SPA, 1000, { escrowsNecessarios: 0 }).map((j) => ({ ...j, escrowsNecessarios: Math.round(j.listados! * f), concluidoEm: isoE(AGORA - 8 * H), criadoEm: isoE(AGORA - 9 * H) })),
+      { sinaisShopee: SEM_SINAIS, origem: "background" }); return jobDa(l)!; };
+    const muito = comF(0.9), pouco = comF(0.01);
+    assert(muito.proposito === "refresh" && pouco.proposito === "refresh" && muito.fim === pouco.fim && dur(muito) < dur(pouco), `${dur(muito) / H} h vs ${dur(pouco) / H} h`);
+    // 1% medido fica no PISO (5%): o pedaço e o do piso, nunca o de 1%
+    const L = (f: number) => TAM.alvoFatias / ((1000 * TAM.fatorSeguranca / DIA) * custo(f));
+    const ini = (f: number) => isoE(Math.floor((Date.parse(pouco.fim!) - L(f)) / H) * H);
+    assert(pouco.inicio === ini(TAM.pisoFracaoEscrow) && muito.inicio === ini(0.9), `${pouco.inicio} ${muito.inicio}`);
+  });
+  t("CE21-12. refresh pesa CADA pedaço pela medida do job que o contém: trecho calmo atravessa inteiro, o de campanha limita; trecho sem medida usa a vizinhança (nunca zero)", () => {
+    // cobertura de 1.000/dia observada ha 9 h; os dois jobs mais NOVOS (7 h) medem 100/dia e 10.000/dia nos trechos deles
+    const velho = { concluidoEm: isoE(AGORA - 9 * H), criadoEm: isoE(AGORA - 10 * H) }, novo = { concluidoEm: isoE(AGORA - 7 * H), criadoEm: isoE(AGORA - 8 * H) };
+    const calmo = (o: Partial<JobExistenteSync> = {}) => jobSP(SPA, "2026-10-03T03:00:00.000Z", isoE(FIM_COB), { listados: 300, escrowsNecessarios: 0, ...novo, ...o });
+    const pico = jobSP(SPA, "2026-09-29T03:00:00.000Z", "2026-10-03T03:00:00.000Z", { listados: 40_000, escrowsNecessarios: 0, ...novo });
+    // semMedida: o trecho calmo so tem jobs SEM contador (o ultimo bloco da cobertura tambem) → densidade da vizinhanca
+    const rodar = (js: JobExistenteSync[], semContador = false) => jobDa(av(sp(SPA), "2026-07-15", "2026-10-05",
+      [...cobMedida(SPA).map((j) => ({ ...j, ...velho, ...(semContador && j.janelaFim === isoE(FIM_COB) ? { listados: null, escrowsNecessarios: null } : {}) })), ...js],
+      { sinaisShopee: SEM_SINAIS, origem: "background" }))!;
+    const medido = rodar([calmo(), pico]);
+    assert(medido.proposito === "refresh" && medido.fim === isoE(FIM_COB) && Date.parse(medido.inicio!) < Date.parse("2026-10-03T03:00:00.000Z")
+      && Date.parse(medido.inicio!) > Date.parse("2026-10-02T03:00:00.000Z"), `${medido.inicio}`);
+    const semMedida = rodar([calmo({ listados: null, escrowsNecessarios: null }), pico], true);
+    assert(semMedida.fim === isoE(FIM_COB) && Date.parse(semMedida.inicio!) > Date.parse("2026-10-03T03:00:00.000Z"), `${semMedida.inicio}`);
+  });
+  t("CE21-8. fechamento do dia anterior que o INTRADAY já viu usa a fração medida (pedaço maior); trecho nunca visto assume escrow de todos", () => {
+    const ontem0 = Date.parse("2026-10-05T03:00:00.000Z");
+    const cob = cobMedida(SPA).filter((j) => Date.parse(j.janelaFim!) <= ontem0).concat(jobSP(SPA, isoE(Date.parse("2026-09-29T03:00:00.000Z")), isoE(ontem0), { listados: 6000, escrowsNecessarios: 60, criadoEm: isoE(AGORA - 3 * H) }));
+    const viu: JobExistenteSync[] = []; for (let a = ontem0; a < FIM_COB - 15 * 60e3; a += 30 * 60e3) viu.push(intra(SPA, a, Math.min(a + 30 * 60e3, FIM_COB - 15 * 60e3)));
+    const semIntra = jobDa(av(sp(SPA), "2026-07-08", "2026-10-05", cob, { sinaisShopee: SEM_SINAIS, origem: "background" }))!;
+    const comIntra = jobDa(av(sp(SPA), "2026-07-08", "2026-10-05", [...cob, ...viu], { sinaisShopee: SEM_SINAIS, origem: "background" }))!;
+    assert(semIntra.proposito === "descoberta" && comIntra.proposito === "descoberta" && semIntra.fim === isoE(FIM_COB) && comIntra.fim === isoE(FIM_COB) && dur(comIntra) > dur(semIntra),
+      `${dur(semIntra) / H} h vs ${dur(comIntra) / H} h`);
+    // FECHAMENTO (D15B): o dia que o intraday ja viu (ate 23:45) e UM job do dia inteiro; visto pela metade, nao
+    // (densidade vizinha alta, 10.000/dia: o dia visto continua inteiro; o visto pela metade e dimensionado)
+    const denso = cob.map((j) => (j.janelaFim === isoE(ontem0) ? { ...j, listados: 60_000 } : j));
+    const cheio = jobDa(av(sp(SPA), "2026-07-08", "2026-10-05", [...denso, ...viu], { sinaisShopee: SEM_SINAIS, origem: "background" }))!;
+    assert(comIntra.inicio === isoE(ontem0) && cheio.inicio === isoE(ontem0) && dur(cheio) === DIA, `${comIntra.inicio} ${cheio.inicio}`);
+    const metade = jobDa(av(sp(SPA), "2026-07-08", "2026-10-05", [...denso, ...viu.filter((j) => Date.parse(j.janelaFim!) <= ontem0 + 12 * H)], { sinaisShopee: SEM_SINAIS, origem: "background" }))!;
+    assert(metade.fim === isoE(FIM_COB) && dur(metade) < DIA, `${metade.inicio}`);
+    // o intraday NAO e referencia de densidade (janela de 30 min re-detalha candidatos; listados dele nao medem a janela)
+    const viuMuito = viu.map((j) => ({ ...j, listados: 50_000, escrowsNecessarios: 50_000 }));
+    const comIntraMuito = jobDa(av(sp(SPA), "2026-07-08", "2026-10-05", [...cob, ...viuMuito], { sinaisShopee: SEM_SINAIS, origem: "background" }))!;
+    assert(comIntraMuito.chave === comIntra.chave, `${comIntraMuito.inicio} vs ${comIntra.inicio}`);
+  });
+  t("CE21-9. isolamento: densidade/escrow/intraday de OUTRA loja (e do ML) não mudam o pedaço desta", () => {
+    const so = jobDa(bootAno(cobMedida()))!;
+    const outra = [...cobMedida(SPB, 50_000).map((j) => ({ ...j, escrowsNecessarios: j.listados })), jobML(MLA, "2026-06-25", "2026-06-29", { listados: 900_000 } as any),
+      jobSP(SPB, "2026-06-29T03:00:00.000Z", isoE(FIM_HIST), { listados: 999_999 }), intra(SPB, FIM_HIST - 12 * H, FIM_HIST - 11 * H, { listados: 5 })];
+    const com = jobDa(bootAno([...cobMedida(), ...outra]))!;
+    assert(so.chave === com.chave, `${so.inicio} vs ${com.inicio}`);
+    // intraday da PROPRIA loja perto do historico nao e referencia de densidade (30 min re-detalhando candidatos)
+    const comIntraProprio = jobDa(bootAno([...cobMedida(), intra(SPA, FIM_HIST + 2 * H, FIM_HIST + 3 * H, { listados: 50_000, escrowsNecessarios: 50_000 })]))!;
+    assert(so.chave === comIntraProprio.chave, `${so.inicio} vs ${comIntraProprio.inicio}`);
+  });
+  t("CE21-10. lerJobsDasLojas: listados/escrows vêm de progresso (texto do ->>); inválido ou ausente = null (desconhecido, nunca 0)", async () => {
+    const rows = [["50", 5], ["abc", null], [-1, null], [1.5, null], [undefined, undefined]].map(([l, e], i) =>
+      linhaSP(SPA, isoE(FIM_HIST + i * H), isoE(FIM_HIST + (i + 1) * H), { id: `ce10-${i}`, progresso: l === undefined ? null : { listados: l, escrow_necessarios: e } }));
+    const lidos = await C.lerJobsDasLojas(bancoFalso(lojasBase(), rows).cliente, UID, [SPA]);
+    const por = Object.fromEntries(lidos.map((j) => [j.id, [j.listados, j.escrowsNecessarios]]));
+    assert(JSON.stringify(por) === JSON.stringify({ "ce10-0": [50, 5], "ce10-1": [null, null], "ce10-2": [null, null], "ce10-3": [null, null], "ce10-4": [null, null] }), JSON.stringify(por));
+  });
+  t("CE21-11. determinístico/idempotente: mesmo estado em ticks diferentes → MESMA chave; a chave muda só quando um pedaço conclui", () => {
+    const a1 = jobDa(bootAno(cobMedida(), AGORA))!, a2 = jobDa(bootAno(cobMedida(), AGORA + 10 * 60e3))!, a3 = jobDa(bootAno(cobMedida(), AGORA + 3 * H))!;
+    assert(a1.chave === a2.chave && a2.chave === a3.chave, `${a1.chave} / ${a2.chave} / ${a3.chave}`);
+  });
+  t("CB-D15B. cadeia de exceções EXATA: atual − E21 = 5e135e6, − P1 = 8978451 e − D15B = d631748 (byte a byte), nos 3 arquivos de sync tocados", () => {
+    const tmp = mkdtempSync(join(RAIZ, ".tmp-excecao-p1-")), tmpE = mkdtempSync(join(RAIZ, ".tmp-excecao-e21-"));
     try {
+      const TRES = JSON.stringify(["lib/vendas/sync/coordenador.ts", "lib/vendas/sync/planejamento.ts", "lib/vendas/sync/tipos.ts"]);
+      assert(JSON.stringify(Object.keys(PATCH_E21).sort()) === TRES, "excecao E21 cobre arquivo a mais/a menos");
       for (const f of Object.keys(PATCH_P1)) {
-        const p1 = reconstruirBaseP1(RAIZ, f);
-        assert(p1.valido, `${f}: ${p1.motivo}`);
+        // E2.1: atual − E21 = 5e135e6 (byte a byte) e SO esse resultado entra na cadeia P1 → D15B
+        const e21 = reconstruirBaseE21(RAIZ, f);
+        assert(e21.valido, `${f}: ${e21.motivo}`);
+        mkdirSync(join(tmpE, f, ".."), { recursive: true });
+        writeFileSync(join(tmpE, f), reverterE21(RAIZ, f)!, "utf8");
+        const p1 = reconstruirBaseP1(tmpE, f);
+        assert(p1.valido, `${f}: cadeia P1 ${p1.motivo}`);
         mkdirSync(join(tmp, f, ".."), { recursive: true });
-        writeFileSync(join(tmp, f), reverterP1(RAIZ, f)!, "utf8");
+        writeFileSync(join(tmp, f), reverterP1(tmpE, f)!, "utf8");
         const d15b = reconstruirBaseD15B(tmp, f);
         assert(d15b.valido, `${f}: cadeia D15B ${d15b.motivo}`);
       }
-      assert(JSON.stringify(Object.keys(PATCH_P1).sort()) === JSON.stringify(["lib/vendas/sync/coordenador.ts", "lib/vendas/sync/planejamento.ts", "lib/vendas/sync/tipos.ts"]), "excecao P1 cobre arquivo a mais/a menos");
+      assert(JSON.stringify(Object.keys(PATCH_P1).sort()) === TRES, "excecao P1 cobre arquivo a mais/a menos");
       assert(reconstruirBaseD15B(RAIZ, "lib/vendas/sync/coordenador-tick.ts").valido, "coordenador-tick.ts saiu da D15B");
-    } finally { rmSync(tmp, { recursive: true, force: true }); }
+    } finally { rmSync(tmp, { recursive: true, force: true }); rmSync(tmpE, { recursive: true, force: true }); }
   });
 
   t("CP-10. o coordenador só LÊ sync_jobs por lerJanelasSyncJobs (as outras referências são escrita: insert); nenhum select solto", () => {

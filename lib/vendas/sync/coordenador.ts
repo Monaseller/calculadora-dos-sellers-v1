@@ -37,7 +37,7 @@ export async function lerJobsDasLojas(cliente: SupabaseClient, userId: string, l
   // planejamento via buraco de cobertura onde nao havia. Pagina com erro → leitura_falhou: nenhuma decisao com conjunto parcial.
   const data = await lerJanelasSyncJobs<Record<string, any>>("coordenador_jobs", (apos, limite) => {
     let q = cliente.from("sync_jobs")
-      .select("id, loja_id, marketplace, campo_tempo, janela_inicio, janela_fim, status, listagem_completa, concluido_em, criado_em, tipo, date_from, date_to, modo:checkpoint->>modo")
+      .select("id, loja_id, marketplace, campo_tempo, janela_inicio, janela_fim, status, listagem_completa, concluido_em, criado_em, tipo, date_from, date_to, modo:checkpoint->>modo, listados:progresso->>listados, escrows:progresso->>escrow_necessarios")
       .eq("user_id", userId).in("loja_id", lojaIds);
     if (apos !== null) q = q.gt("id", apos);
     return q.order("id", { ascending: true }).limit(limite);
@@ -47,7 +47,16 @@ export async function lerJobsDasLojas(cliente: SupabaseClient, userId: string, l
     concluidoEm: r.concluido_em ?? null, criadoEm: r.criado_em,
     catchup: r.campo_tempo == null && r.janela_inicio == null && r.modo === "escrow_catchup",
     // D15B: so para classificar intraday (ehJobIntraday)
-    tipo: r.tipo ?? null, dateFrom: r.date_from ?? null, dateTo: r.date_to ?? null }));
+    tipo: r.tipo ?? null, dateFrom: r.date_from ?? null, dateTo: r.date_to ?? null,
+    // E2.1: contadores medidos do job (texto do ->>) — so estimativa de tamanho; invalido → null (desconhecido)
+    listados: contador(r.listados), escrowsNecessarios: contador(r.escrows) }));
+}
+
+/** E2.1: inteiro >= 0 de um campo `progresso->>x`; qualquer outra coisa → null (desconhecido, nunca 0). */
+function contador(v: unknown): number | null {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isSafeInteger(n) && n >= 0 ? n : null;
 }
 
 export async function avaliarNecessidadeDeSync(
