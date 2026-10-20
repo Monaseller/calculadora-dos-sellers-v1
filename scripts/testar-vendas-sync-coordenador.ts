@@ -905,6 +905,12 @@ async function principal() {
     const semMedida = rodar([calmo({ listados: null, escrowsNecessarios: null }), pico], true);
     assert(semMedida.fim === isoE(FIM_COB) && Date.parse(semMedida.inicio!) > Date.parse("2026-10-03T03:00:00.000Z"), `${semMedida.inicio}`);
   });
+  t("CE21-13. refresh SEM nenhuma medida (jobs sem contador) não é picotado em sondas: volta ao bloco grande (teto de 7 dias), como antes", () => {
+    const semContador = cobMedida(SPA).map((j) => ({ ...j, listados: null, escrowsNecessarios: null, concluidoEm: isoE(AGORA - 8 * H), criadoEm: isoE(AGORA - 9 * H) }));
+    const l = av(sp(SPA), "2026-07-15", "2026-10-05", semContador, { sinaisShopee: SEM_SINAIS, origem: "background" }); const j = jobDa(l)!;
+    // o trecho velho (≤7 dias, observado ha 8 h) inteiro num job so — nada de sondas de 6 h
+    assert(j.proposito === "refresh" && j.fim === isoE(FIM_COB) && l.desatualizado.length === 1 && j.inicio === l.desatualizado[0].inicio && dur(j) > 6 * DIA, `${j.inicio}→${j.fim}`);
+  });
   t("CE21-8. fechamento do dia anterior que o INTRADAY já viu usa a fração medida (pedaço maior); trecho nunca visto assume escrow de todos", () => {
     const ontem0 = Date.parse("2026-10-05T03:00:00.000Z");
     const cob = cobMedida(SPA).filter((j) => Date.parse(j.janelaFim!) <= ontem0).concat(jobSP(SPA, isoE(Date.parse("2026-09-29T03:00:00.000Z")), isoE(ontem0), { listados: 6000, escrowsNecessarios: 60, criadoEm: isoE(AGORA - 3 * H) }));

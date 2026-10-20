@@ -230,7 +230,9 @@ export function comprimentoJanelaShopee(a: number, b: number, proposito: "descob
   // FECHAMENTO (D15B): o ultimo dia do trecho que o intraday ja observou (≥95%) e relistado INTEIRO, num job so, como
   // antes — os pedidos dele ja estao no banco, com escrow lido pelo intraday; nunca vira fila de pedaços a meia-noite
   if (proposito === "descoberta" && naoVistoEm([Math.max(a, b - DIA_MS), b]) <= 0.05) return limitar(Math.min(b - a, DIA_MS));
-  if (!perto.length) return limitar(tam.sondaMs);
+  // sem nenhuma medida por perto: descoberta sonda (6 h, depois cresce); refresh volta ao bloco grande de antes (teto) —
+  // picotar um trecho ja listado sem saber o tamanho so multiplicaria jobs e deixaria os trechos velhos sem vaga
+  if (!perto.length) return limitar(proposito === "refresh" ? tam.maximoMs : tam.sondaMs);
   const teto = tam.crescimentoMaximo * Math.max(...perto.map((j) => t(j.janelaFim) - t(j.janelaInicio)));
   const densidade = Math.max(...perto.map((j) => j.listados! / (t(j.janelaFim) - t(j.janelaInicio)))) * tam.fatorSeguranca;
   const fracaoDe = (j: JobExistenteSync | undefined) =>
