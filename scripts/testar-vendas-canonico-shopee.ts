@@ -459,7 +459,15 @@ async function principal() {
     // D15D3: excecao EXATA — so o motor intraday Shopee, so com o conteudo aprovado (sha256 do helper D15D2).
     // A verificacao de CALCULO abaixo continua valendo para ele.
     const consultaCandidatos = (f: string) => f === MOTOR_INTRADAY_SHOPEE && motorIntradayShopeeExato(RAIZ);
-    const fora = arqs.filter((f) => !ARMAZENAM.includes(f) && !consultaCandidatos(f) &&
+    // Etapa 3 / V1: excecao NOMINAL — a lista paginada so LE o corpus (shopee_pedidos + componentes de item) e o valor
+    // de cada pedido sai de calcularMetricasShopee; sem escrita. A verificacao de CALCULO abaixo continua valendo para ela.
+    const LISTA_SHOPEE = "lib/vendas/listagem/shopee-pedidos.ts";
+    const listaSoLeitura = (f: string) => {
+      if (f !== LISTA_SHOPEE) return false;
+      const s = readFileSync(join(RAIZ, f), "utf8").replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
+      return /calcularMetricasShopee\(/.test(s) && !/\.(insert|update|upsert|delete|rpc)\(/.test(s);
+    };
+    const fora = arqs.filter((f) => !ARMAZENAM.includes(f) && !consultaCandidatos(f) && !listaSoLeitura(f) &&
       /escrow_voucher_seller|escrow_voucher_shopee|escrow_coin|shopee_pedidos/.test(readFileSync(join(RAIZ, f), "utf8")));
     assert(fora.length === 0, fora.join(", "));
     const calculo = /[-+*]\s*[\w.!?()]*\b(pix_discount|original_shopee_discount|escrow_voucher_seller|escrow_voucher_shopee|escrow_coin|pixDiscount|originalShopeeDiscount|voucherVendedor|voucherShopee|moedas)\b/;
